@@ -138,7 +138,8 @@ a lost answer (a timeout, a dropped connection, a 5xx) is recorded as `unknown`,
 is a fresh request with a new grant, up to `maxGrantsPerCall` (tested). The answer is recorded
 even if the caller's grant expired or the call ended while the door answered (tested). The ledger
 holds each grant's digest and outcome, never the grant. Left to the host: a relay that keeps seen
-grant ids across restarts (or refuses grants for 15 minutes after one), and the door's own safety
+grant ids across restarts (or refuses every grant for 15 minutes plus twice the verifier's clock
+skew after one), and the door's own safety
 (an unlock pulse, not a latch).
 
 ### Money on the wrong account

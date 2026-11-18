@@ -108,7 +108,10 @@ export function verifyAccessGrant(
 
 /**
  * The grant ids a relay has accepted, each kept until the verifier would refuse its grant as
- * expired (expiry plus the clock skew), so a replayed grant is refused. In memory: a relay that restarts must keep refusing for 15 minutes (or keep them on disk).
+ * expired (expiry plus the clock skew), so a replayed grant is refused. In memory only: a relay
+ * that restarts must keep the ids on disk, or refuse every grant for the longest window a grant
+ * can be accepted in, 15 minutes plus twice the clock skew (the verifier allows the skew at both
+ * ends), after it starts.
  */
 export class SeenGrants {
   readonly #until = new Map<string, number>();
