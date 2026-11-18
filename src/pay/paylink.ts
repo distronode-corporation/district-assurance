@@ -130,6 +130,11 @@ export const paylinkModule: AssuranceModule = {
 /**
  * Texts a hosted payment link to the number on file. In a flow, the step sets the amount and
  * `input` must be left out; outside one, the host's code passes it (`amountSource` says where from).
+ *
+ * The request is reserved first. If creating or texting the link fails, the request stays open
+ * (a provider can create a link and still fail to answer), and calling `requestPayment` again
+ * resumes it with the same payment id and idempotency keys: the provider returns the same link,
+ * and the text is sent again. It settles only by the provider's outcome.
  */
 export async function requestPayment(rt: EngineRuntime, callId: string, input?: PaymentInput): Promise<{ paymentId: string; status: PaymentStatus }> {
   const settings = rt.settings<PaylinkSettings>(PAYLINK) ?? {};
@@ -137,11 +142,19 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
     const step = stepOfType<PaylinkRequestStep>(draft.record, "paylink.request");
     if (!rt.authorized(draft.record, "payment.request")) throw new EngineError("scope_denied", "the grant does not cover payment.request");
     if (step !== null && input !== undefined) throw new EngineError("invalid_input", "the flow step sets the amount; pass no input");
+    const subject = matchedSubject(draft.record);
+    const where = { phone: subject.phoneOnFile, locale: draft.record.locale };
+    const last = draft.slice<PaylinkSlice>(PAYLINK).payments.at(-1);
+    if (draft.record.state.phase === "paying" && last !== undefined && last.status === "open" && last.textedAt === null) {
+      if (input !== undefined && (input.amountMinor !== last.amountMinor || input.currency !== last.currency)) {
+        throw new EngineError("invalid_input", "a payment link is still being sent on this call; resume it with the same amount");
+      }
+      return { request: last, ...where };
+    }
     const chosen: PaymentInput | undefined = step ?? input;
     if (chosen === undefined) throw new EngineError("invalid_input", "outside a flow, the amount, currency, description and amountSource are required");
     const errors = requestErrors({ ...chosen }, settings.maxAmountMinor);
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
-    const subject = matchedSubject(draft.record);
     const paymentId = rt.ids.next("pay");
     draft.apply({ type: "payment_requested", paymentId });
     const request: PaymentRequest = {
@@ -155,28 +168,20 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
       status: "open",
       requestedAt: rt.now(),
       settledAt: null,
+      textedAt: null,
     };
     draft.slice<PaylinkSlice>(PAYLINK).payments.push(request);
-    return { request, phone: subject.phoneOnFile, locale: draft.record.locale };
+    return { request, ...where };
   });
   const { request } = reserved;
-  let link: { linkId: string; url: string };
-  try {
-    link = await rt.adapter("payments").createLink({
-      callId,
-      paymentId: request.paymentId,
-      amountMinor: request.amountMinor,
-      currency: request.currency,
-      description: request.description,
-      idempotencyKey: `${callId}:${request.paymentId}`,
-    });
-  } catch (error) {
-    // No link exists, so nothing can be paid: settle it as failed and free the call.
-    await rt.update(callId, (draft) => settle(rt, draft, request.paymentId, "failed"));
-    throw error;
-  }
-  // From here a link exists and may reach the caller, so it stays open until the provider settles
-  // it (paid, failed or expired), even when texting it fails.
+  const link = await rt.adapter("payments").createLink({
+    callId,
+    paymentId: request.paymentId,
+    amountMinor: request.amountMinor,
+    currency: request.currency,
+    description: request.description,
+    idempotencyKey: `${callId}:${request.paymentId}`,
+  });
   await rt.update(callId, (draft) => {
     find(draft, request.paymentId).linkId = link.linkId;
   });
@@ -188,6 +193,8 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
     idempotencyKey: `${callId}:${request.paymentId}:text`,
   });
   return rt.update(callId, (draft) => {
+    const sent = find(draft, request.paymentId);
+    sent.textedAt = rt.now();
     draft.emit("payment.link_sent", "code", {
       paymentId: request.paymentId,
       linkId: link.linkId,
@@ -195,7 +202,7 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
       currency: request.currency,
       amountSource: request.amountSource,
     });
-    return { paymentId: request.paymentId, status: find(draft, request.paymentId).status };
+    return { paymentId: request.paymentId, status: sent.status };
   });
 }
 

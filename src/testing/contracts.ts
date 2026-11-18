@@ -69,6 +69,17 @@ export function sessionStoreContract(factory: () => SessionStore | Promise<Sessi
       },
     ],
     [
+      "never lets two workspace and call id pairs share a key",
+      async (store) => {
+        assert.equal(await store.create("north", "branch/c1", { n: 1 }), true);
+        assert.equal(await store.create("north/branch", "c1", { n: 2 }), true);
+        assert.deepEqual((await store.get("north", "branch/c1"))!.record, { n: 1 });
+        assert.deepEqual((await store.get("north/branch", "c1"))!.record, { n: 2 });
+        assert.equal(await store.bindRef("a", "b/c", "c1"), true);
+        assert.equal(await store.resolveRef("a/b", "c"), null);
+      },
+    ],
+    [
       "binds a reference once, per workspace, and resolves it",
       async (store) => {
         assert.equal(await store.resolveRef("w", "payment:cs_1"), null);

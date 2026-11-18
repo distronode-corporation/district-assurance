@@ -75,8 +75,11 @@ export interface AssuranceModule {
   stepLevel?(step: FlowStep): number | null;
   /** The scopes a step's grant is limited to, when it names them (null: every scope its level reaches). */
   stepGrants?(step: FlowStep): string[] | null;
-  /** The module's part of a new call record. */
-  initCall(): JsonValue;
+  /**
+   * The module's part of a new call record, given the module's (valid) settings. A module copies in
+   * what a call must keep using if the config changes mid-call (Dossier its forms, Trace its wordings).
+   */
+  initCall(settings: unknown): JsonValue;
   /** A step of this module starts. The value returned is the step's mark, handed back to `stepStatus`. */
   enterStep(step: FlowStep, slice: JsonValue): JsonValue;
   /** Where the current step stands. Pure: called after every change to the call. */

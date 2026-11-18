@@ -47,13 +47,19 @@ export class SequentialIds implements IdGenerator {
   }
 }
 
+/** Hands out one check per idempotency key, like a provider that honours idempotency keys. */
 export class FakeIdentityProvider implements IdentityProvider {
   readonly created: Array<{ callId: string; sessionId: string }> = [];
+  readonly #byKey = new Map<string, { sessionId: string; url: string }>();
 
   async createDocumentCheck(input: { callId: string; idempotencyKey: string }): Promise<{ sessionId: string; url: string }> {
+    const existing = this.#byKey.get(input.idempotencyKey);
+    if (existing !== undefined) return existing;
     const sessionId = `vs_fake_${this.created.length + 1}`;
     this.created.push({ callId: input.callId, sessionId });
-    return { sessionId, url: `https://identity.example.test/session/${sessionId}` };
+    const check = { sessionId, url: `https://identity.example.test/session/${sessionId}` };
+    this.#byKey.set(input.idempotencyKey, check);
+    return check;
   }
 }
 

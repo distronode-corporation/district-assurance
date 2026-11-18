@@ -168,7 +168,11 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   PIN is passed once and kept nowhere. It is asked for every attempt: for a malformed entry or an
   account a keypad cannot produce, with a stand-in (`minDigits` zeros, an HMAC subject key) whose
   answer is ignored. A subject the `RecordStore` does not have never passes, whatever it says.
-- Each attempt is counted in its own write before it is judged. After `maxAttemptsPerCall`,
+- Each attempt is counted in its own write before it is judged. Every `beginVerification` starts a
+  new epoch; a factor result, a carrier report or a photo ID check from an earlier epoch is never
+  applied (`precondition_failed`), and a change of subject drops pending photo ID checks.
+- The photo ID link is reserved, created, enrolled and texted in turn; after a failure,
+  `startPhotoId` resumes with the same idempotency keys, so a call never has two links. After `maxAttemptsPerCall`,
   `submitPin` returns `locked` without judging. Across calls: planned (VER-1). Enrolment: planned
   (VER-6).
 
@@ -322,7 +326,8 @@ A call gets a receipt when its flow has a `trace.receipt` step (wherever it is, 
 or not the flow finished), or, for a call that ran no flow, when Trace's `receipts` setting is not
 false. `endCall` returns it, or null. `verification` comes from Badge, `records` from Dossier,
 `payments` from Paylink and `consents` from Trace; a module that is off contributes an empty
-part. `ledger` is the head after `call.ended`. `verifyReceipt(receipt, keys)` picks the key by `kid`
+part. `ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
+the ended call issues the receipt later with the same head, without ending the call again. `verifyReceipt(receipt, keys)` picks the key by `kid`
 and returns false for any change, a wrong algorithm, a malformed signature or an unknown key.
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
 `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
@@ -340,9 +345,11 @@ Forms live in Dossier's settings: a `formId` (lower case, digits, `-`, `_`), a `
 fields with snake_case unique keys, a known type and an English and a French label.
 `validateConfig` refuses fields marked `sensitive` until field encryption exists (FIL-2).
 `startIntake(callId, formId)` names the form, and the draft keeps the form as it was then, so a
-config change mid-intake never changes what is filed. A draft being filed refuses changes. A
-filing that reached the `RecordStore` but lost its last write (`conflict`) resumes with the same
-record on the next `confirmIntake`; one the store refused releases the draft.
+config change mid-intake never changes what is filed; a call also keeps the forms (and Trace the
+wordings) in force when it started. A draft being filed refuses changes. A filing that failed
+after its reservation (the store refused it, or the last write was lost) stays reserved and
+resumes with the same record on the next `confirmIntake`, so `RecordStore.putIntakeRecord` must be
+idempotent by `recordId`; two confirmations at once file one record.
 
 ## 14. Payments
 
@@ -350,9 +357,11 @@ record on the next `confirmIntake`; one the store refused releases the draft.
 Paylink's `maxAmountMinor` (at most 1,000,000), a lower-case ISO 4217 currency, a 1 to 200
 character description and an `amountSource` (`intake_record`, `business_endpoint` or
 `price_list`). In a flow they come from the `paylink.request` step and the host passes none;
-outside a flow the host's code passes them. One link at a time per call. If creating the link
-fails, the request settles `failed`. Once a link exists it may reach the caller, so only the
-provider settles it, even when texting it fails. `requestPayment` returns the status it saw last. Whose
+outside a flow the host's code passes them. One link at a time per call. If creating or texting the
+link fails, the request stays open (a provider can create a link and still fail to answer), and
+calling `requestPayment` again resumes it with the same payment id and idempotency keys; a
+different amount is refused. Only the provider settles a request. `requestPayment` returns the
+status it saw last. Whose
 account takes the money (`connect` or `platform`) is planned (PAY-7). Settlement:
 
 | Provider outcome | Status |

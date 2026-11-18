@@ -110,6 +110,7 @@ export interface IntakeRecord {
 /** The host's records: subjects to verify against, and the intake records callers confirm. */
 export interface RecordStore {
   getSubject(workspaceId: string, subjectKey: string): Promise<SubjectRecord | null>;
+  /** Idempotent by `recordId`: the engine retries a write whose outcome it could not see, with the same record. */
   putIntakeRecord(record: IntakeRecord): Promise<void>;
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
 }

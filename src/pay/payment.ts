@@ -18,6 +18,8 @@ export interface PaymentRequest {
   status: PaymentStatus;
   requestedAt: string;
   settledAt: string | null;
+  /** When the link was texted; null while it is still being created or sent (and can be resumed). */
+  textedAt: string | null;
 }
 
 /** What the provider reported, already parsed from a verified webhook. */

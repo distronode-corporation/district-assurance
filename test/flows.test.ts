@@ -302,6 +302,28 @@ describe("flows", () => {
     assert.deepEqual(await t.engine.applyIdentityOutcome({ sessionId, status: "verified" }), { applied: false });
   });
 
+  it("creates a call with its flow attached, so no other start can race it", async () => {
+    const t = setup({ config: flowConfig() });
+    const create = t.sessions.create.bind(t.sessions);
+    let seen: unknown = null;
+    t.sessions.create = async (w, c, record) => {
+      seen = (record as { flow: unknown }).flow;
+      return create(w, c, record);
+    };
+    const { callId } = await t.engine.startCall({ callId: "c-race", flow: "receipt-first" });
+    assert.deepEqual((seen as { name: string; index: number }).name, "receipt-first");
+    assert.equal((seen as { index: number }).index, 1, "a receipt step is passed before the call is even stored");
+    await assert.rejects(t.engine.startFlow(callId, "owner-command"), rejects("precondition_failed", /already ran a flow/));
+    assert.deepEqual((await t.ledger.list()).map((e) => e.event), ["call.started", "flow.started", "flow.step_completed"]);
+  });
+
+  it("starts a flow on an open call that has none yet", async () => {
+    const t = setup({ config: flowConfig() });
+    const { callId } = await t.engine.startCall();
+    const position = await t.engine.startFlow(callId, "owner-command");
+    assert.deepEqual([position.flow, position.status, position.index], ["owner-command", "running", 0]);
+  });
+
   it("refuses to start an unknown flow, a second flow, or a flow outside the open phase", async () => {
     const t = setup({ config: flowConfig() });
     await assert.rejects(t.engine.startCall({ flow: "nope" }), rejects("invalid_input", /no flow named nope/));

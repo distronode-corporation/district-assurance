@@ -27,7 +27,11 @@ export interface TraceConsentStep extends FlowStep {
 }
 
 export interface TraceSlice {
+  /** The wordings in force when the call started: a config change never strands a consent step. */
+  wordings: ConsentWording[];
   consents: ConsentRecord[];
+  /** The ledger head after `call.ended`, kept so a retried receipt carries the same one. */
+  endedHead: { seq: number; hash: string } | null;
   receipt: SignedReceipt | null;
 }
 
@@ -93,8 +97,9 @@ export const traceModule: AssuranceModule = {
     return errors;
   },
 
-  initCall(): JsonValue {
-    return { consents: [], receipt: null };
+  initCall(settings: unknown): JsonValue {
+    const wordings = (settings as TraceSettings | undefined)?.wordings ?? [];
+    return { wordings: structuredClone(wordings), consents: [], endedHead: null, receipt: null } as unknown as JsonValue;
   },
 
   enterStep(_step: FlowStep, s: JsonValue): JsonValue {
@@ -118,9 +123,9 @@ export async function recordConsent(
   callId: string,
   input: { purpose: string; answer: "yes" | "no"; channel?: ConsentRecord["channel"] },
 ): Promise<ConsentRecord> {
-  const wording = (settingsOf(rt).wordings ?? []).find((w) => w.purpose === input.purpose);
-  if (wording === undefined) throw new EngineError("invalid_input", `no wording for ${input.purpose} in the trace settings`);
   return rt.update(callId, (draft) => {
+    const wording = draft.slice<TraceSlice>(TRACE).wordings.find((w) => w.purpose === input.purpose);
+    if (wording === undefined) throw new EngineError("invalid_input", `no wording for ${input.purpose} in this call's trace settings`);
     if (draft.record.state.phase === "ended") throw new EngineError("invalid_transition", "the call has ended");
     const step = stepOfType<TraceConsentStep>(draft.record, "trace.consent");
     if (step !== null && step.purpose !== input.purpose) throw new EngineError("precondition_failed", `the flow step asks for consent to ${step.purpose}`);
@@ -152,6 +157,22 @@ export async function recordConsent(
 export function wantsReceipt(rt: EngineRuntime, record: CallRecord): boolean {
   if (record.flow !== null) return record.flow.steps.some((s) => s.type === "trace.receipt");
   return settingsOf(rt).receipts !== false;
+}
+
+/** The receipt a call holds, or null. */
+export function receiptOf(record: CallRecord): SignedReceipt | null {
+  return (record.modules[TRACE] as unknown as TraceSlice).receipt;
+}
+
+/** The ledger head after the call ended: taken once, then kept for any retry of the receipt. */
+export async function endedHead(rt: EngineRuntime, record: CallRecord, head: () => Promise<{ seq: number; hash: string }>): Promise<{ seq: number; hash: string }> {
+  const kept = (record.modules[TRACE] as unknown as TraceSlice).endedHead;
+  if (kept !== null) return kept;
+  const taken = await head();
+  await rt.update(record.state.callId, (draft) => {
+    draft.slice<TraceSlice>(TRACE).endedHead = taken;
+  });
+  return taken;
 }
 
 /** Signs the receipt of an ended call. `parts` are what the other modules contribute. */

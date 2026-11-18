@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import { badgeModule } from "../src/verify/badge.ts";
 import type { FactorJudgeInput } from "../src/verify/factors.ts";
 import { pinDigest, subjectKeyFor } from "../src/verify/knowledge.ts";
-import { TEST_KNOWLEDGE_KEY } from "../src/testing/index.ts";
+import { TEST_KNOWLEDGE_KEY, testSubject } from "../src/testing/index.ts";
 import { ACCOUNT, PIN, rejects, setup, testConfig } from "./helpers.ts";
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
@@ -149,5 +149,93 @@ describe("factor plug-ins", () => {
     await t.engine.beginVerification(again.callId, { accountNumber: ACCOUNT });
     await t.engine.submitFactor(again.callId, "voice_passphrase", "open sesame");
     await assert.rejects(t.engine.startPhotoId(again.callId), rejects("precondition_failed"), "a plug-in match does not unlock texts to the number on file");
+  });
+});
+
+describe("results that arrive late (CodeRabbit threads on PR 3)", () => {
+  it("never applies a factor judged for a verification that restarted for another subject", async () => {
+    const t = setup({
+      badge: badgeModule({
+        factors: [
+          {
+            kind: "slow_check",
+            summary: "a judge that lets the call move on meanwhile",
+            maxAttemptsPerCall: 1,
+            adapters: [],
+            judge: async () => {
+              await t.engine.finishVerification(callId);
+              await t.engine.beginVerification(callId, { accountNumber: "99999999" });
+              return true;
+            },
+          },
+        ],
+      }),
+      config: testConfig((c) => {
+        c.policy.levels[0] = { level: 1, anyOf: [["keypad_knowledge"], ["slow_check"]] };
+        (c.modules.badge!.settings as { factors: string[] }).factors.push("slow_check");
+      }),
+    });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await assert.rejects(t.engine.submitFactor(callId, "slow_check", "x"), rejects("precondition_failed", /verification restarted/));
+    assert.deepEqual((await t.engine.state(callId)).factors, [], "nothing counts for the other subject");
+  });
+
+  it("never stores a carrier report for a subject other than the one it checked", async () => {
+    const t = setup();
+    t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: "22222222", phoneOnFile: "+15555550199", knowledge: {}, pin: "9999" }));
+    t.carrier.set("+15555550100", { identityMatch: "match" });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: "19850214" });
+    const check = t.carrier.check.bind(t.carrier);
+    t.carrier.check = async (input) => {
+      await t.engine.finishVerification(callId);
+      await t.engine.beginVerification(callId, { accountNumber: "22222222" });
+      await t.engine.submitPin(callId, "9999");
+      return check(input);
+    };
+    await assert.rejects(t.engine.checkCarrier(callId), rejects("precondition_failed", /verification restarted/));
+    assert.deepEqual((await t.engine.state(callId)).factors.map((f) => f.kind), ["pin"]);
+  });
+
+  it("drops a pending photo ID check when the subject changes, and resumes a link after a failure", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: "19850214" });
+    const create = t.identity.createDocumentCheck.bind(t.identity);
+    t.identity.createDocumentCheck = async () => {
+      throw new Error("provider down");
+    };
+    await assert.rejects(t.engine.startPhotoId(callId), /provider down/);
+    t.identity.createDocumentCheck = create;
+    const send = t.messages.sendText.bind(t.messages);
+    t.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(t.engine.startPhotoId(callId), /carrier down/);
+    t.messages.sendText = send;
+    assert.deepEqual(await t.engine.startPhotoId(callId), { sent: true }, "resumed, same check");
+    assert.equal(t.identity.created.length, 1);
+    await assert.rejects(t.engine.startPhotoId(callId), rejects("precondition_failed", /already sent/));
+    // The subject changes: the check sent for the first one no longer counts.
+    await t.engine.finishVerification(callId);
+    await t.engine.beginVerification(callId, { subjectKey: subjectKeyFor(TEST_KNOWLEDGE_KEY, "33333333") });
+    assert.deepEqual(await t.engine.applyIdentityOutcome({ sessionId: t.identity.created[0]!.sessionId, status: "verified" }), { applied: false });
+  });
+
+  it("voids a reserved link when the subject changes before it was created", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { subjectKey: OWNER });
+    await t.engine.submitPin(callId, PIN);
+    t.identity.createDocumentCheck = async () => {
+      throw new Error("provider down");
+    };
+    await assert.rejects(t.engine.startPhotoId(callId), /provider down/);
+    await t.engine.finishVerification(callId);
+    await t.engine.beginVerification(callId, { accountNumber: "99999999" });
+    await assert.rejects(t.engine.startPhotoId(callId), rejects("precondition_failed"));
   });
 });

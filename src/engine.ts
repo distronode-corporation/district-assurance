@@ -173,7 +173,10 @@ export class Engine {
   async startCall(input: { callId?: string; locale?: Locale; flow?: string } = {}): Promise<SessionState> {
     const callId = input.callId ?? this.#ids.next("call");
     const modules: Record<string, JsonValue> = {};
-    for (const module of this.registry.list()) if (this.isEnabled(module.manifest.name)) modules[module.manifest.name] = module.initCall();
+    for (const module of this.registry.list()) {
+      const name = module.manifest.name;
+      if (this.isEnabled(name)) modules[name] = module.initCall(this.#config.modules[name]?.settings);
+    }
     const record: CallRecord = {
       v: 1,
       state: newSession(callId, this.workspaceId, this.#now()),
@@ -181,14 +184,20 @@ export class Engine {
       revision: this.#config.revision,
       flow: null,
       modules,
-      outbox: [{ eventId: `${callId}:1:0`, name: "call.started", actor: "system", at: this.#now(), detail: { locale: input.locale ?? "en", revision: this.#config.revision } }],
+      outbox: [],
     };
-    // The flow is chosen now, so the call runs the definition and revision it was started with.
-    const flow = input.flow === undefined ? null : { name: input.flow, definition: this.#flowDefinition(input.flow), revision: this.#config.revision };
+    // A call started with a flow is created with it attached, so no other process can start a
+    // different flow on the same id in between.
+    const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
+    if (input.flow !== undefined) {
+      const draft = this.#draft(record, events);
+      this.#attachFlow(draft, input.flow, this.#flowDefinition(input.flow), this.#config.revision);
+      this.#advance(draft);
+    }
+    record.outbox = events.map((event, i) => ({ eventId: `${callId}:1:${i}`, ...event }));
     const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
     if (!created) throw new EngineError("invalid_input", "a call with that id exists");
     await this.#flush(callId, 1, record);
-    if (flow !== null) await this.#startFlow(callId, flow.name, flow.definition, flow.revision);
     return this.state(callId);
   }
 
@@ -249,11 +258,14 @@ export class Engine {
 
   /** Starts a named flow on an open call. A call runs at most one flow; its steps are copied in now. */
   async startFlow(callId: string, name: string): Promise<FlowPosition> {
-    return this.#startFlow(callId, name, this.#flowDefinition(name), this.#config.revision);
+    const definition = this.#flowDefinition(name);
+    const revision = this.#config.revision;
+    await this.#update(callId, (draft) => this.#attachFlow(draft, name, definition, revision));
+    return (await this.flowPosition(callId))!;
   }
 
-  async #startFlow(callId: string, name: string, definition: FlowConfig["flows"][string], revision: string): Promise<FlowPosition> {
-    await this.#update(callId, (draft) => {
+  #attachFlow(draft: CallDraft, name: string, definition: FlowConfig["flows"][string], revision: string): void {
+    {
       const record = draft.record;
       if (record.flow !== null) throw new EngineError("precondition_failed", "this call already ran a flow");
       if (record.state.phase !== "open") throw new EngineError("invalid_transition", `a flow starts on an open call, not while ${record.state.phase}`);
@@ -267,8 +279,7 @@ export class Engine {
       const mark = firstOwner.enterStep(first, record.modules[firstOwner.manifest.name]!);
       record.flow = { name, revision, steps, index: 0, mark, status: "running" };
       draft.emit("flow.started", "code", { flow: name, revision, steps: steps.length });
-    });
-    return (await this.flowPosition(callId))!;
+    }
   }
 
   /** Where the call is in its flow, or null when it runs none. */
@@ -357,7 +368,10 @@ export class Engine {
 
   /** Ends the call. A running flow is abandoned. Returns the signed receipt when the call gets one, else null. */
   async endCall(callId: string): Promise<SignedReceipt | null> {
-    const record = await this.#update(callId, (draft) => {
+    // A call that ended without its receipt (the signer failed) gets it now, without ending again.
+    const before = await this.#read(callId);
+    const pending = before.state.phase === "ended" && trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null;
+    const record = pending ? before : await this.#update(callId, (draft) => {
       draft.apply({ type: "call_ended", at: this.#now() });
       const flow = draft.record.flow;
       if (flow !== null && flow.status === "running") {
@@ -368,7 +382,7 @@ export class Engine {
       return structuredClone(draft.record);
     });
     if (!trace.wantsReceipt(this.#rt, record)) return null;
-    const head = await this.#adapters.ledger.head();
+    const head = await trace.endedHead(this.#rt, record, () => this.#adapters.ledger.head());
     const parts: Pick<ReceiptBody, "verification" | "records" | "payments"> = { verification: { level: 0, methods: [] }, records: [], payments: [] };
     // The built-in contributors, not the registry: a module removed after this call filed or paid still appears on its receipt.
     for (const module of this.#receiptModules) {
@@ -581,9 +595,10 @@ export class Engine {
     if (record.outbox.length === 0) return;
     for (const queued of record.outbox) {
       await this.#adapters.ledger.append({ eventId: queued.eventId, callId, actor: queued.actor, event: queued.name, at: queued.at, detail: queued.detail });
-      // A listener is told, at least once and best effort; its failure never stops the ledger (INT-5).
+        // A listener is told, at least once and best effort; its failure, thrown or rejected, never stops the ledger (INT-5).
       try {
-        this.#onEvent?.({ name: queued.name, callId, actor: queued.actor, at: queued.at, detail: queued.detail });
+        const told: unknown = this.#onEvent?.({ name: queued.name, callId, actor: queued.actor, at: queued.at, detail: queued.detail });
+        if (told instanceof Promise) told.catch(() => undefined);
       } catch {
         // Ignored by design: the ledger is the record.
       }

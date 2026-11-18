@@ -45,6 +45,21 @@ describe("Engine construction", () => {
     );
   });
 
+  it("catches a listener's rejected promise", async () => {
+    let rejected = 0;
+    const t = setup({
+      onEvent: () => {
+        rejected++;
+        return Promise.reject(new Error("async listener bug")) as unknown as void;
+      },
+    });
+    const { callId } = await t.engine.startCall();
+    await t.engine.markUntrusted(callId, "x");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(rejected, 2);
+    assert.equal((await t.ledger.list()).length, 2);
+  });
+
   it("keeps writing the ledger when the listener throws", async () => {
     const t = setup({
       onEvent: () => {
@@ -400,6 +415,28 @@ describe("Engine file", () => {
     await assert.rejects(t.engine.confirmIntake(verified, { confirmedBy: "voice" }), rejects("invalid_transition"));
   });
 
+  it("files one record when two confirmations of the same draft run at once", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const put = t.records.putIntakeRecord.bind(t.records);
+    let second: Promise<unknown> | null = null;
+    let calls = 0;
+    t.records.putIntakeRecord = async (record) => {
+      // The first write waits for a second confirmation, which resumes the same record and files it first.
+      if (++calls === 1) {
+        second = t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
+        await second;
+      }
+      return put(record);
+    };
+    const first = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    assert.deepEqual(await second, first, "the second one resumed the same record");
+    assert.deepEqual((await t.engine.state(callId)).recordIds, ["rec_1"]);
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "intake.confirmed").length, 1);
+  });
+
   it("re-checks the grant at confirmation", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
@@ -409,7 +446,7 @@ describe("Engine file", () => {
     await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("scope_denied"));
   });
 
-  it("holds the draft while it is filed, and releases it when the store fails", async () => {
+  it("holds the draft while it is filed, and keeps it reserved for the same record when the store fails", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
     await t.engine.startIntake(callId, "repair");
@@ -423,8 +460,9 @@ describe("Engine file", () => {
     await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /database down/);
     assert.ok(during.every((r) => (r as PromiseSettledResult<unknown>).status === "rejected" && rejects("precondition_failed")((r as PromiseRejectedResult).reason)));
     t.records.putIntakeRecord = put;
-    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
-    assert.equal(record.values.issue, "leak");
+    await assert.rejects(t.engine.setIntakeField(callId, "issue", "changed"), rejects("precondition_failed"), "still reserved after the failed write");
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
+    assert.deepEqual([record.recordId, record.values.issue, record.confirmedBy], ["rec_1", "leak", "voice"], "the same record, written again");
   });
 });
 
@@ -477,27 +515,29 @@ describe("Engine pay", () => {
     await assert.rejects(t.engine.requestPayment(verified, { ...request, amountMinor: "100" as never }), /amountMinor and currency are required/);
   });
 
-  it("settles a link as failed when it cannot be created, and leaves a created one to the provider", async () => {
+  it("keeps a request open when creating or texting its link fails, and resumes it with the same keys", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
     const create = t.payments.createLink.bind(t.payments);
     t.payments.createLink = async () => {
-      throw new Error("provider down");
+      throw new Error("provider timed out");
     };
-    await assert.rejects(t.engine.requestPayment(callId, request), /provider down/);
-    assert.equal((await t.engine.state(callId)).phase, "open");
-    assert.deepEqual((await t.ledger.list()).at(-1)!.detail, { paymentId: "pay_1", status: "failed" });
+    await assert.rejects(t.engine.requestPayment(callId, request), /provider timed out/);
+    assert.equal((await t.engine.state(callId)).phase, "paying", "the provider may have created it: not failed");
     t.payments.createLink = create;
-    // The link exists, so it may reach the caller: a failed text leaves it open for the provider.
     const send = t.messages.sendText.bind(t.messages);
     t.messages.sendText = async () => {
       throw new Error("carrier down");
     };
-    await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
-    assert.equal((await t.engine.state(callId)).phase, "paying");
-    const linkId = t.payments.created.at(-1)!.linkId;
-    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId, paymentStatus: "paid" }), { applied: true, callId, status: "paid" });
-    // A provider that settles while the text is still on its way: the result says so.
+    await assert.rejects(t.engine.requestPayment(callId), /carrier down/, "resumed without input");
+    await assert.rejects(t.engine.requestPayment(callId, { ...request, amountMinor: 1 }), rejects("invalid_input", /same amount/));
+    t.messages.sendText = send;
+    assert.deepEqual(await t.engine.requestPayment(callId, request), { paymentId: "pay_1", status: "open" });
+    assert.equal(t.payments.created.length, 1, "one link for the request, through every retry");
+    assert.equal(t.messages.sent.filter((m) => m.purpose === "payment_link").length, 1);
+    await assert.rejects(t.engine.requestPayment(callId, request), rejects("invalid_transition"), "delivered: no second link");
+    // A provider that settles while the text is on its way: the result says so.
+    await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" });
     t.messages.sendText = async (input) => {
       await t.engine.applyPaymentOutcome({ kind: "completed", linkId: t.payments.created.at(-1)!.linkId, paymentStatus: "paid" });
       return send(input);
@@ -505,7 +545,7 @@ describe("Engine pay", () => {
     assert.equal((await t.engine.requestPayment(callId, request)).status, "paid");
     t.messages.sendText = send;
     const receipt = await t.engine.endCall(callId);
-    assert.deepEqual(receipt!.body.payments.map((p) => p.status), ["failed", "paid", "paid"]);
+    assert.deepEqual(receipt!.body.payments.map((p) => p.status), ["paid", "paid"]);
   });
 
   it("runs paylink without settings, at the package's own limit", async () => {
@@ -551,6 +591,36 @@ describe("Engine prove", () => {
     await t.engine.submitKeypad(callId, { dob: "1" });
     const receipt = await t.engine.endCall(callId);
     assert.deepEqual(receipt!.body.verification, { level: 0, methods: [] });
+  });
+
+  it("issues the receipt of an ended call when signing failed the first time, with the same ledger head", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    const signer = generateTestSigner();
+    let fail = true;
+    const flaky = { ...signer, keyId: signer.keyId, algorithm: signer.algorithm, publicJwk: () => signer.publicJwk(), sign: async (p: Uint8Array) => {
+      if (fail) throw new Error("kms down");
+      return signer.sign(p);
+    } };
+    const u = setup({ adapters: { signer: flaky } });
+    const call = await u.engine.startCall();
+    await assert.rejects(u.engine.endCall(call.callId), /kms down/);
+    assert.equal(await u.engine.receipt(call.callId), null);
+    fail = false;
+    const receipt = (await u.engine.endCall(call.callId))!;
+    const ended = (await u.ledger.list()).find((e) => e.event === "call.ended")!;
+    assert.deepEqual(receipt.body.ledger, { seq: ended.seq, hash: ended.hash });
+    assert.equal((await u.ledger.list()).filter((e) => e.event === "call.ended").length, 1, "ended once");
+    await assert.rejects(u.engine.endCall(call.callId), rejects("invalid_transition"), "and only once");
+    assert.equal(await t.engine.endCall(callId).then((r) => r !== null), true);
+  });
+
+  it("keeps the consent wordings a call started with when the config changes", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    t.engine.configure(testConfig((c) => (c.modules.trace = { settings: { wordings: [{ purpose: "marketing", version: "1", text: { en: "a", fr: "b" } }] } })));
+    assert.equal((await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" })).purpose, "texts");
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "marketing", answer: "yes" }), rejects("invalid_input"));
   });
 
   it("issues no receipt when receipts are off, and keeps the ledger", async () => {

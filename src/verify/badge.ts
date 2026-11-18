@@ -55,8 +55,14 @@ export interface BadgeSlice {
   /** A keypad or PIN factor matched since verification last started from nothing. */
   knowledgeMatched: boolean;
   carrier: CarrierSignalReport | null;
-  /** The one photo ID link a call may have: reserved before it is sent, void if the call was tainted meanwhile. */
-  identityLink: "none" | "reserved" | "sent" | "void";
+  /**
+   * The one photo ID link a call may have: reserved before it is created, `sent` once its session
+   * counts, `texted` once delivered; `void` if the call was tainted or the subject changed first.
+   * A reserved or sent link resumes with the same idempotency keys after a failure.
+   */
+  identityLink: "none" | "reserved" | "sent" | "texted" | "void";
+  /** Goes up on every beginVerification, so a result judged for an earlier one is never applied. */
+  epoch: number;
   /** Identity sessions whose outcome may still count. */
   identitySessions: string[];
   /** How many verifications finished on this call, and the last one's level and counted methods. */
@@ -203,6 +209,7 @@ export class BadgeModule implements AssuranceModule {
       knowledgeMatched: false,
       carrier: null,
       identityLink: "none",
+      epoch: 0,
       identitySessions: [],
       finished: 0,
       lastLevel: 0,
@@ -224,12 +231,22 @@ export class BadgeModule implements AssuranceModule {
   onUntrusted(s: JsonValue): JsonValue {
     // A photo ID link sent before the taint no longer counts. One link per call still holds.
     const badge = s as unknown as BadgeSlice;
-    return { ...badge, identitySessions: [], identityLink: badge.identityLink === "reserved" ? "void" : badge.identityLink } as unknown as JsonValue;
+    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink) } as unknown as JsonValue;
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
     return { verification: { level: state.level, methods: state.level === 0 ? [] : (s as unknown as BadgeSlice).lastMethods } };
   }
+}
+
+/** A link not yet delivered can no longer count: it is void. One delivered stays delivered (and stops any other). */
+function voided(link: BadgeSlice["identityLink"]): BadgeSlice["identityLink"] {
+  return link === "reserved" || link === "sent" ? "void" : link;
+}
+
+/** Refuses to apply a result judged for an earlier verification of this call. */
+function assertSameVerification(s: BadgeSlice, epoch: number): void {
+  if (s.epoch !== epoch) throw new EngineError("precondition_failed", "verification restarted while this result was on its way; it does not count");
 }
 
 function pinSettingsErrors(pin: unknown): string[] {
@@ -276,7 +293,14 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
   await rt.update(callId, (draft) => {
     stepOfType(draft.record, "badge.verify");
     const s = draft.slice<BadgeSlice>(BADGE);
-    draft.apply({ type: "verification_started", reset: subjectKey !== s.subjectKey });
+    const reset = subjectKey !== s.subjectKey;
+    draft.apply({ type: "verification_started", reset });
+    s.epoch++;
+    if (reset) {
+      // Another subject: nothing collected for the previous one can count for this one.
+      s.identitySessions = [];
+      s.identityLink = voided(s.identityLink);
+    }
     if (draft.record.state.factors.length === 0) {
       s.knowledgeMatched = false;
       s.carrier = null;
@@ -303,7 +327,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     const used = s.attempts[kind] ?? 0;
     if (used >= max) return null;
     s.attempts[kind] = used + 1;
-    return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max };
+    return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch };
   });
   if (reserved === null) return { matched: false, locked: true };
   const input = { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey, subject: reserved.subject, entry, hmac: (d: string) => rt.hmac(d) };
@@ -314,6 +338,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
         ? await judgePin(rt, rt.settings<BadgeSettings>(BADGE).pin as PinSettings, input)
         : (await plugin!.judge(input)) === true;
   await rt.update(callId, (draft) => {
+    assertSameVerification(draft.slice<BadgeSlice>(BADGE), reserved.epoch);
     const factor = { kind, passed, at: rt.now() };
     draft.apply({ type: "factor_recorded", factor });
     if (passed && KNOWLEDGE_FACTORS.includes(kind)) draft.slice<BadgeSlice>(BADGE).knowledgeMatched = true;
@@ -330,12 +355,14 @@ export async function checkCarrier(rt: EngineRuntime, callId: string): Promise<{
   if (!canApply(before.state, { type: "factor_recorded", factor: { kind: "carrier_identity_match", passed: false, at: rt.now() } })) {
     throw new EngineError("invalid_transition", `the carrier is checked while verifying, not while ${before.state.phase}`);
   }
+  const epoch = (before.modules[BADGE] as unknown as BadgeSlice).epoch;
   const report = await rt.adapter("carrier").check({ phoneNumber: subject.phoneOnFile });
   const trusted = textCodeTrusted(rt.policy, report);
   await rt.update(callId, (draft) => {
     allowFactor(rt, draft.record, "carrier_identity_match");
     matchedSubject(draft.record);
     const s = draft.slice<BadgeSlice>(BADGE);
+    assertSameVerification(s, epoch);
     if (report.identityMatch !== "unavailable") {
       draft.apply({ type: "factor_recorded", factor: { kind: "carrier_identity_match", passed: report.identityMatch === "match", at: rt.now() } });
     } else {
@@ -362,23 +389,31 @@ export async function startPhotoId(rt: EngineRuntime, callId: string): Promise<{
     allowFactor(rt, draft.record, "photo_id");
     const subject = matchedSubject(draft.record);
     const s = draft.slice<BadgeSlice>(BADGE);
-    if (s.identityLink !== "none") throw new EngineError("precondition_failed", "a photo ID link was already sent on this call");
-    s.identityLink = "reserved";
+    if (s.identityLink === "texted" || s.identityLink === "void") throw new EngineError("precondition_failed", "a photo ID link was already sent on this call");
+    if (s.identityLink === "none") s.identityLink = "reserved";
     return { phone: subject.phoneOnFile, locale: draft.record.locale };
   });
+  // Reserved or sent and not delivered: a retry resumes with the same keys, and the provider
+  // returns the same check, so a call never has two links.
   const check = await rt.adapter("identity").createDocumentCheck({ callId, idempotencyKey: `${callId}:identity` });
   const enrolled = await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
-    if (s.identityLink !== "reserved") return false;
-    s.identityLink = "sent";
-    s.identitySessions.push(check.sessionId);
+    if (s.identityLink === "void") return false;
+    if (s.identityLink === "reserved") {
+      s.identityLink = "sent";
+      s.identitySessions.push(check.sessionId);
+    }
     return true;
   });
   // Tainted while the check was created: the link would never count, so it is never sent.
   if (!enrolled) throw new EngineError("precondition_failed", "untrusted content entered the call while the photo ID check was created");
   await rt.bindRef(`identity:${check.sessionId}`, callId);
   await rt.adapter("messages").sendText({ to: phone, body: identityText(locale, check.url), purpose: "identity_link", idempotencyKey: `${callId}:identity:text` });
-  await rt.update(callId, (draft) => draft.emit("identity.link_sent", "code", {}));
+  await rt.update(callId, (draft) => {
+    const s = draft.slice<BadgeSlice>(BADGE);
+    if (s.identityLink === "sent") s.identityLink = "texted";
+    draft.emit("identity.link_sent", "code", {});
+  });
   return { sent: true };
 }
 

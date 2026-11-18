@@ -22,6 +22,8 @@ export interface DossierCollectStep extends FlowStep {
 }
 
 export interface DossierSlice {
+  /** The forms in force when the call started: a config change never strands a collect step. */
+  forms: IntakeForm[];
   /** The open draft, with the form as it was when the intake started, and the record being filed (if any). */
   intake: { form: IntakeForm; values: Record<string, FieldValue>; filing: IntakeRecord | null } | null;
   records: Array<{ recordId: string; formId: string; digest: string }>;
@@ -48,11 +50,7 @@ function formErrors(form: unknown, index: number): string[] {
   return errors;
 }
 
-function form(rt: EngineRuntime, formId: string): IntakeForm {
-  const found = rt.settings<DossierSettings>(DOSSIER).forms.find((f) => f.formId === formId);
-  if (found === undefined) throw new EngineError("invalid_input", `no form ${formId} in the dossier settings`);
-  return found;
-}
+
 
 export const dossierModule: AssuranceModule = {
   manifest: {
@@ -85,8 +83,8 @@ export const dossierModule: AssuranceModule = {
     return errors;
   },
 
-  initCall(): JsonValue {
-    return { intake: null, records: [] };
+  initCall(settings: unknown): JsonValue {
+    return { forms: structuredClone((settings as DossierSettings).forms), intake: null, records: [] } as unknown as JsonValue;
   },
 
   enterStep(_step: FlowStep, s: JsonValue): JsonValue {
@@ -106,9 +104,11 @@ export const dossierModule: AssuranceModule = {
 // ---- runtime -------------------------------------------------------------------------------
 
 export async function startIntake(rt: EngineRuntime, callId: string, formId: string): Promise<void> {
-  const chosen = form(rt, formId);
+  rt.settings(DOSSIER);
   await rt.update(callId, (draft) => {
     const s = draft.slice<DossierSlice>(DOSSIER);
+    const chosen = s.forms.find((f) => f.formId === formId);
+    if (chosen === undefined) throw new EngineError("invalid_input", `no form ${formId} in this call's dossier settings`);
     const step = stepOfType<DossierCollectStep>(draft.record, "dossier.collect");
     if (step !== null && step.form !== formId) throw new EngineError("precondition_failed", `the flow step collects ${step.form}`);
     if (!rt.authorized(draft.record, "intake.file")) throw new EngineError("scope_denied", "the grant does not cover intake.file");
@@ -139,7 +139,8 @@ export async function setIntakeField(rt: EngineRuntime, callId: string, key: str
 
 /**
  * Files the draft once the caller confirmed the read-back: reserved, stored, then recorded. A
- * filing whose last write was lost (`conflict`) resumes with the same record on the next call.
+ * filing that failed anywhere after the reservation (the store, a lost write) resumes with the
+ * same record on the next call; the draft stays closed to changes until it is filed.
  */
 export async function confirmIntake(rt: EngineRuntime, callId: string, input: { confirmedBy: "voice" | "keypad" }): Promise<IntakeRecord> {
   rt.settings(DOSSIER);
@@ -164,17 +165,13 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
     intake.filing = built;
     return built;
   });
-  try {
-    await rt.adapter("records").putIntakeRecord(record);
-  } catch (error) {
-    // Not stored: release the draft so the caller can change it or try again.
-    await rt.update(callId, (draft) => {
-      draft.slice<DossierSlice>(DOSSIER).intake!.filing = null;
-    });
-    throw error;
-  }
+  // A rejected write may still have been stored, so the reservation is kept and any retry writes
+  // this same record again (RecordStore.putIntakeRecord is idempotent by recordId). Two processes
+  // confirming at once write the same record; the first to commit files it, the other finds it filed.
+  await rt.adapter("records").putIntakeRecord(record);
   await rt.update(callId, (draft) => {
     const s = draft.slice<DossierSlice>(DOSSIER);
+    if (s.records.some((r) => r.recordId === record.recordId)) return;
     draft.apply({ type: "intake_confirmed", recordId: record.recordId });
     s.intake = null;
     s.records.push({ recordId: record.recordId, formId: record.formId, digest: record.digest });
