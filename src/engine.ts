@@ -278,6 +278,7 @@ export class Engine {
         const owner = module.manifest.name;
         const slice = record.modules[owner];
         if (slice === undefined) throw new EngineError("module_disabled", `${owner} was off when this call started`);
+        if (!this.isEnabled(owner)) throw new EngineError("module_disabled", `the ${owner} module is turned off`);
         const reason = module.cannotRunStep?.(step, slice) ?? null;
         if (reason !== null) throw new EngineError("precondition_failed", `${step.type} cannot run on this call: ${reason}`);
       }
@@ -379,7 +380,9 @@ export class Engine {
     const before = await this.#read(callId);
     const pending = before.state.phase === "ended" && trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null;
     const record = pending ? before : await this.#update(callId, (draft) => {
-      for (const module of this.registry.list()) {
+      // The built-in modules' guards run even after a module was removed, as their receipt parts do.
+      const guards = [...this.#receiptModules, ...this.registry.list().filter((m) => !this.#receiptModules.includes(m))];
+      for (const module of guards) {
         const slice = draft.record.modules[module.manifest.name];
         const reason = slice === undefined ? null : (module.blocksEnd?.(slice) ?? null);
         if (reason !== null) throw new EngineError("precondition_failed", `the call cannot end yet: ${reason}`);

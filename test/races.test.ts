@@ -41,6 +41,27 @@ describe("flows attached to a running call", () => {
     assert.equal((await t.engine.startFlow(callId, "r")).step!.type, "badge.verify", "the call's own form still runs");
   });
 
+  it("refuses a flow whose outside module was turned off while the call was read", async () => {
+    const loyalty = { manifest: { name: "loyalty", version: "1", summary: "x", provides: { factors: [], steps: ["loyalty.lookup"], outcomes: [] }, scopes: { grants: [], needs: {} }, adapters: [] }, validateSettings: () => [], requiredAdapters: () => [], validateStep: () => [], initCall: () => ({}), enterStep: () => null, stepStatus: () => "pending" as const };
+    const t = setup({ modules: [loyalty] });
+    t.engine.configure(testConfig((c) => {
+      c.modules.loyalty = {};
+      c.flows = { l: { steps: [{ type: "loyalty.lookup" }] } };
+    }));
+    const { callId } = await t.engine.startCall();
+    const get = t.sessions.get.bind(t.sessions);
+    let once = true;
+    t.sessions.get = async (w, c) => {
+      if (once) {
+        once = false;
+        t.engine.configure(testConfig((x) => (x.modules.loyalty = { enabled: false })));
+      }
+      return get(w, c);
+    };
+    await assert.rejects(t.engine.startFlow(callId, "l"), rejects("module_disabled", /loyalty module is turned off/));
+    assert.equal(await t.engine.flowPosition(callId), null);
+  });
+
   it("refuses a flow whose module was removed while the call was read", async () => {
     const t = setup({ config: testConfig((c) => (c.flows = { p: { steps: [{ type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }, { type: "dossier.collect", form: "repair" }] } })) });
     const { callId } = await t.engine.startCall();
@@ -118,6 +139,24 @@ describe("overlapping retries", () => {
     assert.ok(rejects("precondition_failed", /being filed/)(ended));
     const receipt = await t.engine.endCall(callId);
     assert.deepEqual(receipt!.body.records.map((r) => r.recordId), ["rec_1"]);
+  });
+
+  it("keeps the filing guard when Dossier is removed while a record is being filed", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const put = t.records.putIntakeRecord.bind(t.records);
+    let ended: unknown = null;
+    t.records.putIntakeRecord = async (record) => {
+      t.engine.configure(testConfig((c) => (c.modules.dossier = { enabled: false })));
+      t.engine.remove("dossier");
+      ended = await t.engine.endCall(callId).catch((e: unknown) => e);
+      return put(record);
+    };
+    await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    assert.ok(rejects("precondition_failed", /being filed/)(ended));
+    assert.deepEqual((await t.engine.endCall(callId))!.body.records.map((r) => r.recordId), ["rec_1"]);
   });
 
   it("queues a copy of an outside module's detail, checked as queued", async () => {
