@@ -460,8 +460,9 @@ the lifetime (pass no input); outside one the host's code passes `{target, lifet
    Refused: `scope_denied` without a verification grant covering `entry.open` (none, expired,
    tainted, or below today's minimum); `invalid_input` for a missing or unknown target or a bad
    lifetime; `precondition_failed` while another grant of the call is in flight or once
-   `maxGrantsPerCall` grants were issued. A reservation whose grant expired without an answer
-   recorded is first settled as `unknown`. The grant's expiry is the earlier of now plus its
+   `maxGrantsPerCall` grants were issued. First, in a write of its own (so it holds even when the
+   request is then refused), a reservation whose grant expired without an answer recorded is
+   settled as `unknown`; at the grant limit that fails the step. The grant's expiry is the earlier of now plus its
    lifetime and the verification grant's expiry. Ledger: `access.issued`.
 2. **Sign**: ES256 over the canonical JSON of the body below, with Gate's signer. A signing
    failure settles the grant `failed` (nothing sent) and throws.
@@ -469,7 +470,8 @@ the lifetime (pass no input); outside one the host's code passes `{target, lifet
    being `[workspaceId, callId, grantId, "unlock"]`. Never retried.
 4. **Record** (`recordModuleOutcome`): `delivered` (with `confirmed` when the controller reported
    the door moved), `refused` (the controller certainly did not act; its reason as a short code),
-   or `unknown` when the call threw or timed out. Ledger: `access.delivered`, `access.refused`,
+   or `unknown` when the controller's call threw or timed out. A failure to write the answer is
+   thrown as it is, never turned into `unknown`; the reservation settles once its grant expires. Ledger: `access.delivered`, `access.refused`,
    `access.unknown` or `access.failed`, each with `grantId` and the grant's `digest`
    (SHA-256 of its signed bytes) and `kid`, never the grant or its signature. A fresh request
    after `unknown` is a new grant.

@@ -97,8 +97,9 @@ describe("webhookRelay", () => {
 
   it("throws on a 5xx, a redirect and a timeout, so Gate records unknown", async () => {
     await assert.rejects(webhookRelay({ url: `${base}/down` }).unlock(input), /answered 503/);
+    const confirmedBefore = seen.filter((s) => s.path === "/confirmed").length;
     await assert.rejects(webhookRelay({ url: `${base}/moved` }).unlock(input));
-    assert.equal(seen.filter((s) => s.path === "/confirmed").length, 1, "the redirect was not followed");
+    assert.equal(seen.filter((s) => s.path === "/confirmed").length, confirmedBefore, "the redirect was not followed");
     await assert.rejects(webhookRelay({ url: `${base}/slow`, timeoutMs: 100 }).unlock(input), (e: unknown) => e instanceof Error && e.name === "TimeoutError");
   });
 

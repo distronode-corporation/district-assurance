@@ -101,6 +101,7 @@ describe("receipts", () => {
     const keys = [signer.publicJwk()];
     assert.equal("d" in keys[0]!, false, "the published key has no private part");
     assert.equal(verifyReceipt(receipt, keys), true);
+    for (const bad of [null, "x", 7, { ...receipt, signature: 1 }]) assert.equal(verifyReceipt(bad as never, keys), false, "never throws on a malformed envelope");
     assert.equal(new TextDecoder().decode(receiptPayload(body())).startsWith('{"callId":"c1","consents":'), true);
     assert.match(receiptDigest(body()), /^[0-9a-f]{64}$/);
   });

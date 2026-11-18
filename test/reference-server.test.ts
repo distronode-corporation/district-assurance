@@ -5,6 +5,7 @@ import { after, before, describe, it } from "node:test";
 
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { runDemo } from "../examples/reference-server/src/demo.ts";
+import { createDoorRelay } from "../examples/reference-server/src/door-relay.ts";
 import { StripeCheckoutLinks, StripeIdentityProvider } from "../examples/reference-server/src/stripe-adapters.ts";
 import { NotImplementedError, signStripePayload, type Engine } from "../src/index.ts";
 import { createTestEngine, type TestEngine } from "../src/testing/index.ts";
@@ -89,6 +90,25 @@ describe("reference server", () => {
     const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/receipts/c1`);
     assert.deepEqual([res.status, await res.json()], [500, { error: "internal" }]);
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+});
+
+describe("example door relay", () => {
+  it("refuses an oversized body without keeping it, and a body that is not JSON", async () => {
+    const opened: string[] = [];
+    const relay = createDoorRelay({ audience: "lobby", keys: [], clock: { now: () => new Date(0) }, open: async (target) => void opened.push(target) });
+    await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(relay.address() as AddressInfo).port}`;
+    try {
+      const big = await fetch(`${url}/unlock`, { method: "POST", body: "x".repeat(64 * 1024) });
+      assert.deepEqual([big.status, await big.json()], [413, { error: "body_too_large" }]);
+      const junk = await fetch(`${url}/unlock`, { method: "POST", body: "{" });
+      assert.deepEqual([junk.status, await junk.json()], [400, { error: "malformed" }]);
+      assert.equal((await fetch(`${url}/other`)).status, 404);
+      assert.deepEqual(opened, []);
+    } finally {
+      await new Promise<void>((resolve) => relay.close(() => resolve()));
+    }
   });
 });
 

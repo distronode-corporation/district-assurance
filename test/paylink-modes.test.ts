@@ -209,6 +209,7 @@ describe("paylink: the engine's own deadline", () => {
     assert.deepEqual(await t.engine.expirePaymentLinks(callId), { expired: [] }, "settled once");
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "expired", linkId: "cs_fake_1", account: ACCT }), { applied: false }, "Stripe's own expiry later changes nothing");
     const events = (await t.ledger.list()).map((e) => e.event);
+    assert.ok(events.includes("payment.link_expired"), "the engine's expiry is in the ledger");
     assert.ok(events.indexOf("payment.link_expired") < events.lastIndexOf("payment.settled"));
   });
 
@@ -244,6 +245,19 @@ describe("paylink: the engine's own deadline", () => {
     };
     assert.deepEqual(await t.engine.expirePaymentLinks(callId), { expired: [] }, "the payment won");
     assert.equal((await t.engine.endCall(callId))!.body.payments[0]!.status, "paid");
+  });
+
+  it("never expires a link whose text never went out, even past its deadline", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    t.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
+    t.clock.advance(61 * 60_000);
+    assert.deepEqual(await t.engine.expirePaymentLinks(callId), { expired: [] });
+    assert.equal(t.payments.expired.length, 0, "the provider was never asked");
+    assert.equal((await t.engine.state(callId)).phase, "paying", "still open, to resume");
   });
 
   it("refuses on a call that started with paylink off", async () => {

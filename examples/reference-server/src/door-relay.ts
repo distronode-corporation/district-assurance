@@ -18,6 +18,8 @@ export interface DoorRelayOptions {
   open(target: string, grant: AccessGrantBody): Promise<void>;
 }
 
+const MAX_BODY_BYTES = 16 * 1024;
+
 export function createDoorRelay(options: DoorRelayOptions): Server {
   const seen = new SeenGrants();
   return createServer((req, res) => {
@@ -25,9 +27,15 @@ export function createDoorRelay(options: DoorRelayOptions): Server {
       res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
     };
     if (req.method !== "POST" || req.url !== "/unlock") return void answer(404, { error: "not_found" });
+    // A grant is well under 2 KiB: stop keeping a body past 16 KiB, drain it, and refuse it.
     const chunks: Buffer[] = [];
-    req.on("data", (c: Buffer) => chunks.push(c));
+    let size = 0;
+    req.on("data", (c: Buffer) => {
+      size += c.length;
+      if (size <= MAX_BODY_BYTES) chunks.push(c);
+    });
     req.on("end", () => {
+      if (size > MAX_BODY_BYTES) return void answer(413, { error: "body_too_large" });
       let grant: unknown;
       try {
         grant = JSON.parse(Buffer.concat(chunks).toString("utf8"));

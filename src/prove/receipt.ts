@@ -54,7 +54,8 @@ export async function signDocument<B>(signer: ReceiptSigner, body: B): Promise<S
  * malformed signature, a body canonical JSON refuses, or any change to the body. Never throws.
  */
 export function verifyDocument(document: SignedDocument<unknown>, keys: ReadonlyArray<JsonWebKey & { kid?: string }>): boolean {
-  if (document.alg !== "ES256") return false;
+  // A parsed document can be anything: check the envelope before reading it.
+  if (typeof document !== "object" || document === null || document.alg !== "ES256" || typeof document.signature !== "string") return false;
   const jwk = keys.find((k) => k.kid === document.kid);
   if (jwk === undefined) return false;
   try {

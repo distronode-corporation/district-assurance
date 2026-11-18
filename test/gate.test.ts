@@ -284,9 +284,12 @@ describe("gate: grants", () => {
     const lost: GateHost = {
       workspaceId: t.engine.workspaceId,
       updateModule: (c, n, fn) => t.engine.updateModule(c, n, fn),
+      moduleState: (c, n) => t.engine.moduleState(c, n),
       recordModuleOutcome: () => Promise.reject(new Error("the process stopped")),
     };
+    // The door answered "delivered", then writing it failed: that error is thrown as it is, never turned into "unknown".
     await assert.rejects(t.gate.grantAccess(lost, callId, { target: "front-door" }), /the process stopped/);
+    assert.equal(t.door.received.length, 1);
     assert.equal((await slice(t, callId)).grants[0]!.status, "reserved");
     await assert.rejects(t.gate.grantAccess(t.engine, callId, { target: "front-door" }), rejects("precondition_failed", /being delivered/));
     t.clock.advance(60_000);
@@ -298,6 +301,24 @@ describe("gate: grants", () => {
       ["access.issued", null],
       ["access.delivered", null],
     ]);
+  });
+
+  it("fails the step at the grant limit once a stale reservation settles, and keeps that settlement", async () => {
+    const t = gateSetup("confirm", (c) => (c.modules.gate!.settings = { targets: structuredClone(targets), maxGrantsPerCall: 1 }));
+    const callId = await verified(t);
+    const lost: GateHost = {
+      workspaceId: t.engine.workspaceId,
+      updateModule: (c, n, fn) => t.engine.updateModule(c, n, fn),
+      moduleState: (c, n) => t.engine.moduleState(c, n),
+      recordModuleOutcome: () => Promise.reject(new Error("the process stopped")),
+    };
+    await assert.rejects(t.gate.grantAccess(lost, callId), /the process stopped/);
+    t.clock.advance(60_000);
+    // Settling the stale grant uses the call's last one, so the step fails and the request is refused.
+    await assert.rejects(t.gate.grantAccess(t.engine, callId), rejects("precondition_failed", /flow entry has failed/));
+    assert.equal((await slice(t, callId)).grants[0]!.status, "unknown", "settled in its own write, though the request was refused");
+    assert.equal(t.door.received.length, 1, "no second grant was sent");
+    assert.equal((await t.engine.flowPosition(callId))!.status, "failed");
   });
 
   it("records the answer even if the grant expired or the call ended while the door answered", async () => {
