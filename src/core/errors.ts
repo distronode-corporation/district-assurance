@@ -27,7 +27,11 @@ export type EngineErrorCode =
   /** An argument failed validation: a policy, a form, an amount, a field value. */
   | "invalid_input"
   /** A precondition of the step is not met, for example a link before the keypad checks pass. */
-  | "precondition_failed";
+  | "precondition_failed"
+  /** The module is installed but turned off in the workspace's config, or not installed. */
+  | "module_disabled"
+  /** Another process changed the call at the same time, every retry included (SessionStore). */
+  | "conflict";
 
 /** A refusal. The message is for logs; hosts branch on `code`, never on the message. */
 export class EngineError extends Error {

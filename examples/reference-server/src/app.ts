@@ -77,7 +77,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     if (receipt !== null) {
       expect("GET");
       try {
-        const found = options.engine.receipt(receipt[1]!);
+        const found = await options.engine.receipt(receipt[1]!);
         return found === null ? [404, { error: "not_found" }] : [200, found as unknown as Json];
       } catch (error) {
         if (error instanceof EngineError && error.code === "unknown_call") return [404, { error: "not_found" }];

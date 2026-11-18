@@ -7,7 +7,7 @@ import * as testing from "../src/testing/index.ts";
 import { ENGINE_EVENTS } from "../src/core/events.ts";
 
 describe("entry points", () => {
-  it("the root exports the engine, every module and the webhooks", () => {
+  it("the root exports the engine, the core, every module and the webhooks", () => {
     for (const name of [
       "createEngine",
       "Engine",
@@ -31,6 +31,20 @@ describe("entry points", () => {
       "verifyStripeSignature",
       "parseStripeEvent",
       "ENGINE_EVENTS",
+      "ModuleRegistry",
+      "validateConfig",
+      "ConfigError",
+      "defaultConfig",
+      "builtInModules",
+      "badgeModule",
+      "dossierModule",
+      "paylinkModule",
+      "traceModule",
+      "gateModule",
+      "MemorySessionStore",
+      "pinDigest",
+      "PAYMENT_MODES",
+      "formatAmount",
     ]) {
       assert.ok(name in root, name);
     }
@@ -49,9 +63,15 @@ describe("entry points", () => {
       "testSubject",
       "generateTestSigner",
       "TEST_KNOWLEDGE_KEY",
+      "FakePinVerifier",
+      "sessionStoreContract",
     ]) {
       assert.ok(name in testing, name);
     }
+  });
+
+  it("keeps the runtime functions of the modules out of the root", () => {
+    for (const name of ["submitFactor", "beginVerification", "requestPayment", "startIntake", "recordConsent"]) assert.equal(name in root, false, name);
   });
 
   it("event names are unique and dotted", () => {

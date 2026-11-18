@@ -2,7 +2,8 @@
 //
 // The model never takes part in this: factors are results recorded by code, the level is computed
 // from them here, and a scope is allowed only when the level reaches the scope's minimum. Caller
-// ID is not a factor kind at all, so no policy can count it.
+// ID is not a factor kind at all, so no policy can count it, and no factor plug-in may take a name
+// that means it (FORBIDDEN_FACTOR_KINDS).
 
 export type AssuranceLevel = 0 | 1 | 2 | 3;
 
@@ -15,13 +16,19 @@ export const FACTOR_KINDS = [
   "text_code",
   /** The carrier confirms that the number on file belongs to the person on record. */
   "carrier_identity_match",
-  /** A keypad PIN the caller chose after an earlier strong verification. */
-  "returning_pin",
+  /** A keypad PIN, compared against a keyed hash on file or by the host's own PIN verifier. */
+  "pin",
   /** A government photo ID plus a selfie, checked by an identity provider through a texted link. */
   "photo_id",
 ] as const;
 
-export type FactorKind = (typeof FACTOR_KINDS)[number];
+export type BuiltInFactorKind = (typeof FACTOR_KINDS)[number];
+
+/** A built-in kind, or the kind of a factor plug-in a host added to Badge. */
+export type FactorKind = BuiltInFactorKind | (string & {});
+
+/** Names no factor may take: the calling number is never evidence of who is calling. */
+export const FORBIDDEN_FACTOR_KINDS: readonly string[] = ["caller_id", "calling_number", "ani", "cli"];
 
 export interface FactorResult {
   kind: FactorKind;
@@ -83,7 +90,7 @@ export function defaultVerificationPolicy(): VerificationPolicy {
         anyOf: [
           ["keypad_knowledge", "text_code"],
           ["keypad_knowledge", "carrier_identity_match"],
-          ["returning_pin", "text_code"],
+          ["pin", "text_code"],
         ],
       },
       { level: 3, anyOf: [["keypad_knowledge", "photo_id"]] },
@@ -102,8 +109,11 @@ export function defaultVerificationPolicy(): VerificationPolicy {
   };
 }
 
-/** Every problem with a policy, as sentences. An empty list means the policy can be used. */
-export function validatePolicy(policy: VerificationPolicy): string[] {
+/**
+ * Every problem with a policy, as sentences. An empty list means the policy can be used.
+ * `knownFactors` is every factor kind the installed modules provide (the built-in kinds by default).
+ */
+export function validatePolicy(policy: VerificationPolicy, knownFactors: readonly string[] = FACTOR_KINDS): string[] {
   const errors: string[] = [];
   const seen = new Set<number>();
   for (const rule of policy.levels) {
@@ -111,7 +121,7 @@ export function validatePolicy(policy: VerificationPolicy): string[] {
     if (seen.has(rule.level)) errors.push(`level ${rule.level} is defined twice`);
     seen.add(rule.level);
     if (rule.anyOf.length === 0) errors.push(`level ${rule.level} has no factor sets`);
-    for (const set of rule.anyOf) errors.push(...checkFactorSet(rule.level, set));
+    for (const set of rule.anyOf) errors.push(...checkFactorSet(rule.level, set, knownFactors));
   }
   for (const [scope, level] of Object.entries(policy.scopes)) {
     if (![0, 1, 2, 3].includes(level)) errors.push(`scope ${scope} has level ${level}, not 0 to 3`);
@@ -127,12 +137,12 @@ export function validatePolicy(policy: VerificationPolicy): string[] {
   return errors;
 }
 
-function checkFactorSet(level: number, set: FactorKind[]): string[] {
+function checkFactorSet(level: number, set: FactorKind[], knownFactors: readonly string[]): string[] {
   const errors: string[] = [];
   const label = `level ${level} set [${set.join(", ")}]`;
   if (set.length === 0) return [`level ${level} has an empty factor set`];
   for (const kind of set) {
-    if (!(FACTOR_KINDS as readonly string[]).includes(kind)) errors.push(`${label}: unknown factor ${kind}`);
+    if (!knownFactors.includes(kind)) errors.push(`${label}: unknown factor ${kind}`);
   }
   if (new Set(set).size !== set.length) errors.push(`${label}: a factor is repeated`);
   if (level >= 2 && new Set(set).size < 2) errors.push(`${label}: level 2 and above need two different factors`);

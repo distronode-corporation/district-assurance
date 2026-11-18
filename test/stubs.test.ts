@@ -1,6 +1,6 @@
 // Every planned-but-unbuilt entry point throws NotImplementedError naming its roadmap issue.
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { NotImplementedError } from "../src/core/errors.ts";
@@ -8,7 +8,8 @@ import { buildReadBack, createUploadLink, deliverRecord } from "../src/file/late
 import { cancelPaymentLink, chargeSavedCard, startKeypadCardCapture } from "../src/pay/later.ts";
 import { revokeConsent } from "../src/prove/consent.ts";
 import { exportLedger } from "../src/prove/later.ts";
-import { checkTextCode, normaliseSpokenAnswer, recordSubjectFailure, returningCallerPin, sendTextCode } from "../src/verify/later.ts";
+import { gateModule } from "../src/gate/later.ts";
+import { checkTextCode, enrolPin, normaliseSpokenAnswer, recordSubjectFailure, sendTextCode } from "../src/verify/later.ts";
 import { verifySinchSignature, verifyTelnyxSignature, verifyTwilioSignature } from "../src/webhooks/carrier.ts";
 
 const form = { formId: "f", version: "1", fields: [] };
@@ -19,7 +20,7 @@ const STUBS: Array<[string, () => unknown]> = [
   ["VER-2", () => sendTextCode({ callId: "c" })],
   ["VER-2", () => checkTextCode({ callId: "c", code: "1" })],
   ["VER-3", () => normaliseSpokenAnswer({ field: "postal", transcript: "", locale: "en" })],
-  ["VER-6", () => returningCallerPin({ subjectKey: "s" })],
+  ["VER-6", () => enrolPin({ callId: "c" })],
   ["FIL-1", () => buildReadBack(form, {}, "fr")],
   ["FIL-3", () => deliverRecord({ workspaceId: "w", recordId: "r" })],
   ["FIL-5", () => createUploadLink({ callId: "c", recordId: "r" })],
@@ -31,10 +32,46 @@ const STUBS: Array<[string, () => unknown]> = [
   ["SRV-1", () => verifyTwilioSignature(hook)],
   ["SRV-1", () => verifyTelnyxSignature(hook)],
   ["SRV-1", () => verifySinchSignature(hook)],
+  ["GAT-1", () => gateModule()],
 ];
+
+/** Planned work a validator refuses by id (so a config can never reach it mid-call). */
+const REFUSED_BY_VALIDATORS = ["VER-2", "VER-3", "FIL-2", "PAY-7"];
+
+/** Every `NotImplementedError("...", "ID")` in src/, so a new stub cannot skip this file. */
+function stubIdsInSource(dir: URL): string[] {
+  const ids: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) ids.push(...stubIdsInSource(new URL(`${entry.name}/`, dir)));
+    else if (entry.name.endsWith(".ts")) {
+      const text = readFileSync(new URL(entry.name, dir), "utf8");
+      for (const m of text.matchAll(/new NotImplementedError\([^,]+, "([A-Z]{3}-\d+)"\)/g)) ids.push(m[1]!);
+    }
+  }
+  return ids;
+}
 
 describe("planned entry points", () => {
   const roadmap = readFileSync(new URL("../ROADMAP.md", import.meta.url), "utf8");
+  const issues = readFileSync(new URL("../ISSUES.md", import.meta.url), "utf8");
+
+  it("every NotImplementedError in src/ is listed here", () => {
+    const listed = new Set(STUBS.map(([id]) => id));
+    for (const id of stubIdsInSource(new URL("../src/", import.meta.url))) assert.ok(listed.has(id), `${id} is thrown in src/ but not tested here`);
+  });
+
+  for (const id of REFUSED_BY_VALIDATORS) {
+    it(`${id}: refused by a validator, and in ROADMAP.md`, () => {
+      assert.ok(roadmap.includes(`**${id}**`), `${id} is missing from ROADMAP.md`);
+    });
+  }
+
+  it("every issue in ISSUES.md is in ROADMAP.md, written out once", () => {
+    const ids = [...issues.matchAll(/^### ([A-Z]{3}-\d+):/gm)].map((m) => m[1]!);
+    assert.ok(ids.length > 0);
+    for (const id of ids) assert.ok(roadmap.includes(`**${id}**`), `${id} is in ISSUES.md but not in ROADMAP.md`);
+    assert.equal(new Set(ids).size, ids.length, "an issue is written out twice");
+  });
 
   for (const [issue, call] of STUBS) {
     it(`${issue}: throws NotImplementedError, and the issue is in ROADMAP.md`, () => {

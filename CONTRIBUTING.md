@@ -39,6 +39,10 @@ editorconfig-checker. Tests use `node:test` and `node:assert`, one file per area
 - One change per pull request, with tests. New code in `src/` keeps every file at 100%.
 - A change to the state machine, the factor rules, the ledger or the receipt format updates
   SPEC.md in the same pull request; a change to a control updates SECURITY-MODEL.md.
+- A new module setting or flow step comes with `validateConfig` tests for every problem it can
+  have (`test/config.test.ts`), so a bad config is refused when it is saved.
+- A new `NotImplementedError` names a ROADMAP.md issue and is added to `test/stubs.test.ts`, which
+  fails otherwise.
 - A decision with alternatives gets an ADR in DECISIONS.md.
 - Add a line under "Unreleased" in CHANGELOG.md.
 - Never put real customer data, real phone numbers, keys or secrets in code, tests or issues. Use

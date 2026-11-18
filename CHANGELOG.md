@@ -8,6 +8,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The modular core. A module registry and module interface (what a module provides, the scopes it
+  grants or needs, the adapters it requires, its settings validator); Badge, Dossier, Paylink and
+  Trace as modules, switched on and off per workspace config; outside modules with `engine.use`.
+- FlowConfig, a versioned JSON document per workspace, and `validateConfig(config, registry)`, which
+  returns every problem with its path. Flow execution: a call runs its flow step by step, and only
+  the current step's work is allowed.
+- Badge factor plug-ins, and the `pin` factor (a keyed hash bound to the subject, or the host's own
+  `PinVerifier`), with attempts counted before they are judged.
+- `SessionStore` with compare-and-set (INT-3), `MemorySessionStore`, and `sessionStoreContract` in
+  `district-assurance/testing`. Several engines can run one call.
+- The demo runs `owner-command` (a PIN only, on two engines sharing one store) and `deposit`.
+- ROADMAP.md and ISSUES.md for the modular design, owner-command first; ADR-13 to ADR-20.
+
+### Changed
+
+- The ledger is always on: Trace cannot be turned off or removed, and an engine needs a ledger.
+  Receipts are per flow (`trace.receipt`) or Trace's `receipts` setting; `endCall` returns null
+  when a call gets none.
+- The policy, forms, consent wordings, grant lifetime and payment limit moved into FlowConfig;
+  `startIntake` takes a form id and `recordConsent` a purpose.
+- `state`, `authorize`, `setIntakeField` and `receipt` are asynchronous (the session store).
+- `returning_pin` is now `pin`; `returningCallerPin` is `enrolPin` (VER-6).
+
 - M0 skeleton. The engine (`createEngine`) with the call session state machine, the assurance
   policy (levels, scope floors, carrier signal handling), keypad knowledge comparison, the photo
   ID flow, intake forms and confirmed records, payment links and settlement, consent records,

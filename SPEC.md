@@ -45,14 +45,67 @@ the only caller in the package.
 speech-to-text and the model, and holds staff listen-in. The engine tracks the flag; the host
 enforces it.
 
-## 2. Factors, levels and scopes
+## 2. The call record and the SessionStore
 
-Factor kinds: `keypad_knowledge`, `spoken_knowledge` (planned, VER-3), `text_code` (planned,
-VER-2), `carrier_identity_match`, `returning_pin` (planned, VER-6), `photo_id`. Caller ID is not
-a kind.
+A call is one JSON record: `{v: 1, state, locale, revision, flow, modules}`, where `state` is the
+session above, `revision` the FlowConfig revision the call started under, `flow` the cursor of the
+flow it runs (or null), and `modules` each enabled module's own part, created by its `initCall`
+when the call starts. A module turned on after a call started has no part in it and is refused on
+that call (`module_disabled`).
+
+The record lives in a `SessionStore`:
+
+- `create(workspaceId, callId, record)` stores it at version 1, or answers false if the id exists.
+- `get` returns `{version, record}` or null.
+- `compareAndSet(workspaceId, callId, expectedVersion, record)` writes only if the stored version is
+  `expectedVersion`, and the new version is `expectedVersion + 1`; otherwise `{ok: false}`.
+- `bindRef(workspaceId, ref, callId)` points a provider reference (`identity:<session id>`,
+  `payment:<link id>`) at a call, first binding wins; `resolveRef` reads it.
+
+Every engine step reads the record, applies one pure change, and writes it with compare-and-set.
+On `{ok: false}` the step starts again from a fresh read, up to 5 attempts (`MAX_WRITE_ATTEMPTS`),
+then throws `EngineError("conflict")`. Ledger entries and listener events for a step are written
+only after its write succeeded. Steps with side effects use two writes or more: an attempt is
+counted before it is judged; a photo ID link and a payment link are reserved before the provider
+is called. `sessionStoreContract(factory)` in `district-assurance/testing` is the suite a store
+must pass; `MemorySessionStore` is the reference.
+
+## 3. Modules
+
+A module is an `AssuranceModule`: a `manifest` and pure functions.
+
+| Manifest field | |
+|---|---|
+| `name` | 2 to 32 of `a-z`, `0-9`, `-`, starting with a letter; not `core`, `engine`, `flow`, `module` |
+| `provides.factors`, `.steps`, `.outcomes` | factor kinds (Badge), step types `<name>.<snake_case>`, outcomes |
+| `scopes.grants`, `scopes.needs` | scopes it issues grants for; step type to the scope its step needs |
+| `adapters` | the adapter names it always needs |
+| `alwaysOn` | true only for Trace, which holds the ledger |
+
+`ModuleRegistry.use` refuses a manifest with a bad or reserved name, a name or factor already
+installed, a step not prefixed with the module's name, a scope need for a step it does not
+provide, or a second `alwaysOn` module. `remove` refuses Trace. `Engine.remove` also refuses a
+module the config has on.
+
+| Built-in | Steps | Needs | Adapters |
+|---|---|---|---|
+| `badge` | `badge.verify` | | `records`; `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `pinVerifier` with `pin` in verifier mode |
+| `dossier` | `dossier.collect` | `intake.file` | `records` |
+| `paylink` | `paylink.request` | `payment.request` | `payments`, `messages` |
+| `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
+
+## 4. Factors, levels and scopes
+
+Built-in factor kinds: `keypad_knowledge`, `pin`, `carrier_identity_match`, `photo_id`,
+`text_code` (planned, VER-2) and `spoken_knowledge` (planned, VER-3). A **factor plug-in** adds a
+kind the caller enters and code judges: `{kind, summary, maxAttemptsPerCall (1 to 5), adapters,
+judge}`, installed with `badgeModule({ factors })`. Its kind is snake_case, 3 to 32 characters, not
+a built-in kind, and never `caller_id`, `calling_number`, `ani` or `cli`. Its judge gets the
+subject, the entry and `hmac(data)` under the knowledge key, never the key. Caller ID is not a
+kind.
 
 A policy lists, per level 1 to 3, sets of factor kinds; a level is reached when every kind in one
-of its sets has passed. `validatePolicy` refuses:
+of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:
 
 - a level outside 1 to 3, a level defined twice, an empty set, an unknown or repeated kind;
 - at level 2 or 3, a set with fewer than two different kinds;
@@ -61,18 +114,29 @@ of its sets has passed. `validatePolicy` refuses:
 - a scope below its floor: `payment.*`, `payout.*` and `contact.*` are at least level 2.
 
 The default policy: level 1 is keypad knowledge; level 2 is keypad plus a trusted texted code, or
-keypad plus carrier identity match, or a returning PIN plus a texted code; level 3 is keypad plus
-photo ID. Scopes: `status.read` 1, `intake.file` 1, `payment.request` 2, `contact.update` 3,
-`payout.update` 3. Two keypad attempts per call. A texted code counts only when the carrier
-answered and reported no SIM change or port in the last 72 hours.
+keypad plus carrier identity match, or a PIN plus a texted code; level 3 is keypad plus photo ID.
+Scopes: `status.read` 1, `intake.file` 1, `payment.request` 2, `contact.update` 3, `payout.update`
+3. Two keypad attempts per call. A texted code counts only when the carrier answered and reported
+no SIM change or port in the last 72 hours.
 
-A **grant** carries the level, the scopes at or below it, and an expiry (15 minutes by default, at
-most 60). `authorize(callId, scope)` is true only for a listed scope, on a call that has not ended,
-whose minimum is 0 or whose grant includes it and has not expired.
+Badge's settings turn factors on (`factors`, at least one), set the grant lifetime
+(`grantTtlSeconds`, default 900, at most 3600) and, when `pin` is on, the PIN settings (section 6).
+A factor that is off is refused at every entry point. A planned factor cannot be turned on.
 
-## 3. Keypad knowledge
+A **grant** carries the level, the scopes at or below it (narrowed to the verify step's `scopes`
+when the step lists them), and an expiry. `authorize(callId, scope)` is true only for a scope the
+policy lists, on a call that has not ended, whose minimum is 0 or whose grant includes it and has
+not expired.
 
-- Subject key: `HMAC-SHA256(knowledgeKey, "subject:" + accountNumber)`, hex.
+Links go only to the subject's number on file, and only after a `keypad_knowledge` or `pin`
+factor passed since verification last started from nothing. A plug-in's pass does not unlock
+texts.
+
+## 5. Keypad knowledge
+
+- Subject key: `HMAC-SHA256(knowledgeKey, "subject:" + accountNumber)`, hex. A host may instead
+  start verification with a subject key its own code chose (`{subjectKey}`, 64 lower-case hex);
+  choosing the subject is not a factor.
 - Field digest: `HMAC-SHA256(knowledgeKey, "field:" + field + ":" + value)`, hex.
 - An entry counts only if it is 1 to 32 ASCII digits.
 - `submitKeypad` compares every configured field, in constant time per field, even after a
@@ -80,16 +144,106 @@ whose minimum is 0 or whose grant includes it and has not expired.
 - After `maxKeypadAttemptsPerCall` judged attempts, further submissions return `locked` without
   judging.
 
-## 4. Engine events
+## 6. PIN
+
+Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsPerCall (1 to 5)}`.
+
+- An entry is well formed when it is ASCII digits with a length from `minDigits` to `maxDigits`.
+  A malformed entry is still an attempt, and fails.
+- `keyed_hash` mode: the stored digest is `pinDigest(knowledgeKey, subjectKey, pin)` =
+  `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`, in `SubjectRecord.pinDigest`. The
+  entry is hashed the same way and compared in constant time; an unknown subject, a subject without
+  a digest and a malformed entry do the same work and give the same answer.
+- `verifier` mode: the host's `PinVerifier.verify({workspaceId, subjectKey, pin})` decides, for a
+  well-formed entry on a keypad-producible subject; the PIN is passed once and kept nowhere. A
+  subject the `RecordStore` does not have never passes, whatever the verifier says.
+- Each attempt is counted in its own write before it is judged. After `maxAttemptsPerCall`,
+  `submitPin` returns `locked` without judging. Across calls: planned (VER-1). Enrolment: planned
+  (VER-6).
+
+## 7. FlowConfig
+
+```json
+{
+  "version": 1,
+  "revision": "2026-11-18.1",
+  "policy": { "version": "...", "levels": [], "scopes": {}, "keypadFields": [], "maxKeypadAttemptsPerCall": 2,
+              "simSwapWindowHours": 72, "trustTextCodeWithoutCarrierCheck": false },
+  "modules": { "<name>": { "enabled": true, "settings": {} } },
+  "flows": { "<name>": { "summary": "...", "steps": [{ "type": "<module>.<step>" }] } }
+}
+```
+
+- `version` is 1. `revision` is the host's label, 1 to 64 of letters, digits, `.`, `:`, `-`, `_`;
+  it is written in `call.started` and `flow.started`.
+- A module listed and not `enabled: false` is on; an installed module not listed is off; Trace is
+  always on and `enabled: false` on it is a problem.
+- Flow names are lower-case letters, digits and hyphens, at most 64. A flow has at least one step.
+
+`validateConfig(config, registry)` never throws and returns every problem, each starting with its
+path (`modules.badge.settings: ...`, `flows.deposit.steps[2] (paylink.request): ...`). It checks
+unknown fields at every level, the policy's shape and then its rules against the installed
+factors, every module's switch and settings, every adapter an enabled module's settings need,
+every step's module (installed and on) and the step itself, and, walking each flow in order, that
+every step needing a scope comes after a `badge.verify` step whose level reaches that scope's
+minimum and whose `scopes`, if listed, include it. Cross-checks against a module's settings or the
+policy are skipped when those did not validate (their own problems are reported). The engine
+refuses a config with any problem (`ConfigError`, code `invalid_input`, with `problems`).
+
+| Step | Fields |
+|---|---|
+| `badge.verify` | `level` 1 to 3; `factors`, at least one, each on in Badge's settings, together reaching `level` under the policy; optional `scopes`, each in the policy at or below `level` |
+| `dossier.collect` | `form`, a form id in Dossier's settings |
+| `paylink.request` | `amountMinor`, `currency`, `description`, `amountSource` (section 14); `mode` is refused until PAY-7 |
+| `trace.consent` | `purpose`, a wording in Trace's settings |
+| `trace.receipt` | none; needs the `signer` adapter |
+
+Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
+until FIL-2); Paylink `{maxAmountMinor?}` (1 to 1,000,000); Trace `{receipts?, wordings?}`
+(`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr}}`, purposes
+unique).
+
+## 8. Flow execution
+
+`startCall({flow})` or `startFlow(callId, name)`, on an open call that has not run a flow, copies
+the flow's steps into the call record, so a later config change never moves a call. The first step
+is entered: its module's `enterStep` returns a mark. After every change to the call, the engine
+asks the current step's module for `stepStatus(step, {state, slice, mark})`:
+
+- `pending`: the call stays on the step.
+- `complete`: `flow.step_completed`, the next step is entered (and judged at once, so a
+  `trace.receipt` step passes immediately); after the last, `flow.completed`.
+- `failed`: `flow.failed`, and the flow stops.
+
+| Step | Complete when | Failed when |
+|---|---|---|
+| `badge.verify` | a verification finished during the step at `level` or above | it finished below `level` |
+| `dossier.collect` | a record was confirmed during the step | never (abandon and start again) |
+| `paylink.request` | the step's payment settled `paid` | it settled `failed` or `expired` |
+| `trace.consent` | a consent for `purpose` was recorded during the step | never |
+| `trace.receipt` | at once | never |
+
+While a flow runs, work that is not the current step's is refused with `precondition_failed`:
+verification inputs outside a `badge.verify` step or for a factor it does not list, intake of a
+form other than the step's, a payment outside its step or with an amount of its own (the step sets
+it), a consent for another purpose. During a `badge.verify` step, only its factors count toward
+the level. A step whose module was removed while the call ran fails. `endCall` abandons a running
+flow (`flow.abandoned`). `flowPosition(callId)` returns `{flow, revision, status, index, step}`.
+
+## 9. Engine events
 
 Each event is one ledger entry: `name`, `callId`, `actor` (`caller`, `ai`, `code`, `member`,
-`system`), `at`, and a `detail` object that never carries a value the caller keyed, an answer on
-file, a phone number, a link or card data.
+`system`), `at`, and a `detail` object that never carries a value the caller keyed, a PIN, an
+answer on file, a phone number, a link or card data.
 
 | Event | Detail |
 |---|---|
-| `call.started` | `locale` |
-| `verification.started` | none |
+| `call.started` | `locale`, `revision` |
+| `flow.started` | `flow`, `revision`, `steps` (count) |
+| `flow.step_completed` / `flow.failed` | `flow`, `step` (index), `type` |
+| `flow.completed` | `flow`, `steps` |
+| `flow.abandoned` | `flow`, `step` |
+| `verification.started` | `subject`: `account` or `host` |
 | `verification.factor` | `kind`, `passed` (and `status` for photo ID) |
 | `verification.carrier_checked` | `checked`, `textCodeTrusted`, `identityMatch` |
 | `identity.link_sent` | none |
@@ -106,8 +260,11 @@ file, a phone number, a link or card data.
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
+| `module.event` | `module`, `event`, `detail` (written by an outside module) |
 
-## 5. Audit ledger
+The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
+
+## 10. Audit ledger
 
 Entry: `{seq, prevHash, callId, actor, event, at, detail, hash}`. `seq` starts at 1; the first
 `prevHash` is 64 zeros; `hash` is SHA-256 over the canonical JSON of every other field.
@@ -115,13 +272,13 @@ Entry: `{seq, prevHash, callId, actor, event, at, detail, hash}`. `seq` starts a
 `chainEntry` refuses a detail in which any string (other than a 64-character hex digest) contains
 a card number.
 
-## 6. Canonical JSON
+## 11. Canonical JSON
 
 Object keys sorted by UTF-16 code units, no whitespace, strings and numbers as ECMAScript
 `JSON.stringify` writes them. Refused: `undefined`, functions, symbols, bigints, non-finite
 numbers, sparse array holes, and objects whose prototype is not `Object.prototype` or `null`.
 
-## 7. Receipts
+## 12. Receipts
 
 ```json
 {
@@ -140,12 +297,16 @@ numbers, sparse array holes, and objects whose prototype is not `Object.prototyp
 }
 ```
 
-`ledger` is the head after `call.ended`. `verifyReceipt(receipt, keys)` picks the key by `kid`
+A call gets a receipt when its flow has a `trace.receipt` step (wherever it is, and whether
+or not the flow finished), or, for a call that ran no flow, when Trace's `receipts` setting is not
+false. `endCall` returns it, or null. `verification` comes from Badge, `records` from Dossier,
+`payments` from Paylink and `consents` from Trace; a module that is off contributes an empty
+part. `ledger` is the head after `call.ended`. `verifyReceipt(receipt, keys)` picks the key by `kid`
 and returns false for any change, a wrong algorithm, a malformed signature or an unknown key.
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
 `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
 
-## 8. Intake values
+## 13. Intake values
 
 | Type | Accepted | Stored as |
 |---|---|---|
@@ -154,14 +315,21 @@ Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording 
 | `date` | `YYYY-MM-DD` naming a real day | string |
 | `yes_no` | `yes`, `y`, `oui` / `no`, `n`, `non`, any case | boolean |
 
-Forms need snake_case unique keys and an English and a French label per field. Fields marked
-`sensitive` are refused until field encryption exists (FIL-2).
+Forms live in Dossier's settings: a `formId` (lower case, digits, `-`, `_`), a `version` and
+fields with snake_case unique keys, a known type and an English and a French label.
+`validateConfig` refuses fields marked `sensitive` until field encryption exists (FIL-2).
+`startIntake(callId, formId)` names the form; a draft being filed (between the reserving write and
+the store's answer) refuses changes.
 
-## 9. Payments
+## 14. Payments
 
-`requestPayment` needs `payment.request`, a positive integer amount in minor units up to the
-engine's limit (at most 1,000,000), a lower-case ISO 4217 currency and a 1 to 200 character
-description. One link at a time per call. Settlement:
+`requestPayment` needs `payment.request`, a positive integer amount in minor units up to
+Paylink's `maxAmountMinor` (at most 1,000,000), a lower-case ISO 4217 currency, a 1 to 200
+character description and an `amountSource` (`intake_record`, `business_endpoint` or
+`price_list`). In a flow they come from the `paylink.request` step and the host passes none;
+outside a flow the host's code passes them. One link at a time per call. If creating or texting
+the link fails, the request settles `failed` (unless the provider already settled it). Whose
+account takes the money (`connect` or `platform`) is planned (PAY-7). Settlement:
 
 | Provider outcome | Status |
 |---|---|
@@ -174,7 +342,7 @@ description. One link at a time per call. Settlement:
 
 A request settles once; later outcomes are ignored.
 
-## 10. Stripe webhooks
+## 15. Stripe webhooks
 
 `verifyStripeSignature` follows Stripe's published scheme: the `Stripe-Signature` header has
 `t=<unix seconds>` and one or more `v1=<hex>`; each `v1` is `HMAC-SHA256(secret, t + "." + raw
@@ -184,7 +352,7 @@ of now, either way. `parseStripeEvent` maps
 `checkout.session.{completed,async_payment_succeeded,async_payment_failed,expired}`; other types
 are reported as ignored, and a body that is not a well-formed event is `null`.
 
-## 11. Texts
+## 16. Texts
 
 Code builds every text, in the call's locale (English or French). The destination is always the
 subject's number on file. Identity link: "Your one-time identity check link: URL" / "Votre lien

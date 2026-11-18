@@ -19,6 +19,14 @@ export function knowledgeDigest(knowledgeKey: string | Uint8Array, field: string
   return hmacSha256Hex(knowledgeKey, `field:${field}:${value}`);
 }
 
+/**
+ * The stored digest of a subject's PIN, for the PIN factor in `keyed_hash` mode. Bound to the
+ * subject, so two subjects with the same PIN have different digests.
+ */
+export function pinDigest(knowledgeKey: string | Uint8Array, subjectKey: string, pin: string): string {
+  return hmacSha256Hex(knowledgeKey, `pin:${subjectKey}:${pin}`);
+}
+
 /** Whether a string is something a keypad could have produced. */
 export function isKeypadEntry(value: string): boolean {
   return KEYPAD_DIGITS.test(value);
@@ -34,11 +42,21 @@ export function judgeKeypadFactors(
   fields: readonly string[],
   entries: Readonly<Record<string, string>>,
 ): boolean {
+  return judgeKeypadWith((data) => hmacSha256Hex(knowledgeKey, data), subject, fields, entries);
+}
+
+/** `judgeKeypadFactors` with the keyed hash as a function, so the key can stay where it is. */
+export function judgeKeypadWith(
+  hmac: (data: string) => string,
+  subject: SubjectRecord | null,
+  fields: readonly string[],
+  entries: Readonly<Record<string, string>>,
+): boolean {
   let ok = subject !== null;
   for (const field of fields) {
     const entry = entries[field] ?? "";
     const stored = subject?.knowledge[field] ?? "";
-    const digest = knowledgeDigest(knowledgeKey, field, isKeypadEntry(entry) ? entry : "");
+    const digest = hmac(`field:${field}:${isKeypadEntry(entry) ? entry : ""}`);
     const match = hexDigestsEqual(digest, stored);
     ok = ok && match && isKeypadEntry(entry);
   }

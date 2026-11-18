@@ -4,6 +4,11 @@ import type { JsonValue } from "./canonical.ts";
 
 export const ENGINE_EVENTS = [
   "call.started",
+  "flow.started",
+  "flow.step_completed",
+  "flow.completed",
+  "flow.failed",
+  "flow.abandoned",
   "verification.started",
   "verification.factor",
   "verification.carrier_checked",
@@ -22,6 +27,7 @@ export const ENGINE_EVENTS = [
   "consent.recorded",
   "call.ended",
   "receipt.issued",
+  "module.event",
 ] as const;
 
 export type EngineEventName = (typeof ENGINE_EVENTS)[number];

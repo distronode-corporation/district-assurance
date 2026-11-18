@@ -1,81 +1,42 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { EngineError, NotImplementedError, type EngineErrorCode } from "../src/core/errors.ts";
+import { ConfigError } from "../src/core/config.ts";
+import { NotImplementedError } from "../src/core/errors.ts";
 import type { EngineEvent } from "../src/core/events.ts";
 import { defaultVerificationPolicy } from "../src/core/policy.ts";
-import { createEngine, formatAmount } from "../src/engine.ts";
-import type { IntakeForm } from "../src/file/intake.ts";
-import { verifyChain } from "../src/prove/ledger.ts";
+import { createEngine } from "../src/engine.ts";
+import { defaultConfig } from "../src/modules.ts";
+import { formatAmount } from "../src/pay/paylink.ts";
+import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import { verifyReceipt } from "../src/prove/receipt.ts";
-import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../src/testing/index.ts";
 import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
-import { MemoryAuditLedger } from "../src/prove/ledger.ts";
-
-const ACCOUNT = "12345678";
-const DOB = "19850214";
-const PHONE_ON_FILE = "+15555550100";
-
-const form: IntakeForm = {
-  formId: "repair",
-  version: "1",
-  fields: [
-    { key: "issue", label: { en: "Issue", fr: "Problème" }, type: "text", required: true },
-    { key: "urgent", label: { en: "Urgent", fr: "Urgent" }, type: "yes_no", required: false },
-  ],
-};
-
-const wording = { purpose: "texts", version: "1", text: { en: "May we text you?", fr: "Pouvons-nous vous texter?" } };
-
-function setup(options: Parameters<typeof createTestEngine>[0] = {}): TestEngine {
-  const t = createTestEngine(options);
-  t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } }));
-  return t;
-}
-
-const rejects = (code: EngineErrorCode) => (e: unknown) => e instanceof EngineError && e.code === code;
-
-/** A call verified to level 3 by keypad and photo ID, in the open phase. */
-async function verifiedCall(t: TestEngine, locale: "en" | "fr" = "en"): Promise<string> {
-  const { callId } = await t.engine.startCall({ locale });
-  await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
-  assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: true, locked: false });
-  await t.engine.startPhotoId(callId);
-  const sessionId = t.identity.created.at(-1)!.sessionId;
-  assert.deepEqual(await t.engine.applyIdentityOutcome({ sessionId, status: "verified" }), { applied: true, callId });
-  assert.equal((await t.engine.finishVerification(callId)).level, 3);
-  return callId;
-}
+import { TEST_KNOWLEDGE_KEY, createTestEngine } from "../src/testing/index.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
 describe("Engine construction", () => {
-  it("refuses a bad policy, a short key, a bad grant lifetime and an empty workspace", () => {
-    const adapters = createTestEngine();
-    const base = {
-      workspaceId: "w",
-      knowledgeKey: TEST_KNOWLEDGE_KEY,
-      adapters: {
-        identity: adapters.identity,
-        carrier: adapters.carrier,
-        messages: adapters.messages,
-        payments: adapters.payments,
-        records: adapters.records,
-        ledger: adapters.ledger,
-        signer: generateTestSigner(),
-      },
-    };
-    assert.throws(() => createEngine({ ...base, policy: { ...defaultVerificationPolicy(), keypadFields: [] } }), /keypadFields is empty/);
+  it("refuses a short key, an empty workspace, a missing ledger and a bad config", () => {
+    const base = { workspaceId: "w", knowledgeKey: TEST_KNOWLEDGE_KEY, adapters: { ledger: new MemoryAuditLedger() }, config: { ...defaultConfig(), modules: { trace: { settings: { receipts: false } } } } };
     assert.throws(() => createEngine({ ...base, knowledgeKey: "short" }), /at least 16 bytes/);
     assert.throws(() => createEngine({ ...base, knowledgeKey: new Uint8Array(15) }), /at least 16 bytes/);
-    assert.throws(() => createEngine({ ...base, grantTtlSeconds: 0 }), /grantTtlSeconds/);
-    assert.throws(() => createEngine({ ...base, grantTtlSeconds: 3601 }), /grantTtlSeconds/);
-    assert.throws(() => createEngine({ ...base, grantTtlSeconds: 1.5 }), /grantTtlSeconds/);
-    assert.throws(() => createEngine({ ...base, workspaceId: "" }), rejects("invalid_input"));
+    assert.throws(() => createEngine({ ...base, workspaceId: "" }), rejects("invalid_input", /workspaceId is empty/));
+    assert.throws(() => createEngine({ ...base, adapters: {} as never }), /the ledger adapter is required/);
+    assert.throws(
+      () => createEngine({ ...base, config: { ...defaultConfig(), policy: { ...defaultVerificationPolicy(), keypadFields: [] } } }),
+      (e: unknown) => e instanceof ConfigError && e.code === "invalid_input" && e.problems.includes("policy: keypadFields is empty"),
+    );
+    // The default config needs every adapter its modules use.
+    assert.throws(() => createEngine({ ...base, config: undefined }), (e: unknown) => e instanceof ConfigError && e.problems.includes("modules.badge: needs the records adapter, which the engine does not have"));
     const engine = createEngine({ ...base, knowledgeKey: new Uint8Array(16) });
     assert.equal(engine.workspaceId, "w");
     assert.deepEqual(engine.policy, defaultVerificationPolicy());
+    assert.deepEqual(engine.config.modules, { trace: { settings: { receipts: false } } });
+    assert.equal(engine.isEnabled("trace"), true, "the ledger is always on");
+    assert.equal(engine.isEnabled("badge"), false);
+    assert.deepEqual(engine.receiptKeys(), []);
   });
 
-  it("runs on the system clock and random ids by default", async () => {
+  it("runs on the system clock, random ids and an in-memory session store by default", async () => {
     const engine = createEngine({
       workspaceId: "w",
       knowledgeKey: TEST_KNOWLEDGE_KEY,
@@ -103,11 +64,13 @@ describe("Engine sessions", () => {
     const state = await t.engine.startCall({ callId: "c1" });
     assert.equal(state.phase, "open");
     await assert.rejects(t.engine.startCall({ callId: "c1" }), rejects("invalid_input"));
-    assert.throws(() => t.engine.state("nope"), rejects("unknown_call"));
-    assert.equal(t.engine.state("c1").callId, "c1");
+    await assert.rejects(t.engine.state("nope"), rejects("unknown_call"));
+    await assert.rejects(t.engine.redact("nope", "hello"), rejects("unknown_call"));
+    await assert.rejects(t.engine.markUntrusted("nope", "x"), rejects("unknown_call"));
+    assert.equal((await t.engine.state("c1")).callId, "c1");
   });
 
-  it("reports every event to the listener and the ledger, in order", async () => {
+  it("reports every event to the listener and the ledger, in order, with the config revision", async () => {
     const events: EngineEvent[] = [];
     const t = setup({ onEvent: (e) => events.push(e) });
     const { callId } = await t.engine.startCall();
@@ -117,10 +80,11 @@ describe("Engine sessions", () => {
       events.map((e) => e.name),
       ["call.started", "session.tainted"],
     );
+    assert.deepEqual(events[0]!.detail, { locale: "en", revision: "default" });
     assert.deepEqual(events[1]!.detail, { source: "business_endpoint" });
     const entries = await t.ledger.list();
     assert.deepEqual(entries.map((e) => e.event), ["call.started", "session.tainted"]);
-    assert.equal(t.engine.state(callId).tainted, true);
+    assert.equal((await t.engine.state(callId)).tainted, true);
   });
 
   it("opens and closes the keypad segment during verification", async () => {
@@ -129,9 +93,9 @@ describe("Engine sessions", () => {
     await assert.rejects(t.engine.openSensitive(callId, "keypad"), rejects("invalid_transition"));
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     await t.engine.openSensitive(callId, "keypad");
-    assert.equal(t.engine.state(callId).sensitive, "keypad");
+    assert.equal((await t.engine.state(callId)).sensitive, "keypad");
     await t.engine.closeSensitive(callId);
-    assert.equal(t.engine.state(callId).sensitive, null);
+    assert.equal((await t.engine.state(callId)).sensitive, null);
   });
 
   it("redacts text and counts findings by kind, without logging the text", async () => {
@@ -151,14 +115,14 @@ describe("Engine verify", () => {
   it("reaches level 3 with keypad and photo ID, texting the link to the number on file only", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
-    const state = t.engine.state(callId);
+    const state = await t.engine.state(callId);
     assert.equal(state.level, 3);
     assert.deepEqual(state.grant?.scopes, ["contact.update", "intake.file", "payment.request", "payout.update", "status.read"]);
     assert.equal(state.grant?.expiresAt, "2026-01-01T00:15:00.000Z");
     assert.deepEqual(t.messages.sent.map((m) => [m.to, m.purpose]), [[PHONE_ON_FILE, "identity_link"]]);
     assert.match(t.messages.sent[0]!.body, /^Your one-time identity check link: https:\/\/identity\.example\.test\//);
-    const events = (await t.ledger.list()).map((e) => e.event);
-    assert.deepEqual(events, [
+    const entries = await t.ledger.list();
+    assert.deepEqual(entries.map((e) => e.event), [
       "call.started",
       "verification.started",
       "verification.factor",
@@ -167,6 +131,7 @@ describe("Engine verify", () => {
       "verification.finished",
       "grant.issued",
     ]);
+    assert.deepEqual(entries[1]!.detail, { subject: "account" });
   });
 
   it("gives the same answer for an unknown account, a wrong value and a non-keypad entry", async () => {
@@ -178,7 +143,7 @@ describe("Engine verify", () => {
       const detail = (await t.ledger.list()).at(-1)!.detail;
       assert.deepEqual(detail, { kind: "keypad_knowledge", passed: false });
       assert.deepEqual(await t.engine.finishVerification(callId), { level: 0, scopes: [] });
-      assert.equal(t.engine.state(callId).grant, null);
+      assert.equal((await t.engine.state(callId)).grant, null);
     }
   });
 
@@ -191,7 +156,7 @@ describe("Engine verify", () => {
     assert.deepEqual(await t.engine.submitKeypad(callId, { dob: "2" }), { matched: false, locked: true });
     // Even the right answer is not judged now.
     assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: false, locked: true });
-    assert.equal(t.engine.state(callId).factors.length, 2);
+    assert.equal((await t.engine.state(callId)).factors.length, 2);
   });
 
   it("asks the carrier about the number on file after a match, and records identity match", async () => {
@@ -202,7 +167,7 @@ describe("Engine verify", () => {
     await t.engine.submitKeypad(callId, { dob: DOB });
     assert.deepEqual(await t.engine.checkCarrier(callId), { textCodeTrusted: true });
     assert.deepEqual(t.carrier.checked, [PHONE_ON_FILE]);
-    assert.equal(t.engine.state(callId).factors.length, 1, "identity match unavailable records nothing");
+    assert.equal((await t.engine.state(callId)).factors.length, 1, "identity match unavailable records nothing");
     t.carrier.set(PHONE_ON_FILE, { identityMatch: "match", lastSimSwapHoursAgo: 3 });
     assert.deepEqual(await t.engine.checkCarrier(callId), { textCodeTrusted: false });
     assert.deepEqual(await t.engine.finishVerification(callId), {
@@ -211,6 +176,7 @@ describe("Engine verify", () => {
     });
     const carrierEvent = (await t.ledger.list()).find((e) => e.event === "verification.carrier_checked" && e.detail.identityMatch === "match");
     assert.deepEqual(carrierEvent?.detail, { checked: true, textCodeTrusted: false, identityMatch: "match" });
+    await assert.rejects(t.engine.checkCarrier(callId), rejects("invalid_transition"), "only while verifying");
   });
 
   it("records a carrier identity mismatch as a failed factor", async () => {
@@ -220,7 +186,7 @@ describe("Engine verify", () => {
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     await t.engine.submitKeypad(callId, { dob: DOB });
     await t.engine.checkCarrier(callId);
-    assert.deepEqual(t.engine.state(callId).factors.map((f) => [f.kind, f.passed]), [
+    assert.deepEqual((await t.engine.state(callId)).factors.map((f) => [f.kind, f.passed]), [
       ["keypad_knowledge", true],
       ["carrier_identity_match", false],
     ]);
@@ -235,8 +201,8 @@ describe("Engine verify", () => {
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     await t.engine.startPhotoId(callId);
     await assert.rejects(t.engine.beginVerification(callId, { accountNumber: "87654321" }), rejects("invalid_transition"));
-    assert.equal(t.engine.state(callId).phase, "verifying");
-    const s = t.engine.state(callId);
+    const s = await t.engine.state(callId);
+    assert.equal(s.phase, "verifying");
     assert.equal(s.factors.length, 1, "the step-up kept the keypad factor");
   });
 
@@ -247,7 +213,7 @@ describe("Engine verify", () => {
     await t.engine.submitKeypad(callId, { dob: DOB });
     await t.engine.finishVerification(callId);
     await t.engine.beginVerification(callId, { accountNumber: "87654321" });
-    assert.equal(t.engine.state(callId).factors.length, 0);
+    assert.equal((await t.engine.state(callId)).factors.length, 0);
     await assert.rejects(t.engine.startPhotoId(callId), rejects("precondition_failed"));
   });
 
@@ -286,34 +252,53 @@ describe("Engine verify", () => {
     await t.engine.submitKeypad(callId, { dob: DOB });
     await assert.rejects(t.engine.sendTextCode(callId), (e: unknown) => e instanceof NotImplementedError && e.issue === "VER-2");
   });
+
+  it("refuses factors that are turned off, and entries for factors the caller does not enter", async () => {
+    const t = setup({ config: testConfig((c) => (c.modules.badge = { settings: { factors: ["keypad_knowledge"] } })) });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await assert.rejects(t.engine.submitPin(callId, "4826"), rejects("precondition_failed", /pin factor is turned off/));
+    await assert.rejects(t.engine.submitFactor(callId, "photo_id", "x"), rejects("invalid_input", /not a factor the caller enters/));
+    await assert.rejects(t.engine.submitFactor(callId, "spoken_knowledge", "x"), rejects("precondition_failed", /turned off/));
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await assert.rejects(t.engine.checkCarrier(callId), rejects("precondition_failed", /carrier_identity_match factor is turned off/));
+    await assert.rejects(t.engine.startPhotoId(callId), rejects("precondition_failed", /photo_id factor is turned off/));
+    assert.deepEqual(t.carrier.checked, [], "the carrier is never asked for a factor that is off");
+  });
 });
 
 describe("Engine authorize", () => {
   it("refuses unknown scopes, ended calls, missing and expired grants", async () => {
-    const policy = { ...defaultVerificationPolicy(), scopes: { ...defaultVerificationPolicy().scopes, "hours.read": 0 as const } };
-    const t = setup({ policy, grantTtlSeconds: 60 });
+    const t = setup({
+      config: testConfig((c) => {
+        c.policy.scopes["hours.read"] = 0;
+        (c.modules.badge!.settings as { grantTtlSeconds?: number }).grantTtlSeconds = 60;
+      }),
+    });
     const { callId } = await t.engine.startCall();
-    assert.equal(t.engine.authorize(callId, "hours.read"), true);
-    assert.equal(t.engine.authorize(callId, "status.read"), false);
-    assert.equal(t.engine.authorize(callId, "made.up"), false);
+    assert.equal(await t.engine.authorize(callId, "hours.read"), true);
+    assert.equal(await t.engine.authorize(callId, "status.read"), false);
+    assert.equal(await t.engine.authorize(callId, "made.up"), false);
+    assert.equal(await t.engine.authorize(callId, "constructor"), false, "not an inherited property");
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     await t.engine.submitKeypad(callId, { dob: DOB });
     await t.engine.finishVerification(callId);
-    assert.equal(t.engine.authorize(callId, "status.read"), true);
-    assert.equal(t.engine.authorize(callId, "payment.request"), false);
+    assert.equal(await t.engine.authorize(callId, "status.read"), true);
+    assert.equal(await t.engine.authorize(callId, "payment.request"), false);
     t.clock.advance(60_000);
-    assert.equal(t.engine.authorize(callId, "status.read"), false, "expired");
+    assert.equal(await t.engine.authorize(callId, "status.read"), false, "expired");
     await t.engine.endCall(callId);
-    assert.equal(t.engine.authorize(callId, "hours.read"), false);
+    assert.equal(await t.engine.authorize(callId, "hours.read"), false);
   });
 
   it("drops the grant when untrusted text enters, and re-verification starts from nothing", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
     await t.engine.markUntrusted(callId, "document");
-    assert.equal(t.engine.authorize(callId, "status.read"), false);
+    assert.equal(await t.engine.authorize(callId, "status.read"), false);
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
-    assert.equal(t.engine.state(callId).factors.length, 0);
+    assert.equal((await t.engine.state(callId)).factors.length, 0);
+    await assert.rejects(t.engine.startPhotoId(callId), rejects("precondition_failed"), "the match before the taint no longer counts");
   });
 
   it("ignores a photo ID outcome for a link sent before the taint", async () => {
@@ -327,11 +312,27 @@ describe("Engine authorize", () => {
     await t.engine.submitKeypad(callId, { dob: DOB });
     await t.engine.startPhotoId(callId);
     await t.engine.markUntrusted(callId, "document");
-    assert.equal(t.engine.state(callId).phase, "verifying");
+    assert.equal((await t.engine.state(callId)).phase, "verifying");
     const sessionId = t.identity.created.at(-1)!.sessionId;
     assert.deepEqual(await t.engine.applyIdentityOutcome({ sessionId, status: "verified" }), { applied: false });
     const otherSession = t.identity.created[0]!.sessionId;
     assert.deepEqual(await t.engine.applyIdentityOutcome({ sessionId: otherSession, status: "verified" }), { applied: true, callId: other.callId }, "other calls keep theirs");
+  });
+
+  it("voids a photo ID link reserved before the taint and created after it", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    const original = t.identity.createDocumentCheck.bind(t.identity);
+    t.identity.createDocumentCheck = async (input) => {
+      await t.engine.markUntrusted(callId, "document");
+      return original(input);
+    };
+    await t.engine.startPhotoId(callId);
+    const sessionId = t.identity.created[0]!.sessionId;
+    assert.deepEqual(await t.engine.applyIdentityOutcome({ sessionId, status: "verified" }), { applied: false });
+    await assert.rejects(t.engine.startPhotoId(callId), rejects("precondition_failed"), "one link per call still holds");
   });
 });
 
@@ -339,41 +340,58 @@ describe("Engine file", () => {
   it("files a confirmed record with its digest", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
-    await t.engine.startIntake(callId, form);
-    assert.deepEqual(t.engine.setIntakeField(callId, "issue", "4242 4242 4242 4242"), { ok: false, reason: "card_number" });
+    await t.engine.startIntake(callId, "repair");
+    assert.deepEqual(await t.engine.setIntakeField(callId, "issue", "4242 4242 4242 4242"), { ok: false, reason: "card_number" });
     await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /required fields missing: issue/);
-    assert.deepEqual(t.engine.setIntakeField(callId, "issue", " Leak under sink "), { ok: true, value: "Leak under sink" });
-    t.engine.setIntakeField(callId, "urgent", "yes");
-    assert.throws(() => t.engine.setIntakeField(callId, "nope", "x"), rejects("invalid_input"));
+    assert.deepEqual(await t.engine.setIntakeField(callId, "issue", " Leak under sink "), { ok: true, value: "Leak under sink" });
+    await t.engine.setIntakeField(callId, "urgent", "yes");
+    await assert.rejects(t.engine.setIntakeField(callId, "nope", "x"), rejects("invalid_input"));
     const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
     assert.deepEqual(record.values, { issue: "Leak under sink", urgent: true });
     assert.deepEqual(await t.records.getIntakeRecord("ws_test", record.recordId), record);
     assert.equal(await t.records.getIntakeRecord("ws_test", "rec_404"), null);
-    assert.deepEqual(t.engine.state(callId).recordIds, [record.recordId]);
-    assert.throws(() => t.engine.setIntakeField(callId, "issue", "x"), rejects("invalid_transition"));
+    assert.deepEqual((await t.engine.state(callId)).recordIds, [record.recordId]);
+    await assert.rejects(t.engine.setIntakeField(callId, "issue", "x"), rejects("invalid_transition"));
   });
 
-  it("refuses intake without the scope, a bad form, and sensitive fields until encryption exists", async () => {
+  it("refuses intake without the scope, an unknown form, and abandons", async () => {
     const t = setup();
     const { callId } = await t.engine.startCall();
-    await assert.rejects(t.engine.startIntake(callId, form), rejects("scope_denied"));
+    await assert.rejects(t.engine.startIntake(callId, "repair"), rejects("scope_denied"));
     const verified = await verifiedCall(t);
-    await assert.rejects(t.engine.startIntake(verified, { ...form, fields: [] }), rejects("invalid_input"));
-    const sensitive = { ...form, fields: [{ ...form.fields[0]!, sensitive: true }] };
-    await assert.rejects(t.engine.startIntake(verified, sensitive), (e: unknown) => e instanceof NotImplementedError && e.issue === "FIL-2");
-    await t.engine.startIntake(verified, form);
+    await assert.rejects(t.engine.startIntake(verified, "nope"), rejects("invalid_input", /no form nope/));
+    await assert.rejects(t.engine.abandonIntake(verified), rejects("invalid_transition"));
+    await t.engine.startIntake(verified, "repair");
     await t.engine.abandonIntake(verified);
-    assert.equal(t.engine.state(verified).phase, "open");
+    assert.equal((await t.engine.state(verified)).phase, "open");
     await assert.rejects(t.engine.confirmIntake(verified, { confirmedBy: "voice" }), rejects("invalid_transition"));
   });
 
   it("re-checks the grant at confirmation", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
-    await t.engine.startIntake(callId, form);
-    t.engine.setIntakeField(callId, "issue", "leak");
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
     t.clock.advance(15 * 60_000);
     await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("scope_denied"));
+  });
+
+  it("holds the draft while it is filed, and releases it when the store fails", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const put = t.records.putIntakeRecord.bind(t.records);
+    let during: unknown[] = [];
+    t.records.putIntakeRecord = async () => {
+      during = await Promise.allSettled([t.engine.setIntakeField(callId, "issue", "x"), t.engine.abandonIntake(callId)]);
+      throw new Error("database down");
+    };
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /database down/);
+    assert.ok(during.every((r) => (r as PromiseSettledResult<unknown>).status === "rejected" && rejects("precondition_failed")((r as PromiseRejectedResult).reason)));
+    t.records.putIntakeRecord = put;
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    assert.equal(record.values.issue, "leak");
   });
 });
 
@@ -384,8 +402,9 @@ describe("Engine pay", () => {
     const t = setup();
     const callId = await verifiedCall(t);
     const { paymentId } = await t.engine.requestPayment(callId, request);
-    assert.equal(t.engine.state(callId).phase, "paying");
-    assert.equal(t.engine.state(callId).sensitive, "payment");
+    const state = await t.engine.state(callId);
+    assert.equal(state.phase, "paying");
+    assert.equal(state.sensitive, "payment");
     const text = t.messages.sent.at(-1)!;
     assert.equal(text.to, PHONE_ON_FILE);
     assert.equal(text.purpose, "payment_link");
@@ -395,10 +414,10 @@ describe("Engine pay", () => {
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId, paymentStatus: "unpaid" }), { applied: false });
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "async_succeeded", linkId }), { applied: true, callId, status: "paid" });
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "async_failed", linkId }), { applied: false }, "settled once");
-    assert.equal(t.engine.state(callId).phase, "open");
+    assert.equal((await t.engine.state(callId)).phase, "open");
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "expired", linkId: "cs_unknown" }), { applied: false });
     const receipt = await t.engine.endCall(callId);
-    assert.deepEqual(receipt.body.payments, [{ paymentId, status: "paid", amountMinor: 15000, currency: "cad", providerRef: linkId }]);
+    assert.deepEqual(receipt!.body.payments, [{ paymentId, status: "paid", amountMinor: 15000, currency: "cad", providerRef: linkId }]);
   });
 
   it("settles a payment after the call ended without moving the session", async () => {
@@ -409,17 +428,47 @@ describe("Engine pay", () => {
     await t.engine.endCall(callId);
     const result = await t.engine.applyPaymentOutcome({ kind: "expired", linkId: "cs_fake_1" });
     assert.deepEqual(result, { applied: true, callId, status: "expired" });
-    assert.equal(t.engine.state(callId).phase, "ended");
+    assert.equal((await t.engine.state(callId)).phase, "ended");
   });
 
-  it("refuses without the scope, and refuses bad amounts and descriptions", async () => {
-    const t = setup({ maxPaymentMinor: 10000 });
+  it("refuses without the scope, without an amount, and refuses bad amounts and descriptions", async () => {
+    const t = setup({ config: testConfig((c) => (c.modules.paylink = { settings: { maxAmountMinor: 10000 } })) });
     const { callId } = await t.engine.startCall();
     await assert.rejects(t.engine.requestPayment(callId, request), rejects("scope_denied"));
     const verified = await verifiedCall(t);
+    await assert.rejects(t.engine.requestPayment(verified), rejects("invalid_input", /outside a flow/));
     await assert.rejects(t.engine.requestPayment(verified, request), /above the limit/);
     await assert.rejects(t.engine.requestPayment(verified, { ...request, amountMinor: 100, description: "  " }), /description/);
     await assert.rejects(t.engine.requestPayment(verified, { ...request, amountMinor: 100, description: "x".repeat(201) }), /description/);
+    await assert.rejects(t.engine.requestPayment(verified, { ...request, amountMinor: 100, amountSource: "model" as never }), /amountSource/);
+    await assert.rejects(t.engine.requestPayment(verified, { ...request, amountMinor: "100" as never }), /amountMinor and currency are required/);
+  });
+
+  it("settles a link as failed when it cannot be created or texted, and keeps a paid one paid", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const send = t.messages.sendText.bind(t.messages);
+    t.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
+    assert.equal((await t.engine.state(callId)).phase, "open");
+    assert.deepEqual((await t.ledger.list()).at(-1)!.detail, { paymentId: "pay_1", status: "failed" });
+    // The provider settled it before the text failed: the money moved, it stays paid.
+    t.messages.sendText = async () => {
+      await t.engine.applyPaymentOutcome({ kind: "completed", linkId: t.payments.created.at(-1)!.linkId, paymentStatus: "paid" });
+      throw new Error("carrier down");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
+    t.messages.sendText = send;
+    const receipt = await t.engine.endCall(callId);
+    assert.deepEqual(receipt!.body.payments.map((p) => p.status), ["failed", "paid"]);
+  });
+
+  it("runs paylink without settings, at the package's own limit", async () => {
+    const t = setup({ config: testConfig((c) => (c.modules.paylink = {})) });
+    const callId = await verifiedCall(t);
+    assert.equal((await t.engine.requestPayment(callId, { ...request, amountMinor: 1_000_000 })).status, "open");
   });
 
   it("formats amounts with the currency's own decimals", () => {
@@ -433,23 +482,23 @@ describe("Engine prove", () => {
   it("records consent and ends with a signed receipt that carries the ledger head", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
-    assert.equal(t.engine.receipt(callId), null);
-    const consent = await t.engine.recordConsent(callId, { wording, answer: "yes" });
+    assert.equal(await t.engine.receipt(callId), null);
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "nope", answer: "yes" }), rejects("invalid_input"));
+    const consent = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
     assert.equal(consent.channel, "call");
-    assert.equal((await t.engine.recordConsent(callId, { wording, answer: "no", channel: "text" })).channel, "text");
-    const receipt = await t.engine.endCall(callId);
+    assert.equal((await t.engine.recordConsent(callId, { purpose: "texts", answer: "no", channel: "text" })).channel, "text");
+    const receipt = (await t.engine.endCall(callId))!;
     assert.equal(verifyReceipt(receipt, t.engine.receiptKeys()), true);
-    assert.deepEqual(t.engine.receipt(callId), receipt);
+    assert.deepEqual(await t.engine.receipt(callId), receipt);
     assert.deepEqual(receipt.body.verification, { level: 3, methods: ["keypad_knowledge", "photo_id"] });
     assert.equal(receipt.body.consents.length, 2);
     const entries = await t.ledger.list();
-    const check = verifyChain(entries);
-    assert.equal(check.ok, true);
+    assert.equal(verifyChain(entries).ok, true);
     const ended = entries.find((e) => e.event === "call.ended")!;
     assert.deepEqual(receipt.body.ledger, { seq: ended.seq, hash: ended.hash });
     assert.equal(entries.at(-1)!.event, "receipt.issued");
     await assert.rejects(t.engine.endCall(callId), rejects("invalid_transition"));
-    await assert.rejects(t.engine.recordConsent(callId, { wording, answer: "yes" }), rejects("invalid_transition"));
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), rejects("invalid_transition"));
   });
 
   it("lists no methods on a receipt for an unverified call", async () => {
@@ -458,7 +507,22 @@ describe("Engine prove", () => {
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     await t.engine.submitKeypad(callId, { dob: "1" });
     const receipt = await t.engine.endCall(callId);
-    assert.deepEqual(receipt.body.verification, { level: 0, methods: [] });
+    assert.deepEqual(receipt!.body.verification, { level: 0, methods: [] });
+  });
+
+  it("issues no receipt when receipts are off, and keeps the ledger", async () => {
+    const t = createTestEngine({ config: testConfig((c) => (c.modules.trace = { settings: { receipts: false } })), adapters: { signer: undefined } });
+    const { callId } = await t.engine.startCall();
+    assert.equal(await t.engine.endCall(callId), null);
+    assert.deepEqual((await t.ledger.list()).map((e) => e.event), ["call.started", "call.ended"]);
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), rejects("invalid_input"), "no wordings");
+  });
+
+  it("builds a receipt from the modules that are on", async () => {
+    const t = createTestEngine({ config: { ...defaultConfig(), modules: {} }, adapters: { records: undefined } });
+    const { callId } = await t.engine.startCall();
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.deepEqual([receipt.body.verification, receipt.body.records, receipt.body.payments, receipt.body.consents], [{ level: 0, methods: [] }, [], [], []]);
   });
 
   it("never writes a keyed value, an answer on file or a phone number to the ledger", async () => {
