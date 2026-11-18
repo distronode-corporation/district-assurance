@@ -31,7 +31,7 @@ export async function runDemo(print = true): Promise<DemoResult> {
   world.base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   let allOk = true;
   const play = async (flow: DemoFlow): Promise<ScriptRun> => {
-    const call: ScriptRun = { callId: "", receipt: null };
+    const call: ScriptRun = { callId: "", linkId: "", receipt: null };
     for (const step of SCRIPTS[flow]) {
       const outcome = await step.run(world, call);
       allOk &&= outcome.ok;

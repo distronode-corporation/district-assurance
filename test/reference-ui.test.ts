@@ -274,6 +274,46 @@ describe("reference UI: DemoRuns", () => {
     assert.equal(done.ok && done.view.next, 1);
   });
 
+  it("answers a view asked for during a step after that step, never half way", async () => {
+    const runs = new DemoRuns(createDemoWorld());
+    const { runId } = await runs.start("deposit");
+    const stepping = runs.step(runId);
+    const seen = await runs.view(runId);
+    assert.ok(seen.ok);
+    assert.equal(seen.view.next, 1);
+    assert.notEqual(seen.view.callId, null);
+    assert.equal(seen.view.state!.callId, seen.view.callId);
+    await stepping;
+  });
+
+  it("keeps a run's payment its own when runs interleave", async () => {
+    const s = await serve();
+    try {
+      const runs = new DemoRuns(s.world);
+      const a = await runs.start("deposit");
+      const b = await runs.start("deposit");
+      const payAt = SCRIPTS.deposit.findIndex((step) => step.label.startsWith("pay:"));
+      for (let i = 0; i <= payAt; i++) {
+        await runs.step(a.runId);
+        await runs.step(b.runId);
+      }
+      let last: RunView | null = null;
+      for (const runId of [a.runId, b.runId]) {
+        let answer = await runs.step(runId);
+        while (answer.ok && !answer.view.done) answer = await runs.step(runId);
+        assert.ok(answer.ok);
+        assert.ok(answer.view.results.every((r) => r.ok), JSON.stringify(answer.view.results.filter((r) => !r.ok)));
+        assert.equal(answer.view.results[payAt]!.detail.endsWith(`cs_fake_${runId === a.runId ? 1 : 2}"`), true);
+        last = answer.view;
+        const receipt = (await s.world.engine.receipt(answer.view.callId!))!;
+        assert.equal(receipt.body.payments[0]!.status, "paid");
+      }
+      assert.ok(last !== null);
+    } finally {
+      await s.close();
+    }
+  });
+
   it("keeps only the newest runs", async () => {
     const runs = new DemoRuns(createDemoWorld(), 2);
     const a = await runs.start("deposit");

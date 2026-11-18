@@ -167,7 +167,7 @@ async function renderLedger(view) {
 
 function resetReceipt() {
   $("receipt-status").textContent = "The receipt is signed when the call ends.";
-  for (const id of ["receipt-check", "tamper", "tamper-result", "receipt-details"]) $(id).hidden = true;
+  for (const id of ["receipt-retry", "receipt-check", "tamper", "tamper-result", "receipt-details"]) $(id).hidden = true;
 }
 
 /** @param {{ ok: boolean, reason: keyof typeof REASONS }} result */
@@ -203,6 +203,24 @@ async function showReceipt(callId) {
   return result.ok ? "Receipt signature valid." : `Receipt signature rejected: ${REASONS[result.reason]}.`;
 }
 
+/**
+ * Fetches and checks the receipt; on a failure, offers a retry that runs no engine step.
+ *
+ * @param {string} callId
+ * @returns {Promise<string>} what to announce
+ */
+async function loadReceipt(callId) {
+  try {
+    const message = await showReceipt(callId);
+    $("receipt-retry").hidden = true;
+    return message;
+  } catch (error) {
+    $("receipt-status").textContent = `Could not fetch or check the receipt: ${error instanceof Error ? error.message : String(error)}.`;
+    $("receipt-retry").hidden = false;
+    return "Could not fetch the receipt; the receipt section has a button to try again.";
+  }
+}
+
 async function render(view) {
   current = view;
   $("run").hidden = false;
@@ -221,9 +239,7 @@ async function step() {
     await render(view);
     const result = view.results.at(-1);
     let message = `Step ${result.index + 1} of ${view.steps.length}, ${result.label}: ${result.detail}.${result.ok ? "" : " The check failed."}`;
-    if (view.done && view.callId !== null) {
-      message += ` Run finished. ${await showReceipt(view.callId)}`;
-    }
+    if (view.done && view.callId !== null) message += ` Run finished. ${await loadReceipt(view.callId)}`;
     announce(message);
     return true;
   } catch (error) {
@@ -267,6 +283,17 @@ $("next").addEventListener("click", () => {
 
 $("rest").addEventListener("click", async () => {
   while (current !== null && !current.done && (await step()));
+});
+
+$("receipt-retry").addEventListener("click", async () => {
+  if (current === null || current.callId === null || busy) return;
+  setBusy(true);
+  try {
+    announce(await loadReceipt(current.callId));
+    if ($("receipt-retry").hidden) $("receipt-heading").focus();
+  } finally {
+    setBusy(false);
+  }
 });
 
 $("tamper").addEventListener("click", async () => {

@@ -63,6 +63,8 @@ export function createDemoWorld(): DemoWorld {
 /** One scripted call in progress. */
 export interface ScriptRun {
   callId: string;
+  /** This call's payment link, once requested: runs share the fakes, so never "the latest link". */
+  linkId: string;
   receipt: SignedReceipt | null;
 }
 
@@ -189,22 +191,22 @@ const deposit: ScriptStep[] = [
     label: "pay: link texted, amount from flow",
     async run(w, call) {
       const payment = await w.engine.requestPayment(call.callId);
-      return pass(`${payment.paymentId}: "${w.t.messages.sent.at(-1)!.body}"`);
+      call.linkId = w.t.payments.created.find((link) => link.paymentId === payment.paymentId)!.linkId;
+      const text = w.t.messages.sent.find((message) => message.body.endsWith(`/${call.linkId}`))!;
+      return pass(`${payment.paymentId}: "${text.body}"`);
     },
   },
   {
     label: "webhook: payment completed",
-    async run(w) {
-      const linkId = w.t.payments.created.at(-1)!.linkId;
-      const hook = await w.stripe("/webhooks/stripe/payments", "checkout.session.completed", { id: linkId, payment_status: "paid" });
+    async run(w, call) {
+      const hook = await w.stripe("/webhooks/stripe/payments", "checkout.session.completed", { id: call.linkId, payment_status: "paid" });
       return { detail: `signed, applied: ${String(hook.applied)}`, ok: hook.applied === true };
     },
   },
   {
     label: "webhook: same outcome again",
-    async run(w) {
-      const linkId = w.t.payments.created.at(-1)!.linkId;
-      const replay = await w.stripe("/webhooks/stripe/payments", "checkout.session.completed", { id: linkId, payment_status: "paid" });
+    async run(w, call) {
+      const replay = await w.stripe("/webhooks/stripe/payments", "checkout.session.completed", { id: call.linkId, payment_status: "paid" });
       return { detail: `applied: ${String(replay.applied)} (settled once)`, ok: replay.applied === false };
     },
   },

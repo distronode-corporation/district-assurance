@@ -45,6 +45,8 @@ interface Run {
   results: StepResult[];
   busy: boolean;
   failed: boolean;
+  /** Steps and views of one run take turns, so a view never mixes a step's before and after. */
+  turn: Promise<unknown>;
 }
 
 export class DemoRuns {
@@ -63,7 +65,7 @@ export class DemoRuns {
   }
 
   async start(flow: DemoFlow): Promise<RunView> {
-    const run: Run = { runId: `run_${randomUUID()}`, flow, call: { callId: "", receipt: null }, results: [], busy: false, failed: false };
+    const run: Run = { runId: `run_${randomUUID()}`, flow, call: { callId: "", linkId: "", receipt: null }, results: [], busy: false, failed: false, turn: Promise.resolve() };
     this.#runs.set(run.runId, run);
     for (const old of this.#runs.keys()) {
       if (this.#runs.size <= this.#max) break;
@@ -74,7 +76,7 @@ export class DemoRuns {
 
   async view(runId: string): Promise<RunAnswer> {
     const run = this.#runs.get(runId);
-    return run === undefined ? { ok: false, status: 404, error: "not_found" } : { ok: true, view: await this.#view(run) };
+    return run === undefined ? { ok: false, status: 404, error: "not_found" } : { ok: true, view: await this.#inTurn(run, () => this.#view(run)) };
   }
 
   /** Runs the next step. One step at a time per run: a second request while one runs answers `busy`. */
@@ -85,8 +87,16 @@ export class DemoRuns {
     const steps = SCRIPTS[run.flow];
     const index = run.results.length;
     if (run.failed || index >= steps.length) return { ok: false, status: 409, error: "done" };
-    const step = steps[index]!;
     run.busy = true;
+    try {
+      return { ok: true, view: await this.#inTurn(run, () => this.#runStep(run, index)) };
+    } finally {
+      run.busy = false;
+    }
+  }
+
+  async #runStep(run: Run, index: number): Promise<RunView> {
+    const step = SCRIPTS[run.flow][index]!;
     try {
       const outcome = await step.run(this.#world, run.call);
       run.results.push({ index, label: step.label, ...outcome });
@@ -94,10 +104,15 @@ export class DemoRuns {
       run.failed = true;
       const detail = error instanceof EngineError ? `refused: ${error.code}` : "failed: internal error";
       run.results.push({ index, label: step.label, detail, ok: false });
-    } finally {
-      run.busy = false;
     }
-    return { ok: true, view: await this.#view(run) };
+    return this.#view(run);
+  }
+
+  /** Runs `fn` after everything already queued on this run; a failure is the caller's, not the queue's. */
+  #inTurn<T>(run: Run, fn: () => Promise<T>): Promise<T> {
+    const next = run.turn.then(fn);
+    run.turn = next.catch(() => undefined);
+    return next;
   }
 
   async #view(run: Run): Promise<RunView> {
