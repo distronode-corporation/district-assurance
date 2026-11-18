@@ -103,12 +103,14 @@ by common key management services, so a host can keep the private key in a KMS b
 
 ## ADR-11. Stripe webhook signatures are real, carrier ones are stubs
 
-**Decided.** `verifyStripeSignature` is implemented and tested now; Twilio, Telnyx and Sinch
+**Decided.** `verifyStripeSignature` is implemented and tested now; Twilio and Telnyx
 signature checks throw `NotImplementedError` and the reference server answers 501 on their routes.
 **Why.** The demo needs signed identity and payment outcomes end to end, and Stripe's scheme is
 small, public and testable without Stripe. Each carrier scheme differs (Twilio signs the URL and
 form parameters, Telnyx uses Ed25519), and each will be built against the carrier's own test
 vectors (SRV-1). Until then a carrier route can never be trusted by accident.
+**Amended (modular core):** the carriers are Twilio and Telnyx. Sinch is out of scope for now; its
+stub and route are removed, and `CarrierSignals` stays vendor-neutral so it can be added later.
 
 ## ADR-12. The package is private until a release is decided
 

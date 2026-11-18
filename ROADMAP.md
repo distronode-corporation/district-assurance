@@ -23,7 +23,7 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-20, says why.
   tests and, where a vendor publishes them, the vendor's own test vectors.
 - **Shared state:** a contract suite per durable adapter (`sessionStoreContract` today), run
   against the memory implementation in CI and by the host against its own.
-- **Vendor adapters** (Stripe, Twilio, Telnyx, Sinch, door controllers): tested in CI against a
+- **Vendor adapters** (Stripe, Twilio, Telnyx, door controllers): tested in CI against a
   local fake HTTP server replaying recorded responses, never the network; proven once by hand
   against the vendor's test mode with the contributor's own test keys, the run described in the
   pull request.
@@ -303,13 +303,14 @@ Canadian postal codes contain letters. A spoken check must be exact after normal
 *Tests:* test/verify-spoken.test.ts with a corpus of transcripts in both languages, including misrecognitions that must come out `unusable`  
 *Depends on:* none
 
-#### **VER-4** Carrier signal adapters: Twilio Lookup, Sinch Number Lookup, Telnyx Number Lookup
+#### **VER-4** Carrier signal adapters: Twilio Lookup and Telnyx Number Lookup
 
-The SIM swap and port checks the policy already uses need real sources.
+The SIM swap, porting and identity match checks the policy already uses need real sources. Twilio and Telnyx first; `CarrierSignals` stays vendor-neutral, so another carrier (Sinch, for example) can be added later as its own adapter.
 
 *Acceptance*
 
-- Three `CarrierSignals` implementations in the reference server, each mapping the vendor's answer to `CarrierSignalReport`.
+- A Twilio Lookup adapter: SIM Swap (hours since the last SIM change) and Identity Match, mapped to `CarrierSignalReport`.
+- A Telnyx Number Lookup adapter: porting status and date, and the carrier, mapped to `CarrierSignalReport` (`lastPortHoursAgo`; no SIM swap or identity match, reported as unknown or `unavailable`).
 - Timeouts, errors, unsupported countries and unapproved features all return `checked: false` (fail closed); nothing throws into the call.
 - Credentials from the environment only; no keys in code or tests.
 - A table in the reference server README of which signal each vendor provides, and where approval is needed.
@@ -587,7 +588,7 @@ Carrier routes answer 501 today.
 
 *Acceptance*
 
-- `verifyTwilioSignature` (HMAC-SHA1 of the URL and sorted form parameters), `verifyTelnyxSignature` (Ed25519 over timestamp and body, with a tolerance), `verifySinchSignature` (the scheme of the product used).
+- `verifyTwilioSignature` (HMAC-SHA1 of the URL and sorted form parameters) and `verifyTelnyxSignature` (Ed25519 over timestamp and body, with a tolerance).
 - Each tested against the vendor's published examples; the routes stop answering 501 only when the check is real.
 
 *Files:* `src/webhooks/carrier.ts`, `examples/reference-server/src/app.ts`  

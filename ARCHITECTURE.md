@@ -26,7 +26,7 @@
   SessionStore  AuditLedger  RecordStore  PinVerifier  IdentityProvider
   CarrierSignals  MessageSender  PaymentLinks  ReceiptSigner
        |
-  the host's database and key store, Stripe, Twilio / Telnyx / Sinch
+  the host's database and key store, Stripe, Twilio / Telnyx
 ```
 
 The engine is a library. It holds no sockets and reads no environment. The host creates an

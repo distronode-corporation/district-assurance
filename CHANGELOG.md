@@ -23,6 +23,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
+  are removed. `CarrierSignals` stays vendor-neutral.
+
 - The ledger is always on: Trace cannot be turned off or removed, and an engine needs a ledger.
   Receipts are per flow (`trace.receipt`) or Trace's `receipts` setting; `endCall` returns null
   when a call gets none.

@@ -39,10 +39,10 @@ Use test-mode keys only. Never commit a secret; the server reads them from the e
 
 ## Carrier signals
 
-Planned (VER-4). What each carrier offers, to be confirmed per country when the adapters are built:
+Planned (VER-4), Twilio and Telnyx. What each offers, to be confirmed per country when the adapters
+are built. `CarrierSignals` is vendor-neutral, so another carrier can be added as its own adapter.
 
 | Carrier | SIM swap | Porting | Identity match | One-time codes |
 |---|---|---|---|---|
 | Twilio (Lookup, Verify) | yes, with carrier approval | yes | yes, with carrier approval | SMS, voice, WhatsApp |
-| Telnyx (Number Lookup, Verify) | not found | yes | caller identity (name, address) | SMS, voice, flash call, WhatsApp |
-| Sinch (Number Lookup, Verification) | US and Canada, with approval | yes | no | SMS, voice, flash call, data |
+| Telnyx (Number Lookup, Verify) | not found | porting status and date, carrier | caller identity (name, address) | SMS, voice, flash call, WhatsApp |

@@ -68,7 +68,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       expect("POST");
       return stripeWebhook(req, path.endsWith("identity") ? "identity" : "payments");
     }
-    const carrier = /^\/webhooks\/(twilio|telnyx|sinch)$/.exec(path);
+    const carrier = /^\/webhooks\/(twilio|telnyx)$/.exec(path);
     if (carrier !== null) {
       expect("POST");
       return [501, { error: "not_implemented", issue: "SRV-1", carrier: carrier[1] }];

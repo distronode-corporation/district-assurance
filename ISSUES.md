@@ -435,7 +435,7 @@ Canadian postal codes contain letters. A spoken check must be exact after normal
 All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
 ```
 
-### VER-4: Carrier signal adapters: Twilio Lookup, Sinch Number Lookup, Telnyx Number Lookup
+### VER-4: Carrier signal adapters: Twilio Lookup and Telnyx Number Lookup
 
 **Labels:** `badge`, `m4`  
 **Milestone:** M4 Badge  
@@ -444,11 +444,12 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 ```markdown
 ## Why
 
-The SIM swap and port checks the policy already uses need real sources.
+The SIM swap, porting and identity match checks the policy already uses need real sources. Twilio and Telnyx first; `CarrierSignals` stays vendor-neutral, so another carrier (Sinch, for example) can be added later as its own adapter.
 
 ## Acceptance criteria
 
-- [ ] Three `CarrierSignals` implementations in the reference server, each mapping the vendor's answer to `CarrierSignalReport`.
+- [ ] A Twilio Lookup adapter: SIM Swap (hours since the last SIM change) and Identity Match, mapped to `CarrierSignalReport`.
+- [ ] A Telnyx Number Lookup adapter: porting status and date, and the carrier, mapped to `CarrierSignalReport` (`lastPortHoursAgo`; no SIM swap or identity match, reported as unknown or `unavailable`).
 - [ ] Timeouts, errors, unsupported countries and unapproved features all return `checked: false` (fail closed); nothing throws into the call.
 - [ ] Credentials from the environment only; no keys in code or tests.
 - [ ] A table in the reference server README of which signal each vendor provides, and where approval is needed.
@@ -1046,7 +1047,7 @@ Carrier routes answer 501 today.
 
 ## Acceptance criteria
 
-- [ ] `verifyTwilioSignature` (HMAC-SHA1 of the URL and sorted form parameters), `verifyTelnyxSignature` (Ed25519 over timestamp and body, with a tolerance), `verifySinchSignature` (the scheme of the product used).
+- [ ] `verifyTwilioSignature` (HMAC-SHA1 of the URL and sorted form parameters) and `verifyTelnyxSignature` (Ed25519 over timestamp and body, with a tolerance).
 - [ ] Each tested against the vendor's published examples; the routes stop answering 501 only when the check is real.
 
 ## Files
