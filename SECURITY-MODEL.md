@@ -85,8 +85,9 @@ A host bug or a manipulated tool path calling the engine out of order, or a gran
 used for another. **Controls:** while a flow runs, only its current step's work is accepted, and
 only the step's factors count toward its level; once a call's flow has ended (completed, failed or
 abandoned), no step work runs on that call at all, so a failed PIN cannot be followed by a fresh
-verification outside the flow (tested). A consent answered "no" fails its step, so a flow never
-reaches a payment after a refusal (tested). An outside module's step is held to the scope its
+verification outside the flow (tested). With the default `require: "yes"`, a consent answered "no"
+fails its step, so the flow never reaches a payment after a refusal (tested); a step set to
+`require: "answer"` moves on either way, by the config's choice. An outside module's step is held to the scope its
 manifest needs by the engine itself (tested). An issued grant is checked against today's minimum
 too, so a stricter config applies at once (tested). A `badge.verify` step can name the scopes
 its grant covers, and the demo flows do, so a caller verified for a deposit never holds

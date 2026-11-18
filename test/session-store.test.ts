@@ -176,6 +176,60 @@ describe("ledger entries saved with the step (review item 6)", () => {
     await assert.rejects(t.engine.flushLedger("nope"), rejects("unknown_call"));
   });
 
+  it("keeps two workspaces' entries apart on one shared ledger, even with the same call id", async () => {
+    const ledger = new MemoryAuditLedger();
+    const a = setup({ adapters: { ledger } });
+    const b = setup({ adapters: { ledger }, workspaceId: "ws_other" });
+    await a.engine.startCall({ callId: "c1" });
+    await b.engine.startCall({ callId: "c1" });
+    assert.deepEqual((await ledger.list()).map((e) => e.event), ["call.started", "call.started"]);
+  });
+
+  it("refuses an entry the ledger would refuse before it is saved, so it never blocks later writes", async () => {
+    const t = setup({ modules: [] });
+    const { callId } = await t.engine.startCall();
+    const loyalty = { manifest: { name: "loyalty", version: "1", summary: "x", provides: { factors: [], steps: [], outcomes: [] }, scopes: { grants: [], needs: {} }, adapters: [] }, validateSettings: () => [], requiredAdapters: () => [], validateStep: () => [], initCall: () => ({}), enterStep: () => null, stepStatus: () => "pending" as const };
+    t.engine.use(loyalty);
+    t.engine.configure(testConfig((c) => (c.modules.loyalty = {})));
+    const call = await t.engine.startCall();
+    await assert.rejects(
+      t.engine.updateModule(call.callId, "loyalty", (slice, view) => {
+        view.emit("4242 4242 4242 4242", {});
+        return slice;
+      }),
+      rejects("invalid_input", /card number/),
+    );
+    await t.engine.markUntrusted(call.callId, "x");
+    assert.equal((await t.ledger.list()).at(-1)!.event, "session.tainted", "later writes are not blocked");
+    assert.ok(callId);
+  });
+
+  it("resumes a payment and a receipt whose step was saved while the ledger was down", async () => {
+    const ledger = new FlakyLedger();
+    const t = setup({ adapters: { ledger } });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    t.carrier.set("+15555550100", { identityMatch: "match" });
+    await t.engine.checkCarrier(callId);
+    const request = { amountMinor: 100, currency: "cad", description: "x", amountSource: "price_list" as const };
+    // The ledger goes down: verification's entries stay pending, and the payment's reservation
+    // is saved before its flush of those entries fails, with no link created yet.
+    ledger.failures = 2;
+    await assert.rejects(t.engine.finishVerification(callId), /ledger down/);
+    await assert.rejects(t.engine.requestPayment(callId, request), /ledger down/);
+    assert.equal((await t.engine.state(callId)).phase, "paying", "reserved, no link yet");
+    assert.equal(t.payments.created.length, 0);
+    assert.equal((await t.engine.requestPayment(callId, request)).paymentId, "pay_1", "resumed");
+    await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" });
+    ledger.failures = 1;
+    await assert.rejects(t.engine.endCall(callId), /ledger down/);
+    const receipt = await t.engine.endCall(callId);
+    assert.equal(receipt!.body.payments[0]!.status, "paid");
+    assert.equal((await ledger.list()).filter((e) => e.event === "call.ended").length, 1);
+    assert.equal(verifyChain(await ledger.list()).ok, true);
+  });
+
   it("makes the memory ledger idempotent by event id", async () => {
     const ledger = new MemoryAuditLedger();
     const input: AuditInput = { eventId: "c:2:0", callId: "c", actor: "code", event: "call.ended", at: "2026-01-01T00:00:00.000Z", detail: {} };

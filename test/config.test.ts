@@ -82,7 +82,7 @@ describe("validateConfig: the document", () => {
       [
         "policy: version must be a non-empty string",
         "policy: levels[0] must be { level, anyOf: [[factor, ...], ...] }",
-        "policy: scope a has level 1, not 0 to 3",
+        "policy: scope a has level of type string, not 0 to 3",
         "policy: scope a has no class: name it in scopeClasses (money, contact, access or none)",
         "policy: keypadFields must be a list of field names",
         "policy: maxKeypadAttemptsPerCall must be an integer from 1 to 5",

@@ -194,7 +194,7 @@ export class Engine {
       this.#attachFlow(draft, input.flow, this.#flowDefinition(input.flow), this.#config.revision);
       this.#advance(draft);
     }
-    record.outbox = events.map((event, i) => ({ eventId: `${callId}:1:${i}`, ...event }));
+    record.outbox = events.map((event, i) => ({ eventId: this.#eventId(callId, 1, i), ...event }));
     const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
     if (!created) throw new EngineError("invalid_input", "a call with that id exists");
     await this.#flush(callId, 1, record);
@@ -430,11 +430,7 @@ export class Engine {
       const view: ModuleCallView = {
         state: snapshot(draft.record.state),
         authorized: (scope) => this.#authorized(draft.record, scope),
-        emit: (event, detail) => {
-          // Refused here, inside the step, so a bad entry is never saved to be appended later.
-          if (detailCarriesCardNumber(detail)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
-          draft.emit("module.event", "code", { module: name, event, detail });
-        },
+        emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
       };
       const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);
       draft.record.modules[name] = structuredClone(next);
@@ -530,7 +526,7 @@ export class Engine {
       // The step's ledger entries are saved with the step, then appended: a ledger that fails
       // leaves them in the record, and the next write (or flushLedger) appends them, once each.
       const version = stored.version + 1;
-      events.forEach((event, i) => record.outbox.push({ eventId: `${callId}:${version}:${i}`, ...event }));
+      events.forEach((event, i) => record.outbox.push({ eventId: this.#eventId(callId, version, i), ...event }));
       const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
       if (saved.ok) {
         await this.#flush(callId, version, record);
@@ -551,6 +547,8 @@ export class Engine {
         if (!canApply(record.state, event)) throw new EngineError("invalid_transition", `${event.type} is not allowed while ${record.state.phase}`);
       },
       emit: (name, actor, detail) => {
+        // Checked here, inside the step, so an entry the ledger would refuse is never saved to be appended later.
+        if (detailCarriesCardNumber(detail)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
         events.push({ name, actor, at: this.#now(), detail });
       },
       step: () => currentStep(record),
@@ -604,6 +602,11 @@ export class Engine {
       }
     }
     await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue);
+  }
+
+  /** A ledger event id, unique across workspaces sharing one ledger: a JSON tuple, so no two ids collide. */
+  #eventId(callId: string, version: number, index: number): string {
+    return JSON.stringify([this.workspaceId, callId, version, index]);
   }
 
   /** Appends any ledger entries a call still has pending (after a ledger outage). Every write does this too. */

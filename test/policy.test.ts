@@ -142,6 +142,10 @@ describe("validatePolicy: the review's hostile cases", () => {
         "trustTextCodeWithoutCarrierCheck must be true or false",
       ],
     );
+    assert.deepEqual(validatePolicy(policy({ scopes: { "status.read": { toString: null } as never, "status.x": null as never } })), [
+      "scope status.read has level of type object, not 0 to 3",
+      "scope status.x has level of type null, not 0 to 3",
+    ], "never coerced to a string");
     assert.deepEqual(validatePolicy({ ...defaultVerificationPolicy(), levels: "x", scopes: [] }), ["levels must be a list of { level, anyOf: [[factor, ...], ...] }", "scopes must map scope names to levels"]);
   });
 });

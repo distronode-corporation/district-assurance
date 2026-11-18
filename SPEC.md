@@ -283,7 +283,9 @@ answer on file, a phone number, a link or card data.
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
 A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
-with an `eventId` (`<callId>:<version>:<index>`), then appended in order; the outbox is cleared by
+with an `eventId` (the JSON tuple `[workspaceId, callId, version, index]`, unique on a ledger that
+several workspaces share), then appended in order; an entry the ledger would refuse (card data) is
+refused before it is saved; the outbox is cleared by
 a further write if nobody wrote since. A failed append leaves them pending, and the next write or
 `flushLedger(callId)` appends them. A ledger appends an `eventId` once (a second append returns the
 first entry), so nothing is lost or doubled. The listener is told after each append, at least once

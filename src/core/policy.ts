@@ -176,7 +176,10 @@ export function validatePolicy(
     errors.push("scopes must map scope names to levels");
   } else {
     for (const [scope, level] of Object.entries(p.scopes)) {
-      if (!([0, 1, 2, 3] as unknown[]).includes(level)) errors.push(`scope ${scope} has level ${String(level)}, not 0 to 3`);
+      if (!([0, 1, 2, 3] as unknown[]).includes(level)) {
+        // Never coerce the value: an object with no usable toString would throw.
+        errors.push(`scope ${scope} has level ${typeof level === "number" ? level : `of type ${level === null ? "null" : typeof level}`}, not 0 to 3`);
+      }
       const cls = scopeClass(scope, policyClasses, declaredClasses);
       if (cls === null) {
         errors.push(`scope ${scope} has no class: name it in scopeClasses (money, contact, access or none)`);
