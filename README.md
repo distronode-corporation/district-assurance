@@ -109,7 +109,7 @@ await engine.finishVerification(callId);                               // the fl
 if (await engine.authorize(callId, "owner.command")) {
   // run the owner's command
 }
-await engine.endCall(callId); // a signed receipt when the flow has a trace.receipt step, else null
+await engine.endCall(callId); // in a flow, a receipt only with a trace.receipt step; without one, per Trace's receipts setting
 ```
 
 `district-assurance/testing` has a fake for every adapter, the `sessionStoreContract` suite a

@@ -36,6 +36,26 @@ describe("Engine construction", () => {
     assert.deepEqual(engine.receiptKeys(), []);
   });
 
+  it("checks a null config instead of using the default, and refuses one that is not plain data", () => {
+    const adapters = { ledger: new MemoryAuditLedger() };
+    assert.throws(() => createEngine({ workspaceId: "w", knowledgeKey: TEST_KNOWLEDGE_KEY, adapters, config: null }), (e: unknown) => e instanceof ConfigError && e.problems[0] === "the config must be an object");
+    assert.throws(
+      () => createEngine({ workspaceId: "w", knowledgeKey: TEST_KNOWLEDGE_KEY, adapters, config: { ...defaultConfig(), revision: () => "x" } }),
+      (e: unknown) => e instanceof ConfigError && e.problems[0] === "the config must be plain JSON data",
+    );
+  });
+
+  it("keeps writing the ledger when the listener throws", async () => {
+    const t = setup({
+      onEvent: () => {
+        throw new Error("listener bug");
+      },
+    });
+    const { callId } = await t.engine.startCall();
+    await t.engine.markUntrusted(callId, "x");
+    assert.deepEqual((await t.ledger.list()).map((e) => e.event), ["call.started", "session.tainted"]);
+  });
+
   it("runs on the system clock, random ids and an in-memory session store by default", async () => {
     const engine = createEngine({
       workspaceId: "w",
@@ -329,7 +349,8 @@ describe("Engine authorize", () => {
       await t.engine.markUntrusted(callId, "document");
       return original(input);
     };
-    await t.engine.startPhotoId(callId);
+    await assert.rejects(t.engine.startPhotoId(callId), rejects("precondition_failed", /untrusted content/));
+    assert.equal(t.messages.sent.length, 0, "a link that could never count is never texted");
     const sessionId = t.identity.created[0]!.sessionId;
     assert.deepEqual(await t.engine.applyIdentityOutcome({ sessionId, status: "verified" }), { applied: false });
     await assert.rejects(t.engine.startPhotoId(callId), rejects("precondition_failed"), "one link per call still holds");
@@ -444,25 +465,35 @@ describe("Engine pay", () => {
     await assert.rejects(t.engine.requestPayment(verified, { ...request, amountMinor: "100" as never }), /amountMinor and currency are required/);
   });
 
-  it("settles a link as failed when it cannot be created or texted, and keeps a paid one paid", async () => {
+  it("settles a link as failed when it cannot be created, and leaves a created one to the provider", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
+    const create = t.payments.createLink.bind(t.payments);
+    t.payments.createLink = async () => {
+      throw new Error("provider down");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /provider down/);
+    assert.equal((await t.engine.state(callId)).phase, "open");
+    assert.deepEqual((await t.ledger.list()).at(-1)!.detail, { paymentId: "pay_1", status: "failed" });
+    t.payments.createLink = create;
+    // The link exists, so it may reach the caller: a failed text leaves it open for the provider.
     const send = t.messages.sendText.bind(t.messages);
     t.messages.sendText = async () => {
       throw new Error("carrier down");
     };
     await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
-    assert.equal((await t.engine.state(callId)).phase, "open");
-    assert.deepEqual((await t.ledger.list()).at(-1)!.detail, { paymentId: "pay_1", status: "failed" });
-    // The provider settled it before the text failed: the money moved, it stays paid.
-    t.messages.sendText = async () => {
+    assert.equal((await t.engine.state(callId)).phase, "paying");
+    const linkId = t.payments.created.at(-1)!.linkId;
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId, paymentStatus: "paid" }), { applied: true, callId, status: "paid" });
+    // A provider that settles while the text is still on its way: the result says so.
+    t.messages.sendText = async (input) => {
       await t.engine.applyPaymentOutcome({ kind: "completed", linkId: t.payments.created.at(-1)!.linkId, paymentStatus: "paid" });
-      throw new Error("carrier down");
+      return send(input);
     };
-    await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
+    assert.equal((await t.engine.requestPayment(callId, request)).status, "paid");
     t.messages.sendText = send;
     const receipt = await t.engine.endCall(callId);
-    assert.deepEqual(receipt!.body.payments.map((p) => p.status), ["failed", "paid"]);
+    assert.deepEqual(receipt!.body.payments.map((p) => p.status), ["failed", "paid", "paid"]);
   });
 
   it("runs paylink without settings, at the package's own limit", async () => {

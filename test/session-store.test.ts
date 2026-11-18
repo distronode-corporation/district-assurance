@@ -88,6 +88,29 @@ describe("compare-and-set conflicts", () => {
     assert.equal(t.sessions, sessions);
   });
 
+  it("resumes a filing whose last write was lost, with the same record", async () => {
+    const sessions = new ContendedStore();
+    const t = setup({ adapters: { sessions } });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const put = t.records.putIntakeRecord.bind(t.records);
+    t.records.putIntakeRecord = async (record) => {
+      await put(record);
+      sessions.losses = MAX_WRITE_ATTEMPTS;
+    };
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("conflict"));
+    await assert.rejects(t.engine.abandonIntake(callId), rejects("precondition_failed"), "the draft stays reserved for its record");
+    t.records.putIntakeRecord = put;
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
+    assert.equal(record.recordId, "rec_1");
+    assert.equal(record.confirmedBy, "voice", "the same record, not a second one");
+    assert.deepEqual((await t.engine.state(callId)).recordIds, ["rec_1"]);
+  });
+
   it("refuses an id that exists in the store, whichever engine made it", async () => {
     const store: SessionStore = new MemorySessionStore();
     const a = setup({ adapters: { sessions: store } });

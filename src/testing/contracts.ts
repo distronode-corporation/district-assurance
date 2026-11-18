@@ -65,7 +65,7 @@ export function sessionStoreContract(factory: () => SessionStore | Promise<Sessi
         assert.equal(results.filter((r) => r.ok).length, 1);
         const stored = await store.get("w", "c1");
         assert.equal(stored!.version, 2);
-        assert.ok([1, 2].includes((stored!.record as { n: number }).n));
+        assert.equal((stored!.record as { n: number }).n, results.findIndex((r) => r.ok) + 1, "the stored record is the winner's");
       },
     ],
     [

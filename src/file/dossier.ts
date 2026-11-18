@@ -7,7 +7,7 @@ import { stepOfType } from "../core/flow.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
 import type { EngineRuntime } from "../core/runtime.ts";
 import type { SessionState } from "../core/session.ts";
-import { isObject, unknownKeys } from "../core/shape.ts";
+import { isDenseArray, isObject, unknownKeys } from "../core/shape.ts";
 import { intakeDigest, missingRequired, normaliseFieldValue, validateForm, type FieldValue, type IntakeForm, type NormaliseResult } from "./intake.ts";
 
 export const DOSSIER = "dossier";
@@ -22,7 +22,8 @@ export interface DossierCollectStep extends FlowStep {
 }
 
 export interface DossierSlice {
-  intake: { formId: string; values: Record<string, FieldValue>; filing: string | null } | null;
+  /** The open draft, with the form as it was when the intake started, and the record being filed (if any). */
+  intake: { form: IntakeForm; values: Record<string, FieldValue>; filing: IntakeRecord | null } | null;
   records: Array<{ recordId: string; formId: string; digest: string }>;
 }
 
@@ -30,7 +31,7 @@ const FORM_ID = /^[a-z][a-z0-9_-]{0,63}$/;
 
 function formErrors(form: unknown, index: number): string[] {
   const at = `forms[${index}]`;
-  if (!isObject(form) || typeof form.formId !== "string" || typeof form.version !== "string" || !Array.isArray(form.fields)) {
+  if (!isObject(form) || typeof form.formId !== "string" || typeof form.version !== "string" || !isDenseArray(form.fields)) {
     return [`${at} must be { formId, version, fields }`];
   }
   const fieldsOk = form.fields.every(
@@ -64,7 +65,7 @@ export const dossierModule: AssuranceModule = {
   },
 
   validateSettings(settings: unknown): string[] {
-    if (!isObject(settings) || !Array.isArray(settings.forms)) return ["must be an object with a list of forms"];
+    if (!isObject(settings) || !isDenseArray(settings.forms)) return ["must be an object with a list of forms"];
     const errors = unknownKeys(settings, ["forms"]).map((k) => `${k} is not a dossier setting`);
     settings.forms.forEach((f: unknown, i: number) => errors.push(...formErrors(f, i)));
     const ids = settings.forms.map((f: unknown) => (isObject(f) ? f.formId : undefined));
@@ -92,8 +93,9 @@ export const dossierModule: AssuranceModule = {
     return (s as unknown as DossierSlice).records.length;
   },
 
-  stepStatus(_step: FlowStep, view: StepView): StepStatus {
-    return (view.slice as unknown as DossierSlice).records.length > (view.mark as number) ? "complete" : "pending";
+  stepStatus(step: FlowStep, view: StepView): StepStatus {
+    const filed = (view.slice as unknown as DossierSlice).records.slice(view.mark as number);
+    return filed.some((r) => r.formId === step.form) ? "complete" : "pending";
   },
 
   receiptPart(s: JsonValue, _state: SessionState): { [key: string]: JsonValue } {
@@ -111,7 +113,7 @@ export async function startIntake(rt: EngineRuntime, callId: string, formId: str
     if (step !== null && step.form !== formId) throw new EngineError("precondition_failed", `the flow step collects ${step.form}`);
     if (!rt.authorized(draft.record, "intake.file")) throw new EngineError("scope_denied", "the grant does not cover intake.file");
     draft.apply({ type: "intake_started" });
-    s.intake = { formId, values: {}, filing: null };
+    s.intake = { form: structuredClone(chosen), values: {}, filing: null };
     draft.emit("intake.started", "code", { formId, version: chosen.version });
   });
 }
@@ -127,7 +129,7 @@ export async function setIntakeField(rt: EngineRuntime, callId: string, key: str
   rt.settings(DOSSIER);
   return rt.update(callId, (draft) => {
     const intake = openIntake(draft.slice<DossierSlice>(DOSSIER));
-    const field = form(rt, intake.formId).fields.find((f) => f.key === key);
+    const field = intake.form.fields.find((f) => f.key === key);
     if (field === undefined) throw new EngineError("invalid_input", `the form has no field ${key}`);
     const result = normaliseFieldValue(field, raw);
     if (result.ok) intake.values[key] = result.value;
@@ -135,32 +137,37 @@ export async function setIntakeField(rt: EngineRuntime, callId: string, key: str
   });
 }
 
-/** Files the draft once the caller confirmed the read-back: reserved, stored, then recorded. */
+/**
+ * Files the draft once the caller confirmed the read-back: reserved, stored, then recorded. A
+ * filing whose last write was lost (`conflict`) resumes with the same record on the next call.
+ */
 export async function confirmIntake(rt: EngineRuntime, callId: string, input: { confirmedBy: "voice" | "keypad" }): Promise<IntakeRecord> {
   rt.settings(DOSSIER);
   const record = await rt.update(callId, (draft) => {
-    const intake = openIntake(draft.slice<DossierSlice>(DOSSIER));
+    const intake = draft.slice<DossierSlice>(DOSSIER).intake;
+    if (intake === null) throw new EngineError("invalid_transition", "no intake is open on this call");
+    if (intake.filing !== null) return intake.filing;
     if (!rt.authorized(draft.record, "intake.file")) throw new EngineError("scope_denied", "the grant does not cover intake.file");
-    const chosen = form(rt, intake.formId);
-    const missing = missingRequired(chosen, intake.values);
+    const missing = missingRequired(intake.form, intake.values);
     if (missing.length > 0) throw new EngineError("invalid_input", `required fields missing: ${missing.join(", ")}`);
     const built: IntakeRecord = {
       recordId: rt.ids.next("rec"),
       workspaceId: rt.workspaceId,
       callId,
-      formId: chosen.formId,
-      formVersion: chosen.version,
+      formId: intake.form.formId,
+      formVersion: intake.form.version,
       values: structuredClone(intake.values),
-      digest: intakeDigest(chosen, intake.values),
+      digest: intakeDigest(intake.form, intake.values),
       confirmedBy: input.confirmedBy,
       confirmedAt: rt.now(),
     };
-    intake.filing = built.recordId;
+    intake.filing = built;
     return built;
   });
   try {
     await rt.adapter("records").putIntakeRecord(record);
   } catch (error) {
+    // Not stored: release the draft so the caller can change it or try again.
     await rt.update(callId, (draft) => {
       draft.slice<DossierSlice>(DOSSIER).intake!.filing = null;
     });

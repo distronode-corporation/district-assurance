@@ -13,7 +13,7 @@ import type { JsonWebKey } from "node:crypto";
 import type { IntakeRecord, SessionStore } from "./core/adapters.ts";
 import type { JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
-import { assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
+import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
 import { EngineError } from "./core/errors.ts";
 import { currentStep } from "./core/flow.ts";
 import type { Actor, EngineEvent, EngineEventName, EventListener } from "./core/events.ts";
@@ -97,6 +97,7 @@ export class Engine {
   readonly #onEvent: EventListener | undefined;
   readonly #badge: badge.BadgeModule;
   readonly #rt: EngineRuntime;
+  readonly #receiptModules: readonly AssuranceModule[];
   #config: FlowConfig;
 
   constructor(options: EngineOptions) {
@@ -116,8 +117,9 @@ export class Engine {
     this.#onEvent = options.onEvent;
     this.#badge = options.badge ?? badge.badgeModule();
     const present = Object.entries(this.#adapters).filter(([, value]) => value !== undefined).map(([name]) => name);
-    this.registry = new ModuleRegistry({ adapters: present, modules: [...builtInModules(this.#badge), ...(options.modules ?? [])] });
-    this.#config = assertConfig(structuredClone(options.config ?? defaultConfig()), this.registry);
+    this.#receiptModules = builtInModules(this.#badge);
+    this.registry = new ModuleRegistry({ adapters: present, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
+    this.#config = this.#prepare(options.config === undefined ? defaultConfig() : options.config);
     this.#rt = this.#runtime();
   }
 
@@ -134,7 +136,7 @@ export class Engine {
 
   /** Replaces the config, after checking it. Calls in progress keep the flow steps they started with. */
   configure(config: unknown): void {
-    this.#config = assertConfig(structuredClone(config), this.registry);
+    this.#config = this.#prepare(config);
   }
 
   /** Installs an outside module. It stays off until a config turns it on. */
@@ -170,11 +172,12 @@ export class Engine {
       flow: null,
       modules,
     };
-    if (input.flow !== undefined) this.#flowDefinition(input.flow);
+    // The flow is chosen now, so the call runs the definition and revision it was started with.
+    const flow = input.flow === undefined ? null : { name: input.flow, definition: this.#flowDefinition(input.flow), revision: this.#config.revision };
     const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
     if (!created) throw new EngineError("invalid_input", "a call with that id exists");
     await this.#emit(callId, { name: "call.started", actor: "system", detail: { locale: record.locale, revision: record.revision } });
-    if (input.flow !== undefined) await this.startFlow(callId, input.flow);
+    if (flow !== null) await this.#startFlow(callId, flow.name, flow.definition, flow.revision);
     return this.state(callId);
   }
 
@@ -235,8 +238,10 @@ export class Engine {
 
   /** Starts a named flow on an open call. A call runs at most one flow; its steps are copied in now. */
   async startFlow(callId: string, name: string): Promise<FlowPosition> {
-    const definition = this.#flowDefinition(name);
-    const revision = this.#config.revision;
+    return this.#startFlow(callId, name, this.#flowDefinition(name), this.#config.revision);
+  }
+
+  async #startFlow(callId: string, name: string, definition: FlowConfig["flows"][string], revision: string): Promise<FlowPosition> {
     await this.#update(callId, (draft) => {
       const record = draft.record;
       if (record.flow !== null) throw new EngineError("precondition_failed", "this call already ran a flow");
@@ -354,7 +359,8 @@ export class Engine {
     if (!trace.wantsReceipt(this.#rt, record)) return null;
     const head = await this.#adapters.ledger.head();
     const parts: Pick<ReceiptBody, "verification" | "records" | "payments"> = { verification: { level: 0, methods: [] }, records: [], payments: [] };
-    for (const module of this.registry.list()) {
+    // The built-in contributors, not the registry: a module removed after this call filed or paid still appears on its receipt.
+    for (const module of this.#receiptModules) {
       const slice = record.modules[module.manifest.name];
       if (module.receiptPart !== undefined && slice !== undefined) Object.assign(parts, module.receiptPart(slice, record.state));
     }
@@ -424,6 +430,17 @@ export class Engine {
       },
       resolveRef: (ref) => this.#sessions.resolveRef(this.workspaceId, ref),
     };
+  }
+
+  /** A copy of a config, checked. A value that is not plain data is a config problem too. */
+  #prepare(config: unknown): FlowConfig {
+    let copy: unknown;
+    try {
+      copy = structuredClone(config);
+    } catch {
+      throw new ConfigError(["the config must be plain JSON data"]);
+    }
+    return assertConfig(copy, this.registry);
   }
 
   #outsideModule(name: string): void {
@@ -528,7 +545,12 @@ export class Engine {
   async #emit(callId: string, queued: QueuedEvent): Promise<void> {
     const event: EngineEvent = { name: queued.name, callId, actor: queued.actor, at: this.#now(), detail: queued.detail };
     await this.#adapters.ledger.append({ callId, actor: event.actor, event: event.name, at: event.at, detail: event.detail });
-    this.#onEvent?.(event);
+    // A listener is told, best effort; its failure never stops the ledger entries after it (INT-5).
+    try {
+      this.#onEvent?.(event);
+    } catch {
+      // Ignored by design: the ledger is the record.
+    }
   }
 }
 

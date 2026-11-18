@@ -11,6 +11,13 @@ import { builtInModules, defaultConfig } from "../src/modules.ts";
 import { badgeModule } from "../src/verify/badge.ts";
 import { testConfig } from "./helpers.ts";
 
+/** A sparse array of length 1: one hole, no element. */
+function hole(): unknown[] {
+  const list: unknown[] = [];
+  list.length = 1;
+  return list;
+}
+
 const ALL_ADAPTERS = ["ledger", "sessions", "records", "identity", "carrier", "messages", "payments", "signer", "pinVerifier"];
 
 function registry(adapters: readonly string[] = ALL_ADAPTERS, extra: AssuranceModule[] = []): ModuleRegistry {
@@ -122,6 +129,8 @@ describe("validateConfig: modules", () => {
     assert.deepEqual(validateConfig(c, registry()), []);
     assert.equal(moduleEnabled(c as unknown as FlowConfig, registry(), "trace"), true);
     assert.equal(moduleEnabled(c as unknown as FlowConfig, registry(), "nope"), false);
+    const inherited = registry(ALL_ADAPTERS, [outside("constructor-x")]);
+    assert.equal(moduleEnabled(c as unknown as FlowConfig, inherited, "constructor-x"), false);
     const off = config((x) => (x.modules.paylink.enabled = false));
     assert.equal(moduleEnabled(off as unknown as FlowConfig, registry(), "paylink"), false);
     const bare = new ModuleRegistry({ adapters: ALL_ADAPTERS, modules: builtInModules().slice(0, 3) });
@@ -173,12 +182,15 @@ describe("validateConfig: modules", () => {
     ]);
     assert.deepEqual(at({ factors: ["keypad_knowledge"], grantTtlSeconds: 3600 }), []);
     assert.deepEqual(at({ factors: ["keypad_knowledge", 3] }), ["modules.badge.settings: factors must list at least one factor"]);
+    assert.deepEqual(at({ factors: hole() }), ["modules.badge.settings: factors must list at least one factor"], "a hole is not a factor");
   });
 
   it("checks dossier settings", () => {
     const at = (settings: unknown) => validateConfig(config((c) => (c.modules.dossier.settings = settings)), registry());
     assert.deepEqual(at(null), ["modules.dossier.settings: must be an object with a list of forms"]);
     assert.deepEqual(at({ forms: "x" }), ["modules.dossier.settings: must be an object with a list of forms"]);
+    assert.deepEqual(at({ forms: hole() }), ["modules.dossier.settings: must be an object with a list of forms"]);
+    assert.deepEqual(at({ forms: [{ formId: "a", version: "1", fields: hole() }] }), ["modules.dossier.settings: forms[0] must be { formId, version, fields }"]);
     const field = { key: "issue", label: { en: "Issue", fr: "Problème" }, type: "text", required: true };
     assert.deepEqual(
       at({

@@ -1217,16 +1217,18 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 ```markdown
 ## Why
 
-`onEvent` is synchronous and best effort today.
+Ledger entries are appended after a step's compare-and-set write, and the listener is told best effort. A ledger append that fails after the write leaves the state changed and the entry lost.
 
 ## Acceptance criteria
 
-- [ ] An async listener with defined semantics: the ledger append is the source of truth, listener failures are reported and never block the call.
+- [ ] Pending ledger entries are written with the step's change (an outbox in the call record) and appended idempotently, so a failed append is retried by the next step or by `flushLedger(callId)`, and never lost or doubled.
+- [ ] An async listener with defined semantics: the ledger is the source of truth; listener failures are reported and never block the call or the ledger (they are already swallowed today).
 
 ## Files
 
 - src/engine.ts
 - src/core/events.ts
+- src/core/adapters.ts
 
 ## Tests
 

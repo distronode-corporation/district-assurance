@@ -38,18 +38,39 @@ const STUBS: Array<[string, () => unknown]> = [
 /** Planned work a validator refuses by id (so a config can never reach it mid-call). */
 const REFUSED_BY_VALIDATORS = ["VER-2", "VER-3", "FIL-2", "PAY-7"];
 
+/** One `new NotImplementedError(<string literal>, "<ID>")`, whatever the quotes, commas or escapes in the first argument. */
+const STUB_CALL = /new NotImplementedError\(\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)\s*,\s*["'`]([A-Z]{3}-\d+)["'`]\s*\)/g;
+
+function stubIds(text: string): string[] {
+  const ids = [...text.matchAll(STUB_CALL)].map((m) => m[1]!);
+  // A call the pattern cannot read (a variable as an argument) must not slip past.
+  assert.equal(ids.length, text.split("new NotImplementedError(").length - 1, "every NotImplementedError takes two string literals");
+  return ids;
+}
+
 /** Every `NotImplementedError("...", "ID")` in src/, so a new stub cannot skip this file. */
 function stubIdsInSource(dir: URL): string[] {
   const ids: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) ids.push(...stubIdsInSource(new URL(`${entry.name}/`, dir)));
-    else if (entry.name.endsWith(".ts")) {
-      const text = readFileSync(new URL(entry.name, dir), "utf8");
-      for (const m of text.matchAll(/new NotImplementedError\([^,]+, "([A-Z]{3}-\d+)"\)/g)) ids.push(m[1]!);
-    }
+    else if (entry.name.endsWith(".ts")) ids.push(...stubIds(readFileSync(new URL(entry.name, dir), "utf8")));
   }
   return ids;
 }
+
+describe("the stub scanner", () => {
+  it("reads ids after commas, escaped quotes and any quote style", () => {
+    const src = [
+      'new NotImplementedError("simple", "VER-1")',
+      'new NotImplementedError("Pending, see roadmap", "VER-99")',
+      "new NotImplementedError('it\\'s, later', 'PAY-7')",
+      'new NotImplementedError(`a "b", c`, `GAT-2`)',
+      'new NotImplementedError("say \\"x\\", y", "FIL-3")',
+    ].join("\n");
+    assert.deepEqual(stubIds(src), ["VER-1", "VER-99", "PAY-7", "GAT-2", "FIL-3"]);
+    assert.throws(() => stubIds("new NotImplementedError(name, id)"), /two string literals/);
+  });
+});
 
 describe("planned entry points", () => {
   const roadmap = readFileSync(new URL("../ROADMAP.md", import.meta.url), "utf8");

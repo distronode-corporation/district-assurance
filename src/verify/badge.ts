@@ -367,13 +367,15 @@ export async function startPhotoId(rt: EngineRuntime, callId: string): Promise<{
     return { phone: subject.phoneOnFile, locale: draft.record.locale };
   });
   const check = await rt.adapter("identity").createDocumentCheck({ callId, idempotencyKey: `${callId}:identity` });
-  await rt.update(callId, (draft) => {
+  const enrolled = await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
-    if (s.identityLink === "reserved") {
-      s.identityLink = "sent";
-      s.identitySessions.push(check.sessionId);
-    }
+    if (s.identityLink !== "reserved") return false;
+    s.identityLink = "sent";
+    s.identitySessions.push(check.sessionId);
+    return true;
   });
+  // Tainted while the check was created: the link would never count, so it is never sent.
+  if (!enrolled) throw new EngineError("precondition_failed", "untrusted content entered the call while the photo ID check was created");
   await rt.bindRef(`identity:${check.sessionId}`, callId);
   await rt.adapter("messages").sendText({ to: phone, body: identityText(locale, check.url), purpose: "identity_link", idempotencyKey: `${callId}:identity:text` });
   await rt.update(callId, (draft) => draft.emit("identity.link_sent", "code", {}));

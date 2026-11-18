@@ -163,6 +163,41 @@ describe("flows", () => {
     assert.equal((await t.engine.flowPosition(callId))!.status, "failed");
   });
 
+  it("completes a collect step only with its own form, filed during the step", async () => {
+    const t = setup({
+      config: flowConfig((c) => {
+        c.modules.dossier = {
+          settings: { forms: [{ formId: "repair", version: "1", fields: [{ key: "issue", label: { en: "Issue", fr: "Problème" }, type: "text", required: true }] }, { formId: "other", version: "1", fields: [{ key: "x", label: { en: "X", fr: "X" }, type: "text", required: false }] }] },
+        };
+        c.flows.deposit!.steps = [{ type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }, { type: "trace.receipt" }, { type: "dossier.collect", form: "repair" }];
+      }),
+      modules: [loyaltyModule()],
+    });
+    const { callId } = await t.engine.startCall({ flow: "deposit" });
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    // The flow is on dossier.collect for repair; a record of another form must not complete it.
+    const view = { state: await t.engine.state(callId), slice: { intake: null, records: [{ recordId: "r", formId: "other", digest: "d" }] } as unknown as JsonValue, mark: 0 };
+    const dossier = t.engine.registry.get("dossier")!;
+    assert.equal(dossier.stepStatus({ type: "dossier.collect", form: "repair" }, view), "pending");
+    assert.equal(dossier.stepStatus({ type: "dossier.collect", form: "repair" }, { ...view, mark: 1 }), "pending", "only records filed after the step started");
+    assert.equal(dossier.stepStatus({ type: "dossier.collect", form: "other" }, view), "complete");
+  });
+
+  it("keeps the form a draft started with when the config changes the form", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    t.engine.configure(testConfig((c) => (c.modules.dossier = { settings: { forms: [{ formId: "repair", version: "2", fields: [{ key: "other", label: { en: "O", fr: "O" }, type: "text", required: true }] }] } })));
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    assert.deepEqual([record.formVersion, record.values], ["1", { issue: "leak" }]);
+  });
+
   it("completes a receipt step at once, and abandons a running flow when the call ends", async () => {
     const t = setup({ config: flowConfig() });
     const { callId } = await t.engine.startCall({ flow: "receipt-first" });

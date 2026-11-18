@@ -5,8 +5,14 @@ export function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** A dense array of strings. A hole in a sparse array is not a string. */
 export function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
+  return isDenseArray(value) && value.every((item) => typeof item === "string");
+}
+
+/** An array with no holes (`every` and `forEach` skip holes, so check before using them). */
+export function isDenseArray(value: unknown): value is unknown[] {
+  return Array.isArray(value) && Object.keys(value).length === value.length;
 }
 
 export function isIntegerIn(value: unknown, min: number, max: number): value is number {

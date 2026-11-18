@@ -218,7 +218,7 @@ asks the current step's module for `stepStatus(step, {state, slice, mark})`:
 | Step | Complete when | Failed when |
 |---|---|---|
 | `badge.verify` | a verification finished during the step at `level` or above | it finished below `level` |
-| `dossier.collect` | a record was confirmed during the step | never (abandon and start again) |
+| `dossier.collect` | a record of the step's form was confirmed during the step | never (abandon and start again) |
 | `paylink.request` | the step's payment settled `paid` | it settled `failed` or `expired` |
 | `trace.consent` | a consent for `purpose` was recorded during the step | never |
 | `trace.receipt` | at once | never |
@@ -318,8 +318,10 @@ Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording 
 Forms live in Dossier's settings: a `formId` (lower case, digits, `-`, `_`), a `version` and
 fields with snake_case unique keys, a known type and an English and a French label.
 `validateConfig` refuses fields marked `sensitive` until field encryption exists (FIL-2).
-`startIntake(callId, formId)` names the form; a draft being filed (between the reserving write and
-the store's answer) refuses changes.
+`startIntake(callId, formId)` names the form, and the draft keeps the form as it was then, so a
+config change mid-intake never changes what is filed. A draft being filed refuses changes. A
+filing that reached the `RecordStore` but lost its last write (`conflict`) resumes with the same
+record on the next `confirmIntake`; one the store refused releases the draft.
 
 ## 14. Payments
 
@@ -327,8 +329,9 @@ the store's answer) refuses changes.
 Paylink's `maxAmountMinor` (at most 1,000,000), a lower-case ISO 4217 currency, a 1 to 200
 character description and an `amountSource` (`intake_record`, `business_endpoint` or
 `price_list`). In a flow they come from the `paylink.request` step and the host passes none;
-outside a flow the host's code passes them. One link at a time per call. If creating or texting
-the link fails, the request settles `failed` (unless the provider already settled it). Whose
+outside a flow the host's code passes them. One link at a time per call. If creating the link
+fails, the request settles `failed`. Once a link exists it may reach the caller, so only the
+provider settles it, even when texting it fails. `requestPayment` returns the status it saw last. Whose
 account takes the money (`connect` or `platform`) is planned (PAY-7). Settlement:
 
 | Provider outcome | Status |

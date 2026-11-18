@@ -3,7 +3,8 @@
 // is saved; outside a flow the host's code passes it. Either way it never comes from the model.
 //
 // The link is reserved in one write (the call enters `paying`, so a second request is refused
-// everywhere), created and texted, then committed. A failed create or text settles it as failed.
+// everywhere), created and texted, then committed. A failed create settles it as failed; once a
+// link exists, only the provider settles it.
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
@@ -159,8 +160,9 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
     return { request, phone: subject.phoneOnFile, locale: draft.record.locale };
   });
   const { request } = reserved;
+  let link: { linkId: string; url: string };
   try {
-    const link = await rt.adapter("payments").createLink({
+    link = await rt.adapter("payments").createLink({
       callId,
       paymentId: request.paymentId,
       amountMinor: request.amountMinor,
@@ -168,32 +170,33 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
       description: request.description,
       idempotencyKey: `${callId}:${request.paymentId}`,
     });
-    await rt.update(callId, (draft) => {
-      find(draft, request.paymentId).linkId = link.linkId;
-    });
-    await rt.bindRef(`payment:${link.linkId}`, callId);
-    await rt.adapter("messages").sendText({
-      to: reserved.phone,
-      body: paymentText(reserved.locale, link.url, request.amountMinor, request.currency),
-      purpose: "payment_link",
-      idempotencyKey: `${callId}:${request.paymentId}:text`,
-    });
-    await rt.update(callId, (draft) =>
-      draft.emit("payment.link_sent", "code", {
-        paymentId: request.paymentId,
-        linkId: link.linkId,
-        amountMinor: request.amountMinor,
-        currency: request.currency,
-        amountSource: request.amountSource,
-      }),
-    );
   } catch (error) {
-    await rt.update(callId, (draft) => {
-      if (find(draft, request.paymentId).status === "open") settle(rt, draft, request.paymentId, "failed");
-    });
+    // No link exists, so nothing can be paid: settle it as failed and free the call.
+    await rt.update(callId, (draft) => settle(rt, draft, request.paymentId, "failed"));
     throw error;
   }
-  return { paymentId: request.paymentId, status: "open" };
+  // From here a link exists and may reach the caller, so it stays open until the provider settles
+  // it (paid, failed or expired), even when texting it fails.
+  await rt.update(callId, (draft) => {
+    find(draft, request.paymentId).linkId = link.linkId;
+  });
+  await rt.bindRef(`payment:${link.linkId}`, callId);
+  await rt.adapter("messages").sendText({
+    to: reserved.phone,
+    body: paymentText(reserved.locale, link.url, request.amountMinor, request.currency),
+    purpose: "payment_link",
+    idempotencyKey: `${callId}:${request.paymentId}:text`,
+  });
+  return rt.update(callId, (draft) => {
+    draft.emit("payment.link_sent", "code", {
+      paymentId: request.paymentId,
+      linkId: link.linkId,
+      amountMinor: request.amountMinor,
+      currency: request.currency,
+      amountSource: request.amountSource,
+    });
+    return { paymentId: request.paymentId, status: find(draft, request.paymentId).status };
+  });
 }
 
 function find(draft: CallDraft, paymentId: string): PaymentRequest {

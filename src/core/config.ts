@@ -74,7 +74,7 @@ export function moduleEnabled(config: FlowConfig, registry: ModuleRegistry, name
   const module = registry.get(name);
   if (module === undefined) return false;
   if (module.manifest.alwaysOn === true) return true;
-  const entry = config.modules[name];
+  const entry = Object.hasOwn(config.modules, name) ? config.modules[name] : undefined;
   return entry !== undefined && entry.enabled !== false;
 }
 

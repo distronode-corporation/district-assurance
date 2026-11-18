@@ -122,6 +122,8 @@ depends on its whole call path.
 **Controls:** the ledger is hash-chained, and any changed, removed or reordered entry is detected
 (tested). Receipts are signed with ES256 over canonical JSON and carry the ledger head; one changed
 byte fails verification (tested). Planned: key rotation and a published key set history (PRV-1).
+Known gap: ledger entries are appended right after a step's write, so a ledger that fails at that
+moment loses the step's entries while the step stands; INT-5 writes them with the step and retries.
 
 ### Breach of stored data
 
