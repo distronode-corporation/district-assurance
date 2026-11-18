@@ -8,7 +8,7 @@ import { buildReadBack, createUploadLink, deliverRecord } from "../src/file/late
 import { cancelPaymentLink, chargeSavedCard, startKeypadCardCapture } from "../src/pay/later.ts";
 import { revokeConsent } from "../src/prove/consent.ts";
 import { exportLedger } from "../src/prove/later.ts";
-import { gateModule } from "../src/gate/later.ts";
+import { issueAccessCode, issueStepUpToken, seamAccessController, vendorAccessController } from "../src/gate/later.ts";
 import { createTestEngine } from "../src/testing/index.ts";
 import { checkTextCode, enrolPin, normaliseSpokenAnswer, recordSubjectFailure, sendTextCode } from "../src/verify/later.ts";
 import { verifyTelnyxSignature, verifyTwilioSignature } from "../src/webhooks/carrier.ts";
@@ -32,12 +32,15 @@ const STUBS: Array<[string, () => unknown]> = [
   ["PRV-4", () => exportLedger({ fromSeq: 1 })],
   ["SRV-1", () => verifyTwilioSignature(hook)],
   ["SRV-1", () => verifyTelnyxSignature(hook)],
-  ["GAT-1", () => gateModule()],
+  ["GAT-3", () => issueAccessCode({ callId: "c", target: "front-door" })],
+  ["GAT-4", () => issueStepUpToken({ callId: "c", audience: "https://example.test", nonce: "4729" })],
+  ["GAT-5", () => seamAccessController({ apiKey: "k" }).unlock({ grant: null as never, target: "d", idempotencyKey: "k" })],
+  ["GAT-6", () => vendorAccessController({ vendor: "kisi", apiKey: "k" })],
   ["MOD-3", () => createTestEngine().engine.useFactor({ kind: "x_factor", summary: "x", maxAttemptsPerCall: 1, adapters: [], judge: async () => false })],
 ];
 
 /** Planned work a validator refuses by id (so a config can never reach it mid-call). */
-const REFUSED_BY_VALIDATORS = ["VER-2", "VER-3", "FIL-2", "PAY-7"];
+const REFUSED_BY_VALIDATORS = ["VER-2", "VER-3", "FIL-2"];
 
 /** One `new NotImplementedError(<string literal>, "<ID>")`, whatever the quotes, commas or escapes in the first argument. */
 const STUB_CALL = /new NotImplementedError\(\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)\s*,\s*["'`]([A-Z]{3}-\d+)["'`]\s*\)/g;

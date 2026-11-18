@@ -1,0 +1,47 @@
+// An example door relay: the small program on a site's own network that Gate's `webhookRelay`
+// adapter posts to. It holds only Gate's public key. It checks the grant (signature, audience,
+// window, lifetime), refuses a grant id it has seen, and only then works the door, here a callback
+// (a real one would pulse a relay: a Shelly `Switch.Set` with `toggle_after`, an ESPHome switch).
+// Not hardened for production: it keeps seen grant ids in memory.
+import type { JsonWebKey } from "node:crypto";
+import { createServer, type Server } from "node:http";
+
+import { SeenGrants, verifyAccessGrant, type AccessGrantBody, type Clock } from "../../../src/index.ts";
+
+export interface DoorRelayOptions {
+  /** This relay's id: the controller name grants must be addressed to. */
+  audience: string;
+  /** Gate's public key set (`gate.keys()`). */
+  keys: readonly JsonWebKey[];
+  clock: Clock;
+  /** Works the door. Resolves once it moved. */
+  open(target: string, grant: AccessGrantBody): Promise<void>;
+}
+
+export function createDoorRelay(options: DoorRelayOptions): Server {
+  const seen = new SeenGrants();
+  return createServer((req, res) => {
+    const answer = (status: number, body: Record<string, unknown>): void => {
+      res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+    };
+    if (req.method !== "POST" || req.url !== "/unlock") return void answer(404, { error: "not_found" });
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      let grant: unknown;
+      try {
+        grant = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      } catch {
+        return void answer(400, { error: "malformed" });
+      }
+      const now = options.clock.now();
+      const check = verifyAccessGrant(grant, options.keys, { audience: options.audience, now });
+      if (!check.ok) return void answer(401, { error: check.reason });
+      if (!seen.accept(check.body, now)) return void answer(409, { error: "replay" });
+      options.open(check.body.target, check.body).then(
+        () => answer(200, { state: "confirmed", ref: `${options.audience}:${check.body.grantId}` }),
+        () => answer(502, { error: "door" }),
+      );
+    });
+  });
+}

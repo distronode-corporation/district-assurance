@@ -488,7 +488,7 @@ describe("Engine pay", () => {
     assert.equal((await t.engine.state(callId)).phase, "open");
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "expired", linkId: "cs_unknown" }), { applied: false });
     const receipt = await t.engine.endCall(callId);
-    assert.deepEqual(receipt!.body.payments, [{ paymentId, status: "paid", amountMinor: 15000, currency: "cad", providerRef: linkId }]);
+    assert.deepEqual(receipt!.body.payments, [{ paymentId, status: "paid", amountMinor: 15000, currency: "cad", mode: "platform", providerRef: linkId }]);
   });
 
   it("settles a payment after the call ended without moving the session", async () => {
@@ -532,7 +532,7 @@ describe("Engine pay", () => {
     await assert.rejects(t.engine.requestPayment(callId), /carrier down/, "resumed without input");
     await assert.rejects(t.engine.requestPayment(callId, { ...request, amountMinor: 1 }), rejects("invalid_input", /same amount/));
     t.messages.sendText = send;
-    assert.deepEqual(await t.engine.requestPayment(callId, request), { paymentId: "pay_1", status: "open" });
+    assert.deepEqual(await t.engine.requestPayment(callId, request), { paymentId: "pay_1", status: "open", expiresAt: "2026-01-01T00:15:00.000Z" });
     assert.equal(t.payments.created.length, 1, "one link for the request, through every retry");
     assert.equal(t.messages.sent.filter((m) => m.purpose === "payment_link").length, 1);
     await assert.rejects(t.engine.requestPayment(callId, request), rejects("invalid_transition"), "delivered: no second link");

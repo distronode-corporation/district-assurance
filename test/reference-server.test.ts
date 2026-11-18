@@ -48,6 +48,8 @@ describe("reference server", () => {
     assert.deepEqual(await res.json(), { error: "signature", reason: "no_matching_signature" });
     res = await post("/webhooks/stripe/payments", body, signed(body));
     assert.deepEqual(await res.json(), { error: "signature", reason: "no_secret" }, "an endpoint without a secret refuses everything");
+    res = await post("/webhooks/stripe/connect", body, signed(body));
+    assert.deepEqual(await res.json(), { error: "signature", reason: "no_secret" }, "the Connect endpoint has its own secret, unset here");
     res = await post("/webhooks/stripe/identity", "{}", signed("{}"));
     assert.deepEqual([res.status, await res.json()], [400, { error: "malformed_event" }]);
   });
@@ -91,9 +93,14 @@ describe("reference server", () => {
 });
 
 describe("demo and Stripe adapters", () => {
-  it("runs the owner-command and deposit flows end to end", async () => {
+  it("runs the owner-command, deposit (both modes) and entry flows end to end", async () => {
     const result = await runDemo(false);
     assert.equal(result.ownerAuthorized, true);
+    assert.equal(result.receipt.body.payments[0]!.mode, "platform");
+    assert.equal(result.connectReceipt.body.payments[0]!.mode, "connect");
+    assert.equal(result.connectReceipt.body.payments[0]!.status, "paid");
+    assert.deepEqual(result.doorOpened, ["door-1"], "opened once, the replay and the changed grant refused");
+    assert.equal(result.replayRefused, true);
     assert.equal(result.ownerReceipt, null, "owner-command has no receipt step");
     assert.equal(result.tamperedFails, true);
     assert.equal(result.chainOk, true);
@@ -105,7 +112,22 @@ describe("demo and Stripe adapters", () => {
   it("has Stripe adapters that are planned, not built", async () => {
     await assert.rejects(new StripeIdentityProvider("rk_test").createDocumentCheck({ callId: "c", idempotencyKey: "k" }), (e: unknown) => e instanceof NotImplementedError && e.issue === "VER-5");
     await assert.rejects(
-      new StripeCheckoutLinks("rk_test").createLink({ callId: "c", paymentId: "p", amountMinor: 1, currency: "cad", description: "d", idempotencyKey: "k" }),
+      new StripeCheckoutLinks("rk_test").createLink({
+        callId: "c",
+        paymentId: "p",
+        amountMinor: 1,
+        currency: "cad",
+        description: "d",
+        mode: "connect",
+        connectedAccountId: "acct_x",
+        paymentMethods: ["card"],
+        expiresAt: "2026-01-01T00:15:00.000Z",
+        idempotencyKey: "k",
+      }),
+      (e: unknown) => e instanceof NotImplementedError && e.issue === "PAY-1",
+    );
+    await assert.rejects(
+      new StripeCheckoutLinks("rk_test").expireLink({ linkId: "cs_x", mode: "platform", idempotencyKey: "k" }),
       (e: unknown) => e instanceof NotImplementedError && e.issue === "PAY-1",
     );
   });

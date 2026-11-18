@@ -18,15 +18,16 @@
   |                                                                     |
   |   modules (on or off per FlowConfig):                               |
   |     Badge verify/   Dossier file/   Paylink pay/   Trace prove/     |
-  |     Gate gate/ (planned)            outside modules: engine.use()   |
+  |     Gate gate/ (engine.use)         outside modules: engine.use()   |
   |                                                                     |
   |   webhooks/: Stripe signatures and event mapping                    |
   +----+----------------------------------------------------------------+
        | adapter interfaces (src/core/adapters.ts, EngineAdapters)
   SessionStore  AuditLedger  RecordStore  PinVerifier  IdentityProvider
   CarrierSignals  MessageSender  PaymentLinks  ReceiptSigner
+  (Gate's own: AccessController, its ReceiptSigner)
        |
-  the host's database and key store, Stripe, Twilio / Telnyx
+  the host's database and key store, Stripe, Twilio / Telnyx, door relays
 ```
 
 The engine is a library. It holds no sockets and reads no environment. The host creates an
@@ -56,9 +57,9 @@ engine, its inputs or its answers; it hears fixed lines the host speaks on the e
 |---|---|---|---|---|
 | Badge | `src/verify/badge.ts`, `factors.ts`, `knowledge.ts` | factors (`keypad_knowledge`, `pin`, `carrier_identity_match`, `photo_id`, planned `text_code` and `spoken_knowledge`, plug-ins), the `badge.verify` step, grants | | `records`, plus per factor: `carrier`; `identity` and `messages`; `pinVerifier` in verifier mode |
 | Dossier | `src/file/dossier.ts`, `intake.ts` | the `dossier.collect` step, records | `intake.file` | `records` |
-| Paylink | `src/pay/paylink.ts`, `payment.ts` | the `paylink.request` step, payments | `payment.request` | `payments`, `messages` |
+| Paylink | `src/pay/paylink.ts`, `payment.ts` | the `paylink.request` step, payments in `connect` or `platform` mode, the engine's link deadline | `payment.request` | `payments`, `messages` |
 | Trace | `src/prove/trace.ts`, `ledger.ts`, `receipt.ts`, `consent.ts` | the ledger (always on), the `trace.consent` and `trace.receipt` steps, receipts, consents | | `ledger`, and `signer` while receipts are on |
-| Gate | `src/gate/` | planned (GAT-1): the `gate.grant` step, signed access grants | `entry.*` | `accessController` |
+| Gate | `src/gate/gate.ts`, `access.ts`, `relay.ts` | the `gate.grant` step, signed access grants, the signed-webhook relay | `entry.open` | none: its own signer and `AccessController`s, given to `gateModule` |
 
 Each module is an object with a manifest and a few pure functions: `validateSettings`,
 `requiredAdapters`, `validateStep`, `initCall` (its part of a new call record), `enterStep` and
@@ -70,7 +71,8 @@ the `Engine` methods.
 
 Module boundaries: the core imports no module. Badge, Dossier and Trace import only the core.
 Paylink imports Badge's `matchedSubject`, because a payment link goes to the number on file that
-Badge matched. `src/modules.ts` lists the built-in modules and the default config, and
+Badge matched. Gate imports Trace's `signDocument` (one ES256 format for receipts and grants) and
+only the `Engine` type: it runs on the outside module path, never on the internal runtime. `src/modules.ts` lists the built-in modules and the default config, and
 `src/engine.ts` composes everything.
 
 ### Outside modules
@@ -80,8 +82,11 @@ turns it on in the config. Its steps can appear in flows, its settings are check
 validator, and `validateConfig` holds its steps to the scopes its manifest says they need. At run
 time the host's code changes the module's part of a call with `engine.updateModule(callId, name,
 fn)`, one compare-and-set write, and reads it with `engine.moduleState`. `fn` sees the session
-state, can ask whether a scope is authorized, and can write `module.event` ledger entries. A
-running flow moves on when the module's `stepStatus` says its step is complete.
+state, the current step, the engine's clock and an id source, can ask whether a scope is
+authorized, and can write `module.event` ledger entries; the engine holds the current step to the
+scope it needs whatever `fn` does. `engine.recordModuleOutcome` writes the result of work started
+there (a provider's answer) even if the grant expired meanwhile. A running flow moves on when the
+module's `stepStatus` says its step is complete. Gate is built exactly this way.
 
 ## One call, step by step
 
@@ -102,7 +107,11 @@ running flow moves on when the module's `stepStatus` says its step is complete.
 6. Paylink: `requestPayment` needs `payment.request`; in a flow the step sets the amount. The link
    is texted to the number on file, the call enters `paying`, and `applyPaymentOutcome` settles it
    only on `paid`. The flow moves on when it is paid, and fails when it failed or expired.
+   The link lives 15 minutes from the text by default; the host calls `expirePaymentLinks` at
+   `expiresAt`, and the engine expires a link still open, at the provider first.
 7. Trace: `recordConsent(purpose)` fingerprints the configured wording and stores the answer.
+   Gate: `gate.grantAccess` needs `entry.open`, reserves one grant, signs it, sends it once to the
+   door's controller and records the answer (delivered, refused or unknown).
 8. `endCall` closes the session (abandoning a flow still running) and, when the call gets a
    receipt, takes the ledger head and signs it.
 

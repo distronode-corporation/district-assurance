@@ -10,6 +10,8 @@ claim.
 - What a verified caller may do: read status, file a record, request a payment, change contact
   or payout details.
 - Card data, which the engine must never receive.
+- Doors and other access: what a verified caller may open, and when.
+- Whose account a payment lands on (the business's, or the platform's).
 - The record of what happened on a call: the ledger and the receipts.
 - The workspace's FlowConfig: which modules run, which factors count, which scopes a flow grants.
 
@@ -19,9 +21,10 @@ claim.
 |---|---|
 | The host's code paths that call the engine | Everything the caller says |
 | The adapters the host plugs in | Everything the model says or proposes |
-| The knowledge key and the receipt signing key | Caller ID and any number given on the call |
+| The knowledge key, the receipt signing key and Gate's signing key | Caller ID and any number given on the call |
 | The clock and id source | Webhook bodies until their signature verifies |
 | The outside modules the host installs | Text from business endpoints, CRMs and documents |
+| The door controllers and relays the host configures | A door relay's answer, beyond "took it", "refused" or "lost" |
 | The SessionStore's compare-and-set | A FlowConfig until `validateConfig` passes |
 
 ## Threats and controls
@@ -100,8 +103,10 @@ winning), money, contact and access are never below level 2, and a scope with no
 ### Config tampering
 
 Someone who can edit a workspace's FlowConfig. **Controls:** the engine refuses any config with a
-problem, Trace (the ledger) cannot be turned off, the floors cannot be lowered, planned factors
-and payment modes cannot be turned on, and every call's ledger entries carry the config revision
+problem, Trace (the ledger) cannot be turned off, the floors cannot be lowered (`entry.open` is
+an access scope, never below level 2), planned factors cannot be turned on, a payment link can
+offer only instant methods and live 5 to 60 minutes, connect mode cannot run without a connected
+account, and every call's ledger entries carry the config revision
 it ran under. Who may edit a config, and how its history is kept, is the host's (left to the host).
 
 ### Races across processes
@@ -118,10 +123,40 @@ taints the session, drops the grant and sets the level to 0; the next verificati
 factors, and a photo ID link sent before the taint no longer counts (tested). Fetched text never chooses a tool, a recipient or an amount: amounts come from
 the host's code with an `amountSource`, and destinations come from the subject record.
 
+### Unlocks: forged, replayed, or sent twice
+
+Someone forges an access grant, replays one, or a retry opens a door for a caller who is no longer
+there. **Controls:** Gate refuses without a verification grant covering `entry.open` (level 2 or
+more), checked by the engine itself on the flow step and by Gate (tested). An access grant is
+signed with ES256 under Gate's own key and carries its audience (the controller), its target, its
+level and a short validity, never past the verification grant (tested); a relay holds only the
+public key, so taking a relay over does not let anyone mint grants, and one changed byte fails
+(tested). The example relay refuses a grant id it has seen (`SeenGrants`, tested in the demo).
+**An unlock is never retried:** one grant in flight per call, sent once, no redirects followed;
+a lost answer (a timeout, a dropped connection, a 5xx) is recorded as `unknown`, and opening again
+is a fresh request with a new grant, up to `maxGrantsPerCall` (tested). The answer is recorded
+even if the caller's grant expired or the call ended while the door answered (tested). The ledger
+holds each grant's digest and outcome, never the grant. Left to the host: a relay that keeps seen
+grant ids across restarts (or refuses grants for 15 minutes after one), and the door's own safety
+(an unlock pulse, not a latch).
+
+### Money on the wrong account
+
+A webhook from one account settles a payment taken on another, or a config sends money to the
+wrong merchant. **Controls:** each step names its mode; connect mode needs a connected account in
+the settings, checked when the config is saved and again when the link is requested (tested). An
+outcome from a connected account other than the payment's, or a connected account's outcome for a
+platform payment, is ignored and written to the ledger (tested). The reference server takes
+connect-mode events on their own endpoint with their own signing secret. The idempotency key of a
+link includes the mode.
+
 ### Card data and PCI DSS scope
 
 **Controls:** Pay is by a hosted payment page; the engine sees a link id and a status, never a card
-number. Card numbers in transcripts are detected (Luhn, digits and English or French digit words)
+number. A link offers only methods that settle during the call (cards, Apple Pay, Google Pay,
+Link) and lives 15 minutes from the text by default (5 to 60); the engine expires it itself at
+that deadline, at the provider first, because a provider's shortest link life can be longer
+(tested). Card numbers in transcripts are detected (Luhn, digits and English or French digit words)
 and replaced, and the host is told to interrupt (tested). Intake refuses a value carrying a card
 number, and the ledger refuses detail carrying one (tested). Keypad card capture is planned only
 through a PCI-certified carrier service on a call path where tones never reach this engine
@@ -144,11 +179,23 @@ of birth is reversed by trying every date; the caller's entries are never stored
 fields are refused by `validateConfig` until field encryption exists (FIL-2). PINs on file are
 HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode).
 
+## Open questions
+
+- **Refunds and disputes in platform mode.** In `platform` mode the platform is the merchant of
+  record, so a refund or a dispute lands on the platform's account, not the business's. Who
+  carries them, and on what terms, is a legal and payment provider question that is not decided.
+  The engine has no refund or dispute code in either mode; a host handles both at the provider.
+- **Seam in the door path.** A paid third party between the engine and a door (GAT-5) waits on its
+  pricing and its handling of Canadian data being checked.
+
 ## Left to the host
 
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
   speech-to-text and the model while `sensitive` is set.
-- Keeping the knowledge key and the receipt signing key in a key store.
+- Keeping the knowledge key, the receipt signing key and Gate's signing key in a key store, Gate's
+  apart from the receipts'.
+- Calling `expirePaymentLinks` at each link's `expiresAt` (a timer or a sweep); until it does, a
+  link lives as long as the provider keeps it.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
   guarantees (`sessionStoreContract` today; PRV-5 for the others).
 - Choosing the subject when it starts verification with a subject key (for example the owner of

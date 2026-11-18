@@ -8,7 +8,9 @@ import type {
   IntakeRecord,
   MessagePurpose,
   MessageSender,
+  PaymentLinkRequest,
   PaymentLinks,
+  PaymentMode,
   PinVerifier,
   ReceiptSigner,
   RecordStore,
@@ -16,6 +18,7 @@ import type {
 } from "../core/adapters.ts";
 import type { Clock, IdGenerator } from "../core/clock.ts";
 import type { CarrierSignalReport } from "../core/policy.ts";
+import type { AccessController, SignedAccessGrant, UnlockResult } from "../gate/access.ts";
 import { keyPairSigner } from "../prove/receipt.ts";
 import { knowledgeDigest, pinDigest, subjectKeyFor } from "../verify/knowledge.ts";
 
@@ -93,26 +96,68 @@ export class FakeMessageSender implements MessageSender {
   }
 }
 
-/** Hands out one link per idempotency key, like a provider that honours idempotency keys. */
+/**
+ * Hands out one link per idempotency key, like a provider that honours idempotency keys, and
+ * expires an open link once. `created` records the mode, account, methods and expiry each link
+ * was asked for; `settle(linkId)` marks one as no longer open (paid or expired at the provider).
+ */
 export class FakePaymentLinks implements PaymentLinks {
-  readonly created: Array<{ linkId: string; paymentId: string; amountMinor: number; currency: string }> = [];
+  readonly created: Array<Omit<PaymentLinkRequest, "callId" | "description" | "idempotencyKey"> & { linkId: string }> = [];
+  readonly expired: Array<{ linkId: string; mode: PaymentMode; connectedAccountId?: string }> = [];
   readonly #byKey = new Map<string, { linkId: string; url: string }>();
+  readonly #closed = new Set<string>();
 
-  async createLink(input: {
-    callId: string;
-    paymentId: string;
-    amountMinor: number;
-    currency: string;
-    description: string;
-    idempotencyKey: string;
-  }): Promise<{ linkId: string; url: string }> {
+  async createLink(input: PaymentLinkRequest): Promise<{ linkId: string; url: string }> {
     const existing = this.#byKey.get(input.idempotencyKey);
     if (existing !== undefined) return existing;
     const linkId = `cs_fake_${this.created.length + 1}`;
     const link = { linkId, url: `https://pay.example.test/c/${linkId}` };
     this.#byKey.set(input.idempotencyKey, link);
-    this.created.push({ linkId, paymentId: input.paymentId, amountMinor: input.amountMinor, currency: input.currency });
+    const { callId: _c, description: _d, idempotencyKey: _k, ...asked } = input;
+    this.created.push({ ...structuredClone(asked), linkId });
     return link;
+  }
+
+  async expireLink(input: { linkId: string; mode: PaymentMode; connectedAccountId?: string; idempotencyKey: string }): Promise<{ state: "expired" | "not_open" }> {
+    if (this.#closed.has(input.linkId)) return { state: "not_open" };
+    this.#closed.add(input.linkId);
+    const { idempotencyKey: _k, ...asked } = input;
+    this.expired.push(asked);
+    return { state: "expired" };
+  }
+
+  /** The provider closed a link on its own (paid or expired): a later expireLink answers not_open. */
+  settle(linkId: string): void {
+    this.#closed.add(linkId);
+  }
+}
+
+/**
+ * A door controller for tests and the demo. `mode` says how it answers: `deliver` (took it),
+ * `confirm` (took it and the door moved), `refuse` (did not act), or `lose` (acted, then the
+ * answer was lost: the call throws). Every grant it received is in `received`.
+ */
+export class FakeAccessController implements AccessController {
+  readonly received: Array<{ grant: SignedAccessGrant; target: string; idempotencyKey: string }> = [];
+  mode: "deliver" | "confirm" | "refuse" | "lose";
+
+  constructor(mode: FakeAccessController["mode"] = "confirm") {
+    this.mode = mode;
+  }
+
+  async unlock(input: { grant: SignedAccessGrant; target: string; idempotencyKey: string }): Promise<UnlockResult> {
+    this.received.push(structuredClone(input));
+    const providerRef = `door_fake_${this.received.length}`;
+    switch (this.mode) {
+      case "deliver":
+        return { outcome: "delivered", providerRef, confirmed: false };
+      case "confirm":
+        return { outcome: "delivered", providerRef, confirmed: true };
+      case "refuse":
+        return { outcome: "refused", reason: "door_offline" };
+      case "lose":
+        throw new Error("the controller's answer was lost");
+    }
   }
 }
 

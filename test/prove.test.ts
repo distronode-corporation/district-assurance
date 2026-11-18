@@ -84,7 +84,7 @@ function body(patch: Partial<ReceiptBody> = {}): ReceiptBody {
     issuedAt: at,
     verification: { level: 3, methods: ["keypad_knowledge", "photo_id"] },
     records: [{ recordId: "rec_1", formId: "repair", digest: "ab".repeat(32) }],
-    payments: [{ paymentId: "pay_1", status: "paid", amountMinor: 15000, currency: "cad", providerRef: "cs_1" }],
+    payments: [{ paymentId: "pay_1", status: "paid", amountMinor: 15000, currency: "cad", mode: "platform", providerRef: "cs_1" }],
     consents: [{ purpose: "texts", wordingVersion: "1", wordingDigest: "cd".repeat(32), answer: "yes" }],
     ledger: { seq: 9, hash: "ef".repeat(32) },
     ...patch,

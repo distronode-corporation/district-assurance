@@ -1,6 +1,6 @@
 # Issues
 
-Every open issue of [ROADMAP.md](ROADMAP.md), 42 of them, ready to paste into GitHub: the heading is the title, the fenced block is the body. They are in milestone order, owner-command first; open them in that order. ROADMAP.md has the waves and the dependencies, and `test/stubs.test.ts` fails if an id here is missing there.
+Every open issue of [ROADMAP.md](ROADMAP.md), 41 of them, ready to paste into GitHub: the heading is the title, the fenced block is the body. They are in milestone order, owner-command first; open them in that order. ROADMAP.md has the waves and the dependencies, and `test/stubs.test.ts` fails if an id here is missing there.
 
 ### VER-1: Durable failure counters and lockout per subject and per calling number (hard gate before owner-command goes live)
 
@@ -198,116 +198,11 @@ The `pin` factor checks a PIN against a keyed hash on file or the host's own ver
 All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
 ```
 
-### GAT-1: Gate module: signed, time-limited access grants through an AccessController
-
-**Labels:** `gate`, `m3`  
-**Milestone:** M3 Gate and payment modes  
-**Depends on:** none
-
-```markdown
-## Why
-
-Secure entry, physical and digital, is the outcome some flows exist for. Gate is the fifth built-in module: Badge says who is calling, Gate turns a verified call into access.
-
-## Acceptance criteria
-
-- [ ] `gateModule()` in `src/gate/` (it throws `NotImplementedError` today) with a `gate.grant` step: the access target, the scope it needs (for example `entry.open`, floor level 2), and a lifetime (at most 15 minutes).
-- [ ] A grant is refused without a valid verification grant covering the step's scope; an access grant is ES256 over canonical JSON (the code in `src/prove/`), with its own `kid`, and verifiable by the access side with the public key only.
-- [ ] Delivery through an `AccessController` adapter (`grant`, `revoke`); a fake in `district-assurance/testing`. The real adapters (GAT-2 to GAT-4) throw `NotImplementedError` with their ids.
-- [ ] Every grant, refusal and revocation goes to the ledger (`gate.granted`, `gate.refused`, `gate.revoked`), never the code or credential itself.
-- [ ] `validateConfig` checks the step, the adapter and the floor; the demo gets an `entry` flow.
-
-## Files
-
-- src/gate/gate.ts (new)
-- src/gate/later.ts
-- src/core/adapters.ts
-- src/core/events.ts
-- src/modules.ts
-- src/testing/fakes.ts
-- examples/reference-server/src/flows.ts
-
-## Tests
-
-- test/gate.test.ts: refused without a grant, signed grant verifies, a changed byte fails, expiry
-- test/flows.test.ts: an entry flow end to end on the fake
-
-## Done when
-
-All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
-```
-
-### PAY-7: Paylink payment modes: connect and platform
-
-**Labels:** `paylink`, `m3`  
-**Milestone:** M3 Gate and payment modes  
-**Depends on:** none
-
-```markdown
-## Why
-
-Whose account takes the money is a per-flow choice: `connect` (the business's own Stripe account, direct charges, the business is the merchant) or `platform` (the platform's account, the platform is the merchant). `validateConfig` refuses a `mode` today.
-
-## Acceptance criteria
-
-- [ ] `mode` on a `paylink.request` step (`connect` or `platform`), with Paylink settings for the default mode and, for `connect`, where the connected account comes from.
-- [ ] One `PaymentLinks` adapter shape: the request carries the mode and an optional connected account. The engine still never sees card data.
-- [ ] `validateConfig` refuses a `connect` step without a connected account source, and a mode the host's adapter does not support.
-- [ ] The receipt and the `payment.link_sent` event say which mode took the payment.
-
-## Files
-
-- src/pay/paylink.ts
-- src/core/adapters.ts
-- src/testing/fakes.ts
-- SPEC.md
-
-## Tests
-
-- test/engine.test.ts
-- test/config.test.ts
-- test/flows.test.ts
-
-## Done when
-
-All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
-```
-
-### GAT-2: Door controller webhook adapter
-
-**Labels:** `gate`, `m3`  
-**Milestone:** M3 Gate and payment modes  
-**Depends on:** GAT-1
-
-```markdown
-## Why
-
-The first physical-entry `AccessController`: a signed unlock request to a door controller's webhook.
-
-## Acceptance criteria
-
-- [ ] An adapter that POSTs the signed access grant to a configured URL with an HMAC header in the `t=,v1=` scheme, a short timeout and one retry, and fails closed.
-- [ ] Credentials from the environment only; tested against a local fake HTTP server.
-
-## Files
-
-- src/gate/later.ts
-- examples/reference-server/src/gate-adapters.ts (new)
-
-## Tests
-
-- test/gate-adapters.test.ts
-
-## Done when
-
-All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
-```
-
 ### GAT-3: One-time access codes
 
 **Labels:** `gate`, `m3`  
 **Milestone:** M3 Gate and payment modes  
-**Depends on:** GAT-1, VER-2
+**Depends on:** VER-2
 
 ```markdown
 ## Why
@@ -316,12 +211,14 @@ Entry where no controller can be called live: a short code, texted to the number
 
 ## Acceptance criteria
 
-- [ ] Codes stored only as keyed hashes, single use, bound to the access grant and its lifetime, texted only to the number on file.
+- [ ] `issueAccessCode` (it throws `NotImplementedError` today) through an `AccessController.issueCode` method: a code valid from `startsAt` to `endsAt`, single use where the lock supports it, bound to the access grant and its lifetime, texted only to the number on file and never written to the ledger.
+- [ ] Codes stored by the engine only as keyed hashes; `revoke` removes a code before its end, and revoking one already gone is success.
 - [ ] Send limits shared with texted codes (VER-2).
 
 ## Files
 
 - src/gate/codes.ts (new)
+- src/gate/access.ts
 - src/gate/later.ts
 
 ## Tests
@@ -337,17 +234,18 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 **Labels:** `gate`, `m3`  
 **Milestone:** M3 Gate and payment modes  
-**Depends on:** GAT-1
+**Depends on:** none
 
 ```markdown
 ## Why
 
-Digital entry: a verified call lets the same person finish signing in on the web.
+Digital entry: a verified call lets the same person finish signing in on the web. Decided: an ES256 JWT, checked by the site against the engine's published JWKS, bound to a nonce the site showed.
 
 ## Acceptance criteria
 
-- [ ] A step-up token the host's web sign-in exchanges once, bound to the subject and the access grant, short-lived, refused after the call is tainted.
-- [ ] Documented for an OpenID Connect `acr` step-up.
+- [ ] `issueStepUpToken` (it throws `NotImplementedError` today): a compact JWS (`alg: ES256`) with `iss`, `aud` (the site), `sub` (an opaque handle the site knows), `iat`, `exp` (2 to 5 minutes), `jti`, `acr` (the level) and the site's `nonce`, which the caller keys on the call.
+- [ ] A JWKS document of the step-up keys, its own `kid`, for `/.well-known/jwks.json`; checked with an off-the-shelf JOSE library in a test (development dependency only).
+- [ ] Delivered by a text to the number on file or a POST to the site's registered callback; refused after the call is tainted; each `jti` used once by the site.
 
 ## Files
 
@@ -357,6 +255,67 @@ Digital entry: a verified call lets the same person finish signing in on the web
 ## Tests
 
 - test/gate.test.ts
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### GAT-5: Seam adapter
+
+**Labels:** `gate`, `m3`  
+**Milestone:** M3 Gate and payment modes  
+**Depends on:** none
+
+```markdown
+## Why
+
+One public, self-serve API with a sandbox reaches August, Yale, Nuki, Salto KS, Kisi, Brivo and Avigilon Alta. Built after Seam's pricing and its handling of Canadian data are checked.
+
+## Acceptance criteria
+
+- [ ] `seamAccessController` (it throws `NotImplementedError` today): `unlock` through Seam's lock unlock call, checking the device can unlock remotely first; `confirmed` only when Seam reports that the device confirmed it.
+- [ ] No retries (Seam documents no idempotency key on unlock); a lost answer is `unknown`, as Gate requires.
+- [ ] Tested against a local fake HTTP server replaying recorded sandbox responses; proven once by hand in Seam's sandbox.
+
+## Files
+
+- src/gate/seam.ts (new)
+- src/gate/later.ts
+
+## Tests
+
+- test/gate-seam.test.ts
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### GAT-6: Direct vendor adapters
+
+**Labels:** `gate`, `m3`  
+**Milestone:** M3 Gate and payment modes  
+**Depends on:** none
+
+```markdown
+## Why
+
+For access systems no aggregator reaches (Verkada, for example) or a host that has an account with one vendor only (Kisi).
+
+## Acceptance criteria
+
+- [ ] `vendorAccessController` (it throws `NotImplementedError` today) for Kisi and Verkada, each through the vendor's documented unlock call, with the same never-retry rule.
+- [ ] Each tested against a local fake HTTP server; proven once by hand on the vendor's own test setup.
+
+## Files
+
+- src/gate/vendors.ts (new)
+- src/gate/later.ts
+
+## Tests
+
+- test/gate-vendors.test.ts
 
 ## Done when
 
@@ -700,7 +659,7 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 **Labels:** `paylink`, `m6`  
 **Milestone:** M6 Paylink  
-**Depends on:** PAY-7
+**Depends on:** none
 
 ```markdown
 ## Why
@@ -709,8 +668,11 @@ Pay runs on fakes today.
 
 ## Acceptance criteria
 
-- [ ] `StripeCheckoutLinks.createLink` creates a Checkout Session in payment mode, cards only, the amount and currency from the engine, a 30-minute expiry, the payment id in metadata and the engine's idempotency key.
-- [ ] In `connect` mode, a direct charge on the connected account (the `Stripe-Account` header); in `platform` mode, on the platform's own account (PAY-7 carries the mode).
+- [ ] `StripeCheckoutLinks.createLink` creates a Checkout Session in payment mode with the engine's instant payment methods, the amount and currency from the engine, `expires_at` at the later of the engine's deadline and Stripe's 30-minute minimum, the payment id in metadata and the engine's idempotency key.
+- [ ] In `connect` mode, a direct charge on the connected account (the `Stripe-Account` header); in `platform` mode, on the platform's own account.
+- [ ] `expireLink` calls the session's expire endpoint (with `Stripe-Account` in connect mode) and answers `not_open` when Stripe says the session is no longer open.
+- [ ] How Apple Pay, Google Pay and Link map to Checkout's parameters is proven in test mode, not assumed.
+- [ ] Connect-mode events come from the Connect endpoint, with its own signing secret, and carry the connected account.
 - [ ] Never logs the URL; returns the session id as `linkId`.
 - [ ] The payments webhook settles it end to end with a real test-mode event.
 
@@ -760,7 +722,7 @@ The amount must come from a record, a price list or the business's endpoint, and
 All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
 ```
 
-### PAY-3: Cancel and expire open links
+### PAY-3: Cancel open links
 
 **Labels:** `paylink`, `m6`  
 **Milestone:** M6 Paylink  
@@ -769,18 +731,17 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 ```markdown
 ## Why
 
-A link should not outlive its purpose.
+A link should not outlive its purpose. The engine already expires a link at its own deadline (`expirePaymentLinks`, through `PaymentLinks.expireLink`); this is the rest.
 
 ## Acceptance criteria
 
-- [ ] `cancelPaymentLink` through a `PaymentLinks.cancel` method; open links are expired when the call ends, and the receipt shows them as expired.
+- [ ] `cancelPaymentLink` (the caller changed their mind) through `PaymentLinks.expireLink`; open links are expired when the call ends, and the receipt shows them as expired.
 - [ ] A late `paid` after cancellation is still recorded as paid (the money moved) and flagged in the ledger.
 
 ## Files
 
 - src/pay/later.ts
 - src/pay/paylink.ts
-- src/core/adapters.ts
 - src/engine.ts
 
 ## Tests

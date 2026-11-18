@@ -31,18 +31,46 @@ export interface MessageSender {
   }>;
 }
 
-/** Hosted payment pages (for example Stripe Checkout on the business's own account). */
+/**
+ * Whose account takes the money. `connect`: the business's own account at the provider (for
+ * example a Stripe direct charge on a connected account); the business is the merchant.
+ * `platform`: the platform's own account; the platform is the merchant.
+ */
+export type PaymentMode = "connect" | "platform";
+
+/** Payment methods that settle while the caller is still on the call. Nothing else may be offered. */
+export type InstantPaymentMethod = "card" | "apple_pay" | "google_pay" | "link";
+
+export interface PaymentLinkRequest {
+  callId: string;
+  paymentId: string;
+  /** Integer, in the currency's minor unit (cents). */
+  amountMinor: number;
+  /** ISO 4217, lower case. */
+  currency: string;
+  description: string;
+  mode: PaymentMode;
+  /** The business's account at the provider. Present exactly when `mode` is `connect`. */
+  connectedAccountId?: string;
+  /** What the page may offer: only methods that settle at once. How a provider names them is the adapter's. */
+  paymentMethods: readonly InstantPaymentMethod[];
+  /**
+   * When the engine plans to expire the link (ISO 8601). A provider whose shortest link life is
+   * longer (Stripe Checkout: 30 minutes) sets its own minimum; the engine calls `expireLink` at
+   * its own deadline, which counts from when the link was texted.
+   */
+  expiresAt: string;
+  idempotencyKey: string;
+}
+
+/** Hosted payment pages (for example Stripe Checkout, on the business's account or the platform's). */
 export interface PaymentLinks {
-  createLink(input: {
-    callId: string;
-    paymentId: string;
-    /** Integer, in the currency's minor unit (cents). */
-    amountMinor: number;
-    /** ISO 4217, lower case. */
-    currency: string;
-    description: string;
-    idempotencyKey: string;
-  }): Promise<{ linkId: string; url: string }>;
+  createLink(input: PaymentLinkRequest): Promise<{ linkId: string; url: string }>;
+  /**
+   * Expires an open link now. `expired` when it was open and is closed; `not_open` when the
+   * provider says it already completed or expired, in which case its webhook settles it.
+   */
+  expireLink(input: { linkId: string; mode: PaymentMode; connectedAccountId?: string; idempotencyKey: string }): Promise<{ state: "expired" | "not_open" }>;
 }
 
 /** The person on record, as the engine sees them: keyed digests, never the values. */

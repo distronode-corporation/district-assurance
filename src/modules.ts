@@ -7,7 +7,11 @@ import { paylinkModule } from "./pay/paylink.ts";
 import { traceModule } from "./prove/trace.ts";
 import { badgeModule, type BadgeModule } from "./verify/badge.ts";
 
-/** The names of the built-in modules. Gate (entry) joins them in PR 2 of the modular core (GAT-1). */
+/**
+ * The names of the built-in modules, which the engine wires itself. Gate (entry) ships in the
+ * package too, but a host installs it with `engine.use(gateModule(...))`, with its own signer and
+ * door controllers, and it runs on the outside module path (`Engine.updateModule`).
+ */
 export const BUILT_IN_MODULES = ["badge", "dossier", "paylink", "trace"] as const;
 
 /** Badge (with the given factor plug-ins, if any), Dossier, Paylink and Trace. */

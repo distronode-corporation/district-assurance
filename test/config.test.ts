@@ -379,7 +379,7 @@ describe("validateConfig: flows", () => {
     ]);
     const pay = { type: "paylink.request", amountMinor: 100, currency: "cad", description: "x", amountSource: "price_list" };
     assert.deepEqual(one({ ...pay, mode: "cash" }), ["(paylink.request): mode must be connect or platform"]);
-    assert.deepEqual(one({ ...pay, mode: "connect" }), ["(paylink.request): mode connect is not built yet (PAY-7)"]);
+    assert.deepEqual(one({ ...pay, mode: "connect" }), ["(paylink.request): connect mode needs connectedAccountId in the paylink settings"]);
     assert.deepEqual(one({ ...pay, amountMinor: 1_000_001 }), ["(paylink.request): amountMinor is above the limit"]);
     assert.deepEqual(one({ type: "trace.consent", x: 1 }), ["(trace.consent): x is not a field of this step", "(trace.consent): purpose must name a wording"]);
     assert.deepEqual(one({ type: "trace.consent", purpose: "nope" }), ["(trace.consent): no wording for nope in the trace settings"]);

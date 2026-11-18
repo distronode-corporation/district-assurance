@@ -1,5 +1,6 @@
 // The reference server: a small node:http server around one Engine. It receives the Stripe
-// webhooks that finish a photo ID check and a payment, serves receipts and the receipt key set,
+// webhooks that finish a photo ID check and a payment (platform-mode payments on the account
+// endpoint, connect-mode payments on the Connect endpoint, each with its own signing secret), serves receipts and the receipt key set,
 // and answers 501 on the carrier webhooks that are not built yet. Not hardened for production;
 // ROADMAP.md, "Reference server", lists what that takes.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -8,8 +9,11 @@ import { EngineError, parseStripeEvent, verifyStripeSignature, type Clock, type 
 
 export interface ReferenceServerOptions {
   engine: Engine;
-  /** Signing secrets per Stripe endpoint. Empty means the endpoint refuses everything. */
-  stripeSecrets: { identity: readonly string[]; payments: readonly string[] };
+  /**
+   * Signing secrets per Stripe endpoint. Empty means the endpoint refuses everything. `connect` is
+   * the Connect endpoint ("Events from: Connected accounts"), which has its own secret.
+   */
+  stripeSecrets: { identity: readonly string[]; payments: readonly string[]; connect?: readonly string[] };
   clock: Clock;
   /** Default 64 KiB. */
   maxBodyBytes?: number;
@@ -29,13 +33,13 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   const processed = new Set<string>();
   const maxBody = options.maxBodyBytes ?? 64 * 1024;
 
-  async function stripeWebhook(req: IncomingMessage, route: "identity" | "payments"): Promise<[number, Json]> {
+  async function stripeWebhook(req: IncomingMessage, route: "identity" | "payments" | "connect"): Promise<[number, Json]> {
     const payload = await readBody(req, maxBody);
     const header = req.headers["stripe-signature"];
     const check = verifyStripeSignature({
       payload,
       header: Array.isArray(header) ? header[0] : header,
-      secrets: options.stripeSecrets[route],
+      secrets: options.stripeSecrets[route] ?? [],
       now: options.clock.now(),
     });
     if (!check.ok) return [400, { error: "signature", reason: check.reason }];
@@ -44,7 +48,8 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     if (processed.has(event.eventId)) return [200, { received: true, duplicate: true }];
     let applied = false;
     if (route === "identity" && event.kind === "identity") applied = (await options.engine.applyIdentityOutcome(event.outcome)).applied;
-    if (route === "payments" && event.kind === "payment") applied = (await options.engine.applyPaymentOutcome(event.outcome)).applied;
+    // The engine ignores an outcome whose connected account is not the payment's.
+    if (route !== "identity" && event.kind === "payment") applied = (await options.engine.applyPaymentOutcome(event.outcome)).applied;
     processed.add(event.eventId);
     return [200, { received: true, applied }];
   }
@@ -64,9 +69,10 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       expect("GET");
       return [200, { keys: options.engine.receiptKeys() }];
     }
-    if (path === "/webhooks/stripe/identity" || path === "/webhooks/stripe/payments") {
+    const stripe = /^\/webhooks\/stripe\/(identity|payments|connect)$/.exec(path);
+    if (stripe !== null) {
       expect("POST");
-      return stripeWebhook(req, path.endsWith("identity") ? "identity" : "payments");
+      return stripeWebhook(req, stripe[1] as "identity" | "payments" | "connect");
     }
     const carrier = /^\/webhooks\/(twilio|telnyx)$/.exec(path);
     if (carrier !== null) {

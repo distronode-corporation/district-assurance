@@ -23,11 +23,11 @@ added and removed per workspace config.
 |---|---|---|
 | **Badge** (verify) | Who is calling, in levels. Factors are plug-ins: a PIN (against a keyed hash, or the host's own PIN store), keypad knowledge checked against the organisation's records, carrier signals on the number on file, a photo ID plus selfie by a texted link, and any factor a host adds. A flow can use a PIN only or all of them. | Built on fakes. Texted codes, spoken answers and lockouts across calls are planned. |
 | **Dossier** (file) | Intake the caller confirms: forms the organisation defines, values normalised by code, a structured record with a fingerprint. | Built. Read-backs, encrypted fields and delivery are planned. |
-| **Paylink** (pay) | Payment by a secure link texted to the number on file (a hosted page such as Stripe Checkout). The engine never handles card numbers. | Built on fakes. The Stripe adapter and the `connect` and `platform` modes are planned. |
+| **Paylink** (pay) | Payment by a secure link texted to the number on file (a hosted page such as Stripe Checkout), on the business's own account (`connect`) or the platform's (`platform`), chosen per flow. Only methods that settle during the call; the engine expires the link itself, 15 minutes after it is texted by default. The engine never handles card numbers. | Built on fakes, both modes. The Stripe adapter is planned. |
 | **Trace** (prove) | The hash-chained audit ledger, which is always on and cannot be turned off, plus optional signed receipts (ES256 over canonical JSON) and consent records with fingerprinted wording. | Built, in memory. Export, key rotation and revocation are planned. |
-| **Gate** (entry) | The outcome after verification: a signed, time-limited access grant for a door controller, a one-time access code or a web sign-in step-up. | Planned (GAT-1), next. |
+| **Gate** (entry) | The outcome after verification: a signed, time-limited access grant for a door, never sent twice. Installed with `engine.use(gateModule(...))`. | Built, with the signed-webhook relay adapter and a fake. One-time codes, web sign-in step-up, Seam and direct vendor adapters are planned. |
 
-Outside modules plug in with `engine.use(module)`. A module declares what it provides (factors,
+Outside modules plug in with `engine.use(module)`, and so does Gate, which runs on that same path. A module declares what it provides (factors,
 flow steps, outcomes), the scopes it grants or needs, the adapters it requires and a validator for
 its settings. The code keeps the plain names `verify`, `file`, `pay` and `prove` for the folders.
 
@@ -45,7 +45,8 @@ their settings, and named flows, each an ordered list of steps.
     "badge": { "settings": { "factors": ["pin", "keypad_knowledge", "carrier_identity_match"],
                              "pin": { "mode": "keyed_hash", "minDigits": 4, "maxDigits": 8, "maxAttemptsPerCall": 3 } } },
     "dossier": { "settings": { "forms": ["..."] } },
-    "paylink": { "settings": { "maxAmountMinor": 50000 } },
+    "paylink": { "settings": { "maxAmountMinor": 50000, "connectedAccountId": "acct_..." } },
+    "gate": { "settings": { "targets": [{ "id": "front-door", "controller": "lobby", "ref": "door-1" }] } },
     "trace": { "settings": { "receipts": true, "wordings": ["..."] } }
   },
   "flows": {
@@ -53,9 +54,14 @@ their settings, and named flows, each an ordered list of steps.
     "deposit": { "steps": [
       { "type": "badge.verify", "level": 2, "factors": ["keypad_knowledge", "carrier_identity_match"], "scopes": ["intake.file", "payment.request"] },
       { "type": "dossier.collect", "form": "maintenance" },
-      { "type": "paylink.request", "amountMinor": 15000, "currency": "cad", "description": "Repair deposit", "amountSource": "price_list" },
+      { "type": "paylink.request", "amountMinor": 15000, "currency": "cad", "description": "Repair deposit", "amountSource": "price_list",
+        "mode": "connect", "linkLifeMinutes": 15, "paymentMethods": ["card", "apple_pay", "google_pay", "link"] },
       { "type": "trace.consent", "purpose": "repair_texts" },
       { "type": "trace.receipt" }
+    ] },
+    "entry": { "steps": [
+      { "type": "badge.verify", "level": 2, "factors": ["keypad_knowledge", "carrier_identity_match"], "scopes": ["entry.open"] },
+      { "type": "gate.grant", "target": "front-door", "lifetimeSeconds": 30 }
     ] }
   }
 }
@@ -77,7 +83,7 @@ npm ci
 npm test              # node:test over the TypeScript sources
 npm run typecheck
 npm run test:coverage # 100% lines, statements, functions and branches in every src/ file
-npm run demo          # two scripted calls, end to end, on fake adapters and a loopback server
+npm run demo          # four scripted calls, end to end, on fake adapters and loopback servers
 ```
 
 The demo runs `owner-command` first: the owner of a line keys a PIN, on two engines that share one
@@ -86,7 +92,11 @@ owner commands only. Then `deposit`: a made-up caller is verified to level 2 by 
 carrier match, files a repair request, has a card number read aloud removed from the transcript,
 receives a payment link for the amount the flow sets, pays (a signed Stripe webhook), consents, and
 the signed receipt and the key set are fetched from the server and checked (and a one-byte change
-fails). Nothing leaves the machine.
+fails); that money goes to the platform's account. `deposit-connect` takes a deposit on the
+business's own account: a webhook without the connected account is ignored, the Connect one
+settles it. Last, `entry`: a verified caller gets a signed 30-second access grant, the relay adapter
+posts it to an example door relay, which checks it with Gate's public key and opens the pretend
+door; the same grant sent again, and a changed copy, are refused. Nothing leaves the machine.
 
 ## Using the engine
 
@@ -125,14 +135,15 @@ state machine, the config, the events and the formats.
 | Route | |
 |---|---|
 | `POST /webhooks/stripe/identity` | Stripe Identity outcomes, signature checked first |
-| `POST /webhooks/stripe/payments` | Stripe Checkout outcomes, signature checked first, each event applied once |
+| `POST /webhooks/stripe/payments` | Stripe Checkout outcomes on the platform's account, signature checked first, each event applied once |
+| `POST /webhooks/stripe/connect` | Stripe Checkout outcomes from connected accounts (connect mode), with their own signing secret |
 | `POST /webhooks/twilio`, `/telnyx` | `501` until carrier signature checks are built |
 | `GET /receipts/:callId` | a call's signed receipt (demo only: real receipt links need capability tokens) |
 | `GET /.well-known/receipt-keys.json` | the public key set for receipts |
 | `GET /healthz` | liveness |
 
-`npm run serve` starts it on `127.0.0.1:8787`. With `STRIPE_IDENTITY_WEBHOOK_SECRET` and
-`STRIPE_PAYMENTS_WEBHOOK_SECRET` set to your own test-mode endpoint secrets, `stripe listen` can
+`npm run serve` starts it on `127.0.0.1:8787`. With `STRIPE_IDENTITY_WEBHOOK_SECRET`,
+`STRIPE_PAYMENTS_WEBHOOK_SECRET` and `STRIPE_CONNECT_WEBHOOK_SECRET` set to your own test-mode endpoint secrets, `stripe listen` can
 forward real test events to it; their signatures are checked, and since the Stripe adapters are
 not built yet, the sessions they name are unknown to the engine. It is not hardened for
 production.
@@ -157,6 +168,8 @@ production.
   validator or throws `NotImplementedError` with its roadmap id instead of guessing.
 - **Fail closed.** An unknown scope is refused, an expired grant is refused, an unsigned webhook is
   refused, a step outside the flow's current one is refused.
+- **Never open a door twice.** An unlock is sent once; a lost answer is recorded as unknown, and
+  opening again needs a fresh request.
 
 ## What it does not do
 

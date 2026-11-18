@@ -96,11 +96,31 @@ describe("fakes", () => {
 
   it("payment links honour idempotency keys", async () => {
     const links = new testing.FakePaymentLinks();
-    const input = { callId: "c", paymentId: "p", amountMinor: 1, currency: "cad", description: "d", idempotencyKey: "k" };
+    const input = {
+      callId: "c",
+      paymentId: "p",
+      amountMinor: 1,
+      currency: "cad",
+      description: "d",
+      mode: "platform" as const,
+      paymentMethods: ["card" as const],
+      expiresAt: "2026-01-01T00:15:00.000Z",
+      idempotencyKey: "k",
+    };
     const a = await links.createLink(input);
     assert.deepEqual(await links.createLink(input), a);
     assert.notDeepEqual(await links.createLink({ ...input, idempotencyKey: "k2" }), a);
     assert.equal(links.created.length, 2);
+    assert.deepEqual(links.created[0], { paymentId: "p", amountMinor: 1, currency: "cad", mode: "platform", paymentMethods: ["card"], expiresAt: "2026-01-01T00:15:00.000Z", linkId: a.linkId });
+  });
+
+  it("payment links expire once, and not after the provider closed them", async () => {
+    const links = new testing.FakePaymentLinks();
+    assert.deepEqual(await links.expireLink({ linkId: "cs_1", mode: "connect", connectedAccountId: "acct_1", idempotencyKey: "k" }), { state: "expired" });
+    assert.deepEqual(await links.expireLink({ linkId: "cs_1", mode: "connect", connectedAccountId: "acct_1", idempotencyKey: "k" }), { state: "not_open" });
+    links.settle("cs_2");
+    assert.deepEqual(await links.expireLink({ linkId: "cs_2", mode: "platform", idempotencyKey: "k2" }), { state: "not_open" });
+    assert.deepEqual(links.expired, [{ linkId: "cs_1", mode: "connect", connectedAccountId: "acct_1" }]);
   });
 
   it("the record store returns copies and nothing for unknown keys", async () => {

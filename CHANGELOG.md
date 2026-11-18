@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Gate, the fifth module (GAT-1): signed, time-limited access grants (ES256 over canonical JSON,
+  like receipts) after verification to `entry.open` (level 2 or more), delivered once through an
+  `AccessController`, every grant and outcome in the ledger. Installed with `engine.use`, on the
+  outside module path. `verifyAccessGrant` and `SeenGrants` for the access side.
+- The signed-webhook relay adapter (GAT-2), `webhookRelay`, and an example door relay. An unlock
+  is never retried; a lost answer is `unknown`.
+- `FakeAccessController` in `district-assurance/testing`.
+- Paylink's two modes (PAY-7), `connect` and `platform`, per flow step; `linkLifeMinutes` (5 to 60,
+  default 15) with the engine expiring links itself (`expirePaymentLinks`, `PaymentLinks.expireLink`);
+  an allow-list of instant payment methods (card, Apple Pay, Google Pay, Link). Outcomes from
+  another account than the payment's are ignored.
+- `Engine.recordModuleOutcome`; outside modules see the current step, the clock and an id source.
+- The reference server's Connect webhook route; the demo takes a deposit in each mode and opens a
+  door through the relay.
+- ADR-21 to ADR-24.
+
 - The modular core. A module registry and module interface (what a module provides, the scopes it
   grants or needs, the adapters it requires, its settings validator); Badge, Dossier, Paylink and
   Trace as modules, switched on and off per workspace config; outside modules with `engine.use`.
@@ -22,6 +38,9 @@ All notable changes to this project are documented here. The format follows
 - ROADMAP.md and ISSUES.md for the modular design, owner-command first; ADR-13 to ADR-20.
 
 ### Changed
+
+- `PaymentLinks.createLink` takes a `PaymentLinkRequest` (mode, connected account, payment methods,
+  expiry); `requestPayment` also returns `expiresAt`; receipts' payments carry `mode`.
 
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.

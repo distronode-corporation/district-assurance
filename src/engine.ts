@@ -75,6 +75,12 @@ export interface FlowPosition {
 /** What an outside module's update function sees of the call. */
 export interface ModuleCallView {
   state: SessionState;
+  /** The flow step the call is on (a copy), or null when no flow is running. */
+  step: FlowStep | null;
+  /** The engine's clock for this attempt, ISO 8601. */
+  now: string;
+  /** A new id from the engine's id source, `prefix_...`. A retried attempt draws a new one. */
+  newId(prefix: string): string;
   authorized(scope: string): boolean;
   /** A ledger entry `module.event` with `{ module, event, detail }`. Never put a value the caller keyed in it. */
   emit(event: string, detail: { [key: string]: JsonValue }): void;
@@ -360,8 +366,14 @@ export class Engine {
 
   // ---- Paylink (pay) -----------------------------------------------------------------------
 
-  requestPayment(callId: string, input?: paylink.PaymentInput): Promise<{ paymentId: string; status: PaymentStatus }> {
+  /** Texts a payment link. `expiresAt` is the engine's deadline for it: call `expirePaymentLinks` then. */
+  requestPayment(callId: string, input?: paylink.PaymentInput): Promise<{ paymentId: string; status: PaymentStatus; expiresAt: string | null }> {
     return paylink.requestPayment(this.#rt, callId, input);
+  }
+
+  /** Expires a call's texted links that are still open past their deadline (Paylink's link life). */
+  expirePaymentLinks(callId: string): Promise<{ expired: string[] }> {
+    return paylink.expirePaymentLinks(this.#rt, callId);
   }
 
   applyPaymentOutcome(outcome: PaymentOutcome): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
@@ -442,15 +454,36 @@ export class Engine {
         const scope = module.manifest.scopes.needs[step.type];
         if (scope !== undefined && !this.#authorized(draft.record, scope)) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
       }
-      const view: ModuleCallView = {
-        state: snapshot(draft.record.state),
-        authorized: (scope) => this.#authorized(draft.record, scope),
-        emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
-      };
-      const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);
-      draft.record.modules[name] = structuredClone(next);
-      return structuredClone(next);
+      return this.#applyModule(draft, name, fn);
     });
+  }
+
+  /**
+   * Records the outcome of work an outside module started in `updateModule` (a provider's
+   * answer), in one compare-and-set write. Unlike `updateModule` it is not held to the step's
+   * scope and runs after the flow or the call ended, because the work was authorized when it
+   * started and its result must still be written: Gate records an unlock's answer this way even
+   * if the caller's grant expired while the door controller answered. Never use it for the work.
+   */
+  async recordModuleOutcome(callId: string, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): Promise<JsonValue> {
+    if ((BUILT_IN_MODULES as readonly string[]).includes(name)) throw new EngineError("precondition_failed", `${name} is built in; use its own methods`);
+    if (this.registry.get(name) === undefined) throw new EngineError("module_disabled", `no module named ${name} is installed`);
+    return this.#update(callId, (draft) => this.#applyModule(draft, name, fn));
+  }
+
+  #applyModule(draft: CallDraft, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): JsonValue {
+    const step = draft.step();
+    const view: ModuleCallView = {
+      state: snapshot(draft.record.state),
+      step: step === null ? null : structuredClone(step),
+      now: this.#now(),
+      newId: (prefix) => this.#ids.next(prefix),
+      authorized: (scope) => this.#authorized(draft.record, scope),
+      emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
+    };
+    const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);
+    draft.record.modules[name] = structuredClone(next);
+    return structuredClone(next);
   }
 
   // ---- internals ---------------------------------------------------------------------------
