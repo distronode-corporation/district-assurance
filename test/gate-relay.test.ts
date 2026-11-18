@@ -51,8 +51,8 @@ describe("webhookRelay", () => {
       seen.push({ path: req.url!, body: Buffer.concat(chunks).toString("utf8"), headers: req.headers });
       // Only the paths this test defines answer; any other is a 404.
       const handler = answers.get(req.url ?? "");
-      if (handler === undefined) res.writeHead(404).end();
-      else handler(res);
+      if (typeof handler === "function") handler(res);
+      else res.writeHead(404).end();
     });
   });
   before(async () => {
