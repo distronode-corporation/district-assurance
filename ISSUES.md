@@ -1,38 +1,362 @@
 # Issues
 
-The first 26 issues, ready to paste into GitHub: the heading is the title, the fenced block is the body. ROADMAP.md has the full list, the ordering and the dependencies. Open them in the order of ROADMAP.md, "Order of work".
+Every open issue of [ROADMAP.md](ROADMAP.md), 42 of them, ready to paste into GitHub: the heading is the title, the fenced block is the body. They are in milestone order, owner-command first; open them in that order. ROADMAP.md has the waves and the dependencies, and `test/stubs.test.ts` fails if an id here is missing there.
 
-### VER-1: Durable failure counters and lockout per subject and per calling number
+### VER-1: Durable failure counters and lockout per subject and per calling number (hard gate before owner-command goes live)
 
-**Labels:** `verify`, `m1`  
-**Milestone:** M1 Verify  
+**Labels:** `badge`, `m2`  
+**Milestone:** M2 Owner command  
 **Depends on:** none
 
 ```markdown
 ## Why
 
-Today the keypad limit is per call; a caller can call again. Counters must survive across calls.
+Attempt limits are per call today, for keypad knowledge, the PIN and plug-in factors alike; a caller can call again, and a 4-digit PIN with 3 attempts per call falls within about 3,300 calls. **Hard gate:** no host runs the owner-command flow, or any PIN factor, on a live line before this is merged.
 
 ## Acceptance criteria
 
-- [ ] An `AttemptCounters` adapter interface in `src/core/adapters.ts`: `get`, `recordFailure`, `reset`, keyed by workspace and either subject key or a hash of the calling number.
-- [ ] `submitKeypad` consults the counters before judging and refuses to judge while locked (same `locked: true` answer).
-- [ ] Backoff after failures (5, 15, 60, 300, 900 seconds) and a hard lock after 10 failures in 24 hours, both configurable in the policy with these as defaults and floors.
-- [ ] A `verification.locked` event with the scope of the lock (`subject` or `number`), never the values.
-- [ ] `recordSubjectFailure` in `src/verify/later.ts` is replaced by the real implementation.
+- [ ] An `AttemptCounters` adapter interface in `src/core/adapters.ts`: `get`, `recordFailure`, `reset`, keyed by workspace, factor kind and either subject key or a hash of the calling number.
+- [ ] `submitFactor` (and so `submitKeypad` and `submitPin`) consults the counters before counting the attempt, and refuses to judge while locked (the same `locked: true` answer).
+- [ ] Backoff after failures (5, 15, 60, 300, 900 seconds) and a hard lock after 10 failures in 24 hours, in Badge's settings with these as defaults and floors, checked by `validateConfig`.
+- [ ] A `verification.locked` event with the scope of the lock (`subject` or `number`) and the factor kind, never the values.
+- [ ] Badge requires the adapter when any entered factor is on; `recordSubjectFailure` in `src/verify/later.ts` is replaced by the real implementation.
 
 ## Files
 
 - src/core/adapters.ts
-- src/core/policy.ts
 - src/verify/counters.ts (new)
-- src/engine.ts
+- src/verify/badge.ts
+- src/verify/later.ts
 - src/testing/fakes.ts
+- src/testing/contracts.ts
 
 ## Tests
 
-- test/verify-counters.test.ts: backoff and lock with the fixed clock
-- test/engine.test.ts: lock carries across two calls; unknown subjects are counted by number
+- test/verify-counters.test.ts: backoff and lock with the fixed clock, and a contract suite for the adapter
+- test/pin.test.ts: a PIN lock carries across two calls and two engines; unknown subjects are counted by number
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### VER-8: Policy version and config revision in grants and receipts
+
+**Labels:** `badge`, `m2`  
+**Milestone:** M2 Owner command  
+**Depends on:** none
+
+```markdown
+## Why
+
+A receipt should say which policy and which revision of the workspace's FlowConfig judged the caller. `call.started` already carries the revision; the grant and the receipt do not.
+
+## Acceptance criteria
+
+- [ ] Grants and receipts carry `policyVersion` and `configRevision`; the `verification.finished` event too.
+- [ ] Receipt format version stays 1 if the fields are optional, otherwise becomes 2 with SPEC.md updated.
+
+## Files
+
+- src/core/session.ts
+- src/verify/badge.ts
+- src/prove/trace.ts
+- src/prove/receipt.ts
+- SPEC.md
+
+## Tests
+
+- test/engine.test.ts
+- test/prove.test.ts
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### INT-1: Keypad collector helper
+
+**Labels:** `integration`, `m2`  
+**Milestone:** M2 Owner command  
+**Depends on:** none
+
+```markdown
+## Why
+
+Every host needs the same digit buffer; getting it wrong leaks digits.
+
+## Acceptance criteria
+
+- [ ] A pure `KeypadCollector` that buffers tones until `#`, with a maximum length and an idle timeout, exposes no digits through `toString` or JSON, and hands the digits to one callback.
+
+## Files
+
+- src/core/keypad.ts (new)
+
+## Tests
+
+- test/keypad.test.ts
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### INT-4: Key store contracts for the knowledge key and the receipt signer
+
+**Labels:** `integration`, `m2`  
+**Milestone:** M2 Owner command  
+**Depends on:** none
+
+```markdown
+## Why
+
+Production keys live in a KMS, not in process memory.
+
+## Acceptance criteria
+
+- [ ] Document and test the contract: `ReceiptSigner.sign` returns a 64-byte P1363 ES256 signature; a helper converts DER signatures (what most KMS APIs return) to P1363.
+- [ ] The knowledge key can be an opaque HMAC function instead of bytes, so it never leaves the key store. Factor plug-ins already receive only `hmac`; the engine's own use moves to the same function.
+
+## Files
+
+- src/prove/receipt.ts
+- src/verify/knowledge.ts
+- src/engine.ts
+
+## Tests
+
+- test/prove.test.ts: DER to P1363 conversion against node:crypto output
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### PRV-5: Adapter contract suites in district-assurance/testing
+
+**Labels:** `trace`, `m2`  
+**Milestone:** M2 Owner command  
+**Depends on:** none
+
+```markdown
+## Why
+
+A host's durable stores must keep the same guarantees as the memory ones.
+
+## Acceptance criteria
+
+- [ ] `auditLedgerContract(factory)` and `recordStoreContract(factory)` exported from `district-assurance/testing`, in the style of `sessionStoreContract`: ordering, copies, append-only, chain validity, concurrency of appends.
+- [ ] The memory adapters pass them in CI.
+
+## Files
+
+- src/testing/contracts.ts
+- src/testing/index.ts
+
+## Tests
+
+- test/contracts.test.ts
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### VER-6: PIN enrolment and reset
+
+**Labels:** `badge`, `m2`  
+**Milestone:** M2 Owner command  
+**Depends on:** VER-1
+
+```markdown
+## Why
+
+The `pin` factor checks a PIN against a keyed hash on file or the host's own verifier. Nothing yet lets a caller choose one on the line.
+
+## Acceptance criteria
+
+- [ ] `enrolPin` (in `src/verify/later.ts` today) lets a caller who verified to level 2 or above on this call choose a PIN, keyed twice and compared, then stored through a new `RecordStore.putPinDigest` as `pinDigest(knowledgeKey, subjectKey, pin)`.
+- [ ] Refuses PINs that are all one digit, a run (1234, 4321) or the subject's keypad knowledge; the length comes from Badge's PIN settings.
+- [ ] Reset by the business only (a host call, not a caller one). In `verifier` mode the host's own store enrols, and `enrolPin` refuses.
+- [ ] A `pin.enrolled` event, never the digits.
+
+## Files
+
+- src/verify/pin.ts (new)
+- src/verify/later.ts
+- src/core/adapters.ts
+- src/verify/badge.ts
+- src/engine.ts
+
+## Tests
+
+- test/pin.test.ts: enrolment needs level 2, weak PINs refused, the digest matches what `submitPin` compares
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### GAT-1: Gate module: signed, time-limited access grants through an AccessController
+
+**Labels:** `gate`, `m3`  
+**Milestone:** M3 Gate and payment modes  
+**Depends on:** none
+
+```markdown
+## Why
+
+Secure entry, physical and digital, is the outcome some flows exist for. Gate is the fifth built-in module: Badge says who is calling, Gate turns a verified call into access.
+
+## Acceptance criteria
+
+- [ ] `gateModule()` in `src/gate/` (it throws `NotImplementedError` today) with a `gate.grant` step: the access target, the scope it needs (for example `entry.open`, floor level 2), and a lifetime (at most 15 minutes).
+- [ ] A grant is refused without a valid verification grant covering the step's scope; an access grant is ES256 over canonical JSON (the code in `src/prove/`), with its own `kid`, and verifiable by the access side with the public key only.
+- [ ] Delivery through an `AccessController` adapter (`grant`, `revoke`); a fake in `district-assurance/testing`. The real adapters (GAT-2 to GAT-4) throw `NotImplementedError` with their ids.
+- [ ] Every grant, refusal and revocation goes to the ledger (`gate.granted`, `gate.refused`, `gate.revoked`), never the code or credential itself.
+- [ ] `validateConfig` checks the step, the adapter and the floor; the demo gets an `entry` flow.
+
+## Files
+
+- src/gate/gate.ts (new)
+- src/gate/later.ts
+- src/core/adapters.ts
+- src/core/events.ts
+- src/modules.ts
+- src/testing/fakes.ts
+- examples/reference-server/src/flows.ts
+
+## Tests
+
+- test/gate.test.ts: refused without a grant, signed grant verifies, a changed byte fails, expiry
+- test/flows.test.ts: an entry flow end to end on the fake
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### PAY-7: Paylink payment modes: connect and platform
+
+**Labels:** `paylink`, `m3`  
+**Milestone:** M3 Gate and payment modes  
+**Depends on:** none
+
+```markdown
+## Why
+
+Whose account takes the money is a per-flow choice: `connect` (the business's own Stripe account, direct charges, the business is the merchant) or `platform` (the platform's account, the platform is the merchant). `validateConfig` refuses a `mode` today.
+
+## Acceptance criteria
+
+- [ ] `mode` on a `paylink.request` step (`connect` or `platform`), with Paylink settings for the default mode and, for `connect`, where the connected account comes from.
+- [ ] One `PaymentLinks` adapter shape: the request carries the mode and an optional connected account. The engine still never sees card data.
+- [ ] `validateConfig` refuses a `connect` step without a connected account source, and a mode the host's adapter does not support.
+- [ ] The receipt and the `payment.link_sent` event say which mode took the payment.
+
+## Files
+
+- src/pay/paylink.ts
+- src/core/adapters.ts
+- src/testing/fakes.ts
+- SPEC.md
+
+## Tests
+
+- test/engine.test.ts
+- test/config.test.ts
+- test/flows.test.ts
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### GAT-2: Door controller webhook adapter
+
+**Labels:** `gate`, `m3`  
+**Milestone:** M3 Gate and payment modes  
+**Depends on:** GAT-1
+
+```markdown
+## Why
+
+The first physical-entry `AccessController`: a signed unlock request to a door controller's webhook.
+
+## Acceptance criteria
+
+- [ ] An adapter that POSTs the signed access grant to a configured URL with an HMAC header in the `t=,v1=` scheme, a short timeout and one retry, and fails closed.
+- [ ] Credentials from the environment only; tested against a local fake HTTP server.
+
+## Files
+
+- src/gate/later.ts
+- examples/reference-server/src/gate-adapters.ts (new)
+
+## Tests
+
+- test/gate-adapters.test.ts
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### GAT-3: One-time access codes
+
+**Labels:** `gate`, `m3`  
+**Milestone:** M3 Gate and payment modes  
+**Depends on:** GAT-1, VER-2
+
+```markdown
+## Why
+
+Entry where no controller can be called live: a short code, texted to the number on file, that a keypad at the door accepts once.
+
+## Acceptance criteria
+
+- [ ] Codes stored only as keyed hashes, single use, bound to the access grant and its lifetime, texted only to the number on file.
+- [ ] Send limits shared with texted codes (VER-2).
+
+## Files
+
+- src/gate/codes.ts (new)
+- src/gate/later.ts
+
+## Tests
+
+- test/gate.test.ts
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### GAT-4: Web sign-in step-up
+
+**Labels:** `gate`, `m3`  
+**Milestone:** M3 Gate and payment modes  
+**Depends on:** GAT-1
+
+```markdown
+## Why
+
+Digital entry: a verified call lets the same person finish signing in on the web.
+
+## Acceptance criteria
+
+- [ ] A step-up token the host's web sign-in exchanges once, bound to the subject and the access grant, short-lived, refused after the call is tainted.
+- [ ] Documented for an OpenID Connect `acr` step-up.
+
+## Files
+
+- src/gate/step-up.ts (new)
+- src/gate/later.ts
+
+## Tests
+
+- test/gate.test.ts
 
 ## Done when
 
@@ -41,8 +365,8 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### VER-2: Texted one-time codes with send limits
 
-**Labels:** `verify`, `m1`  
-**Milestone:** M1 Verify  
+**Labels:** `badge`, `m4`  
+**Milestone:** M4 Badge  
 **Depends on:** VER-1
 
 ```markdown
@@ -55,20 +379,22 @@ The second factor for level 2. Codes are also the easiest way to abuse a phone l
 - [ ] `sendTextCode(callId)` sends a 6-digit code to the number on file only after the keypad checks matched; the code is stored as an HMAC, expires after 10 minutes, allows 5 tries, is single-use and bound to the call.
 - [ ] Limits: 5 codes per subject per 24 hours, 60 seconds between sends, a per-calling-number limit, and a destination country allow-list in the policy; a refused send gives the same spoken result as a sent one.
 - [ ] `checkTextCode(callId, code)` records a `text_code` factor; the policy's carrier rule decides whether it counts (already implemented).
-- [ ] The texts are code-built in English and French; `Engine.sendTextCode` stops throwing.
+- [ ] The texts are code-built in English and French; `text_code` can be turned on in Badge's settings, and `Engine.sendTextCode` stops throwing.
 
 ## Files
 
 - src/verify/text-code.ts (new)
 - src/verify/later.ts
+- src/verify/factors.ts
+- src/verify/badge.ts
 - src/core/adapters.ts (a CodeStore interface)
-- src/engine.ts
 - src/testing/fakes.ts
 
 ## Tests
 
 - test/verify-text-code.test.ts: expiry, tries, single use, limits, country allow-list
-- test/engine.test.ts: no text before a match; refused and sent sends look the same to the caller
+- test/engine.test.ts: no text before a match
+- refused and sent sends look the same to the caller
 
 ## Done when
 
@@ -77,8 +403,8 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### VER-3: Spoken answers for values a keypad cannot enter
 
-**Labels:** `verify`, `m1`  
-**Milestone:** M1 Verify  
+**Labels:** `badge`, `m4`  
+**Milestone:** M4 Badge  
 **Depends on:** none
 
 ```markdown
@@ -91,14 +417,14 @@ Canadian postal codes contain letters. A spoken check must be exact after normal
 - [ ] `normaliseSpokenAnswer({field, transcript, locale})` for postal codes (Canada and US) and short alphanumeric references, handling letter names and the common spelling alphabets in English and French.
 - [ ] Returns a normalised value or `unusable`; never a near match.
 - [ ] A `spoken_knowledge` factor compared like keypad fields (keyed digest, constant time).
-- [ ] The policy can use `spoken_knowledge` only at level 1 or combined with another factor.
+- [ ] The policy can use `spoken_knowledge` only at level 1 or combined with another factor; it can then be turned on in Badge's settings.
 
 ## Files
 
 - src/verify/spoken.ts (new)
 - src/verify/later.ts
+- src/verify/factors.ts
 - src/core/policy.ts
-- src/engine.ts
 
 ## Tests
 
@@ -109,20 +435,21 @@ Canadian postal codes contain letters. A spoken check must be exact after normal
 All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
 ```
 
-### VER-4: Carrier signal adapters: Twilio Lookup, Sinch Number Lookup, Telnyx Number Lookup
+### VER-4: Carrier signal adapters: Twilio Lookup and Telnyx Number Lookup
 
-**Labels:** `verify`, `m1`  
-**Milestone:** M1 Verify  
+**Labels:** `badge`, `m4`  
+**Milestone:** M4 Badge  
 **Depends on:** none
 
 ```markdown
 ## Why
 
-The SIM swap and port checks the policy already uses need real sources.
+The SIM swap, porting and identity match checks the policy already uses need real sources. Twilio and Telnyx first; `CarrierSignals` stays vendor-neutral, so another carrier (Sinch, for example) can be added later as its own adapter.
 
 ## Acceptance criteria
 
-- [ ] Three `CarrierSignals` implementations in the reference server, each mapping the vendor's answer to `CarrierSignalReport`.
+- [ ] A Twilio Lookup adapter: SIM Swap (hours since the last SIM change) and Identity Match, mapped to `CarrierSignalReport`.
+- [ ] A Telnyx Number Lookup adapter: porting status and date, and the carrier, mapped to `CarrierSignalReport` (`lastPortHoursAgo`; no SIM swap or identity match, reported as unknown or `unavailable`).
 - [ ] Timeouts, errors, unsupported countries and unapproved features all return `checked: false` (fail closed); nothing throws into the call.
 - [ ] Credentials from the environment only; no keys in code or tests.
 - [ ] A table in the reference server README of which signal each vendor provides, and where approval is needed.
@@ -143,8 +470,8 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### VER-5: Stripe Identity adapter
 
-**Labels:** `verify`, `m1`  
-**Milestone:** M1 Verify  
+**Labels:** `badge`, `m4`  
+**Milestone:** M4 Badge  
 **Depends on:** none
 
 ```markdown
@@ -177,8 +504,8 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### VER-7: Adversarial evaluation suite in English and French
 
-**Labels:** `verify`, `m1`  
-**Milestone:** M1 Verify  
+**Labels:** `badge`, `m4`  
+**Milestone:** M4 Badge  
 **Depends on:** VER-2
 
 ```markdown
@@ -206,43 +533,10 @@ Social engineering is the main threat. The suite makes the rules executable.
 All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
 ```
 
-### VER-8: Policy version in grants and receipts
-
-**Labels:** `verify`, `m1`  
-**Milestone:** M1 Verify  
-**Depends on:** none
-
-```markdown
-## Why
-
-A receipt should say which policy judged the caller.
-
-## Acceptance criteria
-
-- [ ] Grants and receipts carry `policyVersion`; the `verification.finished` event too.
-- [ ] Receipt format version stays 1 if the field is optional, otherwise becomes 2 with SPEC.md updated.
-
-## Files
-
-- src/core/session.ts
-- src/engine.ts
-- src/prove/receipt.ts
-- SPEC.md
-
-## Tests
-
-- test/engine.test.ts
-- test/prove.test.ts
-
-## Done when
-
-All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
-```
-
 ### FIL-1: Read-back library in English and French
 
-**Labels:** `file`, `m2`  
-**Milestone:** M2 File  
+**Labels:** `dossier`, `m5`  
+**Milestone:** M5 Dossier  
 **Depends on:** none
 
 ```markdown
@@ -260,7 +554,7 @@ The caller must confirm exactly what will be filed, read by code.
 
 - src/file/readback.ts (new)
 - src/file/later.ts
-- src/engine.ts
+- src/file/dossier.ts
 
 ## Tests
 
@@ -274,25 +568,26 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### FIL-2: Encrypted sensitive fields
 
-**Labels:** `file`, `m2`  
-**Milestone:** M2 File  
+**Labels:** `dossier`, `m5`  
+**Milestone:** M5 Dossier  
 **Depends on:** none
 
 ```markdown
 ## Why
 
-Forms with sensitive fields are refused today.
+`validateConfig` refuses a form with a sensitive field today.
 
 ## Acceptance criteria
 
-- [ ] A `FieldCipher` adapter (interface exists) passed to the engine; sensitive values are encrypted before `putIntakeRecord`.
-- [ ] Without a cipher, sensitive fields stay refused.
+- [ ] A `FieldCipher` adapter (the interface exists) that Dossier requires once a form has a sensitive field; sensitive values are encrypted before `putIntakeRecord`.
+- [ ] Without the adapter, `validateConfig` keeps refusing sensitive fields.
 - [ ] DECISIONS.md records whether the record digest covers plaintext or ciphertext, and why.
 
 ## Files
 
+- src/file/dossier.ts
 - src/file/later.ts
-- src/engine.ts
+- src/core/runtime.ts
 - src/testing/fakes.ts
 - DECISIONS.md
 
@@ -307,8 +602,8 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### FIL-3: Record delivery with signed webhooks, retries and idempotency
 
-**Labels:** `file`, `m2`  
-**Milestone:** M2 File  
+**Labels:** `dossier`, `m5`  
+**Milestone:** M5 Dossier  
 **Depends on:** FIL-1
 
 ```markdown
@@ -340,8 +635,8 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### FIL-4: Conditional fields and validation rules
 
-**Labels:** `file`, `m2`  
-**Milestone:** M2 File  
+**Labels:** `dossier`, `m5`  
+**Milestone:** M5 Dossier  
 **Depends on:** none
 
 ```markdown
@@ -357,10 +652,44 @@ Real intake forms branch and validate.
 ## Files
 
 - src/file/intake.ts
+- src/file/dossier.ts
 
 ## Tests
 
 - test/modules.test.ts
+- test/config.test.ts: the validator reports every bad rule
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### FIL-5: Documents by text: single-use upload links
+
+**Labels:** `dossier`, `m5`  
+**Milestone:** M5 Dossier  
+**Depends on:** SRV-2
+
+```markdown
+## Why
+
+A photo or PDF into the record, without MMS.
+
+## Acceptance criteria
+
+- [ ] `createUploadLink` returns a capability token (only its hash stored), single use, 30-minute expiry, allowed types and a size cap, bound to the call and record.
+- [ ] A `DocumentStore` adapter and a scanning hook interface; the reference server serves a minimal upload page in English and French.
+
+## Files
+
+- src/file/upload.ts (new)
+- src/file/later.ts
+- src/core/adapters.ts
+- examples/reference-server/src/app.ts
+
+## Tests
+
+- test/file-upload.test.ts: single use, expiry, type and size refusals
 
 ## Done when
 
@@ -369,9 +698,9 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### PAY-1: Stripe Checkout adapter
 
-**Labels:** `pay`, `m3`  
-**Milestone:** M3 Pay  
-**Depends on:** none
+**Labels:** `paylink`, `m6`  
+**Milestone:** M6 Paylink  
+**Depends on:** PAY-7
 
 ```markdown
 ## Why
@@ -380,7 +709,8 @@ Pay runs on fakes today.
 
 ## Acceptance criteria
 
-- [ ] `StripeCheckoutLinks.createLink` creates a Checkout Session in payment mode, cards only, the amount and currency from the engine, a 30-minute expiry, the payment id in metadata, the engine's idempotency key, and the `Stripe-Account` header when a connected account is configured.
+- [ ] `StripeCheckoutLinks.createLink` creates a Checkout Session in payment mode, cards only, the amount and currency from the engine, a 30-minute expiry, the payment id in metadata and the engine's idempotency key.
+- [ ] In `connect` mode, a direct charge on the connected account (the `Stripe-Account` header); in `platform` mode, on the platform's own account (PAY-7 carries the mode).
 - [ ] Never logs the URL; returns the session id as `linkId`.
 - [ ] The payments webhook settles it end to end with a real test-mode event.
 
@@ -401,25 +731,25 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### PAY-2: Amounts from code, read back before the link is sent
 
-**Labels:** `pay`, `m3`  
-**Milestone:** M3 Pay  
+**Labels:** `paylink`, `m6`  
+**Milestone:** M6 Paylink  
 **Depends on:** FIL-1
 
 ```markdown
 ## Why
 
-The amount must come from a record, a price list or the business's endpoint, and the caller hears it first.
+The amount must come from a record, a price list or the business's endpoint, and the caller hears it first. A `paylink.request` step carries a fixed amount today.
 
 ## Acceptance criteria
 
-- [ ] An `AmountSource` adapter resolves an amount from a reference; `requestPayment` takes the reference, not a raw number.
+- [ ] An `AmountSource` adapter resolves an amount from a reference; a `paylink.request` step can name the reference instead of a fixed amount, and `validateConfig` checks one or the other.
 - [ ] A code-built amount read-back and a confirmation before the link is texted.
 
 ## Files
 
 - src/pay/amount.ts (new)
-- src/engine.ts
-- src/core/adapters.ts
+- src/pay/paylink.ts
+- src/core/runtime.ts
 
 ## Tests
 
@@ -432,8 +762,8 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### PAY-3: Cancel and expire open links
 
-**Labels:** `pay`, `m3`  
-**Milestone:** M3 Pay  
+**Labels:** `paylink`, `m6`  
+**Milestone:** M6 Paylink  
 **Depends on:** PAY-1
 
 ```markdown
@@ -449,6 +779,7 @@ A link should not outlive its purpose.
 ## Files
 
 - src/pay/later.ts
+- src/pay/paylink.ts
 - src/core/adapters.ts
 - src/engine.ts
 
@@ -461,10 +792,39 @@ A link should not outlive its purpose.
 All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
 ```
 
+### PAY-4: Saved-card charges for level 2 callers (gated)
+
+**Labels:** `paylink`, `m6`  
+**Milestone:** M6 Paylink  
+**Depends on:** PAY-2
+
+```markdown
+## Why
+
+Charging a card the business already holds. Off by default, its own switch.
+
+## Acceptance criteria
+
+- [ ] `chargeSavedCard` through an adapter, only with a level 2 grant and a confirmed amount read-back; never enabled by default.
+
+## Files
+
+- src/pay/later.ts
+- src/pay/paylink.ts
+
+## Tests
+
+- test/engine.test.ts
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
 ### PAY-5: Live card-number detector for partial and spoken numbers
 
-**Labels:** `pay`, `m3`  
-**Milestone:** M3 Pay  
+**Labels:** `paylink`, `m6`  
+**Milestone:** M6 Paylink  
 **Depends on:** none
 
 ```markdown
@@ -492,10 +852,41 @@ Redaction catches whole numbers; the interrupt should fire while the caller is s
 All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
 ```
 
+### PAY-6: Keypad card capture through a certified carrier service (gated)
+
+**Labels:** `paylink`, `m6`  
+**Milestone:** M6 Paylink  
+**Depends on:** PAY-1
+
+```markdown
+## Why
+
+Some buyers will need it; it must never route tones through this engine.
+
+## Acceptance criteria
+
+- [ ] Starts only after an assessor's scoping. The engine calls a `CarrierPayments` adapter to start and end capture and receives only a token and a result.
+- [ ] An architecture note in SECURITY-MODEL.md shows that no tone reaches the engine during capture.
+
+## Files
+
+- src/pay/later.ts
+- src/core/adapters.ts
+- SECURITY-MODEL.md
+
+## Tests
+
+- test/engine.test.ts: the engine never receives digits
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
 ### PRV-1: Receipt key sets and rotation
 
-**Labels:** `prove`, `m4`  
-**Milestone:** M4 Prove  
+**Labels:** `trace`, `m7`  
+**Milestone:** M7 Trace  
 **Depends on:** none
 
 ```markdown
@@ -511,6 +902,7 @@ Keys must rotate without breaking old receipts.
 ## Files
 
 - src/prove/receipt.ts
+- src/prove/trace.ts
 - src/engine.ts
 - examples/reference-server/src/app.ts
 
@@ -525,8 +917,8 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### PRV-2: Stand-alone receipt verifier
 
-**Labels:** `prove`, `m4`  
-**Milestone:** M4 Prove  
+**Labels:** `trace`, `m7`  
+**Milestone:** M7 Trace  
 **Depends on:** PRV-1
 
 ```markdown
@@ -555,8 +947,8 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### PRV-3: Consent revocation
 
-**Labels:** `prove`, `m4`  
-**Milestone:** M4 Prove  
+**Labels:** `trace`, `m7`  
+**Milestone:** M7 Trace  
 **Depends on:** none
 
 ```markdown
@@ -571,8 +963,8 @@ Consent must be revocable by voice, text or dashboard.
 ## Files
 
 - src/prove/consent.ts
+- src/prove/trace.ts
 - src/core/adapters.ts
-- src/engine.ts
 
 ## Tests
 
@@ -583,30 +975,29 @@ Consent must be revocable by voice, text or dashboard.
 All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
 ```
 
-### PRV-5: Adapter contract suites in district-assurance/testing
+### PRV-4: Ledger export as signed NDJSON with a cursor
 
-**Labels:** `prove`, `m4`  
-**Milestone:** M4 Prove  
-**Depends on:** none
+**Labels:** `trace`, `m7`  
+**Milestone:** M7 Trace  
+**Depends on:** PRV-1
 
 ```markdown
 ## Why
 
-A host's durable stores must keep the same guarantees as the memory ones.
+Auditors and SIEMs need the ledger outside the host.
 
 ## Acceptance criteria
 
-- [ ] `runAuditLedgerContract(factory)` and `runRecordStoreContract(factory)` exported from `district-assurance/testing`: ordering, copies, append-only, chain validity, concurrency of appends.
-- [ ] The memory adapters pass them in CI.
+- [ ] `exportLedger({fromSeq})` yields newline-delimited JSON entries and a signed trailer with the head; resumable by cursor.
 
 ## Files
 
-- src/testing/contracts.ts (new)
-- src/testing/index.ts
+- src/prove/later.ts
+- src/prove/export.ts (new)
 
 ## Tests
 
-- test/contracts.test.ts
+- test/prove.test.ts: export, resume and tamper detection
 
 ## Done when
 
@@ -615,8 +1006,8 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### PRV-6: More redactors: SIN, health card numbers, bank account numbers
 
-**Labels:** `prove`, `m4`  
-**Milestone:** M4 Prove  
+**Labels:** `trace`, `m7`  
+**Milestone:** M7 Trace  
 **Depends on:** PAY-5
 
 ```markdown
@@ -645,8 +1036,8 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### SRV-1: Carrier webhook signature verification
 
-**Labels:** `reference-server`, `m5`  
-**Milestone:** M5 Reference server hardening  
+**Labels:** `reference-server`, `m8`  
+**Milestone:** M8 Reference server hardening  
 **Depends on:** none
 
 ```markdown
@@ -656,7 +1047,7 @@ Carrier routes answer 501 today.
 
 ## Acceptance criteria
 
-- [ ] `verifyTwilioSignature` (HMAC-SHA1 of the URL and sorted form parameters), `verifyTelnyxSignature` (Ed25519 over timestamp and body, with a tolerance), `verifySinchSignature` (the scheme of the product used).
+- [ ] `verifyTwilioSignature` (HMAC-SHA1 of the URL and sorted form parameters) and `verifyTelnyxSignature` (Ed25519 over timestamp and body, with a tolerance).
 - [ ] Each tested against the vendor's published examples; the routes stop answering 501 only when the check is real.
 
 ## Files
@@ -675,8 +1066,8 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### SRV-2: Server limits and logging
 
-**Labels:** `reference-server`, `m5`  
-**Milestone:** M5 Reference server hardening  
+**Labels:** `reference-server`, `m8`  
+**Milestone:** M8 Reference server hardening  
 **Depends on:** none
 
 ```markdown
@@ -703,8 +1094,8 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 
 ### SRV-3: Receipt links by capability token, and a receipt page
 
-**Labels:** `reference-server`, `m5`  
-**Milestone:** M5 Reference server hardening  
+**Labels:** `reference-server`, `m8`  
+**Milestone:** M8 Reference server hardening  
 **Depends on:** PRV-1
 
 ```markdown
@@ -730,10 +1121,38 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
 ```
 
+### SRV-4: Optional persistent stores for the reference server
+
+**Labels:** `reference-server`, `m8`  
+**Milestone:** M8 Reference server hardening  
+**Depends on:** PRV-5
+
+```markdown
+## Why
+
+The server forgets everything on restart.
+
+## Acceptance criteria
+
+- [ ] SQLite-backed `RecordStore` and `AuditLedger` on `node:sqlite` (no new dependency), passing the PRV-5 contract suites.
+
+## Files
+
+- examples/reference-server/src/sqlite-stores.ts (new)
+
+## Tests
+
+- The PRV-5 contract suites
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
 ### SRV-5: Release workflow
 
-**Labels:** `reference-server`, `m5`  
-**Milestone:** M5 Reference server hardening  
+**Labels:** `reference-server`, `m8`  
+**Milestone:** M8 Reference server hardening  
 **Depends on:** none
 
 ```markdown
@@ -761,62 +1180,152 @@ Nothing is published yet, by decision.
 All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
 ```
 
-### INT-1: Keypad collector helper
+### INT-2: Transcript and audio forwarding helper
 
-**Labels:** `integration`, `m6`  
-**Milestone:** M6 Host integration points  
+**Labels:** `integration`, `m9`  
+**Milestone:** M9 Host integration and module authors  
 **Depends on:** none
 
 ```markdown
 ## Why
 
-Every host needs the same digit buffer; getting it wrong leaks digits.
+Hosts must pause transcripts and cut audio while `sensitive` is set.
 
 ## Acceptance criteria
 
-- [ ] A pure `KeypadCollector` that buffers tones until `#`, with a maximum length and an idle timeout, exposes no digits through `toString` or JSON, and hands the digits to one callback.
+- [ ] `forwardingFor(state)` returns what the host may forward (transcript, audio to speech-to-text, audio to the model, listen-in) for the current session; documented as the single place a host asks.
 
 ## Files
 
-- src/core/keypad.ts (new)
+- src/core/forwarding.ts (new)
+- ARCHITECTURE.md
 
 ## Tests
 
-- test/keypad.test.ts
+- test/session.test.ts
 
 ## Done when
 
 All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
 ```
 
-### INT-3: Session storage shared across processes
+### INT-5: Event delivery semantics
 
-**Labels:** `integration`, `m6`  
-**Milestone:** M6 Host integration points  
+**Labels:** `integration`, `m9`  
+**Milestone:** M9 Host integration and module authors  
 **Depends on:** none
 
 ```markdown
 ## Why
 
-The engine keeps sessions in memory. A host whose voice agent and web backend are separate processes, or run several replicas, needs shared session state.
+Ledger entries are saved with each step (an outbox in the call record) and appended idempotently by event id; a failed append is retried by the next write or `flushLedger`. The listener is still synchronous and told at least once, best effort.
 
 ## Acceptance criteria
 
-- [ ] A `SessionStore` adapter with a version number per session (compare-and-set); every engine method loads, applies and saves with the version, and retries or refuses on conflict.
-- [ ] Identity session and payment link lookups move into the store.
-- [ ] The memory implementation and a contract suite (PRV-5 style).
+- [ ] An async listener with defined semantics: the ledger is the source of truth; listener failures are reported (an `onListenerError` hook) and never block the call or the ledger.
+- [ ] A background flush a host can schedule for calls whose outbox is not empty, and an `auditLedgerContract` case (PRV-5) for idempotent appends.
 
 ## Files
 
-- src/core/adapters.ts
 - src/engine.ts
-- src/testing/fakes.ts
-- src/testing/contracts.ts
+- src/core/events.ts
+- src/core/adapters.ts
 
 ## Tests
 
-- test/engine.test.ts with two engines sharing one store
-- Conflict tests
+- test/engine.test.ts
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### MOD-1: Module author kit: a contract suite for outside modules and an example module
+
+**Labels:** `core`, `m9`  
+**Milestone:** M9 Host integration and module authors  
+**Depends on:** none
+
+```markdown
+## Why
+
+`engine.use(module)` works today, and the tests carry one outside module. Authors need the rules written down and checked.
+
+## Acceptance criteria
+
+- [ ] `moduleContract(module)` in `district-assurance/testing`: the manifest passes `checkManifest`, the validators never throw on garbage, `stepStatus` is pure, `initCall` is JSON.
+- [ ] An example outside module in `examples/` with its own flow step, and a short guide in ARCHITECTURE.md.
+
+## Files
+
+- src/testing/contracts.ts
+- examples/modules/ (new)
+- ARCHITECTURE.md
+
+## Tests
+
+- test/contracts.test.ts
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### MOD-2: A JSON Schema for FlowConfig
+
+**Labels:** `core`, `m9`  
+**Milestone:** M9 Host integration and module authors  
+**Depends on:** none
+
+```markdown
+## Why
+
+Hosts edit and store FlowConfig outside TypeScript; a schema lets their tools catch shape errors early. `validateConfig` stays the authority.
+
+## Acceptance criteria
+
+- [ ] A JSON Schema (2020-12) for version 1, published with the package; a test that every config `validateConfig` accepts also passes the schema, using a corpus of good and bad configs.
+
+## Files
+
+- schema/flow-config.v1.json (new)
+- package.json
+
+## Tests
+
+- test/config-schema.test.ts
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### MOD-3: Register Badge factor plug-ins after the engine is built
+
+**Labels:** `core`, `m9`  
+**Milestone:** M9 Host integration and module authors  
+**Depends on:** none
+
+```markdown
+## Why
+
+Factor plug-ins are given when the engine is built (`badge: badgeModule({ factors })`). `Engine.useFactor` exists and throws `NotImplementedError` until this lands.
+
+## Acceptance criteria
+
+- [ ] `engine.useFactor(plugin)`, or `engine.use(module)` with a module whose manifest provides factors and supplies their judges, adds a factor that the registry checks for clashes and caller-ID names.
+- [ ] A factor added after a config was applied stays off until a config turns it on; `validateConfig` sees it.
+
+## Files
+
+- src/engine.ts
+- src/verify/badge.ts
+- src/core/module.ts
+
+## Tests
+
+- test/pin.test.ts
+- test/config.test.ts
 
 ## Done when
 

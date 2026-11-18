@@ -35,6 +35,7 @@ export function chainEntry(input: AuditInput, seq: number, prevHash: string): Au
   const unsigned: Omit<AuditEntry, "hash"> = {
     seq,
     prevHash,
+    ...(input.eventId === undefined ? {} : { eventId: input.eventId }),
     callId: input.callId,
     actor: input.actor,
     event: input.event,
@@ -67,11 +68,15 @@ export function verifyChain(entries: readonly AuditEntry[], from: { seq: number;
 /** In memory. Entries are copied in and out, so a caller cannot change what is stored. */
 export class MemoryAuditLedger implements AuditLedger {
   readonly #entries: AuditEntry[] = [];
+  readonly #byEventId = new Map<string, AuditEntry>();
 
   async append(input: AuditInput): Promise<AuditEntry> {
+    const seen = input.eventId === undefined ? undefined : this.#byEventId.get(input.eventId);
+    if (seen !== undefined) return structuredClone(seen);
     const last = this.#entries.at(-1);
     const entry = chainEntry(input, (last?.seq ?? 0) + 1, last?.hash ?? GENESIS_HASH);
     this.#entries.push(entry);
+    if (input.eventId !== undefined) this.#byEventId.set(input.eventId, entry);
     return structuredClone(entry);
   }
 

@@ -53,6 +53,45 @@ export interface SubjectRecord {
   phoneOnFile: string;
   /** Field name to the HMAC of its value (`knowledgeDigest`). */
   knowledge: Record<string, string>;
+  /** The HMAC of the subject's PIN (`pinDigest`), for the PIN factor in `keyed_hash` mode. */
+  pinDigest?: string;
+}
+
+/**
+ * The host's own PIN store, for the PIN factor in `verifier` mode: a host that already keeps PINs
+ * (for example as scrypt hashes) checks the entry itself. The engine hands over the digits once,
+ * keeps nothing, and counts the attempt before asking. The answer must not depend on whether the
+ * subject exists, and should take the same time either way.
+ */
+export interface PinVerifier {
+  verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean }>;
+}
+
+/** A stored call session and its version. The version goes up by one on every write. */
+export interface StoredSession {
+  version: number;
+  record: JsonValue;
+}
+
+/**
+ * Where call sessions live, so several processes (a voice agent and a web backend, several
+ * replicas) can run one call. Every write is a compare-and-set on the session's version: the
+ * engine reads, applies one step, and writes only if nobody wrote in between, retrying the step
+ * from a fresh read when someone did. `MemorySessionStore` is the reference implementation, and
+ * `sessionStoreContract` in `district-assurance/testing` is the suite a durable one must pass.
+ */
+export interface SessionStore {
+  /** Stores a new session at version 1. False, and nothing written, when the id exists. */
+  create(workspaceId: string, callId: string, record: JsonValue): Promise<boolean>;
+  get(workspaceId: string, callId: string): Promise<StoredSession | null>;
+  /**
+   * Writes the record only if the stored version is `expectedVersion`, and returns the new
+   * version (`expectedVersion + 1`). `{ ok: false }` when the version moved or the session is gone.
+   */
+  compareAndSet(workspaceId: string, callId: string, expectedVersion: number, record: JsonValue): Promise<{ ok: true; version: number } | { ok: false }>;
+  /** Points a provider reference (an identity session, a payment link) at a call. The first binding wins. */
+  bindRef(workspaceId: string, ref: string, callId: string): Promise<boolean>;
+  resolveRef(workspaceId: string, ref: string): Promise<string | null>;
 }
 
 export interface IntakeRecord {
@@ -71,11 +110,14 @@ export interface IntakeRecord {
 /** The host's records: subjects to verify against, and the intake records callers confirm. */
 export interface RecordStore {
   getSubject(workspaceId: string, subjectKey: string): Promise<SubjectRecord | null>;
+  /** Idempotent by `recordId`: the engine retries a write whose outcome it could not see, with the same record. */
   putIntakeRecord(record: IntakeRecord): Promise<void>;
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
 }
 
 export interface AuditInput {
+  /** The engine's id for this entry. A ledger appends an id once: a second append returns the first entry. */
+  eventId?: string;
   callId: string | null;
   actor: Actor;
   event: EngineEventName;
@@ -92,7 +134,7 @@ export interface AuditEntry extends AuditInput {
   hash: string;
 }
 
-/** Append-only. No update, no delete. */
+/** Append-only. No update, no delete. Idempotent by `eventId`, so the engine can retry an append. */
 export interface AuditLedger {
   append(input: AuditInput): Promise<AuditEntry>;
   head(): Promise<{ seq: number; hash: string }>;

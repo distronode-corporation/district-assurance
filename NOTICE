@@ -7,5 +7,5 @@ under the Apache License, Version 2.0. The full licence text is in LICENSE.
 district-assurance is original work, not a fork, and no third-party source
 code is vendored into this repository. It has no runtime dependencies.
 
-Stripe, Twilio, Telnyx and Sinch are named only to describe interoperability;
+Stripe, Twilio and Telnyx are named only to describe interoperability;
 this project is not affiliated with or endorsed by them.

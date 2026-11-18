@@ -2,7 +2,7 @@
   "name": "district-assurance",
   "version": "0.0.0",
   "private": true,
-  "description": "District Assurance: a TypeScript engine for trusted phone calls (verify the caller, file what they confirm, take payment by link, prove each step) and a small reference server. Pre-alpha.",
+  "description": "District Assurance: a modular TypeScript engine for trusted phone calls (verify the caller, file what they confirm, take payment by link, prove each step), with flows as config, and a small reference server. Pre-alpha.",
   "keywords": [
     "voice",
     "telephony",

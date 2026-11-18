@@ -16,7 +16,3 @@ export function verifyTwilioSignature(_input: CarrierWebhookInput): never {
 export function verifyTelnyxSignature(_input: CarrierWebhookInput): never {
   throw new NotImplementedError("verifyTelnyxSignature", "SRV-1");
 }
-
-export function verifySinchSignature(_input: CarrierWebhookInput): never {
-  throw new NotImplementedError("verifySinchSignature", "SRV-1");
-}

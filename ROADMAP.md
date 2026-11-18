@@ -1,20 +1,32 @@
 # Roadmap
 
-The coding roadmap for district-assurance, from this skeleton to a production-ready engine that a
-host can run on live calls. It has no dates: an item is done when the pull request that does it
+The coding roadmap for district-assurance, from the modular core to a production-ready engine that
+a host can run on live calls. It has no dates: an item is done when the pull request that does it
 is merged, and it then moves to [CHANGELOG.md](CHANGELOG.md). Every issue id here is also the id a
-`NotImplementedError` names in the code, and `test/stubs.test.ts` fails if one is missing from
-this file. The first 26 issues are written out, ready to paste, in [ISSUES.md](ISSUES.md).
+`NotImplementedError` names in the code, or a validator names when it refuses planned work, and
+`test/stubs.test.ts` fails if one is missing from this file. Every open issue is written out,
+ready to paste, in [ISSUES.md](ISSUES.md).
+
+The design: a small core (the session state machine on a shared session store, the policy and
+its levels, redaction, the module registry and the audit ledger) and modules around it: Badge
+(verify), Dossier (file), Paylink (pay), Trace (prove), Gate (entry, next), and any outside module
+a host adds. Every module can be turned on, turned off, added and removed per workspace config,
+and flows are config, not code. DECISIONS.md, ADR-13 to ADR-20, says why.
 
 ## How work is proven
 
 - **Every pull request:** lint, typecheck, `npm run test:coverage` (100% lines, statements,
   functions and branches in every `src/` file) and `npm run demo`, on Linux, macOS and Windows.
-- **Formats** (receipts, the ledger, canonical JSON, webhook signatures): tamper tests and, where
-  a vendor publishes them, the vendor's own test vectors.
-- **Vendor adapters** (Stripe, Twilio, Telnyx, Sinch): tested in CI against a local fake HTTP
-  server replaying recorded responses, never the network; proven once by hand against the
-  vendor's test mode with the contributor's own test keys, the run described in the pull request.
+- **Config:** every new setting or step gets `validateConfig` tests for each problem it can have,
+  so a host refuses a bad config when it is saved, never in the middle of a call.
+- **Formats** (receipts, access grants, the ledger, canonical JSON, webhook signatures): tamper
+  tests and, where a vendor publishes them, the vendor's own test vectors.
+- **Shared state:** a contract suite per durable adapter (`sessionStoreContract` today), run
+  against the memory implementation in CI and by the host against its own.
+- **Vendor adapters** (Stripe, Twilio, Telnyx, door controllers): tested in CI against a
+  local fake HTTP server replaying recorded responses, never the network; proven once by hand
+  against the vendor's test mode with the contributor's own test keys, the run described in the
+  pull request.
 - **Behaviour under attack:** the adversarial suite (VER-7) in English and French.
 - **Live calls** are proven in the host's own repository, not here: this repository has no phone
   line.
@@ -23,33 +35,38 @@ this file. The first 26 issues are written out, ready to paste, in [ISSUES.md](I
 
 | Milestone | What it delivers | Issues |
 |---|---|---|
-| M0 Skeleton | This run: the engine, real core pieces, stubs, reference server, demo, CI | done |
-| M1 Verify | Lockouts across calls, texted codes, spoken answers, carrier and Stripe Identity adapters, adversarial suite | VER-1 to VER-8 |
-| M2 File | Read-backs, encrypted fields, delivery, conditional fields, documents by text | FIL-1 to FIL-5 |
-| M3 Pay | Stripe Checkout, amounts from code, cancel and expiry, live detector; saved cards and keypad capture gated | PAY-1 to PAY-6 |
-| M4 Prove | Key rotation, stand-alone verifier, consent revocation, ledger export, contract suites, more redactors | PRV-1 to PRV-6 |
-| M5 Reference server hardening | Carrier signatures, limits, receipt links, persistent stores, release workflow | SRV-1 to SRV-5 |
-| M6 Host integration points | Shared session storage, keypad and gating helpers, key store contracts, events, configuration | INT-1 to INT-6 |
+| M0 Skeleton | The engine, real core pieces, stubs, reference server, demo, CI | done |
+| M1 Modular core | Module registry, Badge, Dossier, Paylink and Trace as modules, factor plug-ins and the PIN factor, FlowConfig with `validateConfig` and flow execution, the shared SessionStore, the ledger always on | done |
+| M2 Owner command | What the first live use (`owner-command`) still needs. VER-1 (lockouts across calls) is a hard gate before it goes live in any host. Also: policy and config revision in receipts, the keypad collector, key store contracts, ledger and record store contracts, PIN enrolment | VER-1, VER-8, INT-1, INT-4, PRV-5, VER-6 |
+| M3 Gate and payment modes | The Gate module with signed access grants on a fake controller; Paylink's `connect` and `platform` modes; real access adapters | GAT-1, PAY-7, GAT-2 to GAT-4 |
+| M4 Badge | Texted codes, spoken answers, carrier and Stripe Identity adapters, adversarial suite | VER-2 to VER-5, VER-7 |
+| M5 Dossier | Read-backs, encrypted fields, delivery, conditional fields, documents by text | FIL-1 to FIL-5 |
+| M6 Paylink | Stripe Checkout, amounts from code, cancel and expiry, live detector; saved cards and keypad capture gated | PAY-1 to PAY-6 |
+| M7 Trace | Key rotation, stand-alone verifier, consent revocation, ledger export, more redactors | PRV-1 to PRV-4, PRV-6 |
+| M8 Reference server hardening | Carrier signatures, limits, receipt links, persistent stores, release workflow | SRV-1 to SRV-5 |
+| M9 Host integration and module authors | Transcript forwarding, event delivery, a module author kit, a JSON Schema for FlowConfig, factors added after construction | INT-2, INT-5, MOD-1 to MOD-3 |
 
 ## Order of work
 
-Milestones overlap; the order below is by dependency, and items in the same wave touch different
-files, so they can run in parallel.
+Milestones overlap; the order below is by dependency, owner-command first. Items in the same wave
+touch different files, so they can run in parallel.
 
-1. **Wave 1:** INT-3 (session storage; every later engine change builds on its state shape),
-   VER-1, VER-8, FIL-4, PAY-5, PRV-5, SRV-1, SRV-2, INT-1.
-2. **Wave 2:** VER-2, VER-3, VER-4, VER-5, FIL-1, FIL-2, PAY-1, PRV-1, PRV-3, PRV-6.
-3. **Wave 3:** VER-7, FIL-3, PAY-2, PAY-3, PRV-2, SRV-3, SRV-5, INT-2, INT-4.
-4. **Wave 4:** VER-6, FIL-5, PAY-4, PRV-4, SRV-4, INT-5, INT-6.
+1. **Wave 1, owner-command and the second core pull request:** VER-1, VER-8, INT-1, INT-4, PRV-5,
+   GAT-1, PAY-7. **VER-1 is a hard gate:** no host runs owner-command, or any PIN factor, on a
+   live line before VER-1 is merged.
+2. **Wave 2:** VER-6, VER-2, VER-4, VER-5, FIL-1, FIL-2, PAY-1, PAY-5, PRV-1, PRV-3, SRV-1, SRV-2,
+   MOD-1.
+3. **Wave 3:** VER-3, VER-7, FIL-3, FIL-4, PAY-2, PAY-3, PRV-2, PRV-6, SRV-3, SRV-5, INT-2, GAT-2,
+   GAT-3, MOD-2, MOD-3.
+4. **Wave 4:** FIL-5, PAY-4, PRV-4, SRV-4, INT-5, GAT-4.
 5. **Gated, not scheduled:** PAY-6 starts only after an assessor's scoping and a buyer who needs it.
 
-Dependencies: VER-2 needs VER-1; VER-6 needs VER-1; VER-7 needs VER-2; FIL-3 and PAY-2 need FIL-1;
-FIL-5 needs SRV-2; PAY-3, PAY-6 need PAY-1; PAY-4 needs PAY-2; PRV-2, PRV-4, SRV-3 need PRV-1;
-PRV-6 needs PAY-5; SRV-4 needs PRV-5.
+Dependencies: VER-2 and VER-6 need VER-1; VER-7 needs VER-2; FIL-3 and PAY-2 need FIL-1; FIL-5
+needs SRV-2; PAY-1 needs PAY-7; PAY-3 and PAY-6 need PAY-1; PAY-4 needs PAY-2; PRV-2, PRV-4 and
+SRV-3 need PRV-1; PRV-6 needs PAY-5; SRV-4 needs PRV-5; GAT-2, GAT-3 and GAT-4 need GAT-1, and
+GAT-3 also needs VER-2.
 
 ## M0. Skeleton (done)
-
-What exists and how it is proven:
 
 | Piece | Where | Proof |
 |---|---|---|
@@ -63,35 +80,198 @@ What exists and how it is proven:
 | Audit ledger | `src/prove/ledger.ts` | chain, tamper, copies, card refusal (`test/prove.test.ts`) |
 | Receipts | `src/prove/receipt.ts` | sign, verify, one-byte change fails (`test/prove.test.ts`) |
 | Stripe webhooks | `src/webhooks/stripe.ts` | the published scheme, every refusal reason (`test/webhooks.test.ts`) |
-| Engine | `src/engine.ts` | full flows and refusals (`test/engine.test.ts`) |
-| Fakes | `src/testing/` | `test/entry-points.test.ts` |
-| Stubs | `src/*/later.ts`, `src/webhooks/carrier.ts` | each throws with an id listed here (`test/stubs.test.ts`) |
-| Reference server and demo | `examples/reference-server/` | real socket, signatures, 413, 501, receipts (`test/reference-server.test.ts`), `npm run demo` |
+| Reference server | `examples/reference-server/` | real socket, signatures, 413, 501, receipts (`test/reference-server.test.ts`) |
 | CI and Dependabot | `.github/` | lint, EditorConfig, no em dashes, typecheck, coverage, build, demo |
+
+## M1. Modular core (done)
+
+INT-3 (shared session storage) and INT-6 (a versioned configuration document) of the first
+roadmap are done here.
+
+| Piece | Where | Proof |
+|---|---|---|
+| Module interface and registry | `src/core/module.ts` | manifests, clashes, reserved names, the ledger's module cannot be removed (`test/config.test.ts`) |
+| FlowConfig and `validateConfig` | `src/core/config.ts` | every problem with its path: modules, settings, adapters, policy, steps, floors, granted scopes (`test/config.test.ts`) |
+| Flow execution | `src/engine.ts`, `src/core/flow.ts` | step by step, only the current step's work, failure, abandonment, config changes mid-call (`test/flows.test.ts`) |
+| SessionStore (INT-3) | `src/core/adapters.ts`, `src/core/session-store.ts`, `src/testing/contracts.ts` | the contract suite, two engines on one store, retries and `conflict` (`test/session-store.test.ts`) |
+| Badge as a module, factor plug-ins | `src/verify/badge.ts`, `src/verify/factors.ts` | factors on and off, attempts counted before judging, plug-ins see only the keyed hash (`test/pin.test.ts`, `test/engine.test.ts`) |
+| The PIN factor | `src/verify/factors.ts` | keyed hash and host verifier, malformed and unknown look the same, limited attempts (`test/pin.test.ts`) |
+| Dossier, Paylink, Trace as modules | `src/file/dossier.ts`, `src/pay/paylink.ts`, `src/prove/trace.ts` | forms and wordings from config, the amount from the flow step, receipts per flow (`test/engine.test.ts`, `test/flows.test.ts`) |
+| Ledger always on | `src/prove/trace.ts`, `src/core/config.ts` | Trace cannot be turned off or removed, an engine without a ledger is refused (`test/config.test.ts`, `test/engine.test.ts`) |
+| Outside modules | `Engine.use`, `Engine.updateModule` | an outside step in a flow, its ledger events, guards (`test/flows.test.ts`) |
+| Demo | `examples/reference-server/src/demo.ts`, `flows.ts` | `owner-command` on two engines sharing one store, then `deposit` end to end (`test/reference-server.test.ts`, `npm run demo`) |
 
 ## Milestones and issues
 
-### M1. Verify
+### M2. Owner command
 
-Durable checks across calls, texted codes, real carrier and Stripe Identity adapters, and the adversarial evaluation.
+The first live use: the `owner-command` flow (Badge with a PIN only, plus Trace) replaces a host's own owner PIN check. What it still needs before a live call. VER-1 is a hard gate: no host runs owner-command live before it is merged.
 
-**Proven by:** Unit and contract tests at 100%; the adversarial suite passes in English and French; each adapter proven against a local fake HTTP server in CI and once by hand against the vendor's test mode, with the run recorded in the pull request.
+**Proven by:** Unit and contract tests at 100%; the PIN lockout proven across two calls and two engines on one session store; the live call is proven in the host's own repository.
 
-#### **VER-1** Durable failure counters and lockout per subject and per calling number
+#### **VER-1** Durable failure counters and lockout per subject and per calling number (hard gate before owner-command goes live)
 
-Today the keypad limit is per call; a caller can call again. Counters must survive across calls.
+Attempt limits are per call today, for keypad knowledge, the PIN and plug-in factors alike; a caller can call again, and a 4-digit PIN with 3 attempts per call falls within about 3,300 calls. **Hard gate:** no host runs the owner-command flow, or any PIN factor, on a live line before this is merged.
 
 *Acceptance*
 
-- An `AttemptCounters` adapter interface in `src/core/adapters.ts`: `get`, `recordFailure`, `reset`, keyed by workspace and either subject key or a hash of the calling number.
-- `submitKeypad` consults the counters before judging and refuses to judge while locked (same `locked: true` answer).
-- Backoff after failures (5, 15, 60, 300, 900 seconds) and a hard lock after 10 failures in 24 hours, both configurable in the policy with these as defaults and floors.
-- A `verification.locked` event with the scope of the lock (`subject` or `number`), never the values.
-- `recordSubjectFailure` in `src/verify/later.ts` is replaced by the real implementation.
+- An `AttemptCounters` adapter interface in `src/core/adapters.ts`: `get`, `recordFailure`, `reset`, keyed by workspace, factor kind and either subject key or a hash of the calling number.
+- `submitFactor` (and so `submitKeypad` and `submitPin`) consults the counters before counting the attempt, and refuses to judge while locked (the same `locked: true` answer).
+- Backoff after failures (5, 15, 60, 300, 900 seconds) and a hard lock after 10 failures in 24 hours, in Badge's settings with these as defaults and floors, checked by `validateConfig`.
+- A `verification.locked` event with the scope of the lock (`subject` or `number`) and the factor kind, never the values.
+- Badge requires the adapter when any entered factor is on; `recordSubjectFailure` in `src/verify/later.ts` is replaced by the real implementation.
 
-*Files:* `src/core/adapters.ts`, `src/core/policy.ts`, `src/verify/counters.ts` (new), `src/engine.ts`, `src/testing/fakes.ts`  
-*Tests:* test/verify-counters.test.ts: backoff and lock with the fixed clock; test/engine.test.ts: lock carries across two calls; unknown subjects are counted by number  
+*Files:* `src/core/adapters.ts`, `src/verify/counters.ts` (new), `src/verify/badge.ts`, `src/verify/later.ts`, `src/testing/fakes.ts`, `src/testing/contracts.ts`  
+*Tests:* test/verify-counters.test.ts: backoff and lock with the fixed clock, and a contract suite for the adapter; test/pin.test.ts: a PIN lock carries across two calls and two engines; unknown subjects are counted by number  
 *Depends on:* none
+
+#### **VER-8** Policy version and config revision in grants and receipts
+
+A receipt should say which policy and which revision of the workspace's FlowConfig judged the caller. `call.started` already carries the revision; the grant and the receipt do not.
+
+*Acceptance*
+
+- Grants and receipts carry `policyVersion` and `configRevision`; the `verification.finished` event too.
+- Receipt format version stays 1 if the fields are optional, otherwise becomes 2 with SPEC.md updated.
+
+*Files:* `src/core/session.ts`, `src/verify/badge.ts`, `src/prove/trace.ts`, `src/prove/receipt.ts`, `SPEC.md`  
+*Tests:* test/engine.test.ts; test/prove.test.ts  
+*Depends on:* none
+
+#### **INT-1** Keypad collector helper
+
+Every host needs the same digit buffer; getting it wrong leaks digits.
+
+*Acceptance*
+
+- A pure `KeypadCollector` that buffers tones until `#`, with a maximum length and an idle timeout, exposes no digits through `toString` or JSON, and hands the digits to one callback.
+
+*Files:* `src/core/keypad.ts` (new)  
+*Tests:* test/keypad.test.ts  
+*Depends on:* none
+
+#### **INT-4** Key store contracts for the knowledge key and the receipt signer
+
+Production keys live in a KMS, not in process memory.
+
+*Acceptance*
+
+- Document and test the contract: `ReceiptSigner.sign` returns a 64-byte P1363 ES256 signature; a helper converts DER signatures (what most KMS APIs return) to P1363.
+- The knowledge key can be an opaque HMAC function instead of bytes, so it never leaves the key store. Factor plug-ins already receive only `hmac`; the engine's own use moves to the same function.
+
+*Files:* `src/prove/receipt.ts`, `src/verify/knowledge.ts`, `src/engine.ts`  
+*Tests:* test/prove.test.ts: DER to P1363 conversion against node:crypto output  
+*Depends on:* none
+
+#### **PRV-5** Adapter contract suites in district-assurance/testing
+
+A host's durable stores must keep the same guarantees as the memory ones.
+
+*Acceptance*
+
+- `auditLedgerContract(factory)` and `recordStoreContract(factory)` exported from `district-assurance/testing`, in the style of `sessionStoreContract`: ordering, copies, append-only, chain validity, concurrency of appends.
+- The memory adapters pass them in CI.
+
+*Files:* `src/testing/contracts.ts`, `src/testing/index.ts`  
+*Tests:* test/contracts.test.ts  
+*Depends on:* none
+
+#### **VER-6** PIN enrolment and reset
+
+The `pin` factor checks a PIN against a keyed hash on file or the host's own verifier. Nothing yet lets a caller choose one on the line.
+
+*Acceptance*
+
+- `enrolPin` (in `src/verify/later.ts` today) lets a caller who verified to level 2 or above on this call choose a PIN, keyed twice and compared, then stored through a new `RecordStore.putPinDigest` as `pinDigest(knowledgeKey, subjectKey, pin)`.
+- Refuses PINs that are all one digit, a run (1234, 4321) or the subject's keypad knowledge; the length comes from Badge's PIN settings.
+- Reset by the business only (a host call, not a caller one). In `verifier` mode the host's own store enrols, and `enrolPin` refuses.
+- A `pin.enrolled` event, never the digits.
+
+*Files:* `src/verify/pin.ts` (new), `src/verify/later.ts`, `src/core/adapters.ts`, `src/verify/badge.ts`, `src/engine.ts`  
+*Tests:* test/pin.test.ts: enrolment needs level 2, weak PINs refused, the digest matches what `submitPin` compares  
+*Depends on:* VER-1
+
+### M3. Gate and payment modes
+
+The second pull request of the modular core: the Gate module on a fake AccessController with signed grants, and Paylink's `connect` and `platform` modes.
+
+**Proven by:** Unit tests at 100%; a signed access grant verified with the public key only, a one-byte change rejected; an entry flow and a deposit in each mode in the demo.
+
+#### **GAT-1** Gate module: signed, time-limited access grants through an AccessController
+
+Secure entry, physical and digital, is the outcome some flows exist for. Gate is the fifth built-in module: Badge says who is calling, Gate turns a verified call into access.
+
+*Acceptance*
+
+- `gateModule()` in `src/gate/` (it throws `NotImplementedError` today) with a `gate.grant` step: the access target, the scope it needs (for example `entry.open`, floor level 2), and a lifetime (at most 15 minutes).
+- A grant is refused without a valid verification grant covering the step's scope; an access grant is ES256 over canonical JSON (the code in `src/prove/`), with its own `kid`, and verifiable by the access side with the public key only.
+- Delivery through an `AccessController` adapter (`grant`, `revoke`); a fake in `district-assurance/testing`. The real adapters (GAT-2 to GAT-4) throw `NotImplementedError` with their ids.
+- Every grant, refusal and revocation goes to the ledger (`gate.granted`, `gate.refused`, `gate.revoked`), never the code or credential itself.
+- `validateConfig` checks the step, the adapter and the floor; the demo gets an `entry` flow.
+
+*Files:* `src/gate/gate.ts` (new), `src/gate/later.ts`, `src/core/adapters.ts`, `src/core/events.ts`, `src/modules.ts`, `src/testing/fakes.ts`, `examples/reference-server/src/flows.ts`  
+*Tests:* test/gate.test.ts: refused without a grant, signed grant verifies, a changed byte fails, expiry; test/flows.test.ts: an entry flow end to end on the fake  
+*Depends on:* none
+
+#### **PAY-7** Paylink payment modes: connect and platform
+
+Whose account takes the money is a per-flow choice: `connect` (the business's own Stripe account, direct charges, the business is the merchant) or `platform` (the platform's account, the platform is the merchant). `validateConfig` refuses a `mode` today.
+
+*Acceptance*
+
+- `mode` on a `paylink.request` step (`connect` or `platform`), with Paylink settings for the default mode and, for `connect`, where the connected account comes from.
+- One `PaymentLinks` adapter shape: the request carries the mode and an optional connected account. The engine still never sees card data.
+- `validateConfig` refuses a `connect` step without a connected account source, and a mode the host's adapter does not support.
+- The receipt and the `payment.link_sent` event say which mode took the payment.
+
+*Files:* `src/pay/paylink.ts`, `src/core/adapters.ts`, `src/testing/fakes.ts`, `SPEC.md`  
+*Tests:* test/engine.test.ts; test/config.test.ts; test/flows.test.ts  
+*Depends on:* none
+
+#### **GAT-2** Door controller webhook adapter
+
+The first physical-entry `AccessController`: a signed unlock request to a door controller's webhook.
+
+*Acceptance*
+
+- An adapter that POSTs the signed access grant to a configured URL with an HMAC header in the `t=,v1=` scheme, a short timeout and one retry, and fails closed.
+- Credentials from the environment only; tested against a local fake HTTP server.
+
+*Files:* `src/gate/later.ts`, `examples/reference-server/src/gate-adapters.ts` (new)  
+*Tests:* test/gate-adapters.test.ts  
+*Depends on:* GAT-1
+
+#### **GAT-3** One-time access codes
+
+Entry where no controller can be called live: a short code, texted to the number on file, that a keypad at the door accepts once.
+
+*Acceptance*
+
+- Codes stored only as keyed hashes, single use, bound to the access grant and its lifetime, texted only to the number on file.
+- Send limits shared with texted codes (VER-2).
+
+*Files:* `src/gate/codes.ts` (new), `src/gate/later.ts`  
+*Tests:* test/gate.test.ts  
+*Depends on:* GAT-1, VER-2
+
+#### **GAT-4** Web sign-in step-up
+
+Digital entry: a verified call lets the same person finish signing in on the web.
+
+*Acceptance*
+
+- A step-up token the host's web sign-in exchanges once, bound to the subject and the access grant, short-lived, refused after the call is tainted.
+- Documented for an OpenID Connect `acr` step-up.
+
+*Files:* `src/gate/step-up.ts` (new), `src/gate/later.ts`  
+*Tests:* test/gate.test.ts  
+*Depends on:* GAT-1
+
+### M4. Badge
+
+Texted codes, spoken answers, real carrier and Stripe Identity adapters, and the adversarial evaluation.
+
+**Proven by:** Unit and contract tests at 100%; the adversarial suite passes in English and French; each adapter proven against a local fake HTTP server in CI and once by hand against the vendor's test mode, with the run recorded in the pull request.
 
 #### **VER-2** Texted one-time codes with send limits
 
@@ -102,9 +282,9 @@ The second factor for level 2. Codes are also the easiest way to abuse a phone l
 - `sendTextCode(callId)` sends a 6-digit code to the number on file only after the keypad checks matched; the code is stored as an HMAC, expires after 10 minutes, allows 5 tries, is single-use and bound to the call.
 - Limits: 5 codes per subject per 24 hours, 60 seconds between sends, a per-calling-number limit, and a destination country allow-list in the policy; a refused send gives the same spoken result as a sent one.
 - `checkTextCode(callId, code)` records a `text_code` factor; the policy's carrier rule decides whether it counts (already implemented).
-- The texts are code-built in English and French; `Engine.sendTextCode` stops throwing.
+- The texts are code-built in English and French; `text_code` can be turned on in Badge's settings, and `Engine.sendTextCode` stops throwing.
 
-*Files:* `src/verify/text-code.ts` (new), `src/verify/later.ts`, `src/core/adapters.ts` (a CodeStore interface), `src/engine.ts`, `src/testing/fakes.ts`  
+*Files:* `src/verify/text-code.ts` (new), `src/verify/later.ts`, `src/verify/factors.ts`, `src/verify/badge.ts`, `src/core/adapters.ts` (a CodeStore interface), `src/testing/fakes.ts`  
 *Tests:* test/verify-text-code.test.ts: expiry, tries, single use, limits, country allow-list; test/engine.test.ts: no text before a match; refused and sent sends look the same to the caller  
 *Depends on:* VER-1
 
@@ -117,19 +297,20 @@ Canadian postal codes contain letters. A spoken check must be exact after normal
 - `normaliseSpokenAnswer({field, transcript, locale})` for postal codes (Canada and US) and short alphanumeric references, handling letter names and the common spelling alphabets in English and French.
 - Returns a normalised value or `unusable`; never a near match.
 - A `spoken_knowledge` factor compared like keypad fields (keyed digest, constant time).
-- The policy can use `spoken_knowledge` only at level 1 or combined with another factor.
+- The policy can use `spoken_knowledge` only at level 1 or combined with another factor; it can then be turned on in Badge's settings.
 
-*Files:* `src/verify/spoken.ts` (new), `src/verify/later.ts`, `src/core/policy.ts`, `src/engine.ts`  
+*Files:* `src/verify/spoken.ts` (new), `src/verify/later.ts`, `src/verify/factors.ts`, `src/core/policy.ts`  
 *Tests:* test/verify-spoken.test.ts with a corpus of transcripts in both languages, including misrecognitions that must come out `unusable`  
 *Depends on:* none
 
-#### **VER-4** Carrier signal adapters: Twilio Lookup, Sinch Number Lookup, Telnyx Number Lookup
+#### **VER-4** Carrier signal adapters: Twilio Lookup and Telnyx Number Lookup
 
-The SIM swap and port checks the policy already uses need real sources.
+The SIM swap, porting and identity match checks the policy already uses need real sources. Twilio and Telnyx first; `CarrierSignals` stays vendor-neutral, so another carrier (Sinch, for example) can be added later as its own adapter.
 
 *Acceptance*
 
-- Three `CarrierSignals` implementations in the reference server, each mapping the vendor's answer to `CarrierSignalReport`.
+- A Twilio Lookup adapter: SIM Swap (hours since the last SIM change) and Identity Match, mapped to `CarrierSignalReport`.
+- A Telnyx Number Lookup adapter: porting status and date, and the carrier, mapped to `CarrierSignalReport` (`lastPortHoursAgo`; no SIM swap or identity match, reported as unknown or `unavailable`).
 - Timeouts, errors, unsupported countries and unapproved features all return `checked: false` (fail closed); nothing throws into the call.
 - Credentials from the environment only; no keys in code or tests.
 - A table in the reference server README of which signal each vendor provides, and where approval is needed.
@@ -153,20 +334,6 @@ The photo ID tier runs on fakes today.
 *Tests:* test/stripe-adapters.test.ts: request shape, headers and idempotency against a local fake; A recorded manual run in Stripe test mode in the pull request  
 *Depends on:* none
 
-#### **VER-6** Returning-caller PIN
-
-Faster checks for callers who verified strongly before, without making a PIN a full pass.
-
-*Acceptance*
-
-- Enrolment only on a level 2 or higher call; a 6-digit PIN hashed with scrypt; lockout through VER-1.
-- A `returning_pin` factor that the policy can combine but never use alone for level 2 or above (already enforced by `validatePolicy`).
-- Reset by the business only.
-
-*Files:* `src/verify/pin.ts` (new), `src/verify/later.ts`, `src/core/adapters.ts`, `src/engine.ts`  
-*Tests:* test/verify-pin.test.ts  
-*Depends on:* VER-1
-
 #### **VER-7** Adversarial evaluation suite in English and French
 
 Social engineering is the main threat. The suite makes the rules executable.
@@ -181,20 +348,7 @@ Social engineering is the main threat. The suite makes the rules executable.
 *Tests:* The suite itself  
 *Depends on:* VER-2
 
-#### **VER-8** Policy version in grants and receipts
-
-A receipt should say which policy judged the caller.
-
-*Acceptance*
-
-- Grants and receipts carry `policyVersion`; the `verification.finished` event too.
-- Receipt format version stays 1 if the field is optional, otherwise becomes 2 with SPEC.md updated.
-
-*Files:* `src/core/session.ts`, `src/engine.ts`, `src/prove/receipt.ts`, `SPEC.md`  
-*Tests:* test/engine.test.ts; test/prove.test.ts  
-*Depends on:* none
-
-### M2. File
+### M5. Dossier
 
 The read-back library, encrypted sensitive fields, delivery with retries, richer fields, and documents by text.
 
@@ -210,21 +364,21 @@ The caller must confirm exactly what will be filed, read by code.
 - `confirmIntake` takes the digest of the read-back the caller heard and refuses if the draft changed since.
 - No value marked sensitive is read back.
 
-*Files:* `src/file/readback.ts` (new), `src/file/later.ts`, `src/engine.ts`  
+*Files:* `src/file/readback.ts` (new), `src/file/later.ts`, `src/file/dossier.ts`  
 *Tests:* test/file-readback.test.ts: snapshots per type and locale; test/engine.test.ts: a changed draft refuses confirmation  
 *Depends on:* none
 
 #### **FIL-2** Encrypted sensitive fields
 
-Forms with sensitive fields are refused today.
+`validateConfig` refuses a form with a sensitive field today.
 
 *Acceptance*
 
-- A `FieldCipher` adapter (interface exists) passed to the engine; sensitive values are encrypted before `putIntakeRecord`.
-- Without a cipher, sensitive fields stay refused.
+- A `FieldCipher` adapter (the interface exists) that Dossier requires once a form has a sensitive field; sensitive values are encrypted before `putIntakeRecord`.
+- Without the adapter, `validateConfig` keeps refusing sensitive fields.
 - DECISIONS.md records whether the record digest covers plaintext or ciphertext, and why.
 
-*Files:* `src/file/later.ts`, `src/engine.ts`, `src/testing/fakes.ts`, `DECISIONS.md`  
+*Files:* `src/file/dossier.ts`, `src/file/later.ts`, `src/core/runtime.ts`, `src/testing/fakes.ts`, `DECISIONS.md`  
 *Tests:* test/engine.test.ts with a fake cipher: stored values are ciphertext, the digest is stable  
 *Depends on:* none
 
@@ -251,8 +405,8 @@ Real intake forms branch and validate.
 - `showIf` on a field (another field's value), min and max for numbers and dates, a pattern for text.
 - Form validation refuses a field whose label or key names a Social Insurance Number or a card, and refuses `showIf` cycles.
 
-*Files:* `src/file/intake.ts`  
-*Tests:* test/modules.test.ts  
+*Files:* `src/file/intake.ts`, `src/file/dossier.ts`  
+*Tests:* test/modules.test.ts; test/config.test.ts: the validator reports every bad rule  
 *Depends on:* none
 
 #### **FIL-5** Documents by text: single-use upload links
@@ -268,7 +422,7 @@ A photo or PDF into the record, without MMS.
 *Tests:* test/file-upload.test.ts: single use, expiry, type and size refusals  
 *Depends on:* SRV-2
 
-### M3. Pay
+### M6. Paylink
 
 The Stripe Checkout adapter, amounts from code with a read-back, link cancellation, and the live card-number detector. Saved cards and keypad capture are gated.
 
@@ -280,24 +434,25 @@ Pay runs on fakes today.
 
 *Acceptance*
 
-- `StripeCheckoutLinks.createLink` creates a Checkout Session in payment mode, cards only, the amount and currency from the engine, a 30-minute expiry, the payment id in metadata, the engine's idempotency key, and the `Stripe-Account` header when a connected account is configured.
+- `StripeCheckoutLinks.createLink` creates a Checkout Session in payment mode, cards only, the amount and currency from the engine, a 30-minute expiry, the payment id in metadata and the engine's idempotency key.
+- In `connect` mode, a direct charge on the connected account (the `Stripe-Account` header); in `platform` mode, on the platform's own account (PAY-7 carries the mode).
 - Never logs the URL; returns the session id as `linkId`.
 - The payments webhook settles it end to end with a real test-mode event.
 
 *Files:* `examples/reference-server/src/stripe-adapters.ts`, `examples/reference-server/src/main.ts`  
 *Tests:* test/stripe-adapters.test.ts against a local fake; A recorded manual run in Stripe test mode in the pull request  
-*Depends on:* none
+*Depends on:* PAY-7
 
 #### **PAY-2** Amounts from code, read back before the link is sent
 
-The amount must come from a record, a price list or the business's endpoint, and the caller hears it first.
+The amount must come from a record, a price list or the business's endpoint, and the caller hears it first. A `paylink.request` step carries a fixed amount today.
 
 *Acceptance*
 
-- An `AmountSource` adapter resolves an amount from a reference; `requestPayment` takes the reference, not a raw number.
+- An `AmountSource` adapter resolves an amount from a reference; a `paylink.request` step can name the reference instead of a fixed amount, and `validateConfig` checks one or the other.
 - A code-built amount read-back and a confirmation before the link is texted.
 
-*Files:* `src/pay/amount.ts` (new), `src/engine.ts`, `src/core/adapters.ts`  
+*Files:* `src/pay/amount.ts` (new), `src/pay/paylink.ts`, `src/core/runtime.ts`  
 *Tests:* test/engine.test.ts  
 *Depends on:* FIL-1
 
@@ -310,7 +465,7 @@ A link should not outlive its purpose.
 - `cancelPaymentLink` through a `PaymentLinks.cancel` method; open links are expired when the call ends, and the receipt shows them as expired.
 - A late `paid` after cancellation is still recorded as paid (the money moved) and flagged in the ledger.
 
-*Files:* `src/pay/later.ts`, `src/core/adapters.ts`, `src/engine.ts`  
+*Files:* `src/pay/later.ts`, `src/pay/paylink.ts`, `src/core/adapters.ts`, `src/engine.ts`  
 *Tests:* test/engine.test.ts  
 *Depends on:* PAY-1
 
@@ -322,7 +477,7 @@ Charging a card the business already holds. Off by default, its own switch.
 
 - `chargeSavedCard` through an adapter, only with a level 2 grant and a confirmed amount read-back; never enabled by default.
 
-*Files:* `src/pay/later.ts`, `src/engine.ts`  
+*Files:* `src/pay/later.ts`, `src/pay/paylink.ts`  
 *Tests:* test/engine.test.ts  
 *Depends on:* PAY-2
 
@@ -352,11 +507,11 @@ Some buyers will need it; it must never route tones through this engine.
 *Tests:* test/engine.test.ts: the engine never receives digits  
 *Depends on:* PAY-1
 
-### M4. Prove
+### M7. Trace
 
-Key rotation, a stand-alone verifier, consent revocation, ledger export, adapter contract suites and more redactors.
+Key rotation, a stand-alone verifier, consent revocation, ledger export and more redactors.
 
-**Proven by:** Unit tests at 100%; tamper tests on every signed artifact; the verifier runs with only a receipt and a key set; the contract suites run against the memory adapters in CI.
+**Proven by:** Unit tests at 100%; tamper tests on every signed artifact; the verifier runs with only a receipt and a key set.
 
 #### **PRV-1** Receipt key sets and rotation
 
@@ -367,7 +522,7 @@ Keys must rotate without breaking old receipts.
 - Several signers with one active; the published key set keeps retired public keys; `verifyReceipt` already selects by `kid`.
 - The reference server's key set route serves the history.
 
-*Files:* `src/prove/receipt.ts`, `src/engine.ts`, `examples/reference-server/src/app.ts`  
+*Files:* `src/prove/receipt.ts`, `src/prove/trace.ts`, `src/engine.ts`, `examples/reference-server/src/app.ts`  
 *Tests:* test/prove.test.ts: a receipt signed before rotation still verifies  
 *Depends on:* none
 
@@ -392,7 +547,7 @@ Consent must be revocable by voice, text or dashboard.
 
 - `revokeConsent` through a `ConsentStore` adapter; revocation is a ledger event; STOP and its French forms map to revocation.
 
-*Files:* `src/prove/consent.ts`, `src/core/adapters.ts`, `src/engine.ts`  
+*Files:* `src/prove/consent.ts`, `src/prove/trace.ts`, `src/core/adapters.ts`  
 *Tests:* test/engine.test.ts  
 *Depends on:* none
 
@@ -408,19 +563,6 @@ Auditors and SIEMs need the ledger outside the host.
 *Tests:* test/prove.test.ts: export, resume and tamper detection  
 *Depends on:* PRV-1
 
-#### **PRV-5** Adapter contract suites in district-assurance/testing
-
-A host's durable stores must keep the same guarantees as the memory ones.
-
-*Acceptance*
-
-- `runAuditLedgerContract(factory)` and `runRecordStoreContract(factory)` exported from `district-assurance/testing`: ordering, copies, append-only, chain validity, concurrency of appends.
-- The memory adapters pass them in CI.
-
-*Files:* `src/testing/contracts.ts` (new), `src/testing/index.ts`  
-*Tests:* test/contracts.test.ts  
-*Depends on:* none
-
 #### **PRV-6** More redactors: SIN, health card numbers, bank account numbers
 
 Card numbers are not the only sensitive numbers read aloud.
@@ -434,7 +576,7 @@ Card numbers are not the only sensitive numbers read aloud.
 *Tests:* test/redaction.test.ts  
 *Depends on:* PAY-5
 
-### M5. Reference server hardening
+### M8. Reference server hardening
 
 Carrier webhook signatures, limits, capability links for receipts, an optional persistent store, and the release workflow.
 
@@ -446,7 +588,7 @@ Carrier routes answer 501 today.
 
 *Acceptance*
 
-- `verifyTwilioSignature` (HMAC-SHA1 of the URL and sorted form parameters), `verifyTelnyxSignature` (Ed25519 over timestamp and body, with a tolerance), `verifySinchSignature` (the scheme of the product used).
+- `verifyTwilioSignature` (HMAC-SHA1 of the URL and sorted form parameters) and `verifyTelnyxSignature` (Ed25519 over timestamp and body, with a tolerance).
 - Each tested against the vendor's published examples; the routes stop answering 501 only when the check is real.
 
 *Files:* `src/webhooks/carrier.ts`, `examples/reference-server/src/app.ts`  
@@ -502,93 +644,82 @@ Nothing is published yet, by decision.
 *Tests:* A dry run on a tag in a fork  
 *Depends on:* none
 
-### M6. Host integration points
+### M9. Host integration and module authors
 
-What any host (District first) needs to run the engine in production: shared session storage, keypad and transcript helpers, key store contracts, event delivery and a configuration schema.
+What any host or module author needs next: transcript forwarding, event delivery, a module author kit and a JSON Schema for FlowConfig.
 
-**Proven by:** Unit and contract tests at 100%; the demo runs with two engine instances sharing one session store; integration is proven in the host's own repository, not here.
+**Proven by:** Unit and contract tests at 100%; integration is proven in the host's own repository, not here.
 
-#### **INT-1** Keypad collector helper
-
-Every host needs the same digit buffer; getting it wrong leaks digits.
-
-*Acceptance*
-
-- A pure `KeypadCollector` that buffers tones until `#`, with a maximum length and an idle timeout, exposes no digits through `toString` or JSON, and hands the digits to one callback.
-
-*Files:* `src/core/keypad.ts` (new)  
-*Tests:* test/keypad.test.ts  
-*Depends on:* none
-
-#### **INT-2** Transcript and audio gating helper
+#### **INT-2** Transcript and audio forwarding helper
 
 Hosts must pause transcripts and cut audio while `sensitive` is set.
 
 *Acceptance*
 
-- `gateFor(state)` returns what the host may forward (transcript, audio to speech-to-text, audio to the model, listen-in) for the current session; documented as the single place a host asks.
+- `forwardingFor(state)` returns what the host may forward (transcript, audio to speech-to-text, audio to the model, listen-in) for the current session; documented as the single place a host asks.
 
-*Files:* `src/core/gating.ts` (new), `ARCHITECTURE.md`  
+*Files:* `src/core/forwarding.ts` (new), `ARCHITECTURE.md`  
 *Tests:* test/session.test.ts  
-*Depends on:* none
-
-#### **INT-3** Session storage shared across processes
-
-The engine keeps sessions in memory. A host whose voice agent and web backend are separate processes, or run several replicas, needs shared session state.
-
-*Acceptance*
-
-- A `SessionStore` adapter with a version number per session (compare-and-set); every engine method loads, applies and saves with the version, and retries or refuses on conflict.
-- Identity session and payment link lookups move into the store.
-- The memory implementation and a contract suite (PRV-5 style).
-
-*Files:* `src/core/adapters.ts`, `src/engine.ts`, `src/testing/fakes.ts`, `src/testing/contracts.ts`  
-*Tests:* test/engine.test.ts with two engines sharing one store; Conflict tests  
-*Depends on:* none
-
-#### **INT-4** Key store contracts for the knowledge key and the receipt signer
-
-Production keys live in a KMS, not in process memory.
-
-*Acceptance*
-
-- Document and test the contract: `ReceiptSigner.sign` returns a 64-byte P1363 ES256 signature; a helper converts DER signatures (what most KMS APIs return) to P1363.
-- The knowledge key can be an opaque HMAC function instead of bytes, so it never leaves the key store.
-
-*Files:* `src/prove/receipt.ts`, `src/verify/knowledge.ts`, `src/engine.ts`  
-*Tests:* test/prove.test.ts: DER to P1363 conversion against node:crypto output  
 *Depends on:* none
 
 #### **INT-5** Event delivery semantics
 
-`onEvent` is synchronous and best effort today.
+Ledger entries are saved with each step (an outbox in the call record) and appended idempotently by event id; a failed append is retried by the next write or `flushLedger`. The listener is still synchronous and told at least once, best effort.
 
 *Acceptance*
 
-- An async listener with defined semantics: the ledger append is the source of truth, listener failures are reported and never block the call.
+- An async listener with defined semantics: the ledger is the source of truth; listener failures are reported (an `onListenerError` hook) and never block the call or the ledger.
+- A background flush a host can schedule for calls whose outbox is not empty, and an `auditLedgerContract` case (PRV-5) for idempotent appends.
 
-*Files:* `src/engine.ts`, `src/core/events.ts`  
+*Files:* `src/engine.ts`, `src/core/events.ts`, `src/core/adapters.ts`  
 *Tests:* test/engine.test.ts  
 *Depends on:* none
 
-#### **INT-6** Versioned configuration schema
+#### **MOD-1** Module author kit: a contract suite for outside modules and an example module
 
-Hosts store policies, forms and wordings per workspace.
+`engine.use(module)` works today, and the tests carry one outside module. Authors need the rules written down and checked.
 
 *Acceptance*
 
-- One `EngineConfig` document (policy, forms, wordings) with a version and a validator that returns every problem, so a host can validate on save.
+- `moduleContract(module)` in `district-assurance/testing`: the manifest passes `checkManifest`, the validators never throw on garbage, `stepStatus` is pure, `initCall` is JSON.
+- An example outside module in `examples/` with its own flow step, and a short guide in ARCHITECTURE.md.
 
-*Files:* `src/core/config.ts` (new)  
-*Tests:* test/config.test.ts  
+*Files:* `src/testing/contracts.ts`, `examples/modules/` (new), `ARCHITECTURE.md`  
+*Tests:* test/contracts.test.ts  
+*Depends on:* none
+
+#### **MOD-2** A JSON Schema for FlowConfig
+
+Hosts edit and store FlowConfig outside TypeScript; a schema lets their tools catch shape errors early. `validateConfig` stays the authority.
+
+*Acceptance*
+
+- A JSON Schema (2020-12) for version 1, published with the package; a test that every config `validateConfig` accepts also passes the schema, using a corpus of good and bad configs.
+
+*Files:* `schema/flow-config.v1.json` (new), `package.json`  
+*Tests:* test/config-schema.test.ts  
+*Depends on:* none
+
+#### **MOD-3** Register Badge factor plug-ins after the engine is built
+
+Factor plug-ins are given when the engine is built (`badge: badgeModule({ factors })`). `Engine.useFactor` exists and throws `NotImplementedError` until this lands.
+
+*Acceptance*
+
+- `engine.useFactor(plugin)`, or `engine.use(module)` with a module whose manifest provides factors and supplies their judges, adds a factor that the registry checks for clashes and caller-ID names.
+- A factor added after a config was applied stays off until a config turns it on; `validateConfig` sees it.
+
+*Files:* `src/engine.ts`, `src/verify/badge.ts`, `src/core/module.ts`  
+*Tests:* test/pin.test.ts; test/config.test.ts  
 *Depends on:* none
 
 ## Not planned
 
 - Voice biometrics, call recording, and caller ID as a factor: excluded by design.
 - A hosted service: this repository is a library and a reference server.
+- A configuration UI: flows are config and API first; a host builds its own editor on `validateConfig`.
 - Regulated identity proofing (the methods some regulated reporting entities must use): the engine
   checks a caller against the organisation's own records.
-- A payment processor: money is taken by the organisation's own payment provider account.
+- A payment processor: money is taken by a Stripe account, the business's own or the platform's.
 
 A change to any of these would be proposed as an issue first.

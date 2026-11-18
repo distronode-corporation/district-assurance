@@ -91,12 +91,15 @@ describe("reference server", () => {
 });
 
 describe("demo and Stripe adapters", () => {
-  it("runs the scripted call end to end", async () => {
+  it("runs the owner-command and deposit flows end to end", async () => {
     const result = await runDemo(false);
+    assert.equal(result.ownerAuthorized, true);
+    assert.equal(result.ownerReceipt, null, "owner-command has no receipt step");
     assert.equal(result.tamperedFails, true);
     assert.equal(result.chainOk, true);
-    assert.equal(result.receipt.body.verification.level, 3);
+    assert.deepEqual(result.receipt.body.verification, { level: 2, methods: ["carrier_identity_match", "keypad_knowledge"] });
     assert.equal(result.receipt.body.payments[0]!.status, "paid");
+    assert.equal(result.receipt.body.consents[0]!.purpose, "repair_texts");
   });
 
   it("has Stripe adapters that are planned, not built", async () => {

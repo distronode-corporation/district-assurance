@@ -68,7 +68,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       expect("POST");
       return stripeWebhook(req, path.endsWith("identity") ? "identity" : "payments");
     }
-    const carrier = /^\/webhooks\/(twilio|telnyx|sinch)$/.exec(path);
+    const carrier = /^\/webhooks\/(twilio|telnyx)$/.exec(path);
     if (carrier !== null) {
       expect("POST");
       return [501, { error: "not_implemented", issue: "SRV-1", carrier: carrier[1] }];
@@ -77,7 +77,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     if (receipt !== null) {
       expect("GET");
       try {
-        const found = options.engine.receipt(receipt[1]!);
+        const found = await options.engine.receipt(receipt[1]!);
         return found === null ? [404, { error: "not_found" }] : [200, found as unknown as Json];
       } catch (error) {
         if (error instanceof EngineError && error.code === "unknown_call") return [404, { error: "not_found" }];

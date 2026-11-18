@@ -6,11 +6,12 @@ claim.
 
 ## Assets
 
-- The organisation's reference values (account numbers, dates of birth and similar).
+- The organisation's reference values (account numbers, dates of birth and similar) and PINs.
 - What a verified caller may do: read status, file a record, request a payment, change contact
   or payout details.
 - Card data, which the engine must never receive.
 - The record of what happened on a call: the ledger and the receipts.
+- The workspace's FlowConfig: which modules run, which factors count, which scopes a flow grants.
 
 ## Trusted and untrusted
 
@@ -20,7 +21,8 @@ claim.
 | The adapters the host plugs in | Everything the model says or proposes |
 | The knowledge key and the receipt signing key | Caller ID and any number given on the call |
 | The clock and id source | Webhook bodies until their signature verifies |
-| | Text from business endpoints, CRMs and documents |
+| The outside modules the host installs | Text from business endpoints, CRMs and documents |
+| The SessionStore's compare-and-set | A FlowConfig until `validateConfig` passes |
 
 ## Threats and controls
 
@@ -35,14 +37,23 @@ Planned: an adversarial evaluation set in English and French gating each release
 
 Trying account numbers to learn which exist, or learning which factor failed. **Controls:** all
 keypad fields are judged together and give one answer; an unknown account, a wrong value and a
-non-keypad entry give the same result and the same ledger detail (tested); every field is compared
-even after a mismatch; nothing reads back a value on file; links go out only after a match, so a
+non-keypad entry give the same result and the same ledger detail (tested), and the same holds for
+the PIN: an unknown subject, a subject with no PIN and a malformed entry do the same keyed-hash work
+and answer the same (tested); every field is compared even after a mismatch; nothing reads back a value on file; links go out only after a match, so a
 text never confirms an account. Planned: per-subject and per-number counters across calls (VER-1).
 
 ### Guessing
 
-**Control:** a per-call limit on judged keypad attempts, after which the line stops judging, even
-the right answer (tested). Planned: durable lockout across calls (VER-1).
+**Controls:** a per-call limit on judged attempts for every factor the caller enters (keypad
+knowledge, the PIN at 1 to 5, plug-ins at 1 to 5), after which the line stops judging, even the
+right answer (tested). Each attempt is counted in its own write before it is judged, so a crash, a
+failing PIN verifier or a second process never gives a free try (tested, two engines on one
+store). PINs are at least 4 digits, and keypad attempts are capped at 5 per call like the PIN's.
+**Hard gate:** durable lockout across calls (VER-1) must be merged before any host runs the
+owner-command flow, or any PIN factor, on a live line. Without it, a 4-digit PIN with 3 attempts
+per call falls within about 3,300 calls, half that on average. In `verifier` mode the host's PIN
+store is asked for every attempt, with a stand-in for a malformed entry, so timing does not tell
+them apart.
 
 ### SIM swap and port-out
 
@@ -68,6 +79,38 @@ Identity links are single-use by the provider. Left to the host: whether keypad 
 out-of-band events or as in-band audio on each carrier bridge, since in-band tones can be replayed
 acoustically and can reach speech-to-text.
 
+### Skipping steps and widening grants
+
+A host bug or a manipulated tool path calling the engine out of order, or a grant for one purpose
+used for another. **Controls:** while a flow runs, only its current step's work is accepted, and
+only the step's factors count toward its level; once a call's flow has ended (completed, failed or
+abandoned), no step work runs on that call at all, so a failed PIN cannot be followed by a fresh
+verification outside the flow (tested). With the default `require: "yes"`, a consent answered "no"
+fails its step, so the flow never reaches a payment after a refusal (tested); a step set to
+`require: "answer"` moves on either way, by the config's choice. An outside module's step is held to the scope its
+manifest needs by the engine itself (tested). An issued grant is checked against today's minimum
+too, so a stricter config applies at once (tested). A `badge.verify` step can name the scopes
+its grant covers, and the demo flows do, so a caller verified for a deposit never holds
+`owner.command` (tested). `validateConfig` refuses a flow whose step needs a scope its earlier
+verification does not reach or grant, and the policy's floors hold whatever a config says: every
+scope has a class (by its name, a module's manifest, or the policy's `scopeClasses`, the strictest
+winning), money, contact and access are never below level 2, and a scope with no class is refused
+(tested). Level 2 and above need a factor that is not something the caller knows (tested).
+
+### Config tampering
+
+Someone who can edit a workspace's FlowConfig. **Controls:** the engine refuses any config with a
+problem, Trace (the ledger) cannot be turned off, the floors cannot be lowered, planned factors
+and payment modes cannot be turned on, and every call's ledger entries carry the config revision
+it ran under. Who may edit a config, and how its history is kept, is the host's (left to the host).
+
+### Races across processes
+
+Two processes acting on one call at once. **Controls:** every change is a compare-and-set on the
+call's version, retried from a fresh read; links are reserved before they are created, so two
+processes cannot both send one; a lost race writes nothing to the ledger (tested). A durable store
+must pass `sessionStoreContract`.
+
 ### Prompt injection
 
 A webhook reply, a CRM note or a document says "ignore the rules". **Controls:** `markUntrusted`
@@ -90,20 +133,30 @@ depends on its whole call path.
 **Controls:** the ledger is hash-chained, and any changed, removed or reordered entry is detected
 (tested). Receipts are signed with ES256 over canonical JSON and carry the ledger head; one changed
 byte fails verification (tested). Planned: key rotation and a published key set history (PRV-1).
+A step's ledger entries are saved with the step itself (an outbox in the call record) and
+appended by event id, once each; a ledger that fails leaves them pending, and the next write or
+`flushLedger` appends them, so no saved step is ever missing from the ledger for good (tested).
 
 ### Breach of stored data
 
 **Controls:** reference values are HMACs under a per-workspace key, because a plain hash of a date
 of birth is reversed by trying every date; the caller's entries are never stored. Sensitive intake
-fields are refused until field encryption exists (FIL-2).
+fields are refused by `validateConfig` until field encryption exists (FIL-2). PINs on file are
+HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode).
 
 ## Left to the host
 
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
   speech-to-text and the model while `sensitive` is set.
 - Keeping the knowledge key and the receipt signing key in a key store.
-- Durable `RecordStore` and `AuditLedger` implementations that keep the same guarantees (contract
-  tests: PRV-5).
+- Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
+  guarantees (`sessionStoreContract` today; PRV-5 for the others).
+- Choosing the subject when it starts verification with a subject key (for example the owner of
+  the line it was called on). That choice is not a factor: the PIN or other factors still decide.
+- A `PinVerifier` that answers the same way, in the same time, for an unknown subject.
+- Who may edit a workspace's FlowConfig, and keeping its revisions.
+- Outside modules: their code runs inside the engine's writes and is part of the host's security
+  model.
 - The person path: a caller who fails or cannot use a keypad reaches someone who can help.
 - Disclosure that an automated assistant answers and that the call is transcribed.
 - Deciding who may switch these modules on (business verification), so the line cannot be used to

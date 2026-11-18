@@ -5,7 +5,7 @@ imports the package sources directly and has no dependencies or `package.json` o
 from the repository root. Not hardened for production (ROADMAP.md, M5).
 
 ```sh
-npm run demo    # one scripted call on fake adapters and a loopback server, then exits
+npm run demo    # owner-command and deposit, on fake adapters and a loopback server, then exits
 npm run serve   # the server on 127.0.0.1:8787 until stopped
 ```
 
@@ -14,7 +14,8 @@ npm run serve   # the server on 127.0.0.1:8787 until stopped
 | File | |
 |---|---|
 | `src/app.ts` | `createReferenceServer({ engine, stripeSecrets, clock })`: the routes |
-| `src/demo.ts` | the scripted call; `runDemo(false)` is also run by the test suite |
+| `src/demo.ts` | the scripted calls; `runDemo(false)` is also run by the test suite |
+| `src/flows.ts` | the demo's FlowConfig: the `owner-command` and `deposit` flows |
 | `src/main.ts` | `npm run serve`: reads the environment, starts the server |
 | `src/stripe-adapters.ts` | Stripe Identity and Checkout adapters, planned (VER-5, PAY-1) |
 
@@ -38,10 +39,10 @@ Use test-mode keys only. Never commit a secret; the server reads them from the e
 
 ## Carrier signals
 
-Planned (VER-4). What each carrier offers, to be confirmed per country when the adapters are built:
+Planned (VER-4), Twilio and Telnyx. What each offers, to be confirmed per country when the adapters
+are built. `CarrierSignals` is vendor-neutral, so another carrier can be added as its own adapter.
 
 | Carrier | SIM swap | Porting | Identity match | One-time codes |
 |---|---|---|---|---|
 | Twilio (Lookup, Verify) | yes, with carrier approval | yes | yes, with carrier approval | SMS, voice, WhatsApp |
-| Telnyx (Number Lookup, Verify) | not found | yes | caller identity (name, address) | SMS, voice, flash call, WhatsApp |
-| Sinch (Number Lookup, Verification) | US and Canada, with approval | yes | no | SMS, voice, flash call, data |
+| Telnyx (Number Lookup, Verify) | not found | porting status and date, carrier | caller identity (name, address) | SMS, voice, flash call, WhatsApp |

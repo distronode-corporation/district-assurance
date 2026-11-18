@@ -24,7 +24,10 @@ export function normaliseSpokenAnswer(_input: { field: string; transcript: strin
   throw new NotImplementedError("normaliseSpokenAnswer", "VER-3");
 }
 
-/** Enrols or checks a caller-chosen keypad PIN after a strong verification. */
-export function returningCallerPin(_input: { subjectKey: string }): never {
-  throw new NotImplementedError("returningCallerPin", "VER-6");
+/**
+ * Lets a caller who verified to level 2 or above on this call choose a PIN, stored as the keyed
+ * hash the PIN factor compares against. Checking a PIN is built (the `pin` factor); enrolment is not.
+ */
+export function enrolPin(_input: { callId: string }): never {
+  throw new NotImplementedError("enrolPin", "VER-6");
 }

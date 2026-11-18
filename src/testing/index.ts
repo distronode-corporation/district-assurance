@@ -1,4 +1,7 @@
-// `district-assurance/testing`: fakes and a ready-wired engine for tests and demos.
+// `district-assurance/testing`: fakes, contract suites and a ready-wired engine for tests and demos.
+import type { SessionStore } from "../core/adapters.ts";
+import type { EngineAdapters } from "../core/runtime.ts";
+import { MemorySessionStore } from "../core/session-store.ts";
 import { createEngine, type Engine, type EngineOptions } from "../engine.ts";
 import { MemoryAuditLedger } from "../prove/ledger.ts";
 import {
@@ -6,12 +9,14 @@ import {
   FakeIdentityProvider,
   FakeMessageSender,
   FakePaymentLinks,
+  FakePinVerifier,
   FixedClock,
   MemoryRecordStore,
   SequentialIds,
   generateTestSigner,
 } from "./fakes.ts";
 
+export * from "./contracts.ts";
 export * from "./fakes.ts";
 
 export const TEST_KNOWLEDGE_KEY = "test-knowledge-key-not-a-secret";
@@ -26,10 +31,20 @@ export interface TestEngine {
   payments: FakePaymentLinks;
   records: MemoryRecordStore;
   ledger: MemoryAuditLedger;
+  sessions: SessionStore;
+  pinVerifier: FakePinVerifier;
 }
 
-/** An engine on fakes only: a fixed clock, sequential ids, in-memory stores, a throwaway key. */
-export function createTestEngine(options: Partial<Omit<EngineOptions, "adapters">> = {}): TestEngine {
+export type TestEngineOptions = Partial<Omit<EngineOptions, "adapters">> & {
+  /** Replace or remove (with `undefined`) any of the fakes. */
+  adapters?: Partial<{ [K in keyof EngineAdapters]: EngineAdapters[K] | undefined }>;
+};
+
+/**
+ * An engine on fakes only: a fixed clock, sequential ids, in-memory stores, a throwaway signing key,
+ * every adapter wired, and `defaultConfig()` unless a config is given.
+ */
+export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
   const parts = {
     clock: new FixedClock(),
     ids: new SequentialIds(),
@@ -39,22 +54,23 @@ export function createTestEngine(options: Partial<Omit<EngineOptions, "adapters"
     payments: new FakePaymentLinks(),
     records: new MemoryRecordStore(),
     ledger: new MemoryAuditLedger(),
+    sessions: new MemorySessionStore() as SessionStore,
+    pinVerifier: new FakePinVerifier(),
   };
-  const engine = createEngine({
-    workspaceId: "ws_test",
-    knowledgeKey: TEST_KNOWLEDGE_KEY,
-    clock: parts.clock,
-    ids: parts.ids,
-    ...options,
-    adapters: {
-      identity: parts.identity,
-      carrier: parts.carrier,
-      messages: parts.messages,
-      payments: parts.payments,
-      records: parts.records,
-      ledger: parts.ledger,
-      signer: generateTestSigner(),
-    },
-  });
+  const { adapters: overrides = {}, ...rest } = options;
+  const adapters = {
+    identity: parts.identity,
+    carrier: parts.carrier,
+    messages: parts.messages,
+    payments: parts.payments,
+    records: parts.records,
+    ledger: parts.ledger,
+    sessions: parts.sessions,
+    pinVerifier: parts.pinVerifier,
+    signer: generateTestSigner(),
+    ...overrides,
+  } as EngineAdapters;
+  if (overrides.sessions !== undefined) parts.sessions = overrides.sessions;
+  const engine = createEngine({ workspaceId: "ws_test", knowledgeKey: TEST_KNOWLEDGE_KEY, clock: parts.clock, ids: parts.ids, ...rest, adapters });
   return { engine, ...parts };
 }

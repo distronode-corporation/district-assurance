@@ -9,6 +9,7 @@ import type {
   MessagePurpose,
   MessageSender,
   PaymentLinks,
+  PinVerifier,
   ReceiptSigner,
   RecordStore,
   SubjectRecord,
@@ -16,7 +17,7 @@ import type {
 import type { Clock, IdGenerator } from "../core/clock.ts";
 import type { CarrierSignalReport } from "../core/policy.ts";
 import { keyPairSigner } from "../prove/receipt.ts";
-import { knowledgeDigest, subjectKeyFor } from "../verify/knowledge.ts";
+import { knowledgeDigest, pinDigest, subjectKeyFor } from "../verify/knowledge.ts";
 
 /** A clock that only moves when told to. */
 export class FixedClock implements Clock {
@@ -46,13 +47,19 @@ export class SequentialIds implements IdGenerator {
   }
 }
 
+/** Hands out one check per idempotency key, like a provider that honours idempotency keys. */
 export class FakeIdentityProvider implements IdentityProvider {
   readonly created: Array<{ callId: string; sessionId: string }> = [];
+  readonly #byKey = new Map<string, { sessionId: string; url: string }>();
 
   async createDocumentCheck(input: { callId: string; idempotencyKey: string }): Promise<{ sessionId: string; url: string }> {
+    const existing = this.#byKey.get(input.idempotencyKey);
+    if (existing !== undefined) return existing;
     const sessionId = `vs_fake_${this.created.length + 1}`;
     this.created.push({ callId: input.callId, sessionId });
-    return { sessionId, url: `https://identity.example.test/session/${sessionId}` };
+    const check = { sessionId, url: `https://identity.example.test/session/${sessionId}` };
+    this.#byKey.set(input.idempotencyKey, check);
+    return check;
   }
 }
 
@@ -132,14 +139,35 @@ export class MemoryRecordStore implements RecordStore {
   }
 }
 
+/**
+ * A host's own PIN store, for the PIN factor in `verifier` mode. Holds plain PINs (it is a fake);
+ * a real one compares against its own hashes, for example scrypt.
+ */
+export class FakePinVerifier implements PinVerifier {
+  readonly asked: string[] = [];
+  readonly #pins = new Map<string, string>();
+
+  set(workspaceId: string, subjectKey: string, pin: string): void {
+    this.#pins.set(`${workspaceId}/${subjectKey}`, pin);
+  }
+
+  async verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean }> {
+    this.asked.push(input.subjectKey);
+    return { matched: this.#pins.get(`${input.workspaceId}/${input.subjectKey}`) === input.pin };
+  }
+}
+
 /** A subject record built from plain values, hashed the way the engine compares them. */
 export function testSubject(
   knowledgeKey: string | Uint8Array,
-  input: { accountNumber: string; phoneOnFile: string; knowledge: Record<string, string> },
+  input: { accountNumber: string; phoneOnFile: string; knowledge: Record<string, string>; pin?: string },
 ): SubjectRecord {
   const knowledge: Record<string, string> = {};
   for (const [field, value] of Object.entries(input.knowledge)) knowledge[field] = knowledgeDigest(knowledgeKey, field, value);
-  return { subjectKey: subjectKeyFor(knowledgeKey, input.accountNumber), phoneOnFile: input.phoneOnFile, knowledge };
+  const subjectKey = subjectKeyFor(knowledgeKey, input.accountNumber);
+  const subject: SubjectRecord = { subjectKey, phoneOnFile: input.phoneOnFile, knowledge };
+  if (input.pin !== undefined) subject.pinDigest = pinDigest(knowledgeKey, subjectKey, input.pin);
+  return subject;
 }
 
 /** A receipt signer over a fresh P-256 key that lives only in this process. */

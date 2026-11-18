@@ -1,189 +1,236 @@
-// The engine: one object per workspace that runs call sessions through Verify, File, Pay and
-// Prove. The host's voice agent calls it from code paths (keypad events, tool handlers, webhook
-// routes); the model never calls it directly and never sees what it compares.
+// The engine: one object per workspace. It holds the core (the session state machine on a shared
+// SessionStore, the policy and its levels, redaction, the module registry and the audit ledger)
+// and runs the modules a workspace's FlowConfig turns on. The host's voice agent and web backend
+// call it from code paths (keypad events, tool handlers, webhook routes); the model never calls it
+// directly and never sees what it compares.
 //
-// Every step writes an audit entry, every refusal is an EngineError with a stable code, and every
-// planned-but-unbuilt step throws NotImplementedError. SPEC.md describes the flow.
+// Every change to a call is one compare-and-set write on the SessionStore, retried from a fresh
+// read when another process wrote first, so several processes can run one call. Every step writes
+// to the ledger, every refusal is an EngineError with a stable code, and every planned step
+// throws NotImplementedError. SPEC.md describes the flow.
 import type { JsonWebKey } from "node:crypto";
 
-import type {
-  AuditLedger,
-  CarrierSignals,
-  IdentityProvider,
-  IntakeRecord,
-  MessageSender,
-  PaymentLinks,
-  ReceiptSigner,
-  RecordStore,
-  SubjectRecord,
-} from "./core/adapters.ts";
+import type { IntakeRecord, SessionStore } from "./core/adapters.ts";
 import type { JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
+import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
 import { EngineError, NotImplementedError } from "./core/errors.ts";
-import type { Actor, EngineEvent, EngineEventName, EventListener } from "./core/events.ts";
-import {
-  defaultVerificationPolicy,
-  evaluateAssurance,
-  scopesForLevel,
-  textCodeTrusted,
-  validatePolicy,
-  type AssuranceLevel,
-  type CarrierSignalReport,
-  type VerificationPolicy,
-} from "./core/policy.ts";
+import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
+import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
+import { hmacSha256Hex } from "./core/hash.ts";
+import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
+import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
-import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionEvent, type SessionState } from "./core/session.ts";
-import { intakeDigest, missingRequired, normaliseFieldValue, validateForm, type FieldValue, type IntakeForm, type NormaliseResult } from "./file/intake.ts";
-import { settlementFor, validateAmount, type AmountSource, type PaymentOutcome, type PaymentRequest, type PaymentStatus } from "./pay/payment.ts";
-import { wordingDigest, type ConsentRecord, type ConsentWording } from "./prove/consent.ts";
-import { receiptDigest, signReceipt, type ReceiptBody, type SignedReceipt } from "./prove/receipt.ts";
-import { isKeypadEntry, judgeKeypadFactors, subjectKeyFor } from "./verify/knowledge.ts";
+import type { AdapterName, CallDraft, CallRecord, EngineAdapters, EngineRuntime, FlowStatus, Locale } from "./core/runtime.ts";
+import { MemorySessionStore } from "./core/session-store.ts";
+import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
+import * as dossier from "./file/dossier.ts";
+import type { NormaliseResult } from "./file/intake.ts";
+import { BUILT_IN_MODULES, builtInModules, defaultConfig } from "./modules.ts";
+import * as paylink from "./pay/paylink.ts";
+import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
+import type { ConsentRecord } from "./prove/consent.ts";
+import { detailCarriesCardNumber } from "./prove/ledger.ts";
+import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
+import * as trace from "./prove/trace.ts";
+import * as badge from "./verify/badge.ts";
+import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
-export interface EngineAdapters {
-  identity: IdentityProvider;
-  carrier: CarrierSignals;
-  messages: MessageSender;
-  payments: PaymentLinks;
-  records: RecordStore;
-  ledger: AuditLedger;
-  signer: ReceiptSigner;
-}
+export type { EngineAdapters, Locale } from "./core/runtime.ts";
+export type { KeypadResult, OutcomeResult, VerificationResult } from "./verify/badge.ts";
+
+
+/** Writes per step before the engine gives up with `conflict`. */
+export const MAX_WRITE_ATTEMPTS = 5;
 
 export interface EngineOptions {
   workspaceId: string;
-  /** The per-workspace HMAC key for knowledge factors. At least 16 bytes. */
+  /** The per-workspace HMAC key for knowledge factors and PINs. At least 16 bytes. */
   knowledgeKey: string | Uint8Array;
   adapters: EngineAdapters;
-  policy?: VerificationPolicy;
+  /** The workspace's FlowConfig. Default: `defaultConfig()`. Checked with `validateConfig`; any problem throws a ConfigError. */
+  config?: unknown;
+  /** Badge with the host's factor plug-ins. Default: `badgeModule()`. */
+  badge?: badge.BadgeModule;
+  /** Outside modules, installed before the config is checked (or later with `use`). */
+  modules?: readonly AssuranceModule[];
   clock?: Clock;
   ids?: IdGenerator;
   /** Default: card numbers. */
   redactor?: Redactor;
-  /** Default 900 (15 minutes). At most 3600. */
-  grantTtlSeconds?: number;
-  /** Upper bound per payment link, in minor units. */
-  maxPaymentMinor?: number;
   onEvent?: EventListener;
 }
 
-export type Locale = "en" | "fr";
+export interface FlowPosition {
+  flow: string;
+  revision: string;
+  status: FlowStatus;
+  /** The index of the current step; equal to the number of steps once completed. */
+  index: number;
+  /** The current step, or null once the flow is not running. */
+  step: FlowStep | null;
+}
 
-interface CallContext {
+/** What an outside module's update function sees of the call. */
+export interface ModuleCallView {
   state: SessionState;
-  locale: Locale;
-  subjectKey: string | null;
-  subject: SubjectRecord | null;
-  keypadAttempts: number;
-  keypadMatched: boolean;
-  carrier: CarrierSignalReport | null;
-  identityLinks: number;
-  intake: { form: IntakeForm; values: Record<string, FieldValue> } | null;
-  payments: Map<string, PaymentRequest>;
-  records: ReceiptBody["records"];
-  consents: ConsentRecord[];
-  receipt: SignedReceipt | null;
+  authorized(scope: string): boolean;
+  /** A ledger entry `module.event` with `{ module, event, detail }`. Never put a value the caller keyed in it. */
+  emit(event: string, detail: { [key: string]: JsonValue }): void;
 }
 
-export interface KeypadResult {
-  /** One answer for all fields: never which one failed. */
-  matched: boolean;
-  /** No more keypad attempts on this call. */
-  locked: boolean;
+interface QueuedEvent {
+  name: EngineEventName;
+  actor: Actor;
+  at: string;
+  detail: { [key: string]: JsonValue };
 }
-
-export interface VerificationResult {
-  level: AssuranceLevel;
-  scopes: string[];
-}
-
-export type OutcomeResult = { applied: false } | { applied: true; callId: string };
 
 export class Engine {
   readonly workspaceId: string;
-  readonly policy: VerificationPolicy;
+  readonly registry: ModuleRegistry;
   readonly #key: string | Uint8Array;
   readonly #adapters: EngineAdapters;
+  readonly #sessions: SessionStore;
   readonly #clock: Clock;
   readonly #ids: IdGenerator;
   readonly #redactor: Redactor;
-  readonly #grantTtlMs: number;
-  readonly #maxPaymentMinor: number | undefined;
   readonly #onEvent: EventListener | undefined;
-  readonly #calls = new Map<string, CallContext>();
-  readonly #identitySessions = new Map<string, string>();
-  readonly #paymentLinks = new Map<string, { callId: string; paymentId: string }>();
+  readonly #badge: badge.BadgeModule;
+  readonly #rt: EngineRuntime;
+  readonly #receiptModules: readonly AssuranceModule[];
+  #config: FlowConfig;
 
   constructor(options: EngineOptions) {
-    const policy = options.policy ?? defaultVerificationPolicy();
-    const errors = validatePolicy(policy);
+    const errors: string[] = [];
     const keyLength = typeof options.knowledgeKey === "string" ? Buffer.byteLength(options.knowledgeKey) : options.knowledgeKey.byteLength;
     if (keyLength < 16) errors.push("knowledgeKey must be at least 16 bytes");
-    const ttl = options.grantTtlSeconds ?? 900;
-    if (!Number.isInteger(ttl) || ttl < 1 || ttl > 3600) errors.push("grantTtlSeconds must be an integer from 1 to 3600");
     if (options.workspaceId === "") errors.push("workspaceId is empty");
+    if ((options.adapters as Partial<EngineAdapters>).ledger === undefined) errors.push("the ledger adapter is required: the ledger is always on");
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     this.workspaceId = options.workspaceId;
-    this.policy = structuredClone(policy);
     this.#key = options.knowledgeKey;
-    this.#adapters = options.adapters;
+    this.#sessions = options.adapters.sessions ?? new MemorySessionStore();
+    this.#adapters = { ...options.adapters, sessions: this.#sessions };
     this.#clock = options.clock ?? systemClock;
     this.#ids = options.ids ?? randomIds;
     this.#redactor = options.redactor ?? cardNumberRedactor;
-    this.#grantTtlMs = ttl * 1000;
-    this.#maxPaymentMinor = options.maxPaymentMinor;
     this.#onEvent = options.onEvent;
+    this.#badge = options.badge ?? badge.badgeModule();
+    const present = Object.entries(this.#adapters).filter(([, value]) => value !== undefined).map(([name]) => name);
+    this.#receiptModules = builtInModules(this.#badge);
+    this.registry = new ModuleRegistry({ adapters: present, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
+    this.#config = this.#prepare(options.config === undefined ? defaultConfig() : options.config);
+    this.#rt = this.#runtime();
+  }
+
+  // ---- modules and config ------------------------------------------------------------------
+
+  /** The config in force, as a copy. */
+  get config(): FlowConfig {
+    return structuredClone(this.#config);
+  }
+
+  get policy(): VerificationPolicy {
+    return structuredClone(this.#config.policy);
+  }
+
+  /** Replaces the config, after checking it. Calls in progress keep the flow steps they started with. */
+  configure(config: unknown): void {
+    this.#config = this.#prepare(config);
+  }
+
+  /** Installs an outside module. It stays off until a config turns it on. */
+  use(module: AssuranceModule): this {
+    this.registry.use(module);
+    return this;
+  }
+
+  /**
+   * Adds a Badge factor plug-in after the engine was built. Planned (MOD-3): today plug-ins are
+   * given at construction, with `badge: badgeModule({ factors })`.
+   */
+  useFactor(_plugin: FactorPlugin): never {
+    throw new NotImplementedError("Engine.useFactor", "MOD-3");
+  }
+
+  /** Uninstalls a module that the config has turned off. The ledger's module cannot be removed. */
+  remove(name: string): void {
+    if (moduleEnabled(this.#config, this.registry, name) && this.registry.get(name)?.manifest.alwaysOn !== true) {
+      throw new EngineError("precondition_failed", `${name} is on in the config; turn it off first`);
+    }
+    this.registry.remove(name);
+  }
+
+  isEnabled(name: string): boolean {
+    return moduleEnabled(this.#config, this.registry, name);
   }
 
   // ---- sessions ----------------------------------------------------------------------------
 
-  async startCall(input: { callId?: string; locale?: Locale } = {}): Promise<SessionState> {
+  /** Opens a call. With `flow`, the call runs that flow from its first step. */
+  async startCall(input: { callId?: string; locale?: Locale; flow?: string } = {}): Promise<SessionState> {
     const callId = input.callId ?? this.#ids.next("call");
-    if (this.#calls.has(callId)) throw new EngineError("invalid_input", "a call with that id exists");
-    const ctx: CallContext = {
+    const modules: Record<string, JsonValue> = {};
+    for (const module of this.registry.list()) {
+      const name = module.manifest.name;
+      if (this.isEnabled(name)) modules[name] = module.initCall(this.#config.modules[name]?.settings);
+    }
+    const record: CallRecord = {
+      v: 1,
       state: newSession(callId, this.workspaceId, this.#now()),
       locale: input.locale ?? "en",
-      subjectKey: null,
-      subject: null,
-      keypadAttempts: 0,
-      keypadMatched: false,
-      carrier: null,
-      identityLinks: 0,
-      intake: null,
-      payments: new Map(),
-      records: [],
-      consents: [],
-      receipt: null,
+      revision: this.#config.revision,
+      flow: null,
+      modules,
+      outbox: [],
     };
-    this.#calls.set(callId, ctx);
-    await this.#emit(ctx, "call.started", "system", { locale: ctx.locale });
-    return snapshot(ctx.state);
+    // A call started with a flow is created with it attached, so no other process can start a
+    // different flow on the same id in between.
+    const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
+    if (input.flow !== undefined) {
+      const draft = this.#draft(record, events);
+      this.#attachFlow(draft, input.flow, this.#flowDefinition(input.flow), this.#config.revision);
+      this.#advance(draft);
+    }
+    record.outbox = events.map((event, i) => ({ eventId: this.#eventId(callId, 1, i), ...event }));
+    const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
+    if (!created) throw new EngineError("invalid_input", "a call with that id exists");
+    await this.#flush(callId, 1, record);
+    return this.state(callId);
   }
 
-  state(callId: string): SessionState {
-    return snapshot(this.#call(callId).state);
+  async state(callId: string): Promise<SessionState> {
+    return snapshot((await this.#read(callId)).state);
   }
 
   /** Untrusted text (a business webhook reply, a document) entered the conversation. */
   async markUntrusted(callId: string, source: string): Promise<void> {
-    const ctx = this.#call(callId);
-    this.#apply(ctx, { type: "untrusted_content", source });
-    // A photo ID link sent before the taint no longer counts. One link per call still holds.
-    for (const [sessionId, owner] of this.#identitySessions) if (owner === callId) this.#identitySessions.delete(sessionId);
-    await this.#emit(ctx, "session.tainted", "code", { source });
+    await this.#update(callId, (draft) => {
+      draft.apply({ type: "untrusted_content", source });
+      for (const module of this.registry.list()) {
+        const name = module.manifest.name;
+        const slice = draft.record.modules[name];
+        if (module.onUntrusted !== undefined && slice !== undefined) draft.record.modules[name] = module.onUntrusted(slice);
+      }
+      draft.emit("session.tainted", "code", { source });
+    });
   }
 
   /** Keypad entry is open: the host pauses transcripts, cuts audio to the model and holds listen-in. */
   async openSensitive(callId: string, reason: SensitiveReason): Promise<void> {
-    const ctx = this.#call(callId);
-    this.#apply(ctx, { type: "sensitive_opened", reason });
-    await this.#emit(ctx, "sensitive.opened", "code", { reason });
+    await this.#update(callId, (draft) => {
+      draft.apply({ type: "sensitive_opened", reason });
+      draft.emit("sensitive.opened", "code", { reason });
+    });
   }
 
   async closeSensitive(callId: string): Promise<void> {
-    const ctx = this.#call(callId);
-    this.#apply(ctx, { type: "sensitive_closed" });
-    await this.#emit(ctx, "sensitive.closed", "code", {});
+    await this.#update(callId, (draft) => {
+      draft.apply({ type: "sensitive_closed" });
+      draft.emit("sensitive.closed", "code", {});
+    });
   }
 
   /**
@@ -191,424 +238,403 @@ export class Engine {
    * fixed "please don't read card numbers" line.
    */
   async redact(callId: string, text: string): Promise<{ text: string; findings: RedactionFinding[]; interrupt: boolean }> {
-    const ctx = this.#call(callId);
     const result = this.#redactor.redact(text);
-    if (result.findings.length > 0) {
+    if (result.findings.length === 0) {
+      await this.#read(callId);
+    } else {
       const kinds: Record<string, number> = {};
       for (const f of result.findings) kinds[f.kind] = (kinds[f.kind] ?? 0) + 1;
-      await this.#emit(ctx, "redaction.applied", "code", { kinds });
+      await this.#update(callId, (draft) => draft.emit("redaction.applied", "code", { kinds }));
     }
     return { ...result, interrupt: result.findings.length > 0 };
   }
 
-  // ---- verify ------------------------------------------------------------------------------
+  /** Whether the call's grant covers a scope now. A scope the policy does not list is refused. */
+  async authorize(callId: string, scope: string): Promise<boolean> {
+    return this.#authorized(await this.#read(callId), scope);
+  }
 
-  /** Starts (or restarts) verification with the account number the caller keyed. */
-  async beginVerification(callId: string, input: { accountNumber: string }): Promise<void> {
-    const ctx = this.#call(callId);
-    const subjectKey = isKeypadEntry(input.accountNumber) ? subjectKeyFor(this.#key, input.accountNumber) : null;
-    const reset = subjectKey !== ctx.subjectKey;
-    this.#apply(ctx, { type: "verification_started", reset });
-    if (ctx.state.factors.length === 0) {
-      ctx.keypadMatched = false;
-      ctx.carrier = null;
+  // ---- flows -------------------------------------------------------------------------------
+
+  /** Starts a named flow on an open call. A call runs at most one flow; its steps are copied in now. */
+  async startFlow(callId: string, name: string): Promise<FlowPosition> {
+    const definition = this.#flowDefinition(name);
+    const revision = this.#config.revision;
+    await this.#update(callId, (draft) => this.#attachFlow(draft, name, definition, revision));
+    return (await this.flowPosition(callId))!;
+  }
+
+  #attachFlow(draft: CallDraft, name: string, definition: FlowConfig["flows"][string], revision: string): void {
+    {
+      const record = draft.record;
+      if (record.flow !== null) throw new EngineError("precondition_failed", "this call already ran a flow");
+      if (record.state.phase !== "open") throw new EngineError("invalid_transition", `a flow starts on an open call, not while ${record.state.phase}`);
+      const steps = structuredClone(definition.steps);
+      // Checked inside the write, against the registry and the call as they are now: a module can
+      // be removed, or the call can lack what a newer config's step needs, while this runs.
+      for (const step of steps) {
+        const module = this.registry.stepOwner(step.type);
+        if (module === undefined) throw new EngineError("module_disabled", `no installed module provides ${step.type}`);
+        const owner = module.manifest.name;
+        const slice = record.modules[owner];
+        if (slice === undefined) throw new EngineError("module_disabled", `${owner} was off when this call started`);
+        if (!this.isEnabled(owner)) throw new EngineError("module_disabled", `the ${owner} module is turned off`);
+        const reason = module.cannotRunStep?.(step, slice) ?? null;
+        if (reason !== null) throw new EngineError("precondition_failed", `${step.type} cannot run on this call: ${reason}`);
+      }
+      const first = steps[0]!;
+      const firstOwner = this.registry.stepOwner(first.type)!;
+      const mark = firstOwner.enterStep(first, record.modules[firstOwner.manifest.name]!);
+      record.flow = { name, revision, steps, index: 0, mark, status: "running" };
+      draft.emit("flow.started", "code", { flow: name, revision, steps: steps.length });
     }
-    ctx.subjectKey = subjectKey;
-    ctx.subject = subjectKey === null ? null : await this.#adapters.records.getSubject(this.workspaceId, subjectKey);
-    await this.#emit(ctx, "verification.started", "code", {});
+  }
+
+  /** Where the call is in its flow, or null when it runs none. */
+  async flowPosition(callId: string): Promise<FlowPosition | null> {
+    const record = await this.#read(callId);
+    const flow = record.flow;
+    if (flow === null) return null;
+    return { flow: flow.name, revision: flow.revision, status: flow.status, index: flow.index, step: currentStep(record) };
+  }
+
+  // ---- Badge (verify) ----------------------------------------------------------------------
+
+  /** Starts (or restarts) verification, with the account number the caller keyed or a subject key the host's code chose. */
+  beginVerification(callId: string, input: { accountNumber: string } | { subjectKey: string }): Promise<void> {
+    return badge.beginVerification(this.#rt, callId, input);
   }
 
   /** Judges every keypad field at once. The answer is the same for an unknown account and a wrong value. */
-  async submitKeypad(callId: string, entries: Readonly<Record<string, string>>): Promise<KeypadResult> {
-    const ctx = this.#call(callId);
-    const factor = { kind: "keypad_knowledge" as const, passed: false, at: this.#now() };
-    this.#assertCan(ctx, { type: "factor_recorded", factor });
-    const max = this.policy.maxKeypadAttemptsPerCall;
-    if (ctx.keypadAttempts >= max) return { matched: false, locked: true };
-    ctx.keypadAttempts++;
-    factor.passed = judgeKeypadFactors(this.#key, ctx.subject, this.policy.keypadFields, entries);
-    ctx.keypadMatched ||= factor.passed;
-    this.#apply(ctx, { type: "factor_recorded", factor });
-    await this.#emit(ctx, "verification.factor", "code", { kind: factor.kind, passed: factor.passed });
-    return { matched: factor.passed, locked: !factor.passed && ctx.keypadAttempts >= max };
+  submitKeypad(callId: string, entries: Readonly<Record<string, string>>): Promise<badge.KeypadResult> {
+    return badge.submitFactor(this.#rt, this.#badge, callId, "keypad_knowledge", entries);
   }
 
-  /** Asks the carrier about the number on file. Only after the keypad checks matched. */
-  async checkCarrier(callId: string): Promise<{ textCodeTrusted: boolean }> {
-    const ctx = this.#call(callId);
-    const subject = this.#matchedSubject(ctx);
-    const report = await this.#adapters.carrier.check({ phoneNumber: subject.phoneOnFile });
-    ctx.carrier = report;
-    const trusted = textCodeTrusted(this.policy, report);
-    if (report.identityMatch !== "unavailable") {
-      const factor = { kind: "carrier_identity_match" as const, passed: report.identityMatch === "match", at: this.#now() };
-      this.#apply(ctx, { type: "factor_recorded", factor });
+  /** Judges a PIN, against the keyed hash on file or the host's verifier. Attempts are limited per call. */
+  submitPin(callId: string, pin: string): Promise<badge.KeypadResult> {
+    return badge.submitFactor(this.#rt, this.#badge, callId, "pin", pin);
+  }
+
+  /** Judges an entry for any factor the caller enters, a host's plug-in included. */
+  submitFactor(callId: string, kind: string, entry: FactorEntry): Promise<badge.KeypadResult> {
+    return badge.submitFactor(this.#rt, this.#badge, callId, kind, entry);
+  }
+
+  checkCarrier(callId: string): Promise<{ textCodeTrusted: boolean }> {
+    return badge.checkCarrier(this.#rt, callId);
+  }
+
+  sendTextCode(callId: string): Promise<never> {
+    return badge.sendTextCode(this.#rt, callId);
+  }
+
+  startPhotoId(callId: string): Promise<{ sent: true }> {
+    return badge.startPhotoId(this.#rt, callId);
+  }
+
+  applyIdentityOutcome(outcome: IdentityOutcome): Promise<badge.OutcomeResult> {
+    return badge.applyIdentityOutcome(this.#rt, outcome);
+  }
+
+  finishVerification(callId: string): Promise<badge.VerificationResult> {
+    return badge.finishVerification(this.#rt, callId);
+  }
+
+  // ---- Dossier (file) ----------------------------------------------------------------------
+
+  startIntake(callId: string, formId: string): Promise<void> {
+    return dossier.startIntake(this.#rt, callId, formId);
+  }
+
+  setIntakeField(callId: string, key: string, raw: string): Promise<NormaliseResult> {
+    return dossier.setIntakeField(this.#rt, callId, key, raw);
+  }
+
+  confirmIntake(callId: string, input: { confirmedBy: "voice" | "keypad" }): Promise<IntakeRecord> {
+    return dossier.confirmIntake(this.#rt, callId, input);
+  }
+
+  abandonIntake(callId: string): Promise<void> {
+    return dossier.abandonIntake(this.#rt, callId);
+  }
+
+  // ---- Paylink (pay) -----------------------------------------------------------------------
+
+  requestPayment(callId: string, input?: paylink.PaymentInput): Promise<{ paymentId: string; status: PaymentStatus }> {
+    return paylink.requestPayment(this.#rt, callId, input);
+  }
+
+  applyPaymentOutcome(outcome: PaymentOutcome): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
+    return paylink.applyPaymentOutcome(this.#rt, outcome);
+  }
+
+  // ---- Trace (prove) -----------------------------------------------------------------------
+
+  recordConsent(callId: string, input: { purpose: string; answer: "yes" | "no"; channel?: ConsentRecord["channel"] }): Promise<ConsentRecord> {
+    return trace.recordConsent(this.#rt, callId, input);
+  }
+
+  /** Ends the call. A running flow is abandoned. Returns the signed receipt when the call gets one, else null. */
+  async endCall(callId: string): Promise<SignedReceipt | null> {
+    // A call that ended without its receipt (the signer failed) gets it now, without ending again.
+    const before = await this.#read(callId);
+    const pending = before.state.phase === "ended" && trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null;
+    const record = pending ? before : await this.#update(callId, (draft) => {
+      // The built-in modules' guards run even after a module was removed, as their receipt parts do.
+      const guards = [...this.#receiptModules, ...this.registry.list().filter((m) => !this.#receiptModules.includes(m))];
+      for (const module of guards) {
+        const slice = draft.record.modules[module.manifest.name];
+        const reason = slice === undefined ? null : (module.blocksEnd?.(slice) ?? null);
+        if (reason !== null) throw new EngineError("precondition_failed", `the call cannot end yet: ${reason}`);
+      }
+      draft.apply({ type: "call_ended", at: this.#now() });
+      const flow = draft.record.flow;
+      if (flow !== null && flow.status === "running") {
+        flow.status = "abandoned";
+        draft.emit("flow.abandoned", "system", { flow: flow.name, step: flow.index });
+      }
+      draft.emit("call.ended", "system", {});
+      return structuredClone(draft.record);
+    });
+    if (!trace.wantsReceipt(this.#rt, record)) return null;
+    const head = await trace.endedHead(this.#rt, record, () => this.#adapters.ledger.head());
+    const parts: Pick<ReceiptBody, "verification" | "records" | "payments"> = { verification: { level: 0, methods: [] }, records: [], payments: [] };
+    // The built-in contributors, not the registry: a module removed after this call filed or paid still appears on its receipt.
+    for (const module of this.#receiptModules) {
+      const slice = record.modules[module.manifest.name];
+      if (module.receiptPart !== undefined && slice !== undefined) Object.assign(parts, module.receiptPart(slice, record.state));
     }
-    await this.#emit(ctx, "verification.carrier_checked", "code", {
-      checked: report.checked,
-      textCodeTrusted: trusted,
-      identityMatch: report.identityMatch,
-    });
-    return { textCodeTrusted: trusted };
+    return trace.issueReceipt(this.#rt, record, head, parts);
   }
 
-  /** The texted one-time code. Planned (VER-2): limits per subject and per number come first. */
-  async sendTextCode(callId: string): Promise<never> {
-    this.#matchedSubject(this.#call(callId));
-    throw new NotImplementedError("Engine.sendTextCode", "VER-2");
+  async receipt(callId: string): Promise<SignedReceipt | null> {
+    const slice = (await this.#read(callId)).modules[trace.TRACE] as unknown as trace.TraceSlice;
+    return slice.receipt === null ? null : structuredClone(slice.receipt);
   }
 
-  /**
-   * The strong tier: a photo ID and selfie check by a link texted to the number on file, only
-   * after the keypad checks matched, at most one link per call.
-   */
-  async startPhotoId(callId: string): Promise<{ sent: true }> {
-    const ctx = this.#call(callId);
-    const subject = this.#matchedSubject(ctx);
-    if (ctx.identityLinks > 0) throw new EngineError("precondition_failed", "a photo ID link was already sent on this call");
-    ctx.identityLinks++;
-    const check = await this.#adapters.identity.createDocumentCheck({ callId, idempotencyKey: `${callId}:identity` });
-    this.#identitySessions.set(check.sessionId, callId);
-    await this.#adapters.messages.sendText({
-      to: subject.phoneOnFile,
-      body: identityText(ctx.locale, check.url),
-      purpose: "identity_link",
-      idempotencyKey: `${callId}:identity:text`,
-    });
-    await this.#emit(ctx, "identity.link_sent", "code", {});
-    return { sent: true };
-  }
-
-  /** The identity provider's verified webhook outcome. Unknown or late sessions are ignored. */
-  async applyIdentityOutcome(outcome: IdentityOutcome): Promise<OutcomeResult> {
-    const callId = this.#identitySessions.get(outcome.sessionId);
-    if (callId === undefined) return { applied: false };
-    const ctx = this.#call(callId);
-    const factor = { kind: "photo_id" as const, passed: outcome.status === "verified", at: this.#now() };
-    if (!canApply(ctx.state, { type: "factor_recorded", factor })) return { applied: false };
-    this.#identitySessions.delete(outcome.sessionId);
-    this.#apply(ctx, { type: "factor_recorded", factor });
-    await this.#emit(ctx, "verification.factor", "system", { kind: factor.kind, passed: factor.passed, status: outcome.status });
-    return { applied: true, callId };
-  }
-
-  /** Computes the level from the recorded factors and issues the grant. */
-  async finishVerification(callId: string): Promise<VerificationResult> {
-    const ctx = this.#call(callId);
-    const result = evaluateAssurance(this.policy, ctx.state.factors, ctx.carrier);
-    const scopes = scopesForLevel(this.policy, result.level);
-    const issuedAt = this.#clock.now();
-    const grant =
-      result.level === 0
-        ? null
-        : {
-            grantId: this.#ids.next("grant"),
-            level: result.level,
-            scopes,
-            issuedAt: issuedAt.toISOString(),
-            expiresAt: new Date(issuedAt.getTime() + this.#grantTtlMs).toISOString(),
-          };
-    this.#apply(ctx, { type: "verification_finished", level: result.level, grant });
-    await this.#emit(ctx, "verification.finished", "code", {
-      level: result.level,
-      methods: result.counted,
-      discounted: result.discounted.map((d) => d.kind),
-    });
-    if (grant !== null) {
-      await this.#emit(ctx, "grant.issued", "code", { grantId: grant.grantId, level: grant.level, scopes, expiresAt: grant.expiresAt });
-    }
-    return { level: result.level, scopes: grant === null ? [] : scopes };
-  }
-
-  /** Whether the call's grant covers a scope now. A scope the policy does not list is refused. */
-  authorize(callId: string, scope: string): boolean {
-    const state = this.#call(callId).state;
-    const min = this.policy.scopes[scope];
-    if (min === undefined || state.phase === "ended") return false;
-    if (min === 0) return true;
-    const grant = state.grant;
-    return grant !== null && grant.scopes.includes(scope) && this.#clock.now().getTime() < Date.parse(grant.expiresAt);
-  }
-
-  // ---- file --------------------------------------------------------------------------------
-
-  async startIntake(callId: string, form: IntakeForm): Promise<void> {
-    const ctx = this.#call(callId);
-    this.#require(ctx, "intake.file");
-    const errors = validateForm(form);
-    if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
-    if (form.fields.some((f) => f.sensitive === true)) throw new NotImplementedError("sensitive intake fields", "FIL-2");
-    this.#apply(ctx, { type: "intake_started" });
-    ctx.intake = { form: structuredClone(form), values: {} };
-    await this.#emit(ctx, "intake.started", "code", { formId: form.formId, version: form.version });
-  }
-
-  /** Normalises and stores one value in the draft. A refused value is not stored. */
-  setIntakeField(callId: string, key: string, raw: string): NormaliseResult {
-    const intake = this.#intake(this.#call(callId));
-    const field = intake.form.fields.find((f) => f.key === key);
-    if (field === undefined) throw new EngineError("invalid_input", `the form has no field ${key}`);
-    const result = normaliseFieldValue(field, raw);
-    if (result.ok) intake.values[key] = result.value;
-    return result;
-  }
-
-  /** Files the draft once the caller confirmed the read-back. */
-  async confirmIntake(callId: string, input: { confirmedBy: "voice" | "keypad" }): Promise<IntakeRecord> {
-    const ctx = this.#call(callId);
-    const intake = this.#intake(ctx);
-    this.#require(ctx, "intake.file");
-    const missing = missingRequired(intake.form, intake.values);
-    if (missing.length > 0) throw new EngineError("invalid_input", `required fields missing: ${missing.join(", ")}`);
-    const record: IntakeRecord = {
-      recordId: this.#ids.next("rec"),
-      workspaceId: this.workspaceId,
-      callId,
-      formId: intake.form.formId,
-      formVersion: intake.form.version,
-      values: structuredClone(intake.values),
-      digest: intakeDigest(intake.form, intake.values),
-      confirmedBy: input.confirmedBy,
-      confirmedAt: this.#now(),
-    };
-    await this.#adapters.records.putIntakeRecord(record);
-    this.#apply(ctx, { type: "intake_confirmed", recordId: record.recordId });
-    ctx.intake = null;
-    ctx.records.push({ recordId: record.recordId, formId: record.formId, digest: record.digest });
-    await this.#emit(ctx, "intake.confirmed", "caller", {
-      recordId: record.recordId,
-      formId: record.formId,
-      digest: record.digest,
-      confirmedBy: record.confirmedBy,
-    });
-    return record;
-  }
-
-  async abandonIntake(callId: string): Promise<void> {
-    const ctx = this.#call(callId);
-    this.#apply(ctx, { type: "intake_abandoned" });
-    ctx.intake = null;
-    await this.#emit(ctx, "intake.abandoned", "code", {});
-  }
-
-  // ---- pay ---------------------------------------------------------------------------------
-
-  /**
-   * Texts a hosted payment link to the number on file. The amount comes from the host's code
-   * (`amountSource` says where), never from the model.
-   */
-  async requestPayment(
-    callId: string,
-    input: { amountMinor: number; currency: string; description: string; amountSource: AmountSource },
-  ): Promise<{ paymentId: string; status: PaymentStatus }> {
-    const ctx = this.#call(callId);
-    this.#require(ctx, "payment.request");
-    const errors = validateAmount(input.amountMinor, input.currency, this.#maxPaymentMinor);
-    const description = input.description.trim();
-    if (description === "" || description.length > 200) errors.push("description must be 1 to 200 characters");
-    if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
-    const paymentId = this.#ids.next("pay");
-    this.#assertCan(ctx, { type: "payment_requested", paymentId });
-    const subject = this.#matchedSubject(ctx);
-    const link = await this.#adapters.payments.createLink({
-      callId,
-      paymentId,
-      amountMinor: input.amountMinor,
-      currency: input.currency,
-      description,
-      idempotencyKey: `${callId}:${paymentId}`,
-    });
-    await this.#adapters.messages.sendText({
-      to: subject.phoneOnFile,
-      body: paymentText(ctx.locale, link.url, input.amountMinor, input.currency),
-      purpose: "payment_link",
-      idempotencyKey: `${callId}:${paymentId}:text`,
-    });
-    const request: PaymentRequest = {
-      paymentId,
-      callId,
-      amountMinor: input.amountMinor,
-      currency: input.currency,
-      description,
-      amountSource: input.amountSource,
-      linkId: link.linkId,
-      status: "open",
-      requestedAt: this.#now(),
-      settledAt: null,
-    };
-    ctx.payments.set(paymentId, request);
-    this.#paymentLinks.set(link.linkId, { callId, paymentId });
-    this.#apply(ctx, { type: "payment_requested", paymentId });
-    await this.#emit(ctx, "payment.link_sent", "code", {
-      paymentId,
-      linkId: link.linkId,
-      amountMinor: input.amountMinor,
-      currency: input.currency,
-      amountSource: input.amountSource,
-    });
-    return { paymentId, status: "open" };
-  }
-
-  /** The payment provider's verified webhook outcome. "Paid" only when the provider says paid. */
-  async applyPaymentOutcome(outcome: PaymentOutcome): Promise<OutcomeResult & { status?: PaymentStatus }> {
-    const ref = this.#paymentLinks.get(outcome.linkId);
-    if (ref === undefined) return { applied: false };
-    const ctx = this.#call(ref.callId);
-    const request = ctx.payments.get(ref.paymentId) as PaymentRequest;
-    const status = settlementFor(outcome);
-    if (request.status !== "open" || status === null) return { applied: false };
-    request.status = status;
-    request.settledAt = this.#now();
-    if (ctx.state.phase === "paying") this.#apply(ctx, { type: "payment_settled", paymentId: request.paymentId });
-    await this.#emit(ctx, "payment.settled", "system", { paymentId: request.paymentId, status });
-    return { applied: true, callId: ref.callId, status };
-  }
-
-  // ---- prove -------------------------------------------------------------------------------
-
-  async recordConsent(
-    callId: string,
-    input: { wording: ConsentWording; answer: "yes" | "no"; channel?: ConsentRecord["channel"] },
-  ): Promise<ConsentRecord> {
-    const ctx = this.#call(callId);
-    if (ctx.state.phase === "ended") throw new EngineError("invalid_transition", "the call has ended");
-    const record: ConsentRecord = {
-      consentId: this.#ids.next("cns"),
-      callId,
-      purpose: input.wording.purpose,
-      wordingVersion: input.wording.version,
-      wordingDigest: wordingDigest(input.wording),
-      locale: ctx.locale,
-      answer: input.answer,
-      channel: input.channel ?? "call",
-      at: this.#now(),
-    };
-    ctx.consents.push(record);
-    await this.#emit(ctx, "consent.recorded", "caller", {
-      consentId: record.consentId,
-      purpose: record.purpose,
-      wordingVersion: record.wordingVersion,
-      wordingDigest: record.wordingDigest,
-      answer: record.answer,
-      locale: record.locale,
-    });
-    return structuredClone(record);
-  }
-
-  /** Ends the call and issues its signed receipt, which carries the ledger head. */
-  async endCall(callId: string): Promise<SignedReceipt> {
-    const ctx = this.#call(callId);
-    const endedAt = this.#now();
-    this.#apply(ctx, { type: "call_ended", at: endedAt });
-    await this.#emit(ctx, "call.ended", "system", {});
-    const head = await this.#adapters.ledger.head();
-    const result = evaluateAssurance(this.policy, ctx.state.factors, ctx.carrier);
-    const body: ReceiptBody = {
-      v: 1,
-      receiptId: this.#ids.next("rcpt"),
-      callId,
-      workspaceId: this.workspaceId,
-      startedAt: ctx.state.startedAt,
-      endedAt,
-      issuedAt: this.#now(),
-      verification: { level: ctx.state.level, methods: ctx.state.level === 0 ? [] : result.counted },
-      records: structuredClone(ctx.records),
-      payments: [...ctx.payments.values()].map((p) => ({
-        paymentId: p.paymentId,
-        status: p.status,
-        amountMinor: p.amountMinor,
-        currency: p.currency,
-        providerRef: p.linkId,
-      })),
-      consents: ctx.consents.map((c) => ({
-        purpose: c.purpose,
-        wordingVersion: c.wordingVersion,
-        wordingDigest: c.wordingDigest,
-        answer: c.answer,
-      })),
-      ledger: head,
-    };
-    const receipt = await signReceipt(this.#adapters.signer, body);
-    ctx.receipt = receipt;
-    await this.#emit(ctx, "receipt.issued", "code", { receiptId: body.receiptId, digest: receiptDigest(body), kid: receipt.kid });
-    return structuredClone(receipt);
-  }
-
-  receipt(callId: string): SignedReceipt | null {
-    const receipt = this.#call(callId).receipt;
-    return receipt === null ? null : structuredClone(receipt);
-  }
-
-  /** The key set for verifying this engine's receipts. */
+  /** The key set for verifying this engine's receipts (empty without a signer). */
   receiptKeys(): JsonWebKey[] {
-    return [this.#adapters.signer.publicJwk()];
+    return this.#adapters.signer === undefined ? [] : [this.#adapters.signer.publicJwk()];
+  }
+
+  // ---- outside modules ---------------------------------------------------------------------
+
+  /** An outside module's part of a call. */
+  async moduleState(callId: string, name: string): Promise<JsonValue> {
+    this.#outsideModule(name);
+    return structuredClone(this.#slice((await this.#read(callId)).modules, name));
+  }
+
+  /**
+   * Changes an outside module's part of a call, in one compare-and-set write (retried on conflict,
+   * so `fn` must be pure). A running flow moves on when the module's step completes.
+   */
+  async updateModule(callId: string, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): Promise<JsonValue> {
+    this.#outsideModule(name);
+    const module = this.registry.get(name)!;
+    return this.#update(callId, (draft) => {
+      // An outside module does only its current step's work, and the engine itself holds that step
+      // to the scope its manifest needs: a module that forgets to ask `authorized` still fails closed.
+      assertFlowNotEnded(draft.record);
+      const step = draft.step();
+      if (step !== null) {
+        if (!module.manifest.provides.steps.includes(step.type)) throw new EngineError("precondition_failed", `the flow is on step ${step.type}, not a step of ${name}`);
+        const scope = module.manifest.scopes.needs[step.type];
+        if (scope !== undefined && !this.#authorized(draft.record, scope)) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
+      }
+      const view: ModuleCallView = {
+        state: snapshot(draft.record.state),
+        authorized: (scope) => this.#authorized(draft.record, scope),
+        emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
+      };
+      const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);
+      draft.record.modules[name] = structuredClone(next);
+      return structuredClone(next);
+    });
   }
 
   // ---- internals ---------------------------------------------------------------------------
 
-  #call(callId: string): CallContext {
-    const ctx = this.#calls.get(callId);
-    if (ctx === undefined) throw new EngineError("unknown_call", "no such call");
-    return ctx;
+  #runtime(): EngineRuntime {
+    const config = (): FlowConfig => this.#config;
+    return {
+      workspaceId: this.workspaceId,
+      clock: this.#clock,
+      ids: this.#ids,
+      get policy() {
+        return config().policy;
+      },
+      now: () => this.#now(),
+      hmac: (data) => hmacSha256Hex(this.#key, data),
+      settings: <T>(name: string): T => {
+        if (!this.isEnabled(name)) throw new EngineError("module_disabled", `the ${name} module is turned off`);
+        return this.#config.modules[name]?.settings as T;
+      },
+      // validateConfig refused any config whose modules need an adapter the engine lacks.
+      adapter: <K extends AdapterName>(name: K) => this.#adapters[name]!,
+      update: (callId, fn) => this.#update(callId, fn),
+      read: (callId) => this.#read(callId),
+      authorized: (record, scope) => this.#authorized(record, scope),
+      bindRef: async (ref, callId) => {
+        await this.#sessions.bindRef(this.workspaceId, ref, callId);
+      },
+      resolveRef: (ref) => this.#sessions.resolveRef(this.workspaceId, ref),
+      idempotencyKey: (callId, ...parts) => JSON.stringify([this.workspaceId, callId, ...parts]),
+    };
+  }
+
+  /** A copy of a config, checked. A value that is not plain data is a config problem too. */
+  #prepare(config: unknown): FlowConfig {
+    let copy: unknown;
+    try {
+      copy = structuredClone(config);
+    } catch {
+      throw new ConfigError(["the config must be plain JSON data"]);
+    }
+    return assertConfig(copy, this.registry);
+  }
+
+  #outsideModule(name: string): void {
+    if ((BUILT_IN_MODULES as readonly string[]).includes(name)) throw new EngineError("precondition_failed", `${name} is built in; use its own methods`);
+    if (!this.isEnabled(name)) throw new EngineError("module_disabled", `the ${name} module is turned off`);
+  }
+
+  #slice(modules: Record<string, JsonValue>, name: string): JsonValue {
+    const slice = modules[name];
+    if (slice === undefined) throw new EngineError("module_disabled", `${name} was off when this call started`);
+    return slice;
+  }
+
+  #flowDefinition(name: string): FlowConfig["flows"][string] {
+    const definition = Object.hasOwn(this.#config.flows, name) ? this.#config.flows[name] : undefined;
+    if (definition === undefined) throw new EngineError("invalid_input", `no flow named ${name} in the config`);
+    return definition;
   }
 
   #now(): string {
     return this.#clock.now().toISOString();
   }
 
-  #assertCan(ctx: CallContext, event: SessionEvent): void {
-    if (!canApply(ctx.state, event)) {
-      throw new EngineError("invalid_transition", `${event.type} is not allowed while ${ctx.state.phase}`);
+  #authorized(record: CallRecord, scope: string): boolean {
+    const min: AssuranceLevel | undefined = Object.hasOwn(this.#config.policy.scopes, scope) ? this.#config.policy.scopes[scope] : undefined;
+    if (min === undefined || record.state.phase === "ended") return false;
+    if (min === 0) return true;
+    const grant = record.state.grant;
+    // The grant's level is checked against today's minimum too, so a stricter config applies to grants already issued.
+    return grant !== null && grant.scopes.includes(scope) && grant.level >= min && this.#clock.now().getTime() < Date.parse(grant.expiresAt);
+  }
+
+  async #read(callId: string): Promise<CallRecord> {
+    const stored = await this.#sessions.get(this.workspaceId, callId);
+    if (stored === null) throw new EngineError("unknown_call", "no such call");
+    return structuredClone(stored.record) as unknown as CallRecord;
+  }
+
+  async #update<R>(callId: string, fn: (draft: CallDraft) => R): Promise<R> {
+    for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
+      const stored = await this.#sessions.get(this.workspaceId, callId);
+      if (stored === null) throw new EngineError("unknown_call", "no such call");
+      const record = structuredClone(stored.record) as unknown as CallRecord;
+      const events: QueuedEvent[] = [];
+      const draft = this.#draft(record, events);
+      const result = fn(draft);
+      this.#advance(draft);
+      // The step's ledger entries are saved with the step, then appended: a ledger that fails
+      // leaves them in the record, and the next write (or flushLedger) appends them, once each.
+      const version = stored.version + 1;
+      events.forEach((event, i) => record.outbox.push({ eventId: this.#eventId(callId, version, i), ...event }));
+      const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
+      if (saved.ok) {
+        await this.#flush(callId, version, record);
+        return result;
+      }
+    }
+    throw new EngineError("conflict", `the call changed under every one of ${MAX_WRITE_ATTEMPTS} attempts`);
+  }
+
+  #draft(record: CallRecord, events: QueuedEvent[]): CallDraft {
+    return {
+      record,
+      slice: <T>(name: string): T => this.#slice(record.modules, name) as unknown as T,
+      apply: (event) => {
+        record.state = reduce(record.state, event);
+      },
+      assertCan: (event) => {
+        if (!canApply(record.state, event)) throw new EngineError("invalid_transition", `${event.type} is not allowed while ${record.state.phase}`);
+      },
+      emit: (name, actor, detail) => {
+        // A copy, checked here, inside the step, so an entry the ledger would refuse is never saved
+        // to be appended later, and a caller changing its object afterwards changes nothing.
+        const copy = structuredClone(detail);
+        if (detailCarriesCardNumber(copy)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
+        events.push({ name, actor, at: this.#now(), detail: copy });
+      },
+      step: () => currentStep(record),
+    };
+  }
+
+  /** Moves a running flow past every step that is now complete, and stops it on a failed one. */
+  #advance(draft: CallDraft): void {
+    const record = draft.record;
+    const flow = record.flow;
+    while (flow !== null && flow.status === "running") {
+      const step = flow.steps[flow.index]!;
+      // A module removed while the call ran fails its step. Slices exist for every module a flow uses (startFlow).
+      const owner = this.registry.stepOwner(step.type);
+      const status = owner === undefined ? "failed" : owner.stepStatus(step, { state: record.state, slice: record.modules[owner.manifest.name]!, mark: flow.mark });
+      if (status === "pending") return;
+      const detail = { flow: flow.name, step: flow.index, type: step.type };
+      if (status === "failed") {
+        flow.status = "failed";
+        draft.emit("flow.failed", "code", detail);
+        return;
+      }
+      draft.emit("flow.step_completed", "code", detail);
+      flow.index++;
+      const next = flow.steps[flow.index];
+      if (next === undefined) {
+        flow.status = "completed";
+        draft.emit("flow.completed", "code", { flow: flow.name, steps: flow.steps.length });
+        return;
+      }
+      const nextOwner = this.registry.stepOwner(next.type);
+      flow.mark = nextOwner === undefined ? null : nextOwner.enterStep(next, record.modules[nextOwner.manifest.name]!);
     }
   }
 
-  #apply(ctx: CallContext, event: SessionEvent): void {
-    ctx.state = reduce(ctx.state, event);
-  }
-
-  #require(ctx: CallContext, scope: string): void {
-    if (!this.authorize(ctx.state.callId, scope)) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
-  }
-
-  #matchedSubject(ctx: CallContext): SubjectRecord {
-    if (!ctx.keypadMatched || ctx.subject === null) {
-      throw new EngineError("precondition_failed", "the keypad checks have not matched on this call");
+  /**
+   * Appends a call's pending ledger entries in order, each with its event id (a ledger appends an
+   * id once), then clears them from the record if nobody wrote since. A failed append throws and
+   * leaves the rest pending; a lost clear leaves them for the next write, which appends nothing twice.
+   */
+  async #flush(callId: string, version: number, record: CallRecord): Promise<void> {
+    if (record.outbox.length === 0) return;
+    for (const queued of record.outbox) {
+      await this.#adapters.ledger.append({ eventId: queued.eventId, callId, actor: queued.actor, event: queued.name, at: queued.at, detail: queued.detail });
+        // A listener is told, at least once and best effort; its failure, thrown or rejected, never stops the ledger (INT-5).
+      try {
+        const told: unknown = this.#onEvent?.({ name: queued.name, callId, actor: queued.actor, at: queued.at, detail: queued.detail });
+        if (told instanceof Promise) told.catch(() => undefined);
+      } catch {
+        // Ignored by design: the ledger is the record.
+      }
     }
-    return ctx.subject;
+    await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue);
   }
 
-  #intake(ctx: CallContext): { form: IntakeForm; values: Record<string, FieldValue> } {
-    if (ctx.intake === null) throw new EngineError("invalid_transition", "no intake is open on this call");
-    return ctx.intake;
+  /** A ledger event id, unique across workspaces sharing one ledger: a JSON tuple, so no two ids collide. */
+  #eventId(callId: string, version: number, index: number): string {
+    return JSON.stringify([this.workspaceId, callId, version, index]);
   }
 
-  async #emit(ctx: CallContext, name: EngineEventName, actor: Actor, detail: { [key: string]: JsonValue }): Promise<void> {
-    const event: EngineEvent = { name, callId: ctx.state.callId, actor, at: this.#now(), detail };
-    await this.#adapters.ledger.append({ callId: event.callId, actor, event: name, at: event.at, detail });
-    this.#onEvent?.(event);
+  /** Appends any ledger entries a call still has pending (after a ledger outage). Every write does this too. */
+  async flushLedger(callId: string): Promise<void> {
+    const stored = await this.#sessions.get(this.workspaceId, callId);
+    if (stored === null) throw new EngineError("unknown_call", "no such call");
+    await this.#flush(callId, stored.version, structuredClone(stored.record) as unknown as CallRecord);
   }
 }
 
 export function createEngine(options: EngineOptions): Engine {
   return new Engine(options);
-}
-
-// ---- code-built texts, English and French --------------------------------------------------
-
-function identityText(locale: Locale, url: string): string {
-  return locale === "fr"
-    ? `Votre lien de vérification d'identité, à usage unique : ${url}`
-    : `Your one-time identity check link: ${url}`;
-}
-
-/** Formats an amount in minor units with the currency's own number of decimals. */
-export function formatAmount(locale: Locale, amountMinor: number, currency: string): string {
-  const format = new Intl.NumberFormat(locale === "fr" ? "fr-CA" : "en-CA", { style: "currency", currency: currency.toUpperCase() });
-  const digits = format.resolvedOptions().maximumFractionDigits as number;
-  return format.format(amountMinor / 10 ** digits);
-}
-
-function paymentText(locale: Locale, url: string, amountMinor: number, currency: string): string {
-  const amount = formatAmount(locale, amountMinor, currency);
-  return locale === "fr" ? `Votre lien de paiement sécurisé pour ${amount} : ${url}` : `Your secure payment link for ${amount}: ${url}`;
 }
