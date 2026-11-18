@@ -14,6 +14,8 @@ export function demoConfig(): FlowConfig {
   policy.version = "demo-1";
   policy.levels[0] = { level: 1, anyOf: [["keypad_knowledge"], ["pin"]] };
   policy.scopes["owner.command"] = 1;
+  // An owner's own command moves no money and changes no contact details; its floor is 0.
+  policy.scopeClasses = { "owner.command": "none" };
   return {
     version: 1,
     revision: "demo-2026-11",

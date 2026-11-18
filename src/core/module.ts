@@ -7,7 +7,7 @@
 // registry holds the installed modules; a workspace's FlowConfig turns each one on or off.
 import type { JsonValue } from "./canonical.ts";
 import { EngineError } from "./errors.ts";
-import type { VerificationPolicy } from "./policy.ts";
+import { scopeClass, type ScopeClass, type VerificationPolicy } from "./policy.ts";
 import type { SessionState } from "./session.ts";
 
 /** One step of a flow, as stored in a FlowConfig: `type` is `<module>.<step>`, the rest is the step's own. */
@@ -34,6 +34,8 @@ export interface ModuleManifest {
     grants: readonly string[];
     /** Step type to the scope the call's grant must cover before that step can run. */
     needs: Readonly<Record<string, string>>;
+    /** The class of the scopes this module acts on (money, contact, access or none), which sets their floor. */
+    classes?: Readonly<Record<string, ScopeClass>>;
   };
   /** Adapter names this module always needs (see `EngineAdapters`). Settings can add more. */
   adapters: readonly string[];
@@ -159,6 +161,15 @@ export class ModuleRegistry {
   /** The installed module that provides a step type. */
   stepOwner(type: string): AssuranceModule | undefined {
     return this.list().find((m) => m.manifest.provides.steps.includes(type));
+  }
+
+  /** The scope classes the installed modules declare; the strictest wins when two disagree. */
+  scopeClasses(): Record<string, ScopeClass> {
+    const merged: Record<string, ScopeClass> = {};
+    for (const module of this.list()) {
+      for (const [scope, cls] of Object.entries(module.manifest.scopes.classes ?? {})) merged[scope] = scopeClass(scope, { [scope]: cls }, merged)!;
+    }
+    return merged;
   }
 
   /** Every factor kind the installed modules provide. */

@@ -111,7 +111,17 @@ of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:
 - at level 2 or 3, a set with fewer than two different kinds;
 - at level 3, a set without `photo_id`;
 - a set that is `text_code` alone;
-- a scope below its floor: `payment.*`, `payout.*` and `contact.*` are at least level 2.
+- a set at level 2 or 3 made only of things the caller knows: it needs `text_code`,
+  `carrier_identity_match` or `photo_id` (keypad knowledge, the PIN, spoken answers and plug-ins
+  are knowledge);
+- a scope with no class, or below its class's floor. A scope's class is the strictest of what its
+  name implies (`payment.`, `payout.`, `refund.`, `transfer.`, `charge.`: money; `contact.`:
+  contact; `entry.`, `access.`: access; `status.`, `intake.`: none), what an installed module's
+  manifest declares (`scopes.classes`), and the policy's own `scopeClasses`. Money, contact and
+  access are at least level 2; none is at least 0;
+- `maxKeypadAttemptsPerCall` outside 1 to 5.
+
+It checks every part in one pass: a malformed part is reported and the others are still checked.
 
 The default policy: level 1 is keypad knowledge; level 2 is keypad plus a trusted texted code, or
 keypad plus carrier identity match, or a PIN plus a texted code; level 3 is keypad plus photo ID.
@@ -125,8 +135,8 @@ A factor that is off is refused at every entry point. A planned factor cannot be
 
 A **grant** carries the level, the scopes at or below it (narrowed to the verify step's `scopes`
 when the step lists them), and an expiry. `authorize(callId, scope)` is true only for a scope the
-policy lists, on a call that has not ended, whose minimum is 0 or whose grant includes it and has
-not expired.
+policy lists, on a call that has not ended, whose minimum is 0 or whose grant includes it, has not
+expired, and has a level at or above the scope's minimum under the config in force now.
 
 Links go only to the subject's number on file, and only after a `keypad_knowledge` or `pin`
 factor passed since verification last started from nothing. A plug-in's pass does not unlock
@@ -154,9 +164,10 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`, in `SubjectRecord.pinDigest`. The
   entry is hashed the same way and compared in constant time; an unknown subject, a subject without
   a digest and a malformed entry do the same work and give the same answer.
-- `verifier` mode: the host's `PinVerifier.verify({workspaceId, subjectKey, pin})` decides, for a
-  well-formed entry on a keypad-producible subject; the PIN is passed once and kept nowhere. A
-  subject the `RecordStore` does not have never passes, whatever the verifier says.
+- `verifier` mode: the host's `PinVerifier.verify({workspaceId, subjectKey, pin})` decides; the
+  PIN is passed once and kept nowhere. It is asked for every attempt: for a malformed entry or an
+  account a keypad cannot produce, with a stand-in (`minDigits` zeros, an HMAC subject key) whose
+  answer is ignored. A subject the `RecordStore` does not have never passes, whatever it says.
 - Each attempt is counted in its own write before it is judged. After `maxAttemptsPerCall`,
   `submitPin` returns `locked` without judging. Across calls: planned (VER-1). Enrolment: planned
   (VER-6).
@@ -195,7 +206,7 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 | `badge.verify` | `level` 1 to 3; `factors`, at least one, each on in Badge's settings, together reaching `level` under the policy; optional `scopes`, each in the policy at or below `level` |
 | `dossier.collect` | `form`, a form id in Dossier's settings |
 | `paylink.request` | `amountMinor`, `currency`, `description`, `amountSource` (section 14); `mode` is refused until PAY-7 |
-| `trace.consent` | `purpose`, a wording in Trace's settings |
+| `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
 | `trace.receipt` | none; needs the `signer` adapter |
 
 Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
@@ -220,14 +231,18 @@ asks the current step's module for `stepStatus(step, {state, slice, mark})`:
 | `badge.verify` | a verification finished during the step at `level` or above | it finished below `level` |
 | `dossier.collect` | a record of the step's form was confirmed during the step | never (abandon and start again) |
 | `paylink.request` | the step's payment settled `paid` | it settled `failed` or `expired` |
-| `trace.consent` | a consent for `purpose` was recorded during the step | never |
+| `trace.consent` | a consent for `purpose` was recorded during the step: "yes", or any answer with `require: "answer"` | the answer was "no" (default `require: "yes"`) |
 | `trace.receipt` | at once | never |
 
 While a flow runs, work that is not the current step's is refused with `precondition_failed`:
 verification inputs outside a `badge.verify` step or for a factor it does not list, intake of a
 form other than the step's, a payment outside its step or with an amount of its own (the step sets
 it), a consent for another purpose. During a `badge.verify` step, only its factors count toward
-the level. A step whose module was removed while the call ran fails. `endCall` abandons a running
+the level. Once the flow has ended (completed, failed or abandoned), every step method is refused
+on that call, an identity outcome is ignored, and an outside module's `updateModule` is refused;
+grants the flow issued stand, and a payment link already sent can still settle. An outside
+module's step is held by the engine to the scope its manifest needs. A step whose module was
+removed while the call ran fails. `endCall` abandons a running
 flow (`flow.abandoned`). `flowPosition(callId)` returns `{flow, revision, status, index, step}`.
 
 ## 9. Engine events
@@ -263,10 +278,16 @@ answer on file, a phone number, a link or card data.
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
+A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
+with an `eventId` (`<callId>:<version>:<index>`), then appended in order; the outbox is cleared by
+a further write if nobody wrote since. A failed append leaves them pending, and the next write or
+`flushLedger(callId)` appends them. A ledger appends an `eventId` once (a second append returns the
+first entry), so nothing is lost or doubled. The listener is told after each append, at least once
+and best effort.
 
 ## 10. Audit ledger
 
-Entry: `{seq, prevHash, callId, actor, event, at, detail, hash}`. `seq` starts at 1; the first
+Entry: `{seq, prevHash, eventId?, callId, actor, event, at, detail, hash}`. `seq` starts at 1; the first
 `prevHash` is 64 zeros; `hash` is SHA-256 over the canonical JSON of every other field.
 `verifyChain(entries, from?)` reports the first entry whose `seq`, `prevHash` or `hash` is wrong.
 `chainEntry` refuses a detail in which any string (other than a 64-character hex digest) contains

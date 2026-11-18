@@ -64,8 +64,9 @@ their settings, and named flows, each an ordered list of steps.
 `validateConfig(config, registry)` returns every problem at once (an unknown or switched-off
 module, a level below a scope's floor, a missing adapter, a bad step), so a host refuses a config
 when it is saved, never in the middle of a call. The engine runs a flow step by step and allows
-only the current step's work. Money movement and contact changes can never go below level 2, and
-pay by link is level 2 by default. There is no UI: config and API come first.
+only the current step's work, and none once the flow has ended. Money movement, contact changes and
+access can never go below level 2, whatever a scope is called, and level 2 always needs a factor
+that is not something the caller knows. Pay by link is level 2 by default. There is no UI: config and API come first.
 
 ## Try it
 

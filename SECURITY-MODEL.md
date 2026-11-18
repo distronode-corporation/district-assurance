@@ -48,9 +48,12 @@ text never confirms an account. Planned: per-subject and per-number counters acr
 knowledge, the PIN at 1 to 5, plug-ins at 1 to 5), after which the line stops judging, even the
 right answer (tested). Each attempt is counted in its own write before it is judged, so a crash, a
 failing PIN verifier or a second process never gives a free try (tested, two engines on one
-store). PINs are at least 4 digits. Planned, and needed before a PIN guards a live line: durable
-lockout across calls (VER-1): without it, a 4-digit PIN with 3 attempts per call falls within
-about 3,300 calls, half that on average.
+store). PINs are at least 4 digits, and keypad attempts are capped at 5 per call like the PIN's.
+**Hard gate:** durable lockout across calls (VER-1) must be merged before any host runs the
+owner-command flow, or any PIN factor, on a live line. Without it, a 4-digit PIN with 3 attempts
+per call falls within about 3,300 calls, half that on average. In `verifier` mode the host's PIN
+store is asked for every attempt, with a stand-in for a malformed entry, so timing does not tell
+them apart.
 
 ### SIM swap and port-out
 
@@ -80,11 +83,18 @@ acoustically and can reach speech-to-text.
 
 A host bug or a manipulated tool path calling the engine out of order, or a grant for one purpose
 used for another. **Controls:** while a flow runs, only its current step's work is accepted, and
-only the step's factors count toward its level (tested). A `badge.verify` step can name the scopes
+only the step's factors count toward its level; once a call's flow has ended (completed, failed or
+abandoned), no step work runs on that call at all, so a failed PIN cannot be followed by a fresh
+verification outside the flow (tested). A consent answered "no" fails its step, so a flow never
+reaches a payment after a refusal (tested). An outside module's step is held to the scope its
+manifest needs by the engine itself (tested). An issued grant is checked against today's minimum
+too, so a stricter config applies at once (tested). A `badge.verify` step can name the scopes
 its grant covers, and the demo flows do, so a caller verified for a deposit never holds
 `owner.command` (tested). `validateConfig` refuses a flow whose step needs a scope its earlier
-verification does not reach or grant, and the policy's floors hold whatever a config says: money
-movement and contact changes are never below level 2 (tested).
+verification does not reach or grant, and the policy's floors hold whatever a config says: every
+scope has a class (by its name, a module's manifest, or the policy's `scopeClasses`, the strictest
+winning), money, contact and access are never below level 2, and a scope with no class is refused
+(tested). Level 2 and above need a factor that is not something the caller knows (tested).
 
 ### Config tampering
 
@@ -122,8 +132,9 @@ depends on its whole call path.
 **Controls:** the ledger is hash-chained, and any changed, removed or reordered entry is detected
 (tested). Receipts are signed with ES256 over canonical JSON and carry the ledger head; one changed
 byte fails verification (tested). Planned: key rotation and a published key set history (PRV-1).
-Known gap: ledger entries are appended right after a step's write, so a ledger that fails at that
-moment loses the step's entries while the step stands; INT-5 writes them with the step and retries.
+A step's ledger entries are saved with the step itself (an outbox in the call record) and
+appended by event id, once each; a ledger that fails leaves them pending, and the next write or
+`flushLedger` appends them, so no saved step is ever missing from the ledger for good (tested).
 
 ### Breach of stored data
 

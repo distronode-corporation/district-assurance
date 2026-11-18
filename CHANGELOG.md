@@ -30,6 +30,13 @@ All notable changes to this project are documented here. The format follows
   `startIntake` takes a form id and `recordConsent` a purpose.
 - `state`, `authorize`, `setIntakeField` and `receipt` are asynchronous (the session store).
 - `returning_pin` is now `pin`; `returningCallerPin` is `enrolPin` (VER-6).
+- Once a call's flow has ended, no step work runs on that call. A consent answered "no" fails its
+  step unless the step says `require: "answer"`. Outside modules' steps are held to their scopes
+  by the engine. Grants are checked against the config in force.
+- Scope classes (money, contact, access, none) set the floors; level 2 needs a factor that is not
+  knowledge; keypad attempts are capped at 5.
+- Ledger entries are saved with each step and appended idempotently by `eventId`
+  (`flushLedger`); `AuditLedger.append` is idempotent by `eventId`.
 
 - M0 skeleton. The engine (`createEngine`) with the call session state machine, the assurance
   policy (levels, scope floors, carrier signal handling), keypad knowledge comparison, the photo

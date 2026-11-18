@@ -8,7 +8,7 @@ import type { JsonValue } from "./canonical.ts";
 import { EngineError } from "./errors.ts";
 import type { FlowStep, ModuleRegistry, StepContext } from "./module.ts";
 import { validatePolicy, type VerificationPolicy } from "./policy.ts";
-import { isIntegerIn, isObject, isStringArray, unknownKeys } from "./shape.ts";
+import { isIntegerIn, isObject, unknownKeys } from "./shape.ts";
 
 export const FLOW_CONFIG_VERSION = 1;
 
@@ -50,25 +50,6 @@ export class ConfigError extends EngineError {
 const REVISION = /^[A-Za-z0-9._:-]{1,64}$/;
 const FLOW_NAME = /^[a-z][a-z0-9-]{0,63}$/;
 
-/** Problems with the shape of a policy, before its rules are checked. */
-function policyShapeErrors(policy: unknown): string[] {
-  if (!isObject(policy)) return ["policy must be an object"];
-  const errors: string[] = [];
-  if (typeof policy.version !== "string" || policy.version === "") errors.push("policy.version must be a non-empty string");
-  const levelsOk =
-    Array.isArray(policy.levels) &&
-    policy.levels.every((rule) => isObject(rule) && typeof rule.level === "number" && Array.isArray(rule.anyOf) && rule.anyOf.every(isStringArray));
-  if (!levelsOk) errors.push("policy.levels must be a list of { level, anyOf: [[factor, ...], ...] }");
-  if (!isObject(policy.scopes) || !Object.values(policy.scopes).every((level) => typeof level === "number")) {
-    errors.push("policy.scopes must map scope names to levels");
-  }
-  if (!isStringArray(policy.keypadFields)) errors.push("policy.keypadFields must be a list of field names");
-  if (typeof policy.maxKeypadAttemptsPerCall !== "number") errors.push("policy.maxKeypadAttemptsPerCall must be a number");
-  if (typeof policy.simSwapWindowHours !== "number") errors.push("policy.simSwapWindowHours must be a number");
-  if (typeof policy.trustTextCodeWithoutCarrierCheck !== "boolean") errors.push("policy.trustTextCodeWithoutCarrierCheck must be true or false");
-  return errors;
-}
-
 /** Whether a module is on in a config: listed and not switched off, or the ledger's module. */
 export function moduleEnabled(config: FlowConfig, registry: ModuleRegistry, name: string): boolean {
   const module = registry.get(name);
@@ -91,11 +72,10 @@ export function validateConfig(config: unknown, registry: ModuleRegistry): strin
     problems.push("revision: must be 1 to 64 letters, digits, dots, colons, hyphens or underscores");
   }
 
-  // The policy belongs to the core: levels, scopes and their floors.
-  const shape = policyShapeErrors(config.policy);
-  const rules = shape.length === 0 ? validatePolicy(config.policy as VerificationPolicy, registry.factorKinds()) : [];
-  problems.push(...shape, ...rules.map((e) => `policy: ${e}`));
-  const policy = shape.length === 0 && rules.length === 0 ? (config.policy as VerificationPolicy) : null;
+  // The policy belongs to the core: levels, scopes and their floors, checked in one pass.
+  const rules = validatePolicy(config.policy, registry.factorKinds(), registry.scopeClasses());
+  problems.push(...rules.map((e) => `policy: ${e}`));
+  const policy = rules.length === 0 ? (config.policy as VerificationPolicy) : null;
 
   // Modules: installed, switched, and with valid settings and the adapters those settings need.
   const settingsOf = new Map<string, unknown>();

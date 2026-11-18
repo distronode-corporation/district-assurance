@@ -1,8 +1,8 @@
 # Issues
 
-Every open issue of [ROADMAP.md](ROADMAP.md), 41 of them, ready to paste into GitHub: the heading is the title, the fenced block is the body. They are in milestone order, owner-command first; open them in that order. ROADMAP.md has the waves and the dependencies, and `test/stubs.test.ts` fails if an id here is missing there.
+Every open issue of [ROADMAP.md](ROADMAP.md), 42 of them, ready to paste into GitHub: the heading is the title, the fenced block is the body. They are in milestone order, owner-command first; open them in that order. ROADMAP.md has the waves and the dependencies, and `test/stubs.test.ts` fails if an id here is missing there.
 
-### VER-1: Durable failure counters and lockout per subject and per calling number
+### VER-1: Durable failure counters and lockout per subject and per calling number (hard gate before owner-command goes live)
 
 **Labels:** `badge`, `m2`  
 **Milestone:** M2 Owner command  
@@ -11,7 +11,7 @@ Every open issue of [ROADMAP.md](ROADMAP.md), 41 of them, ready to paste into Gi
 ```markdown
 ## Why
 
-Attempt limits are per call today, for keypad knowledge, the PIN and plug-in factors alike; a caller can call again. The owner-command flow makes this the first gap to close: a PIN is short.
+Attempt limits are per call today, for keypad knowledge, the PIN and plug-in factors alike; a caller can call again, and a 4-digit PIN with 3 attempts per call falls within about 3,300 calls. **Hard gate:** no host runs the owner-command flow, or any PIN factor, on a live line before this is merged.
 
 ## Acceptance criteria
 
@@ -1217,12 +1217,12 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 ```markdown
 ## Why
 
-Ledger entries are appended after a step's compare-and-set write, and the listener is told best effort. A ledger append that fails after the write leaves the state changed and the entry lost.
+Ledger entries are saved with each step (an outbox in the call record) and appended idempotently by event id; a failed append is retried by the next write or `flushLedger`. The listener is still synchronous and told at least once, best effort.
 
 ## Acceptance criteria
 
-- [ ] Pending ledger entries are written with the step's change (an outbox in the call record) and appended idempotently, so a failed append is retried by the next step or by `flushLedger(callId)`, and never lost or doubled.
-- [ ] An async listener with defined semantics: the ledger is the source of truth; listener failures are reported and never block the call or the ledger (they are already swallowed today).
+- [ ] An async listener with defined semantics: the ledger is the source of truth; listener failures are reported (an `onListenerError` hook) and never block the call or the ledger.
+- [ ] A background flush a host can schedule for calls whose outbox is not empty, and an `auditLedgerContract` case (PRV-5) for idempotent appends.
 
 ## Files
 
@@ -1293,6 +1293,38 @@ Hosts edit and store FlowConfig outside TypeScript; a schema lets their tools ca
 ## Tests
 
 - test/config-schema.test.ts
+
+## Done when
+
+All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
+```
+
+### MOD-3: Register Badge factor plug-ins after the engine is built
+
+**Labels:** `core`, `m9`  
+**Milestone:** M9 Host integration and module authors  
+**Depends on:** none
+
+```markdown
+## Why
+
+Factor plug-ins are given when the engine is built (`badge: badgeModule({ factors })`). `Engine.useFactor` exists and throws `NotImplementedError` until this lands.
+
+## Acceptance criteria
+
+- [ ] `engine.useFactor(plugin)`, or `engine.use(module)` with a module whose manifest provides factors and supplies their judges, adds a factor that the registry checks for clashes and caller-ID names.
+- [ ] A factor added after a config was applied stays off until a config turns it on; `validateConfig` sees it.
+
+## Files
+
+- src/engine.ts
+- src/verify/badge.ts
+- src/core/module.ts
+
+## Tests
+
+- test/pin.test.ts
+- test/config.test.ts
 
 ## Done when
 

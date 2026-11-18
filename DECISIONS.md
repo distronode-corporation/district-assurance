@@ -85,6 +85,11 @@ factors). Level 3 always includes `photo_id`. A texted code is never a factor al
 not count without a clean carrier answer unless the policy opts in.
 **Why.** A weakly verified caller who can change the phone number on file owns the account from
 then on. These floors are the minimum that stops that, whatever a business configures.
+**Amended (modular core review):** floors follow a scope's class, not only its name. Every scope
+has a class (money, contact, access or none), from its name, a module's manifest or the policy's
+`scopeClasses`, the strictest winning; a scope with no class is refused, so `refund.issue` or
+`transfer.funds` cannot slip under level 2. Level 2 and above also need a factor that is not
+knowledge (texted code, carrier identity match or photo ID), so keypad plus PIN is not level 2.
 
 ## ADR-10. Hash-chained ledger and ES256 receipts over canonical JSON
 
@@ -216,8 +221,8 @@ on its own account. One adapter shape keeps the engine's payment rules the same 
 **Decided.** The first flow a host runs live is `owner-command`: Badge with a PIN only, plus Trace
 (the ledger; no receipt step), granting `owner.command` at level 1 and nothing else. It replaces a
 host's own owner PIN check on its phone line, before Dossier or Paylink go live. The PIN factor
-and the shared session store are on its critical path, and so were built first; VER-1 (lockouts
-across calls) is the first open issue.
+and the shared session store are on its critical path, and so were built first. VER-1 (lockouts across
+calls) is a hard gate: no host runs it on a live line before VER-1 is merged.
 **Why.** It is the smallest flow that proves the engine on a real line: one factor, one scope, no
 money and no customer data, run across the host's processes. Its scopes stay below the floors, so
 an owner command can never move money or change contact details at level 1.

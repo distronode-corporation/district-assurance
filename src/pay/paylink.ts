@@ -68,7 +68,7 @@ export const paylinkModule: AssuranceModule = {
     version: "1",
     summary: "Take a payment by a hosted link texted to the number on file.",
     provides: { factors: [], steps: ["paylink.request"], outcomes: ["payment"] },
-    scopes: { grants: [], needs: { "paylink.request": "payment.request" } },
+    scopes: { grants: [], needs: { "paylink.request": "payment.request" }, classes: { "payment.request": "money" } },
     adapters: ["payments", "messages"],
   },
 
@@ -134,8 +134,8 @@ export const paylinkModule: AssuranceModule = {
 export async function requestPayment(rt: EngineRuntime, callId: string, input?: PaymentInput): Promise<{ paymentId: string; status: PaymentStatus }> {
   const settings = rt.settings<PaylinkSettings>(PAYLINK) ?? {};
   const reserved = await rt.update(callId, (draft) => {
-    if (!rt.authorized(draft.record, "payment.request")) throw new EngineError("scope_denied", "the grant does not cover payment.request");
     const step = stepOfType<PaylinkRequestStep>(draft.record, "paylink.request");
+    if (!rt.authorized(draft.record, "payment.request")) throw new EngineError("scope_denied", "the grant does not cover payment.request");
     if (step !== null && input !== undefined) throw new EngineError("invalid_input", "the flow step sets the amount; pass no input");
     const chosen: PaymentInput | undefined = step ?? input;
     if (chosen === undefined) throw new EngineError("invalid_input", "outside a flow, the amount, currency, description and amountSource are required");

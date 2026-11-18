@@ -68,7 +68,7 @@ describe("PIN factor, the host's verifier", () => {
       (c.modules.badge!.settings as { pin: { mode: string } }).pin.mode = "verifier";
     });
 
-  it("asks the host's PIN store, never for a malformed entry or a non-keypad account", async () => {
+  it("asks the host's PIN store every time, with a stand-in for a malformed entry or a non-keypad account (review item 11)", async () => {
     const t = setup({ config: verifierConfig() });
     t.pinVerifier.set("ws_test", OWNER, PIN);
     const { callId } = await t.engine.startCall();
@@ -76,11 +76,16 @@ describe("PIN factor, the host's verifier", () => {
     assert.equal((await t.engine.submitPin(callId, "0000")).matched, false);
     assert.equal((await t.engine.submitPin(callId, "12")).matched, false);
     assert.equal((await t.engine.submitPin(callId, PIN)).matched, true);
-    assert.deepEqual(t.pinVerifier.asked, [OWNER, OWNER]);
+    assert.deepEqual(t.pinVerifier.asked, [OWNER, OWNER, OWNER], "the malformed entry was asked too, as a stand-in");
     const other = await t.engine.startCall();
     await t.engine.beginVerification(other.callId, { accountNumber: "12a" });
+    t.pinVerifier.verify = async (input) => {
+      t.pinVerifier.asked.push(input.subjectKey);
+      return { matched: true }; // a verifier that says yes to a stand-in still never passes it
+    };
     assert.equal((await t.engine.submitPin(other.callId, PIN)).matched, false);
-    assert.equal(t.pinVerifier.asked.length, 2);
+    assert.equal((await t.engine.submitPin(other.callId, "1")).matched, false);
+    assert.equal(t.pinVerifier.asked.length, 5);
   });
 
   it("never passes a subject the records do not have, whatever the verifier says", async () => {

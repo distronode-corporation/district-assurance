@@ -390,7 +390,8 @@ export async function applyIdentityOutcome(rt: EngineRuntime, outcome: IdentityO
     const s = draft.slice<BadgeSlice>(BADGE);
     const factor = { kind: "photo_id", passed: outcome.status === "verified", at: rt.now() };
     const step = draft.step();
-    const stepAllows = step === null || (step.type === "badge.verify" && (step.factors as string[]).includes("photo_id"));
+    // No flow at all, or a running flow on a step that uses photo ID. A flow that ended takes nothing more.
+    const stepAllows = step === null ? draft.record.flow === null : step.type === "badge.verify" && (step.factors as string[]).includes("photo_id");
     if (!s.identitySessions.includes(outcome.sessionId) || !canApply(draft.record.state, { type: "factor_recorded", factor }) || !stepAllows) {
       return { applied: false };
     }

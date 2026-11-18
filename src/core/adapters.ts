@@ -115,6 +115,8 @@ export interface RecordStore {
 }
 
 export interface AuditInput {
+  /** The engine's id for this entry. A ledger appends an id once: a second append returns the first entry. */
+  eventId?: string;
   callId: string | null;
   actor: Actor;
   event: EngineEventName;
@@ -131,7 +133,7 @@ export interface AuditEntry extends AuditInput {
   hash: string;
 }
 
-/** Append-only. No update, no delete. */
+/** Append-only. No update, no delete. Idempotent by `eventId`, so the engine can retry an append. */
 export interface AuditLedger {
   append(input: AuditInput): Promise<AuditEntry>;
   head(): Promise<{ seq: number; hash: string }>;

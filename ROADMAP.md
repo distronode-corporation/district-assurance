@@ -37,14 +37,14 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-20, says why.
 |---|---|---|
 | M0 Skeleton | The engine, real core pieces, stubs, reference server, demo, CI | done |
 | M1 Modular core | Module registry, Badge, Dossier, Paylink and Trace as modules, factor plug-ins and the PIN factor, FlowConfig with `validateConfig` and flow execution, the shared SessionStore, the ledger always on | done |
-| M2 Owner command | What the first live use (`owner-command`) still needs: lockouts across calls, policy and config revision in receipts, the keypad collector, key store contracts, ledger and record store contracts, PIN enrolment | VER-1, VER-8, INT-1, INT-4, PRV-5, VER-6 |
+| M2 Owner command | What the first live use (`owner-command`) still needs. VER-1 (lockouts across calls) is a hard gate before it goes live in any host. Also: policy and config revision in receipts, the keypad collector, key store contracts, ledger and record store contracts, PIN enrolment | VER-1, VER-8, INT-1, INT-4, PRV-5, VER-6 |
 | M3 Gate and payment modes | The Gate module with signed access grants on a fake controller; Paylink's `connect` and `platform` modes; real access adapters | GAT-1, PAY-7, GAT-2 to GAT-4 |
 | M4 Badge | Texted codes, spoken answers, carrier and Stripe Identity adapters, adversarial suite | VER-2 to VER-5, VER-7 |
 | M5 Dossier | Read-backs, encrypted fields, delivery, conditional fields, documents by text | FIL-1 to FIL-5 |
 | M6 Paylink | Stripe Checkout, amounts from code, cancel and expiry, live detector; saved cards and keypad capture gated | PAY-1 to PAY-6 |
 | M7 Trace | Key rotation, stand-alone verifier, consent revocation, ledger export, more redactors | PRV-1 to PRV-4, PRV-6 |
 | M8 Reference server hardening | Carrier signatures, limits, receipt links, persistent stores, release workflow | SRV-1 to SRV-5 |
-| M9 Host integration and module authors | Transcript forwarding, event delivery, a module author kit, a JSON Schema for FlowConfig | INT-2, INT-5, MOD-1, MOD-2 |
+| M9 Host integration and module authors | Transcript forwarding, event delivery, a module author kit, a JSON Schema for FlowConfig, factors added after construction | INT-2, INT-5, MOD-1 to MOD-3 |
 
 ## Order of work
 
@@ -52,11 +52,12 @@ Milestones overlap; the order below is by dependency, owner-command first. Items
 touch different files, so they can run in parallel.
 
 1. **Wave 1, owner-command and the second core pull request:** VER-1, VER-8, INT-1, INT-4, PRV-5,
-   GAT-1, PAY-7.
+   GAT-1, PAY-7. **VER-1 is a hard gate:** no host runs owner-command, or any PIN factor, on a
+   live line before VER-1 is merged.
 2. **Wave 2:** VER-6, VER-2, VER-4, VER-5, FIL-1, FIL-2, PAY-1, PAY-5, PRV-1, PRV-3, SRV-1, SRV-2,
    MOD-1.
 3. **Wave 3:** VER-3, VER-7, FIL-3, FIL-4, PAY-2, PAY-3, PRV-2, PRV-6, SRV-3, SRV-5, INT-2, GAT-2,
-   GAT-3, MOD-2.
+   GAT-3, MOD-2, MOD-3.
 4. **Wave 4:** FIL-5, PAY-4, PRV-4, SRV-4, INT-5, GAT-4.
 5. **Gated, not scheduled:** PAY-6 starts only after an assessor's scoping and a buyer who needs it.
 
@@ -104,13 +105,13 @@ roadmap are done here.
 
 ### M2. Owner command
 
-The first live use: the `owner-command` flow (Badge with a PIN only, plus Trace) replaces a host's own owner PIN check. What it still needs before a live call.
+The first live use: the `owner-command` flow (Badge with a PIN only, plus Trace) replaces a host's own owner PIN check. What it still needs before a live call. VER-1 is a hard gate: no host runs owner-command live before it is merged.
 
 **Proven by:** Unit and contract tests at 100%; the PIN lockout proven across two calls and two engines on one session store; the live call is proven in the host's own repository.
 
-#### **VER-1** Durable failure counters and lockout per subject and per calling number
+#### **VER-1** Durable failure counters and lockout per subject and per calling number (hard gate before owner-command goes live)
 
-Attempt limits are per call today, for keypad knowledge, the PIN and plug-in factors alike; a caller can call again. The owner-command flow makes this the first gap to close: a PIN is short.
+Attempt limits are per call today, for keypad knowledge, the PIN and plug-in factors alike; a caller can call again, and a 4-digit PIN with 3 attempts per call falls within about 3,300 calls. **Hard gate:** no host runs the owner-command flow, or any PIN factor, on a live line before this is merged.
 
 *Acceptance*
 
@@ -662,12 +663,12 @@ Hosts must pause transcripts and cut audio while `sensitive` is set.
 
 #### **INT-5** Event delivery semantics
 
-Ledger entries are appended after a step's compare-and-set write, and the listener is told best effort. A ledger append that fails after the write leaves the state changed and the entry lost.
+Ledger entries are saved with each step (an outbox in the call record) and appended idempotently by event id; a failed append is retried by the next write or `flushLedger`. The listener is still synchronous and told at least once, best effort.
 
 *Acceptance*
 
-- Pending ledger entries are written with the step's change (an outbox in the call record) and appended idempotently, so a failed append is retried by the next step or by `flushLedger(callId)`, and never lost or doubled.
-- An async listener with defined semantics: the ledger is the source of truth; listener failures are reported and never block the call or the ledger (they are already swallowed today).
+- An async listener with defined semantics: the ledger is the source of truth; listener failures are reported (an `onListenerError` hook) and never block the call or the ledger.
+- A background flush a host can schedule for calls whose outbox is not empty, and an `auditLedgerContract` case (PRV-5) for idempotent appends.
 
 *Files:* `src/engine.ts`, `src/core/events.ts`, `src/core/adapters.ts`  
 *Tests:* test/engine.test.ts  
@@ -696,6 +697,19 @@ Hosts edit and store FlowConfig outside TypeScript; a schema lets their tools ca
 
 *Files:* `schema/flow-config.v1.json` (new), `package.json`  
 *Tests:* test/config-schema.test.ts  
+*Depends on:* none
+
+#### **MOD-3** Register Badge factor plug-ins after the engine is built
+
+Factor plug-ins are given when the engine is built (`badge: badgeModule({ factors })`). `Engine.useFactor` exists and throws `NotImplementedError` until this lands.
+
+*Acceptance*
+
+- `engine.useFactor(plugin)`, or `engine.use(module)` with a module whose manifest provides factors and supplies their judges, adds a factor that the registry checks for clashes and caller-ID names.
+- A factor added after a config was applied stays off until a config turns it on; `validateConfig` sees it.
+
+*Files:* `src/engine.ts`, `src/verify/badge.ts`, `src/core/module.ts`  
+*Tests:* test/pin.test.ts; test/config.test.ts  
 *Depends on:* none
 
 ## Not planned

@@ -14,9 +14,9 @@ import type { IntakeRecord, SessionStore } from "./core/adapters.ts";
 import type { JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
-import { EngineError } from "./core/errors.ts";
-import { currentStep } from "./core/flow.ts";
-import type { Actor, EngineEvent, EngineEventName, EventListener } from "./core/events.ts";
+import { EngineError, NotImplementedError } from "./core/errors.ts";
+import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
+import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
 import { hmacSha256Hex } from "./core/hash.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
 import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
@@ -30,10 +30,11 @@ import { BUILT_IN_MODULES, builtInModules, defaultConfig } from "./modules.ts";
 import * as paylink from "./pay/paylink.ts";
 import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
 import type { ConsentRecord } from "./prove/consent.ts";
+import { detailCarriesCardNumber } from "./prove/ledger.ts";
 import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
 import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
-import type { FactorEntry } from "./verify/factors.ts";
+import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
 export type { EngineAdapters, Locale } from "./core/runtime.ts";
@@ -82,6 +83,7 @@ export interface ModuleCallView {
 interface QueuedEvent {
   name: EngineEventName;
   actor: Actor;
+  at: string;
   detail: { [key: string]: JsonValue };
 }
 
@@ -145,6 +147,14 @@ export class Engine {
     return this;
   }
 
+  /**
+   * Adds a Badge factor plug-in after the engine was built. Planned (MOD-3): today plug-ins are
+   * given at construction, with `badge: badgeModule({ factors })`.
+   */
+  useFactor(_plugin: FactorPlugin): never {
+    throw new NotImplementedError("Engine.useFactor", "MOD-3");
+  }
+
   /** Uninstalls a module that the config has turned off. The ledger's module cannot be removed. */
   remove(name: string): void {
     if (moduleEnabled(this.#config, this.registry, name) && this.registry.get(name)?.manifest.alwaysOn !== true) {
@@ -171,12 +181,13 @@ export class Engine {
       revision: this.#config.revision,
       flow: null,
       modules,
+      outbox: [{ eventId: `${callId}:1:0`, name: "call.started", actor: "system", at: this.#now(), detail: { locale: input.locale ?? "en", revision: this.#config.revision } }],
     };
     // The flow is chosen now, so the call runs the definition and revision it was started with.
     const flow = input.flow === undefined ? null : { name: input.flow, definition: this.#flowDefinition(input.flow), revision: this.#config.revision };
     const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
     if (!created) throw new EngineError("invalid_input", "a call with that id exists");
-    await this.#emit(callId, { name: "call.started", actor: "system", detail: { locale: record.locale, revision: record.revision } });
+    await this.#flush(callId, 1, record);
     if (flow !== null) await this.#startFlow(callId, flow.name, flow.definition, flow.revision);
     return this.state(callId);
   }
@@ -391,11 +402,25 @@ export class Engine {
    */
   async updateModule(callId: string, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): Promise<JsonValue> {
     this.#outsideModule(name);
+    const module = this.registry.get(name)!;
     return this.#update(callId, (draft) => {
+      // An outside module does only its current step's work, and the engine itself holds that step
+      // to the scope its manifest needs: a module that forgets to ask `authorized` still fails closed.
+      assertFlowNotEnded(draft.record);
+      const step = draft.step();
+      if (step !== null) {
+        if (!module.manifest.provides.steps.includes(step.type)) throw new EngineError("precondition_failed", `the flow is on step ${step.type}, not a step of ${name}`);
+        const scope = module.manifest.scopes.needs[step.type];
+        if (scope !== undefined && !this.#authorized(draft.record, scope)) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
+      }
       const view: ModuleCallView = {
         state: snapshot(draft.record.state),
         authorized: (scope) => this.#authorized(draft.record, scope),
-        emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
+        emit: (event, detail) => {
+          // Refused here, inside the step, so a bad entry is never saved to be appended later.
+          if (detailCarriesCardNumber(detail)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
+          draft.emit("module.event", "code", { module: name, event, detail });
+        },
       };
       const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);
       draft.record.modules[name] = structuredClone(next);
@@ -469,7 +494,8 @@ export class Engine {
     if (min === undefined || record.state.phase === "ended") return false;
     if (min === 0) return true;
     const grant = record.state.grant;
-    return grant !== null && grant.scopes.includes(scope) && this.#clock.now().getTime() < Date.parse(grant.expiresAt);
+    // The grant's level is checked against today's minimum too, so a stricter config applies to grants already issued.
+    return grant !== null && grant.scopes.includes(scope) && grant.level >= min && this.#clock.now().getTime() < Date.parse(grant.expiresAt);
   }
 
   async #read(callId: string): Promise<CallRecord> {
@@ -487,9 +513,13 @@ export class Engine {
       const draft = this.#draft(record, events);
       const result = fn(draft);
       this.#advance(draft);
+      // The step's ledger entries are saved with the step, then appended: a ledger that fails
+      // leaves them in the record, and the next write (or flushLedger) appends them, once each.
+      const version = stored.version + 1;
+      events.forEach((event, i) => record.outbox.push({ eventId: `${callId}:${version}:${i}`, ...event }));
       const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
       if (saved.ok) {
-        for (const event of events) await this.#emit(callId, event);
+        await this.#flush(callId, version, record);
         return result;
       }
     }
@@ -507,7 +537,7 @@ export class Engine {
         if (!canApply(record.state, event)) throw new EngineError("invalid_transition", `${event.type} is not allowed while ${record.state.phase}`);
       },
       emit: (name, actor, detail) => {
-        events.push({ name, actor, detail });
+        events.push({ name, actor, at: this.#now(), detail });
       },
       step: () => currentStep(record),
     };
@@ -542,15 +572,30 @@ export class Engine {
     }
   }
 
-  async #emit(callId: string, queued: QueuedEvent): Promise<void> {
-    const event: EngineEvent = { name: queued.name, callId, actor: queued.actor, at: this.#now(), detail: queued.detail };
-    await this.#adapters.ledger.append({ callId, actor: event.actor, event: event.name, at: event.at, detail: event.detail });
-    // A listener is told, best effort; its failure never stops the ledger entries after it (INT-5).
-    try {
-      this.#onEvent?.(event);
-    } catch {
-      // Ignored by design: the ledger is the record.
+  /**
+   * Appends a call's pending ledger entries in order, each with its event id (a ledger appends an
+   * id once), then clears them from the record if nobody wrote since. A failed append throws and
+   * leaves the rest pending; a lost clear leaves them for the next write, which appends nothing twice.
+   */
+  async #flush(callId: string, version: number, record: CallRecord): Promise<void> {
+    if (record.outbox.length === 0) return;
+    for (const queued of record.outbox) {
+      await this.#adapters.ledger.append({ eventId: queued.eventId, callId, actor: queued.actor, event: queued.name, at: queued.at, detail: queued.detail });
+      // A listener is told, at least once and best effort; its failure never stops the ledger (INT-5).
+      try {
+        this.#onEvent?.({ name: queued.name, callId, actor: queued.actor, at: queued.at, detail: queued.detail });
+      } catch {
+        // Ignored by design: the ledger is the record.
+      }
     }
+    await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue);
+  }
+
+  /** Appends any ledger entries a call still has pending (after a ledger outage). Every write does this too. */
+  async flushLedger(callId: string): Promise<void> {
+    const stored = await this.#sessions.get(this.workspaceId, callId);
+    if (stored === null) throw new EngineError("unknown_call", "no such call");
+    await this.#flush(callId, stored.version, structuredClone(stored.record) as unknown as CallRecord);
   }
 }
 

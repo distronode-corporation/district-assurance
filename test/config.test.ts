@@ -64,14 +64,14 @@ describe("validateConfig: the document", () => {
       "extra: not a config field",
       "version: must be 1",
       "revision: must be 1 to 64 letters, digits, dots, colons, hyphens or underscores",
-      "policy must be an object",
+      "policy: must be an object",
       "modules: must be an object",
       "flows: must be an object",
     ]);
     assert.ok(validateConfig(config((c) => (c.revision = "has space")), registry()).includes("revision: must be 1 to 64 letters, digits, dots, colons, hyphens or underscores"));
   });
 
-  it("checks the policy's shape, then its rules against the installed factors", () => {
+  it("checks the policy's shape and its rules in one pass, against the installed factors", () => {
     assert.deepEqual(
       validateConfig(
         config((c) => {
@@ -80,13 +80,14 @@ describe("validateConfig: the document", () => {
         registry(),
       ),
       [
-        "policy.version must be a non-empty string",
-        "policy.levels must be a list of { level, anyOf: [[factor, ...], ...] }",
-        "policy.scopes must map scope names to levels",
-        "policy.keypadFields must be a list of field names",
-        "policy.maxKeypadAttemptsPerCall must be a number",
-        "policy.simSwapWindowHours must be a number",
-        "policy.trustTextCodeWithoutCarrierCheck must be true or false",
+        "policy: version must be a non-empty string",
+        "policy: levels[0] must be { level, anyOf: [[factor, ...], ...] }",
+        "policy: scope a has level 1, not 0 to 3",
+        "policy: scope a has no class: name it in scopeClasses (money, contact, access or none)",
+        "policy: keypadFields must be a list of field names",
+        "policy: maxKeypadAttemptsPerCall must be an integer from 1 to 5",
+        "policy: simSwapWindowHours must be a positive number",
+        "policy: trustTextCodeWithoutCarrierCheck must be true or false",
       ],
     );
     const problems = validateConfig(
@@ -96,7 +97,7 @@ describe("validateConfig: the document", () => {
       }),
       registry(),
     );
-    assert.deepEqual(problems, ["policy: level 1 set [voiceprint]: unknown factor voiceprint", "policy: scope payment.request is below its floor of level 2"]);
+    assert.deepEqual(problems, ["policy: level 1 set [voiceprint]: unknown factor voiceprint", "policy: scope payment.request is money, and below its floor of level 2"]);
     // A plug-in's kind is a known factor.
     const plugin = { kind: "voiceprint", summary: "x", maxAttemptsPerCall: 1, adapters: [], judge: async () => false };
     const withPlugin = new ModuleRegistry({ adapters: ALL_ADAPTERS, modules: builtInModules(badgeModule({ factors: [plugin] })) });
@@ -410,6 +411,15 @@ describe("validateConfig: flows", () => {
       registry(),
     );
     assert.deepEqual(badDossier, ["modules.dossier.settings: must be an object with a list of forms", "flows.f.steps[0] (dossier.collect): needs the scope intake.file at level 1, but the flow has verified to level 0 at this point"]);
+  });
+
+  it("takes scope classes from module manifests, and keeps the strictest", () => {
+    const door = outside("door", { scopes: { grants: [], needs: { "door.lookup": "door.open" }, classes: { "door.open": "access" } }, provides: { factors: [], steps: ["door.lookup"], outcomes: [] } });
+    const lax = outside("lax", { scopes: { grants: [], needs: {}, classes: { "door.open": "none" } }, provides: { factors: [], steps: ["lax.lookup"], outcomes: [] } });
+    const reg = registry(ALL_ADAPTERS, [door, lax]);
+    assert.deepEqual(reg.scopeClasses(), { "payment.request": "money", "intake.file": "none", "door.open": "access" });
+    const problems = validateConfig(config((c) => (c.policy.scopes["door.open"] = 1)), reg);
+    assert.deepEqual(problems, ["policy: scope door.open is access, and below its floor of level 2"]);
   });
 
   it("runs an outside module's own validators", () => {

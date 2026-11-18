@@ -22,6 +22,8 @@ export interface TraceSettings {
 export interface TraceConsentStep extends FlowStep {
   type: "trace.consent";
   purpose: string;
+  /** "yes" (the default): a "no" fails the step and stops the flow. "answer": either answer moves on. */
+  require?: "yes" | "answer";
 }
 
 export interface TraceSlice {
@@ -81,7 +83,8 @@ export const traceModule: AssuranceModule = {
       if (!ctx.adapters.has("signer")) errors.push("a receipt needs the signer adapter, which the engine does not have");
       return errors;
     }
-    const errors = unknownKeys(step, ["type", "purpose"]).map((k) => `${k} is not a field of this step`);
+    const errors = unknownKeys(step, ["type", "purpose", "require"]).map((k) => `${k} is not a field of this step`);
+    if (step.require !== undefined && step.require !== "yes" && step.require !== "answer") errors.push('require must be "yes" (the default) or "answer"');
     if (typeof step.purpose !== "string") return [...errors, "purpose must name a wording"];
     const settings = ctx.settings as TraceSettings | undefined | null;
     if (settings !== null && !(settings?.wordings ?? []).some((w) => w.purpose === step.purpose)) {
@@ -100,8 +103,10 @@ export const traceModule: AssuranceModule = {
 
   stepStatus(step: FlowStep, view: StepView): StepStatus {
     if (step.type === "trace.receipt") return "complete";
-    const after = (view.slice as unknown as TraceSlice).consents.slice(view.mark as number);
-    return after.some((c) => c.purpose === step.purpose) ? "complete" : "pending";
+    const answer = (view.slice as unknown as TraceSlice).consents.slice(view.mark as number).find((c) => c.purpose === step.purpose);
+    if (answer === undefined) return "pending";
+    // A "no" stops the flow unless the step only asks for an answer (require: "answer").
+    return answer.answer === "yes" || step.require === "answer" ? "complete" : "failed";
   },
 };
 

@@ -292,6 +292,7 @@ describe("Engine authorize", () => {
     const t = setup({
       config: testConfig((c) => {
         c.policy.scopes["hours.read"] = 0;
+        c.policy.scopeClasses = { "hours.read": "none" };
         (c.modules.badge!.settings as { grantTtlSeconds?: number }).grantTtlSeconds = 60;
       }),
     });
@@ -309,6 +310,17 @@ describe("Engine authorize", () => {
     assert.equal(await t.engine.authorize(callId, "status.read"), false, "expired");
     await t.engine.endCall(callId);
     assert.equal(await t.engine.authorize(callId, "hours.read"), false);
+  });
+
+  it("holds an issued grant to a stricter minimum set later (review item 9)", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    assert.equal(await t.engine.authorize(callId, "status.read"), true);
+    t.engine.configure(testConfig((c) => (c.policy.scopes["status.read"] = 2)));
+    assert.equal(await t.engine.authorize(callId, "status.read"), false, "a level 1 grant no longer covers a level 2 scope");
   });
 
   it("drops the grant when untrusted text enters, and re-verification starts from nothing", async () => {

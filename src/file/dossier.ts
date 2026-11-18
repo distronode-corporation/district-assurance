@@ -60,7 +60,7 @@ export const dossierModule: AssuranceModule = {
     version: "1",
     summary: "Collect a form the caller confirms, as a fingerprinted record.",
     provides: { factors: [], steps: ["dossier.collect"], outcomes: ["record"] },
-    scopes: { grants: [], needs: { "dossier.collect": "intake.file" } },
+    scopes: { grants: [], needs: { "dossier.collect": "intake.file" }, classes: { "intake.file": "none" } },
     adapters: ["records"],
   },
 

@@ -88,9 +88,12 @@ export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: 
   const pin = typeof input.entry === "string" ? input.entry : "";
   const wellFormed = isKeypadEntry(pin) && pin.length >= settings.minDigits && pin.length <= settings.maxDigits;
   if (settings.mode === "verifier") {
-    if (input.subjectKey === null || !wellFormed) return false;
-    const { matched } = await rt.adapter("pinVerifier").verify({ workspaceId: input.workspaceId, subjectKey: input.subjectKey, pin });
-    return matched && input.subject !== null;
+    // The verifier is asked every time, with a stand-in for a malformed entry or a non-keypad
+    // account, so the answer's timing never says which it was. The stand-in's answer is ignored.
+    const usable = input.subjectKey !== null && wellFormed;
+    const subjectKey = input.subjectKey ?? input.hmac("subject:");
+    const { matched } = await rt.adapter("pinVerifier").verify({ workspaceId: input.workspaceId, subjectKey, pin: wellFormed ? pin : "0".repeat(settings.minDigits) });
+    return matched && usable && input.subject !== null;
   }
   const digest = input.hmac(`pin:${input.subjectKey ?? ""}:${wellFormed ? pin : ""}`);
   const match = hexDigestsEqual(digest, input.subject?.pinDigest ?? "");

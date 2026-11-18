@@ -62,6 +62,8 @@ export interface CallRecord {
   flow: FlowCursor | null;
   /** Each module's own part, by module name. */
   modules: Record<string, JsonValue>;
+  /** Ledger entries saved with a change and not yet known to be appended. */
+  outbox: Array<{ eventId: string; name: EngineEventName; actor: Actor; at: string; detail: { [key: string]: JsonValue } }>;
 }
 
 /** A call being changed inside one compare-and-set attempt. Everything here is synchronous and pure. */

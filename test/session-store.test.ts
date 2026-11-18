@@ -2,7 +2,8 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import type { SessionStore } from "../src/core/adapters.ts";
+import type { AuditInput, SessionStore } from "../src/core/adapters.ts";
+import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import type { JsonValue } from "../src/core/canonical.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { MAX_WRITE_ATTEMPTS, createEngine } from "../src/engine.ts";
@@ -27,12 +28,17 @@ describe("the contract suite", () => {
   });
 });
 
-/** A store that loses the next `n` compare-and-sets, as if another process always wrote first. */
+/** A store that loses the next `n` compare-and-sets (or only the next clears of a ledger outbox), as if another process wrote first. */
 class ContendedStore extends MemorySessionStore {
   losses = 0;
+  loseClears = 0;
   override async compareAndSet(w: string, c: string, v: number, r: JsonValue): Promise<{ ok: true; version: number } | { ok: false }> {
     if (this.losses > 0) {
       this.losses--;
+      return { ok: false };
+    }
+    if (this.loseClears > 0 && (r as { outbox: unknown[] }).outbox.length === 0) {
+      this.loseClears--;
       return { ok: false };
     }
     return super.compareAndSet(w, c, v, r);
@@ -117,5 +123,65 @@ describe("compare-and-set conflicts", () => {
     const b = setup({ adapters: { sessions: store } });
     await a.engine.startCall({ callId: "c1" });
     await assert.rejects(b.engine.startCall({ callId: "c1" }), rejects("invalid_input"));
+  });
+});
+
+/** A ledger that fails the next `n` appends, as an outage would. */
+class FlakyLedger extends MemoryAuditLedger {
+  failures = 0;
+  override async append(input: AuditInput) {
+    if (this.failures > 0) {
+      this.failures--;
+      throw new Error("ledger down");
+    }
+    return super.append(input);
+  }
+}
+
+describe("ledger entries saved with the step (review item 6)", () => {
+  it("keeps a step's entries when the ledger fails, and appends them once, in order, on the next write", async () => {
+    const ledger = new FlakyLedger();
+    const t = setup({ adapters: { ledger } });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    ledger.failures = 1;
+    await assert.rejects(t.engine.finishVerification(callId), /ledger down/);
+    assert.equal((await t.engine.state(callId)).level, 1, "the step stands");
+    assert.equal((await ledger.list()).some((e) => e.event === "grant.issued"), false, "not yet in the ledger");
+    await t.engine.markUntrusted(callId, "document");
+    const events = (await ledger.list()).map((e) => e.event);
+    assert.deepEqual(events.slice(3), ["verification.finished", "grant.issued", "session.tainted"]);
+    assert.equal(verifyChain(await ledger.list()).ok, true);
+  });
+
+  it("appends nothing twice when the clear after a flush is lost, and flushLedger catches up", async () => {
+    const ledger = new FlakyLedger();
+    const sessions = new ContendedStore();
+    const t = setup({ adapters: { ledger, sessions } });
+    const { callId } = await t.engine.startCall();
+    ledger.failures = 1;
+    await assert.rejects(t.engine.openSensitive(callId, "keypad"), rejects("invalid_transition"));
+    await assert.rejects(t.engine.markUntrusted(callId, "x"), /ledger down/);
+    await t.engine.flushLedger(callId);
+    await t.engine.flushLedger(callId);
+    // A clear that loses its compare-and-set leaves the entries pending; the next flush appends none twice.
+    sessions.loseClears = 1;
+    await t.engine.redact(callId, "4242424242424242");
+    assert.equal(((await sessions.get("ws_test", callId))!.record as { outbox: unknown[] }).outbox.length, 1, "still pending");
+    await t.engine.flushLedger(callId);
+    assert.equal(((await sessions.get("ws_test", callId))!.record as { outbox: unknown[] }).outbox.length, 0);
+    const events = (await ledger.list()).map((e) => e.event);
+    assert.deepEqual(events, ["call.started", "session.tainted", "redaction.applied"]);
+    await assert.rejects(t.engine.flushLedger("nope"), rejects("unknown_call"));
+  });
+
+  it("makes the memory ledger idempotent by event id", async () => {
+    const ledger = new MemoryAuditLedger();
+    const input: AuditInput = { eventId: "c:2:0", callId: "c", actor: "code", event: "call.ended", at: "2026-01-01T00:00:00.000Z", detail: {} };
+    const first = await ledger.append(input);
+    assert.deepEqual(await ledger.append(input), first);
+    assert.equal((await ledger.list()).length, 1);
+    assert.equal(first.eventId, "c:2:0");
   });
 });

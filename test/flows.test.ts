@@ -4,7 +4,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import type { JsonValue } from "../src/core/canonical.ts";
-import { ConfigError, type FlowConfig } from "../src/core/config.ts";
+import { ConfigError, validateConfig, type FlowConfig } from "../src/core/config.ts";
 import type { AssuranceModule } from "../src/core/module.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { TEST_KNOWLEDGE_KEY } from "../src/testing/index.ts";
@@ -17,6 +17,7 @@ function flowConfig(patch: (c: FlowConfig) => void = () => undefined): FlowConfi
   return testConfig((c) => {
     c.policy.levels[0] = { level: 1, anyOf: [["keypad_knowledge"], ["pin"]] };
     c.policy.scopes["owner.command"] = 1;
+    c.policy.scopeClasses = { "owner.command": "none" };
     c.flows = {
       "owner-command": { steps: [{ type: "badge.verify", level: 1, factors: ["pin"], scopes: ["owner.command"] }] },
       deposit: {
@@ -92,9 +93,69 @@ describe("flows", () => {
     const position = await t.engine.flowPosition(callId);
     assert.deepEqual([position!.status, position!.step], ["failed", null]);
     assert.deepEqual((await t.ledger.list()).at(-1)!.detail, { flow: "owner-command", step: 0, type: "badge.verify" });
-    // Outside a running flow the API is open again, scopes permitting.
-    await t.engine.beginVerification(callId, { subjectKey: OWNER });
+    await assert.rejects(t.engine.beginVerification(callId, { subjectKey: OWNER }), rejects("precondition_failed", /has failed/));
     await assert.rejects(t.engine.startFlow(callId, "owner-command"), rejects("precondition_failed", /already ran a flow/));
+  });
+
+  it("refuses every step on a call whose flow ended (review blocker 1: no escalation after a failed PIN)", async () => {
+    const t = setup({ config: flowConfig() });
+    t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+    const { callId } = await t.engine.startCall({ flow: "owner-command" });
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    for (let i = 0; i < 3; i++) await t.engine.submitPin(callId, "0000");
+    assert.equal((await t.engine.finishVerification(callId)).level, 0);
+    assert.equal((await t.engine.flowPosition(callId))!.status, "failed");
+    const ended = rejects("precondition_failed", /flow owner-command has failed/);
+    await assert.rejects(t.engine.beginVerification(callId, { accountNumber: ACCOUNT }), ended);
+    await assert.rejects(t.engine.submitKeypad(callId, { dob: DOB }), ended);
+    await assert.rejects(t.engine.checkCarrier(callId), ended);
+    await assert.rejects(t.engine.startPhotoId(callId), ended);
+    await assert.rejects(t.engine.finishVerification(callId), ended);
+    await assert.rejects(t.engine.startIntake(callId, "repair"), ended);
+    await assert.rejects(t.engine.requestPayment(callId, { amountMinor: 99999, currency: "cad", description: "x", amountSource: "price_list" }), ended);
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), ended);
+    assert.equal(await t.engine.authorize(callId, "payment.request"), false);
+    assert.equal(t.payments.created.length, 0, "no link was ever created");
+  });
+
+  it("refuses more steps after a flow completed, and ignores a late identity outcome", async () => {
+    const t = setup({ config: flowConfig((c) => (c.flows["owner-command"]!.steps = [{ type: "badge.verify", level: 1, factors: ["pin", "photo_id"], scopes: ["owner.command"] }])) });
+    const { callId } = await t.engine.startCall({ flow: "owner-command" });
+    await t.engine.beginVerification(callId, { subjectKey: OWNER });
+    await t.engine.submitPin(callId, PIN);
+    await t.engine.startPhotoId(callId);
+    await t.engine.finishVerification(callId);
+    assert.equal((await t.engine.flowPosition(callId))!.status, "completed");
+    await assert.rejects(t.engine.beginVerification(callId, { subjectKey: OWNER }), rejects("precondition_failed", /has completed/));
+    const sessionId = t.identity.created[0]!.sessionId;
+    assert.deepEqual(await t.engine.applyIdentityOutcome({ sessionId, status: "verified" }), { applied: false });
+    assert.equal(await t.engine.authorize(callId, "owner.command"), true, "the grant the flow issued stands");
+  });
+
+  it("fails the flow on a consent of no, before any money step (review blocker 2)", async () => {
+    const steps = (require?: string) => [
+      { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["payment.request"] },
+      { type: "trace.consent", purpose: "texts", ...(require === undefined ? {} : { require }) },
+      pay,
+    ];
+    for (const [require, expected] of [[undefined, "failed"], ["yes", "failed"], ["answer", "running"]] as const) {
+      const t = setup({ config: flowConfig((c) => (c.flows.pay = { steps: steps(require) as never })) });
+      t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+      const { callId } = await t.engine.startCall({ flow: "pay" });
+      await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+      await t.engine.submitKeypad(callId, { dob: DOB });
+      await t.engine.checkCarrier(callId);
+      await t.engine.finishVerification(callId);
+      await t.engine.recordConsent(callId, { purpose: "texts", answer: "no" });
+      assert.equal((await t.engine.flowPosition(callId))!.status, expected, String(require));
+      if (expected === "failed") {
+        await assert.rejects(t.engine.requestPayment(callId), rejects("precondition_failed"));
+        assert.equal(t.messages.sent.length, 0, "no link was texted");
+      } else {
+        assert.equal((await t.engine.requestPayment(callId)).status, "open");
+      }
+    }
+    assert.ok(validateConfig(flowConfig((c) => (c.flows.pay = { steps: [{ type: "trace.consent", purpose: "texts", require: "maybe" }] })), setup().engine.registry).includes('flows.pay.steps[0] (trace.consent): require must be "yes" (the default) or "answer"'));
   });
 
   it("counts only the step's factors toward its level", async () => {
@@ -128,7 +189,7 @@ describe("flows", () => {
     assert.equal((await t.engine.flowPosition(callId))!.step!.type, "paylink.request", "waits for the payment to settle");
     await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" });
     await assert.rejects(t.engine.recordConsent(callId, { purpose: "other", answer: "yes" }), rejects("invalid_input"));
-    await t.engine.recordConsent(callId, { purpose: "texts", answer: "no" });
+    await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
     const done = await t.engine.flowPosition(callId);
     assert.deepEqual([done!.status, done!.index], ["completed", 5]);
     const receipt = await t.engine.endCall(callId);
@@ -349,6 +410,40 @@ describe("outside modules", () => {
     assert.deepEqual(entry.detail, { module: "loyalty", event: "tier_found", detail: { tier: "gold" } });
   });
 
+  it("holds an outside module's step to its scope even when the module never asks (review item 3)", async () => {
+    const t = setup({ config: flowConfig(), modules: [loyaltyModule()] });
+    t.engine.configure(flowConfig((c) => {
+      c.modules.loyalty = {};
+      c.flows.l = { steps: [{ type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }, { type: "loyalty.lookup" }] };
+    }));
+    const { callId } = await t.engine.startCall({ flow: "l" });
+    await assert.rejects(t.engine.updateModule(callId, "loyalty", () => ({ tier: "gold" })), rejects("precondition_failed", /not a step of loyalty/));
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    await t.engine.markUntrusted(callId, "document");
+    await assert.rejects(t.engine.updateModule(callId, "loyalty", () => ({ tier: "gold" })), rejects("scope_denied", /status.read/));
+    assert.deepEqual(await t.engine.moduleState(callId, "loyalty"), { tier: null });
+    await assert.rejects(
+      t.engine.updateModule(callId, "loyalty", (slice) => slice),
+      rejects("scope_denied"),
+    );
+  });
+
+  it("refuses an outside module's entry that carries a card number, before anything is saved", async () => {
+    const t = setup({ config: flowConfig(), modules: [loyaltyModule()] });
+    t.engine.configure(flowConfig((c) => (c.modules.loyalty = {})));
+    const { callId } = await t.engine.startCall();
+    await assert.rejects(
+      t.engine.updateModule(callId, "loyalty", (slice, call) => {
+        call.emit("note", { text: "card 4242 4242 4242 4242" });
+        return slice;
+      }),
+      rejects("invalid_input", /card number/),
+    );
+    assert.deepEqual((await t.ledger.list()).map((e) => e.event), ["call.started"]);
+  });
+
   it("fails a flow on the module's failed step, and guards the built-in and switched-off modules", async () => {
     const t = setup({ config: flowConfig(), modules: [loyaltyModule()] });
     await assert.rejects(t.engine.updateModule("c", "badge", (s) => s), rejects("precondition_failed", /built in/));
@@ -365,5 +460,6 @@ describe("outside modules", () => {
     await t.engine.finishVerification(callId);
     await t.engine.updateModule(callId, "loyalty", () => ({ tier: "banned" }));
     assert.equal((await t.engine.flowPosition(callId))!.status, "failed");
+    await assert.rejects(t.engine.updateModule(callId, "loyalty", () => ({ tier: "gold" })), rejects("precondition_failed", /has failed/));
   });
 });
