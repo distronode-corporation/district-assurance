@@ -231,6 +231,24 @@ async function render(view) {
   await renderLedger(view);
 }
 
+/**
+ * After a failed step request, reads the run back: the step may have run with its answer lost.
+ * A finished run then shows as finished, with its receipt.
+ *
+ * @returns {Promise<string>} what to add to the announcement
+ */
+async function recover() {
+  if (current === null) return "";
+  try {
+    const view = await api(`/demo/runs/${current.runId}`);
+    await render(view);
+    if (view.done && view.callId !== null) return `The run is finished. ${await loadReceipt(view.callId)}`;
+    return `The run is at step ${view.next + 1} of ${view.steps.length}.`;
+  } catch (error) {
+    return `The run could not be read back (${error instanceof Error ? error.message : String(error)}): start a new run.`;
+  }
+}
+
 async function step() {
   if (current === null || current.done || busy) return false;
   setBusy(true);
@@ -243,7 +261,7 @@ async function step() {
     announce(message);
     return true;
   } catch (error) {
-    announce(`Something went wrong: ${error instanceof Error ? error.message : String(error)}.`);
+    announce(`Something went wrong: ${error instanceof Error ? error.message : String(error)}. ${await recover()}`);
     return false;
   } finally {
     setBusy(false);
@@ -265,9 +283,11 @@ $("pick").addEventListener("submit", async (event) => {
   }
   setBusy(true);
   try {
+    const view = await post("/demo/runs", { flow: choice.value });
+    // Only once the new run exists: a failed start keeps the previous run and its receipt.
     resetReceipt();
     lastReceipt = null;
-    await render(await post("/demo/runs", { flow: choice.value }));
+    await render(view);
     announce(`Run started: ${choice.value}, ${current.steps.length} steps. Nothing has run yet.`);
     $("run-heading").focus();
   } catch (error) {
@@ -297,9 +317,11 @@ $("receipt-retry").addEventListener("click", async () => {
 });
 
 $("tamper").addEventListener("click", async () => {
-  if (lastReceipt === null) return;
-  const forged = tamperedCopy(lastReceipt);
-  const result = await checkReceipt(forged, lastKeys);
+  if (lastReceipt === null || busy) return;
+  const receipt = lastReceipt;
+  const result = await checkReceipt(tamperedCopy(receipt), lastKeys);
+  // A newer run may have started while the check ran: its receipt section is not this one's.
+  if (lastReceipt !== receipt) return;
   const node = $("tamper-result");
   node.hidden = false;
   node.className = `verdict ${result.ok ? "bad" : "ok"}`;

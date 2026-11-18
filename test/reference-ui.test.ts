@@ -91,10 +91,10 @@ describe("reference UI: static files", () => {
 
   it("keeps the page free of inline script, inline style and inline handlers, so the CSP holds", () => {
     const html = readFileSync(new URL("index.html", PUBLIC), "utf8");
-    for (const tag of html.match(/<script\b[^>]*>/g) ?? []) assert.match(tag, /src="\/[a-z-]+\.js"/, "every script is a file");
-    assert.doesNotMatch(html, /<script\b[^>]*>[^<]/, "no inline script");
-    assert.doesNotMatch(html, /<style\b|\sstyle=/, "no inline style");
-    assert.doesNotMatch(html, /\son[a-z]+=/, "no inline event handler");
+    for (const tag of html.match(/<script\b[^>]*>/gi) ?? []) assert.match(tag, /src="\/[a-z-]+\.js"/, "every script is a file");
+    assert.doesNotMatch(html, /<script\b[^>]*>\s*[^<\s]/i, "no inline script");
+    assert.doesNotMatch(html, /<style\b|\sstyle\s*=/i, "no inline style");
+    assert.doesNotMatch(html, /\son[a-z]+\s*=/i, "no inline event handler");
     const app = readFileSync(new URL("app.js", PUBLIC), "utf8");
     assert.doesNotMatch(app, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|new Function/, "values are written as text");
   });
