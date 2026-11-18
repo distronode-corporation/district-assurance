@@ -18,7 +18,7 @@ import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import type { AssuranceModule, FlowStep, ModuleManifest, StepContext, StepStatus, StepView } from "../core/module.ts";
 import type { AssuranceLevel } from "../core/policy.ts";
-import { isIntegerIn, isObject, unknownKeys } from "../core/shape.ts";
+import { isDenseArray, isIntegerIn, isObject, unknownKeys } from "../core/shape.ts";
 import type { Engine, ModuleCallView } from "../engine.ts";
 import { signDocument } from "../prove/receipt.ts";
 import { accessGrantDigest, MAX_ACCESS_GRANT_SECONDS, type AccessController, type AccessGrantBody, type SignedAccessGrant, type UnlockResult } from "./access.ts";
@@ -136,7 +136,7 @@ export class GateModule implements AssuranceModule {
       errors.push(`maxGrantsPerCall must be an integer from 1 to ${MAX_GRANTS_PER_CALL}`);
     }
     const targets = settings.targets;
-    if (!Array.isArray(targets) || targets.length === 0) return [...errors, "targets must list at least one target"];
+    if (!isDenseArray(targets) || targets.length === 0) return [...errors, "targets must list at least one target"];
     const ids: unknown[] = [];
     targets.forEach((target: unknown, i: number) => {
       const at = `targets[${i}]`;
@@ -225,6 +225,10 @@ export class GateModule implements AssuranceModule {
       throw error;
     }
     const digest = accessGrantDigest(body);
+    // Signing can take a while (a KMS): the call may have been tainted, or the grant expired, since
+    // the reservation. Checked once more right before the door is asked; nothing is sent if not.
+    const lapsed = await this.#stillAuthorized(engine, callId, record.grantId, digest);
+    if (lapsed !== null) throw new EngineError("scope_denied", `the access grant was not sent: ${lapsed}`);
     let answer: UnlockResult | null;
     try {
       answer = await this.#controllers.get(record.controller)!.unlock({
@@ -255,6 +259,31 @@ export class GateModule implements AssuranceModule {
       kid: grant.kid,
     });
     return { grantId: record.grantId, status: "refused", confirmed: false };
+  }
+
+  /** Settles the reservation as failed and returns why, when the grant may no longer be sent; null when it may. */
+  async #stillAuthorized(engine: GateHost, callId: string, grantId: string, digest: string): Promise<string | null> {
+    // Set by each attempt of the write; the attempt that was saved is the last one to run.
+    let lapsed: string | null = null;
+    await engine.recordModuleOutcome(callId, GATE, (s, call) => {
+      const slice = s as unknown as GateSlice;
+      const record = slice.grants.find((g) => g.grantId === grantId)!;
+      lapsed =
+        record.status !== "reserved"
+          ? "it was settled meanwhile"
+          : !call.authorized(ENTRY_SCOPE)
+            ? "the call is no longer authorized"
+            : Date.parse(record.expiresAt) <= Date.parse(call.now)
+              ? "it expired"
+              : null;
+      if (lapsed !== null && record.status === "reserved") {
+        record.status = "failed";
+        record.digest = digest;
+        call.emit("access.failed", { grantId, digest, reason: lapsed === "it expired" ? "expired" : "not_authorized" });
+      }
+      return slice as unknown as JsonValue;
+    });
+    return lapsed;
   }
 }
 

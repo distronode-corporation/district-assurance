@@ -466,6 +466,10 @@ the lifetime (pass no input); outside one the host's code passes `{target, lifet
    lifetime and the verification grant's expiry. Ledger: `access.issued`.
 2. **Sign**: ES256 over the canonical JSON of the body below, with Gate's signer. A signing
    failure settles the grant `failed` (nothing sent) and throws.
+   Then, in a write of its own, the grant is checked once more: if the call is no longer
+   authorized for `entry.open` (tainted, its grant expired) or the access grant expired while it
+   was signed, it is settled `failed` (`access.failed`, reason `not_authorized` or `expired`),
+   nothing is sent, and `scope_denied` is thrown.
 3. **Send once** to the target's controller: `unlock({grant, target, idempotencyKey})`, the key
    being `[workspaceId, callId, grantId, "unlock"]`. Never retried.
 4. **Record** (`recordModuleOutcome`): `delivered` (with `confirmed` when the controller reported

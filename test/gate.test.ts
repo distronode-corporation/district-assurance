@@ -70,6 +70,9 @@ describe("gate: config", () => {
       "targets must list at least one target",
     ]);
     assert.deepEqual(gate.validateSettings({ targets: "front-door" }), ["targets must list at least one target"]);
+    const sparse: unknown[] = [];
+    sparse[1] = targets[0];
+    assert.deepEqual(gate.validateSettings({ targets: sparse }), ["targets must list at least one target"], "a hole is not a target");
     assert.deepEqual(gate.validateSettings({ targets: [7, { id: "Front", controller: "attic", ref: " ", y: 1 }, { id: "a", controller: "lobby", ref: "x".repeat(201) }, { id: "a", controller: 1, ref: 1 }] }), [
       "targets[0] must be { id, controller, ref }",
       "targets[1].y is not a target field",
@@ -285,7 +288,8 @@ describe("gate: grants", () => {
       workspaceId: t.engine.workspaceId,
       updateModule: (c, n, fn) => t.engine.updateModule(c, n, fn),
       moduleState: (c, n) => t.engine.moduleState(c, n),
-      recordModuleOutcome: () => Promise.reject(new Error("the process stopped")),
+      // The check before sending is written; the answer after it is not.
+      recordModuleOutcome: (c, n, fn) => (t.door.received.length === 0 ? t.engine.recordModuleOutcome(c, n, fn) : Promise.reject(new Error("the process stopped"))),
     };
     // The door answered "delivered", then writing it failed: that error is thrown as it is, never turned into "unknown".
     await assert.rejects(t.gate.grantAccess(lost, callId, { target: "front-door" }), /the process stopped/);
@@ -310,7 +314,8 @@ describe("gate: grants", () => {
       workspaceId: t.engine.workspaceId,
       updateModule: (c, n, fn) => t.engine.updateModule(c, n, fn),
       moduleState: (c, n) => t.engine.moduleState(c, n),
-      recordModuleOutcome: () => Promise.reject(new Error("the process stopped")),
+      // The check before sending is written; the answer after it is not.
+      recordModuleOutcome: (c, n, fn) => (t.door.received.length === 0 ? t.engine.recordModuleOutcome(c, n, fn) : Promise.reject(new Error("the process stopped"))),
     };
     await assert.rejects(t.gate.grantAccess(lost, callId), /the process stopped/);
     t.clock.advance(60_000);
@@ -339,6 +344,41 @@ describe("gate: grants", () => {
     };
     assert.equal((await t.gate.grantAccess(t.engine, c2, { target: "front-door" })).status, "delivered");
     assert.equal((await slice(t, c2)).grants[0]!.status, "delivered");
+  });
+
+  it("sends nothing when the call was tainted or the grant expired while it was being signed", async () => {
+    const door = new FakeAccessController();
+    const signer = generateTestSigner("gate-key-1");
+    let during: () => Promise<void> = async () => undefined;
+    const gate = gateModule({
+      signer: { ...signer, sign: async (payload) => (await during(), signer.sign(payload)) },
+      controllers: { lobby: door },
+    });
+    const t = { ...setup({ modules: [gate], config: gateConfig() }), gate, door };
+    t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+    const tainted = await verified(t, null);
+    during = () => t.engine.markUntrusted(tainted, "crm_note");
+    await assert.rejects(t.gate.grantAccess(t.engine, tainted, { target: "front-door" }), rejects("scope_denied", /no longer authorized/));
+    const slow = await verified(t, null);
+    during = async () => t.clock.advance(60_000);
+    await assert.rejects(t.gate.grantAccess(t.engine, slow, { target: "front-door" }), rejects("scope_denied", /it expired/));
+    assert.equal(door.received.length, 0, "no door was asked");
+    assert.deepEqual((await slice(t, tainted)).grants.map((g) => g.status), ["failed"]);
+    const reasons = (await gateEvents(t)).filter(([e]) => e === "access.failed").map(([, d]) => (d as { reason: string }).reason);
+    assert.deepEqual(reasons, ["not_authorized", "expired"]);
+    // Settled by another process while signing (it saw the grant expire): left as that process left it.
+    const raced = await verified(t, null);
+    during = async () => {
+      t.clock.advance(60_000);
+      await t.engine.recordModuleOutcome(raced, "gate", (s) => {
+        const sl = s as unknown as GateSlice;
+        sl.grants[0]!.status = "unknown";
+        return s;
+      });
+    };
+    await assert.rejects(t.gate.grantAccess(t.engine, raced, { target: "front-door" }), rejects("scope_denied", /settled meanwhile/));
+    assert.deepEqual((await slice(t, raced)).grants.map((g) => g.status), ["unknown"]);
+    assert.equal(door.received.length, 0);
   });
 
   it("keeps an outcome settled meanwhile as it is", async () => {

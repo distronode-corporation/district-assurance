@@ -127,7 +127,8 @@ the host's code with an `amountSource`, and destinations come from the subject r
 
 Someone forges an access grant, replays one, or a retry opens a door for a caller who is no longer
 there. **Controls:** Gate refuses without a verification grant covering `entry.open` (level 2 or
-more), checked by the engine itself on the flow step and by Gate (tested). An access grant is
+more), checked by the engine itself on the flow step and by Gate, and once more right before the door
+is asked, so a call tainted or a grant expired while it was signed sends nothing (tested). An access grant is
 signed with ES256 under Gate's own key and carries its audience (the controller), its target, its
 level and a short validity, never past the verification grant (tested); a relay holds only the
 public key, so taking a relay over does not let anyone mint grants, and one changed byte fails
