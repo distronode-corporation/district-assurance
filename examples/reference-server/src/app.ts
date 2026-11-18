@@ -1,10 +1,14 @@
 // The reference server: a small node:http server around one Engine. It receives the Stripe
 // webhooks that finish a photo ID check and a payment, serves receipts and the receipt key set,
-// and answers 501 on the carrier webhooks that are not built yet. Not hardened for production;
-// ROADMAP.md, "Reference server", lists what that takes.
+// and answers 501 on the carrier webhooks that are not built yet. With `ui`, it also serves the
+// demo's browser UI and the routes that run the scripted demo one step at a time. Not hardened
+// for production; ROADMAP.md, "Reference server", lists what that takes.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { EngineError, parseStripeEvent, verifyStripeSignature, type Clock, type Engine } from "../../../src/index.ts";
+import type { DemoRuns, RunAnswer } from "./demo-runs.ts";
+import { isDemoFlow } from "./script.ts";
+import { UI_HEADERS, loadStaticFiles, type StaticFile } from "./static.ts";
 
 export interface ReferenceServerOptions {
   engine: Engine;
@@ -13,9 +17,23 @@ export interface ReferenceServerOptions {
   clock: Clock;
   /** Default 64 KiB. */
   maxBodyBytes?: number;
+  /** The demo's runs: serves the browser UI and the `/demo/*` routes. Off when absent. */
+  ui?: DemoRuns;
 }
 
 type Json = Record<string, unknown>;
+type Answer = [number, Json] | StaticFile;
+
+/** On every JSON answer: never sniffed as anything else, never framed, never cached. */
+const JSON_HEADERS = {
+  "content-type": "application/json; charset=utf-8",
+  "cache-control": "no-store",
+  "x-content-type-options": "nosniff",
+  "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+};
+
+/** The UI is for this machine only: a page on another name (DNS rebinding) gets nothing. */
+const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
 class HttpError extends Error {
   readonly status: number;
@@ -28,6 +46,7 @@ class HttpError extends Error {
 export function createReferenceServer(options: ReferenceServerOptions): Server {
   const processed = new Set<string>();
   const maxBody = options.maxBodyBytes ?? 64 * 1024;
+  const files = options.ui === undefined ? new Map<string, StaticFile>() : loadStaticFiles();
 
   async function stripeWebhook(req: IncomingMessage, route: "identity" | "payments"): Promise<[number, Json]> {
     const payload = await readBody(req, maxBody);
@@ -49,7 +68,45 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     return [200, { received: true, applied }];
   }
 
-  async function route(req: IncomingMessage): Promise<[number, Json]> {
+  async function demoRoute(req: IncomingMessage, runs: DemoRuns, path: string, method: string): Promise<Answer> {
+    const host = req.headers.host ?? "";
+    if (!LOCAL_HOSTS.has(hostname(host))) throw new HttpError(403, "host_not_allowed");
+    const file = files.get(path);
+    if (file !== undefined) {
+      if (method !== "GET") throw new HttpError(405, "method_not_allowed");
+      return file;
+    }
+    const answer = (a: RunAnswer): [number, Json] => (a.ok ? [200, a.view as unknown as Json] : [a.status, { error: a.error }]);
+    if (path === "/demo/flows") {
+      if (method !== "GET") throw new HttpError(405, "method_not_allowed");
+      return [200, { flows: runs.flows() }];
+    }
+    const run = /^\/demo\/runs(?:\/(run_[A-Za-z0-9-]{1,64})(\/next)?)?$/.exec(path);
+    if (run !== null) {
+      const [, runId, next] = run;
+      const post = runId === undefined || next !== undefined;
+      if (method !== (post ? "POST" : "GET")) throw new HttpError(405, "method_not_allowed");
+      if (!post) return answer(await runs.view(runId as string));
+      // A page on another origin can send a simple POST without asking; it cannot send JSON
+      // without a preflight this server never answers, nor forge its Origin.
+      if (!(req.headers["content-type"] ?? "").startsWith("application/json")) throw new HttpError(415, "json_required");
+      const origin = req.headers.origin;
+      if (origin !== undefined && origin !== `http://${host}`) throw new HttpError(403, "cross_origin");
+      const body = await readBody(req, maxBody);
+      if (runId !== undefined) return answer(await runs.step(runId));
+      let flow: unknown;
+      try {
+        flow = (JSON.parse(body) as { flow?: unknown } | null)?.flow;
+      } catch {
+        throw new HttpError(400, "malformed_json");
+      }
+      if (!isDemoFlow(flow)) throw new HttpError(400, "unknown_flow");
+      return [201, (await runs.start(flow)) as unknown as Json];
+    }
+    return [404, { error: "not_found" }];
+  }
+
+  async function route(req: IncomingMessage): Promise<Answer> {
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = url.pathname;
     const method = req.method ?? "GET";
@@ -84,17 +141,32 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
         throw error;
       }
     }
+    if (options.ui !== undefined && (files.has(path) || path.startsWith("/demo/"))) return demoRoute(req, options.ui, path, method);
     return [404, { error: "not_found" }];
   }
 
   return createServer((req: IncomingMessage, res: ServerResponse) => {
     route(req)
-      .catch((error: unknown): [number, Json] => (error instanceof HttpError ? [error.status, { error: error.message }] : [500, { error: "internal" }]))
-      .then(([status, body]) => {
-        res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-        res.end(JSON.stringify(body));
+      .catch((error: unknown): Answer => (error instanceof HttpError ? [error.status, { error: error.message }] : [500, { error: "internal" }]))
+      .then((answer) => {
+        if (Array.isArray(answer)) {
+          res.writeHead(answer[0], JSON_HEADERS);
+          res.end(JSON.stringify(answer[1]));
+          return;
+        }
+        res.writeHead(200, { ...UI_HEADERS, "content-type": answer.contentType });
+        res.end(answer.body);
       });
   });
+}
+
+/** The name part of a Host header, lower case; empty when it does not parse. */
+function hostname(host: string): string {
+  try {
+    return new URL(`http://${host}`).hostname;
+  } catch {
+    return "";
+  }
 }
 
 function readBody(req: IncomingMessage, max: number): Promise<string> {

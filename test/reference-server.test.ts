@@ -93,7 +93,7 @@ describe("reference server", () => {
 describe("demo and Stripe adapters", () => {
   it("runs the owner-command and deposit flows end to end", async () => {
     const result = await runDemo(false);
-    assert.equal(result.ownerAuthorized, true);
+    assert.equal(result.checksOk, true);
     assert.equal(result.ownerReceipt, null, "owner-command has no receipt step");
     assert.equal(result.tamperedFails, true);
     assert.equal(result.chainOk, true);
