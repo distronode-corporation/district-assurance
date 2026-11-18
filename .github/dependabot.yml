@@ -1,0 +1,44 @@
+version: 2
+
+# Every `uses:` in .github/workflows is pinned to a full commit SHA with a `# vX.Y.Z` comment.
+# The `github-actions` entry turns each pin into a pull request when a release lands.
+#
+# `cooldown` holds a version update back until the release is 14 days old, so a compromised
+# publish that is yanked within days never reaches a pull request here. It does not delay
+# security updates.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor:
+        update-types: [minor, patch]
+
+  # Exact pins stay exact: "1.2.3" becomes "1.2.4", never a range. There are no runtime
+  # dependencies; every entry here is a development tool.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    versioning-strategy: increase
+    ignore:
+      # @types/node follows the oldest Node the package supports (engines: >=24.2). A new
+      # major comes with a deliberate engines change, not from a bot.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    groups:
+      # TypeScript writes the published dist/, so a person reads every update to it.
+      npm-build-tools:
+        patterns: [typescript]
+        update-types: [minor, patch]
+      npm-dev-minor:
+        dependency-type: development
+        update-types: [minor, patch]
+        exclude-patterns: [typescript]

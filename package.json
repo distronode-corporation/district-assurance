@@ -1,0 +1,68 @@
+{
+  "name": "district-assurance",
+  "version": "0.0.0",
+  "private": true,
+  "description": "District Assurance: a TypeScript engine for trusted phone calls (verify the caller, file what they confirm, take payment by link, prove each step) and a small reference server. Pre-alpha.",
+  "keywords": [
+    "voice",
+    "telephony",
+    "identity-verification",
+    "audit-log",
+    "redaction",
+    "stripe",
+    "call-receipts"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/distronode-corporation/district-assurance.git"
+  },
+  "license": "Apache-2.0",
+  "author": "Distronode Corporation",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "SECURITY-MODEL.md",
+    "SECURITY.md",
+    "SPEC.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=24.2"
+  },
+  "scripts": {
+    "build": "node scripts/clean.mjs && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "oxlint --deny-warnings",
+    "test": "node --test --throw-deprecation --test-reporter=spec \"test/**/*.test.ts\"",
+    "test:coverage": "c8 node --test --throw-deprecation --test-reporter=spec \"test/**/*.test.ts\"",
+    "demo": "node examples/reference-server/src/demo.ts",
+    "serve": "node examples/reference-server/src/main.ts"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "c8": "12.0.0",
+    "oxlint": "1.90.0",
+    "typescript": "7.0.2"
+  },
+  "overrides": {
+    "test-exclude": {
+      "glob": "14.0.3",
+      "minimatch": "11.0.3"
+    }
+  }
+}
