@@ -264,7 +264,9 @@ too.
 escape hatch for any door system), Seam after its pricing and Canadian data handling are
 checked, and a lost unlock never retried, because a retry can open a door twice for a caller who
 is no longer there. GAT-2's original text asked for an HMAC header and one retry; both are
-superseded by this record. **Revisit** if a relay needs to refuse junk before parsing (an
+superseded by this record. GAT-1's original `revoke` and `gate.revoked` are dropped by design: a
+momentary unlock that lives at most 15 minutes has nothing to revoke once sent, and revoking an
+issued code is part of one-time codes (GAT-3). **Revisit** if a relay needs to refuse junk before parsing (an
 optional HMAC header could be added without changing the grant).
 
 ## ADR-23. Two payment modes, a link life the engine enforces, instant methods only

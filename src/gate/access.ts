@@ -107,19 +107,25 @@ export function verifyAccessGrant(
 }
 
 /**
- * The grant ids a relay has accepted, each kept until its grant expires, so a replayed grant is
- * refused. In memory: a relay that restarts must keep refusing for 15 minutes (or keep them on disk).
+ * The grant ids a relay has accepted, each kept until the verifier would refuse its grant as
+ * expired (expiry plus the clock skew), so a replayed grant is refused. In memory: a relay that restarts must keep refusing for 15 minutes (or keep them on disk).
  */
 export class SeenGrants {
   readonly #until = new Map<string, number>();
+  readonly #skewMs: number;
+
+  /** `clockSkewSeconds` must be at least the verifier's (default 30, the verifier's default too). */
+  constructor(options: { clockSkewSeconds?: number } = {}) {
+    this.#skewMs = (options.clockSkewSeconds ?? 30) * 1000;
+  }
 
   /** True the first time a grant id is offered while it is valid; false for a replay. */
   accept(body: AccessGrantBody, now: Date): boolean {
     const at = now.getTime();
     for (const [id, until] of this.#until) if (until <= at) this.#until.delete(id);
     if (this.#until.has(body.grantId)) return false;
-    // Kept a little past expiry, for the clock skew a verifier allows.
-    this.#until.set(body.grantId, Date.parse(body.expiresAt) + 60_000);
+    // Kept until the verifier refuses the grant as expired: its expiry plus the same skew.
+    this.#until.set(body.grantId, Date.parse(body.expiresAt) + this.#skewMs);
     return true;
   }
 }

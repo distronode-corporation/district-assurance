@@ -7,8 +7,8 @@ import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { runDemo } from "../examples/reference-server/src/demo.ts";
 import { createDoorRelay } from "../examples/reference-server/src/door-relay.ts";
 import { StripeCheckoutLinks, StripeIdentityProvider } from "../examples/reference-server/src/stripe-adapters.ts";
-import { NotImplementedError, signStripePayload, type Engine } from "../src/index.ts";
-import { createTestEngine, type TestEngine } from "../src/testing/index.ts";
+import { NotImplementedError, canonicalJson, signDocument, signStripePayload, type Engine } from "../src/index.ts";
+import { createTestEngine, generateTestSigner, type TestEngine } from "../src/testing/index.ts";
 
 const SECRET = "whsec_test_not_a_secret";
 
@@ -106,6 +106,29 @@ describe("example door relay", () => {
       assert.deepEqual([junk.status, await junk.json()], [400, { error: "malformed" }]);
       assert.equal((await fetch(`${url}/other`)).status, 404);
       assert.deepEqual(opened, []);
+    } finally {
+      await new Promise<void>((resolve) => relay.close(() => resolve()));
+    }
+  });
+
+  it("answers 502 when the door callback throws, without stopping the relay", async () => {
+    const signer = generateTestSigner("g1");
+    const body = { v: 1, kind: "access", grantId: "acc_1", workspaceId: "w", audience: "lobby", target: "door-1", action: "unlock", scope: "entry.open", level: 2, issuedAt: "1970-01-01T00:00:00.000Z", expiresAt: "1970-01-01T00:01:00.000Z" } as const;
+    const grant = await signDocument(signer, body);
+    const relay = createDoorRelay({
+      audience: "lobby",
+      keys: [signer.publicJwk()],
+      clock: { now: () => new Date(0) },
+      open: () => {
+        throw new Error("relay board unplugged");
+      },
+    });
+    await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(relay.address() as AddressInfo).port}/unlock`;
+    try {
+      const res = await fetch(url, { method: "POST", body: canonicalJson(grant) });
+      assert.deepEqual([res.status, await res.json()], [502, { error: "door" }]);
+      assert.equal((await fetch(url, { method: "POST", body: canonicalJson(grant) })).status, 409, "still running, and the grant stays seen");
     } finally {
       await new Promise<void>((resolve) => relay.close(() => resolve()));
     }

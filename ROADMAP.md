@@ -202,7 +202,7 @@ The second pull request of the modular core built the first part (GAT-1, PAY-7, 
 | Link life and instant methods | `src/pay/paylink.ts`, `src/pay/payment.ts` | 5 to 60 minutes (default 15) from the text, expired by the engine at its deadline; only card, Apple Pay, Google Pay and Link (`test/paylink-modes.test.ts`) |
 | Demo | `examples/reference-server/src/demo.ts` | a deposit in each mode and a Gate unlock through the relay (`npm run demo`) |
 
-What is still open: one-time access codes, web sign-in step-up, the Seam adapter and direct vendor adapters.
+What is still open: one-time access codes, web sign-in step-up, the Seam adapter and direct vendor adapters. Grant revocation is dropped by design (ADR-22): a momentary unlock has nothing to revoke once sent; revoking a code is part of GAT-3.
 
 **Proven by:** Unit tests at 100%; each vendor adapter against a local fake HTTP server, and once by hand against the vendor's sandbox.
 

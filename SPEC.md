@@ -401,8 +401,9 @@ and be absent in platform mode, or it is ignored (`payment.outcome_ignored`). Re
 disputes are not handled by the engine (SECURITY-MODEL.md, open questions).
 
 **Link life.** A link lives `linkLifeMinutes` (step, else settings, else 15; 5 to 60) from the
-moment it was texted: `expiresAt`. The provider is asked for the same time and may keep a longer
-minimum of its own (Stripe Checkout: 30 minutes). `expirePaymentLinks(callId)`, which the host
+moment it was texted, but never past what the provider was asked for: `expiresAt`. The provider is
+asked for twice the link life from the request (so a text resumed late still gets its full life)
+and may keep a longer minimum of its own (Stripe Checkout: 30 minutes). `expirePaymentLinks(callId)`, which the host
 calls at `expiresAt` or later, asks the provider to expire each texted link still open past its
 deadline (`expireLink`): on `expired` the request settles `expired` (and its flow step fails); on
 `not_open` it is left for the provider's webhook, which may still say paid. A link that was never
@@ -468,7 +469,8 @@ the lifetime (pass no input); outside one the host's code passes `{target, lifet
    failure settles the grant `failed` (nothing sent) and throws.
    Then, in a write of its own, the grant is checked once more: if the call is no longer
    authorized for `entry.open` (tainted, its grant expired) or the access grant expired while it
-   was signed, it is settled `failed` (`access.failed`, reason `not_authorized` or `expired`),
+   was signed, it is settled `failed` (`access.failed`, with `digest`, `kid` and the reason
+   `not_authorized` or `expired`),
    nothing is sent, and `scope_denied` is thrown.
 3. **Send once** to the target's controller: `unlock({grant, target, idempotencyKey})`, the key
    being `[workspaceId, callId, grantId, "unlock"]`. Never retried.
@@ -477,6 +479,8 @@ the lifetime (pass no input); outside one the host's code passes `{target, lifet
    or `unknown` when the controller's call threw or timed out. A failure to write the answer is
    thrown as it is, never turned into `unknown`; the reservation settles once its grant expires. Ledger: `access.delivered`, `access.refused`,
    `access.unknown` or `access.failed`, each with `grantId` and the grant's `digest`
+   (also kept on the reservation before the send, so a stale reservation settled as `unknown`
+   still names it)
    (SHA-256 of its signed bytes) and `kid`, never the grant or its signature. A fresh request
    after `unknown` is a new grant.
 
@@ -495,8 +499,9 @@ the lifetime (pass no input); outside one the host's code passes `{target, lifet
 `verifyAccessGrant(grant, keys, {audience, now, clockSkewSeconds?})` returns `{ok: true, body}` or
 `{ok: false, reason}`: `malformed` (not this shape), `signature` (unknown `kid`, another algorithm,
 any change), `audience`, `not_yet_valid` and `expired` (with 30 seconds of skew by default), and
-`lifetime` (longer than 900 seconds, or ending before it starts). `SeenGrants.accept(body, now)`
-is true once per grant id while it is valid. `gate.keys()` is the public key set.
+`lifetime` (longer than 900 seconds, or ending before it starts). `new SeenGrants({ clockSkewSeconds })` (default
+30, at least the verifier's): `accept(body, now)` is true once per grant id, and keeps the id until
+the verifier would refuse the grant as expired. `gate.keys()` is the public key set.
 
 **The relay contract, version 1** (`webhookRelay({url, timeoutMs?})`): `POST <url>` with
 `content-type: application/json`, `idempotency-key: <the key above>` and the signed grant as
@@ -507,5 +512,6 @@ when it did not act, optionally `{"error": "<code>"}` (`replay`, `signature`, ..
 including no answer, is `unknown`. A relay checks the grant with `verifyAccessGrant` against
 `gate.keys()` and its own audience, and refuses a grant id it has seen.
 
-Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS
+A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);
+revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS
 (GAT-4), a Seam adapter (GAT-5), direct vendor adapters (GAT-6).

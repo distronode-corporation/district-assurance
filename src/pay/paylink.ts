@@ -267,7 +267,7 @@ export async function requestPayment(
     mode: request.mode,
     ...(request.connectedAccountId === null ? {} : { connectedAccountId: request.connectedAccountId }),
     paymentMethods: request.paymentMethods,
-    expiresAt: deadline(rt.now(), request.linkLifeMinutes),
+    expiresAt: providerExpiry(request),
     // The mode is part of the key, so a request resumed under another mode can never replay the first.
     idempotencyKey: rt.idempotencyKey(callId, request.paymentId, "link", request.mode),
   });
@@ -286,7 +286,9 @@ export async function requestPayment(
     // Two resumes of one request can both get here: the first records the delivery, once.
     if (sent.textedAt !== null) return { paymentId: request.paymentId, status: sent.status, expiresAt: sent.expiresAt };
     sent.textedAt = rt.now();
-    sent.expiresAt = deadline(sent.textedAt, sent.linkLifeMinutes);
+    // The link life counts from the text, but never past what the provider was asked for when the
+    // link was created, so the engine never promises a deadline the link itself would not reach.
+    sent.expiresAt = new Date(Math.min(Date.parse(deadline(sent.textedAt, sent.linkLifeMinutes)), Date.parse(providerExpiry(sent)))).toISOString();
     draft.emit("payment.link_sent", "code", {
       paymentId: request.paymentId,
       linkId: link.linkId,
@@ -298,6 +300,15 @@ export async function requestPayment(
     });
     return { paymentId: request.paymentId, status: sent.status, expiresAt: sent.expiresAt };
   });
+}
+
+/**
+ * What the provider is asked for: twice the link life from the request, so a text that goes out
+ * late (a resumed request) still gets its full life after it is sent. The engine's own deadline,
+ * the text plus the life, is what closes the link.
+ */
+function providerExpiry(request: PaymentRequest): string {
+  return deadline(request.requestedAt, 2 * request.linkLifeMinutes);
 }
 
 function deadline(from: string, minutes: number): string {

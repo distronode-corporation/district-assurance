@@ -110,7 +110,7 @@ describe("paylink modes: running", () => {
     const result = await t.engine.requestPayment(callId);
     assert.deepEqual(result, { paymentId: "pay_1", status: "open", expiresAt: "2026-01-01T00:16:00.000Z" });
     assert.deepEqual(t.payments.created, [
-      { paymentId: "pay_1", amountMinor: 5000, currency: "cad", mode: "platform", paymentMethods: ["card", "apple_pay", "google_pay", "link"], expiresAt: "2026-01-01T00:16:00.000Z", linkId: "cs_fake_1" },
+      { paymentId: "pay_1", amountMinor: 5000, currency: "cad", mode: "platform", paymentMethods: ["card", "apple_pay", "google_pay", "link"], expiresAt: "2026-01-01T00:31:00.000Z", linkId: "cs_fake_1" },
     ]);
     const sent = (await t.ledger.list()).find((e) => e.event === "payment.link_sent")!;
     assert.deepEqual(sent.detail, { paymentId: "pay_1", linkId: "cs_fake_1", amountMinor: 5000, currency: "cad", amountSource: "price_list", mode: "platform", expiresAt: "2026-01-01T00:16:00.000Z" });
@@ -134,7 +134,7 @@ describe("paylink modes: running", () => {
       mode: "connect",
       connectedAccountId: ACCT,
       paymentMethods: ["card"],
-      expiresAt: "2026-01-01T00:05:00.000Z",
+      expiresAt: "2026-01-01T00:10:00.000Z",
       linkId: "cs_fake_1",
     });
     assert.deepEqual(JSON.parse(keys[0]!), ["ws_test", callId, "pay_1", "link", "connect"], "the mode is part of the key");
@@ -258,6 +258,31 @@ describe("paylink: the engine's own deadline", () => {
     assert.deepEqual(await t.engine.expirePaymentLinks(callId), { expired: [] });
     assert.equal(t.payments.expired.length, 0, "the provider was never asked");
     assert.equal((await t.engine.state(callId)).phase, "paying", "still open, to resume");
+  });
+
+  it("gives a text resumed late its full life, never past what the provider was asked for", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const send = t.messages.sendText.bind(t.messages);
+    t.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
+    assert.equal(t.payments.created[0]!.expiresAt, "2026-01-01T00:30:00.000Z", "twice the life, from the request");
+    t.clock.advance(14 * 60_000);
+    t.messages.sendText = send;
+    assert.equal((await t.engine.requestPayment(callId, request)).expiresAt, "2026-01-01T00:29:00.000Z", "15 minutes after the text");
+
+    const late = setup({ config: testConfig((c) => (c.modules.paylink = { settings: { linkLifeMinutes: 5 } })) });
+    const lateCall = await verifiedCall(late);
+    const lateSend = late.messages.sendText.bind(late.messages);
+    late.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(late.engine.requestPayment(lateCall, request), /carrier down/);
+    late.clock.advance(7 * 60_000);
+    late.messages.sendText = lateSend;
+    assert.equal((await late.engine.requestPayment(lateCall, request)).expiresAt, "2026-01-01T00:10:00.000Z", "what is left of the provider's link, not 00:12");
   });
 
   it("refuses on a call that started with paylink off", async () => {

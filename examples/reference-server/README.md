@@ -31,6 +31,7 @@ npm run serve   # the server on 127.0.0.1:8787 until stopped
    ```sh
    STRIPE_IDENTITY_WEBHOOK_SECRET=whsec_... STRIPE_PAYMENTS_WEBHOOK_SECRET=whsec_... STRIPE_CONNECT_WEBHOOK_SECRET=whsec_... npm run serve
    stripe listen --forward-to localhost:8787/webhooks/stripe/payments
+   stripe listen --forward-to localhost:8787/webhooks/stripe/identity   # in a second terminal, its own secret
    ```
 
 3. Trigger a test event (`stripe trigger checkout.session.completed`). The server checks the

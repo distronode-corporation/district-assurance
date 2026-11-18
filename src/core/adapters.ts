@@ -55,9 +55,10 @@ export interface PaymentLinkRequest {
   /** What the page may offer: only methods that settle at once. How a provider names them is the adapter's. */
   paymentMethods: readonly InstantPaymentMethod[];
   /**
-   * When the engine plans to expire the link (ISO 8601). A provider whose shortest link life is
-   * longer (Stripe Checkout: 30 minutes) sets its own minimum; the engine calls `expireLink` at
-   * its own deadline, which counts from when the link was texted.
+   * The latest the link may live (ISO 8601): twice the flow's link life from the request, so a
+   * text sent late still gets its full life. The engine closes it earlier, at its own deadline (the
+   * text plus the link life), by calling `expireLink`. A provider whose shortest link life is longer
+   * (Stripe Checkout: 30 minutes) sets its own minimum.
    */
   expiresAt: string;
   idempotencyKey: string;

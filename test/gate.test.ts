@@ -168,6 +168,7 @@ describe("gate: grants", () => {
       confirmed: true,
       providerRef: "door_fake_1",
       digest,
+      kid: "gate-key-1",
     });
   });
 
@@ -299,6 +300,8 @@ describe("gate: grants", () => {
     t.clock.advance(60_000);
     assert.equal((await t.gate.grantAccess(t.engine, callId, { target: "front-door" })).status, "delivered");
     assert.deepEqual((await slice(t, callId)).grants.map((g) => g.status), ["unknown", "delivered"]);
+    const stale = (await gateEvents(t))[1]![1] as Record<string, unknown>;
+    assert.deepEqual(Object.keys(stale).sort(), ["digest", "grantId", "kid", "reason"], "the grant that never got its answer is still named");
     assert.deepEqual((await gateEvents(t)).map(([e, d]) => [e, (d as { reason?: string }).reason ?? null]), [
       ["access.issued", null],
       ["access.unknown", "no_answer_recorded"],
@@ -324,6 +327,23 @@ describe("gate: grants", () => {
     assert.equal((await slice(t, callId)).grants[0]!.status, "unknown", "settled in its own write, though the request was refused");
     assert.equal(t.door.received.length, 1, "no second grant was sent");
     assert.equal((await t.engine.flowPosition(callId))!.status, "failed");
+  });
+
+  it("settles a reservation that stopped before it was signed as unknown, naming no grant it never had", async () => {
+    const t = gateSetup();
+    const callId = await verified(t, null);
+    const stopped: GateHost = {
+      workspaceId: t.engine.workspaceId,
+      updateModule: (c, n, fn) => t.engine.updateModule(c, n, fn),
+      moduleState: (c, n) => t.engine.moduleState(c, n),
+      recordModuleOutcome: () => Promise.reject(new Error("the process stopped")),
+    };
+    await assert.rejects(t.gate.grantAccess(stopped, callId, { target: "front-door" }), /the process stopped/);
+    assert.equal(t.door.received.length, 0, "stopped before the send");
+    t.clock.advance(60_000);
+    assert.equal((await t.gate.grantAccess(t.engine, callId, { target: "front-door" })).status, "delivered");
+    const stale = (await gateEvents(t))[1]!;
+    assert.deepEqual(stale, ["access.unknown", { grantId: "acc_1", reason: "no_answer_recorded" }]);
   });
 
   it("records the answer even if the grant expired or the call ended while the door answered", async () => {
@@ -366,6 +386,7 @@ describe("gate: grants", () => {
     assert.deepEqual((await slice(t, tainted)).grants.map((g) => g.status), ["failed"]);
     const reasons = (await gateEvents(t)).filter(([e]) => e === "access.failed").map(([, d]) => (d as { reason: string }).reason);
     assert.deepEqual(reasons, ["not_authorized", "expired"]);
+    assert.equal(((await gateEvents(t)).find(([e]) => e === "access.failed")![1] as { kid: string }).kid, "gate-key-1");
     // Settled by another process while signing (it saw the grant expire): left as that process left it.
     const raced = await verified(t, null);
     during = async () => {
@@ -395,8 +416,9 @@ describe("gate: grants", () => {
       }
       return unlock(input);
     };
-    await t.gate.grantAccess(t.engine, callId, { target: "front-door" });
+    const firstResult = await t.gate.grantAccess(t.engine, callId, { target: "front-door" });
     assert.deepEqual((await slice(t, callId)).grants.map((g) => g.status), ["unknown", "delivered"]);
+    assert.deepEqual(firstResult, { grantId: "acc_1", status: "unknown", confirmed: false }, "what the call holds, not what the door said");
   });
 
   it("keeps the targets a call started with when the config changes", async () => {
@@ -475,6 +497,17 @@ describe("access grants: the verifier and replay", () => {
     const later = new Date("2026-01-01T00:02:01.000Z");
     assert.equal(seen.accept({ ...body, grantId: "acc_2", expiresAt: "2026-01-01T00:03:00.000Z" }, later), true, "and forgets the expired one");
     assert.equal(seen.accept(first.body, later), true, "forgotten after expiry plus skew, when the verifier refuses it anyway");
+  });
+
+  it("keeps a grant id as long as a verifier with a wider skew still accepts the grant", async () => {
+    const seen = new SeenGrants({ clockSkewSeconds: 120 });
+    const grant = await sign();
+    assert.equal(seen.accept(grant.body, now), true);
+    const late = new Date("2026-01-01T00:02:59.000Z");
+    assert.equal(check(grant, late, { clockSkewSeconds: 120 }).ok, true, "still valid to this verifier");
+    assert.equal(seen.accept(grant.body, late), false, "so still refused as a replay");
+    const gone = new Date("2026-01-01T00:03:00.000Z");
+    assert.equal(check(grant, gone, { clockSkewSeconds: 120 }).ok, false);
   });
 
   it("is the GateModule class gateModule builds", () => {

@@ -46,7 +46,10 @@ export function createDoorRelay(options: DoorRelayOptions): Server {
       const check = verifyAccessGrant(grant, options.keys, { audience: options.audience, now });
       if (!check.ok) return void answer(401, { error: check.reason });
       if (!seen.accept(check.body, now)) return void answer(409, { error: "replay" });
-      options.open(check.body.target, check.body).then(
+      // A door callback that throws before it returns a promise is a door failure too, never a crash.
+      Promise.resolve()
+        .then(() => options.open(check.body.target, check.body))
+        .then(
         () => answer(200, { state: "confirmed", ref: `${options.audience}:${check.body.grantId}` }),
         () => answer(502, { error: "door" }),
       );
