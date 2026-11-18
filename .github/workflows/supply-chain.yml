@@ -3,10 +3,9 @@ name: Supply chain
 # The dependency trees of this repository, checked on every pull request and push to main,
 # and weekly through audit.yml (which calls this file):
 #   dependency-review  (pull requests only) what a pull request adds to a dependency tree.
-#   npm-audit          both lockfiles against GitHub's advisory database, through npm.
-#   osv-scanner        both lockfiles against the OSV database.
-# Two lockfiles: the package's own, and the example server's (examples/basic-server), which
-# is never published but is what people copy.
+#   npm-audit          the lockfile against GitHub's advisory database, through npm.
+#   osv-scanner        the lockfile against the OSV database.
+# One lockfile: the reference server in examples/ runs from the package's own tree.
 #
 # The workflows themselves are checked by zizmor in public-hygiene.yml.
 on:
@@ -52,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        directory: [., examples/basic-server]
+        directory: [.]
     steps:
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
