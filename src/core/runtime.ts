@@ -96,5 +96,7 @@ export interface EngineRuntime {
   /** Whether the call's grant covers a scope now. */
   authorized(record: CallRecord, scope: string): boolean;
   bindRef(ref: string, callId: string): Promise<void>;
+  /** An idempotency key for a provider call, unique across workspaces and stable across retries. */
+  idempotencyKey(callId: string, ...parts: string[]): string;
   resolveRef(ref: string): Promise<string | null>;
 }

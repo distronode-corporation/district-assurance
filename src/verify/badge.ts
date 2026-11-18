@@ -395,7 +395,7 @@ export async function startPhotoId(rt: EngineRuntime, callId: string): Promise<{
   });
   // Reserved or sent and not delivered: a retry resumes with the same keys, and the provider
   // returns the same check, so a call never has two links.
-  const check = await rt.adapter("identity").createDocumentCheck({ callId, idempotencyKey: `${callId}:identity` });
+  const check = await rt.adapter("identity").createDocumentCheck({ callId, idempotencyKey: rt.idempotencyKey(callId, "identity") });
   const enrolled = await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
     if (s.identityLink === "void") return false;
@@ -408,7 +408,7 @@ export async function startPhotoId(rt: EngineRuntime, callId: string): Promise<{
   // Tainted while the check was created: the link would never count, so it is never sent.
   if (!enrolled) throw new EngineError("precondition_failed", "untrusted content entered the call while the photo ID check was created");
   await rt.bindRef(`identity:${check.sessionId}`, callId);
-  await rt.adapter("messages").sendText({ to: phone, body: identityText(locale, check.url), purpose: "identity_link", idempotencyKey: `${callId}:identity:text` });
+  await rt.adapter("messages").sendText({ to: phone, body: identityText(locale, check.url), purpose: "identity_link", idempotencyKey: rt.idempotencyKey(callId, "identity", "text") });
   await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
     if (s.identityLink === "sent") s.identityLink = "texted";

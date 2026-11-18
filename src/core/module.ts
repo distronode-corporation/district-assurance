@@ -84,6 +84,13 @@ export interface AssuranceModule {
   enterStep(step: FlowStep, slice: JsonValue): JsonValue;
   /** Where the current step stands. Pure: called after every change to the call. */
   stepStatus(step: FlowStep, view: StepView): StepStatus;
+  /**
+   * Why a step cannot run on this call, given what the call kept when it started (a form or a
+   * wording it does not have), or null. Checked when a flow is attached to a running call.
+   */
+  cannotRunStep?(step: FlowStep, slice: JsonValue): string | null;
+  /** Why the call cannot end now (work in progress that would be lost), or null. */
+  blocksEnd?(slice: JsonValue): string | null;
   /** Untrusted text entered the call: drop anything that relied on trust. Returns the new slice. */
   onUntrusted?(slice: JsonValue): JsonValue;
   /** What this module puts in the call's receipt (built-in modules only: `verification`, `records`, `payments`). */

@@ -270,9 +270,16 @@ export class Engine {
       if (record.flow !== null) throw new EngineError("precondition_failed", "this call already ran a flow");
       if (record.state.phase !== "open") throw new EngineError("invalid_transition", `a flow starts on an open call, not while ${record.state.phase}`);
       const steps = structuredClone(definition.steps);
+      // Checked inside the write, against the registry and the call as they are now: a module can
+      // be removed, or the call can lack what a newer config's step needs, while this runs.
       for (const step of steps) {
-        const owner = this.registry.stepOwner(step.type)!.manifest.name;
-        if (record.modules[owner] === undefined) throw new EngineError("module_disabled", `${owner} was off when this call started`);
+        const module = this.registry.stepOwner(step.type);
+        if (module === undefined) throw new EngineError("module_disabled", `no installed module provides ${step.type}`);
+        const owner = module.manifest.name;
+        const slice = record.modules[owner];
+        if (slice === undefined) throw new EngineError("module_disabled", `${owner} was off when this call started`);
+        const reason = module.cannotRunStep?.(step, slice) ?? null;
+        if (reason !== null) throw new EngineError("precondition_failed", `${step.type} cannot run on this call: ${reason}`);
       }
       const first = steps[0]!;
       const firstOwner = this.registry.stepOwner(first.type)!;
@@ -372,6 +379,11 @@ export class Engine {
     const before = await this.#read(callId);
     const pending = before.state.phase === "ended" && trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null;
     const record = pending ? before : await this.#update(callId, (draft) => {
+      for (const module of this.registry.list()) {
+        const slice = draft.record.modules[module.manifest.name];
+        const reason = slice === undefined ? null : (module.blocksEnd?.(slice) ?? null);
+        if (reason !== null) throw new EngineError("precondition_failed", `the call cannot end yet: ${reason}`);
+      }
       draft.apply({ type: "call_ended", at: this.#now() });
       const flow = draft.record.flow;
       if (flow !== null && flow.status === "running") {
@@ -464,6 +476,7 @@ export class Engine {
         await this.#sessions.bindRef(this.workspaceId, ref, callId);
       },
       resolveRef: (ref) => this.#sessions.resolveRef(this.workspaceId, ref),
+      idempotencyKey: (callId, ...parts) => JSON.stringify([this.workspaceId, callId, ...parts]),
     };
   }
 
@@ -547,9 +560,11 @@ export class Engine {
         if (!canApply(record.state, event)) throw new EngineError("invalid_transition", `${event.type} is not allowed while ${record.state.phase}`);
       },
       emit: (name, actor, detail) => {
-        // Checked here, inside the step, so an entry the ledger would refuse is never saved to be appended later.
-        if (detailCarriesCardNumber(detail)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
-        events.push({ name, actor, at: this.#now(), detail });
+        // A copy, checked here, inside the step, so an entry the ledger would refuse is never saved
+        // to be appended later, and a caller changing its object afterwards changes nothing.
+        const copy = structuredClone(detail);
+        if (detailCarriesCardNumber(copy)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
+        events.push({ name, actor, at: this.#now(), detail: copy });
       },
       step: () => currentStep(record),
     };

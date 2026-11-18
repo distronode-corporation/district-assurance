@@ -180,7 +180,7 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
     amountMinor: request.amountMinor,
     currency: request.currency,
     description: request.description,
-    idempotencyKey: `${callId}:${request.paymentId}`,
+    idempotencyKey: rt.idempotencyKey(callId, request.paymentId, "link"),
   });
   await rt.update(callId, (draft) => {
     find(draft, request.paymentId).linkId = link.linkId;
@@ -190,10 +190,12 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
     to: reserved.phone,
     body: paymentText(reserved.locale, link.url, request.amountMinor, request.currency),
     purpose: "payment_link",
-    idempotencyKey: `${callId}:${request.paymentId}:text`,
+    idempotencyKey: rt.idempotencyKey(callId, request.paymentId, "text"),
   });
   return rt.update(callId, (draft) => {
     const sent = find(draft, request.paymentId);
+    // Two resumes of one request can both get here: the first records the delivery, once.
+    if (sent.textedAt !== null) return { paymentId: request.paymentId, status: sent.status };
     sent.textedAt = rt.now();
     draft.emit("payment.link_sent", "code", {
       paymentId: request.paymentId,

@@ -106,6 +106,11 @@ export const traceModule: AssuranceModule = {
     return (s as unknown as TraceSlice).consents.length;
   },
 
+  cannotRunStep(step: FlowStep, s: JsonValue): string | null {
+    if (step.type === "trace.receipt") return null;
+    return (s as unknown as TraceSlice).wordings.some((w) => w.purpose === step.purpose) ? null : `the call has no wording for ${String(step.purpose)}`;
+  },
+
   stepStatus(step: FlowStep, view: StepView): StepStatus {
     if (step.type === "trace.receipt") return "complete";
     const answer = (view.slice as unknown as TraceSlice).consents.slice(view.mark as number).find((c) => c.purpose === step.purpose);
@@ -169,10 +174,12 @@ export async function endedHead(rt: EngineRuntime, record: CallRecord, head: () 
   const kept = (record.modules[TRACE] as unknown as TraceSlice).endedHead;
   if (kept !== null) return kept;
   const taken = await head();
-  await rt.update(record.state.callId, (draft) => {
-    draft.slice<TraceSlice>(TRACE).endedHead = taken;
+  // Two retries can both take a head: the first one kept is the one every receipt uses.
+  return rt.update(record.state.callId, (draft) => {
+    const s = draft.slice<TraceSlice>(TRACE);
+    s.endedHead ??= taken;
+    return s.endedHead;
   });
-  return taken;
 }
 
 /** Signs the receipt of an ended call. `parts` are what the other modules contribute. */
@@ -204,9 +211,13 @@ export async function issueReceipt(
   };
   const signer = rt.adapter("signer");
   const receipt = await signReceipt(signer, body);
-  await rt.update(callId, (draft) => {
-    draft.slice<TraceSlice>(TRACE).receipt = receipt;
-    draft.emit("receipt.issued", "code", { receiptId: body.receiptId, digest: receiptDigest(body), kid: receipt.kid });
+  // Two retries can both sign: the first stored is the call's receipt, returned to both.
+  return rt.update(callId, (draft) => {
+    const s = draft.slice<TraceSlice>(TRACE);
+    if (s.receipt === null) {
+      s.receipt = receipt;
+      draft.emit("receipt.issued", "code", { receiptId: body.receiptId, digest: receiptDigest(body), kid: receipt.kid });
+    }
+    return structuredClone(s.receipt);
   });
-  return structuredClone(receipt);
 }

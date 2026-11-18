@@ -351,7 +351,11 @@ config change mid-intake never changes what is filed; a call also keeps the form
 wordings) in force when it started. A draft being filed refuses changes. A filing that failed
 after its reservation (the store refused it, or the last write was lost) stays reserved and
 resumes with the same record on the next `confirmIntake`, so `RecordStore.putIntakeRecord` must be
-idempotent by `recordId`; two confirmations at once file one record.
+idempotent by `recordId`; two confirmations at once file one record. A confirmation retried after its record was
+filed (its ledger entry failed) returns the same record. `endCall` is refused while a record is
+being filed. Provider idempotency keys are JSON tuples of the workspace, the call and the
+operation, so workspaces sharing an adapter never share a key. A flow attached to a running call
+is refused when a step needs a form or a wording the call did not keep.
 
 ## 14. Payments
 

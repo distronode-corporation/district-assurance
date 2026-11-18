@@ -27,6 +27,8 @@ export interface DossierSlice {
   /** The open draft, with the form as it was when the intake started, and the record being filed (if any). */
   intake: { form: IntakeForm; values: Record<string, FieldValue>; filing: IntakeRecord | null } | null;
   records: Array<{ recordId: string; formId: string; digest: string }>;
+  /** The record the last confirmation filed, until another intake starts: a retried confirmation gets it back. */
+  confirmed: IntakeRecord | null;
 }
 
 const FORM_ID = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -84,11 +86,19 @@ export const dossierModule: AssuranceModule = {
   },
 
   initCall(settings: unknown): JsonValue {
-    return { forms: structuredClone((settings as DossierSettings).forms), intake: null, records: [] } as unknown as JsonValue;
+    return { forms: structuredClone((settings as DossierSettings).forms), intake: null, records: [], confirmed: null } as unknown as JsonValue;
   },
 
   enterStep(_step: FlowStep, s: JsonValue): JsonValue {
     return (s as unknown as DossierSlice).records.length;
+  },
+
+  cannotRunStep(step: FlowStep, s: JsonValue): string | null {
+    return (s as unknown as DossierSlice).forms.some((f) => f.formId === step.form) ? null : `the call has no form ${String(step.form)}`;
+  },
+
+  blocksEnd(s: JsonValue): string | null {
+    return (s as unknown as DossierSlice).intake?.filing != null ? "a record is being filed; confirm it first" : null;
   },
 
   stepStatus(step: FlowStep, view: StepView): StepStatus {
@@ -114,6 +124,7 @@ export async function startIntake(rt: EngineRuntime, callId: string, formId: str
     if (!rt.authorized(draft.record, "intake.file")) throw new EngineError("scope_denied", "the grant does not cover intake.file");
     draft.apply({ type: "intake_started" });
     s.intake = { form: structuredClone(chosen), values: {}, filing: null };
+    s.confirmed = null;
     draft.emit("intake.started", "code", { formId, version: chosen.version });
   });
 }
@@ -144,10 +155,14 @@ export async function setIntakeField(rt: EngineRuntime, callId: string, key: str
  */
 export async function confirmIntake(rt: EngineRuntime, callId: string, input: { confirmedBy: "voice" | "keypad" }): Promise<IntakeRecord> {
   rt.settings(DOSSIER);
-  const record = await rt.update(callId, (draft) => {
-    const intake = draft.slice<DossierSlice>(DOSSIER).intake;
+  const reserved = await rt.update(callId, (draft): { record: IntakeRecord; filed: boolean } => {
+    const s = draft.slice<DossierSlice>(DOSSIER);
+    const intake = s.intake;
+    // Filed already (a retry after the last write's ledger entry failed): this write appends that
+    // entry, and the same record comes back.
+    if (intake === null && s.confirmed !== null) return { record: s.confirmed, filed: true };
     if (intake === null) throw new EngineError("invalid_transition", "no intake is open on this call");
-    if (intake.filing !== null) return intake.filing;
+    if (intake.filing !== null) return { record: intake.filing, filed: false };
     if (!rt.authorized(draft.record, "intake.file")) throw new EngineError("scope_denied", "the grant does not cover intake.file");
     const missing = missingRequired(intake.form, intake.values);
     if (missing.length > 0) throw new EngineError("invalid_input", `required fields missing: ${missing.join(", ")}`);
@@ -163,8 +178,10 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
       confirmedAt: rt.now(),
     };
     intake.filing = built;
-    return built;
+    return { record: built, filed: false };
   });
+  const { record } = reserved;
+  if (reserved.filed) return record;
   // A rejected write may still have been stored, so the reservation is kept and any retry writes
   // this same record again (RecordStore.putIntakeRecord is idempotent by recordId). Two processes
   // confirming at once write the same record; the first to commit files it, the other finds it filed.
@@ -174,6 +191,7 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
     if (s.records.some((r) => r.recordId === record.recordId)) return;
     draft.apply({ type: "intake_confirmed", recordId: record.recordId });
     s.intake = null;
+    s.confirmed = record;
     s.records.push({ recordId: record.recordId, formId: record.formId, digest: record.digest });
     draft.emit("intake.confirmed", "caller", { recordId: record.recordId, formId: record.formId, digest: record.digest, confirmedBy: record.confirmedBy });
   });
@@ -187,6 +205,7 @@ export async function abandonIntake(rt: EngineRuntime, callId: string): Promise<
     if (s.intake !== null) openIntake(s);
     draft.apply({ type: "intake_abandoned" });
     s.intake = null;
+    s.confirmed = null;
     draft.emit("intake.abandoned", "code", {});
   });
 }
