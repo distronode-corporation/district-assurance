@@ -32,8 +32,15 @@ const JSON_HEADERS = {
   "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
 };
 
-/** The UI is for this machine only: a page on another name (DNS rebinding) gets nothing. */
-const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+/**
+ * With the UI on, the server answers this machine's own names on its own port only, on every
+ * route: a page on another name (DNS rebinding) or another port gets nothing, not the UI, not the
+ * receipts, and not the webhooks that accept the demo's published secret.
+ */
+function isLocalHost(host: string, port: number): boolean {
+  const h = host.toLowerCase();
+  return h === `127.0.0.1:${port}` || h === `localhost:${port}` || h === `[::1]:${port}`;
+}
 
 class HttpError extends Error {
   readonly status: number;
@@ -69,8 +76,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   }
 
   async function demoRoute(req: IncomingMessage, runs: DemoRuns, path: string, method: string): Promise<Answer> {
-    const host = req.headers.host ?? "";
-    if (!LOCAL_HOSTS.has(hostname(host))) throw new HttpError(403, "host_not_allowed");
+    const host = req.headers.host!;
     const file = files.get(path);
     if (file !== undefined) {
       if (method !== "GET") throw new HttpError(405, "method_not_allowed");
@@ -107,8 +113,9 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   }
 
   async function route(req: IncomingMessage): Promise<Answer> {
-    const url = new URL(req.url ?? "/", "http://localhost");
-    const path = url.pathname;
+    if (options.ui !== undefined && !isLocalHost(req.headers.host ?? "", req.socket.localPort!)) throw new HttpError(403, "host_not_allowed");
+    // Prefixed, so a path that starts with `//` stays a path instead of naming a host.
+    const path = parseUrl(req.url!).pathname;
     const method = req.method ?? "GET";
     const expect = (m: string) => {
       if (method !== m) throw new HttpError(405, "method_not_allowed");
@@ -160,13 +167,10 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   });
 }
 
-/** The name part of a Host header, lower case; empty when it does not parse. */
-function hostname(host: string): string {
-  try {
-    return new URL(`http://${host}`).hostname;
-  } catch {
-    return "";
-  }
+/** The request target as a URL; a target that is not a path (an absolute URL, garbage) is a 400. */
+function parseUrl(target: string): URL {
+  if (!target.startsWith("/")) throw new HttpError(400, "bad_request");
+  return new URL(`http://x${target}`);
 }
 
 function readBody(req: IncomingMessage, max: number): Promise<string> {

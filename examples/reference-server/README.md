@@ -44,7 +44,9 @@ How the page is kept small and safe:
 - A strict Content Security Policy: `default-src 'none'; script-src 'self'; style-src 'self';
   connect-src 'self'`, no inline script or style, no framing, plus `nosniff` and `no-referrer`.
   The page writes every value as text, never as markup.
-- Only `127.0.0.1`, `localhost` and `[::1]` are served (a rebound DNS name gets `403`), and a run
+- On every route, receipts, key set and webhooks included, only a Host of `127.0.0.1`,
+  `localhost` or `[::1]` with the server's own port is served (a rebound DNS name or another port
+  gets `403`), and a run
   is started or stepped only by a JSON `POST` from the page's own origin, which another site cannot
   send without a preflight this server never answers.
 - No secret reaches the browser: it sees session states, ledger entries, the receipt and the public

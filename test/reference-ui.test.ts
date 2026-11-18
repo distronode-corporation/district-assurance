@@ -11,7 +11,7 @@ import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { DemoRuns, type RunView } from "../examples/reference-server/src/demo-runs.ts";
 import { DEMO_SECRET, SCRIPTS, createDemoWorld, isDemoFlow, type DemoWorld } from "../examples/reference-server/src/script.ts";
 import { STATIC_FILES, UI_CSP } from "../examples/reference-server/src/static.ts";
-import { EngineError, canonicalJson, verifyReceipt, type AuditEntry, type SignedReceipt } from "../src/index.ts";
+import { EngineError, canonicalJson, signStripePayload, verifyReceipt, type AuditEntry, type SignedReceipt } from "../src/index.ts";
 
 interface CheckResult {
   ok: boolean;
@@ -51,7 +51,7 @@ async function serve(ui = true): Promise<Served> {
 }
 
 /** A raw request, so the path and the Host header go out exactly as written. */
-function raw(port: number, path: string, headers: Record<string, string> = {}, method = "GET"): Promise<{ status: number; headers: Record<string, unknown>; body: string }> {
+function raw(port: number, path: string, headers: Record<string, string> = {}, method = "GET", body = ""): Promise<{ status: number; headers: Record<string, unknown>; body: string }> {
   return new Promise((resolve, reject) => {
     // Without a host header, send none at all (node would otherwise add its own).
     const req = request({ host: "127.0.0.1", port, path, method, headers, setHost: "host" in headers }, (res) => {
@@ -60,7 +60,7 @@ function raw(port: number, path: string, headers: Record<string, string> = {}, m
       res.on("end", () => resolve({ status: res.statusCode!, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") }));
     });
     req.on("error", reject);
-    req.end();
+    req.end(body);
   });
 }
 
@@ -141,7 +141,48 @@ describe("reference UI: static files", () => {
         assert.deepEqual(JSON.parse(res.body), { error: "host_not_allowed" });
       }
     }
-    for (const host of [`localhost:${s.port}`, `[::1]:${s.port}`, "LOCALHOST"]) assert.equal((await raw(s.port, "/", { host })).status, 200, host);
+    for (const host of [`127.0.0.1:${s.port}`, `localhost:${s.port}`, `[::1]:${s.port}`, `LOCALHOST:${s.port}`]) {
+      assert.equal((await raw(s.port, "/", { host })).status, 200, host);
+    }
+  });
+
+  it("matches the Host header's port too: another port or none is not this server", async () => {
+    for (const host of ["localhost:9999", "127.0.0.1:1", `[::1]:${s.port + 1}`, "localhost", "127.0.0.1", `localhost:${s.port}0`, `localhost:0${s.port}`]) {
+      for (const path of ["/", "/demo/flows", "/healthz"]) {
+        const res = await raw(s.port, path, { host });
+        assert.equal(res.status, 403, `${host} ${path}`);
+      }
+    }
+  });
+
+  it("with the UI on, refuses a foreign Host on every route, the webhooks, receipts and key set included", async () => {
+    const host = `evil.example:${s.port}`;
+    for (const path of ["/.well-known/receipt-keys.json", "/receipts/call_1", "/healthz", "/webhooks/twilio", "/nope"]) {
+      const res = await raw(s.port, path, { host });
+      assert.deepEqual([res.status, JSON.parse(res.body)], [403, { error: "host_not_allowed" }], path);
+    }
+    // A webhook signed with the published demo secret, from a page on a rebound name: refused before it is read.
+    const payload = JSON.stringify({ id: "evt_rebind", type: "checkout.session.completed", data: { object: { id: "cs_fake_1", payment_status: "paid" } } });
+    const signature = signStripePayload(payload, DEMO_SECRET, Math.floor(s.world.t.clock.now().getTime() / 1000));
+    const res = await raw(s.port, "/webhooks/stripe/payments", { host, "stripe-signature": signature, "content-type": "application/json" }, "POST", payload);
+    assert.deepEqual([res.status, JSON.parse(res.body)], [403, { error: "host_not_allowed" }]);
+    const local = await raw(s.port, "/webhooks/stripe/payments", { host: `127.0.0.1:${s.port}`, "stripe-signature": signature }, "POST", payload);
+    assert.deepEqual([local.status, JSON.parse(local.body)], [200, { received: true, applied: false }], "the same event on this machine's name is read");
+  });
+
+  it("answers 400 to a request target that is not a path", async () => {
+    for (const [path, method] of [["*", "OPTIONS"], ["http://evil.example/style.css", "GET"]] as const) {
+      const res = await raw(s.port, path, { host: `127.0.0.1:${s.port}` }, method);
+      assert.deepEqual([res.status, JSON.parse(res.body)], [400, { error: "bad_request" }], path);
+    }
+  });
+
+  it("reads a path that starts with // as a path, not as a host", async () => {
+    for (const path of ["//style.css", "//app.js", "//evil.example/", "///"]) {
+      const res = await raw(s.port, path, { host: `127.0.0.1:${s.port}` });
+      assert.equal(res.status, 404, path);
+      assert.equal(res.headers["content-type"], "application/json; charset=utf-8", path);
+    }
   });
 
   it("sends the hardening headers on JSON answers too", async () => {
@@ -155,6 +196,8 @@ describe("reference UI: static files", () => {
     try {
       for (const path of ["/", "/app.js", "/demo/flows", "/demo/runs"]) assert.equal((await fetch(`${off.base}${path}`)).status, 404, path);
       assert.equal((await fetch(`${off.base}/healthz`)).status, 200);
+      // `npm run serve` takes forwarded webhooks under any name, as before (no UI, no demo secret).
+      assert.equal((await raw(off.port, "/healthz", { host: "tunnel.example" })).status, 200);
     } finally {
       await off.close();
     }
