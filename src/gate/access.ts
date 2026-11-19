@@ -98,20 +98,25 @@ export class SeenGrants {
 
   /** True the first time a grant id is offered while it is valid; false for a replay. */
   accept(body: AccessGrantBody, now: Date): boolean {
+    const expires = Date.parse(body.expiresAt);
+    const at = now.getTime();
+    // A grant whose expiry cannot be read, or a clock that cannot be read, is refused: NaN would be
+    // kept as the latest expiry and stop every later forgetting, and accept a grant never checked.
+    if (!Number.isFinite(expires) || !Number.isFinite(at)) return false;
     // Forgetting goes no further than the latest expiry accepted, so a clock that jumped forward
     // cannot move the forget point past the grants a relay has really seen (which would refuse
     // every fresh grant until real time caught up): at most one grant lifetime ahead of them.
-    const point = Math.min(now.getTime(), this.#latestExpiry);
+    const point = Math.min(at, this.#latestExpiry);
     if (point > this.#forgotUpTo) {
       for (const [id, until] of this.#until) if (until <= point) this.#until.delete(id);
       this.#forgotUpTo = point;
     }
     // A grant that expired by the time ids were last forgotten may have been accepted and then
     // forgotten: refused, even if the clock has since moved back to inside its validity.
-    if (Date.parse(body.expiresAt) <= this.#forgotUpTo) return false;
+    if (expires <= this.#forgotUpTo) return false;
     if (this.#until.has(body.grantId)) return false;
-    this.#until.set(body.grantId, Date.parse(body.expiresAt));
-    this.#latestExpiry = Math.max(this.#latestExpiry, Date.parse(body.expiresAt));
+    this.#until.set(body.grantId, expires);
+    this.#latestExpiry = Math.max(this.#latestExpiry, expires);
     return true;
   }
 }
