@@ -5,7 +5,7 @@
 import type { SubjectRecord } from "../core/adapters.ts";
 import { hexDigestsEqual } from "../core/hash.ts";
 import { FACTOR_KINDS, FORBIDDEN_FACTOR_KINDS, type SpokenFormat, type SpokenPolicy, type VerificationPolicy } from "../core/policy.ts";
-import { isIntegerIn } from "../core/shape.ts";
+import { isIntegerIn, isObject } from "../core/shape.ts";
 import type { AdapterName, EngineRuntime, Locale } from "../core/runtime.ts";
 import { isKeypadEntry, judgeKeypadWith } from "./knowledge.ts";
 import { normaliseSpokenAnswer, normaliseSpokenKeypadEntry } from "./spoken.ts";
@@ -134,11 +134,13 @@ export async function judgeKeypad(policy: VerificationPolicy, input: FactorJudge
  * every value a keypad field can hold.
  */
 export async function judgeSpoken(spoken: SpokenPolicy, input: FactorJudgeInput, keypadFields: readonly string[] = []): Promise<boolean> {
-  const entries = typeof input.entry === "string" ? {} : input.entry;
+  // Anything but a set of answers (a string, null, a number from a host's bug) answers nothing.
+  const entries: Readonly<Record<string, unknown>> = isObject(input.entry) ? input.entry : {};
   const fields: Array<readonly [string, SpokenFormat | null]> = [...Object.entries(spoken.fields), ...keypadFields.map((f) => [f, null] as const)];
   let ok = input.subject !== null && fields.length > 0;
   for (const [field, format] of fields) {
-    const transcript = entries[field] ?? "";
+    // Not coerced: a non-string transcript is unusable (normalise checks it), never read as its digits.
+    const transcript = (entries[field] ?? "") as string;
     const answer =
       format === null ? normaliseSpokenKeypadEntry({ transcript, locale: input.locale }) : normaliseSpokenAnswer({ field: format, transcript, locale: input.locale });
     const value = answer.status === "normalised" ? answer.value : "";

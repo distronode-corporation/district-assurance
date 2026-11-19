@@ -360,7 +360,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   const plugin = module.plugin(kind);
   if (builtIn?.entered !== true && plugin === undefined) throw new EngineError("invalid_input", `${kind} is not a factor the caller enters`);
   // A spoken PIN has already reached speech-to-text. It is refused before it is counted or judged.
-  if (kind === "spoken_knowledge" && typeof entry !== "string" && Object.hasOwn(entry, "pin")) {
+  if (kind === "spoken_knowledge" && isObject(entry) && Object.hasOwn(entry, "pin")) {
     throw new EngineError("invalid_input", "a PIN is never taken by speech: it is keyed, with submitPin");
   }
   const reserved = await rt.update(callId, (draft) => {

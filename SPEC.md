@@ -216,7 +216,8 @@ maxKeypadIdleSeconds?}`.
   state or the receipt. Any other value is refused (`invalid_input`).
 
 **The keypad collector** (`KeypadCollector`, `src/core/keypad.ts`; a stand-in for INT-1). Pure:
-the host passes the time with each tone and calls `tick(nowMs)` from its own timer. Options:
+the host passes the time with each tone and calls `tick(nowMs)` from its own timer (a time that
+is not a finite number is `invalid_input`). Options:
 `maxLength` 1 to 32, `idleTimeoutMs` (1000 or more), `maxIdleTimeoutMs` (at least
 `idleTimeoutMs`, default it), `requestKeys` (`*`, `A` to `D`, each `repeat` or `slower`),
 `onDigits`, `onRequest` (required with `requestKeys`), `onTimeout`.

@@ -131,6 +131,19 @@ describe("a keypad field said instead of keyed", () => {
 });
 
 describe("a spoken PIN", () => {
+  it("counts an entry that is not a set of answers as an unusable answer, never a crash", async () => {
+    const t = accessibleSetup();
+    const callId = await verifying(t);
+    for (const bad of [null, { postal_code: "K1A0B1", dob: 19850214 }]) {
+      assert.equal((await t.engine.submitFactor(callId, "spoken_knowledge", bad as never)).matched, false, JSON.stringify(bad));
+    }
+    assert.deepEqual((await attempts(t, callId)).attempts, { spoken_knowledge: 2 }, "a number is never read as its digits");
+    assert.deepEqual((await t.ledger.list()).filter((e) => e.event === "verification.factor").map((e) => e.detail), [
+      { kind: "spoken_knowledge", passed: false },
+      { kind: "spoken_knowledge", passed: false },
+    ]);
+  });
+
   it("is refused before it is counted or judged", async () => {
     const t = accessibleSetup();
     const callId = await verifying(t);
@@ -307,6 +320,18 @@ describe("the keypad collector (stand-in for INT-1)", () => {
     bad({ requestKeys: { "*": "louder" as KeypadRequest } }, /request on \* must be repeat or slower/);
     bad({ onRequest: undefined }, /onRequest is required with requestKeys/);
     assert.throws(() => collector().c.lengthenIdleTimeout(0), rejects("invalid_input"));
+  });
+
+  it("refuses a time that is not a finite number, which would keep a partial entry forever", () => {
+    const { c, digits, press } = collector();
+    press("12", 0);
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, "6000" as unknown as number]) {
+      assert.throws(() => c.press("3", bad), rejects("invalid_input", /finite number/), String(bad));
+      assert.throws(() => c.tick(bad), rejects("invalid_input", /finite number/), String(bad));
+    }
+    c.tick(6000);
+    press("4#", 6001);
+    assert.deepEqual(digits, ["4"], "the partial entry still timed out");
   });
 });
 
