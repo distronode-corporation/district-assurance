@@ -416,6 +416,8 @@ A consent is revoked by voice, text or dashboard with `revokeConsent({consentId,
 - `revokeConsent(workspaceId, {consentId, via, at})` keeps a revocation beside the consent; the
   first one wins and is returned to every later call.
 
+`recordConsent` takes `answer` `yes` or `no` and `channel` `call`, `text` or `web` (default `call`)
+only: anything else is `invalid_input`, before anything is reserved, stored or ledgered.
 With the adapter, `recordConsent` reserves the consent on the call, writes it to the store and
 then records it (`consent.recorded`, and the flow step judged). If the store write fails the
 consent stays reserved: a consent with another purpose or answer is refused

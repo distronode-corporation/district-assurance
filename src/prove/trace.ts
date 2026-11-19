@@ -145,6 +145,10 @@ export async function recordConsent(
 ): Promise<ConsentRecord> {
   // Read once: the purpose a wording was found for is the one checked against the step and stored.
   const { purpose, answer, channel } = input;
+  // Both go into the consent record, the store and the ledger as they are: only the values a consent
+  // can hold (a host passing a transcript or a phone number by mistake is refused, not recorded).
+  if (answer !== "yes" && answer !== "no") throw new EngineError("invalid_input", "answer must be yes or no");
+  if (channel !== undefined && !CHANNELS.includes(channel)) throw new EngineError("invalid_input", "channel must be call, text or web");
   const store = consentStore(rt);
   const reserved = await rt.update(callId, (draft): ConsentRecord => {
     const s = draft.slice<TraceSlice>(TRACE);
