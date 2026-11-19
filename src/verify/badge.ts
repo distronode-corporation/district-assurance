@@ -248,8 +248,14 @@ export class BadgeModule implements AssuranceModule {
     // No verification finished (or the record predates `lastJudgedBy`): the receipt names neither
     // field. Only the two fields are taken, after level and methods are set, so nothing stored
     // beside them can change what the receipt says about the verification.
-    const judged = badge.lastJudgedBy ?? null;
-    const by = judged === null ? {} : { policyVersion: judged.policyVersion, configRevision: judged.configRevision };
+    // Each field only when the store holds it as text: a damaged record that lacks one (or holds
+    // something else) drops that field, never an undefined the receipt could not be signed with.
+    const judged: unknown = badge.lastJudgedBy;
+    const by: { policyVersion?: string; configRevision?: string } = {};
+    if (isObject(judged)) {
+      if (typeof judged.policyVersion === "string") by.policyVersion = judged.policyVersion;
+      if (typeof judged.configRevision === "string") by.configRevision = judged.configRevision;
+    }
     return { verification: { ...by, level: state.level, methods: state.level === 0 ? [] : badge.lastMethods } };
   }
 }

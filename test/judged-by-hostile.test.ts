@@ -1,5 +1,6 @@
 // Hostile-pass regressions for #83 (VER-8, the policy version and config revision in grants and
-// receipts). V1 failed before the receipt took only the two fields from lastJudgedBy; V2 held.
+// receipts). V1 failed before the receipt took only the two fields from lastJudgedBy; V2 held; V3
+// failed before each field was taken only when it is text.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
@@ -43,5 +44,29 @@ describe("hostile #83: who judged the verification", () => {
     assert.equal(await t.engine.authorize(callId, "status.read"), true, "the old grant still works");
     const receipt = (await t.engine.endCall(callId))!;
     assert.deepEqual(Object.keys(receipt.body.verification).sort(), ["level", "methods"]);
+  });
+});
+
+describe("hostile #83: a damaged lastJudgedBy", () => {
+  it("V3: one that lacks a field, or holds one that is not text, drops that field and the receipt still signs", async () => {
+    for (const [judged, expected] of [
+      [{ policyVersion: "default-1" }, { policyVersion: "default-1" }],
+      [{ configRevision: "default" }, { configRevision: "default" }],
+      [{ policyVersion: 7, configRevision: { x: 1 } }, {}],
+      [{ policyVersion: null, configRevision: "default" }, { configRevision: "default" }],
+      [[], {}],
+      ["default-1", {}],
+    ] as const) {
+      const t = setup();
+      const callId = await verifiedCall(t);
+      await editBadge(t, callId, (badge) => {
+        badge.lastJudgedBy = judged;
+      });
+      const receipt = (await t.engine.endCall(callId))!;
+      assert.notEqual(receipt, null, JSON.stringify(judged));
+      const { level: _level, methods: _methods, ...by } = receipt.body.verification as Record<string, unknown>;
+      assert.deepEqual(by, expected, JSON.stringify(judged));
+      assert.equal(verifyReceipt(receipt, t.engine.receiptKeys()), true);
+    }
   });
 });
