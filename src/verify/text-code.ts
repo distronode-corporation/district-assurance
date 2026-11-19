@@ -136,8 +136,9 @@ function isLive(held: TextCodeState | null, now: Date): boolean {
  */
 export async function checkTextCode(rt: EngineRuntime, callId: string, code: string): Promise<KeypadResult> {
   const entry = codeDigest(rt, callId, /^[0-9]{6}$/.test(code) ? code : "");
-  const now = rt.clock.now();
   return rt.update(callId, (draft) => {
+    // Read the clock on each attempt, so a slow read or a retry cannot judge a code that has expired.
+    const now = rt.clock.now();
     allowFactor(rt, draft.record, "text_code");
     draft.assertCan({ type: "factor_recorded", factor: { kind: "text_code", passed: false, at: rt.now() } });
     const s = draft.slice<BadgeSlice>(BADGE);

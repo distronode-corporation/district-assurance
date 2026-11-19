@@ -55,7 +55,7 @@ describe("the CodeStore contract suite", () => {
     const careless = { take: async () => true };
     const failures: unknown[] = [];
     for (const c of codeStoreContract(() => careless)) await c.run().catch((e: unknown) => failures.push(e));
-    assert.equal(failures.length, 4);
+    assert.equal(failures.length, 5);
   });
 });
 
@@ -198,6 +198,45 @@ describe("texted codes", () => {
     };
     await assert.rejects(t.engine.sendTextCode(callId), rejects("precondition_failed", /verification restarted/));
     assert.equal(t.messages.sent.length, 0);
+  });
+
+  it("does not store a code from a send decided before a taint", async () => {
+    let taint = async (): Promise<void> => undefined;
+    class Tainting extends MemoryCodeStore {
+      override async take(input: { workspaceId: string; key: CodeSendKey; at: string; max: number; windowSeconds: number; minIntervalSeconds: number }): Promise<boolean> {
+        await taint();
+        return super.take(input);
+      }
+    }
+    const t = codeSetup(undefined, new Tainting());
+    const callId = await matchedCall(t);
+    taint = async () => {
+      taint = async () => undefined;
+      await t.engine.markUntrusted(callId, "crm_note");
+    };
+    await assert.rejects(t.engine.sendTextCode(callId), rejects("precondition_failed", /verification restarted/));
+    assert.equal(t.messages.sent.length, 0);
+    const slice = ((await t.sessions.get("ws_test", callId))!.record as { modules: { badge: { textCode: unknown } } }).modules.badge;
+    assert.equal(slice.textCode, null, "no code was stored");
+    await assert.rejects(t.engine.checkTextCode(callId, "123456"), rejects("precondition_failed", /no code was sent/));
+  });
+
+  it("judges expiry by the clock when the check is written, not when it started", async () => {
+    const t = codeSetup();
+    const callId = await matchedCall(t);
+    await t.engine.sendTextCode(callId);
+    const code = lastCode(t);
+    t.clock.advance(10 * MINUTE - 1000);
+    const get = t.sessions.get.bind(t.sessions);
+    let once = true;
+    t.sessions.get = async (w, c) => {
+      if (once) {
+        once = false;
+        t.clock.advance(1000);
+      }
+      return get(w, c);
+    };
+    assert.deepEqual(await t.engine.checkTextCode(callId, code), { matched: false, locked: true });
   });
 });
 

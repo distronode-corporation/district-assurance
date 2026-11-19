@@ -124,6 +124,15 @@ export function codeStoreContract(factory: () => CodeStore | Promise<CodeStore>)
       },
     ],
     [
+      "holds the minimum interval even when it is longer than the window",
+      async (store) => {
+        const take = (seconds: number) => store.take({ workspaceId: "w", key: subject, at: at(seconds), max: 3, windowSeconds: 30, minIntervalSeconds: 60 });
+        assert.equal(await take(0), true);
+        assert.equal(await take(30), false, "the first send left the window but is still inside the interval");
+        assert.equal(await take(60), true);
+      },
+    ],
+    [
       "keeps workspaces, scopes and keys apart",
       async (store) => {
         const one = { ...limits, max: 1 };

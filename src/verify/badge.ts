@@ -64,7 +64,7 @@ export interface BadgeSlice {
    * A reserved or sent link resumes with the same idempotency keys after a failure.
    */
   identityLink: "none" | "reserved" | "sent" | "texted" | "void";
-  /** Goes up on every beginVerification, so a result judged for an earlier one is never applied. */
+  /** Goes up on every beginVerification and every taint, so a result judged before either is never applied. */
   epoch: number;
   /** Identity sessions whose outcome may still count. */
   identitySessions: string[];
@@ -246,8 +246,9 @@ export class BadgeModule implements AssuranceModule {
 
   onUntrusted(s: JsonValue): JsonValue {
     // A photo ID link or a texted code sent before the taint no longer counts. One link per call still holds.
+    // The epoch moves on too, so a result or a send decided before the taint is not applied after it.
     const badge = s as unknown as BadgeSlice;
-    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink), textCode: null } as unknown as JsonValue;
+    return { ...badge, epoch: badge.epoch + 1, identitySessions: [],identityLink: voided(badge.identityLink), textCode: null } as unknown as JsonValue;
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {

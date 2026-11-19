@@ -167,10 +167,13 @@ or `verification.code_refused` with `reason`: `country`, `subject_limit` or `num
 `checkTextCode(callId, code)` counts and judges a try in one write and records a `text_code`
 factor, passed or not. An entry that is not 6 ASCII digits is a try and fails. After the 5th try,
 after 10 minutes, or once the code matched (single use), it returns `locked` without judging or
-recording. Without a code it is refused (`precondition_failed`). A taint or a change of subject
-drops the code. A passed code counts toward a level only under the carrier rule above.
+recording. Expiry is judged by the clock at the write, not when the check began. Without a code it
+is refused (`precondition_failed`). A taint or a change of subject drops the code, and a taint also
+refuses (`precondition_failed`) any send or factor result decided before it but not yet written.
+A passed code counts toward a level only under the carrier rule above.
 `codeStoreContract(factory)` in `district-assurance/testing` is the suite a durable `CodeStore`
-must pass (atomic counting, no count for a refusal); `MemoryCodeStore` is the reference.
+must pass (atomic counting, no count for a refusal, the minimum interval held even when it is
+longer than the window); `MemoryCodeStore` is the reference.
 
 ## 5. Keypad knowledge
 

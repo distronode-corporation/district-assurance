@@ -169,10 +169,12 @@ export class MemoryCodeStore implements CodeStore {
   async take(input: { workspaceId: string; key: CodeSendKey; at: string; max: number; windowSeconds: number; minIntervalSeconds: number }): Promise<boolean> {
     const id = JSON.stringify([input.workspaceId, input.key.scope, input.key.key]);
     const at = Date.parse(input.at);
-    const recent = (this.#sends.get(id) ?? []).filter((t) => t > at - input.windowSeconds * 1000);
-    if (recent.length >= input.max || recent.some((t) => t > at - input.minIntervalSeconds * 1000)) return false;
-    recent.push(at);
-    this.#sends.set(id, recent);
+    // Keep sends for the longer of the window and the interval; count only those in the window.
+    const kept = (this.#sends.get(id) ?? []).filter((t) => t > at - Math.max(input.windowSeconds, input.minIntervalSeconds) * 1000);
+    const inWindow = kept.filter((t) => t > at - input.windowSeconds * 1000).length;
+    if (inWindow >= input.max || kept.some((t) => t > at - input.minIntervalSeconds * 1000)) return false;
+    kept.push(at);
+    this.#sends.set(id, kept);
     return true;
   }
 }
