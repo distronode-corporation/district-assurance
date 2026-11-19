@@ -109,7 +109,7 @@ describe("validateConfig: modules", () => {
   it("refuses unknown modules, malformed entries, unknown fields, and turning the ledger off", () => {
     const problems = validateConfig(
       config((c) => {
-        c.modules.gate = { enabled: true };
+        c.modules.vault = { enabled: true };
         c.modules.paylink = "on";
         c.modules.dossier = { enabled: "yes", settings: { forms: [] }, extra: 1 };
         c.modules.trace = { enabled: false };
@@ -121,7 +121,7 @@ describe("validateConfig: modules", () => {
       "modules.dossier.enabled: must be true or false",
       "modules.paylink: must be an object",
       "modules.trace: trace holds the audit ledger and cannot be turned off",
-      "modules.gate: no module named gate is installed",
+      "modules.vault: no module named vault is installed",
     ]);
   });
 
@@ -284,7 +284,7 @@ describe("validateConfig: flows", () => {
         "Bad Name": { steps: [{ type: "trace.receipt" }] },
         empty: { steps: [] },
         nosteps: "x",
-        odd: { summary: 1, extra: true, steps: ["x", { type: 1 }, { type: "gate.grant" }, { type: "paylink.request" }] },
+        odd: { summary: 1, extra: true, steps: ["x", { type: 1 }, { type: "vault.open" }, { type: "paylink.request" }] },
       }, new ModuleRegistry({ adapters: ALL_ADAPTERS, modules: builtInModules() })) .slice(0, 6),
       [
         "flows.Bad Name: a flow name is lower-case letters, digits and hyphens, at most 64",
@@ -298,14 +298,15 @@ describe("validateConfig: flows", () => {
     const off = validateConfig(
       config((c) => {
         c.modules.paylink.enabled = false;
-        c.flows = { odd: { steps: [{ type: 1 }, { type: "gate.grant" }, { type: "paylink.request" }] } };
+        c.flows = { odd: { steps: [{ type: 1 }, { type: "vault.open" }, { type: "gate.grant" }, { type: "paylink.request" }] } };
       }),
       registry(),
     );
     assert.deepEqual(off, [
       "flows.odd.steps[0]: a step is an object with a type",
-      "flows.odd.steps[1]: no installed module provides the step gate.grant",
-      "flows.odd.steps[2] (paylink.request): the paylink module is turned off",
+      "flows.odd.steps[1]: no installed module provides the step vault.open",
+      "flows.odd.steps[2] (gate.grant): the gate module is turned off",
+      "flows.odd.steps[3] (paylink.request): the paylink module is turned off",
     ]);
   });
 
@@ -417,7 +418,7 @@ describe("validateConfig: flows", () => {
     const door = outside("door", { scopes: { grants: [], needs: { "door.lookup": "door.open" }, classes: { "door.open": "access" } }, provides: { factors: [], steps: ["door.lookup"], outcomes: [] } });
     const lax = outside("lax", { scopes: { grants: [], needs: {}, classes: { "door.open": "none" } }, provides: { factors: [], steps: ["lax.lookup"], outcomes: [] } });
     const reg = registry(ALL_ADAPTERS, [door, lax]);
-    assert.deepEqual(reg.scopeClasses(), { "payment.request": "money", "intake.file": "none", "door.open": "access" });
+    assert.deepEqual(reg.scopeClasses(), { "payment.request": "money", "intake.file": "none", "entry.open": "access", "door.open": "access" });
     const problems = validateConfig(config((c) => (c.policy.scopes["door.open"] = 1)), reg);
     assert.deepEqual(problems, ["policy: scope door.open is access, and below its floor of level 2"]);
   });
@@ -460,7 +461,7 @@ describe("validateConfig: flows", () => {
 describe("module registry", () => {
   it("installs, lists, finds and removes modules", () => {
     const reg = registry(["ledger"], [outside("loyalty")]);
-    assert.deepEqual(reg.list().map((m) => m.manifest.name), ["badge", "dossier", "paylink", "trace", "loyalty"]);
+    assert.deepEqual(reg.list().map((m) => m.manifest.name), ["badge", "dossier", "paylink", "trace", "gate", "loyalty"]);
     assert.equal(reg.stepOwner("loyalty.lookup")?.manifest.name, "loyalty");
     assert.equal(reg.stepOwner("nope.step"), undefined);
     assert.ok(reg.factorKinds().includes("pin"));

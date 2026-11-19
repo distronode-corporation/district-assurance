@@ -187,6 +187,10 @@ export const paylinkModule: AssuranceModule = {
 
   checkAdapters(settings: unknown, capabilities: Readonly<Record<string, unknown>>): string[] {
     const s = (settings ?? {}) as PaylinkSettings;
+    // Known to be absent (an engine's adapter declared nothing): refused. Not known at all: skipped.
+    if (Object.hasOwn(capabilities, "payments") && capabilities.payments === undefined) {
+      return ["the payments adapter declares no capabilities ({ modes, minLinkMinutes, maxLinkMinutes })"];
+    }
     const caps = capabilities.payments;
     if (caps === undefined) return [];
     if (!isCapabilities(caps)) return ["the payments adapter's capabilities must be { modes, minLinkMinutes, maxLinkMinutes }"];
@@ -343,10 +347,10 @@ export async function requestPayment(
   // one already dead: the request is expired instead (at the provider too), and never sent.
   // The process that will text it holds a short lease, so a concurrent resume never expires the
   // link while it is being sent; once the lease lapses (that sender stopped), it may.
-  const tooLate = await rt.update(callId, (draft): boolean | "settled" => {
+  const claim = await rt.update(callId, (draft): "sent" | "claimed" | "late" | "settled" => {
     const pending = find(draft, request.paymentId);
     pending.linkId = link.linkId;
-    if (pending.textedAt !== null) return false;
+    if (pending.textedAt !== null) return "sent";
     // Another process settled the request while this one created the link (it took too long): the
     // link is live at the provider but must never be texted.
     if (pending.status !== "open") return "settled";
@@ -354,13 +358,15 @@ export async function requestPayment(
     const leased = pending.sendingSince !== null && now - Date.parse(pending.sendingSince) < SEND_LEASE_MS;
     if (Date.parse(request.providerExpiresAt) - now >= MIN_LINK_LIFE_MINUTES * 60_000) {
       pending.sendingSince = rt.now();
-      return false;
+      return "claimed";
     }
     if (leased) throw new EngineError("precondition_failed", "another process is texting this payment link");
-    return true;
+    return "late";
   });
-  await rt.bindRef(`payment:${link.linkId}`, callId);
-  if (tooLate === "settled") {
+  await rt.bindRef(paymentRef(request, link.linkId), callId);
+  // Checked again right before the text: binding the reference can take time too.
+  const tooLate = claim === "late" || (claim === "claimed" && Date.parse(request.providerExpiresAt) - rt.clock.now().getTime() < MIN_LINK_LIFE_MINUTES * 60_000);
+  if (claim === "settled") {
     await expireAtProvider(rt, callId, request, link.linkId);
     throw new EngineError("precondition_failed", "the payment request was settled while its link was created; the link was expired and never texted");
   }
@@ -401,6 +407,11 @@ export async function requestPayment(
   });
 }
 
+/** The session store reference a payment link is bound under: per connected account in connect mode. */
+function paymentRef(payment: Pick<PaymentRequest, "connectedAccountId">, linkId: string): string {
+  return payment.connectedAccountId === null ? `payment:${linkId}` : `payment:${JSON.stringify([payment.connectedAccountId, linkId])}`;
+}
+
 /** Asks the provider to expire a link, on the account the payment was taken on. */
 function expireAtProvider(rt: EngineRuntime, callId: string, payment: PaymentRequest, linkId: string): Promise<{ state: "expired" | "not_open" }> {
   return rt.adapter("payments").expireLink({
@@ -435,10 +446,15 @@ function settle(rt: EngineRuntime, draft: CallDraft, paymentId: string, status: 
  * account) is ignored and written to the ledger.
  */
 export async function applyPaymentOutcome(rt: EngineRuntime, outcome: PaymentOutcome): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
-  const callId = await rt.resolveRef(`payment:${outcome.linkId}`);
+  // A connect-mode payment is bound under its account, so two accounts' link ids never collide. A
+  // platform payment's binding is tried last, so a connected account's event for one is seen (and
+  // written down as ignored) rather than lost.
+  const account = outcome.account ?? null;
+  const callId = (account === null ? null : await rt.resolveRef(paymentRef({ connectedAccountId: account }, outcome.linkId))) ?? (await rt.resolveRef(paymentRef({ connectedAccountId: null }, outcome.linkId)));
   if (callId === null) return { applied: false };
   return rt.update(callId, (draft) => {
-    const request = draft.slice<PaylinkSlice>(PAYLINK).payments.find((p) => p.linkId === outcome.linkId)!;
+    const payments = draft.slice<PaylinkSlice>(PAYLINK).payments.filter((p) => p.linkId === outcome.linkId);
+    const request = payments.find((p) => p.connectedAccountId === account) ?? payments[0]!;
     if (!outcomeAccountMatches(request, outcome)) {
       draft.emit("payment.outcome_ignored", "system", { paymentId: request.paymentId, reason: "account" });
       return { applied: false } as const;

@@ -7,7 +7,7 @@
 //   2. `visit`: keypad knowledge and a carrier match to level 2; Paylink in platform mode creates a
 //      real test-mode Checkout Session; you pay it in the browser with a Stripe test card; the demo
 //      reads the session back from Stripe (read only) until it is paid and settles the payment;
-//      Gate signs a grant, the relay checks it (ES256, workspace, audience, window, replay) and
+//      the engine's Gate signs a grant, the relay checks it (ES256, workspace, audience, window, replay) and
 //      opens the pretend door; the call ends with a signed receipt the page verifies.
 //
 // Payment completion is a read-only poll of the Checkout Session, not a webhook: no `stripe
@@ -19,11 +19,11 @@
 //   PORT                     default 8787, bound to 127.0.0.1
 import type { Server } from "node:http";
 
-import { randomIds, systemClock, type FlowConfig } from "../../../src/index.ts";
+import { EngineError, randomIds, systemClock, type FlowConfig, type SignedReceipt } from "../../../src/index.ts";
 import { createReferenceServer } from "./app.ts";
 import { DemoRuns } from "./demo-runs.ts";
 import { demoConfig } from "./flows.ts";
-import { SCRIPTS, createDemoWorld, pass, verifyToLevel2, type ScriptStep, type Scripts, type StepOutcome } from "./script.ts";
+import { SCRIPTS, createDemoWorld, pass, verifyToLevel2, type DemoWorld, type ScriptStep, type Scripts, type StepOutcome } from "./script.ts";
 import { StripeApiError, StripeCheckoutLinks, assertTestModeSecretKey, type CheckoutSessionStatus } from "./stripe-adapters.ts";
 
 /** A session id shortened for the screen and the log: its `cs_test_` prefix and a few characters. */
@@ -36,6 +36,21 @@ export function e2eConfig(): FlowConfig {
   const config = demoConfig();
   delete config.flows["deposit-connect"];
   return config;
+}
+
+/**
+ * Ends the call. The engine refuses (`precondition_failed`) while a door may still act on a grant,
+ * so the host asks again for a few seconds; after that the refusal stands.
+ */
+async function endCallWhenDoorsSettle(w: DemoWorld, callId: string): Promise<SignedReceipt | null> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await w.engine.endCall(callId);
+    } catch (error) {
+      if (!(error instanceof EngineError && error.code === "precondition_failed") || attempt >= 10) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
 }
 
 /** Waits `ms`, or less when `signal` aborts. */
@@ -139,7 +154,7 @@ export function e2eScripts(stripe: StripeCheckoutLinks, options: E2eOptions = {}
       label: "gate: door opened",
       async run(w, call) {
         const opened = w.doorsOpened.length;
-        const access = await w.gate.grantAccess(w.engine, call.callId);
+        const access = await w.engine.grantAccess(call.callId);
         call.grantId = access.grantId;
         return {
           detail: `${access.grantId}, ${access.status}, door moved: ${access.confirmed}, opened ${w.doorsOpened.slice(opened).join(", ")}`,
@@ -151,7 +166,7 @@ export function e2eScripts(stripe: StripeCheckoutLinks, options: E2eOptions = {}
       label: "visit: call ended",
       async run(w, call) {
         const done = await w.engine.flowPosition(call.callId);
-        call.receipt = await w.engine.endCall(call.callId);
+        call.receipt = await endCallWhenDoorsSettle(w, call.callId);
         return { detail: `flow ${done!.status} (${done!.index} steps), receipt ${call.receipt === null ? "MISSING" : "signed"}`, ok: call.receipt !== null };
       },
     },

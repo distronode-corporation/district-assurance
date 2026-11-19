@@ -6,21 +6,20 @@
 // Everything is made up: the accounts, the PIN, the date of birth and the phone numbers (555
 // numbers). The Stripe webhooks are signed here with a demo secret and posted to the reference
 // server over the loopback. Gate's door is an example relay on the loopback that checks each grant
-// with Gate's public key before it "opens" (it only records the door's name).
+// with the engine's access key before it "opens" (it only records the door's name).
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import {
   canonicalJson,
   createEngine,
-  gateModule,
   signStripePayload,
   subjectKeyFor,
   webhookRelay,
+  type AccessController,
   type Clock,
   type Engine,
   type FlowConfig,
-  type GateModule,
   type IdGenerator,
   type PaymentLinks,
   type SignedAccessGrant,
@@ -75,8 +74,8 @@ export interface DemoWorld {
   base: string;
   /** Signs a Stripe event with the demo secret (the Connect one on the Connect route) and posts it. */
   stripe(path: string, type: string, object: Record<string, unknown>, account?: string): Promise<Record<string, unknown>>;
-  /** Gate, installed on both engines, with one controller: the relay adapter, to the example door relay. */
-  gate: GateModule;
+  /** Gate's one door controller, the relay adapter to the example door relay, on both engines. */
+  lobby: AccessController;
   /** Every door the example relay opened, in order. */
   doorsOpened: string[];
   /** Each grant Gate sent, by grant id, so a step can try to replay it. */
@@ -89,7 +88,7 @@ export interface DemoWorld {
   clock: Clock;
   /** The FlowConfig both engines run. */
   config: FlowConfig;
-  /** Every link the payments adapter created, oldest first. */
+  /** Every link a real payments adapter created, oldest first (the fake keeps its own list). */
   links: CreatedLink[];
 }
 
@@ -101,17 +100,15 @@ export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
   let relay: Server | null = null;
   let url = "";
   // The relay adapter needs the relay's port, known once it listens: built per unlock.
-  const gate = gateModule({
-    signer: generateTestSigner("demo-gate-key-1"),
-    controllers: {
-      lobby: {
-        unlock: async (input) => {
-          sentGrants.set(input.grant.body.grantId, input.grant);
-          return webhookRelay({ url: await world.relayUrl() }).unlock(input);
-        },
-      },
+  // Gate's adapters: its own signing key, and one controller, the relay adapter, whose URL is known
+  // once the example relay listens (so it is built per unlock).
+  const accessSigner = generateTestSigner("demo-gate-key-1");
+  const lobby: AccessController = {
+    unlock: async (input) => {
+      sentGrants.set(input.grant.body.grantId, input.grant);
+      return webhookRelay({ url: await world.relayUrl() }).unlock(input);
     },
-  });
+  };
   // A real adapter (the live demo) is wrapped to record what it answered, so a step finds its own
   // call's link; the fake records its links itself (`t.payments.created`).
   const real = options.payments;
@@ -129,10 +126,9 @@ export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
         };
   const t = createTestEngine({
     config,
-    modules: [gate],
     ...(options.clock === undefined ? {} : { clock: options.clock }),
     ...(options.ids === undefined ? {} : { ids: options.ids }),
-    ...(recorded === undefined ? {} : { adapters: { payments: recorded } }),
+    adapters: { access: { lobby }, accessSigner, ...(recorded === undefined ? {} : { payments: recorded }) },
   });
   const payments = recorded ?? t.payments;
   const clock = options.clock ?? t.clock;
@@ -146,10 +142,9 @@ export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
     workspaceId: "ws_test",
     knowledgeKey: TEST_KNOWLEDGE_KEY,
     config,
-    modules: [gate],
     clock,
     ids: options.ids ?? t.ids,
-    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments, signer: generateTestSigner() },
+    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments, signer: generateTestSigner(), access: { lobby }, accessSigner },
   });
   let n = 0;
   const world: DemoWorld = {
@@ -157,7 +152,7 @@ export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
     engine: t.engine,
     other,
     base: "",
-    gate,
+    lobby,
     doorsOpened,
     sentGrants,
     clock,
@@ -168,7 +163,7 @@ export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
         relay = createDoorRelay({
           workspaceId: "ws_test",
           audience: "lobby",
-          keys: gate.keys(),
+          keys: t.engine.accessKeys(),
           clock,
           open: async (target) => {
             doorsOpened.push(target);
@@ -429,6 +424,17 @@ const depositConnect: ScriptStep[] = [
   },
 ];
 
+/** Posts a body to the door relay, within 5 seconds; an answer that is not JSON reads as an error. */
+async function postToRelay(w: DemoWorld, body: string): Promise<{ status: number; error: string }> {
+  try {
+    const res = await fetch(await w.relayUrl(), { method: "POST", body, signal: AbortSignal.timeout(5000) });
+    const answer = (await res.json().catch(() => null)) as { error?: unknown } | null;
+    return { status: res.status, error: typeof answer?.error === "string" ? answer.error : "no_answer" };
+  } catch {
+    return { status: 0, error: "unreachable" };
+  }
+}
+
 /** Verification to level 2 for entry.open, then a signed 30-second grant, checked by the door relay. */
 const entry: ScriptStep[] = [
   {
@@ -443,7 +449,7 @@ const entry: ScriptStep[] = [
     label: "gate: access grant delivered",
     async run(w, call) {
       const opened = w.doorsOpened.length;
-      const access = await w.gate.grantAccess(w.engine, call.callId);
+      const access = await w.engine.grantAccess(call.callId);
       call.grantId = access.grantId;
       return {
         detail: `${access.grantId}, ${access.status}, door moved: ${access.confirmed}, opened ${w.doorsOpened.slice(opened).join(", ")}`,
@@ -454,8 +460,8 @@ const entry: ScriptStep[] = [
   {
     label: "gate: same grant sent again",
     async run(w, call) {
-      const res = await fetch(await w.relayUrl(), { method: "POST", body: canonicalJson(w.sentGrants.get(call.grantId!)!) });
-      return { detail: `${res.status} ${((await res.json()) as { error: string }).error}`, ok: res.status === 409 };
+      const res = await postToRelay(w, canonicalJson(w.sentGrants.get(call.grantId!)!));
+      return { detail: `${res.status} ${res.error}`, ok: res.status === 409 };
     },
   },
   {
@@ -463,8 +469,8 @@ const entry: ScriptStep[] = [
     async run(w, call) {
       const forged = structuredClone(w.sentGrants.get(call.grantId!)!);
       forged.body.target = "door-2";
-      const res = await fetch(await w.relayUrl(), { method: "POST", body: canonicalJson(forged) });
-      return { detail: `${res.status} ${((await res.json()) as { error: string }).error}, the door stays shut`, ok: res.status === 401 };
+      const res = await postToRelay(w, canonicalJson(forged));
+      return { detail: `${res.status} ${res.error}, the door stays shut`, ok: res.status === 401 };
     },
   },
   {

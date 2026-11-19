@@ -8,10 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- Gate, the fifth module (GAT-1): signed, time-limited access grants (ES256 over canonical JSON,
-  like receipts) after verification to `entry.open` (level 2 or more), delivered once through an
-  `AccessController`, every grant and outcome in the ledger. Installed with `engine.use`, on the
-  outside module path. `verifyAccessGrant` and `SeenGrants` for the access side.
+- Gate, the fifth built-in module (GAT-1, ADR-25): signed, time-limited access grants (ES256 over
+  canonical JSON, like receipts) after verification to `entry.open` (level 2 or more), delivered
+  once through an `AccessController`. The engine owns every grant and outcome: it reserves, signs,
+  computes the digest, calls the controller and records its answer. `Engine.grantAccess`,
+  `accessGrants` and `accessKeys`; the `access` and `accessSigner` adapters; `access.*` ledger
+  events. `verifyAccessGrant` (bound to a workspace) and `SeenGrants` for the access side.
 - The signed-webhook relay adapter (GAT-2), `webhookRelay`, and an example door relay. An unlock
   is never retried; a lost answer is `unknown`.
 - `FakeAccessController` in `district-assurance/testing`.
@@ -19,13 +21,13 @@ All notable changes to this project are documented here. The format follows
   default 15) with the engine expiring links itself (`expirePaymentLinks`, `PaymentLinks.expireLink`);
   an allow-list of instant payment methods (card, Apple Pay, Google Pay, Link). Outcomes from
   another account than the payment's are ignored.
-- `Engine.recordModuleOutcome` (settles only a reservation `updateModule` opened) and
-  `Engine.moduleReservations`; outside modules see the current step, the clock and an id source.
-- `PaymentLinks.capabilities` (modes, shortest and longest link life), checked when a config is
-  saved; `verifyAccessGrant` requires the workspace.
+- Outside modules see the current step, the clock and an id source; outside a flow, their
+  `updateModule` is held to every scope their manifest needs.
+- `PaymentLinks.capabilities` (modes, shortest and longest link life), checked when the engine is
+  built and when a config is saved. Connect-mode payments are bound per connected account.
 - The reference server's Connect webhook route; the demo takes a deposit in each mode and opens a
   door through the relay.
-- ADR-21 to ADR-24.
+- ADR-21 to ADR-25.
 - `npm run demo:e2e`: the demo UI with a real Stripe Checkout Session in test mode, through a
   minimal PAY-1 adapter (`StripeCheckoutLinks`: platform mode, built-in fetch, `sk_test_` keys
   only, live and restricted keys refused). The payment is read back from Stripe; Gate's grant goes
