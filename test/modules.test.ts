@@ -200,6 +200,34 @@ describe("file: field rules and conditional fields", () => {
     assert.equal(isShown({ formId: "x", version: "1", fields: [dangling] }, { ghost: true }, dangling), true);
     assert.equal(isShown({ formId: "x", version: "1", fields: [dangling] }, {}, dangling), false);
   });
+
+  it("refuses a showIf value its target's rules would refuse, and keeps the endpoints", () => {
+    const on = (target: IntakeField, equals: string | number | boolean) =>
+      validateForm({ formId: "x", version: "1", fields: [target, f("dep", "text", { showIf: { field: target.key, equals } })] }).filter((e) => e.startsWith("field dep"));
+    const refused = (key: string) => [`field dep: showIf.equals is not a value field ${key} can take`];
+    const count = f("count", "number", { min: 1, max: 10 });
+    assert.deepEqual(on(count, 10), []);
+    assert.deepEqual(on(count, 1), []);
+    assert.deepEqual(on(count, 11), refused("count"));
+    assert.deepEqual(on(count, 0), refused("count"));
+    const when = f("when", "date", { min: "2026-01-01", max: "2026-12-31" });
+    assert.deepEqual(on(when, "2026-12-31"), []);
+    assert.deepEqual(on(when, "2027-01-01"), refused("when"));
+    const code = f("code", "text", { maxLength: 3, pattern: "[A-Z]+" });
+    assert.deepEqual(on(code, "ABC"), []);
+    assert.deepEqual(on(code, "ABCD"), refused("code"));
+    assert.deepEqual(on(code, "abc"), refused("code"));
+    assert.deepEqual(on(f("note", "text"), "4242424242424242"), refused("note"));
+    // Rules the form gets wrong are reported on the target and not applied to the value.
+    assert.deepEqual(on(f("bad_pattern", "text", { pattern: "(" }), "x"), []);
+    assert.deepEqual(on(f("bad_range", "number", { min: 5, max: 4 }), 7), []);
+  });
+
+  it("refuses a number too large to hold", () => {
+    assert.deepEqual(normaliseFieldValue(f("units", "number"), "9".repeat(309)), { ok: false, reason: "not_a_number" });
+    assert.deepEqual(normaliseFieldValue(f("units", "number"), `-${"9".repeat(309)}`), { ok: false, reason: "not_a_number" });
+    assert.deepEqual(normaliseFieldValue(f("units", "number"), "9".repeat(300)).ok, true);
+  });
 });
 
 describe("pay: amounts and settlement", () => {

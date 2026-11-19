@@ -112,10 +112,22 @@ function spoken(field: IntakeField, value: FieldValue, w: Wording): string {
 
 /** Digits grouped by thousands in the locale's way, never in exponent form, with the sign as a word. */
 function spokenNumber(value: number, w: Wording): string {
-  const plain = Math.abs(value).toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 20 });
-  const [whole, fraction] = plain.split(".") as [string, string | undefined];
+  const [whole, fraction] = plainDecimal(Math.abs(value)).split(".") as [string, string | undefined];
   const grouped = whole.replace(/\B(?=(\d{3})+$)/g, w.group);
   return `${value < 0 ? w.minus : ""}${grouped}${fraction === undefined ? "" : `${w.decimal}${fraction}`}`;
+}
+
+/**
+ * A non-negative finite number's shortest round-trip digits written out in full, without
+ * rounding: 1e-21 is 0.000000000000000000001, and 1e21 is 1 followed by 21 zeros.
+ */
+function plainDecimal(value: number): string {
+  const [mantissa, exponent] = String(value).split("e") as [string, string | undefined];
+  if (exponent === undefined) return mantissa;
+  const [int, frac = ""] = mantissa.split(".") as [string, string | undefined];
+  const digits = int + frac;
+  const point = int.length + Number(exponent);
+  return point <= 0 ? `0.${"0".repeat(-point)}${digits}` : digits.padEnd(point, "0");
 }
 
 /** A YYYY-MM-DD date in full: weekday, day, month and year. */

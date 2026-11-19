@@ -181,18 +181,32 @@ function showIfProblem(form: IntakeForm, field: IntakeField): string | null {
   return null;
 }
 
-/** Whether a stored value is one the field could hold after normalisation (its bounds aside). */
+/**
+ * Whether a stored value is one the field could hold after normalisation: its type, and its
+ * bounds, length, pattern and card check. A rule the form gets wrong is reported on its own and
+ * not applied here.
+ */
 function acceptsValue(field: IntakeField, value: unknown): boolean {
   switch (field.type) {
-    case "text":
-      return typeof value === "string" && value.trim() === value && value !== "";
+    case "text": {
+      if (typeof value !== "string" || value.trim() !== value) return false;
+      const longest = typeof field.maxLength === "number" ? field.maxLength : DEFAULT_MAX_LENGTH;
+      const { pattern, ...rest } = field;
+      const checked = pattern !== undefined && patternProblem(pattern, longest) === null ? field : rest;
+      return normaliseFieldValue(checked, value).ok;
+    }
     case "number":
-      return typeof value === "number" && Number.isFinite(value);
+      return typeof value === "number" && Number.isFinite(value) && withinBounds(field, value);
     case "date":
-      return typeof value === "string" && isCalendarDate(value);
+      return typeof value === "string" && isCalendarDate(value) && withinBounds(field, value);
     default:
       return typeof value === "boolean";
   }
+}
+
+/** Whether a value is within the field's bounds; bounds the form gets wrong are not applied. */
+function withinBounds(field: IntakeField, value: number | string): boolean {
+  return rangeErrors(field).length > 0 || inRange(field, value).ok;
 }
 
 export function normaliseFieldValue(field: IntakeField, raw: string): NormaliseResult {
@@ -205,7 +219,8 @@ export function normaliseFieldValue(field: IntakeField, raw: string): NormaliseR
       if (field.pattern !== undefined && !new RegExp(`^(?:${field.pattern})$`, "u").test(value)) return { ok: false, reason: "no_match" };
       return { ok: true, value };
     case "number":
-      return /^-?\d+(\.\d+)?$/.test(value) ? inRange(field, Number(value)) : { ok: false, reason: "not_a_number" };
+      // Hundreds of digits overflow to Infinity, which no record can hold.
+      return /^-?\d+(\.\d+)?$/.test(value) && Number.isFinite(Number(value)) ? inRange(field, Number(value)) : { ok: false, reason: "not_a_number" };
     case "date":
       return isCalendarDate(value) ? inRange(field, value) : { ok: false, reason: "not_a_date" };
     case "yes_no": {

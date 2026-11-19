@@ -47,6 +47,11 @@ describe("file: read-back", () => {
     assert.deepEqual(one("units", 0.0000001), { en: ["Units: 0.0000001."], fr: ["Unités : 0,0000001."] });
     assert.deepEqual(one("units", 1e21), { en: ["Units: 1,000,000,000,000,000,000,000."], fr: [`Unités : 1${" 000".repeat(7)}.`] });
     assert.deepEqual(one("units", -0), { en: ["Units: 0."], fr: ["Unités : 0."] });
+    const tiny = `0.${"0".repeat(20)}1`;
+    assert.deepEqual(one("units", 1e-21), { en: [`Units: ${tiny}.`], fr: [`Unités : ${tiny.replace(".", ",")}.`] });
+    assert.deepEqual(one("units", -1e-21), { en: [`Units: minus ${tiny}.`], fr: [`Unités : moins ${tiny.replace(".", ",")}.`] });
+    assert.deepEqual(one("units", 1.5e-7), { en: ["Units: 0.00000015."], fr: ["Unités : 0,00000015."] });
+    assert.deepEqual(one("units", 1.25e22), { en: ["Units: 12,500,000,000,000,000,000,000."], fr: [`Unités : 12 500${" 000".repeat(6)}.`] });
   });
 
   it("reads dates in full, with the weekday", () => {
