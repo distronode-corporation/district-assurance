@@ -505,6 +505,88 @@ describe("paylink: the engine's own deadline", () => {
     assert.equal((await t.ledger.list()).filter((e) => e.event === "payment.link_sent").length, 1);
   });
 
+  it("never texts a link whose request another process settled while the create was slow, and still records its payment", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const create = t.payments.createLink.bind(t.payments);
+    t.payments.createLink = async () => {
+      throw new Error("provider timed out");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /provider timed out/);
+    // Resume A starts its create at 00:03 and the provider answers late; resume B, at 00:04:01,
+    // finds the request too old to create (34 minutes needed, 30:59 left) and expires it.
+    t.clock.advance(3 * 60_000);
+    let answer: () => void = () => undefined;
+    const late = new Promise<void>((resolve) => (answer = resolve));
+    t.payments.createLink = async (input) => {
+      await late;
+      return create(input);
+    };
+    const a = t.engine.requestPayment(callId, request);
+    await new Promise((resolve) => setImmediate(resolve));
+    t.clock.advance(60_000 + 1000);
+    await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /created in time/));
+    answer();
+    await assert.rejects(a, rejects("precondition_failed", /never texted/));
+    assert.equal(t.messages.sent.filter((m) => m.purpose === "payment_link").length, 0, "the live link was never texted");
+    assert.deepEqual(t.payments.expired, [{ linkId: "cs_fake_1", mode: "platform" }], "and it was expired at the provider");
+    // Should the provider still report it paid (it was live for a moment), the money is recorded.
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" }), { applied: true, callId, status: "paid" });
+    const settled = (await t.ledger.list()).filter((e) => e.event === "payment.settled").map((e) => e.detail);
+    assert.deepEqual(settled, [
+      { paymentId: "pay_1", status: "expired" },
+      { paymentId: "pay_1", status: "paid", late: true },
+    ]);
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" }), { applied: false }, "once");
+  });
+
+  it("records a paid outcome that arrives after the engine's own deadline expired the link, flagged late", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.requestPayment(callId, request);
+    t.clock.advance(15 * 60_000);
+    assert.deepEqual(await t.engine.expirePaymentLinks(callId), { expired: ["pay_1"] });
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "async_succeeded", linkId: "cs_fake_1" }), { applied: true, callId, status: "paid" });
+    assert.equal((await t.engine.endCall(callId))!.body.payments[0]!.status, "paid");
+  });
+
+  it("recovers a create the provider refused near its minimum: the next resume expires the request", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    t.payments.createLink = async () => {
+      throw new Error("expires_at is less than 30 minutes away");
+    };
+    // Asked for 00:35 at 00:00. A resume at 00:03:50 still has 31:10 left and tries; the provider
+    // refuses (its own latency took it under 30). The next resume, at 00:04:10, expires the request.
+    await assert.rejects(t.engine.requestPayment(callId, request), /less than 30 minutes/);
+    t.clock.advance(230_000);
+    await assert.rejects(t.engine.requestPayment(callId, request), /less than 30 minutes/);
+    t.clock.advance(20_000);
+    await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /created in time/));
+    assert.equal((await t.engine.state(callId)).phase, "open", "not stuck in paying");
+  });
+
+  it("a sender that stalls past its lease texts a link the provider has already expired, never one that can still take money unrecorded", async () => {
+    const payments = new FakePaymentLinks({ minLinkMinutes: 0 });
+    const t = setup({ adapters: { payments }, config: testConfig((c) => (c.modules.paylink = { settings: { linkLifeMinutes: 5 } })) });
+    const callId = await verifiedCall(t);
+    const send = t.messages.sendText.bind(t.messages);
+    t.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
+    t.clock.advance(270_000);
+    t.messages.sendText = async (input) => {
+      // A stalls 61 seconds: B finds the lease lapsed, and expires the link at the provider.
+      t.clock.advance(61_000);
+      await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /texted in time/));
+      return send(input);
+    };
+    await t.engine.requestPayment(callId, request);
+    assert.deepEqual(payments.expired.map((e) => e.linkId), ["cs_fake_1"], "the provider closed it before A's text went out");
+    assert.equal(await payments.expireLink({ linkId: "cs_fake_1", mode: "platform", idempotencyKey: "k" }).then((r) => r.state), "not_open", "so it cannot be paid");
+  });
+
   it("refuses on a call that started with paylink off", async () => {
     const t = setup({ config: testConfig((c) => delete (c.modules as Record<string, unknown>).paylink) });
     const { callId } = await t.engine.startCall();

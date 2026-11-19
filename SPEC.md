@@ -416,7 +416,12 @@ is never texted with less than 5 minutes of the provider's life left: it is expi
 provider confirms, or waits for its webhook when the provider says `not_open`. Either way
 `requestPayment` throws `precondition_failed`. A process about to text a link holds a 60 second
 lease on it, so a concurrent resume refuses (`precondition_failed`) rather than expiring a link
-being sent; once the lease lapses, it may. `expirePaymentLinks(callId)`, which the host
+being sent; once the lease lapses, it may, and a sender stalled past it then texts a link the
+provider has already closed (so it cannot be paid). A process whose request another process
+settled while its create was slow never texts the link it got: it expires it at the provider and
+throws `precondition_failed`. The create guard keeps a minute over the provider's minimum for its
+latency; a create the provider still refuses leaves the request to the next resume, which expires
+it. `expirePaymentLinks(callId)`, which the host
 calls at `expiresAt` or later, asks the provider to expire each texted link still open past its
 deadline (`expireLink`): on `expired` the request settles `expired` (and its flow step fails); on
 `not_open` it is left for the provider's webhook, which may still say paid. A link that was never
@@ -445,7 +450,10 @@ Settlement:
 | async payment failed | failed |
 | expired | expired |
 
-A request settles once; later outcomes are ignored.
+A request settles once; later outcomes are ignored, with one exception: money that moved is
+always recorded. A request the engine expired (its own deadline, a link too late to text, or a race
+with a slow create) that the provider then reports paid becomes `paid`, and `payment.settled`
+carries `late: true`.
 
 ## 15. Stripe webhooks
 
