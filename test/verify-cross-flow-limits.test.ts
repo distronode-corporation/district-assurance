@@ -142,6 +142,17 @@ describe("the hourly limit on flow starts (VER-15)", () => {
     assert.deepEqual(at("5"), ["modules.badge.settings: lockout.flowStartsPerHour must be an object"]);
   });
 
+  it("never lifts a start limit with a pass: a pass forgets only its own factor's failures", async () => {
+    const t = limitsSetup();
+    const callingNumber = number(150);
+    const { callId } = await t.engine.startCall({ flow: "deposit", callingNumber });
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT, callingNumber });
+    assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: true, locked: false }, "a pass");
+    const numberKey = numberKeyFor(TEST_KNOWLEDGE_KEY, callingNumber);
+    assert.equal((await t.counters.get(startCounter("subject", SUBJECT), LONG_AGO)).length, 1, "the subject's start stays counted");
+    assert.equal((await t.counters.get(startCounter("number", numberKey), LONG_AGO)).length, 1, "the number's start stays counted");
+  });
+
   it("allows 10 starts an hour per calling number, whatever their outcome, then refuses the same way and writes flow.rate_limited", async () => {
     const t = limitsSetup();
     const callingNumber = number(142);

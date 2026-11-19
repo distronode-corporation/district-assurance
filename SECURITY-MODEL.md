@@ -83,8 +83,12 @@ start gives the host one answer, `rate_limited`, whichever limit was hit, and wr
 `flow.rate_limited` with the scope of the limit, never a value. Caller ID can be spoofed, so the
 per-number limit can lock out the real owner of a number for up to an hour: an attacker who
 spoofs a victim's number can spend its starts. The per-subject limit is the one that holds; the
-per-number one is a backstop against one line trying subject after subject. Lifting either early
-is the host's (`AttemptCounters.reset`).
+per-number one is a backstop against one line trying subject after subject. The subject's limit
+is counted for any account number keyed, real or not, so a caller who keys numbers at random learns
+nothing from it; one who keys a real account soon after that account's own five limited flows in
+the hour is refused, which says only that the account was busy, never its details. Lifting either
+early is the host's (`AttemptCounters.reset` on the `flow.start` counter); a pass never lifts a
+start limit, since it forgets only the failures of its own factor kind (`forgetPass`, tested).
 
 ### SIM swap and port-out
 
