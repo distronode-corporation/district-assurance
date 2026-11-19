@@ -48,7 +48,9 @@ enforces it.
 `forwardingFor(state)` is the single place a host asks what it may forward. It returns
 `{transcript, speechToText, model, listenIn, heldFor}`: the four are all false while `sensitive`
 is set (`heldFor` is the reason, `keypad` or `payment`) and once the phase is `ended` (`heldFor`
-is `ended`), and all true otherwise (`heldFor` null). Taint does not change forwarding. The
+is `ended`), and all true otherwise (`heldFor` null). With no state (null or undefined, when the
+host could not read it) or a state the engine never writes (an unknown phase, a missing or unknown
+`sensitive`), all four are false and `heldFor` is `unknown`. Taint does not change forwarding. The
 function is pure; the host asks again after each engine call and forwards nothing when it cannot
 read the state.
 

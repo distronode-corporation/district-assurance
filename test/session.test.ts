@@ -141,6 +141,14 @@ describe("forwardingFor", () => {
     assert.deepEqual(forwardingFor(s), { ...none, heldFor: "ended" });
   });
 
+  it("fails closed with no state, or one the engine never writes", () => {
+    const held = { ...none, heldFor: "unknown" };
+    const s = newSession("c1", "w1", at);
+    for (const bad of [null, undefined, "open" as unknown, { ...s, sensitive: undefined }, { ...s, sensitive: "microphone" }, { ...s, phase: "closing" }, { ...s, phase: undefined }]) {
+      assert.deepEqual(forwardingFor(bad as SessionState), held, JSON.stringify(bad));
+    }
+  });
+
   it("is exported from the package root", async () => {
     const root = await import("../src/index.ts");
     assert.equal(root.forwardingFor, forwardingFor);

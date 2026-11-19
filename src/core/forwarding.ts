@@ -13,20 +13,33 @@ export interface Forwarding {
   /** Staff listening in on the call. */
   listenIn: boolean;
   /**
-   * Why forwarding is held: the open sensitive segment, or `ended` once the call is over. Null when
-   * everything may be forwarded.
+   * Why forwarding is held: the open sensitive segment, `ended` once the call is over, or `unknown`
+   * when there is no state to read or it is not one the engine writes. Null when everything may be
+   * forwarded.
    */
-  heldFor: SensitiveReason | "ended" | null;
+  heldFor: SensitiveReason | "ended" | "unknown" | null;
 }
+
+const LIVE_PHASES: readonly unknown[] = ["open", "verifying", "filing", "paying"];
+const REASONS: readonly unknown[] = ["keypad", "payment"];
 
 /**
  * What the host may forward for the call in `state`. While `sensitive` is set (keypad entry, a
  * payment) and once the call has ended, nothing is forwarded; otherwise everything may be. A host
- * asks again after every engine call that can change the state, and fails closed (forwards
- * nothing) when it cannot read the state.
+ * asks again after every engine call that can change the state. With no state (null, when the host
+ * could not read it) or a state the engine never writes (an unknown phase, a missing or unknown
+ * `sensitive`, say from an old or damaged store), nothing is forwarded either: it fails closed.
  */
-export function forwardingFor(state: SessionState): Forwarding {
-  const heldFor = state.phase === "ended" ? "ended" : state.sensitive;
+export function forwardingFor(state: SessionState | null | undefined): Forwarding {
+  const heldFor = heldReason(state);
   const allowed = heldFor === null;
   return { transcript: allowed, speechToText: allowed, model: allowed, listenIn: allowed, heldFor };
+}
+
+function heldReason(state: SessionState | null | undefined): Forwarding["heldFor"] {
+  if (typeof state !== "object" || state === null) return "unknown";
+  if (state.phase === "ended") return "ended";
+  if (!LIVE_PHASES.includes(state.phase)) return "unknown";
+  if (state.sensitive === null) return null;
+  return REASONS.includes(state.sensitive) ? state.sensitive : "unknown";
 }
