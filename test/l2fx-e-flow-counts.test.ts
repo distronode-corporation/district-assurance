@@ -9,7 +9,7 @@ import type { FlowConfig } from "../src/core/config.ts";
 import type { AssuranceModule } from "../src/core/module.ts";
 import type { MemorySessionStore } from "../src/core/session-store.ts";
 import { FLOW_START, numberKeyFor } from "../src/verify/counters.ts";
-import { TEST_KNOWLEDGE_KEY, type TestEngine } from "../src/testing/index.ts";
+import { TEST_KNOWLEDGE_KEY, createTestEngine, type TestEngine } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, rejects, setup, testConfig } from "./helpers.ts";
 
 const LONG_AGO = "2000-01-01T00:00:00.000Z";
@@ -186,7 +186,7 @@ describe("l2fx-e U2: startCall gives its count back when the attach fails before
   });
 });
 
-describe("l2fx-e U3: a late flow counter is reserved on the call before it is charged", () => {
+describe("l2fx-e U3: a late flow counter is charged as it is reserved, and given back only when not taken", () => {
   const subjectStarts = async (t: TestEngine, callId: string) => {
     const slice = ((await t.sessions.get("ws_test", callId))!.record as { modules: { badge: { subjectKey: string } } }).modules.badge;
     return (await t.counters.get({ workspaceId: "ws_test", factor: FLOW_START, scope: "subject", key: slice.subjectKey }, LONG_AGO)).length;
@@ -201,7 +201,6 @@ describe("l2fx-e U3: a late flow counter is reserved on the call before it is ch
     await t.engine.submitKeypad(callId, { dob: DOB });
     await t.engine.finishVerification(callId);
   };
-  const charging = async (t: TestEngine, callId: string) => ((await t.sessions.get("ws_test", callId))!.record as { flow: { charging?: unknown } }).flow.charging;
 
   it("charges the subject once when two beginVerification calls overlap", async () => {
     const t = setup({ config: stepUp() });
@@ -228,7 +227,6 @@ describe("l2fx-e U3: a late flow counter is reserved on the call before it is ch
     release();
     await a;
     assert.equal(await subjectStarts(t, callId), 1);
-    assert.equal(await charging(t, callId), undefined);
   });
 
   it("resumes a charge that failed, on the next beginVerification, once", async () => {
@@ -242,7 +240,6 @@ describe("l2fx-e U3: a late flow counter is reserved on the call before it is ch
     await passFirst(t, callId);
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     assert.equal(await subjectStarts(t, callId), 1);
-    assert.equal(await charging(t, callId), undefined);
   });
 
   it("charges again a resumed charge whose reply was lost, the safe side", async () => {
@@ -275,7 +272,7 @@ describe("l2fx-e U3: a late flow counter is reserved on the call before it is ch
     assert.equal((await t.engine.flowPosition(callId))!.status, "failed");
   });
 
-  it("keeps another overlapping call's reservation while it is still being charged", async () => {
+  it("gives back the extra charge of a verification whose counter an overlapping one took first", async () => {
     const t = setup({ config: stepUp() });
     const { callId } = await t.engine.startCall({ flow: "pay" });
     const record = t.counters.recordFailure.bind(t.counters);
@@ -283,8 +280,10 @@ describe("l2fx-e U3: a late flow counter is reserved on the call before it is ch
     const held = new Promise<void>((resolve) => (release = resolve));
     let reached!: () => void;
     const atCharge = new Promise<void>((resolve) => (reached = resolve));
+    let first = true;
     t.counters.recordFailure = async (key, ...rest) => {
-      if (key.factor === FLOW_START && key.scope === "subject") {
+      if (key.factor === FLOW_START && first) {
+        first = false;
         reached();
         await held;
       }
@@ -293,13 +292,34 @@ describe("l2fx-e U3: a late flow counter is reserved on the call before it is ch
     const a = t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     await atCharge;
     await passFirst(t, callId);
-    // This one brings a number: it reserves and charges that counter while the subject's is still out.
+    // This one brings a number too: it charges and takes both while the first charge is still out.
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT, callingNumber: CALLING });
-    assert.equal((await charging(t, callId) as unknown[]).length, 1, "the subject's charge is still owed");
+    assert.equal(await subjectStarts(t, callId), 1);
     release();
     await a;
-    assert.equal(await charging(t, callId), undefined);
     assert.equal(await starts(t), 1);
+    assert.equal(await subjectStarts(t, callId), 1, "the first verification's charge, taken second, is given back");
+  });
+
+  /** The write that takes a late counter on the call: its flow's `counted` is no longer empty. */
+  const takesCounter = (record: JsonValue) => ((record as { flow: { counted: string[] } }).flow.counted.length > 0);
+
+  it("gives every charge back when the write that takes them saves nothing", async () => {
+    const t = setup({ config: stepUp() });
+    const { callId } = await t.engine.startCall({ flow: "pay" });
+    const cas = t.sessions.compareAndSet.bind(t.sessions);
+    // Badge's own writes go through; every attempt of the counting write finds the call moved.
+    t.sessions.compareAndSet = async (...args) => (takesCounter(args[3]) ? { ok: false as const } : cas(...args));
+    await assert.rejects(t.engine.beginVerification(callId, { accountNumber: ACCOUNT }), rejects("conflict"));
+    assert.equal(await subjectStarts(t, callId), 0);
+  });
+
+  it("keeps the charges when the write that takes them gives no answer", async () => {
+    const t = setup({ config: stepUp() });
+    const { callId } = await t.engine.startCall({ flow: "pay" });
+    const cas = t.sessions.compareAndSet.bind(t.sessions);
+    t.sessions.compareAndSet = async (...args) => (takesCounter(args[3]) ? Promise.reject(new Error("store down")) : cas(...args));
+    await assert.rejects(t.engine.beginVerification(callId, { accountNumber: ACCOUNT }), /store down/);
     assert.equal(await subjectStarts(t, callId), 1);
   });
 
@@ -315,6 +335,49 @@ describe("l2fx-e U3: a late flow counter is reserved on the call before it is ch
     };
     await assert.rejects(t.engine.beginVerification(callId, { accountNumber: ACCOUNT, callingNumber: CALLING }), rejects("rate_limited"));
     assert.equal((await t.engine.flowPosition(callId))!.status, "failed");
-    assert.equal(await charging(t, callId), undefined);
+  });
+
+  /** The process stops inside a call: the promise never settles, and nothing after it runs. */
+  const never = () => new Promise<never>(() => undefined);
+  /** A second engine on the same stores, as after a restart. */
+  const restarted = (t: TestEngine, config: FlowConfig) =>
+    createTestEngine({ config, adapters: { sessions: t.sessions, counters: t.counters, records: t.records, ledger: t.ledger } });
+
+  it("keeps the subject charged when the process stops at the charge, and a restarted engine continues the call", async () => {
+    const config = stepUp();
+    const t = setup({ config });
+    const { callId } = await t.engine.startCall({ flow: "pay" });
+    const record = t.counters.recordFailure.bind(t.counters);
+    t.counters.recordFailure = (key, ...rest) => (key.factor === FLOW_START ? never() : record(key, ...rest));
+    void t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await new Promise((resolve) => setImmediate(resolve));
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    t.counters.recordFailure = record;
+    const next = restarted(t, config);
+    await next.engine.submitKeypad(callId, { dob: DOB });
+    await next.engine.finishVerification(callId);
+    await next.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    assert.ok((await subjectStarts(t, callId)) >= 1, "the subject's start is counted: a crash never leaves it free");
+  });
+
+  it("counts at most one extra when the process stops after the charge recorded, before the call took it", async () => {
+    const config = stepUp();
+    const t = setup({ config });
+    const { callId } = await t.engine.startCall({ flow: "pay" });
+    const record = t.counters.recordFailure.bind(t.counters);
+    t.counters.recordFailure = async (key, ...rest) => {
+      const starts = await record(key, ...rest);
+      if (key.factor === FLOW_START) await never();
+      return starts;
+    };
+    void t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await new Promise((resolve) => setImmediate(resolve));
+    t.counters.recordFailure = record;
+    const next = restarted(t, config);
+    await next.engine.submitKeypad(callId, { dob: DOB });
+    await next.engine.finishVerification(callId);
+    await next.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    assert.ok((await subjectStarts(t, callId)) <= 2);
+    assert.ok((await subjectStarts(t, callId)) >= 1);
   });
 });
