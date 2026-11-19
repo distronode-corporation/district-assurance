@@ -34,7 +34,7 @@ import {
   type FactorPlugin,
   type PinSettings,
 } from "./factors.ts";
-import { counterKeys, currentLock, isCallingNumber, lockoutOf, lockoutSettingsErrors, recordFailures, resetCounters, type Lock } from "./counters.ts";
+import { counterKeys, currentLock, isCallingNumber, lockoutOf, lockoutSettingsErrors, forgetPass, recordFailures, type Lock } from "./counters.ts";
 import { isKeypadEntry } from "./knowledge.ts";
 
 export const BADGE = "badge";
@@ -353,8 +353,8 @@ async function refuseLocked(rt: EngineRuntime, callId: string, kind: string, epo
 /**
  * Judges one entered factor: keypad knowledge, the PIN, or a plug-in. The counters across calls
  * are read first, and a locked subject or number is refused without judging or counting. Then the
- * attempt is counted on the call and as a failure across calls, both before it is judged; a pass
- * forgets the failures. After the factor's limit the line stops judging, even the right answer.
+ * attempt is counted on the call and as a failure across calls, both before it is judged; an
+ * accepted pass forgets the subject's failures and its own on the number. After the factor's limit the line stops judging, even the right answer.
  */
 export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callId: string, kind: string, entry: FactorEntry): Promise<KeypadResult> {
   const builtIn = BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS];
@@ -378,9 +378,17 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch };
   });
   if (reserved === null) return { matched: false, locked: true };
-  const recorded = await recordFailures(counters, lockout, keys, rt.clock.now());
+  const at = rt.clock.now();
+  const recorded = await recordFailures(counters, lockout, keys, at);
   // Another attempt, on this call or another, locked the subject or number since they were read.
-  if (recorded.raced !== null) return refuseLocked(rt, callId, kind, reserved.epoch, recorded.raced);
+  // This entry is not judged, so it gives back the call's attempt it reserved, like one refused up front.
+  if (recorded.raced !== null) {
+    await rt.update(callId, (draft) => {
+      const s = draft.slice<BadgeSlice>(BADGE);
+      s.attempts[kind] = Math.max(0, s.attempts[kind]! - 1);
+    });
+    return refuseLocked(rt, callId, kind, reserved.epoch, recorded.raced);
+  }
   const input = { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey, subject: reserved.subject, entry, hmac: (d: string) => rt.hmac(d) };
   const passed =
     kind === "keypad_knowledge"
@@ -388,7 +396,6 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
       : kind === "pin"
         ? await judgePin(rt, rt.settings<BadgeSettings>(BADGE).pin as PinSettings, input)
         : (await plugin!.judge(input)) === true;
-  if (passed) await resetCounters(counters, keys);
   const hard = passed ? null : recorded.hard;
   await rt.update(callId, (draft) => {
     assertSameVerification(draft.slice<BadgeSlice>(BADGE), reserved.epoch);
@@ -398,6 +405,9 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     draft.emit("verification.factor", "code", { kind, passed });
     if (hard !== null) draft.emit("verification.locked", "code", { kind, scope: hard.scope, hard: true, until: hard.until });
   });
+  // Only once the result is accepted. The number keeps its failures but this attempt's own: they
+  // may be against other accounts, so a pass on this one must not clear them.
+  if (passed) await forgetPass(counters, lockout, keys, at);
   return { matched: passed, locked: !passed && (reserved.last || hard !== null) };
 }
 

@@ -5,7 +5,9 @@
 // window.
 //
 // A failure is recorded before the entry is judged, like the per-call attempt, so a crash, a
-// failing verifier or a second process never gives a free try; a pass forgets the failures.
+// failing verifier or a second process never gives a free try. A pass forgets the
+// subject's failures and its own on the number; the number's others stay until they leave the
+// window, so a pass on the caller's own account never clears what the line ran up against others.
 // Subjects are counted by subject key whether or not they exist, so a lock never says which
 // accounts are real. The calling number is counted as a keyed hash, never as the number.
 import type { AttemptCounterKey, AttemptCounters } from "../core/adapters.ts";
@@ -70,7 +72,12 @@ function backoffFloor(index: number): number {
 
 /** Validated settings with the defaults filled in. */
 export function lockoutOf(settings: LockoutSettings | undefined): Lockout {
-  return { ...DEFAULT_LOCKOUT, backoffSeconds: [...DEFAULT_LOCKOUT.backoffSeconds], ...settings };
+  // Field by field, so a setting given as undefined still gets its default.
+  return {
+    backoffSeconds: [...(settings?.backoffSeconds ?? DEFAULT_LOCKOUT.backoffSeconds)],
+    lockAfterFailures: settings?.lockAfterFailures ?? DEFAULT_LOCKOUT.lockAfterFailures,
+    windowHours: settings?.windowHours ?? DEFAULT_LOCKOUT.windowHours,
+  };
 }
 
 /** Whether a string is a calling number the engine counts: E.164. A withheld number is not passed at all. */
@@ -83,11 +90,14 @@ export function numberKeyFor(knowledgeKey: string | Uint8Array, callingNumber: s
   return hmacSha256Hex(knowledgeKey, `number:${callingNumber}`);
 }
 
-/** The counters one attempt is counted under: the subject's, when there is a subject key, and the number's, when the host gave one. */
-export function counterKeys(workspaceId: string, factor: string, keys: { subjectKey: string | null; numberKey: string | null }): AttemptCounterKey[] {
+/**
+ * The counters one attempt is counted under: the subject's, when there is a subject key, and the
+ * number's, when the host gave one. An absent key (a call saved before numbers were kept) is none.
+ */
+export function counterKeys(workspaceId: string, factor: string, keys: { subjectKey?: string | null; numberKey?: string | null }): AttemptCounterKey[] {
   const out: AttemptCounterKey[] = [];
-  if (keys.subjectKey !== null) out.push({ workspaceId, factor, scope: "subject", key: keys.subjectKey });
-  if (keys.numberKey !== null) out.push({ workspaceId, factor, scope: "number", key: keys.numberKey });
+  if (typeof keys.subjectKey === "string") out.push({ workspaceId, factor, scope: "subject", key: keys.subjectKey });
+  if (typeof keys.numberKey === "string") out.push({ workspaceId, factor, scope: "number", key: keys.numberKey });
   return out;
 }
 
@@ -102,7 +112,7 @@ function windowStart(lockout: Lockout, now: Date): string {
  * number. Null when an attempt may be judged.
  */
 export function lockState(lockout: Lockout, failures: readonly string[], now: Date): Omit<Lock, "scope"> | null {
-  const times = failures.map((at) => Date.parse(at));
+  const times = failures.map((at) => Date.parse(at)).sort((a, b) => a - b);
   const n = times.length;
   if (n >= lockout.lockAfterFailures) {
     return { hard: true, until: new Date(times[n - lockout.lockAfterFailures]! + lockout.windowHours * 3_600_000).toISOString() };
@@ -123,8 +133,9 @@ export async function currentLock(counters: AttemptCounters, lockout: Lockout, k
 
 /**
  * Records one failure on every counter, before the entry is judged. `raced` is a lock that
- * another attempt put in place since the counters were read (this one must not be judged);
- * `hard` is the hard lock this failure starts if the entry fails.
+ * another attempt put in place since the counters were read (this one must not be judged); no
+ * counter after it is recorded, so two racing attempts do not also lock each other out on the
+ * next counter. `hard` is the hard lock this failure starts if the entry fails.
  */
 export async function recordFailures(
   counters: AttemptCounters,
@@ -132,19 +143,34 @@ export async function recordFailures(
   keys: readonly AttemptCounterKey[],
   now: Date,
 ): Promise<{ raced: Lock | null; hard: Lock | null }> {
-  let raced: Lock | null = null;
   let hard: Lock | null = null;
   for (const key of keys) {
     const failures = await counters.recordFailure(key, now.toISOString(), windowStart(lockout, now));
     const before = lockState(lockout, failures.slice(0, -1), now);
-    if (raced === null && before !== null) raced = { scope: key.scope, ...before };
+    if (before !== null) return { raced: { scope: key.scope, ...before }, hard: null };
     const after = lockState(lockout, failures, now);
     if (hard === null && after?.hard === true) hard = { scope: key.scope, ...after };
   }
-  return { raced, hard };
+  return { raced: null, hard };
 }
 
-/** Forgets the failures on every counter, after a pass. */
-export async function resetCounters(counters: AttemptCounters, keys: readonly AttemptCounterKey[]): Promise<void> {
-  for (const key of keys) await counters.reset(key);
+/**
+ * After a pass whose failure was recorded at `at`: forgets the subject's failures, and takes only
+ * this attempt's own failure off the number's. The number's other failures may be against other
+ * accounts, so they stay until they leave the window. The store has no single-entry delete, so the
+ * number's counter is reset and the rest written back, with their times; a failure another attempt
+ * records in between may be lost, and the list may come back out of order (`lockState` sorts it).
+ */
+export async function forgetPass(counters: AttemptCounters, lockout: Lockout, keys: readonly AttemptCounterKey[], at: Date): Promise<void> {
+  const since = windowStart(lockout, at);
+  for (const key of keys) {
+    if (key.scope === "subject") {
+      await counters.reset(key);
+      continue;
+    }
+    const failures = await counters.get(key, since);
+    const own = failures.lastIndexOf(at.toISOString());
+    await counters.reset(key);
+    for (const [i, time] of failures.entries()) if (i !== own) await counters.recordFailure(key, time, since);
+  }
 }

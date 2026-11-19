@@ -34,16 +34,21 @@ class FlawedCounters implements AttemptCounters {
     return this.flaw === "shares_keys" ? `${key.workspaceId}/${key.factor}` : JSON.stringify(key);
   }
 
-  async get(key: AttemptCounterKey, since: string): Promise<string[]> {
+  #read(key: AttemptCounterKey, since: string): string[] {
     const all = [...(this.#failures.get(this.#id(key)) ?? [])];
     return this.flaw === "ignores_since" ? all : all.filter((t) => t >= since);
   }
 
+  async get(key: AttemptCounterKey, since: string): Promise<string[]> {
+    return this.#read(key, since);
+  }
+
+  /** Atomic (read and write with no await between) except in the racy mode, so each mode has only its own flaw. */
   async recordFailure(key: AttemptCounterKey, at: string, since: string): Promise<string[]> {
-    const before = await this.get(key, LONG_AGO);
+    const before = this.#read(key, LONG_AGO);
     if (this.flaw === "racy") await new Promise((resolve) => setImmediate(resolve));
     this.#failures.set(this.#id(key), [...before, at]);
-    return this.get(key, since);
+    return this.#read(key, since);
   }
 
   async reset(key: AttemptCounterKey): Promise<void> {
@@ -99,6 +104,17 @@ describe("lockState: the waits and the hard lock, on a fixed clock", () => {
     lockout.backoffSeconds.push(1);
     assert.deepEqual(DEFAULT_LOCKOUT.backoffSeconds, [5, 15, 60, 300, 900]);
     assert.deepEqual(lockoutOf({ lockAfterFailures: 4 }).lockAfterFailures, 4);
+    // As a host's config can carry them, e.g. `lockAfterFailures: env.MAX` with the variable unset.
+    const unset = { backoffSeconds: undefined, lockAfterFailures: undefined, windowHours: undefined } as unknown as Parameters<typeof lockoutOf>[0];
+    assert.deepEqual(lockoutOf(unset), lockoutOf(undefined), "a setting given as undefined keeps its default");
+    const given = [10, 30, 120, 600, 1800];
+    const copied = lockoutOf({ backoffSeconds: given });
+    copied.backoffSeconds.push(1);
+    assert.deepEqual(given, [10, 30, 120, 600, 1800]);
+  });
+
+  it("counts a key left out of an older call as none", () => {
+    assert.deepEqual(counterKeys("w", "pin", { subjectKey: SUBJECT }), [{ workspaceId: "w", factor: "pin", scope: "subject", key: SUBJECT }]);
   });
 
   it("keys a subject and a calling number apart, and never keeps the number", () => {
@@ -178,7 +194,64 @@ describe("lockouts across calls", () => {
     assert.deepEqual(details.slice(0, 2), details.slice(2), "the same ledger detail");
   });
 
-  it("forgets both counters after a pass, keeps the calling number through a restart, and refuses one that is not E.164", async () => {
+  it("keeps a line's failures against other accounts through a pass on its own", async () => {
+    const t = setup({ config: testConfig((c) => ((c.modules.badge!.settings as { lockout?: unknown }).lockout = { lockAfterFailures: 3 })) });
+    const line = { callingNumber: "+15555550142" };
+    const answers: unknown[] = [];
+    for (let i = 0; i < 3; i++) {
+      waitOut(t);
+      answers.push(await t.engine.submitKeypad(await call(t, { ...line, accountNumber: `9999999${i}` }), { dob: "1" }));
+      waitOut(t);
+      if (i < 2) answers.push(await t.engine.submitKeypad(await call(t, line), { dob: DOB }));
+    }
+    assert.deepEqual(answers, [
+      { matched: false, locked: false },
+      { matched: true, locked: false },
+      { matched: false, locked: false },
+      { matched: true, locked: false },
+      { matched: false, locked: true },
+    ]);
+    assert.deepEqual((await t.ledger.list()).at(-1)!.detail, { kind: "keypad_knowledge", scope: "number", hard: true, until: iso(T0 + 900_000 + 24 * HOUR) });
+  });
+
+  it("counts a call saved before calling numbers were kept by its subject only", async () => {
+    const seen: AttemptCounterKey[] = [];
+    class Spy extends MemoryAttemptCounters {
+      override async recordFailure(key: AttemptCounterKey, at: string, since: string): Promise<string[]> {
+        seen.push(key);
+        return super.recordFailure(key, at, since);
+      }
+    }
+    const t = setup({ adapters: { counters: new Spy() } });
+    const callId = await call(t);
+    const stored = (await t.sessions.get("ws_test", callId))!;
+    const record = structuredClone(stored.record) as { modules: { badge: { numberKey?: unknown } } };
+    delete record.modules.badge.numberKey;
+    assert.deepEqual(await t.sessions.compareAndSet("ws_test", callId, stored.version, record as never), { ok: true, version: stored.version + 1 });
+    assert.deepEqual(await t.engine.submitPin(callId, "0000"), { matched: false, locked: false });
+    assert.deepEqual(seen, [subjectCounter("pin")]);
+  });
+
+  it("does not forget the failures for a pass that a restart made stale", async () => {
+    let restart = async (): Promise<void> => undefined;
+    const plugin = { kind: "voice_passphrase", summary: "a passphrase", maxAttemptsPerCall: 3, adapters: [], judge: async () => (await restart(), true) };
+    const t = setup({
+      badge: badgeModule({ factors: [plugin] }),
+      config: testConfig((c) => {
+        c.policy.levels[0] = { level: 1, anyOf: [["voice_passphrase"]] };
+        (c.modules.badge!.settings as { factors: string[] }).factors.push("voice_passphrase");
+      }),
+    });
+    const callId = await call(t);
+    restart = async () => {
+      await t.engine.finishVerification(callId);
+      await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    };
+    await assert.rejects(t.engine.submitFactor(callId, "voice_passphrase", "x"), rejects("precondition_failed", /restarted/));
+    assert.equal((await t.counters.get(subjectCounter("voice_passphrase"), LONG_AGO)).length, 1, "the stale pass reset nothing");
+  });
+
+  it("forgets the subject's counter after a pass, keeps the calling number through a restart, and refuses one that is not E.164", async () => {
     const t = setup();
     const callId = await call(t, { callingNumber: "+15555550142" });
     await t.engine.submitPin(callId, "0000");
@@ -187,8 +260,11 @@ describe("lockouts across calls", () => {
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     const numberCounter: AttemptCounterKey = { workspaceId: "ws_test", factor: "pin", scope: "number", key: numberKeyFor(TEST_KNOWLEDGE_KEY, "+15555550142") };
     assert.equal((await t.counters.get(numberCounter, LONG_AGO)).length, 1);
+    assert.deepEqual(await t.engine.submitPin(callId, "0001"), { matched: false, locked: false });
+    assert.equal((await t.counters.get(numberCounter, LONG_AGO)).length, 2, "the number was kept through the restart");
+    t.clock.advance(15_000);
     assert.deepEqual(await t.engine.submitPin(callId, "4826"), { matched: true, locked: false });
-    assert.deepEqual(await t.counters.get(numberCounter, LONG_AGO), [], "the number was kept through the restart, and forgotten after the pass");
+    assert.deepEqual(await t.counters.get(numberCounter, LONG_AGO), [iso(T0), iso(T0 + 5_000)], "the pass takes back only its own failure on the number");
     assert.deepEqual(await t.counters.get(subjectCounter("pin"), LONG_AGO), []);
     for (const callingNumber of ["5555550142", "+0555", "anonymous", ""]) {
       await assert.rejects(t.engine.beginVerification(callId, { accountNumber: ACCOUNT, callingNumber }), rejects("invalid_input", /E\.164/));
@@ -224,15 +300,21 @@ describe("lockouts across calls", () => {
     const a = setup({ adapters: { counters } });
     const b = createTestEngine({ config: testConfig(), clock: a.clock, ids: a.ids, adapters: { records: a.records, ledger: a.ledger, counters } });
     assert.equal(b.counters, counters, "the test engine keeps the counters it was given");
-    const one = await call(a);
+    const line = { accountNumber: ACCOUNT, callingNumber: "+15555550142" };
+    const one = await call(a, line);
     const { callId: two } = await b.engine.startCall();
-    await b.engine.beginVerification(two, { accountNumber: ACCOUNT });
+    await b.engine.beginVerification(two, line);
     counters.gate = 2;
     const results = await Promise.all([a.engine.submitPin(one, "0000"), b.engine.submitPin(two, "1111")]);
     assert.deepEqual(results.map((r) => r.locked).sort(), [false, true]);
     const judged = (await a.engine.state(one)).factors.length + (await b.engine.state(two)).factors.length;
     assert.equal(judged, 1, "only one entry was judged");
     assert.equal((await a.counters.get(subjectCounter("pin"), LONG_AGO)).length, 2, "both were counted before judging");
+    const numberCounter: AttemptCounterKey = { workspaceId: "ws_test", factor: "pin", scope: "number", key: numberKeyFor(TEST_KNOWLEDGE_KEY, "+15555550142") };
+    assert.equal((await a.counters.get(numberCounter, LONG_AGO)).length, 1, "the refused one stopped at the counter that raced");
+    const [refusedCall, refusedSessions] = results[0]!.locked ? [one, a.sessions] : [two, b.sessions];
+    const stored = (await refusedSessions.get("ws_test", refusedCall))!.record as { modules: { badge: { attempts: Record<string, number> } } };
+    assert.equal(stored.modules.badge.attempts.pin, 0, "the refused one gave back the call's attempt");
     const locked = (await a.ledger.list()).filter((e) => e.event === "verification.locked");
     assert.deepEqual(locked.map((e) => e.detail), [{ kind: "pin", scope: "subject", hard: false, until: iso(T0 + 5_000) }]);
   });

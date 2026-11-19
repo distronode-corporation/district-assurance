@@ -205,7 +205,12 @@ when there is a number.
   attempt, and writes `verification.locked`. Otherwise it counts the call's attempt, then records a
   failure on each counter, both before judging. If the lists `recordFailure` returned show a lock
   that was not there when the counters were read (another attempt, on any call or engine, got in
-  first), the attempt is refused the same way. A pass resets both counters; a failure stands, and
+  first), the attempt is refused the same way: no counter after that one is recorded, and the
+  call's attempt is given back. A pass, once its result is accepted on the call, resets the
+  subject's counter and takes its own failure off the number's (`forgetPass`: the counter is reset
+  and the other failures written back with their times); the number's other failures stay until
+  they leave the window, so a pass on the caller's own account never clears failures the line ran
+  up against others. A failure stands, and
   one that starts a hard lock returns `locked: true` and writes `verification.locked`. A judge or
   verifier that throws leaves its failure counted.
 - Lifting a lock early is the host's: `AttemptCounters.reset` with the keys (`counterKeys`).
