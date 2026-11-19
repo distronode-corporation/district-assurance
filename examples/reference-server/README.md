@@ -72,6 +72,7 @@ How the page is kept small and safe:
 | `public/` | the page: `index.html`, `style.css`, `app.js`, and `receipt-check.js` (no DOM, tested in Node) |
 | `src/e2e.ts` | `npm run demo:e2e`: the UI, the door relay and a real Stripe Checkout in test mode; `owner-command` and `visit` |
 | `src/stripe-adapters.ts` | `StripeCheckoutLinks`, a minimal PAY-1 Checkout adapter (test-mode keys only, platform mode, built-in fetch); Stripe Identity planned (VER-5) |
+| `src/stripe-adapters.ts` | the Stripe Identity adapter (VER-5); the Checkout adapter, planned (PAY-1) |
 
 ## Trying it with your own Stripe test account
 
@@ -96,6 +97,11 @@ How the page is kept small and safe:
    `/webhooks/stripe/connect` (not `/payments`) answered it. Filter each listener to its own event
    types (`--events checkout.session.completed,...`), so an event never reaches an endpoint that
    does not handle it.
+   session is unknown to this engine because the Checkout adapter is not built yet (PAY-1). A wrong
+   secret answers `400` with the reason.
+
+For a photo ID check that goes to Stripe Identity and back, applied to a call, follow "Trying
+Stripe Identity with your own test account" in the repository's README.md.
 
 Use test-mode keys only. Never commit a secret; the server reads them from the environment.
 

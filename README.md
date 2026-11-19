@@ -21,7 +21,7 @@ added and removed per workspace config.
 
 | Module | What it does | Today |
 |---|---|---|
-| **Badge** (verify) | Who is calling, in levels. Factors are plug-ins: a PIN (against a keyed hash, or the host's own PIN store), keypad knowledge checked against the organisation's records, carrier signals on the number on file, a photo ID plus selfie by a texted link, and any factor a host adds. A flow can use a PIN only or all of them. | Built on fakes. Texted codes, spoken answers and lockouts across calls are planned. |
+| **Badge** (verify) | Who is calling, in levels. Factors are plug-ins: a PIN (against a keyed hash, or the host's own PIN store), keypad knowledge checked against the organisation's records, carrier signals on the number on file, a photo ID plus selfie by a texted link, and any factor a host adds. A flow can use a PIN only or all of them. | Built on fakes, with a Stripe Identity adapter for photo ID in the reference server. Texted codes, spoken answers and lockouts across calls are planned. |
 | **Dossier** (file) | Intake the caller confirms: forms the organisation defines, values normalised by code, a structured record with a fingerprint. | Built. Read-backs, encrypted fields and delivery are planned. |
 | **Paylink** (pay) | Payment by a secure link texted to the number on file (a hosted page such as Stripe Checkout), on the business's own account (`connect`) or the platform's (`platform`), chosen per flow. Only methods that settle during the call; the link lives 15 minutes after it is texted by default, and the host calls `expirePaymentLinks` at that deadline (a timer or a sweep) so the engine expires it. The engine never handles card numbers. | Built on fakes, both modes. The Stripe adapter is planned. |
 | **Trace** (prove) | The hash-chained audit ledger, which is always on and cannot be turned off, plus optional signed receipts (ES256 over canonical JSON) and consent records with fingerprinted wording. | Built, in memory. Export, key rotation and revocation are planned. |
@@ -176,9 +176,46 @@ state machine, the config, the events and the formats.
 
 `npm run ui` adds the demo page and its `/demo/*` routes. `npm run serve` starts the server alone on `127.0.0.1:8787`. With `STRIPE_IDENTITY_WEBHOOK_SECRET`,
 `STRIPE_PAYMENTS_WEBHOOK_SECRET` and `STRIPE_CONNECT_WEBHOOK_SECRET` set to your own test-mode endpoint secrets, `stripe listen` can
-forward real test events to it; their signatures are checked, and since that server runs on fake
-adapters, the sessions they name are unknown to the engine. It is not hardened for
+forward real test events to it, and their signatures are checked. The Stripe Identity adapter is
+built (below). That server keeps fake payment adapters, so the Checkout sessions those events name
+are unknown to the engine (`npm run demo:e2e` runs a real Checkout). It is not hardened for
 production.
+
+### Trying Stripe Identity with your own test account
+
+`StripeIdentityProvider` (`examples/reference-server/src/stripe-adapters.ts`) creates a Stripe
+Identity VerificationSession of type `document` with a matching selfie required, the call id in
+its metadata and the engine's idempotency key, with `fetch` and a restricted key. It never logs the
+single-use link. To see a photo ID check go from the engine to Stripe and back:
+
+1. In the Stripe dashboard, in test mode, turn on Identity, then create a restricted key
+   (`rk_test_...`) with write access to Identity verification sessions and nothing else.
+2. Forward Identity events to the server, and note the signing secret `stripe listen` prints:
+
+   ```sh
+   stripe listen --events identity.verification_session.verified,identity.verification_session.requires_input,identity.verification_session.canceled \
+     --forward-to localhost:8787/webhooks/stripe/identity
+   ```
+
+3. In another terminal, start the server with the key and the secret:
+
+   ```sh
+   STRIPE_IDENTITY_KEY=rk_test_... STRIPE_IDENTITY_WEBHOOK_SECRET=whsec_... npm run serve
+   ```
+
+   The server verifies a made-up trial caller by keypad and asks your Stripe account for a photo
+   ID check. The text the caller would receive, with the link, is printed by a stand-in phone
+   (the caller's number on file is a 555 number, and nothing is texted), followed by the trial
+   call's id and the VerificationSession id.
+4. Open the link and complete Stripe's test-mode check (test mode offers verified and failed
+   outcomes without a real document).
+5. `stripe listen` forwards the signed `identity.verification_session.verified` event; the server
+   checks the signature, applies the outcome to the trial call, and prints
+   `verification.factor {"kind":"photo_id","passed":true,"status":"verified"}`.
+
+The server refuses a live key or a secret key: use a restricted test-mode key only, and never
+commit it; the server reads it from the environment. Without `STRIPE_IDENTITY_KEY`, everything
+runs on fakes.
 
 ## Design rules
 

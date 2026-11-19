@@ -420,10 +420,10 @@ export async function startPhotoId(rt: EngineRuntime, callId: string): Promise<{
   const enrolled = await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
     if (s.identityLink === "void") return false;
-    if (s.identityLink === "reserved") {
-      s.identityLink = "sent";
-      s.identitySessions.push(check.sessionId);
-    }
+    if (s.identityLink === "reserved") s.identityLink = "sent";
+    // Every session whose link is about to be texted must be able to apply its outcome, even when
+    // a resume long after a failed text gets a new session (the provider pruned the old key).
+    if (!s.identitySessions.includes(check.sessionId)) s.identitySessions.push(check.sessionId);
     return true;
   });
   // Tainted while the check was created: the link would never count, so it is never sent.

@@ -194,7 +194,9 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   new epoch; a factor result, a carrier report or a photo ID check from an earlier epoch is never
   applied (`precondition_failed`), and a change of subject drops pending photo ID checks.
 - The photo ID link is reserved, created, enrolled and texted in turn; after a failure,
-  `startPhotoId` resumes with the same idempotency keys, so a call never has two links. After `maxAttemptsPerCall`,
+  `startPhotoId` resumes with the same idempotency keys, so a call never has two links. If the
+  provider answers a resume with a new session (it pruned the key), that session is enrolled before
+  its link is texted, so its outcome applies; a repeated session is enrolled once. After `maxAttemptsPerCall`,
   `submitPin` returns `locked` without judging. Across calls: planned (VER-1). Enrolment: planned
   (VER-6).
 
@@ -598,6 +600,27 @@ session's `payment_intent` when it is a string) and
 are reported as ignored, and a body that is not a well-formed event is `null`, including one whose
 `account` is present but not a string (never read as "no account"). The reference server
 applies dispute events from the platform's payments endpoint only.
+
+The reference server's `StripeIdentityProvider` (an example, not part of the package) is an
+`IdentityProvider` that calls Stripe with `fetch`. `createDocumentCheck` sends one
+`POST /v1/identity/verification_sessions`, form-encoded, with exactly `type=document`,
+`options[document][require_matching_selfie]=true` and `metadata[call_id]=<call id>` (the call id
+as is when it is at most 500 UTF-8 bytes, Stripe's metadata value limit, and otherwise `sha256:`
+and its hex SHA-256, the same every time, so a long call id still gets a check), and the
+headers `Authorization: Bearer <restricted key>`, `Idempotency-Key`, and a pinned
+`Stripe-Version` (`2025-03-31.basil`). The `Idempotency-Key` is the engine's key as is when it is
+1 to 255 printable ASCII characters without spaces, and otherwise `sha256:` and the hex SHA-256 of
+it, so the same engine key always sends the same header and a resumed `startPhotoId` gets the same
+session and link. It answers the session's `id` (which must start with `vs_`) as the session id
+and its `url` (which must be `https://` and then 1 to 2,040 printable ASCII characters, no space,
+line break or control character, since it goes into a text message as is) as the link. The constructor takes only a restricted key
+(`rk_test_` or `rk_live_`); `npm run serve` takes only `rk_test_`. A refusal or a malformed answer
+throws `StripeApiError` with the HTTP status and Stripe's error type and code when they are plain
+identifiers, never Stripe's message or any value from the request or the answer. Requests time
+out after 10 seconds (`timeoutMs`, a whole number from 1 to 60,000) and never follow a redirect.
+An `apiBase` option must be `https:`, or `http:` on a loopback host (`127.0.0.1`, `localhost`,
+`[::1]`) only, with no credentials in it; anything else, and a bad `timeoutMs`, throws in the
+constructor, never quoting the value.
 
 ## 16. Texts
 

@@ -6,8 +6,7 @@ import { after, before, describe, it } from "node:test";
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { runDemo } from "../examples/reference-server/src/demo.ts";
 import { createDoorRelay } from "../examples/reference-server/src/door-relay.ts";
-import { StripeIdentityProvider } from "../examples/reference-server/src/stripe-adapters.ts";
-import { NotImplementedError, canonicalJson, signDocument, signStripePayload, type Engine } from "../src/index.ts";
+import { canonicalJson, signDocument, signStripePayload, type Engine } from "../src/index.ts";
 import { createTestEngine, generateTestSigner, type TestEngine } from "../src/testing/index.ts";
 
 const SECRET = "whsec_test_not_a_secret";
@@ -206,9 +205,5 @@ describe("demo and Stripe adapters", () => {
     assert.deepEqual(result.receipt.body.verification, { level: 2, methods: ["carrier_identity_match", "keypad_knowledge"], policyVersion: "demo-1", configRevision: "demo-2026-11" });
     assert.equal(result.receipt.body.payments[0]!.status, "paid");
     assert.equal(result.receipt.body.consents[0]!.purpose, "repair_texts");
-  });
-
-  it("has a Stripe Identity adapter that is planned, not built (the Checkout one is in stripe-adapters.test.ts)", async () => {
-    await assert.rejects(new StripeIdentityProvider("rk_test").createDocumentCheck({ callId: "c", idempotencyKey: "k" }), (e: unknown) => e instanceof NotImplementedError && e.issue === "VER-5");
   });
 });

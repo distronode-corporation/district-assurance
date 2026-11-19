@@ -282,6 +282,31 @@ describe("Engine verify", () => {
     assert.equal((await t.engine.finishVerification(callId)).level, 1);
   });
 
+  it("lets the texted session apply its outcome when a resume gets a new session, without duplicating a repeated one", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    const send = t.messages.sendText.bind(t.messages);
+    t.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(t.engine.startPhotoId(callId), /carrier down/);
+    // Same key, same session (within the provider's retention window): still one entry.
+    await assert.rejects(t.engine.startPhotoId(callId), /carrier down/);
+    const first = t.identity.created[0]!.sessionId;
+    // The provider pruned the key: a later resume gets a new session, and that link is texted.
+    const create = t.identity.createDocumentCheck.bind(t.identity);
+    t.identity.createDocumentCheck = (input) => create({ ...input, idempotencyKey: `${input.idempotencyKey}:pruned` });
+    t.messages.sendText = send;
+    await t.engine.startPhotoId(callId);
+    const texted = t.identity.created[1]!.sessionId;
+    assert.notEqual(texted, first);
+    assert.ok(t.messages.sent.at(-1)!.body.endsWith(texted));
+    assert.deepEqual(await t.engine.applyIdentityOutcome({ sessionId: texted, status: "verified" }), { applied: true, callId });
+    assert.deepEqual(await t.engine.applyIdentityOutcome({ sessionId: texted, status: "verified" }), { applied: false }, "single use");
+  });
+
   it("has a planned texted code, refused before a match", async () => {
     const t = setup();
     const { callId } = await t.engine.startCall();
