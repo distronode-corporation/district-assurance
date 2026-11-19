@@ -79,14 +79,18 @@ function assertCanSend(rt: EngineRuntime, record: CallRecord): SubjectRecord {
   return subject;
 }
 
-/** Counts the send against each limit in turn, and says why it was refused, or null. */
+/**
+ * Counts the send against every limit, and says why it was refused, or null. Both limits are asked
+ * every time, so a send the subject's limit refuses makes the same store calls before the reply as
+ * one that goes out (the time never says a limit applied); it then counts on the number too.
+ */
 async function refusalFor(rt: EngineRuntime, phoneOnFile: string, subjectKey: string, numberKey: string | null, at: string): Promise<TextCodeRefusal | null> {
   if (!textCodeDestinationAllowed(rt.policy, phoneOnFile)) return "country";
   const codes = rt.adapter("codes");
   const take = (key: CodeSendKey) => codes.take({ workspaceId: rt.workspaceId, key, at, ...TEXT_CODE_LIMITS[key.scope] });
-  if (!(await take({ scope: "subject", key: subjectKey }))) return "subject_limit";
-  if (numberKey !== null && !(await take({ scope: "number", key: numberKey }))) return "number_limit";
-  return null;
+  const subjectTaken = await take({ scope: "subject", key: subjectKey });
+  const numberTaken = numberKey === null ? true : await take({ scope: "number", key: numberKey });
+  return !subjectTaken ? "subject_limit" : !numberTaken ? "number_limit" : null;
 }
 
 /**

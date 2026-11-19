@@ -163,8 +163,9 @@ A send counted at step 2 stays counted when step 3 refuses it, or when the text 
 Whether it sent or was refused, `sendTextCode` returns `{sent: true}`: a refused send leaves the
 call with a code that has no digest (it never matches) and the same expiry and tries, unless a code
 from an earlier send is still live, which it keeps. It answers without waiting for the SMS adapter:
-a sent send and a refused one take the same store steps up to the reply (a country refusal skips
-the `CodeStore`, and a subject refusal the number's count), and the text goes out after it. The
+a sent send and a refused one take the same store steps up to the reply (both limits are asked
+every time, so a send the subject's limit refuses is also counted on the number; only a country
+refusal, a property of the number on file, skips the `CodeStore`), and the text goes out after it. The
 ledger then says which (`verification.code_sent`, or `verification.code_refused` with `reason`:
 `country`, `subject_limit`, `number_limit`, or `send_failed` when the SMS adapter failed; the send
 stays counted and the host hears nothing of it).
