@@ -665,6 +665,15 @@ class SwitchedLedger extends MemoryAuditLedger {
   }
 }
 
+/** Refuses appends for the calls in `blocked` and takes the rest. */
+class BlockingLedger extends MemoryAuditLedger {
+  readonly blocked = new Set<string>();
+  override async append(input: AuditInput) {
+    if (input.callId !== null && this.blocked.has(input.callId)) throw new Error("ledger blocked");
+    return super.append(input);
+  }
+}
+
 /** Forgets event ids, so a replay appends twice: the ledger the contract case must catch. */
 class ForgetfulLedger extends MemoryAuditLedger {
   override async append(input: AuditInput) {
@@ -763,6 +772,32 @@ describe("Engine event delivery (INT-5)", () => {
     assert.equal((await async.ledger.list()).length, 1);
   });
 
+  it("ignores an async onListenerError hook that rejects, with no unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let calls = 0;
+      const t = setup({
+        onEvent: () => {
+          throw new Error("listener bug");
+        },
+        onListenerError: async () => {
+          calls++;
+          throw new Error("hook bug");
+        },
+      });
+      await t.engine.startCall();
+      await tick();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(calls, 1);
+      assert.deepEqual(unhandled, []);
+      assert.equal((await t.ledger.list()).length, 1);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
   it("never waits for the listener's promise", async () => {
     const t = setup({ onEvent: () => new Promise(() => undefined) });
     const { callId } = await t.engine.startCall();
@@ -812,6 +847,20 @@ describe("Engine event delivery (INT-5)", () => {
       ],
     );
     assert.equal(verifyChain(entries).ok, true);
+  });
+
+  it("rotates the pending calls, so one that keeps failing does not starve the rest", async () => {
+    const ledger = new BlockingLedger();
+    const t = setup({ adapters: { ledger } });
+    ledger.blocked.add("c_a");
+    ledger.blocked.add("c_b");
+    await assert.rejects(t.engine.startCall({ callId: "c_a" }), /ledger blocked/);
+    await assert.rejects(t.engine.startCall({ callId: "c_b" }), /ledger blocked/);
+    ledger.blocked.delete("c_b");
+    assert.deepEqual(await t.engine.flushPending(1), { flushed: [], failed: ["c_a"] });
+    assert.deepEqual(await t.engine.flushPending(1), { flushed: ["c_b"], failed: [] });
+    assert.deepEqual(await t.engine.flushPending(1), { flushed: [], failed: ["c_a"] }, "the failed call stays pending");
+    assert.deepEqual((await ledger.list()).map((e) => e.callId), ["c_b"]);
   });
 
   it("appends nothing twice when two background flushes run at once", async () => {

@@ -641,7 +641,9 @@ export class Engine {
     if (this.#onEvent === undefined) return;
     const report = (error: unknown): void => {
       try {
-        this.#onListenerError?.(error, event);
+        const handled: unknown = this.#onListenerError?.(error, event);
+        // An async hook that rejects is ignored too, never left as an unhandled rejection.
+        if (handled instanceof Promise) handled.catch(() => undefined);
       } catch {
         // Ignored by design: the ledger is the record, and a failing hook has nowhere left to report.
       }

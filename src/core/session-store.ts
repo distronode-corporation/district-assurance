@@ -43,7 +43,15 @@ export class MemorySessionStore implements SessionStore {
   }
 
   async pendingCalls(workspaceId: string, limit: number): Promise<string[]> {
-    return [...(this.#pending.get(workspaceId) ?? [])].slice(0, limit);
+    const calls = this.#pending.get(workspaceId);
+    if (calls === undefined) return [];
+    const batch = [...calls].slice(0, limit);
+    // Rotate: the listed calls go to the back, so a call that keeps failing cannot starve the rest.
+    for (const callId of batch) {
+      calls.delete(callId);
+      calls.add(callId);
+    }
+    return batch;
   }
 
   async bindRef(workspaceId: string, ref: string, callId: string): Promise<boolean> {
