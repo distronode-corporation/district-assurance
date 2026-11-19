@@ -72,7 +72,7 @@ module, a level below a scope's floor, a missing adapter, a bad step), so a host
 when it is saved, never in the middle of a call. The engine runs a flow step by step and allows
 only the current step's work, and none once the flow has ended. Money movement, contact changes and
 access can never go below level 2, whatever a scope is called, and level 2 always needs a factor
-that is not something the caller knows. Pay by link is level 2 by default. There is no UI: config and API come first.
+that is not something the caller knows. Pay by link is level 2 by default. There is no configuration UI: config and API come first.
 This config turns Gate on, so the engine must be built with Gate installed (`modules:
 [gateModule(...)]`, as in "Using the engine" below): the validator refuses a module that is not
 installed.
@@ -87,6 +87,7 @@ npm test              # node:test over the TypeScript sources
 npm run typecheck
 npm run test:coverage # 100% lines, statements, functions and branches in every src/ file
 npm run demo          # four scripted calls, end to end, on fake adapters and loopback servers
+npm run ui            # the same calls in a browser, step by step, on http://127.0.0.1:8787/
 ```
 
 The demo runs `owner-command` first: the owner of a line keys a PIN, on two engines that share one
@@ -100,6 +101,11 @@ business's own account: a webhook without the connected account is ignored, the 
 settles it. Last, `entry`: a verified caller gets a signed 30-second access grant, the relay adapter
 posts it to an example door relay, which checks it with Gate's public key and opens the pretend
 door; the same grant sent again, and a changed copy, are refused. Nothing leaves the machine.
+
+`npm run ui` serves a small page (plain HTML, CSS and JavaScript, no build step) that runs the
+same script one step at a time and shows the session state, the ledger entries and the signed
+receipt, which the page verifies itself against the public key set
+([examples/reference-server/README.md](examples/reference-server/README.md)).
 
 ## Using the engine
 
@@ -147,7 +153,7 @@ state machine, the config, the events and the formats.
 | `GET /.well-known/receipt-keys.json` | the public key set for receipts |
 | `GET /healthz` | liveness |
 
-`npm run serve` starts it on `127.0.0.1:8787`. With `STRIPE_IDENTITY_WEBHOOK_SECRET`,
+`npm run ui` adds the demo page and its `/demo/*` routes. `npm run serve` starts the server alone on `127.0.0.1:8787`. With `STRIPE_IDENTITY_WEBHOOK_SECRET`,
 `STRIPE_PAYMENTS_WEBHOOK_SECRET` and `STRIPE_CONNECT_WEBHOOK_SECRET` set to your own test-mode endpoint secrets, `stripe listen` can
 forward real test events to it; their signatures are checked, and since the Stripe adapters are
 not built yet, the sessions they name are unknown to the engine. It is not hardened for

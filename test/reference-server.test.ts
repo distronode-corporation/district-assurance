@@ -96,7 +96,7 @@ describe("reference server", () => {
 describe("example door relay", () => {
   it("refuses an oversized body without keeping it, and a body that is not JSON", async () => {
     const opened: string[] = [];
-    const relay = createDoorRelay({ workspaceId: "w", audience: "lobby", keys: [], clock: { now: () => new Date(0) }, open: async (target) => void opened.push(target) });
+    const relay = createDoorRelay({ audience: "lobby", workspaceId: "w", keys: [], clock: { now: () => new Date(0) }, open: async (target) => void opened.push(target) });
     await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve));
     const url = `http://127.0.0.1:${(relay.address() as AddressInfo).port}`;
     try {
@@ -116,8 +116,8 @@ describe("example door relay", () => {
     const body = { v: 1, kind: "access", grantId: "acc_1", workspaceId: "w", audience: "lobby", target: "door-1", action: "unlock", scope: "entry.open", level: 2, issuedAt: "1970-01-01T00:00:00.000Z", expiresAt: "1970-01-01T00:01:00.000Z" } as const;
     const grant = await signDocument(signer, body);
     const relay = createDoorRelay({
-      workspaceId: "w",
       audience: "lobby",
+      workspaceId: "w",
       keys: [signer.publicJwk()],
       clock: { now: () => new Date(0) },
       open: () => {
@@ -139,12 +139,11 @@ describe("example door relay", () => {
 describe("demo and Stripe adapters", () => {
   it("runs the owner-command, deposit (both modes) and entry flows end to end", async () => {
     const result = await runDemo(false);
-    assert.equal(result.ownerAuthorized, true);
+    assert.equal(result.checksOk, true);
     assert.equal(result.receipt.body.payments[0]!.mode, "platform");
     assert.equal(result.connectReceipt.body.payments[0]!.mode, "connect");
     assert.equal(result.connectReceipt.body.payments[0]!.status, "paid");
     assert.deepEqual(result.doorOpened, ["door-1"], "opened once, the replay and the changed grant refused");
-    assert.equal(result.replayRefused, true);
     assert.equal(result.ownerReceipt, null, "owner-command has no receipt step");
     assert.equal(result.tamperedFails, true);
     assert.equal(result.chainOk, true);

@@ -39,6 +39,11 @@ All notable changes to this project are documented here. The format follows
   `district-assurance/testing`. Several engines can run one call.
 - The demo runs `owner-command` (a PIN only, on two engines sharing one store) and `deposit`.
 - ROADMAP.md and ISSUES.md for the modular design, owner-command first; ADR-13 to ADR-20.
+- A demo UI on the reference server (`npm run ui`): pick a flow, run the scripted call one step at a
+  time, and see the session state, the ledger entries and the signed receipt, verified in the
+  browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
+  allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
+  `npm run demo` and the UI.
 
 ### Changed
 
