@@ -403,9 +403,13 @@ the currency's own decimals.
 
 **Runs of digits.** `digitRuns(text)` reads a text into runs of digits. A run is numerals and spoken
 numbers in English or French with only separators between them: spaces, any dash (hyphen, en and
-em dashes, the non-breaking hyphen), the minus sign, dots, commas, and the characters a reader never
-sees (zero-width spaces and joiners, soft hyphens, bidi controls, combining marks:
-`SEPARATOR_CLASS`). Any other word or punctuation ends it. Spoken numbers are read as people say them:
+em dashes, the non-breaking hyphen), the minus sign, dots, commas, slashes, underscores, middle
+dots, and the characters a reader never sees (zero-width spaces and joiners, soft hyphens, bidi
+controls, combining marks: `SEPARATOR_CLASS`). A numeral is any run of Unicode decimal digits
+(fullwidth, Arabic-Indic and the rest), read by its values for the checks, and the original span
+is what is removed. Any other word or punctuation ends a run. Joining this widely can join things
+that are not one number (a date beside an amount); over-redaction is the safe side, since the risk
+is a number reaching storage. Spoken numbers are read as people say them:
 
 | Spoken | Digits |
 |---|---|

@@ -63,3 +63,36 @@ describe("hostile #89: what holds", () => {
     assert.equal(last.interrupt, true);
   });
 });
+
+describe("hostile #89: more separators, and decimal digits in any script", () => {
+  const script = (zero: number) => (digits: string) => Array.from(digits, (d) => String.fromCodePoint(zero + Number(d))).join("");
+  const scripts: Record<string, (d: string) => string> = {
+    fullwidth: script(0xff10),
+    "Arabic-Indic": script(0x0660),
+    "Extended Arabic-Indic": script(0x06f0),
+    Devanagari: script(0x0966),
+    "mathematical bold (astral)": script(0x1d7ce),
+  };
+
+  for (const [name, sep] of Object.entries({ slash: "/", underscore: "_", "middle dot": "·" })) {
+    it(`redacts and interrupts a card number grouped with a ${name}`, () => {
+      assert.equal(redacted(grouped(sep)), MARKER);
+      assert.equal(new LiveCardNumberDetector().push(grouped(sep)).interrupt, true);
+    });
+  }
+
+  for (const [name, write] of Object.entries(scripts)) {
+    it(`reads a card number written in ${name} digits by their values, and removes the original span`, () => {
+      assert.equal(redacted(`card ${write(PAN)} thanks`), `card ${MARKER} thanks`);
+      assert.equal(redacted(`card ${write(PAN.slice(0, 8))} ${write(PAN.slice(8))} thanks`), `card ${MARKER} thanks`, "in groups");
+      const invalid = `${PAN.slice(0, 15)}2`;
+      assert.equal(redacted(write(invalid)), write(invalid), "the Luhn check runs on the values: a number that fails it is kept");
+      assert.equal(new LiveCardNumberDetector().push(write(PAN.slice(0, 8))).interrupt, true);
+    });
+  }
+
+  it("reads mixed scripts in one number", () => {
+    const mixed = `${scripts.fullwidth!(PAN.slice(0, 4))} ${PAN.slice(4, 8)} ${scripts["Arabic-Indic"]!(PAN.slice(8))}`;
+    assert.equal(redacted(mixed), MARKER);
+  });
+});

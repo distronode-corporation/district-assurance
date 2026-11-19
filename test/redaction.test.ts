@@ -12,6 +12,7 @@ import {
   findCardNumbers,
   luhnValid,
   REDACTION_MARKERS,
+  SEPARATOR_CLASS,
   type Redactor,
 } from "../src/core/redaction.ts";
 
@@ -69,11 +70,11 @@ describe("digitRuns", () => {
   });
 
   it("needs separators inside a spoken number", () => {
-    // A slash between words of a number splits it, as it splits numerals.
-    assert.deepEqual(digitRuns("forty/two").map((r) => r.map((p) => p.digits)), [["40"], ["2"]]);
-    assert.deepEqual(digitRuns("four hundred/two").map((r) => r.map((p) => p.digits)), [["400"], ["2"]]);
-    assert.deepEqual(digitRuns("double/4 double").map((r) => r.map((p) => p.digits)), [["4"]]);
-    assert.deepEqual(digitRuns("vingt et/un").map((r) => r.map((p) => p.digits)), [["20"], ["1"]]);
+    // A semicolon between words of a number splits it, as it splits numerals.
+    assert.deepEqual(digitRuns("forty;two").map((r) => r.map((p) => p.digits)), [["40"], ["2"]]);
+    assert.deepEqual(digitRuns("four hundred;two").map((r) => r.map((p) => p.digits)), [["400"], ["2"]]);
+    assert.deepEqual(digitRuns("double;4 double").map((r) => r.map((p) => p.digits)), [["4"]]);
+    assert.deepEqual(digitRuns("vingt et;un").map((r) => r.map((p) => p.digits)), [["20"], ["1"]]);
   });
 
   it("joins only the right words to tens, teens and scales", () => {
@@ -182,11 +183,11 @@ describe("LiveCardNumberDetector", () => {
         const count = (run: Array<{ digits: string }>) => run.reduce((n, p) => n + p.digits.length, 0);
         const interrupt = runs.some((run) => run.at(-1)!.end > fresh && count(run) >= 8);
         const last = runs.at(-1);
-        if (last !== undefined && /^[\s\-.,]*(?:(?:and|et|double|triple)[\s\-.,]*)?$/iu.test(text.slice(last.at(-1)!.end))) {
+        if (last !== undefined && new RegExp(`^${SEPARATOR_CLASS}*(?:(?:and|et|double|triple)${SEPARATOR_CLASS}*)?$`, "iu").test(text.slice(last.at(-1)!.end))) {
           this.#tail = text.slice(last[0]!.start);
           return { interrupt, digits: count(last) };
         }
-        const pending = /(?<!\p{L})(?:double|triple)[\s\-.,]*$/iu.exec(text);
+        const pending = new RegExp(`(?<!\\p{L})(?:double|triple)${SEPARATOR_CLASS}*$`, "iu").exec(text);
         this.#tail = pending === null ? "" : text.slice(pending.index);
         return { interrupt, digits: 0 };
       }
@@ -255,7 +256,7 @@ describe("findCardNumbers", () => {
 
   it("does not join digits across words or other punctuation", () => {
     assert.equal(redact("4242 4242 and 4242 4242"), "4242 4242 and 4242 4242");
-    assert.equal(redact("4242/4242/4242/4242"), "4242/4242/4242/4242");
+    assert.equal(redact("4242;4242;4242;4242"), "4242;4242;4242;4242");
     assert.equal(redact("4242 4242 4242 4242 is mine"), `${M} is mine`);
   });
 

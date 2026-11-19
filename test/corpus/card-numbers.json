@@ -3,7 +3,8 @@
   "version": 1,
   "runs": [
     { "name": "numerals with separators", "text": "4242 4242-4242.4242", "runs": ["4242424242424242"] },
-    { "name": "other punctuation ends a run", "text": "4242/4242", "runs": ["4242", "4242"] },
+    { "name": "other punctuation ends a run", "text": "4242;4242", "runs": ["4242", "4242"] },
+    { "name": "a slash, an underscore or a middle dot joins a run", "text": "4242/4242_4242\u00b74242", "runs": ["4242424242424242"] },
     { "name": "a word ends a run", "text": "4242 4242 and 4242 4242", "runs": ["42424242", "42424242"] },
     { "name": "digit by digit", "text": "four two Four TWO", "runs": ["4242"] },
     { "name": "oh is zero", "text": "four oh four", "runs": ["404"] },

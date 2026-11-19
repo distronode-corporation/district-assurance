@@ -2,8 +2,9 @@
 //
 // The first detector is card numbers (PANs): 13 to 19 digits that pass the Luhn check, written as
 // digits or spoken in English or French (digit by digit, as numbers such as "forty two" or
-// "quarante-deux", or with "double" and "triple"), with separators between groups: spaces, dashes,
-// dots, commas and invisible characters (SEPARATOR_CLASS). The same reading of spoken numbers feeds the live detector (live-detector.ts). A match
+// "quarante-deux", or with "double" and "triple"), in any script's decimal digits, with separators
+// between groups: spaces, dashes, dots, commas, slashes, underscores, middle dots and invisible
+// characters (SEPARATOR_CLASS). The same reading of spoken numbers feeds the live detector (live-detector.ts). A match
 // is replaced by a fixed marker. Over-redaction is accepted; the risk this guards against is a card
 // number reaching storage.
 
@@ -82,6 +83,8 @@ const NUMBER_WORDS: ReadonlyMap<string, NumberWord> = new Map([
 
 interface Lexeme {
   raw: string;
+  /** A numeral's digits in ASCII, whatever script it was written in; null for a word. */
+  digits: string | null;
   /** Lower case, for the word table. */
   word: string;
   start: number;
@@ -109,15 +112,36 @@ type Parser = (lx: readonly Lexeme[], i: number, first: boolean) => Parsed | und
  * A word or numeral, as runs are read (live-detector.ts counts words with it too). A word keeps its
  * combining marks, so "zéro" written decomposed (e and U+0301) is one word, not "ze" and "ro".
  */
-export const LEXEME = /\d+|\p{L}[\p{L}\p{M}]*/gu;
+export const LEXEME = /\p{Nd}+|\p{L}[\p{L}\p{M}]*/gu;
 /**
  * What may lie between the groups of one number: spaces, any dash (the hyphen-minus, en and em
- * dashes, the non-breaking hyphen), the minus sign, dots and commas, and what a reader never sees:
- * format characters (zero-width spaces and joiners, soft hyphens, bidi controls) and combining marks.
+ * dashes, the non-breaking hyphen), the minus sign, dots, commas, slashes, underscores and middle
+ * dots, and what a reader never sees: format characters (zero-width spaces and joiners, soft
+ * hyphens, bidi controls) and combining marks.
  * The live detector uses the same class, so both read one run alike.
  */
-export const SEPARATOR_CLASS = String.raw`[\s\p{Pd}\u2212\p{Cf}\p{M}.,]`;
+export const SEPARATOR_CLASS = String.raw`[\s\p{Pd}\u2212\p{Cf}\p{M}.,/_\u00b7]`;
 const SEPARATOR = new RegExp(`^${SEPARATOR_CLASS}*$`, "u");
+
+const NUMERAL = /^\p{Nd}/u;
+const DECIMAL_DIGIT = /^\p{Nd}$/u;
+
+/**
+ * The value of one Unicode decimal digit. Unicode encodes every decimal digit in runs of ten, 0 to
+ * 9, so a digit's value is its distance from the first digit of its run, modulo 10.
+ */
+function digitValue(cp: number): number {
+  let first = cp;
+  while (DECIMAL_DIGIT.test(String.fromCodePoint(first - 1))) first--;
+  return (cp - first) % 10;
+}
+
+/** A numeral in any script as ASCII digits ("٤١" is "41", "４１" is "41"), for the checks; its span stays the original's. */
+function asciiDigits(raw: string): string {
+  let out = "";
+  for (const ch of raw) out += String(digitValue(ch.codePointAt(0)!));
+  return out;
+}
 
 function lexemes(text: string): Lexeme[] {
   const out: Lexeme[] = [];
@@ -126,7 +150,7 @@ function lexemes(text: string): Lexeme[] {
     const raw = match[0];
     const start = match.index;
     const joined = out.length > 0 && SEPARATOR.test(text.slice(lastEnd, start));
-    out.push({ raw, word: raw.normalize("NFC").toLowerCase(), start, end: start + raw.length, joined });
+    out.push({ raw, digits: NUMERAL.test(raw) ? asciiDigits(raw) : null, word: raw.normalize("NFC").toLowerCase(), start, end: start + raw.length, joined });
     lastEnd = start + raw.length;
   }
   return out;
@@ -222,12 +246,12 @@ const spokenNumber = scaled("thousand", scaled("hundred", below100));
 /** One part of a run at `i`: a numeral, "double" or "triple" and one digit, or a spoken number. */
 function part(lx: readonly Lexeme[], i: number): { digits: string; next: number } | undefined {
   const l = lx[i]!;
-  if (/^\d/.test(l.raw)) return { digits: l.raw, next: i + 1 };
+  if (l.digits !== null) return { digits: l.digits, next: i + 1 };
   const w = NUMBER_WORDS.get(l.word);
   if (w?.kind === "repeat") {
     const times = w.value;
     const after = lx[i + 1];
-    if (after?.joined === true && /^\d$/.test(after.raw)) return { digits: after.raw.repeat(times), next: i + 2 };
+    if (after?.joined === true && after.digits?.length === 1) return { digits: after.digits.repeat(times), next: i + 2 };
     const unit = numberWord(lx, i + 1, false);
     return unit?.kind === "unit" ? { digits: String(unit.value).repeat(times), next: i + 2 } : undefined;
   }
