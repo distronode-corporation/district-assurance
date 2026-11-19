@@ -201,11 +201,15 @@ describe("reference server", () => {
     const later = createTestEngine({ adapters: { signer: receiptKeyRing({ signers: [generateTestSigner("k2")], active: "k2", retired: [{ ...k1.publicJwk(), retiredAt: RETIRED_AT }] }) } });
     const server = createReferenceServer({ engine: later.engine, stripeSecrets: { identity: [], payments: [] }, clock: later.clock });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const { keys } = (await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/.well-known/receipt-keys.json`)).json()) as { keys: JsonWebKey[] };
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    assert.deepEqual(keys.map((k) => k.kid), ["k2", "k1"]);
-    assert.equal(keys.some((k) => "d" in k), false);
-    assert.equal(verifyReceipt(old, keys), true);
+    try {
+      const { keys } = (await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/.well-known/receipt-keys.json`)).json()) as { keys: JsonWebKey[] };
+      assert.deepEqual(keys.map((k) => k.kid), ["k2", "k1"]);
+      assert.equal(keys.some((k) => "d" in k), false);
+      assert.equal(verifyReceipt(old, keys), true);
+    } finally {
+      // A request or an assertion that fails still closes the server, so the test process can exit.
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 
