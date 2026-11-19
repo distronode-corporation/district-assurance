@@ -29,6 +29,10 @@ All notable changes to this project are documented here. The format follows
   and `bankAccountRedactor`, each its own `Redactor` over digits and English or French digit
   words, tested over a shared JSON corpus in `test/corpus/`; compose health card numbers before
   SINs.
+- `SEPARATOR_CLASS`, exported from `district-assurance`: the characters that may lie between the
+  groups of one number (spaces, any dash, the minus sign, dots, commas, slashes, underscores, middle
+  dots, format characters and combining marks). Numerals in every script's decimal digits are read
+  by their values (PRV-6).
 
 ### Changed
 
@@ -36,6 +40,8 @@ All notable changes to this project are documented here. The format follows
   French (`INTERRUPT_LINES`), so a SIN or banking details never get the card number wording (PRV-6).
 - `composeRedactors` reports finding offsets into the original input, no longer into the text each
   redactor saw (PRV-6).
+- `applyFindings` takes findings in any order: it sorts them by position and merges overlapping
+  ones before it applies them (PRV-6).
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 
