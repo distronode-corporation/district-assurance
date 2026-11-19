@@ -16,6 +16,7 @@
 import type { PaymentRefundRequest } from "../core/adapters.ts";
 import { EngineError } from "../core/errors.ts";
 import type { CallDraft, EngineRuntime } from "../core/runtime.ts";
+import { isObject } from "../core/shape.ts";
 import { PAYLINK, paymentIntentRef, type PaylinkSlice } from "./paylink.ts";
 import type { PaymentRequest } from "./payment.ts";
 
@@ -167,23 +168,30 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
     // One key per refund: a resumed refund replays the first, a new refund is a new one.
     idempotencyKey: rt.idempotencyKey(callId, paymentId, "refund", refund.refundId),
   });
+  // The provider's answer goes into the record and the ledger: anything but its three answers is a
+  // provider fault, like an answer that was lost, so the refund stays in flight and resumes with its key.
+  const status: unknown = isObject(answer) ? answer.status : undefined;
+  const providerRef: unknown = isObject(answer) ? answer.refundId : undefined;
+  if ((status !== "pending" && status !== "succeeded" && status !== "failed") || typeof providerRef !== "string" || providerRef === "") {
+    throw new EngineError("precondition_failed", "the payment provider's refund answer is not one it gives; the refund stays in flight");
+  }
   return rt.update(callId, (draft) => {
     const settled = findPayment(draft, paymentId)!;
     const refunds = settled.refunds!;
     const record = refunds.find((r) => r.refundId === refund.refundId)!;
     // Two resumes of one refund can both get here: the first records the answer, once.
     if (record.status === "requested") {
-      record.status = answer.status;
-      record.providerRef = answer.refundId;
+      record.status = status;
+      record.providerRef = providerRef;
       record.settledAt = rt.now();
       draft.emit("payment.refunded", "code", {
         paymentId,
         refundId: record.refundId,
-        providerRef: answer.refundId,
+        providerRef,
         amountMinor: record.amountMinor,
         currency: settled.currency,
         reason: record.reason,
-        status: answer.status,
+        status,
       });
     }
     return { refundId: record.refundId, status: record.status, amountMinor: record.amountMinor, refundedMinor: refunded(refunds) };
@@ -199,6 +207,20 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
 export async function applyDisputeOutcome(rt: EngineRuntime, outcome: DisputeOutcome): Promise<DisputeApplied> {
   // Read once: the payment intent looked up is the one searched, and the status compared is the one recorded.
   const { paymentIntentId, account, disputeId, status, amountMinor, currency } = outcome;
+  // What the parser would never produce from a provider's event is refused before any lookup: the
+  // status decides whether refunds are blocked, and every field goes into the ledger.
+  if (
+    typeof disputeId !== "string" ||
+    disputeId === "" ||
+    (paymentIntentId !== null && typeof paymentIntentId !== "string") ||
+    !(DISPUTE_STATUSES as readonly unknown[]).includes(status) ||
+    !Number.isSafeInteger(amountMinor) ||
+    amountMinor < 0 ||
+    typeof currency !== "string" ||
+    !/^[a-z]{3}$/.test(currency)
+  ) {
+    throw new EngineError("invalid_input", "a dispute outcome is a dispute id, a payment intent or null, a known status, a whole amount and a lower-case currency");
+  }
   if (paymentIntentId === null) return { applied: false };
   const callId = await rt.resolveRef(paymentIntentRef(paymentIntentId));
   // Not bound yet: the payment's own outcome may still be on its way (webhooks come in any order).
