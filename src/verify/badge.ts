@@ -497,12 +497,14 @@ export async function applyIdentityOutcome(rt: EngineRuntime, outcome: IdentityO
  * the band, never the score.
  */
 export async function reportSyntheticVoice(rt: EngineRuntime, callId: string, input: { score: number; vendor: string }): Promise<void> {
+  // Read the input once, before any wait, so a caller changing it during the update cannot split
+  // the vendor whose thresholds set the band from the vendor the ledger names.
+  const { score, vendor } = input;
   const vendors = rt.settings<BadgeVoiceSettings>(BADGE).syntheticVoice ?? {};
-  const thresholds = Object.hasOwn(vendors, input.vendor) ? vendors[input.vendor] : undefined;
+  const thresholds = Object.hasOwn(vendors, vendor) ? vendors[vendor] : undefined;
   if (thresholds === undefined) throw new EngineError("invalid_input", "this vendor has no synthetic voice thresholds in the badge settings");
-  if (!isScore(input.score)) throw new EngineError("invalid_input", "score must be a number from 0 to 1");
-  const band: SyntheticVoiceBand =
-    input.score > thresholds.levelOneAbove ? "level_1" : input.score > thresholds.spokenKnowledgeAbove ? "spoken_off" : "clear";
+  if (!isScore(score)) throw new EngineError("invalid_input", "score must be a number from 0 to 1");
+  const band: SyntheticVoiceBand = score > thresholds.levelOneAbove ? "level_1" : score > thresholds.spokenKnowledgeAbove ? "spoken_off" : "clear";
   await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
     const highest = higherBand(draft.record.state.syntheticVoice, band);
@@ -512,7 +514,7 @@ export async function reportSyntheticVoice(rt: EngineRuntime, callId: string, in
     const reached = kept.length === s.lastMethods.length ? 3 : evaluateAssurance(rt.policy, kept.map((kind) => ({ kind, passed: true, at: rt.now() })), s.carrier).level;
     const ceiling = heldLevel(reached, highest);
     draft.apply({ type: "synthetic_voice_scored", band, ceiling, scopes: scopesForLevel(rt.policy, ceiling) });
-    draft.emit("verification.synthetic_voice", "system", { vendor: input.vendor, band });
+    draft.emit("verification.synthetic_voice", "system", { vendor, band });
   });
 }
 

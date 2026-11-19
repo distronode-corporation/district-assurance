@@ -202,6 +202,22 @@ describe("synthetic voice: the ledger and the receipt", () => {
     const receipt = JSON.stringify(await t.engine.endCall(callId));
     for (const word of ["synthetic", "level_1", "clear", "acme", "voice-co", "8731"]) assert.equal(receipt.includes(word), false, word);
   });
+
+  it("names the vendor whose thresholds set the band, even if the caller changes the input during the update", async () => {
+    const t = setup({ config: voiceConfig() });
+    const callId = await verifiedCall(t);
+    const input = { score: 0.6, vendor: "acme" };
+    const pending = t.engine.reportSyntheticVoice(callId, input);
+    input.vendor = "voice-co";
+    input.score = 0.9;
+    await pending;
+    const entries = (await t.ledger.list()).filter((e) => e.event === "verification.synthetic_voice");
+    assert.deepEqual(
+      entries.map((e) => e.detail),
+      [{ vendor: "acme", band: "spoken_off" }],
+    );
+    assert.equal((await t.engine.state(callId)).syntheticVoice, "spoken_off");
+  });
 });
 
 describe("synthetic voice: refusals", () => {
