@@ -108,6 +108,36 @@ export function sessionStoreContract(factory: () => SessionStore | Promise<Sessi
       },
     ],
     [
+      "copies a record in on every write, so a caller changing it afterwards changes nothing",
+      async (store) => {
+        await store.create("w", "c1", { items: [1] });
+        const next = { items: [2] };
+        assert.deepEqual(await store.compareAndSet("w", "c1", 1, next), { ok: true, version: 2 });
+        next.items.push(3);
+        assert.deepEqual(await store.get("w", "c1"), { version: 2, record: { items: [2] } });
+      },
+    ],
+    [
+      "creates one session and binds one reference when two processes ask at once",
+      async (store) => {
+        const created = await Promise.all([store.create("w", "c1", { n: 1 }), store.create("w", "c1", { n: 2 })]);
+        assert.deepEqual(created.filter(Boolean).length, 1, "one create succeeds");
+        assert.deepEqual((await store.get("w", "c1"))!.record, { n: created.indexOf(true) + 1 }, "and its record stands");
+        const bound = await Promise.all([store.bindRef("w", "payment:cs_1", "c1"), store.bindRef("w", "payment:cs_1", "c2")]);
+        assert.deepEqual(bound.filter(Boolean).length, 1, "one bind succeeds");
+        assert.equal(await store.resolveRef("w", "payment:cs_1"), `c${bound.indexOf(true) + 1}`, "and its call stands");
+      },
+    ],
+    [
+      "binds the same reference in two workspaces, each to its own call",
+      async (store) => {
+        assert.equal(await store.bindRef("w", "payment:cs_1", "c1"), true);
+        assert.equal(await store.bindRef("w2", "payment:cs_1", "c2"), true, "a reference in one workspace never blocks another's");
+        assert.equal(await store.resolveRef("w", "payment:cs_1"), "c1");
+        assert.equal(await store.resolveRef("w2", "payment:cs_1"), "c2");
+      },
+    ],
+    [
       "binds a reference once, per workspace, and resolves it",
       async (store) => {
         assert.equal(await store.resolveRef("w", "payment:cs_1"), null);
@@ -242,6 +272,18 @@ export function auditLedgerContract(factory: () => AuditLedger | Promise<AuditLe
           [1, 2, 3],
           "entries without an eventId always append",
         );
+      },
+    ],
+    [
+      "returns a copy for a replayed eventId too, so a caller cannot change what is stored",
+      async (ledger) => {
+        await ledger.append(contractEntry(1, { eventId: "e1" }));
+        const replayed = await ledger.append(contractEntry(2, { eventId: "e1" }));
+        (replayed.detail.detail as { list: number[] }).list.push(99);
+        replayed.hash = GENESIS_HASH;
+        const stored = await ledger.list();
+        assert.deepEqual(stored, [chainEntry(contractEntry(1, { eventId: "e1" }), 1, GENESIS_HASH)]);
+        assert.equal(verifyChain(stored).ok, true);
       },
     ],
     [

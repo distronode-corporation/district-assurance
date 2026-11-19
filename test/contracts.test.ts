@@ -53,6 +53,7 @@ describe("the AuditLedger contract", () => {
     assert.deepEqual(await failing(auditLedgerContract(() => new Leaky())), [
       "copies in and out, so a caller cannot change what is stored",
       "appends an eventId once: a second append returns the first entry",
+      "returns a copy for a replayed eventId too, so a caller cannot change what is stored",
       "keeps eventIds that differ only in a lone UTF-16 surrogate apart",
       "stores one entry for concurrent appends of one eventId",
     ]);
