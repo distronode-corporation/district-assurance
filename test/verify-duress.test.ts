@@ -55,6 +55,30 @@ async function pinCall(t: TestEngine, pin: string) {
   return { callId, answer, verification, state, scopes };
 }
 
+/** Lets the alerts sent after a write (off the response path) go out and be acknowledged. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+}
+
+/** The Badge part of a stored call: its duress state and the alerts it still owes. */
+async function badgeOf(t: TestEngine, callId: string) {
+  return ((await t.sessions.get("ws_test", callId))!.record as { modules: { badge: { duress?: unknown; duressAlerts?: unknown[] } } }).modules.badge;
+}
+
+/** Holds the next `getSubject` (the judge's or an enrolment's store read) until released. */
+function holdNextRead(t: TestEngine): () => void {
+  const real = t.records.getSubject.bind(t.records);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  t.records.getSubject = async (workspaceId, subjectKey) => {
+    t.records.getSubject = real;
+    const subject = await real(workspaceId, subjectKey);
+    await gate;
+    return subject;
+  };
+  return release;
+}
+
 /** A ledger entry without what its keyed tag changes: the tag itself, the hashes over it, and the receipt digest over the head. */
 function untagged(entry: AuditEntry) {
   const { tag: _tag, ...detail } = entry.detail;
@@ -138,17 +162,138 @@ describe("Duress PIN: what the caller sees", () => {
 });
 
 describe("Duress PIN: the notifier", () => {
-  it("is told once per call, after the write, with the workspace, the subject, the call and the time, never the PIN", async () => {
+  it("is told of every duress entry, after the write and off the response path, with an alert id, the workspace, the subject, the call and the time, never the PIN", async () => {
     const t = await duressSetup();
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     await t.engine.submitPin(callId, DURESS);
+    assert.equal(t.notifier.told.length, 0, "not on the response path");
+    await settle();
     t.clock.advance(1000);
     await t.engine.finishVerification(callId);
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     await t.engine.submitPin(callId, DURESS);
-    assert.deepEqual(t.notifier.told, [{ workspaceId: "ws_test", subjectKey: OWNER, callId, at: "2026-01-01T00:00:00.000Z" }]);
+    await settle();
+    assert.deepEqual(t.notifier.told.map(({ alertId: _id, ...alert }) => alert), [
+      { workspaceId: "ws_test", subjectKey: OWNER, callId, at: "2026-01-01T00:00:00.000Z" },
+      { workspaceId: "ws_test", subjectKey: OWNER, callId, at: "2026-01-01T00:00:01.000Z" },
+    ]);
+    assert.equal(new Set(t.notifier.told.map((a) => a.alertId)).size, 2, "each entry is its own alert");
     assert.equal(JSON.stringify(t.notifier.told).includes(DURESS), false);
+    assert.deepEqual((await badgeOf(t, callId)).duressAlerts, [], "both acknowledged");
+  });
+
+  it("sends the alert even when the ledger append fails, and a normal PIN fails the same way (iMac hostile pass, #124)", async () => {
+    for (const pin of [DURESS, PIN]) {
+      const t = await duressSetup();
+      const { callId } = await t.engine.startCall();
+      await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+      const append = t.ledger.append.bind(t.ledger);
+      t.ledger.append = async (input) => {
+        if (input.event === "verification.factor") throw new Error("ledger 503");
+        return append(input);
+      };
+      await assert.rejects(t.engine.submitPin(callId, pin), /ledger 503/, "the same rejection for both");
+      await settle();
+      assert.equal(t.notifier.told.length, pin === DURESS ? 1 : 0, pin);
+      t.ledger.append = append;
+      await t.engine.flushLedger(callId);
+      await settle();
+      assert.equal(t.notifier.told.length, pin === DURESS ? 1 : 0, "sent once, not again");
+    }
+  });
+
+  it("keeps an alert owed until the notifier answers, and retries it on the next write, on flushLedger and on the host's sweep", async () => {
+    const notifier = new FakeDuressNotifier();
+    const notify = notifier.notify.bind(notifier);
+    let down = true;
+    let tries = 0;
+    notifier.notify = async (input) => {
+      tries++;
+      if (down) throw new Error("pager down");
+      return notify(input);
+    };
+    const t = await duressSetup(undefined, notifier);
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitPin(callId, DURESS);
+    await settle();
+    await t.engine.checkCarrier(callId);
+    await settle();
+    await t.engine.flushLedger(callId);
+    await settle();
+    assert.equal(await t.engine.deliverDuressAlerts(callId), 0);
+    assert.equal(tries, 4, "after the entry, the next write, flushLedger and the sweep");
+    assert.equal((await badgeOf(t, callId)).duressAlerts!.length, 1, "still owed");
+    // An engine without a notifier (a config without the duress PIN) leaves it owed for one that has one.
+    const other = createTestEngine({ config: testConfig(), clock: t.clock, ids: t.ids, adapters: { sessions: t.sessions, records: t.records, ledger: t.ledger } });
+    assert.equal(await other.engine.deliverDuressAlerts(callId), 0);
+    down = false;
+    assert.equal(await t.engine.deliverDuressAlerts(callId), 1);
+    assert.equal(await t.engine.deliverDuressAlerts(callId), 0, "acknowledged once");
+    assert.equal(notifier.told.length, 1);
+  });
+
+  it("sends an alert again, with the same id, when its acknowledgement could not be written; one in hand waits 30 seconds", async () => {
+    const notifier = new FakeDuressNotifier();
+    const notify = notifier.notify.bind(notifier);
+    const t = await duressSetup(undefined, notifier);
+    const cas = t.sessions.compareAndSet.bind(t.sessions);
+    let hang = true;
+    notifier.notify = async (input) => {
+      if (hang) {
+        hang = false;
+        return new Promise<void>(() => undefined);
+      }
+      await notify(input);
+      if (notifier.told.length === 1) t.sessions.compareAndSet = async () => ({ ok: false });
+    };
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitPin(callId, DURESS);
+    await settle();
+    assert.equal(await t.engine.deliverDuressAlerts(callId), 0, "the first send never answered, and is still in hand");
+    t.clock.advance(30_000);
+    assert.equal(await t.engine.deliverDuressAlerts(callId), 0, "sent again after 30 seconds; the acknowledgement could not be written");
+    t.sessions.compareAndSet = cas;
+    assert.equal(await t.engine.deliverDuressAlerts(callId), 1);
+    assert.deepEqual(notifier.told.map((a) => a.alertId), [notifier.told[0]!.alertId, notifier.told[0]!.alertId], "at least once, by one id");
+  });
+
+  it("leaves the alert owed when the session store cannot be read for the send, with no unhandled rejection", async () => {
+    const t = await duressSetup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    const get = t.sessions.get.bind(t.sessions);
+    let reads = 0;
+    t.sessions.get = async (workspaceId, id) => {
+      // The judge's two writes read the session twice; the send after the reply is the third read.
+      if (++reads === 3) throw new Error("session store down");
+      return get(workspaceId, id);
+    };
+    await t.engine.submitPin(callId, DURESS);
+    await settle();
+    assert.equal(t.notifier.told.length, 0);
+    assert.equal(await t.engine.deliverDuressAlerts(callId), 1);
+  });
+
+  it("never holds the caller's answer for the notifier: a slow notifier runs after the reply", async () => {
+    const notifier = new FakeDuressNotifier();
+    let called = false;
+    notifier.notify = async () => {
+      called = true;
+      const until = Date.now() + 20;
+      while (Date.now() < until) {
+        // A notifier that blocks, which it must not; it still runs only after the reply.
+      }
+    };
+    const t = await duressSetup(undefined, notifier);
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    assert.deepEqual(await t.engine.submitPin(callId, DURESS), { matched: true, locked: false });
+    assert.equal(called, false);
+    await settle();
+    assert.equal(called, true);
   });
 
   it("never changes what the call does when it throws, rejects or never answers", async () => {
@@ -270,6 +415,7 @@ describe("Duress PIN: the same work", () => {
     const run = await pinCall(t, DURESS);
     assert.deepEqual(run.answer, { matched: true, locked: false });
     assert.equal(run.scopes["payment.request"], false);
+    await settle();
     assert.equal(t.notifier.told.length, 1);
     await assert.rejects(t.engine.enrolDuressPin(OWNER, "5038"), rejects("precondition_failed", /verifier mode/));
     await assert.rejects(t.engine.removeDuressPin(OWNER), rejects("precondition_failed", /verifier mode/));
@@ -348,5 +494,80 @@ describe("Duress PIN: settings", () => {
       () => createTestEngine({ config: duressConfig() }),
       (e: unknown) => e instanceof ConfigError && e.problems.includes("modules.badge: needs the duressNotifier adapter, which the engine does not have"),
     );
+  });
+});
+
+describe("Duress PIN: races and broken subjects (iMac hostile pass, #124)", () => {
+  it("keeps a duress entry and its alert when verification restarts while it is judged, with the same error as a normal PIN", async () => {
+    const errors: string[] = [];
+    for (const pin of [DURESS, PIN]) {
+      const t = await duressSetup();
+      const { callId } = await t.engine.startCall();
+      await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+      const release = holdNextRead(t);
+      const submit = t.engine.submitPin(callId, pin).then(() => "ok", (e: unknown) => String(e));
+      await settle();
+      await t.engine.finishVerification(callId);
+      await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+      release();
+      errors.push(await submit);
+      await settle();
+      assert.equal(t.notifier.told.length, pin === DURESS ? 1 : 0, pin);
+      assert.deepEqual((await badgeOf(t, callId)).duress, pin === DURESS ? { refuseScopes: ["owner.command"] } : undefined);
+      assert.equal((await t.engine.state(callId)).factors.length, 0, "the stale entry is not a factor");
+    }
+    assert.match(errors[0]!, /verification restarted/);
+    assert.equal(errors[0], errors[1]);
+  });
+
+  it("keeps a duress entry and its alert when the call ended while it was judged", async () => {
+    const t = await duressSetup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    const release = holdNextRead(t);
+    const submit = t.engine.submitPin(callId, DURESS);
+    await settle();
+    await t.engine.endCall(callId);
+    release();
+    await assert.rejects(submit, rejects("invalid_transition"));
+    await settle();
+    assert.equal(t.notifier.told.length, 1);
+  });
+
+  it("refuses a duress PIN when the PIN changed after it was checked, so a reset and a new PIN can never make them equal", async () => {
+    const t = await duressSetup();
+    await t.engine.removeDuressPin(OWNER);
+    const X = "5927";
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.checkCarrier(callId);
+    assert.equal((await t.engine.finishVerification(callId)).level, 2);
+    const release = holdNextRead(t);
+    const enrolDuress = t.engine.enrolDuressPin(OWNER, X);
+    await settle();
+    await t.engine.resetPin(OWNER);
+    assert.deepEqual(await t.engine.enrolPin(callId, { pin: X, confirm: X }), { enrolled: true });
+    release();
+    await assert.rejects(enrolDuress, rejects("conflict", /the PIN changed/));
+    assert.equal((await t.records.getSubject("ws_test", OWNER))!.duressDigest, undefined);
+    const { callId: next } = await t.engine.startCall();
+    await t.engine.beginVerification(next, { accountNumber: ACCOUNT });
+    assert.equal((await t.engine.submitPin(next, X)).matched, true);
+    await settle();
+    assert.equal((await badgeOf(t, next)).duress, undefined, "the real PIN is a real login");
+    assert.equal(t.notifier.told.length, 0);
+    assert.equal(await t.records.putDuressDigest("ws_test", "c".repeat(64), "d".repeat(64), "e".repeat(64)), false, "a subject the store does not have");
+  });
+
+  it("refuses an entry that is both the PIN and the duress PIN of an imported subject: neither a login nor an alarm", async () => {
+    const t = await duressSetup();
+    t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB }, pin: PIN, duressPin: PIN }));
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    assert.deepEqual(await t.engine.submitPin(callId, PIN), { matched: false, locked: false });
+    await settle();
+    assert.equal((await badgeOf(t, callId)).duress, undefined);
+    assert.equal(t.notifier.told.length, 0);
   });
 });

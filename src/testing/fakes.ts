@@ -4,6 +4,7 @@ import { generateKeyPairSync } from "node:crypto";
 
 import type {
   CarrierSignals,
+  DuressAlert,
   DuressNotifier,
   IdentityProvider,
   IntakeRecord,
@@ -149,11 +150,14 @@ export class MemoryRecordStore implements RecordStore {
     return true;
   }
 
-  async putDuressDigest(workspaceId: string, subjectKey: string, digest: string | null): Promise<void> {
+  async putDuressDigest(workspaceId: string, subjectKey: string, digest: string | null, ifPinDigest?: string): Promise<boolean> {
+    // No await: one atomic step.
     const subject = this.#subjects.get(`${workspaceId}/${subjectKey}`);
-    if (subject === undefined) return;
+    if (subject === undefined) return false;
     if (digest === null) delete subject.duressDigest;
+    else if (subject.pinDigest !== ifPinDigest) return false;
     else subject.duressDigest = digest;
+    return true;
   }
 }
 
@@ -184,9 +188,9 @@ export class FakePinVerifier implements PinVerifier {
 
 /** Keeps what it is told of duress PIN entries (VER-12). */
 export class FakeDuressNotifier implements DuressNotifier {
-  readonly told: Array<{ workspaceId: string; subjectKey: string; callId: string; at: string }> = [];
+  readonly told: DuressAlert[] = [];
 
-  async notify(input: { workspaceId: string; subjectKey: string; callId: string; at: string }): Promise<void> {
+  async notify(input: DuressAlert): Promise<void> {
     this.told.push({ ...input });
   }
 }

@@ -223,9 +223,11 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   from `minDigits` to `maxDigits`), `weak` (equal to the PIN on file, the account number or any
   keypad knowledge, compared as keyed hashes; every digit the same; a run; `weak` does not say
   which), or `{enrolled: true}` once `RecordStore.putDuressDigest(workspaceId, subjectKey,
-  digest)` stored `duressDigest(knowledgeKey, subjectKey, pin)` = `HMAC-SHA256(knowledgeKey,
-  "duress:" + subjectKey + ":" + pin)`, in `SubjectRecord.duressDigest`. A second enrolment
-  replaces it. `removeDuressPin(subjectKey)` removes it (same checks, except `pin.duress` may be
+  digest, ifPinDigest)` stored `duressDigest(knowledgeKey, subjectKey, pin)` = `HMAC-SHA256(knowledgeKey,
+  "duress:" + subjectKey + ":" + pin)`, in `SubjectRecord.duressDigest`. The store writes it only
+  while the subject's PIN digest is still the one it was checked against, atomically, and answers
+  whether it did; when not (a reset and a new PIN meanwhile) `enrolDuressPin` throws `conflict` and
+  nothing is stored. A second enrolment replaces it. `removeDuressPin(subjectKey)` removes it (same checks, except `pin.duress` may be
   off). Neither writes to the ledger. `enrolPin` answers `weak` for a PIN equal to a duress PIN on
   file.
 - Judging: in `keyed_hash` mode every PIN entry is hashed as both a PIN and a duress PIN and
@@ -235,16 +237,25 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   both), counts even on a call that began verification before it. In `verifier` mode `PinVerifier.verify`
   may answer `{duress: true}`, and `matched` is then ignored. A duress match counts only on a
   subject on file, with a well-formed entry, while `pin.duress` is set; otherwise it fails like a
-  wrong PIN. Where both would match, duress wins.
+  wrong PIN. In `keyed_hash` mode an entry that matches both (a subject imported with the PIN equal to
+  the duress PIN) fails like a wrong PIN; in `verifier` mode a `duress: true` answer wins.
 - A duress entry is a pass everywhere the caller can reach: the same `submitPin` answer, the same
   factor, level, grant, state, events and receipt as the PIN. The call record's Badge part gets
   `duress: {refuseScopes}` (the setting as it was then), which nothing clears for the rest of the
   call, and `authorize` refuses as section 4 says, with the same `false` as a scope with no grant
   (so `requestPayment` is refused with `scope_denied`). Anything sent after the call (PRV-10)
   follows the same rule as on a normal call.
-- After the write that recorded the first duress entry of a call, the engine calls
-  `DuressNotifier.notify({workspaceId, subjectKey, callId, at})` without waiting for it. A
-  notifier that throws, rejects or never answers changes nothing on the call.
+- Every duress entry owes an alert: in the same write, Badge's part of the call record gets
+  `duressAlerts` `{alertId, subjectKey, at}` and `duress`, even when verification restarted or the
+  call ended while the entry was judged (the entry is then not a factor, and `submitPin` throws the
+  same error as for any other stale entry). After a write, `flushLedger` included, and even when its
+  ledger append failed, the engine calls `DuressNotifier.notify({alertId, workspaceId, subjectKey,
+  callId, at})` for each alert the call owes, off the response path (after the reply), and takes the
+  alert off the record once `notify` resolves. An alert stays owed until then, and is sent again on
+  the next write, `flushLedger` or `deliverDuressAlerts(callId)` (the host's sweep, which waits and
+  answers how many were acknowledged); one engine sends an alert once at a time, again after 30
+  seconds without an answer. So `notify` may see an `alertId` more than once. A notifier that throws,
+  rejects or never answers changes nothing on the call; it must not block.
 - The ledger tag: every `verification.factor` entry with `kind: "pin"` carries `tag` =
   `HMAC-SHA256(knowledgeKey, JSON.stringify(["pin.tag", eventId, outcome]))`, outcome `fail`,
   `pass` or `duress`, whether or not the duress PIN is on. `readPinTag(entry)` on the engine (and

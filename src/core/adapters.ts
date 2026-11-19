@@ -73,13 +73,26 @@ export interface PinVerifier {
   verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean; duress?: boolean }>;
 }
 
+/** One duress alert (VER-12): `alertId` is the same on every retry of it, for a host to drop repeats. */
+export interface DuressAlert {
+  alertId: string;
+  workspaceId: string;
+  subjectKey: string;
+  callId: string;
+  /** When the duress PIN was entered, ISO 8601. */
+  at: string;
+}
+
 /**
- * Told when a caller enters a duress PIN (VER-12), once per call, after the call's write. Best
- * effort: the engine does not wait for it, and a failure, thrown or rejected, changes nothing on the
- * call. Never given the PIN. The host alerts whoever the business named, away from the call.
+ * Told when a caller enters a duress PIN (VER-12), for every duress entry. The alert is owed in the
+ * call record, in the same write that recorded the entry, and sent after that write, off the
+ * caller's response path; it stays owed until `notify` resolves, and is retried on the call's next
+ * write, on `flushLedger` and on `deliverDuressAlerts` (the host's sweep). So it is delivered at
+ * least once: drop repeats by `alertId`. Never given the PIN. The host alerts whoever the business
+ * named, away from the call. `notify` must not block: hand the alert to a queue and return.
  */
 export interface DuressNotifier {
-  notify(input: { workspaceId: string; subjectKey: string; callId: string; at: string }): Promise<void>;
+  notify(input: DuressAlert): Promise<void>;
 }
 
 /** A stored call session and its version. The version goes up by one on every write. */
@@ -138,9 +151,12 @@ export interface RecordStore {
   putPinDigest(workspaceId: string, subjectKey: string, digest: string | null): Promise<boolean>;
   /**
    * Stores a subject's duress PIN digest (`duressDigest`), replacing any (the business changes it),
-   * or removes it with null. Never given the PIN itself. A subject the store does not have is left alone.
+   * only if the subject's PIN digest is still `ifPinDigest`, in one atomic step, so a PIN reset and
+   * a new PIN in between can never leave the duress PIN equal to the PIN; the answer says whether it
+   * stored. Null removes it (whatever `ifPinDigest`) and answers true. Never given the PIN itself. A
+   * subject the store does not have is left alone, and the answer is false.
    */
-  putDuressDigest(workspaceId: string, subjectKey: string, digest: string | null): Promise<void>;
+  putDuressDigest(workspaceId: string, subjectKey: string, digest: string | null, ifPinDigest?: string): Promise<boolean>;
 }
 
 /**

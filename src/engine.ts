@@ -103,6 +103,8 @@ export class Engine {
   readonly #onEvent: EventListener | undefined;
   readonly #badge: badge.BadgeModule;
   readonly #rt: EngineRuntime;
+  /** Duress alerts this engine is sending now, by id, with when it started: one send at a time, retried after a while. */
+  readonly #sending = new Map<string, number>();
   readonly #receiptModules: readonly AssuranceModule[];
   #config: FlowConfig;
 
@@ -582,7 +584,12 @@ export class Engine {
       events.forEach((event, i) => record.outbox.push(this.#outboxEntry(callId, version, i, event)));
       const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
       if (saved.ok) {
-        await this.#flush(callId, version, record);
+        try {
+          await this.#flush(callId, version, record);
+        } finally {
+          // Saved, so owed duress alerts go out even if the ledger is down.
+          this.#sendDuressAlertsSoon(callId, record);
+        }
         return result;
       }
     }
@@ -675,11 +682,68 @@ export class Engine {
     return JSON.stringify([this.workspaceId, callId, version, index]);
   }
 
-  /** Appends any ledger entries a call still has pending (after a ledger outage). Every write does this too. */
+  /** Appends any ledger entries a call still has pending (after a ledger outage), and sends any owed duress alert. Every write does this too. */
   async flushLedger(callId: string): Promise<void> {
     const stored = await this.#sessions.get(this.workspaceId, callId);
     if (stored === null) throw new EngineError("unknown_call", "no such call");
-    await this.#flush(callId, stored.version, structuredClone(stored.record) as unknown as CallRecord);
+    const record = structuredClone(stored.record) as unknown as CallRecord;
+    try {
+      await this.#flush(callId, stored.version, record);
+    } finally {
+      this.#sendDuressAlertsSoon(callId, record);
+    }
+  }
+
+  /**
+   * Sends a call's owed duress alerts (VER-12) and waits for them: the host's sweep, for calls whose
+   * alert may still be owed (a notifier that was down, a process that stopped). Answers how many the
+   * notifier acknowledged now. An alert another send of this engine has in hand is left to it.
+   */
+  async deliverDuressAlerts(callId: string): Promise<number> {
+    return this.#sendDuressAlerts(callId);
+  }
+
+  /** Off the caller's response path: after the reply, so neither the notifier's time nor its failure reaches the caller. */
+  #sendDuressAlertsSoon(callId: string, record: CallRecord): void {
+    if (badge.owedDuressAlerts(record).length === 0) return;
+    setImmediate(() => void this.#sendDuressAlerts(callId).catch(() => undefined));
+  }
+
+  /**
+   * Each alert the stored call owes now (read again, so an alert already acknowledged is not sent
+   * twice), one send at a time per engine (again after 30 seconds without an answer), taken off the
+   * record once acknowledged.
+   */
+  async #sendDuressAlerts(callId: string): Promise<number> {
+    const notifier = this.#adapters.duressNotifier;
+    let delivered = 0;
+    for (const alert of badge.owedDuressAlerts(await this.#read(callId))) {
+      const now = this.#clock.now().getTime();
+      const since = this.#sending.get(alert.alertId);
+      if (notifier === undefined || (since !== undefined && now - since < 30_000)) continue;
+      this.#sending.set(alert.alertId, now);
+      try {
+        await notifier.notify({ alertId: alert.alertId, workspaceId: this.workspaceId, subjectKey: alert.subjectKey, callId, at: alert.at });
+        await this.#acknowledgeDuressAlert(callId, alert.alertId);
+        delivered++;
+      } catch {
+        // Still owed: the next write, flushLedger or deliverDuressAlerts sends it again.
+      } finally {
+        this.#sending.delete(alert.alertId);
+      }
+    }
+    return delivered;
+  }
+
+  /** Takes a delivered alert off the call record, in its own compare-and-set write, with no ledger entry. */
+  async #acknowledgeDuressAlert(callId: string, alertId: string): Promise<void> {
+    for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
+      const stored = (await this.#sessions.get(this.workspaceId, callId))!;
+      const record = structuredClone(stored.record) as unknown as CallRecord;
+      badge.acknowledgeDuressAlert(record, alertId);
+      if ((await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue)).ok) return;
+    }
+    throw new EngineError("conflict", `the call changed under every one of ${MAX_WRITE_ATTEMPTS} attempts`);
   }
 }
 

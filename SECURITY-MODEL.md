@@ -86,8 +86,15 @@ and the answer are the same (tested). A duress entry gets the same answer, level
 and receipt as the PIN (tested); the duress state is kept only in the call record. On that call
 `authorize` refuses every money, contact and access scope and the scopes the business lists in
 `refuseScopes` (for example `owner.command`), with the same `false` as a scope with no grant
-(tested). After the write the host's `DuressNotifier` is told once per call, without the call
-waiting, and a notifier that fails changes nothing (tested). Every PIN ledger entry carries a
+(tested). Every duress entry owes an alert, written in the same write as the entry, and recorded
+against the call even if verification restarted or the call ended while it was judged (tested).
+The engine sends it to the host's `DuressNotifier` after that write, off the caller's response path
+(so a slow notifier delays nothing the caller hears), even when the ledger append fails (tested),
+and keeps it owed until `notify` resolves: the call's next write, `flushLedger` and the host's sweep
+`deliverDuressAlerts` retry it, at least once by `alertId` (tested). A notifier that fails changes
+nothing on the call (tested). `putDuressDigest` stores only while the PIN checked against is still on
+file, so a reset and a new PIN meanwhile can never make the duress PIN equal the PIN (tested), and an
+entry that matches both on an imported subject is refused, neither a login nor an alarm (tested). Every PIN ledger entry carries a
 `tag` keyed to its event id and outcome, so only the holder of the knowledge key can tell a duress
 pass from a normal one (tested); enrolling or removing a duress PIN writes nothing to the ledger.
 A PIN reset removes the duress PIN too.
@@ -202,9 +209,12 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
   the request, never from a path a caller or the model can reach; and a `RecordStore.putPinDigest`
   that stores only the digest it is given, and only if the subject has none, atomically. The same
   for `enrolDuressPin`, `removeDuressPin` and `putDuressDigest`, which stores only the duress
-  digest it is given and replaces one on file (only the business sets it).
+  digest it is given, replaces one on file (only the business sets it), and only while the PIN
+  digest on file is the one given, atomically.
 - A `DuressNotifier` that alerts someone the business named, away from the call, and never
-  through anything the caller or the person beside them can see; and, in `verifier` mode, a
+  through anything the caller or the person beside them can see; that never blocks (it queues the
+  alert and returns); that drops repeats by `alertId`; and a sweep calling `deliverDuressAlerts`
+  for recent calls, in case a process stopped with an alert owed; and, in `verifier` mode, a
   `PinVerifier` that answers a duress PIN in the same time as any other entry.
 - Who may edit a workspace's FlowConfig, and keeping its revisions.
 - Outside modules: their code runs inside the engine's writes and is part of the host's security

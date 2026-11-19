@@ -213,7 +213,11 @@ export async function enrolDuressPin(rt: EngineRuntime, subjectKey: string, pin:
   if (subject === null || pinDigest === undefined) throw new EngineError("precondition_failed", "a duress PIN needs a subject with a PIN on file");
   const problem = duressPinProblem(settings, (d) => rt.hmac(d), { ...subject, pinDigest }, pin);
   if (problem !== null) return { enrolled: false, reason: problem };
-  await records.putDuressDigest(rt.workspaceId, subjectKey, rt.hmac(`duress:${subjectKey}:${pin}`));
+  // Stored only if the PIN checked against is still the one on file: a reset and a new PIN since the
+  // read could otherwise leave the duress PIN equal to the PIN, raising the alarm on every login.
+  if (!(await records.putDuressDigest(rt.workspaceId, subjectKey, rt.hmac(`duress:${subjectKey}:${pin}`), pinDigest))) {
+    throw new EngineError("conflict", "the PIN changed while the duress PIN was being stored; try again");
+  }
   return { enrolled: true };
 }
 

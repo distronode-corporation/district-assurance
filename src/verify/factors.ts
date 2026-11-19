@@ -137,6 +137,9 @@ export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: 
   }
   // A subject on file implies a keypad-shaped account or a host's subject key, never the stand-in.
   if (!wellFormed || input.subject === null) return "fail";
+  // An entry that is both the PIN and the duress PIN (a subject imported with the two equal) is
+  // refused: it can be neither a real login nor a real alarm.
+  if (match && duress && settings.mode === "keyed_hash") return "fail";
   if (duress && settings.duress !== undefined) return "duress";
   return match ? "pass" : "fail";
 }

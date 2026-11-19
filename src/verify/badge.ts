@@ -67,6 +67,11 @@ export interface BadgeSlice {
    * duress state is kept. Absent on every other call.
    */
   duress?: { refuseScopes: string[] };
+  /**
+   * Duress alerts owed to the host's notifier (VER-12), one per duress entry, written with the
+   * entry and removed once `notify` resolved. Never the PIN. Absent until the first.
+   */
+  duressAlerts?: Array<{ alertId: string; subjectKey: string; at: string }>;
   /** A keypad or PIN factor matched since verification last started from nothing. */
   knowledgeMatched: boolean;
   carrier: CarrierSignalReport | null;
@@ -293,14 +298,15 @@ export function duressRefuses(record: CallRecord, scope: string, cls: ScopeClass
   return duress !== undefined && (cls !== "none" || duress.refuseScopes.includes(scope));
 }
 
-/** Tells the host's notifier of a duress entry, without waiting; a failure, thrown or rejected, changes nothing. */
-function notifyDuress(rt: EngineRuntime, input: { workspaceId: string; subjectKey: string; callId: string; at: string }): void {
-  try {
-    const told: unknown = rt.adapter("duressNotifier").notify(input);
-    if (told instanceof Promise) told.catch(() => undefined);
-  } catch {
-    // Ignored by design: the call goes on exactly as it would.
-  }
+/** The duress alerts a call record owes (VER-12). */
+export function owedDuressAlerts(record: CallRecord): Array<{ alertId: string; subjectKey: string; at: string }> {
+  return (record.modules[BADGE] as unknown as BadgeSlice | undefined)?.duressAlerts ?? [];
+}
+
+/** Takes one delivered duress alert off a call record. */
+export function acknowledgeDuressAlert(record: CallRecord, alertId: string): void {
+  const s = record.modules[BADGE] as unknown as BadgeSlice;
+  s.duressAlerts = s.duressAlerts!.filter((a) => a.alertId !== alertId);
 }
 
 // ---- runtime -------------------------------------------------------------------------------
@@ -382,18 +388,27 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   // A duress entry is a pass everywhere the caller can reach: the factor, the level, the grant, the
   // events and the receipt. Only the call record's `duress` and the PIN entry's keyed tag differ.
   const passed = outcome !== "fail";
-  const told = await rt.update(callId, (draft) => {
+  const stale = await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
-    assertSameVerification(s, reserved.epoch);
     const at = rt.now();
-    draft.apply({ type: "factor_recorded", factor: { kind, passed, at } });
+    const factor = { kind, passed, at };
+    // A duress entry is recorded against the call, not the verification: it stands, and its alert is
+    // owed, even if verification restarted or the call moved on while it was judged. The engine sends
+    // the alert after this write (and retries it until the notifier answers).
+    if (outcome === "duress") {
+      s.duress ??= { refuseScopes: [...settings.pin!.duress!.refuseScopes] };
+      s.duressAlerts = [...(s.duressAlerts ?? []), { alertId: rt.ids.next("duress"), subjectKey: reserved.subjectKey!, at }];
+    }
+    // Otherwise the result is applied only to the verification it was judged for, as for any factor;
+    // a stale one is refused with the same error either way, after the write.
+    if (s.epoch !== reserved.epoch) return new EngineError("precondition_failed", "verification restarted while this result was on its way; it does not count");
+    if (!canApply(draft.record.state, { type: "factor_recorded", factor })) return new EngineError("invalid_transition", `factor_recorded is not allowed while ${draft.record.state.phase}`);
+    draft.apply({ type: "factor_recorded", factor });
     if (passed && KNOWLEDGE_FACTORS.includes(kind)) s.knowledgeMatched = true;
-    const first = outcome === "duress" && s.duress === undefined;
-    if (first) s.duress = { refuseScopes: [...settings.pin!.duress!.refuseScopes] };
     draft.emit("verification.factor", "code", { kind, passed }, kind === "pin" ? outcome : undefined);
-    return first ? at : null;
+    return null;
   });
-  if (told !== null) notifyDuress(rt, { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey!, callId, at: told });
+  if (stale !== null) throw stale;
   return { matched: passed, locked: !passed && reserved.last };
 }
 
