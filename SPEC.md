@@ -210,7 +210,8 @@ the duress PIN is off unless it is set.
   caller's request, and needs the `pin` factor on. In `keyed_hash` mode it removes the digest
   (`putPinDigest` with null), so the subject has no PIN until they enrol again at level 2; in
   `verifier` mode the host's store resets its own PIN. Either way it clears the subject's PIN
-  failure counters when the engine has a `counters` adapter (VER-1), and appends `pin.reset` to the ledger with no call. In `keyed_hash` mode `putPinDigest` with null removes the duress PIN too, in the same atomic step, so a duress PIN the business enrols against a PIN chosen after the reset began is never removed by it.
+  failure counters when the engine has a `counters` adapter (VER-1), its hidden one (VER-12)
+  included, but not a duress flag, and appends `pin.reset` to the ledger with no call. In `keyed_hash` mode `putPinDigest` with null removes the duress PIN too, in the same atomic step, so a duress PIN the business enrols against a PIN chosen after the reset began is never removed by it.
 
 **Lockouts across calls (VER-1).** Every factor the caller enters (keypad knowledge, the PIN,
 plug-ins) is also counted across calls, in an `AttemptCounters` store every engine of the
@@ -251,7 +252,9 @@ when there is a number.
   up against others. A failure stands, and
   one that starts a hard lock returns `locked: true` and writes `verification.locked`. A judge or
   verifier that throws leaves its failure counted.
-- Lifting a lock early is the host's: `AttemptCounters.reset` with the keys (`counterKeys`).
+- Lifting a lock early is the host's: `AttemptCounters.reset` with the keys (`counterKeys`) and,
+  with the duress PIN on, the subject's hidden key for the factor (`hiddenCounterKey(workspaceId,
+  kind, subjectKey)`, section 6), whose hard lock otherwise holds.
 
 ### Duress PIN (VER-12)
 

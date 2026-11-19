@@ -626,7 +626,14 @@ describe("PIN enrolment and reset (VER-6)", () => {
     await t.engine.resetPin(OWNER);
     assert.equal((await t.engine.submitPin(before.callId, PIN)).matched, false, "the old PIN no longer works on a call already verifying");
     assert.equal((await t.records.getSubject("ws_test", OWNER))!.pinDigest, undefined);
-    assert.deepEqual(resets, [{ workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER }], "VER-1's own counter key");
+    assert.deepEqual(
+      resets,
+      [
+        { workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER },
+        { workspaceId: "ws_test", factor: "duress.hidden.pin", scope: "subject", key: OWNER },
+      ],
+      "VER-1's own counter key, and VER-12's hidden one",
+    );
     const last = (await t.ledger.list()).find((e) => e.event === "pin.reset")!;
     assert.deepEqual([last.event, last.actor, last.callId, last.detail], ["pin.reset", "member", null, { subjectKey: OWNER }]);
     const { callId } = await t.engine.startCall();
@@ -646,7 +653,10 @@ describe("PIN enrolment and reset (VER-6)", () => {
     });
     await t.engine.resetPin(OWNER);
     assert.equal((await t.records.getSubject("ws_test", OWNER))!.pinDigest, pinDigest(TEST_KNOWLEDGE_KEY, OWNER, PIN));
-    assert.deepEqual(resets, [{ workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER }]);
+    assert.deepEqual(resets, [
+      { workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER },
+      { workspaceId: "ws_test", factor: "duress.hidden.pin", scope: "subject", key: OWNER },
+    ]);
     assert.equal((await t.ledger.list()).at(-1)!.event, "pin.reset");
   });
 });

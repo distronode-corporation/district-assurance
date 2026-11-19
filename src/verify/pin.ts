@@ -16,6 +16,7 @@ import { assertFlowNotEnded, currentStep } from "../core/flow.ts";
 import { hexDigestsEqual } from "../core/hash.ts";
 import type { EngineRuntime } from "../core/runtime.ts";
 import { BADGE, type BadgeSlice } from "./badge.ts";
+import { hiddenCounterKey } from "./duress-flag.ts";
 import { PIN_OUTCOMES, pinTag, type BadgeSettings, type PinOutcome, type PinSettings } from "./factors.ts";
 import { isKeypadEntry } from "./knowledge.ts";
 
@@ -176,8 +177,8 @@ export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: 
  * The business resets a subject's PIN (a host call from its own staff tools, never a caller's).
  * In `keyed_hash` mode the digest on file is removed, so the subject has no PIN until they enrol
  * again at level 2; in `verifier` mode the host's own store resets the PIN itself. Either way the
- * subject's PIN failure counters (VER-1) are cleared, and `pin.reset` goes to the ledger, with no
- * call.
+ * subject's PIN failure counters (VER-1), the hidden one of VER-12 included, are cleared, and
+ * `pin.reset` goes to the ledger, with no call. A duress flag stays until `clearDuress`.
  */
 export async function resetPin(rt: EngineRuntime, subjectKey: string, counters: AttemptCounters | undefined): Promise<void> {
   const settings = pinSettings(rt);
@@ -186,6 +187,9 @@ export async function resetPin(rt: EngineRuntime, subjectKey: string, counters: 
   // PIN is not chosen yet, and a duress PIN the business enrols against that next PIN must survive.
   if (settings.mode === "keyed_hash") await rt.adapter("records").putPinDigest(rt.workspaceId, subjectKey, null);
   await counters?.reset({ workspaceId: rt.workspaceId, factor: "pin", scope: "subject", key: subjectKey });
+  // The PIN's hidden failures too (VER-12): the business's reset lifts every PIN lock on the
+  // subject, the one a duress PIN entry could not clear included. The duress flag stays.
+  await counters?.reset(hiddenCounterKey(rt.workspaceId, "pin", subjectKey));
   await rt.adapter("ledger").append({ callId: null, actor: "member", event: "pin.reset", at: rt.now(), detail: { subjectKey } });
 }
 
