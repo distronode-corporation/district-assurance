@@ -619,30 +619,15 @@ who in the business may ask for a refund, and answering a dispute with evidence 
 ### Card data and PCI DSS scope
 
 **Controls:** Pay is by a hosted payment page; the engine sees a link id and a status, never a card
-number. A link offers only methods that settle during the call (cards, Apple Pay, Google Pay,
-Link) and lives 15 minutes from the text by default (5 to 60); the engine expires it itself at
-that deadline, at the provider first, because a provider's shortest link life can be longer
-(tested). A link never outlives its call: `endCall` expires every open link at the provider
-before the receipt is signed, and the caller can cancel one (`cancelPaymentLink`); a link
-created while its request was being closed, or after its call ended, is expired, never texted,
-and neither a cancel nor the end of the call closes a link while it is being texted (tested). Money that moves
-after the engine closed a link is still recorded as paid and flagged `late` in the ledger, so a
-late payment is never lost (tested). Card numbers in transcripts are detected (Luhn, digits and English or French digit words)
-and replaced, and the host is told to interrupt (tested). Intake refuses a value carrying a card
-number, and the ledger refuses detail carrying one (tested). A form cannot ask for a card or a
-Social Insurance Number at all: `validateConfig` refuses a field whose key or label, in English or
-French, names one (`card`, `carte`, `cvv`, `PAN`, `cc`, `SIN`, `NAS`, `SSN`, `assurance sociale`
-and so on, as a whole part of the name or run into one word as in `creditcard` or `ssnumber`), with
-case, accents and dots ignored (tested). The check reads names, not intent: a field named to slip past it
-number. Card numbers in transcripts are detected (Luhn, digits and English, French or Spanish
-digit words, all three on every call whatever its language, so a caller who switches language is
-still caught) and replaced, and the host is told to interrupt (tested). Intake refuses a value
-carrying a card number, and the ledger refuses detail carrying one (tested). A form cannot ask for
-a card or a national identity number at all: `validateConfig` refuses a field whose key or label,
-in English, French or Spanish, names one (`card`, `carte`, `tarjeta`, `cvv`, `PAN`, `cc`, `SIN`,
-`NAS`, `SSN`, `NSS`, `assurance sociale`, `seguro social` and so on, as a whole part of the name or
-run into one word as in `creditcard` or `ssnumber`), with case, accents and dots ignored (tested). The check reads names, not intent: a field named to slip past it
-is still caught by the card-number check on its value, but a SIN under another name is not. Keypad card capture is planned only
+number. Card numbers in transcripts are detected (Luhn, digits, and English or French number words
+read digit by digit, as numbers such as "forty two" or "quarante-deux", or with "double") and
+replaced, and the host is told to interrupt (tested over a shared JSON corpus). While the caller
+is still reading, the live detector tells the host to interrupt once a run reaches 8 digits, before
+a whole number has been spoken (tested over the same corpus); it keeps only the open run in memory
+and never returns it. Over-redaction and over-interrupting (a phone number read aloud) are
+accepted. Speech-to-text that renders a number in a way the corpus does not cover can still slip
+past both; the host's sensitive pause around payment stays the main control. Intake refuses a value carrying a card
+number, and the ledger refuses detail carrying one (tested). Keypad card capture is planned only
 through a PCI-certified carrier service on a call path where tones never reach this engine
 (PAY-6), after an assessor's scoping. Nothing here is a PCI DSS attestation; a host's scope
 depends on its whole call path.

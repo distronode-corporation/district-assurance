@@ -2067,3 +2067,52 @@ other) and `POST /u/:token` (a `multipart/form-data` body with a part named `fil
 link's `maxBytes` plus 16 KiB). Answers: 201 received, 400 no file, 410 link not usable, 413 too
 large, 415 type, 422 scan refused, 503 scan failed, each as a page in the same language. Creating the link, texting
 it to the number on file and writing ledger entries for it are not wired into the engine yet.
+## 17. Card numbers in transcripts
+
+**Runs of digits.** `digitRuns(text)` reads a text into runs of digits. A run is numerals and spoken
+numbers in English, French or Spanish with only separators between them (Spanish hundreds,
+`doscientos` and the rest, are whole numbers no count multiplies): spaces, any dash (hyphen, en and
+em dashes, the non-breaking hyphen), the minus sign, dots, commas, slashes, underscores, middle
+dots, and the characters a reader never sees (zero-width spaces and joiners, soft hyphens, bidi
+controls, combining marks: `SEPARATOR_CLASS`). A numeral is any run of Unicode decimal digits
+(fullwidth, Arabic-Indic and the rest), read by its values for the checks, and the original span
+is what is removed. English and French number words are read on every call, since callers switch
+between them; Spanish words only on a Spanish call (`Engine.redact` and a `LiveCardNumberDetector`
+given its `locale`), so on an English call "once" and "y" are words. A call is Spanish only once
+the engine takes the `es` locale (#122, which lands with or after this); until then `startCall`
+takes `en` and `fr`, and Spanish is read by a `LiveCardNumberDetector` given `locale: "es"` and by
+text redacted with no call. Text redacted with no call
+reads every language. Any other word or punctuation ends a run. Joining this widely can join things
+that are not one number (a date beside an amount); over-redaction is the safe side, since the risk
+is a number reaching storage. Spoken numbers are read as people say them:
+
+| Spoken | Digits |
+|---|---|
+| digit by digit: `four two`, `oh`, `zéro`, `un`, `une` | `42`, `0`, `0`, `1`, `1` |
+| tens and units: `forty two`, `quarante-deux`, `vingt et un`, `soixante et onze`, `soixante-douze`, `quatre-vingt-dix-sept`, `septante`, `nonante` | `42`, `42`, `21`, `71`, `72`, `97`, `70`, `90` |
+| teens: `twelve`, `dix-sept` | `12`, `17` |
+| `double` and `triple` before one digit: `double four`, `triple 0` | `44`, `000` |
+| scales: `four hundred and two`, `forty two hundred`, `cent deux`, `deux mille vingt` | `402`, `4200`, `102`, `2020` |
+| Spanish: `cero`, `cuarenta y uno`, `veintidós`, `dieciséis`, `ciento once`, `doscientos`, `cuatro mil ciento once` | `0`, `41`, `22`, `16`, `111`, `200`, `4111` |
+
+Words are compared in Unicode NFC, lower case, with their combining marks, so `zéro` written
+decomposed (`e` and U+0301) is still a number word. Units do not combine (`four two` is 4 then 2). `quatre-vingts` and `deux cents` end a number,
+since French writes the plural only there. `double` or `triple` before anything but one digit is
+an ordinary word.
+
+**Redaction.** `findCardNumbers` looks, in each run, for 13 to 19 digits that pass the Luhn check,
+starting and ending on a numeral or spoken number, leftmost first and longest at each position,
+never overlapping; `cardNumberRedactor` replaces each with `[card number removed]`.
+
+**Live detection.** `LiveCardNumberDetector` is fed a call's transcript one chunk at a time
+(`push(chunk)`; chunks are joined with a space, so each must end at a word boundary). It answers
+`{interrupt, digits}`: `interrupt` is true when a run the chunk added to holds `minDigits` digits
+or more (8 by default; an integer from 4 to 19, otherwise `invalid_input`), and `digits` counts the
+digits of the run still open at the end. There is no Luhn check, since a partial number cannot
+pass one, so a phone number read aloud interrupts too. A chunk that does not extend the run does
+not interrupt again. A run continues across chunks, also after a trailing `and`, `et`, `double` or
+`triple`. The detector keeps only the open run's text, without trailing separators, so empty or
+separator-only chunks never grow what it keeps; it never returns it, and forgets it on `reset()`. The host owns one detector per call and speaks its fixed line on `interrupt`.
+
+**Corpus.** `test/corpus/card-numbers.json` holds the cases for runs, redaction and live detection
+as plain JSON, so an implementation in another language can be tested against the same cases.
