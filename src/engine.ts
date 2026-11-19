@@ -109,15 +109,20 @@ export class Engine {
 
   constructor(options: EngineOptions) {
     const errors: string[] = [];
-    const key = options.knowledgeKey;
-    // An HMAC function keeps its key in the key store: only bytes can be measured here.
-    const keyLength = typeof key === "function" ? null : typeof key === "string" ? Buffer.byteLength(key) : key.byteLength;
-    if (keyLength !== null && keyLength < 16) errors.push("knowledgeKey must be at least 16 bytes");
+    const key: unknown = options.knowledgeKey;
+    // An HMAC function keeps its key in the key store: only bytes can be measured here. Anything that
+    // is not a string, a Uint8Array or a function (a number, an object with a byteLength) is refused
+    // now, not at the first hash.
+    if (typeof key === "string" || key instanceof Uint8Array) {
+      if ((typeof key === "string" ? Buffer.byteLength(key) : key.byteLength) < 16) errors.push("knowledgeKey must be at least 16 bytes");
+    } else if (typeof key !== "function") {
+      errors.push("knowledgeKey must be at least 16 bytes (a string or a Uint8Array), or an HMAC function");
+    }
     if (options.workspaceId === "") errors.push("workspaceId is empty");
     if ((options.adapters as Partial<EngineAdapters>).ledger === undefined) errors.push("the ledger adapter is required: the ledger is always on");
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     this.workspaceId = options.workspaceId;
-    this.#hmac = knowledgeHmac(key);
+    this.#hmac = knowledgeHmac(options.knowledgeKey);
     this.#sessions = options.adapters.sessions ?? new MemorySessionStore();
     this.#adapters = { ...options.adapters, sessions: this.#sessions };
     this.#clock = options.clock ?? systemClock;

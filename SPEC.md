@@ -144,7 +144,8 @@ texts.
 
 ## 5. Keypad knowledge
 
-- The knowledge key (`EngineOptions.knowledgeKey`) is its bytes, at least 16, or an opaque
+- The knowledge key (`EngineOptions.knowledgeKey`) is its bytes, at least 16 (a string or a
+  `Uint8Array`; anything else is `invalid_input` when the engine is built), or an opaque
   `KnowledgeHmac` function, `async (data) => HMAC-SHA256(key, UTF-8 data)` as 64 lower-case hex,
   which can call a key management service so the key never enters the engine's process. It is
   asynchronous, the same shape as a plug-in's `hmac`, and the engine's own hashing (subject keys,
