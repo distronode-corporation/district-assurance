@@ -40,8 +40,9 @@ keypad fields are judged together and give one answer; an unknown account, a wro
 non-keypad entry give the same result and the same ledger detail (tested), and the same holds for
 the PIN: an unknown subject, a subject with no PIN and a malformed entry do the same keyed-hash work
 and answer the same (tested), and for spoken answers: an unknown subject, a wrong answer and an
-unusable transcript give the same result and the same ledger detail (tested); every field is compared even after a mismatch; nothing reads back a value on file; links go out only after a match, so a
-text never confirms an account. Planned: per-subject and per-number counters across calls (VER-1).
+unusable transcript give the same result and the same ledger detail (tested); every field is
+compared even after a mismatch; nothing reads back a value on file; links go out only after a
+match, so a text never confirms an account. Planned: per-subject and per-number counters across calls (VER-1).
 
 ### Guessing
 
@@ -69,8 +70,8 @@ transcript is the stored value in the field's format; if speech-to-text turns a 
 the stored value, the engine cannot tell and the factor passes. Speech-to-text accuracy is outside
 this engine and belongs to the host's speech handling. The engine offers no host control for such
 a substitution; a host that needs one must provide it (for example, reading the value back for the
-caller to confirm, or requiring another factor), or keep spoken answers off. The value is compared like a keypad
-field, as a keyed digest in constant time, and never stored or logged. A spoken answer counts on
+caller to confirm, or requiring another factor), or keep spoken answers off. The value is compared
+like a keypad field, as a keyed digest in constant time, and never stored or logged. A spoken answer counts on
 its own only at level 1; above it, the policy needs another factor that is not knowledge
 (tested). A spoken match does not unlock texts to the number on file (tested). A policy without
 spoken fields never judges one (tested). Left to the host: passing the caller's answer from its

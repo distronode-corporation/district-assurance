@@ -178,7 +178,8 @@ transcript per field in the policy's `spoken.fields`: `submitFactor(callId, "spo
   unusable); `reference` 4 to 12 upper-case letters and digits.
 - Each field is compared like a keypad field: `HMAC-SHA256(knowledgeKey, "field:" + field + ":"
   + value)` against `SubjectRecord.knowledge[field]`, in constant time, every field even after a
-  mismatch; an unusable answer does the same work and fails. One factor: passed only if the
+  mismatch. The host must store the value on file in the same normalised form (`K1A0B1`, not
+  `K1A 0B1` or `k1a0b1`), or no answer ever matches; an unusable answer does the same work and fails. One factor: passed only if the
   subject exists and every field matched.
 - Each attempt is counted before it is judged, an unusable one included; after
   `spoken.maxAttemptsPerCall`, submissions return `locked` without judging. Without `spoken` in
