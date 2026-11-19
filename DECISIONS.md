@@ -159,9 +159,9 @@ Badge's settings turn factors on, and a host adds a factor the caller enters wit
 `badgeModule({ factors })`. The new `pin` factor compares against a keyed hash bound to the
 subject (`HMAC(key, "pin:" + subjectKey + ":" + pin)`), or asks the host's own `PinVerifier` (for
 example a scrypt store). 4 to 12 digits, 1 to 5 attempts per call. Every entered factor's attempt
-is counted in its own write before it is judged. Plug-ins get `hmac(data)`, never the key. No
-factor may be named for caller ID. A PIN or keypad match unlocks texts to the number on file; a
-plug-in's match does not. `returning_pin` is replaced by `pin`; enrolment is VER-6.
+is counted in its own write before it is judged. Plug-ins get `hmac(data)` (asynchronous since
+INT-4, so the key can stay in a key management service), never the key. No factor may be named for
+caller ID. A PIN or keypad match unlocks texts to the number on file; a plug-in's match does not. `returning_pin` is replaced by `pin`; enrolment is VER-6.
 **Why.** The first live use is a PIN check (ADR-20), and hosts already keep PINs in their own
 stores, so both a keyed hash and a verifier are needed. Counting before judging means a crash or a
 second process never yields a free try. Binding the digest to the subject stops two equal PINs

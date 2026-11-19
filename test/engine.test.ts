@@ -37,14 +37,16 @@ describe("Engine construction", () => {
     assert.deepEqual(engine.receiptKeys(), []);
   });
 
-  it("takes the knowledge key as an opaque HMAC function, and uses it for its own hashing too", async () => {
-    // A stand-in for a key store: the engine gets the function, never the key.
+  it("takes the knowledge key as an asynchronous HMAC function (a KMS), and uses it for its own hashing too", async () => {
+    // A stand-in for a key management service: every answer comes back on a later turn of the
+    // event loop, as a network call's would, and the engine gets the function, never the key.
     const asked: string[] = [];
-    const keyStore = (data: string): string => {
+    const kms = async (data: string): Promise<string> => {
       asked.push(data.split(":")[0]!);
+      await new Promise((resolve) => setImmediate(resolve));
       return createHmac("sha256", TEST_KNOWLEDGE_KEY).update(data).digest("hex");
     };
-    const t = setup({ knowledgeKey: keyStore });
+    const t = setup({ knowledgeKey: kms });
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: true, locked: false });
@@ -52,40 +54,60 @@ describe("Engine construction", () => {
     assert.deepEqual(asked, ["subject", "field", "pin"], "the subject key, the keypad field and the PIN all went through the function");
     assert.equal((await t.engine.finishVerification(callId)).level, 1);
     assert.equal(JSON.stringify(await t.ledger.list()).includes(DOB), false);
+
+    // A wrong PIN through the KMS is a wrong answer, judged the same way.
+    const other = await t.engine.startCall();
+    await t.engine.beginVerification(other.callId, { accountNumber: ACCOUNT });
+    assert.deepEqual(await t.engine.submitPin(other.callId, "9999"), { matched: false, locked: false });
   });
 
-  it("passes a key store failure to the host as an error, not a wrong answer, and keeps the attempt counted", async () => {
+  it("fails closed when the KMS rejects: no factor, the attempt counted, and nothing it was asked in the ledger or the events", async () => {
     let down = false;
-    const keyStore = (data: string): string => {
-      if (down && data.startsWith("field:")) throw new Error("key store unavailable");
+    const asked: string[] = [];
+    const kms = async (data: string): Promise<string> => {
+      await new Promise((resolve) => setImmediate(resolve));
+      if (down && !data.startsWith("subject:")) {
+        asked.push(data);
+        throw new Error("kms unavailable");
+      }
       return createHmac("sha256", TEST_KNOWLEDGE_KEY).update(data).digest("hex");
     };
-    const t = setup({ knowledgeKey: keyStore });
+    const seen: unknown[] = [];
+    const t = setup({ knowledgeKey: kms, onEvent: (event) => void seen.push(event) });
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     down = true;
-    await assert.rejects(t.engine.submitKeypad(callId, { dob: DOB }), /key store unavailable/);
-    const events = (await t.ledger.list()).map((e) => e.event);
-    assert.equal(events.at(-1), "verification.factor_error");
-    assert.equal(events.includes("verification.factor"), false, "no factor is recorded for a failure");
-    // The failed attempt is not refunded: one of the two is left, and it judges once the store is back.
+    await assert.rejects(t.engine.submitKeypad(callId, { dob: DOB }), /kms unavailable/);
+    await assert.rejects(t.engine.submitPin(callId, PIN), /kms unavailable/);
+    assert.equal(asked.length, 2, "the KMS was asked for the keypad field and the PIN");
+    const entries = await t.ledger.list();
+    const events = entries.map((e) => e.event);
+    assert.deepEqual(events.slice(-2), ["verification.factor_error", "verification.factor_error"]);
+    assert.equal(events.includes("verification.factor"), false, "a failure is never a factor");
+    assert.equal((await t.engine.state(callId)).factors.length, 0);
+    const written = JSON.stringify([entries, seen]);
+    for (const secret of [DOB, PIN, ...asked, ...asked.map((d) => createHmac("sha256", TEST_KNOWLEDGE_KEY).update(d).digest("hex"))]) {
+      assert.equal(written.includes(secret), false, "no entry, digest or question of the KMS is written");
+    }
+    // The failed attempts are not refunded: the PIN has 2 of its 3 left once the KMS is back.
     down = false;
-    assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: true, locked: false });
+    assert.deepEqual(await t.engine.submitPin(callId, "9999"), { matched: false, locked: false });
+    assert.deepEqual(await t.engine.submitPin(callId, PIN), { matched: true, locked: false });
 
-    // An outage that uses up every attempt locks the call, even after the store recovers.
+    // An outage that uses up every keypad attempt locks the call, even after the KMS recovers.
     const second = await t.engine.startCall();
     await t.engine.beginVerification(second.callId, { accountNumber: ACCOUNT });
     down = true;
-    for (let i = 0; i < 2; i++) await assert.rejects(t.engine.submitKeypad(second.callId, { dob: DOB }), /key store unavailable/);
+    for (let i = 0; i < 2; i++) await assert.rejects(t.engine.submitKeypad(second.callId, { dob: DOB }), /kms unavailable/);
     down = false;
     assert.deepEqual(await t.engine.submitKeypad(second.callId, { dob: DOB }), { matched: false, locked: true });
   });
 
-  it("refuses an HMAC function whose answer is not 64 lower-case hex characters", async () => {
+  it("refuses an HMAC function whose answer is not 64 lower-case hex characters, without quoting it", async () => {
     for (const answer of ["AB".repeat(32), "ab".repeat(31), 42 as unknown as string]) {
-      const t = setup({ knowledgeKey: () => answer });
+      const t = setup({ knowledgeKey: async () => answer });
       const { callId } = await t.engine.startCall();
-      await assert.rejects(t.engine.beginVerification(callId, { accountNumber: ACCOUNT }), rejects("invalid_input", /knowledge HMAC function/));
+      await assert.rejects(t.engine.beginVerification(callId, { accountNumber: ACCOUNT }), (e: unknown) => rejects("invalid_input", /knowledge HMAC function/)(e) && !(e as Error).message.includes(String(answer)));
     }
   });
 

@@ -147,10 +147,11 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 
 ### Theft of the keys
 
-**Controls:** neither key has to be in the engine's process. The knowledge key can be an opaque
-HMAC function that runs in the host's key store; the engine, the built-in factors and plug-ins all
-hash through that one function, and an answer that is not a 64-character lower-case hex digest is
-refused (tested). The receipt key stays behind `ReceiptSigner`; a signer that returns anything but
+**Controls:** neither key has to be in the engine's process. The knowledge key can be an opaque,
+asynchronous HMAC function that calls the host's key management service; the engine, the built-in
+factors and plug-ins all hash through that one function, an answer that is not a 64-character
+lower-case hex digest is refused without being quoted, and a key store that rejects fails closed:
+no factor, the attempt counted, nothing it was asked written to the ledger (tested). The receipt key stays behind `ReceiptSigner`; a signer that returns anything but
 a 64-byte P1363 signature is refused, and `derToP1363` converts a key store's DER answer, checked
 against `node:crypto` (tested). An HMAC function does not stop a process that can call it from
 computing digests, so who may call the key store remains the host's control.

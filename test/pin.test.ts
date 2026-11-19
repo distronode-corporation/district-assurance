@@ -142,7 +142,7 @@ describe("factor plug-ins", () => {
     assert.deepEqual(await t.engine.submitFactor(callId, "voice_passphrase", "open sesame"), { matched: false, locked: true });
     assert.equal(seen.length, 1);
     assert.equal(seen[0]!.subjectKey, OWNER);
-    assert.match(seen[0]!.hmac("x"), /^[0-9a-f]{64}$/);
+    assert.match(await seen[0]!.hmac("x"), /^[0-9a-f]{64}$/);
     assert.equal(Object.values(seen[0]!).includes(TEST_KNOWLEDGE_KEY), false);
     assert.equal((await t.engine.finishVerification(callId)).level, 1);
     const again = await t.engine.startCall();

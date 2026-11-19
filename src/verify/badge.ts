@@ -287,7 +287,7 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
     if (!/^[0-9a-f]{64}$/.test(input.subjectKey)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
     subjectKey = input.subjectKey;
   } else {
-    subjectKey = isKeypadEntry(input.accountNumber) ? rt.hmac(`subject:${input.accountNumber}`) : null;
+    subjectKey = isKeypadEntry(input.accountNumber) ? await rt.hmac(`subject:${input.accountNumber}`) : null;
   }
   const subject = subjectKey === null ? null : await rt.adapter("records").getSubject(rt.workspaceId, subjectKey);
   await rt.update(callId, (draft) => {

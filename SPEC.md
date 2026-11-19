@@ -101,8 +101,8 @@ Built-in factor kinds: `keypad_knowledge`, `pin`, `carrier_identity_match`, `pho
 kind the caller enters and code judges: `{kind, summary, maxAttemptsPerCall (1 to 5), adapters,
 judge}`, installed with `badgeModule({ factors })`. Its kind is snake_case, 3 to 32 characters, not
 a built-in kind, and never `caller_id`, `calling_number`, `ani` or `cli`. Its judge gets the
-subject, the entry and `hmac(data)` under the knowledge key, never the key. Caller ID is not a
-kind.
+subject, the entry and `hmac(data)` under the knowledge key (asynchronous, a `Promise` of the hex
+digest), never the key. Caller ID is not a kind.
 
 A policy lists, per level 1 to 3, sets of factor kinds; a level is reached when every kind in one
 of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:
@@ -145,12 +145,15 @@ texts.
 ## 5. Keypad knowledge
 
 - The knowledge key (`EngineOptions.knowledgeKey`) is its bytes, at least 16, or an opaque
-  `KnowledgeHmac` function, `(data) => HMAC-SHA256(key, UTF-8 data)` as 64 lower-case hex, which
-  runs in the host's key store so the key never enters the engine's process. It is synchronous,
-  the same shape as a plug-in's `hmac`, and the engine's own hashing (subject keys, field and PIN
-  digests) goes through the same function. An answer that is not 64 lower-case hex is refused with
-  `invalid_input`. `subjectKeyFor`, `knowledgeDigest`, `pinDigest` and `judgeKeypadFactors` take
-  either form, and give the same digests for the same key.
+  `KnowledgeHmac` function, `async (data) => HMAC-SHA256(key, UTF-8 data)` as 64 lower-case hex,
+  which can call a key management service so the key never enters the engine's process. It is
+  asynchronous, the same shape as a plug-in's `hmac`, and the engine's own hashing (subject keys,
+  field and PIN digests) goes through the same function; every keypad field is hashed before any
+  is compared. An answer that is not 64 lower-case hex is refused with `invalid_input`, whose
+  message never quotes it. A function that throws or rejects fails closed: no factor, the attempt
+  counted, the error passed to the host (below). `subjectKeyFor`, `knowledgeDigest`, `pinDigest`
+  and `judgeKeypadFactors` take either form and give the same digests for the same key: at once
+  for bytes, as a `Promise` for a function.
 - Subject key: `HMAC-SHA256(knowledgeKey, "subject:" + accountNumber)`, hex. A host may instead
   start verification with a subject key its own code chose (`{subjectKey}`, 64 lower-case hex);
   choosing the subject is not a factor.

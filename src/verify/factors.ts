@@ -20,8 +20,8 @@ export interface FactorJudgeInput {
   subject: SubjectRecord | null;
   /** From a code path, never from the model. Discarded after judging. */
   entry: FactorEntry;
-  /** HMAC-SHA256 under the workspace's knowledge key, hex. */
-  hmac(data: string): string;
+  /** HMAC-SHA256 under the workspace's knowledge key, hex. Asynchronous: the key may live in a key management service. */
+  hmac(data: string): Promise<string>;
 }
 
 /** A factor the caller enters and code judges. The engine counts each attempt before judging it. */
@@ -91,11 +91,11 @@ export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: 
     // The verifier is asked every time, with a stand-in for a malformed entry or a non-keypad
     // account, so the answer's timing never says which it was. The stand-in's answer is ignored.
     const usable = input.subjectKey !== null && wellFormed;
-    const subjectKey = input.subjectKey ?? input.hmac("subject:");
+    const subjectKey = input.subjectKey ?? (await input.hmac("subject:"));
     const { matched } = await rt.adapter("pinVerifier").verify({ workspaceId: input.workspaceId, subjectKey, pin: wellFormed ? pin : "0".repeat(settings.minDigits) });
     return matched && usable && input.subject !== null;
   }
-  const digest = input.hmac(`pin:${input.subjectKey ?? ""}:${wellFormed ? pin : ""}`);
+  const digest = await input.hmac(`pin:${input.subjectKey ?? ""}:${wellFormed ? pin : ""}`);
   const match = hexDigestsEqual(digest, input.subject?.pinDigest ?? "");
   return match && wellFormed && input.subject !== null;
 }
