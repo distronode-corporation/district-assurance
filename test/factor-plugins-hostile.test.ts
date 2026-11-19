@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 
 import type { AssuranceModule, FactorPlugin } from "../src/core/module.ts";
 import { badgeModule } from "../src/verify/badge.ts";
-import { ACCOUNT, rejects, setup, testConfig } from "./helpers.ts";
+import { ACCOUNT, rejects, setup, testConfig, waitOut } from "./helpers.ts";
 
 const token = (): FactorPlugin => ({
   kind: "hardware_token",
@@ -33,7 +33,10 @@ async function attempts(t: ReturnType<typeof setup>, n: number): Promise<boolean
   const { callId } = await t.engine.startCall();
   await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
   const locked: boolean[] = [];
-  for (let i = 0; i < n; i++) locked.push((await t.engine.submitFactor(callId, "hardware_token", "000000")).locked);
+  for (let i = 0; i < n; i++) {
+    locked.push((await t.engine.submitFactor(callId, "hardware_token", "000000")).locked);
+    waitOut(t); // past each failure's wait, so only the attempt limit can lock
+  }
   return locked;
 }
 
