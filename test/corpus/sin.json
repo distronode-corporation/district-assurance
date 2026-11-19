@@ -1,0 +1,21 @@
+{
+  "description": "Canadian social insurance numbers: 9 digits that pass the Luhn check, written as digits (grouped 3-3-3 or not at all) or spoken as digit words in English or French. Each case lists the exact substrings a redactor must find, in order. Every number is made up; numbers starting with 0 are never issued.",
+  "kind": "sin",
+  "cases": [
+    { "lang": "en", "text": "my SIN is 046 454 286 thanks", "found": ["046 454 286"] },
+    { "lang": "en", "text": "it's 046-454-286.", "found": ["046-454-286"] },
+    { "lang": "en", "text": "SIN 046454286", "found": ["046454286"] },
+    { "lang": "en", "text": "zero four six four five four two eight six", "found": ["zero four six four five four two eight six"] },
+    { "lang": "en", "text": "oh one two, three four five, six seven four", "found": ["oh one two, three four five, six seven four"] },
+    { "lang": "fr", "text": "mon NAS est zéro quatre six, quatre cinq quatre, deux huit six", "found": ["zéro quatre six, quatre cinq quatre, deux huit six"] },
+    { "lang": "fr", "text": "numéro d'assurance sociale 087 654 323, merci", "found": ["087 654 323"] },
+    { "lang": "en", "text": "one 046 454 286", "found": ["046 454 286"] },
+    { "lang": "en", "text": "SIN 046 454 286 7", "found": ["046 454 286"] },
+    { "lang": "en", "text": "046 454 286 and 012 345 674", "found": ["046 454 286", "012 345 674"] },
+    { "lang": "en", "text": "046 454 287", "found": [] },
+    { "lang": "en", "text": "0464 54286", "found": [] },
+    { "lang": "en", "text": "046 454 28", "found": [] },
+    { "lang": "en", "text": "phone 416 555 0100", "found": [] },
+    { "lang": "fr", "text": "le 18 novembre 2026", "found": [] }
+  ]
+}

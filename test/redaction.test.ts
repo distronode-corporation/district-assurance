@@ -1,15 +1,50 @@
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import {
   applyFindings,
+  bankAccountRedactor,
   cardNumberRedactor,
   composeRedactors,
+  findBankNumbers,
   findCardNumbers,
+  findHealthCardNumbers,
+  findSocialInsuranceNumbers,
+  healthCardRedactor,
   luhnValid,
   REDACTION_MARKERS,
+  sinRedactor,
+  type RedactionFinding,
+  type RedactionKind,
   type Redactor,
 } from "../src/core/redaction.ts";
+
+/** A shared corpus file: each case lists the exact substrings a redactor must find, in order. */
+interface Corpus {
+  description: string;
+  kind: RedactionKind;
+  cases: { lang: "en" | "fr"; text: string; found: string[] }[];
+}
+
+const corpus = (name: string): Corpus =>
+  JSON.parse(readFileSync(join(import.meta.dirname, "corpus", name), "utf8")) as Corpus;
+
+function runCorpus(name: string, find: (text: string) => RedactionFinding[], redactor: Redactor): void {
+  const { kind, cases } = corpus(name);
+  it(`passes every case in corpus/${name}`, () => {
+    assert.ok(cases.some((c) => c.lang === "en") && cases.some((c) => c.lang === "fr"));
+    for (const c of cases) {
+      const findings = find(c.text);
+      assert.deepEqual(findings.map((f) => c.text.slice(f.start, f.end)), c.found, c.text);
+      for (const f of findings) assert.equal(f.kind, kind, c.text);
+      const result = redactor.redact(c.text);
+      assert.deepEqual(result, { text: applyFindings(c.text, findings), findings }, c.text);
+      for (const found of c.found) assert.ok(!result.text.includes(found), c.text);
+    }
+  });
+}
 
 const M = REDACTION_MARKERS.card_number;
 const redact = (text: string) => cardNumberRedactor.redact(text).text;
@@ -63,6 +98,62 @@ describe("findCardNumbers", () => {
     ]);
     // A leading digit that does not belong is skipped, the card after it is found.
     assert.equal(redact("9 4242 4242 4242 4242"), `9 ${M}`);
+  });
+});
+
+describe("findSocialInsuranceNumbers", () => {
+  runCorpus("sin.json", findSocialInsuranceNumbers, sinRedactor);
+
+  it("replaces a SIN with its marker and reports offsets", () => {
+    const result = sinRedactor.redact("SIN 046 454 286.");
+    assert.equal(result.text, `SIN ${REDACTION_MARKERS.sin}.`);
+    assert.deepEqual(result.findings, [{ kind: "sin", start: 4, end: 15 }]);
+  });
+});
+
+describe("findHealthCardNumbers", () => {
+  runCorpus("health-cards.json", findHealthCardNumbers, healthCardRedactor);
+
+  it("replaces a health card number with its marker, letters and all for Quebec", () => {
+    assert.equal(healthCardRedactor.redact("RAMQ TREM 7501 0112").text, `RAMQ ${REDACTION_MARKERS.health_card}`);
+    assert.deepEqual(findHealthCardNumbers("x TREM 7501 0112"), [{ kind: "health_card", start: 2, end: 16 }]);
+  });
+
+  it("checks British Columbia numbers by mod 11 alone", () => {
+    // Neither number passes Luhn, so only the British Columbia rule can find or refuse them.
+    assert.equal(luhnValid("9123456702"), false);
+    assert.equal(luhnValid("9123456712"), false);
+    assert.equal(findHealthCardNumbers("9123456702").length, 1);
+    // 912345671 leaves a remainder of 1: no check digit can follow it.
+    assert.equal(findHealthCardNumbers("9123456712").length, 0);
+  });
+});
+
+describe("findBankNumbers", () => {
+  runCorpus("bank-accounts.json", findBankNumbers, bankAccountRedactor);
+
+  it("replaces a bank number with its marker", () => {
+    assert.equal(bankAccountRedactor.redact("compte 1234567").text, `compte ${REDACTION_MARKERS.bank_account}`);
+  });
+});
+
+describe("the redactors together", () => {
+  it("compose, card numbers first, and their markers trip none of the others", () => {
+    const all = composeRedactors(cardNumberRedactor, sinRedactor, healthCardRedactor, bankAccountRedactor);
+    const text = "card 4242 4242 4242 4242, SIN 046 454 286, OHIP 1234 567 897, account 1234567";
+    const result = all.redact(text);
+    assert.equal(
+      result.text,
+      `card ${M}, SIN ${REDACTION_MARKERS.sin}, OHIP ${REDACTION_MARKERS.health_card}, account ${REDACTION_MARKERS.bank_account}`,
+    );
+    assert.deepEqual(result.findings.map((f) => f.kind), ["card_number", "sin", "health_card", "bank_account"]);
+    for (const marker of Object.values(REDACTION_MARKERS)) assert.deepEqual(all.redact(`account ${marker}`).findings, []);
+  });
+
+  it("each finds only its own kind", () => {
+    assert.deepEqual(findSocialInsuranceNumbers("1234 567 897 and 4242424242424242"), []);
+    assert.deepEqual(findHealthCardNumbers("046 454 286 and 4242424242424242"), []);
+    assert.deepEqual(findBankNumbers("046 454 286 and 1234 567 897"), []);
   });
 });
 

@@ -144,6 +144,17 @@ of birth is reversed by trying every date; the caller's entries are never stored
 fields are refused by `validateConfig` until field encryption exists (FIL-2). PINs on file are
 HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode).
 
+### Other identity and banking numbers in transcripts
+
+A caller reads a social insurance number, a health card number or bank details aloud, and the
+transcript is stored or sent on. **Controls:** `sinRedactor` (9 digits, Luhn),
+`healthCardRedactor` (Ontario, British Columbia and Quebec formats with their checks) and
+`bankAccountRedactor` (3 or more digits after a bank word) find these in digits and in English or
+French digit words, and replace them (tested over the shared corpus in `test/corpus/`). They are
+off unless the host composes them in. Limits: bank numbers have no check digit, so one read with
+no bank word before it is missed; other provinces' health card numbers are missed; intake values
+and ledger detail are checked for card numbers only.
+
 ## Left to the host
 
 - Buffering keypad digits outside the model, never logging them, and cutting audio to

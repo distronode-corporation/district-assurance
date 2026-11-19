@@ -398,3 +398,29 @@ subject's number on file. Identity link: "Your one-time identity check link: URL
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
 the currency's own decimals.
+
+## 17. Redaction
+
+Each detector is its own `Redactor`; a host composes the ones it wants with `composeRedactors`,
+card numbers first. The engine's default redactor is `cardNumberRedactor`, and `Engine.redact`
+sets `interrupt` on any finding, whichever redactor found it. A match is replaced by its kind's
+marker; `redaction.applied` counts findings per kind.
+
+Digits are read in runs: digit groups or single digit words (English and French) with only
+spaces, hyphens, dots or commas between them. In each run, matches are taken leftmost first,
+longest at each position, never overlapping. A format with groups accepts a written number only
+when its groups break where the format's do, or not at all; single digits (spoken digit words, or
+digits read one by one) may break anywhere.
+
+| Kind | Redactor | Matches | Marker |
+|---|---|---|---|
+| `card_number` | `cardNumberRedactor` | 13 to 19 digits, Luhn | `[card number removed]` |
+| `sin` | `sinRedactor` | 9 digits, Luhn, groups 3-3-3 | `[SIN removed]` |
+| `health_card` | `healthCardRedactor` | Ontario: 10 digits, Luhn, groups 4-3-3 (a version code after it is kept). British Columbia: 10 digits starting with 9, mod 11 check digit (weights 2, 4, 8, 5, 10, 9, 7, 3 on digits 2 to 9), groups 4-3-3. Quebec: four letters right before the run, as one word or spelled one by one, then 8 digits whose 3rd to 6th give a month (or month plus 50) and a day, groups 4-4; the letters are removed too | `[health card number removed]` |
+| `bank_account` | `bankAccountRedactor` | a whole run of 3 or more digits with a bank word among the last 4 words before it, counting only words after the previous run. English: bank, branch, transit, institution, account; French: banque, bancaire, succursale, compte, folio | `[banking details removed]` |
+
+Bank numbers carry no check digit, so a bank word is what marks them; an account number read
+with no bank word before it is not found. Health card numbers of other provinces are not found
+yet. Number words ("forty two", "quarante-deux") and "double" forms are planned (PAY-5). The test
+corpus is shared JSON in `test/corpus/`, one file per kind: each case gives a text, its language
+and the exact substrings a redactor must find, in order.

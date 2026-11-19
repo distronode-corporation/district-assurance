@@ -4,8 +4,12 @@
 // digits or spoken as single digit words in English or French, with spaces, hyphens, dots or
 // commas between groups. A match is replaced by a fixed marker. Over-redaction is accepted; the
 // risk this guards against is a card number reaching storage.
+//
+// Further detectors, each its own `Redactor` over the same digit runs (PRV-6): Canadian social
+// insurance numbers, provincial health card numbers, and bank transit and account numbers. A
+// host composes the ones it wants with `composeRedactors`, card numbers first.
 
-export type RedactionKind = "card_number";
+export type RedactionKind = "card_number" | "sin" | "health_card" | "bank_account";
 
 export interface RedactionFinding {
   kind: RedactionKind;
@@ -26,6 +30,9 @@ export interface Redactor {
 
 export const REDACTION_MARKERS: Record<RedactionKind, string> = {
   card_number: "[card number removed]",
+  sin: "[SIN removed]",
+  health_card: "[health card number removed]",
+  bank_account: "[banking details removed]",
 };
 
 /** The Luhn (mod 10) check over a string of digits. */
@@ -120,12 +127,157 @@ export function applyFindings(text: string, findings: readonly RedactionFinding[
   return out + text.slice(at);
 }
 
-export const cardNumberRedactor: Redactor = {
-  redact(text) {
-    const findings = findCardNumbers(text);
-    return { text: applyFindings(text, findings), findings };
-  },
-};
+function redactorFor(find: (text: string) => RedactionFinding[]): Redactor {
+  return {
+    redact(text) {
+      const findings = find(text);
+      return { text: applyFindings(text, findings), findings };
+    },
+  };
+}
+
+export const cardNumberRedactor: Redactor = redactorFor(findCardNumbers);
+
+/** A number with a fixed count of digits, the places a written form may break, and a check. */
+interface NumberFormat {
+  length: number;
+  /** Digit offsets where written groups may break: 3 and 6 for "046 454 286". */
+  breaks: readonly number[];
+  valid(digits: string): boolean;
+  /** Four letters come just before the digits, as one word or spelled out ("TREM", "t r e m"). */
+  afterFourLetters?: boolean;
+}
+
+/**
+ * Whether tokens i to j of a run are grouped as the format allows. A break between two written
+ * groups must fall on one of the format's breaks; single digits (spoken digit words, or digits
+ * read one by one) may break anywhere.
+ */
+function groupedAs(run: readonly Token[], i: number, j: number, breaks: readonly number[]): boolean {
+  let at = 0;
+  for (let k = i; k < j; k++) {
+    at += run[k]!.digits.length;
+    const singles = run[k]!.digits.length === 1 && run[k + 1]!.digits.length === 1;
+    if (!singles && !breaks.includes(at)) return false;
+  }
+  return true;
+}
+
+const FOUR_LETTERS_BEFORE = /(?<!\p{L})(?:\p{L}{4}|\p{L}(?:[\s\-.,]+\p{L}){3})[\s\-.,]*$/u;
+
+/** Where the four letters before a run start, if they are there. */
+function fourLettersBefore(text: string, at: number): number | undefined {
+  return FOUR_LETTERS_BEFORE.exec(text.slice(0, at))?.index;
+}
+
+/**
+ * Numbers of the given formats in a text, leftmost first, longest match at each position, never
+ * overlapping. A match starts at the first run token it uses, or at its four letters.
+ */
+function findFormatted(text: string, kind: RedactionKind, formats: readonly NumberFormat[]): RedactionFinding[] {
+  const longest = Math.max(...formats.map((f) => f.length));
+  const findings: RedactionFinding[] = [];
+  for (const run of digitRuns(text)) {
+    let i = 0;
+    while (i < run.length) {
+      let best = -1;
+      let start = 0;
+      let digits = "";
+      for (let j = i; j < run.length; j++) {
+        digits += run[j]!.digits;
+        if (digits.length > longest) break;
+        for (const f of formats) {
+          if (f.length !== digits.length || !groupedAs(run, i, j, f.breaks) || !f.valid(digits)) continue;
+          // The letters must come before the run itself, never be a digit word inside it.
+          let from: number | undefined = run[i]!.start;
+          if (f.afterFourLetters === true) from = i === 0 ? fourLettersBefore(text, from) : undefined;
+          if (from !== undefined) {
+            best = j;
+            start = from;
+          }
+        }
+      }
+      if (best >= 0) {
+        findings.push({ kind, start, end: run[best]!.end });
+        i = best + 1;
+      } else {
+        i++;
+      }
+    }
+  }
+  return findings;
+}
+
+/** Canadian social insurance numbers: 9 digits, Luhn, grouped 3-3-3 when written in groups. */
+export function findSocialInsuranceNumbers(text: string): RedactionFinding[] {
+  return findFormatted(text, "sin", [{ length: 9, breaks: [3, 6], valid: luhnValid }]);
+}
+
+export const sinRedactor: Redactor = redactorFor(findSocialInsuranceNumbers);
+
+/** The British Columbia personal health number check: a 9, then mod 11 over digits 2 to 9. */
+function bcPhnValid(digits: string): boolean {
+  if (digits[0] !== "9") return false;
+  const weights = [2, 4, 8, 5, 10, 9, 7, 3];
+  let sum = 0;
+  for (let k = 0; k < 8; k++) sum += (digits.charCodeAt(k + 1) - 48) * weights[k]!;
+  const check = 11 - (sum % 11);
+  return check < 10 && check === digits.charCodeAt(9) - 48;
+}
+
+/** Quebec health insurance digits: birth year, month (plus 50 for women), day, then two more. */
+function ramqDigitsValid(digits: string): boolean {
+  const month = Number(digits.slice(2, 4)) % 50;
+  const day = Number(digits.slice(4, 6));
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+}
+
+const HEALTH_CARDS: readonly NumberFormat[] = [
+  // Ontario: 10 digits, Luhn, written 1234 567 890. A version code may follow and is kept.
+  { length: 10, breaks: [4, 7], valid: luhnValid },
+  // British Columbia: 10 digits starting with 9, mod 11 check digit, written 9123 456 789.
+  { length: 10, breaks: [4, 7], valid: bcPhnValid },
+  // Quebec: four letters, then 8 digits, written TREM 7501 0112. The letters are removed too.
+  { length: 8, breaks: [4], valid: ramqDigitsValid, afterFourLetters: true },
+];
+
+/** Provincial health card numbers in the Ontario, British Columbia and Quebec formats. */
+export function findHealthCardNumbers(text: string): RedactionFinding[] {
+  return findFormatted(text, "health_card", HEALTH_CARDS);
+}
+
+export const healthCardRedactor: Redactor = redactorFor(findHealthCardNumbers);
+
+/** Words that mark a number after them as a bank number, in English and French. */
+const BANK_WORDS = new Set([
+  "bank", "branch", "transit", "institution", "account",
+  "banque", "bancaire", "succursale", "compte", "folio",
+]);
+
+const WORD = /\p{L}+/gu;
+
+/**
+ * Bank numbers: a digit run of 3 or more digits (an institution number is 3, a transit number 5,
+ * an account number 7 to 12, or several read together) with a bank word among the last 4 words
+ * before it, since the previous run. Bank numbers carry no check digit, so the word marks them.
+ */
+export function findBankNumbers(text: string): RedactionFinding[] {
+  const findings: RedactionFinding[] = [];
+  let from = 0;
+  for (const run of digitRuns(text)) {
+    const first = run[0]!;
+    const last = run[run.length - 1]!;
+    const words = text.slice(from, first.start).match(WORD) ?? [];
+    from = last.end;
+    const digits = run.reduce((n, t) => n + t.digits.length, 0);
+    if (digits >= 3 && words.slice(-4).some((w) => BANK_WORDS.has(w.toLowerCase()))) {
+      findings.push({ kind: "bank_account", start: first.start, end: last.end });
+    }
+  }
+  return findings;
+}
+
+export const bankAccountRedactor: Redactor = redactorFor(findBankNumbers);
 
 /**
  * Runs redactors in order, each over the previous one's output. Finding offsets refer to the text
