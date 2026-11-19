@@ -235,7 +235,15 @@ the `dialer` (`CallbackDialer`) and `counters` adapters when it is on.
   subject already had `MAX_CALLBACKS_PER_DAY` (3) callbacks placed in the last 24 hours (counted
   in `AttemptCounters` under the key `callback.placed`, recorded before the dial, so of two
   requests racing for the last one only one is placed). Otherwise it is placed, and a failure is
-  recorded on the `callback` counters before the line is dialed; a pass resets them.
+  recorded on the `callback` counters before the line is dialed; a pass forgets the subject's
+  failures and this callback's own on the number (section 6). A pass whose counters could not be
+  updated keeps that work pending, and a repeated outcome retries it without recording `callback`
+  again.
+- The reservation keeps the subject, the verification and the time it is counted at. If
+  verification restarts (another subject included) before the request is decided, it is refused,
+  and nothing reserved for one subject is ever placed for another. A request that failed before
+  it was decided (`requested`) is decided by the next request on the call, as of its reserved
+  time: a counter that already holds its failure at that time is not counted again.
 - Either way the call that asked is ended (`endCall`, a running flow abandoned) and
   `requestCallback` returns nothing: a refused request looks and sounds the same as a placed one.
   The first call never gains a level, a factor or a grant from the callback. Asked again, it gives

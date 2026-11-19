@@ -17,8 +17,8 @@ import type { AttemptCounterKey, SubjectRecord } from "../core/adapters.ts";
 import { EngineError } from "../core/errors.ts";
 import type { CallDraft, EngineRuntime } from "../core/runtime.ts";
 import { canApply } from "../core/session.ts";
-import { BADGE, allowFactor, type BadgeSlice, type OutcomeResult } from "./badge.ts";
-import { counterKeys, currentLock, isCallingNumber, lockoutOf, recordFailures, resetCounters, type Lock } from "./counters.ts";
+import { BADGE, allowFactor, type BadgeSlice, type CallbackState, type OutcomeResult } from "./badge.ts";
+import { counterKeys, currentLock, forgetPass, isCallingNumber, lockoutOf, recordedAt, recordFailures, type Lock } from "./counters.ts";
 import type { BadgeSettings } from "./factors.ts";
 
 export const CALLBACK = "callback";
@@ -48,64 +48,98 @@ export interface CallbackPlan {
   subject: SubjectRecord;
   keys: AttemptCounterKey[];
   lock: Lock | null;
+  /** ISO 8601. When the callback's failure was counted, so a pass forgets that one. */
+  at: string;
 }
 
 /**
  * Decides a callback on the call that asks: the plan for a placed one, or null for a refused one.
  * The caller is not told which. Asked again once decided, it gives the same answer, so a placed
- * callback that failed before it rang is resumed.
+ * callback that failed before it rang is resumed. Asked again while undecided (the counters or the
+ * write failed), it completes the decision for the subject first reserved, counting nothing twice.
  */
 export async function requestCallback(rt: EngineRuntime, callId: string): Promise<CallbackPlan | null> {
   const before = await rt.read(callId);
   const current = before.modules[BADGE] as unknown as BadgeSlice | undefined;
   if (current === undefined) throw new EngineError("module_disabled", `${BADGE} was off when this call started`);
-  if (current.callback.status === "placed") return planOf(current);
+  if (current.callback.status === "placed") return planOf(current.callback);
   if (current.callback.status === "refused") return null;
-  const reserved = await rt.update(callId, (draft) => {
-    allowFactor(rt, draft.record, CALLBACK);
-    draft.assertCan({ type: "factor_recorded", factor: { kind: CALLBACK, passed: false, at: rt.now() } });
-    // The callback call runs the flow again from its first step, so that is where one is asked for.
-    if (draft.record.flow !== null && draft.record.flow.index !== 0) throw new EngineError("precondition_failed", "a callback is asked for on the flow's first step");
-    const s = draft.slice<BadgeSlice>(BADGE);
-    if (s.callback.status !== "none") throw new EngineError("precondition_failed", "a callback was already asked for on this call");
-    s.callback = { ...s.callback, status: "requested", callId: rt.ids.next("call"), keys: counterKeys(rt.workspaceId, CALLBACK, s) };
-    // Only after a keypad or PIN match, and only to a number on file.
-    return { eligible: s.knowledgeMatched && isCallingNumber(s.subject!.phoneOnFile), subjectKey: s.subjectKey, keys: s.callback.keys };
-  });
-  const decided = reserved.eligible ? await allowCallback(rt, reserved.subjectKey!, reserved.keys) : { placed: false, lock: null, hard: null };
+  const resume = current.callback.status === "requested";
+  const reserved = resume
+    ? current.callback
+    : await rt.update(callId, (draft) => {
+        allowFactor(rt, draft.record, CALLBACK);
+        draft.assertCan({ type: "factor_recorded", factor: { kind: CALLBACK, passed: false, at: rt.now() } });
+        // The callback call runs the flow again from its first step, so that is where one is asked for.
+        if (draft.record.flow !== null && draft.record.flow.index !== 0) throw new EngineError("precondition_failed", "a callback is asked for on the flow's first step");
+        const s = draft.slice<BadgeSlice>(BADGE);
+        if (s.callback.status !== "none") throw new EngineError("precondition_failed", "a callback was already asked for on this call");
+        // Only after a keypad or PIN match, and only to a number on file.
+        if (!s.knowledgeMatched || !isCallingNumber(s.subject!.phoneOnFile)) {
+          s.callback = { ...s.callback, status: "refused" };
+          draft.emit("verification.callback_finished", "code", { outcome: "refused" });
+          return null;
+        }
+        s.callback = {
+          ...s.callback,
+          status: "requested",
+          callId: rt.ids.next("call"),
+          keys: counterKeys(rt.workspaceId, CALLBACK, s),
+          subjectKey: s.subjectKey,
+          subject: s.subject,
+          epoch: s.epoch,
+          at: rt.clock.now().toISOString(),
+        };
+        return { ...s.callback };
+      });
+  if (reserved === null) return null;
+  const decided = await allowCallback(rt, reserved, resume);
   return rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
-    s.callback = { ...s.callback, status: decided.placed ? "placed" : "refused", lock: decided.hard };
+    // Another try of this request decided it meanwhile: its answer stands.
+    if (s.callback.status !== "requested") return s.callback.status === "placed" ? planOf(s.callback) : null;
+    // Verification restarted, perhaps for another subject, while this was decided: what was
+    // reserved for the subject that matched is never placed for another, nor counted again.
+    const placed = decided.placed && s.epoch === reserved.epoch && s.subjectKey === reserved.subjectKey;
+    s.callback = { ...s.callback, status: placed ? "placed" : "refused", lock: placed ? decided.hard : null };
     if (decided.lock !== null) draft.emit("verification.locked", "code", { kind: CALLBACK, scope: decided.lock.scope, hard: decided.lock.hard, until: decided.lock.until });
-    if (!decided.placed) {
+    if (!placed) {
       draft.emit("verification.callback_finished", "code", { outcome: "refused" });
       return null;
     }
     draft.emit("verification.callback_started", "code", { callbackCallId: s.callback.callId });
-    return planOf(s);
+    return planOf(s.callback);
   });
 }
 
-function planOf(s: BadgeSlice): CallbackPlan {
-  return { callbackCallId: s.callback.callId!, subjectKey: s.subjectKey!, subject: s.subject!, keys: s.callback.keys, lock: s.callback.lock };
+/** The plan from what the request reserved, never from the call's subject now. */
+function planOf(callback: CallbackState): CallbackPlan {
+  return { callbackCallId: callback.callId!, subjectKey: callback.subjectKey!, subject: callback.subject!, keys: callback.keys, lock: callback.lock, at: callback.at! };
 }
 
 /**
- * The counters: refused while the callback counters are locked or the subject is at its daily
- * limit. Otherwise the callback is counted toward the limit and as a failure, before it is placed.
+ * The counters, as at the time the request was reserved: refused while the callback counters are
+ * locked or the subject is at its daily limit. Otherwise the callback is counted toward the limit
+ * and as a failure, before it is placed. A resumed request finds what it already counted (a
+ * failure at its own time) and does not count it again.
  */
-async function allowCallback(rt: EngineRuntime, subjectKey: string, keys: AttemptCounterKey[]): Promise<{ placed: boolean; lock: Lock | null; hard: Lock | null }> {
+async function allowCallback(rt: EngineRuntime, reserved: CallbackState, resume: boolean): Promise<{ placed: boolean; lock: Lock | null; hard: Lock | null }> {
   const counters = rt.adapter("counters");
   const lockout = lockoutOf(rt.settings<BadgeSettings>(BADGE).lockout);
-  const now = rt.clock.now();
-  const lock = await currentLock(counters, lockout, keys, now);
-  if (lock !== null) return { placed: false, lock, hard: null };
-  const placed: AttemptCounterKey = { workspaceId: rt.workspaceId, factor: CALLBACKS_PLACED, scope: "subject", key: subjectKey };
+  const at = reserved.at!;
+  const now = new Date(at);
+  const placed: AttemptCounterKey = { workspaceId: rt.workspaceId, factor: CALLBACKS_PLACED, scope: "subject", key: reserved.subjectKey! };
   const since = new Date(now.getTime() - DAY_MS + 1).toISOString();
-  if ((await counters.get(placed, since)).length >= MAX_CALLBACKS_PER_DAY) return { placed: false, lock: null, hard: null };
-  // Another request got in first: the list this one returns is over the limit.
-  if ((await counters.recordFailure(placed, now.toISOString(), since)).length > MAX_CALLBACKS_PER_DAY) return { placed: false, lock: null, hard: null };
-  const recorded = await recordFailures(counters, lockout, keys, now);
+  let counted = resume ? recordedAt(await counters.get(placed, since), at) : null;
+  if (counted === null) {
+    const lock = await currentLock(counters, lockout, reserved.keys, now);
+    if (lock !== null) return { placed: false, lock, hard: null };
+    if ((await counters.get(placed, since)).length >= MAX_CALLBACKS_PER_DAY) return { placed: false, lock: null, hard: null };
+    counted = await counters.recordFailure(placed, at, since);
+  }
+  // Another request got in first: the list this one returned is over the limit.
+  if (counted.length > MAX_CALLBACKS_PER_DAY) return { placed: false, lock: null, hard: null };
+  const recorded = await recordFailures(counters, lockout, reserved.keys, now, resume);
   if (recorded.raced !== null) return { placed: false, lock: recorded.raced, hard: null };
   return { placed: true, lock: null, hard: recorded.hard };
 }
@@ -120,7 +154,18 @@ export function beginCallbackCall(draft: CallDraft, plan: CallbackPlan, requeste
   s.epoch++;
   s.subjectKey = plan.subjectKey;
   s.subject = plan.subject;
-  s.callback = { status: "dialing", callId: requestedOn, ref: null, keys: plan.keys, lock: plan.lock };
+  s.callback = {
+    status: "dialing",
+    callId: requestedOn,
+    ref: null,
+    keys: plan.keys,
+    lock: plan.lock,
+    subjectKey: plan.subjectKey,
+    subject: plan.subject,
+    epoch: null,
+    at: plan.at,
+    forgetPending: false,
+  };
   draft.emit("verification.started", "code", { subject: "callback", requestedOn });
 }
 
@@ -149,26 +194,33 @@ export async function dialCallback(rt: EngineRuntime, callId: string): Promise<v
 
 /**
  * The dialer's outcome. `callback` is recorded, passed only when the number on file answered and
- * the person keyed the confirmation. Unknown, late, repeated or voided outcomes are ignored.
+ * the person keyed the confirmation. Unknown, late, repeated or voided outcomes are ignored. A
+ * pass then forgets the callback's failure; until that is done, a repeated outcome retries only it.
  */
 export async function applyCallbackOutcome(rt: EngineRuntime, outcome: CallbackOutcome): Promise<OutcomeResult> {
   const callId = await rt.resolveRef(`callback:${outcome.ref}`);
   if (callId === null) return { applied: false };
   const done = await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
+    if (s.callback.status === "passed" && s.callback.forgetPending) return { passed: true, repeated: true, keys: s.callback.keys, at: s.callback.at! };
     const passed = outcome.answered && outcome.confirmed;
     const factor = { kind: CALLBACK, passed, at: rt.now() };
     if (s.callback.status !== "dialed" || !canApply(draft.record.state, { type: "factor_recorded", factor })) return null;
-    s.callback = { ...s.callback, status: passed ? "passed" : "failed" };
+    s.callback = { ...s.callback, status: passed ? "passed" : "failed", forgetPending: passed };
     draft.apply({ type: "factor_recorded", factor });
     draft.emit("verification.factor", "system", { kind: CALLBACK, passed });
     const result = passed ? "passed" : outcome.answered ? "no_confirmation" : "no_answer";
     draft.emit("verification.callback_finished", "system", { outcome: result, requestedOn: s.callback.callId });
     const lock = s.callback.lock;
     if (!passed && lock !== null) draft.emit("verification.locked", "code", { kind: CALLBACK, scope: lock.scope, hard: lock.hard, until: lock.until });
-    return { passed, keys: s.callback.keys };
+    return { passed, repeated: false, keys: s.callback.keys, at: s.callback.at! };
   });
   if (done === null) return { applied: false };
-  if (done.passed) await resetCounters(rt.adapter("counters"), done.keys);
-  return { applied: true, callId };
+  if (done.passed) {
+    await forgetPass(rt.adapter("counters"), lockoutOf(rt.settings<BadgeSettings>(BADGE).lockout), done.keys, new Date(done.at));
+    await rt.update(callId, (draft) => {
+      draft.slice<BadgeSlice>(BADGE).callback.forgetPending = false;
+    });
+  }
+  return done.repeated ? { applied: false } : { applied: true, callId };
 }

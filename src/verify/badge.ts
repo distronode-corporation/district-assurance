@@ -88,10 +88,19 @@ export interface CallbackState {
   callId: string | null;
   /** The dialer's reference, on the callback call. */
   ref: string | null;
-  /** The counters a failed callback stays counted under, and a pass resets. */
+  /** The counters a failed callback stays counted under, and a pass forgets. */
   keys: AttemptCounterKey[];
   /** The hard lock this callback's failure starts, written to the ledger if it fails. */
   lock: Lock | null;
+  /** The subject the callback is for, kept from the request, so a restart for another subject cannot take it over. */
+  subjectKey: string | null;
+  subject: SubjectRecord | null;
+  /** On the call that asks: its verification (`BadgeSlice.epoch`) when it asked. */
+  epoch: number | null;
+  /** ISO 8601. When the callback is counted, toward the daily limit and as a failure. A resumed request counts at the same time, and a pass forgets that failure. */
+  at: string | null;
+  /** On a passed callback call: its failure is still to be forgotten. A replayed outcome retries that. */
+  forgetPending: boolean;
 }
 
 export interface KeypadResult {
@@ -249,7 +258,7 @@ export class BadgeModule implements AssuranceModule {
       finished: 0,
       lastLevel: 0,
       lastMethods: [],
-      callback: { status: "none", callId: null, ref: null, keys: [], lock: null },
+      callback: { status: "none", callId: null, ref: null, keys: [], lock: null, subjectKey: null, subject: null, epoch: null, at: null, forgetPending: false },
     };
     return initial as unknown as JsonValue;
   }

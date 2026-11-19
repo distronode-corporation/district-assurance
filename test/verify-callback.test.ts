@@ -367,3 +367,119 @@ describe("callback: resuming after a failure", () => {
     assert.deepEqual(await t.engine.applyCallbackOutcome({ ref: dialed[0]!.ref, answered: true, confirmed: true }), { applied: false }, "never bound");
   });
 });
+
+/** A store that can fail once before or after a write, fail a reset once, or run a step after a read. */
+class Faulty extends MemoryAttemptCounters {
+  failBefore: ((key: AttemptCounterKey) => boolean) | null = null;
+  failAfter: ((key: AttemptCounterKey) => boolean) | null = null;
+  failReset = false;
+  onGet: (() => Promise<void>) | null = null;
+
+  override async get(key: AttemptCounterKey, since: string): Promise<string[]> {
+    const seen = await super.get(key, since);
+    const step = this.onGet;
+    this.onGet = null;
+    if (step !== null) await step();
+    return seen;
+  }
+
+  override async recordFailure(key: AttemptCounterKey, at: string, since: string): Promise<string[]> {
+    if (this.failBefore?.(key) === true) {
+      this.failBefore = null;
+      throw new Error("store down");
+    }
+    const failures = await super.recordFailure(key, at, since);
+    if (this.failAfter?.(key) === true) {
+      this.failAfter = null;
+      throw new Error("store down");
+    }
+    return failures;
+  }
+
+  override async reset(key: AttemptCounterKey): Promise<void> {
+    if (this.failReset) {
+      this.failReset = false;
+      throw new Error("store down");
+    }
+    return super.reset(key);
+  }
+}
+
+const SINCE = "2000-01-01T00:00:00.000Z";
+
+describe("callback: a request that failed before it was decided", () => {
+  const byNumber: AttemptCounterKey = { workspaceId: "ws_test", factor: "callback", scope: "number", key: numberKeyFor(TEST_KNOWLEDGE_KEY, CALLING) };
+  const cases: Array<{ name: string; fail: (c: Faulty) => void }> = [
+    { name: "nothing counted", fail: (c) => (c.failBefore = (k) => k.factor === CALLBACKS_PLACED) },
+    { name: "counted toward the limit only", fail: (c) => (c.failBefore = (k) => k.factor === "callback" && k.scope === "subject") },
+    { name: "counted under the subject too", fail: (c) => (c.failBefore = (k) => k.scope === "number") },
+    { name: "counted everywhere, not yet written down", fail: (c) => (c.failAfter = (k) => k.scope === "number") },
+  ];
+  for (const c of cases) {
+    it(`${c.name}: a retry decides it, rings once and counts nothing twice`, async () => {
+      const counters = new Faulty();
+      const t = world({ adapters: { counters } });
+      const first = await firstCall(t);
+      c.fail(counters);
+      await assert.rejects(t.engine.requestCallback(first), /store down/);
+      t.clock.advance(1_000);
+      await t.engine.requestCallback(first);
+      assert.equal(t.dialer.dialed.length, 1);
+      const counts = [counter(CALLBACKS_PLACED), counter("callback"), byNumber].map(async (k) => (await counters.get(k, SINCE)).length);
+      assert.deepEqual(await Promise.all(counts), [1, 1, 1]);
+      assert.deepEqual((await events(t, first)).map((e) => e.event), ["verification.callback_started"]);
+      const { ref, callId } = lastDial(t);
+      assert.deepEqual(await t.engine.applyCallbackOutcome({ ref, answered: true, confirmed: true }), { applied: true, callId });
+      assert.deepEqual(await counters.get(counter("callback"), SINCE), [], "the pass forgets the failure counted at the reserved time");
+    });
+  }
+
+  for (const nested of [false, true]) {
+    it(`never places one for another subject the call restarted for while it was decided${nested ? ", nor does a retry in between" : ""}`, async () => {
+      const counters = new Faulty();
+      const t = world({ adapters: { counters } });
+      const other = "11223344";
+      t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: other, phoneOnFile: "+15555550123", knowledge: { dob: DOB } }));
+      const first = await firstCall(t);
+      counters.onGet = async () => {
+        await t.engine.finishVerification(first);
+        await t.engine.beginVerification(first, { accountNumber: other });
+        if (nested) await t.engine.requestCallback(first);
+      };
+      await t.engine.requestCallback(first);
+      assert.deepEqual(t.dialer.dialed, []);
+      assert.deepEqual(await events(t, first), [{ event: "verification.callback_finished", detail: { outcome: "refused" } }]);
+      await t.engine.requestCallback(first);
+      assert.deepEqual(t.dialer.dialed, [], "decided: asked again, still refused");
+    });
+  }
+
+  it("a retry that decides it while the first try is still counting: the placed callback stands, one ring", async () => {
+    const counters = new Faulty();
+    const t = world({ adapters: { counters } });
+    const first = await firstCall(t);
+    counters.onGet = () => t.engine.requestCallback(first);
+    await t.engine.requestCallback(first);
+    assert.equal(t.dialer.dialed.length, 1);
+    assert.deepEqual((await events(t, first)).map((e) => e.event), ["verification.callback_started"]);
+  });
+});
+
+describe("callback: a pass whose failure was not yet forgotten", () => {
+  it("forgets it on a repeated outcome, which records nothing again", async () => {
+    const counters = new Faulty();
+    const t = world({ adapters: { counters } });
+    await t.engine.requestCallback(await firstCall(t));
+    const { ref, callId } = lastDial(t);
+    counters.failReset = true;
+    await assert.rejects(t.engine.applyCallbackOutcome({ ref, answered: true, confirmed: true }), /store down/);
+    assert.equal((await counters.get(counter("callback"), SINCE)).length, 1);
+    assert.deepEqual(await t.engine.applyCallbackOutcome({ ref, answered: true, confirmed: true }), { applied: false });
+    assert.deepEqual(await counters.get(counter("callback"), SINCE), []);
+    assert.deepEqual(await t.engine.applyCallbackOutcome({ ref, answered: true, confirmed: true }), { applied: false });
+    assert.equal((await t.engine.state(callId)).factors.length, 1, "recorded once");
+    assert.equal((await events(t, callId)).length, 1);
+    await t.engine.requestCallback(await firstCall(t));
+    assert.equal(t.dialer.dialed.length, 2, "nothing stale blocks the next callback");
+  });
+});
