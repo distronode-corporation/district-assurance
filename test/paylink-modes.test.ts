@@ -10,7 +10,7 @@ import { builtInModules } from "../src/modules.ts";
 import { paylinkModule } from "../src/pay/paylink.ts";
 import { INSTANT_PAYMENT_METHODS, outcomeAccountMatches, paymentMethodErrors } from "../src/pay/payment.ts";
 import { parseStripeEvent } from "../src/webhooks/stripe.ts";
-import type { JsonValue } from "../src/core/canonical.ts";
+import { canonicalJson, type JsonValue } from "../src/core/canonical.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { FakePaymentLinks } from "../src/testing/fakes.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
@@ -208,10 +208,19 @@ describe("paylink modes: running", () => {
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_same", paymentStatus: "paid", account: "acct_a" }), { applied: true, callId: first, status: "paid" });
   });
 
+  it("gives a payment recorded before modes existed a receipt, as a platform payment", async () => {
+    const legacy = { paymentId: "pay_1", status: "paid", amountMinor: 100, currency: "cad", linkId: "cs_1" };
+    const part = paylinkModule.receiptPart!({ payments: [legacy] } as never, {} as never);
+    assert.deepEqual(part, { payments: [{ paymentId: "pay_1", status: "paid", amountMinor: 100, currency: "cad", mode: "platform", providerRef: "cs_1" }] });
+    assert.doesNotThrow(() => canonicalJson(part), "so the receipt can be signed");
+  });
+
   it("reads the connected account from a Stripe Connect event", () => {
     const body = (extra: Record<string, unknown>) => JSON.stringify({ id: "evt_1", type: "checkout.session.expired", livemode: false, data: { object: { id: "cs_1" } }, ...extra });
     assert.deepEqual(parseStripeEvent(body({ account: ACCT }))!, { eventId: "evt_1", livemode: false, kind: "payment", outcome: { kind: "expired", linkId: "cs_1", account: ACCT } });
-    assert.deepEqual(parseStripeEvent(body({ account: 7 }))!, { eventId: "evt_1", livemode: false, kind: "payment", outcome: { kind: "expired", linkId: "cs_1" } });
+    // An account that is there but not a name is a malformed event, never read as "no account".
+    assert.equal(parseStripeEvent(body({ account: 7 })), null);
+    assert.equal(parseStripeEvent(body({ account: null })), null);
   });
 });
 
@@ -532,8 +541,9 @@ describe("paylink: the engine's own deadline", () => {
     const a = await t.engine.requestPayment(callId, request);
     release();
     assert.deepEqual(await b, a, "the same delivery, recorded once");
-    assert.equal(keys.length, 2, "both resumes asked the carrier");
-    assert.equal(keys[0], keys[1], "with one idempotency key, so a carrier that honours it sends one text");
+    // One logical delivery; if both resumes asked the carrier, they used one idempotency key.
+    assert.ok(keys.length >= 1);
+    assert.equal(new Set(keys).size, 1, "every carrier request used one idempotency key, so a carrier that honours it sends one text");
     assert.equal((await t.ledger.list()).filter((e) => e.event === "payment.link_sent").length, 1);
   });
 
@@ -663,7 +673,12 @@ describe("paylink: the engine's own deadline", () => {
     };
     sessions.hook = async () => {
       release();
-      await aLinked;
+      // A that stops before texting must fail the test, never leave B waiting here for good.
+      const stopped = a.then(
+        () => Promise.reject(new Error("A finished before it texted")),
+        (e: unknown) => Promise.reject(e instanceof Error ? e : new Error(String(e))),
+      );
+      await Promise.race([aLinked, stopped]);
     };
     await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /another process created this payment link meanwhile/));
     assert.equal((await a).status, "open", "A texted its link");

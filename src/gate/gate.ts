@@ -20,8 +20,8 @@ import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import type { AssuranceModule, FlowStep, ModuleManifest, StepContext, StepStatus, StepView } from "../core/module.ts";
 import type { AssuranceLevel } from "../core/policy.ts";
-import type { CallDraft, EngineRuntime } from "../core/runtime.ts";
-import { isDenseArray, isIntegerIn, isObject, unknownKeys } from "../core/shape.ts";
+import type { CallDraft, CallRecord, EngineRuntime } from "../core/runtime.ts";
+import { isDenseArray, isIntegerIn, isObject, isStringArray, unknownKeys } from "../core/shape.ts";
 import { signDocument } from "../prove/receipt.ts";
 import { accessGrantDigest, MAX_ACCESS_GRANT_SECONDS } from "./access.ts";
 
@@ -138,6 +138,7 @@ export const gateModule: AssuranceModule = {
   checkAdapters(settings: unknown, capabilities: Readonly<Record<string, unknown>>): string[] {
     const declared = capabilities.access as AccessCapabilities | undefined;
     if (declared === undefined) return [];
+    if (!isObject(declared) || !isStringArray(declared.controllers)) return ["the access adapter must declare its controllers as a list of names"];
     return (settings as GateSettings).targets
       .filter((t) => !declared.controllers.includes(t.controller))
       .map((t) => `target ${t.id} names the controller ${t.controller}, which the access adapter does not have (it has: ${declared.controllers.join(", ") || "none"})`);
@@ -244,26 +245,21 @@ export async function grantAccess(rt: EngineRuntime, callId: string, input?: { t
     grant = await signDocument(rt.adapter("accessSigner"), body);
   } catch (error) {
     // Nothing was sent: the grant failed, and a new request may follow.
-    await rt.update(callId, (draft) => {
-      const g = find(draft, record.grantId);
-      if (g.status !== "reserved") return;
-      g.status = "failed";
-      draft.emit("access.failed", "code", { grantId: g.grantId, reason: "not_signed" });
-    });
+    await failUnsent(rt, callId, record.grantId, { reason: "not_signed" });
     throw error;
   }
   // The engine computes the digest from the frozen grant it signed; it is never taken from elsewhere.
   const digest = accessGrantDigest(body);
   // Signing can take a while (a KMS): checked again, in a write, right before the door is asked,
   // and the controller looked up in it: a grant that cannot be sent is failed, never unknown.
-  const checked = await rt.update(callId, (draft): { controller: AccessController } | EngineError => {
+  const checked = await rt.update(callId, (draft): { controller: AccessController; record: CallRecord } | EngineError => {
     const g = find(draft, record.grantId);
     if (g.status !== "reserved") return new EngineError("scope_denied", "the access grant was not sent: it was settled meanwhile");
     const controller = controllerOf(rt, g.controller);
     const why = !rt.authorized(draft.record, ENTRY_SCOPE) ? "not_authorized" : Date.parse(g.expiresAt) <= Date.parse(rt.now()) ? "expired" : controller === null ? "not_sent" : null;
     g.digest = digest;
     g.kid = grant.kid;
-    if (why === null) return { controller: controller! };
+    if (why === null) return { controller: controller!, record: structuredClone(draft.record) };
     g.status = "failed";
     draft.emit("access.failed", "code", { grantId: g.grantId, digest, kid: grant.kid, reason: why });
     return why === "not_sent"
@@ -272,6 +268,12 @@ export async function grantAccess(rt: EngineRuntime, callId: string, input?: { t
   });
   if (checked instanceof EngineError) throw checked;
   const { controller } = checked;
+  // The config can change between that write and here (a stricter floor for entry.open): checked
+  // once more against the config in force, with nothing in between this check and the send.
+  if (!rt.authorized(checked.record, ENTRY_SCOPE)) {
+    await failUnsent(rt, callId, record.grantId, { digest, kid: grant.kid, reason: "not_authorized" });
+    throw new EngineError("scope_denied", "the access grant was not sent: the call is no longer authorized");
+  }
   let answer: UnlockResult | null;
   try {
     answer = await controller.unlock({ grant, target: record.ref, idempotencyKey: rt.idempotencyKey(callId, record.grantId, "unlock") });
@@ -353,6 +355,16 @@ function controllerOf(rt: EngineRuntime, name: string): AccessController | null 
   const all = rt.adapter("access");
   const found = Object.hasOwn(all, name) ? all[name] : undefined;
   return typeof found?.unlock === "function" ? found : null;
+}
+
+/** Settles a grant that was never sent as failed, unless something settled it first. */
+async function failUnsent(rt: EngineRuntime, callId: string, grantId: string, detail: { [key: string]: JsonValue }): Promise<void> {
+  await rt.update(callId, (draft) => {
+    const g = find(draft, grantId);
+    if (g.status !== "reserved") return;
+    g.status = "failed";
+    draft.emit("access.failed", "code", { grantId, ...detail });
+  });
 }
 
 function find(draft: CallDraft, grantId: string): AccessRecord {

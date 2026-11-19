@@ -45,7 +45,7 @@ their settings, and named flows, each an ordered list of steps.
     "badge": { "settings": { "factors": ["pin", "keypad_knowledge", "carrier_identity_match"],
                              "pin": { "mode": "keyed_hash", "minDigits": 4, "maxDigits": 8, "maxAttemptsPerCall": 3 } } },
     "dossier": { "settings": { "forms": ["..."] } },
-    "paylink": { "settings": { "maxAmountMinor": 50000, "connectedAccountId": "acct_..." } },
+    "paylink": { "settings": { "maxAmountMinor": 50000, "mode": "connect", "connectedAccountId": "acct_..." } },
     "gate": { "settings": { "targets": [{ "id": "front-door", "controller": "lobby", "ref": "door-1" }] } },
     "trace": { "settings": { "receipts": true, "wordings": ["..."] } }
   },

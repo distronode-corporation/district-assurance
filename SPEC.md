@@ -329,7 +329,8 @@ a card number.
 
 Object keys sorted by UTF-16 code units, no whitespace, strings and numbers as ECMAScript
 `JSON.stringify` writes them. Refused: `undefined`, functions, symbols, bigints, non-finite
-numbers, sparse array holes, and objects whose prototype is not `Object.prototype` or `null`.
+numbers, sparse array holes, strings or keys with a lone UTF-16 surrogate (RFC 8785 says these
+must fail), and objects whose prototype is not `Object.prototype` or `null`.
 
 ## 12. Receipts
 
@@ -456,7 +457,8 @@ Settlement:
 | async payment failed | failed |
 | expired | expired |
 
-A request settles once; later outcomes are ignored, with one exception: money that moved is
+A payment recorded before modes existed (no `mode`) appears on its receipt as `platform`: it was
+taken on the host's own account. A request settles once; later outcomes are ignored, with one exception: money that moved is
 always recorded. A request the engine expired (its own deadline, a link too late to text, or a race
 with a slow create) that the provider then reports paid becomes `paid`, and `payment.settled`
 carries `late: true`.
@@ -469,7 +471,8 @@ body)`. The check passes if any `v1` matches any configured secret and `t` is wi
 of now, either way. `parseStripeEvent` maps
 `identity.verification_session.{verified,requires_input,canceled}` and
 `checkout.session.{completed,async_payment_succeeded,async_payment_failed,expired}`; other types
-are reported as ignored, and a body that is not a well-formed event is `null`.
+are reported as ignored, and a body that is not a well-formed event is `null`, including one whose
+`account` is present but not a string (never read as "no account").
 
 ## 16. Texts
 
@@ -521,7 +524,10 @@ receipt never verifies as an access grant. A host's module can never take a buil
 5. **Send once** to the target's controller (if it was removed from the adapters meanwhile, the
    grant is settled `failed`, reason `not_sent`, and `precondition_failed` is thrown: nothing was
    sent, so it is never recorded as `unknown`): `unlock({grant, target, idempotencyKey})`, the key
-   being `[workspaceId, callId, grantId, "unlock"]`. Never retried.
+   being `[workspaceId, callId, grantId, "unlock"]`. Never retried. Right before it, with nothing in
+   between, the call is checked once more against the config in force, so a config that raised
+   `entry.open`'s floor after step 4 settles the grant `failed` (`not_authorized`) and nothing is
+   sent. A config changed by another process is seen at its next write, not here.
 6. **Record the answer**, in the engine's write: `delivered` (with `confirmed` when the controller
    reported the door moved), `refused` (the controller certainly did not act; its reason as a short
    code), or `unknown` (reason `answer_lost`) when the call threw or timed out. A grant settled
@@ -568,7 +574,9 @@ the skew, because the engine ends a call only once every grant at a door has ans
 and `lifetime` (longer than 900 seconds, or ending before it starts). This assumes the engine's and
 the relay's clocks agree (NTP): a relay whose clock runs behind by some seconds accepts a grant for
 that much longer. `new SeenGrants()`: `accept(body, now)` is true once per grant id, and keeps the
-id until the grant expires, when the verifier refuses it anyway. `engine.accessKeys()` is the public key set.
+id until the grant expires, when the verifier refuses it anyway. It never forgets one again: once
+ids were forgotten at some time, a grant that had expired by then is refused even if the relay's
+clock later moves back inside its validity. `engine.accessKeys()` is the public key set.
 It, and `engine.receiptKeys()`, publish only a key's public members (`kty`, `crv`, `x`, `y`, `kid`,
 `alg`, `use`), whatever a signer's `publicJwk` returns, so a signer that hands back its private `d`
 never has it published.
@@ -578,8 +586,9 @@ never has it published.
 canonical JSON. HTTPS only, or HTTP to `127.0.0.1`, `localhost` or `[::1]`; no credentials in the
 URL; redirects are not followed; the timeout is 100 to 30,000 ms (default 5,000). The relay
 answers 2xx after it worked the door, optionally `{"state": "confirmed", "ref": "<its id>"}`; 4xx
-when it did not act, optionally `{"error": "<code>"}` (`replay`, `signature`, ...). Anything else,
-including no answer, is `unknown`. A relay checks the grant with `verifyAccessGrant` against
+when it did not act, optionally `{"error": "<code>"}` (`signature`, `workspace`, ...). A 409
+(`replay`) is not a refusal: an earlier request with this grant was accepted and may have opened
+the door, so it is `unknown`. Anything else, including no answer, is `unknown` too. A relay checks the grant with `verifyAccessGrant` against
 `engine.accessKeys()`, its own workspace and its own audience, and refuses a grant id it has seen.
 
 A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);

@@ -144,7 +144,7 @@ export class Engine {
           : (value as { capabilities?: unknown }).capabilities;
     }
     this.#receiptModules = builtInModules(this.#badge);
-    this.registry = new ModuleRegistry({ adapters: present, capabilities, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
+    this.registry = new ModuleRegistry({ adapters: present, capabilities, reserved: BUILT_IN_MODULES, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
     this.#config = this.#prepare(options.config === undefined ? defaultConfig() : options.config);
     this.#rt = this.#runtime();
   }

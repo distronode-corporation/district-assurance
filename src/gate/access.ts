@@ -88,11 +88,19 @@ export function verifyAccessGrant(
  */
 export class SeenGrants {
   readonly #until = new Map<string, number>();
+  /** The latest time ids were forgotten at: a clock that moves back never revives a forgotten id. */
+  #forgotUpTo = Number.NEGATIVE_INFINITY;
 
   /** True the first time a grant id is offered while it is valid; false for a replay. */
   accept(body: AccessGrantBody, now: Date): boolean {
     const at = now.getTime();
-    for (const [id, until] of this.#until) if (until <= at) this.#until.delete(id);
+    if (at > this.#forgotUpTo) {
+      for (const [id, until] of this.#until) if (until <= at) this.#until.delete(id);
+      this.#forgotUpTo = at;
+    }
+    // A grant that expired by the time ids were last forgotten may have been accepted and then
+    // forgotten: refused, even if the clock has since moved back to inside its validity.
+    if (Date.parse(body.expiresAt) <= this.#forgotUpTo) return false;
     if (this.#until.has(body.grantId)) return false;
     this.#until.set(body.grantId, Date.parse(body.expiresAt));
     return true;
