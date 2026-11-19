@@ -115,8 +115,7 @@ export async function sendTextCode(rt: EngineRuntime, callId: string): Promise<{
   const before = await rt.read(callId);
   const subject = assertCanSend(rt, before);
   const s = before.modules[BADGE] as unknown as BadgeSlice;
-  const now = rt.clock.now();
-  const refusal = await refusalFor(rt, subject.phoneOnFile, subject.subjectKey, s.numberKey, now.toISOString());
+  const refusal = await refusalFor(rt, subject.phoneOnFile, subject.subjectKey, s.numberKey, rt.clock.now().toISOString());
   const code = refusal === null ? newCode() : null;
   const sendId = rt.ids.next("code");
   const digest = code === null ? null : await codeDigest(rt, callId, code);
@@ -124,13 +123,17 @@ export async function sendTextCode(rt: EngineRuntime, callId: string): Promise<{
     assertCanSend(rt, draft.record);
     const slice = draft.slice<BadgeSlice>(BADGE);
     assertSameVerification(slice, s.epoch);
+    // Read after the counters and the HMAC: their time takes nothing from the code's life or the hold.
+    const now = rt.clock.now();
     // A refused send never replaces a code still live, so a send that lost a race cannot void the one that won.
     if (code !== null || !isLive(slice.textCode, now)) {
       const expiresAt = new Date(now.getTime() + TEXT_CODE_TTL_SECONDS * 1000).toISOString();
       slice.textCode = { digest, expiresAt, tries: 0 };
     }
     // Sent or refused alike, so the steps are the same: the call ends only once its entry is written.
-    slice.textSend = { sendId, until: new Date(now.getTime() + TEXT_SEND_HOLD_SECONDS * 1000).toISOString() };
+    // Each send holds on its own, so one that finishes never releases another's; holds past their time go.
+    const holds = (slice.textSends ?? []).filter((held) => now.getTime() < Date.parse(held.until));
+    slice.textSends = [...holds, { sendId, until: new Date(now.getTime() + TEXT_SEND_HOLD_SECONDS * 1000).toISOString() }];
   });
   // After the reply, for a sent code and a refused one alike, so the SMS adapter's time never says which.
   setImmediate(() => void finishSend(rt, callId, code, refusal, { to: subject.phoneOnFile, locale: before.locale, sendId }).catch(() => undefined));
@@ -149,7 +152,8 @@ async function finishSend(rt: EngineRuntime, callId: string, code: string | null
   }
   await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
-    if (s.textSend?.sendId === send.sendId) delete s.textSend;
+    // Only this send's own hold: another send's stays until its own entry is written.
+    s.textSends = s.textSends!.filter((held) => held.sendId !== send.sendId);
     // Past the hold the call may have ended: its receipt is the last entry, so nothing follows it.
     if (draft.record.state.phase === "ended") return;
     if (outcome === null) draft.emit("verification.code_sent", "code", {});
