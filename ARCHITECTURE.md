@@ -68,6 +68,11 @@ with an installed module. The built-in modules' runtime functions (Badge's `subm
 Paylink's `requestPayment` and so on) take the engine's internal runtime; hosts reach them through
 the `Engine` methods.
 
+The flow simulator, `src/cli/simulate.ts` (the package's `bin`, `district-assurance simulate`),
+sits outside the engine: it builds a `createTestEngine` engine on the fakes, refuses a config that
+turns on an outside module or fails `validateConfig`, and drives one flow with a scripted caller,
+printing each step, decision, event and the receipt. Nothing in `src/` imports it.
+
 Module boundaries: the core imports no module. Badge, Dossier and Trace import only the core.
 Paylink imports Badge's `matchedSubject`, because a payment link goes to the number on file that
 Badge matched. `src/modules.ts` lists the built-in modules and the default config, and

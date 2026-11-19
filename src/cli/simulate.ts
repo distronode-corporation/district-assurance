@@ -1,0 +1,359 @@
+#!/usr/bin/env node
+// The flow simulator (MOD-4): `district-assurance simulate <config.json> --flow <name> --script <name or file>`
+// runs one flow of a workspace's FlowConfig against a scripted caller, on the in-memory adapters,
+// and prints each step, each decision, every event and the final receipt. A business sees what a
+// flow does before a real caller meets it.
+//
+// It never needs a network or a key: the engine is `createTestEngine`'s, with the fixed clock,
+// sequential ids, the fakes and a throwaway signing key. The caller is made up (a 555 number, an
+// account, answers and a PIN chosen here), and nothing it keys is printed: events carry no values,
+// and decisions say "right" or "wrong", never the digits. Only the built-in modules run: a config
+// that turns on an outside module is refused, because its code is not here to run.
+import { readFile } from "node:fs/promises";
+import { parseArgs } from "node:util";
+
+import { canonicalJson } from "../core/canonical.ts";
+import { validateConfig, type FlowConfig } from "../core/config.ts";
+import type { EngineEvent } from "../core/events.ts";
+import type { FlowStep } from "../core/module.ts";
+import { isObject, unknownKeys } from "../core/shape.ts";
+import type { IntakeForm } from "../file/intake.ts";
+import { BUILT_IN_MODULES } from "../modules.ts";
+import type { PaymentOutcome } from "../pay/payment.ts";
+import { verifyReceipt } from "../prove/receipt.ts";
+import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../testing/index.ts";
+import type { BadgeSettings } from "../verify/factors.ts";
+import { subjectKeyFor } from "../verify/knowledge.ts";
+
+/** How the scripted caller behaves at each kind of step. A script file is a JSON object with any of these fields. */
+export interface CallerScript {
+  summary: string;
+  /** Wrong keypad answers keyed before the right ones (0 to 5); the caller stops once locked out. */
+  wrongKeypad: number;
+  /** Wrong PINs keyed before the right one (0 to 5); the caller stops once locked out. */
+  wrongPins: number;
+  /** What the carrier reports about the number on file. */
+  carrier: "match" | "no_match" | "unavailable";
+  /** What the identity provider reports for the photo ID check. */
+  photoId: "verified" | "requires_input" | "canceled";
+  /** The caller's answer to every consent question. */
+  consent: "yes" | "no";
+  /** What the payment provider reports: paid at once, paid later (completed unpaid, then succeeded), failed or expired. */
+  payment: "paid" | "paid_later" | "failed" | "expired";
+}
+
+const PASS: CallerScript = {
+  summary: "the caller keys every answer right, the carrier matches, the photo ID is verified, the caller consents and pays",
+  wrongKeypad: 0,
+  wrongPins: 0,
+  carrier: "match",
+  photoId: "verified",
+  consent: "yes",
+  payment: "paid",
+};
+
+/** The built-in scripts, by name. */
+export const BUILT_IN_SCRIPTS: Readonly<Record<string, CallerScript>> = {
+  pass: PASS,
+  "wrong-pin": { ...PASS, summary: "one wrong PIN (and one wrong keypad answer), then the right ones", wrongKeypad: 1, wrongPins: 1 },
+  lockout: { ...PASS, summary: "wrong PINs and keypad answers until the line stops judging them", wrongKeypad: 5, wrongPins: 5 },
+  "consent-no": { ...PASS, summary: "as pass, but the caller answers no to consent", consent: "no" },
+  "payment-paid": { ...PASS, summary: "as pass, but the payment completes unpaid (a bank debit) and the provider reports it paid later", payment: "paid_later" },
+  "payment-expired": { ...PASS, summary: "as pass, but the payment link expires unpaid", payment: "expired" },
+};
+
+const CHOICES: Readonly<Record<string, readonly string[]>> = {
+  carrier: ["match", "no_match", "unavailable"],
+  photoId: ["verified", "requires_input", "canceled"],
+  consent: ["yes", "no"],
+  payment: ["paid", "paid_later", "failed", "expired"],
+};
+
+/** A script from a file: every problem, or the script with `pass` filling the fields it leaves out. */
+export function parseCallerScript(value: unknown): { script: CallerScript; problems: [] } | { script: null; problems: string[] } {
+  if (!isObject(value)) return { script: null, problems: ["a script must be a JSON object"] };
+  const problems = unknownKeys(value, Object.keys(PASS)).map((key) => `${key}: not a script field`);
+  if (value.summary !== undefined && typeof value.summary !== "string") problems.push("summary: must be a string");
+  for (const key of ["wrongKeypad", "wrongPins"]) {
+    const n = value[key];
+    if (n !== undefined && !(Number.isInteger(n) && (n as number) >= 0 && (n as number) <= 5)) problems.push(`${key}: must be an integer from 0 to 5`);
+  }
+  for (const [key, allowed] of Object.entries(CHOICES)) {
+    if (value[key] !== undefined && !allowed.includes(value[key] as string)) problems.push(`${key}: must be one of ${allowed.join(", ")}`);
+  }
+  if (problems.length > 0) return { script: null, problems };
+  return { script: { ...PASS, summary: "a script from a file", ...(value as Partial<CallerScript>) }, problems: [] };
+}
+
+/**
+ * The config the simulator runs, or every reason it refuses it: each outside module the config
+ * turns on (the simulator runs the built-in modules only), then every problem `validateConfig`
+ * finds with outside modules left out. An outside module the config switches off is left out.
+ */
+export function simulationConfig(config: unknown, t: TestEngine): { config: FlowConfig; problems: [] } | { config: null; problems: string[] } {
+  const problems: string[] = [];
+  let builtIn = config;
+  if (isObject(config) && isObject(config.modules)) {
+    const modules: Record<string, unknown> = {};
+    for (const [name, entry] of Object.entries(config.modules)) {
+      if ((BUILT_IN_MODULES as readonly string[]).includes(name)) modules[name] = entry;
+      else if (!isObject(entry) || entry.enabled !== false) {
+        problems.push(`modules.${name}: ${name} is an outside module; the simulator runs the built-in modules only (${BUILT_IN_MODULES.join(", ")})`);
+      }
+    }
+    builtIn = { ...config, modules };
+  }
+  problems.push(...validateConfig(builtIn, t.engine.registry));
+  return problems.length === 0 ? { config: builtIn as FlowConfig, problems: [] } : { config: null, problems };
+}
+
+// The made-up caller. Not real values: a 555 number, and answers that are printed nowhere.
+const ACCOUNT = "12345678";
+const PHONE_ON_FILE = "+15555550100";
+const ANSWER = "19850214";
+const WRONG_ANSWER = "00000000";
+const PIN_DIGITS = "482601357913";
+const FACTOR_ORDER = ["keypad_knowledge", "pin", "carrier_identity_match", "photo_id"];
+const SAMPLE_VALUES: Readonly<Record<string, string>> = { text: "A simulated answer", number: "1", date: "2026-01-01", yes_no: "yes" };
+const OUTCOMES: Readonly<Record<CallerScript["payment"], ReadonlyArray<(linkId: string) => PaymentOutcome>>> = {
+  paid: [(linkId) => ({ kind: "completed", linkId, paymentStatus: "paid" })],
+  paid_later: [(linkId) => ({ kind: "completed", linkId, paymentStatus: "unpaid" }), (linkId) => ({ kind: "async_succeeded", linkId })],
+  failed: [(linkId) => ({ kind: "async_failed", linkId })],
+  expired: [(linkId) => ({ kind: "expired", linkId })],
+};
+
+interface Run {
+  t: TestEngine;
+  config: FlowConfig;
+  script: CallerScript;
+  callId: string;
+  pin: string;
+  line(text: string): void;
+}
+
+/** Prints what the caller does, then the engine's events (the listener prints them), then the decision, or the refusal. */
+async function act(run: Run, doing: string, fn: () => Promise<string>): Promise<void> {
+  run.line(`  caller: ${doing}`);
+  try {
+    run.line(`  decision: ${await fn()}`);
+  } catch (e) {
+    run.line(`  refused: ${(e as Error).message}`);
+  }
+}
+
+/** Keys wrong entries, then the right one, and stops once the line no longer judges them. */
+async function keyEntries(run: Run, what: string, wrong: number, submit: (right: boolean) => Promise<{ matched: boolean; locked: boolean }>): Promise<void> {
+  let locked = false;
+  const key = (right: boolean) =>
+    act(run, `keys ${what} (${right ? "right" : "wrong"})`, async () => {
+      const result = await submit(right);
+      locked = result.locked;
+      return result.matched ? `${what} matched` : result.locked ? `no match, locked: no more ${what} attempts on this call` : "no match";
+    });
+  for (let i = 0; i < wrong && !locked; i++) await key(false);
+  if (!locked) await key(true);
+}
+
+const STEP_ACTIONS: Readonly<Record<string, (run: Run, step: FlowStep) => Promise<void>>> = {
+  async "badge.verify"(run, step) {
+    const { engine } = run.t;
+    const factors = FACTOR_ORDER.filter((kind) => (step.factors as string[]).includes(kind));
+    await act(run, "keys the account number", async () => {
+      await engine.beginVerification(run.callId, { accountNumber: ACCOUNT });
+      await engine.openSensitive(run.callId, "keypad");
+      return "verification started, transcript paused for the keypad";
+    });
+    if (factors.includes("keypad_knowledge")) {
+      await keyEntries(run, "keypad answers", run.script.wrongKeypad, (right) => {
+        const value = right ? ANSWER : WRONG_ANSWER;
+        return engine.submitKeypad(run.callId, Object.fromEntries(run.config.policy.keypadFields.map((field) => [field, value])));
+      });
+    }
+    if (factors.includes("pin")) {
+      await keyEntries(run, "PIN", run.script.wrongPins, (right) => engine.submitPin(run.callId, right ? run.pin : "0".repeat(run.pin.length)));
+    }
+    await act(run, "finishes keying", async () => {
+      await engine.closeSensitive(run.callId);
+      return "transcript resumed";
+    });
+    if (factors.includes("carrier_identity_match")) {
+      await act(run, `stays on the line while the carrier is asked (it reports ${run.script.carrier})`, async () => {
+        const { textCodeTrusted } = await engine.checkCarrier(run.callId);
+        return `carrier checked, texted code trusted: ${textCodeTrusted}`;
+      });
+    }
+    if (factors.includes("photo_id")) {
+      await act(run, `opens the texted link (the provider reports ${run.script.photoId})`, async () => {
+        await engine.startPhotoId(run.callId);
+        const outcome = await engine.applyIdentityOutcome({ sessionId: run.t.identity.created.at(-1)!.sessionId, status: run.script.photoId });
+        return `link texted to the number on file, outcome applied: ${outcome.applied}`;
+      });
+    }
+    await act(run, "waits for the result", async () => {
+      const result = await engine.finishVerification(run.callId);
+      return `level ${result.level}, scopes: ${result.scopes.join(", ") || "none"}`;
+    });
+  },
+
+  async "dossier.collect"(run, step) {
+    const { engine } = run.t;
+    const forms = (run.config.modules.dossier!.settings as unknown as { forms: IntakeForm[] }).forms;
+    const form = forms.find((f) => f.formId === step.form)!;
+    await act(run, `starts the ${form.formId} form`, async () => {
+      await engine.startIntake(run.callId, form.formId);
+      return `form ${form.formId} version ${form.version} open`;
+    });
+    for (const field of form.fields) {
+      await act(run, `answers ${field.key} (${field.type})`, async () => {
+        const result = await engine.setIntakeField(run.callId, field.key, SAMPLE_VALUES[field.type]!);
+        return `normalised: ${canonicalJson(result)}`;
+      });
+    }
+    await act(run, "confirms the read-back", async () => {
+      const record = await engine.confirmIntake(run.callId, { confirmedBy: "keypad" });
+      return `record ${record.recordId} filed, digest ${record.digest}`;
+    });
+  },
+
+  async "paylink.request"(run) {
+    const { engine, payments } = run.t;
+    let linkId = "";
+    await act(run, "asks to pay", async () => {
+      const payment = await engine.requestPayment(run.callId);
+      const link = payments.created.find((l) => l.paymentId === payment.paymentId)!;
+      linkId = link.linkId;
+      return `${payment.paymentId} for ${link.amountMinor} ${link.currency} (minor units), link texted to the number on file, status ${payment.status}`;
+    });
+    for (const make of OUTCOMES[run.script.payment]) {
+      const { linkId: _, ...reported } = make(linkId);
+      await act(run, `uses the link; the provider reports ${canonicalJson(reported)}`, async () => {
+        const result = await engine.applyPaymentOutcome(make(linkId));
+        return result.applied ? `settled ${result.status}` : "nothing settled yet";
+      });
+    }
+  },
+
+  async "trace.consent"(run, step) {
+    await act(run, `answers ${run.script.consent} to ${String(step.purpose)}`, async () => {
+      const consent = await run.t.engine.recordConsent(run.callId, { purpose: step.purpose as string, answer: run.script.consent });
+      return `${consent.consentId} recorded, wording version ${consent.wordingVersion}`;
+    });
+  },
+};
+
+/** The outcome of a simulation: the lines it printed and the flow's final status. */
+export interface Simulation {
+  lines: string[];
+  status: string;
+}
+
+/**
+ * Runs one flow of a config from `simulationConfig` with a scripted caller, on the engine of `t`
+ * (from `simulationEngine`). Every engine refusal is printed and the caller goes
+ * on; the call ends after the last step, abandoning a flow that is still running.
+ */
+export async function simulate(t: TestEngine, lines: string[], config: FlowConfig, flow: string, scriptName: string, script: CallerScript): Promise<Simulation> {
+  const line = (text: string) => lines.push(text);
+  const badge = config.modules.badge?.settings as BadgeSettings | undefined;
+  const pin = PIN_DIGITS.slice(0, badge?.pin?.minDigits ?? 4);
+  const subject = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: Object.fromEntries(config.policy.keypadFields.map((f) => [f, ANSWER])), pin });
+  t.records.putSubject(t.engine.workspaceId, subject);
+  t.pinVerifier.set(t.engine.workspaceId, subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT), pin);
+  t.carrier.set(PHONE_ON_FILE, { identityMatch: script.carrier });
+  t.engine.configure(config);
+
+  const steps = config.flows[flow]!.steps;
+  line(`simulate: flow ${flow}, steps: ${steps.length}, config revision ${config.revision}`);
+  line(`script: ${scriptName}: ${script.summary}`);
+  line("call: started");
+  const { callId } = await t.engine.startCall({ flow });
+  const run: Run = { t, config, script, callId, pin, line };
+  let position = (await t.engine.flowPosition(callId))!;
+  // Each turn either moves the flow on or ends it, so the flow's length bounds the turns.
+  for (let turn = 0; turn < steps.length && position.status === "running"; turn++) {
+    const step = position.step!;
+    const { type, ...fields } = step;
+    line(`step ${position.index + 1}/${steps.length}: ${type} ${canonicalJson(fields)}`);
+    await STEP_ACTIONS[type]!(run, step);
+    position = (await t.engine.flowPosition(callId))!;
+  }
+  line(`flow: ${position.status}`);
+  line("call: ending");
+  const receipt = await t.engine.endCall(callId);
+  if (receipt === null) {
+    line("receipt: none (the flow has no trace.receipt step)");
+  } else {
+    line(`receipt: signature valid against the engine's key set: ${verifyReceipt(receipt, t.engine.receiptKeys())}`);
+    lines.push(...JSON.stringify(receipt, null, 2).split("\n"));
+  }
+  return { lines, status: position.status };
+}
+
+/** A fresh engine on the fakes, which prints every event to `lines` as it is appended to the ledger. */
+export function simulationEngine(lines: string[]): TestEngine {
+  return createTestEngine({ onEvent: (event: EngineEvent) => lines.push(`    event ${event.name} (${event.actor}) ${canonicalJson(event.detail)}`) });
+}
+
+export const USAGE = "usage: district-assurance simulate <config.json> --flow <name> --script <" + Object.keys(BUILT_IN_SCRIPTS).join(" | ") + " | file.json>";
+
+/** What `main` writes to. */
+export interface Output {
+  out(line: string): void;
+  err(line: string): void;
+}
+
+async function readJson(path: string): Promise<{ value: unknown } | { error: string }> {
+  try {
+    return { value: JSON.parse(await readFile(path, "utf8")) as unknown };
+  } catch (e) {
+    return { error: `${path}: ${(e as Error).message}` };
+  }
+}
+
+/** The command line. Exit codes: 0 the flow ran (whatever its outcome), 1 a refused config, flow or script, 2 bad usage. */
+export async function main(args: readonly string[], output: Output): Promise<number> {
+  let parsed;
+  try {
+    parsed = parseArgs({ args: [...args], allowPositionals: true, strict: true, options: { flow: { type: "string" }, script: { type: "string" } } });
+  } catch (e) {
+    output.err((e as Error).message);
+    output.err(USAGE);
+    return 2;
+  }
+  const { positionals, values } = parsed;
+  if (positionals.length !== 2 || positionals[0] !== "simulate" || values.flow === undefined || values.script === undefined) {
+    output.err(USAGE);
+    return 2;
+  }
+  const refuse = (problems: readonly string[]): number => {
+    output.err(`simulate: refused, ${problems.length} problem(s):`);
+    for (const problem of problems) output.err(`  - ${problem}`);
+    return 1;
+  };
+
+  const config = await readJson(positionals[1]!);
+  if ("error" in config) return refuse([config.error]);
+  let script = Object.hasOwn(BUILT_IN_SCRIPTS, values.script) ? BUILT_IN_SCRIPTS[values.script]! : null;
+  if (script === null) {
+    const file = await readJson(values.script);
+    if ("error" in file) return refuse([`${file.error} (not a built-in script: ${Object.keys(BUILT_IN_SCRIPTS).join(", ")})`]);
+    const parsedScript = parseCallerScript(file.value);
+    if (parsedScript.script === null) return refuse(parsedScript.problems.map((p) => `${values.script}: ${p}`));
+    script = parsedScript.script;
+  }
+
+  const lines: string[] = [];
+  const t = simulationEngine(lines);
+  const checked = simulationConfig(config.value, t);
+  if (checked.config === null) return refuse(checked.problems);
+  if (!Object.hasOwn(checked.config.flows, values.flow)) {
+    return refuse([`flows: no flow named ${values.flow}; the config's flows are ${JSON.stringify(Object.keys(checked.config.flows))}`]);
+  }
+  await simulate(t, lines, checked.config, values.flow, values.script, script);
+  for (const text of lines) output.out(text);
+  return 0;
+}
+
+if (import.meta.main) {
+  process.exitCode = await main(process.argv.slice(2), { out: (line) => console.log(line), err: (line) => console.error(line) });
+}

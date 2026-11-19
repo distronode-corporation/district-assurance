@@ -25,6 +25,10 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- A flow simulator (MOD-4, #53): `district-assurance simulate <config.json> --flow <name> --script
+  <name or file>` (`npm run simulate --` here) runs a flow on the fakes with a scripted caller
+  (`pass`, `wrong-pin`, `lockout`, `consent-no`, `payment-paid`, `payment-expired`, or a JSON file)
+  and prints each step, decision, event and the receipt; a bad config or an outside module is refused.
 
 ### Changed
 

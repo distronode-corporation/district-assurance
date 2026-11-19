@@ -398,3 +398,49 @@ subject's number on file. Identity link: "Your one-time identity check link: URL
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
 the currency's own decimals.
+
+## 17. The flow simulator
+
+`district-assurance simulate <config.json> --flow <name> --script <name or file>` (the package's
+`bin`; `npm run simulate -- ...` in this repository) runs one flow of a FlowConfig with a scripted
+caller and prints what happens, so a business sees a flow before a real caller meets it. The source
+is `src/cli/simulate.ts`.
+
+- The engine is `createTestEngine`'s: the fixed clock, sequential ids, the in-memory adapters and a
+  throwaway signing key. No network, no key, no environment.
+- The config is refused, with every problem and exit code 1, when it turns on a module that is not
+  built in (`badge`, `dossier`, `paylink`, `trace`: an outside module's code is not there to run)
+  or when `validateConfig` finds a problem; an outside module listed with `enabled: false` is left
+  out. A flow the config does not have, or a script that is neither built in nor a valid file, is
+  refused the same way. Bad arguments print the usage and exit 2. A flow that ran exits 0, whether
+  it completed or failed.
+- The caller is made up: one subject on file with a 555 number, an answer for every keypad field
+  and a PIN of `minDigits` digits. It acts on whatever step the flow is on: at `badge.verify` it
+  keys the account number, then each factor the step lists (keypad answers, the PIN, the carrier
+  check, the photo ID link), then waits for the result; at `dossier.collect` it answers every field
+  of the step's form with a sample value and confirms; at `paylink.request` it asks to pay and the
+  provider reports the script's outcomes; at `trace.consent` it answers. A refusal by the engine is
+  printed and the caller goes on. After the last step the call ends, abandoning a flow still
+  running.
+- A script is `{summary, wrongKeypad, wrongPins, carrier, photoId, consent, payment}`: wrong
+  keypad answers and wrong PINs before the right ones (0 to 5; the caller stops once locked out),
+  the carrier's `identityMatch`, the photo ID outcome, the consent answer, and the payment outcome
+  (`paid`; `paid_later`, completed unpaid then the asynchronous success; `failed`; `expired`). A
+  script file is a JSON object with any of these fields, checked field by field; the rest come
+  from `pass`. Built in:
+
+| Script | |
+|---|---|
+| `pass` | every answer right, the carrier matches, the photo ID is verified, consent yes, paid |
+| `wrong-pin` | one wrong PIN and one wrong keypad answer, then the right ones |
+| `lockout` | wrong PINs and keypad answers until the line stops judging them |
+| `consent-no` | as `pass`, consent no |
+| `payment-paid` | as `pass`, paid later: completed unpaid, then the asynchronous success |
+| `payment-expired` | as `pass`, the link expires |
+
+Output, one line each: the headings `simulate:`, `script:`, `call:`, `step <n>/<count>: <type>
+<fields>`, `flow: <status>` and `receipt:`; `  caller:` what the caller does, then `  decision:` the
+engine's answer or `  refused:` its refusal; `    event <name> (<actor>) <detail>` for every ledger
+entry, as it is appended. Then the signed receipt as JSON, checked against the engine's key set, or
+`receipt: none`. Nothing the caller keys is printed: events carry no values (section 9) and
+decisions say right or wrong, never the digits.
