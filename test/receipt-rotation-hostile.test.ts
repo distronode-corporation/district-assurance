@@ -12,6 +12,18 @@ import { fileURLToPath } from "node:url";
 import { checkReceipt, receiptKeyRing, verifyReceipt, type SignedReceipt } from "../src/index.ts";
 import { createTestEngine, generateTestSigner } from "../src/testing/index.ts";
 
+/**
+ * The shared terminal-escaping vectors (identical in test/simulator-terminal-hostile.test.ts on
+ * #113): C0, DEL, C1 (with the 8-bit CSI U+009B), the bidi controls and marks, the zero-width and
+ * invisible format characters, U+2028, U+2029 and U+FEFF. Every one must be escaped; TERMINAL_KEPT
+ * must come out as it is.
+ */
+const TERMINAL_UNSAFE_VECTORS = [
+  0x00, 0x07, 0x09, 0x0a, 0x1b, 0x1f, 0x7f, 0x80, 0x85, 0x9b, 0x9f, 0x61c, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x2028, 0x2029,
+  0x202a, 0x202e, 0x2060, 0x2064, 0x2066, 0x2069, 0x206f, 0xfeff,
+];
+const TERMINAL_KEPT = "R\u00e9paration 2 500,00 $ \u{1F527} \u00a0 \u200a ~";
+
 // The page's own check, loaded as the page loads it (a plain .js module without types).
 const page = (await import(new URL("../examples/reference-server/public/receipt-check.js", import.meta.url).href)) as {
   checkReceipt(receipt: unknown, keys: unknown): Promise<{ ok: boolean }>;
@@ -144,6 +156,25 @@ describe("hostile #75: the stand-alone verifier", () => {
         return n < 0x20 || n === 0x7f || (n >= 0x202a && n <= 0x202e) || (n >= 0x2066 && n <= 0x2069);
       });
       assert.equal(raw, false, JSON.stringify(out));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("K8: every character of the shared terminal list is escaped, and other text is kept (same vectors as the simulator's M6)", async () => {
+    const { receipt, k1 } = await signedReceipt();
+    const dir = mkdtempSync(join(tmpdir(), "zz75-"));
+    try {
+      writeFileSync(join(dir, "k.json"), JSON.stringify({ keys: [k1.publicJwk()] }));
+      for (const n of TERMINAL_UNSAFE_VECTORS) {
+        writeFileSync(join(dir, "r.json"), JSON.stringify({ ...receipt, kid: `k9${String.fromCharCode(n)}x` }));
+        const { out } = await run([join(dir, "r.json"), join(dir, "k.json")]);
+        // The verdict is one line, ended by the script's own newline.
+        assert.equal(out.replace(/\n$/, "").includes(String.fromCharCode(n)), false, `U+${n.toString(16).padStart(4, "0")} printed raw`);
+      }
+      writeFileSync(join(dir, "r.json"), JSON.stringify({ ...receipt, kid: TERMINAL_KEPT }));
+      const { out } = await run([join(dir, "r.json"), join(dir, "k.json")]);
+      assert.ok(out.includes(TERMINAL_KEPT), "other text is printed as it is");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

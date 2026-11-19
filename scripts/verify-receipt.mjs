@@ -86,12 +86,34 @@ function check(receipt, keys, retired = { at: null }) {
 }
 
 /**
- * A value from the receipt as the terminal may show it: JSON, with the bidi and other invisible
- * format characters JSON leaves as they are written as escapes too, so no text can reorder or hide
- * the verdict it is printed in.
+ * The characters a terminal acts on or that reorder or hide text, as code point ranges: C0, DEL
+ * and C1 controls (escape sequences, the 8-bit CSI U+009B), the Arabic letter mark, the zero-width
+ * characters and bidi marks (U+200B to U+200F), U+2028, U+2029 and the bidi embeddings and
+ * overrides (to U+202E), the invisible format characters and bidi isolates (U+2060 to U+206F), and
+ * U+FEFF. The same table as the simulator's terminalSafe (src/cli/simulate.ts); keep the two identical.
+ */
+const TERMINAL_UNSAFE_RANGES = [
+  [0x00, 0x1f],
+  [0x7f, 0x9f],
+  [0x61c, 0x61c],
+  [0x200b, 0x200f],
+  [0x2028, 0x202e],
+  [0x2060, 0x206f],
+  [0xfeff, 0xfeff],
+];
+
+/**
+ * A value from the receipt as the terminal may show it: JSON, with every character of the table
+ * above that JSON leaves as it is written as a `\u` escape too, so no text can move the cursor, or
+ * reorder or hide the verdict it is printed in.
  */
 function shown(value) {
-  return JSON.stringify(value).replace(/[\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  let out = "";
+  for (const c of JSON.stringify(value)) {
+    const n = c.codePointAt(0);
+    out += TERMINAL_UNSAFE_RANGES.some(([lo, hi]) => n >= lo && n <= hi) ? `\\u${n.toString(16).padStart(4, "0")}` : c;
+  }
+  return out;
 }
 
 function parse(text, what) {
