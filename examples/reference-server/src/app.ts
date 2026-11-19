@@ -25,9 +25,11 @@ export interface ReferenceServerOptions {
   clock: Clock;
   /**
    * The sample receiver of record deliveries (`POST /webhooks/records`): the signing secrets it
-   * accepts, and what it does with a record. Without secrets it refuses everything.
+   * accepts, and what it does with a record. Without secrets it refuses everything. The receiver
+   * awaits `onRecord` and records the key only once it succeeds; when it throws or rejects, the
+   * answer is 500 and the sender's retry applies the record again.
    */
-  records?: { secrets: readonly string[]; onRecord?: (delivery: RecordDeliveryBody) => void };
+  records?: { secrets: readonly string[]; onRecord?: (delivery: RecordDeliveryBody) => void | Promise<void> };
   /** Default 64 KiB. */
   maxBodyBytes?: number;
   /** The demo's runs: serves the browser UI and the `/demo/*` routes. Off when absent. */
@@ -66,6 +68,8 @@ class HttpError extends Error {
 export function createReferenceServer(options: ReferenceServerOptions): Server {
   const processed = new Set<string>();
   const receivedRecords = new Set<string>();
+  /** Deliveries whose `onRecord` is still running; a concurrent duplicate waits on the same one. */
+  const pendingRecords = new Map<string, Promise<void>>();
   const maxBody = options.maxBodyBytes ?? 64 * 1024;
   const files = options.ui === undefined ? new Map<string, StaticFile>() : loadStaticFiles();
 
@@ -93,7 +97,8 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
    * A sample receiver for `deliverRecord`, as a business's own system would run it: the signature
    * first (the same scheme as Stripe's, so the same check), then the body, then each idempotency
    * key once. The key is read from the signed body, not from the unsigned header. A duplicate
-   * answers 200, so the sender stops retrying.
+   * answers 200, so the sender stops retrying. The key counts as received only after `onRecord`
+   * succeeds, so a failed handler answers 500 and the retry is applied, not skipped.
    */
   async function recordWebhook(req: IncomingMessage): Promise<[number, Json]> {
     const payload = await readBody(req, maxBody);
@@ -107,9 +112,24 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     if (!check.ok) return [400, { error: "signature", reason: check.reason }];
     const delivery = parseRecordDelivery(payload);
     if (delivery === null) return [400, { error: "malformed_delivery" }];
-    if (receivedRecords.has(delivery.idempotencyKey)) return [200, { received: true, duplicate: true }];
-    receivedRecords.add(delivery.idempotencyKey);
-    options.records?.onRecord?.(delivery);
+    const key = delivery.idempotencyKey;
+    if (receivedRecords.has(key)) return [200, { received: true, duplicate: true }];
+    const pending = pendingRecords.get(key);
+    if (pending !== undefined) {
+      await pending;
+      return [200, { received: true, duplicate: true }];
+    }
+    const handler = options.records?.onRecord;
+    const applying = (async () => {
+      await handler?.(delivery);
+    })();
+    pendingRecords.set(key, applying);
+    try {
+      await applying;
+    } finally {
+      pendingRecords.delete(key);
+    }
+    receivedRecords.add(key);
     return [200, { received: true, recordId: delivery.record.recordId }];
   }
 
@@ -224,8 +244,8 @@ function parseRecordDelivery(payload: string): RecordDeliveryBody | null {
     return null;
   }
   if (typeof body !== "object" || body === null) return null;
-  const { v, type, idempotencyKey, record } = body as Record<string, unknown>;
-  if (v !== 1 || type !== "record.confirmed" || typeof idempotencyKey !== "string") return null;
+  const { v, type, idempotencyKey, destinationId, record } = body as Record<string, unknown>;
+  if (v !== 1 || type !== "record.confirmed" || typeof idempotencyKey !== "string" || typeof destinationId !== "string") return null;
   if (typeof record !== "object" || record === null || typeof (record as { recordId?: unknown }).recordId !== "string") return null;
   return body as RecordDeliveryBody;
 }

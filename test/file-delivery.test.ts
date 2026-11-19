@@ -232,7 +232,7 @@ describe("the reference server's sample receiver", () => {
     },
   };
 
-  async function serve(t: TestEngine, records?: { secrets: readonly string[]; onRecord?: (d: RecordDeliveryBody) => void }) {
+  async function serve(t: TestEngine, records?: { secrets: readonly string[]; onRecord?: (d: RecordDeliveryBody) => void | Promise<void> }) {
     const server = createReferenceServer({ engine: t.engine, clock: t.clock, stripeSecrets: { identity: [], payments: [] }, ...(records === undefined ? {} : { records }) });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/webhooks/records`;
@@ -243,7 +243,10 @@ describe("the reference server's sample receiver", () => {
     const t = setup();
     const recordId = await confirmedRecord(t);
     const received: RecordDeliveryBody[] = [];
-    const { url, close } = await serve(t, { secrets: ["whsec_old_not_a_secret", SECRET], onRecord: (d) => received.push(d) });
+    const { url, close } = await serve(t, { secrets: ["whsec_old_not_a_secret", SECRET], onRecord: (d) => {
+        received.push(d);
+      },
+    });
     try {
       const to = { ...destination, url };
       const first = await deliverRecord({ ...inputs(t, recordId, fetchDelivery), destination: to });
@@ -285,6 +288,65 @@ describe("the reference server's sample receiver", () => {
     }
   });
 
+  it("answers 500 when the handler throws or rejects, so the retry applies the record", async () => {
+    for (const fail of [
+      () => {
+        throw new Error("sync failure");
+      },
+      () => Promise.reject(new Error("async failure")),
+    ]) {
+      const t = setup();
+      const recordId = await confirmedRecord(t);
+      const applied: string[] = [];
+      let failures = 1;
+      const onRecord = (d: RecordDeliveryBody): void | Promise<void> => {
+        if (failures-- > 0) return fail();
+        applied.push(d.record.recordId);
+      };
+      const { url, close } = await serve(t, { secrets: [SECRET], onRecord });
+      try {
+        const result = await deliverRecord({ ...inputs(t, recordId, fetchDelivery), destination: { ...destination, url } });
+        assert.deepEqual([result.delivered, result.attempts, result.status], [true, 2, 200]);
+        assert.deepEqual(applied, [recordId], "the retry is applied, not taken for a duplicate");
+        const entries = await deliveryEntries(t);
+        assert.deepEqual(entries.map((e) => e.detail.status), [500, 200]);
+      } finally {
+        await close();
+      }
+    }
+  });
+
+  it("applies a delivery once when a duplicate arrives while the first is still running", async () => {
+    const t = setup();
+    const recordId = await confirmedRecord(t);
+    const applied: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => (started = resolve));
+    const { url, close } = await serve(t, {
+      secrets: [SECRET],
+      onRecord: async (d) => {
+        started();
+        await gate;
+        applied.push(d.record.recordId);
+      },
+    });
+    try {
+      const to = { ...destination, url };
+      const first = deliverRecord({ ...inputs(t, recordId, fetchDelivery), destination: to });
+      await running;
+      const second = deliverRecord({ ...inputs(t, recordId, fetchDelivery), destination: to });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      release();
+      const [a, b] = await Promise.all([first, second]);
+      assert.deepEqual([a.status, b.status], [200, 200]);
+      assert.deepEqual(applied, [recordId]);
+    } finally {
+      await close();
+    }
+  });
+
   it("refuses bodies that are not deliveries", async () => {
     const t = setup();
     const { url, close } = await serve(t, { secrets: [SECRET] });
@@ -294,11 +356,13 @@ describe("the reference server's sample receiver", () => {
         "not json",
         "null",
         "1",
-        JSON.stringify({ v: 2, type: "record.confirmed", idempotencyKey: "k", record: { recordId: "r" } }),
-        JSON.stringify({ v: 1, type: "other", idempotencyKey: "k", record: { recordId: "r" } }),
-        JSON.stringify({ v: 1, type: "record.confirmed", idempotencyKey: 1, record: { recordId: "r" } }),
-        JSON.stringify({ v: 1, type: "record.confirmed", idempotencyKey: "k", record: null }),
-        JSON.stringify({ v: 1, type: "record.confirmed", idempotencyKey: "k", record: { recordId: 1 } }),
+        JSON.stringify({ v: 2, type: "record.confirmed", idempotencyKey: "k", destinationId: "crm", record: { recordId: "r" } }),
+        JSON.stringify({ v: 1, type: "other", idempotencyKey: "k", destinationId: "crm", record: { recordId: "r" } }),
+        JSON.stringify({ v: 1, type: "record.confirmed", idempotencyKey: 1, destinationId: "crm", record: { recordId: "r" } }),
+        JSON.stringify({ v: 1, type: "record.confirmed", idempotencyKey: "k", record: { recordId: "r" } }),
+        JSON.stringify({ v: 1, type: "record.confirmed", idempotencyKey: "k", destinationId: 1, record: { recordId: "r" } }),
+        JSON.stringify({ v: 1, type: "record.confirmed", idempotencyKey: "k", destinationId: "crm", record: null }),
+        JSON.stringify({ v: 1, type: "record.confirmed", idempotencyKey: "k", destinationId: "crm", record: { recordId: 1 } }),
       ]) {
         const res = await fetch(url, { method: "POST", body, headers: { [DELIVERY_SIGNATURE_HEADER]: signDelivery(body, SECRET, now) } });
         assert.deepEqual([res.status, await res.json()], [400, { error: "malformed_delivery" }], body);
