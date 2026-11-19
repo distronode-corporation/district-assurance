@@ -644,6 +644,39 @@ when it did not act, optionally `{"error": "<code>"}` (`signature`, `workspace`,
 the door, so it is `unknown`. Anything else, including no answer, is `unknown` too. A relay checks the grant with `verifyAccessGrant` against
 `engine.accessKeys()`, its own workspace and its own audience, and refuses a grant id it has seen.
 
+**The Seam adapter** (`seamAccessController({apiKey, baseUrl?, allowLoopbackForTests?, timeoutMs?,
+confirmWithinMs?, pollIntervalMs?, fetch?, clock?})`), named in the engine's `access` adapter like
+any controller: the target's `ref` is the Seam `device_id`. `baseUrl` defaults to
+`https://connect.getseam.com`, and its host must be one of `SEAM_HOSTS` (`connect.getseam.com`),
+over HTTPS on the default port, with no credentials, query or fragment: the API key goes nowhere
+else. The loopback address, over HTTP or HTTPS, is accepted only with `allowLoopbackForTests: true`,
+which is for tests and never for production; `timeoutMs` is per request, 100 to 30,000 (default 5,000); `confirmWithinMs` 0 to 30,000
+(default 10,000) and `pollIntervalMs` 10 to 5,000 (default 1,000). Every request is a `POST` with
+`authorization: Bearer <apiKey>` and a JSON body, redirects not followed. No idempotency key is
+sent: Seam documents none on unlock.
+
+1. `POST /devices/get {device_id}`. Unless the answer names the same device with
+   `can_remotely_unlock: true` and not `properties.online: false`, the result is `refused`:
+   `cannot_unlock_remotely`, `device_offline`, `device_unreadable`, Seam's error type on a 4xx
+   (`device_not_found`, ...) or `http_<status>`, and `seam_unavailable` on a 5xx or no answer.
+   Nothing was sent to the lock.
+2. Unless the grant has at least `timeoutMs` left by `clock` (the system clock by default), the
+   result is `refused` (`grant_expiring`) and nothing is sent, since the expiry is strict and the
+   call may end then. This bounds when the unlock is sent and how long the client waits for it,
+   not the network, and Seam's own attempt may still complete later.
+   Otherwise `POST /locks/unlock_door {device_id}`, once, never retried. A 4xx is `refused` (Seam's error
+   type when it is a short code, otherwise `http_<status>`); a 5xx, a timeout, a dropped connection,
+   a redirect, or a 2xx without an action attempt (`action_attempt_id` 1 to 200 characters, `status`
+   `pending`, `success` or `error`) throws, which Gate records as `unknown`.
+4. While the attempt is `pending`: `POST /action_attempts/get {action_attempt_id}` after each
+   pause of `pollIntervalMs`, the whole wait held to `confirmWithinMs` of elapsed time (each pause
+   and each request is cut to what is left; 0 never asks). `success` is `delivered`, `confirmed:
+   true` only when Seam reports `result.was_confirmed_by_device: true` (a `success` alone means
+   Seam sent the command, not that the lock moved); `error` throws (`unknown`: a lock that timed
+   out may still have moved); still `pending`, or an answer that cannot be read, is `delivered`
+   with `confirmed: false`. `providerRef` is the action attempt id. Each request's path is set on
+   a copy of `baseUrl`, so its host is always `baseUrl`'s.
+
 A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);
 revoking an issued code belongs to one-time codes, below. Planned: web sign-in step-up as an ES256 JWT against a JWKS
 (GAT-4), a Seam adapter (GAT-5), direct vendor adapters (GAT-6).
@@ -836,3 +869,5 @@ step-up and starts again with a new nonce. A provider that only verifies the JWS
 JWKS (any JOSE library: ES256, `kid`, `iss`, `aud`, `exp`, `nonce`) gets authenticity but neither
 the single use nor the refusal after taint: those are the exchange's, so the exchange is
 required. There is no OpenID Provider in the engine (ADR-24).
+revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS
+(GAT-4), direct vendor adapters (GAT-6).
