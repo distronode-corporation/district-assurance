@@ -39,7 +39,7 @@ import {
   type PinOutcome,
   type PinSettings,
 } from "./factors.ts";
-import { counterKeys, currentLock, isCallingNumber, lockoutOf, lockoutSettingsErrors, forgetPass, recordFailures, type Lock } from "./counters.ts";
+import { counterKeys, currentLock, isCallingNumber, lockoutOf, lockoutSettingsErrors, forgetPass, recordFailures, removeOwnOnNumbers, type Lock } from "./counters.ts";
 import { clearsSoFar, duressClearedData, duressFlagKey, flagDuress, hiddenCounterKey, hiddenHardLock, hiddenWindowStart, isUnderDuress, recordClear } from "./duress-flag.ts";
 import { isKeypadEntry } from "./knowledge.ts";
 import type { TextCodeState } from "./text-code.ts";
@@ -120,9 +120,11 @@ export interface BadgeSlice {
    * write that fails after the pass was saved (its ledger entry) still gets the cleanup, in the same
    * call to `submitFactor` or the call's next. Absent when nothing is owed. `hidden` is the duress
    * PIN's hidden counter (VER-12), when it is on: a pass not under duress resets it, a duress entry
-   * takes off only its own failure. Absent on a pass saved before it was kept here.
+   * takes off only its own failure. Absent on a pass saved before it was kept here. `claimed` is set
+   * on the call before the removals that are not safe to run twice (the number's own failure, the
+   * hidden counter's) run, so a replay skips them.
    */
-  forgetOwed?: { keys: AttemptCounterKey[]; at: string; hidden?: { key: AttemptCounterKey; duress: boolean } };
+  forgetOwed?: { keys: AttemptCounterKey[]; at: string; hidden?: { key: AttemptCounterKey; duress: boolean }; claimed?: true };
   /** The callback this call asked for, or the one it is (callback.ts). Absent on calls saved before: read it with `callbackOf`. */
   callback: CallbackState;
   /** Untrusted content seen on this call so far (onUntrusted counts it), so an entry judged across one is known. Absent on calls saved before. */
@@ -160,6 +162,12 @@ export interface CallbackState {
   at: string | null;
   /** On a passed callback call: its failure is still to be forgotten. A replayed outcome retries that. */
   forgetPending: boolean;
+  /**
+   * Set on the call before the pass's own failure comes off the calling number, which runs at most
+   * once (a replay could take off another failure of the same millisecond). Absent until then, and
+   * on calls saved before it.
+   */
+  forgetClaimed?: true;
   /** On the callback call: the number the dial goes to, kept in the write that claims the dial, and the one the carrier check asks about. */
   to?: string;
   /** On the callback call: how often the number on file changed between tries of the dial. Each number gets its own idempotency key. */
@@ -719,26 +727,55 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
 
 /**
  * Runs the counters cleanup a saved pass owes, if the call still owes the one made at `at`, then
- * takes it off the call. The cleanup is idempotent, so running it again after a lost write is safe;
- * a failure to take it off leaves it owed for the call's next factor.
+ * takes it off the call; a failure to take it off leaves it owed for the call's next factor. The
+ * subject's part is safe to run again. The rest is not (a removal by time can take another
+ * failure of the same millisecond, a reset a later failure), so it is claimed on the call first
+ * and runs at most once: a claim that is not saved runs none of it, and one that is saved and
+ * then fails leaves those failures until they leave the window (fail closed).
  */
 async function settleForget(rt: EngineRuntime, callId: string, at: string): Promise<void> {
   const owed = (await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice;
   if (owed.forgetOwed?.at !== at) return;
   const counters = rt.adapter("counters");
-  await forgetPass(counters, owed.forgetOwed.keys, new Date(at));
-  // The hidden counter forgets only on a pass that is not under duress; a duress entry takes off its
-  // own failure, as a pass does, and keeps the rest. One write either way, so the round trips never
-  // tell a duress pass from another.
-  const hidden = owed.forgetOwed.hidden;
-  if (hidden?.duress === true) await counters.removeFailure(hidden.key, at);
-  else if (hidden !== undefined) await counters.reset(hidden.key);
+  const { keys, hidden } = owed.forgetOwed;
+  await forgetPass(counters, keys, new Date(at));
+  if (owed.forgetOwed.claimed !== true) {
+    // Not claimed (or claimed by another run first): this run leaves the rest to the run that holds it, or the next.
+    const take = (s: BadgeSlice): boolean => {
+      if (s.forgetOwed?.at !== at || s.forgetOwed.claimed === true) return false;
+      s.forgetOwed.claimed = true;
+      return true;
+    };
+    if (!(await claimOnCall(rt, callId, take, (s) => s.forgetOwed?.at === at && s.forgetOwed.claimed === true))) return;
+    await removeOwnOnNumbers(counters, keys, new Date(at));
+    // The hidden counter forgets only on a pass that is not under duress; a duress entry takes off its
+    // own failure, as a pass does, and keeps the rest. One write either way, so the round trips never
+    // tell a duress pass from another.
+    if (hidden?.duress === true) await counters.removeFailure(hidden.key, at);
+    else if (hidden !== undefined) await counters.reset(hidden.key);
+  }
   await rt
     .update(callId, (draft) => {
       const s = draft.slice<BadgeSlice>(BADGE);
       if (s.forgetOwed?.at === at) delete s.forgetOwed;
     })
     .catch(() => undefined);
+}
+
+/**
+ * Claims a step of a cleanup on the call, so it runs at most once: true when this run's write saved
+ * the claim. `take` sets the claim on the slice and says whether it took it (false: not owed, or
+ * claimed already); `held` says whether the call holds it. A write that saved and then failed (the
+ * ledger, appended after the save) still claimed it, which the call says; one that did not save did not.
+ */
+export async function claimOnCall(rt: EngineRuntime, callId: string, take: (s: BadgeSlice) => boolean, held: (s: BadgeSlice) => boolean): Promise<boolean> {
+  let mine = false;
+  try {
+    return await rt.update(callId, (draft) => (mine = take(draft.slice<BadgeSlice>(BADGE))));
+  } catch {
+    if (!mine) return false;
+    return held((await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice);
+  }
 }
 
 /** An opaque member id: no "@" and no space, so no email address or name reaches the ledger. */

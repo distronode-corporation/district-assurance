@@ -17,8 +17,8 @@ import type { AttemptCounterKey, SubjectRecord } from "../core/adapters.ts";
 import { EngineError } from "../core/errors.ts";
 import type { CallDraft, EngineRuntime } from "../core/runtime.ts";
 import { canApply } from "../core/session.ts";
-import { BADGE, allowFactor, callbackOf, type BadgeSlice, type CallbackState, type OutcomeResult } from "./badge.ts";
-import { counterKeys, currentLock, forgetPass, isCallingNumber, lockoutOf, recordedAt, recordFailures, type Lock } from "./counters.ts";
+import { BADGE, allowFactor, callbackOf, claimOnCall, type BadgeSlice, type CallbackState, type OutcomeResult } from "./badge.ts";
+import { counterKeys, currentLock, forgetPass, isCallingNumber, lockoutOf, recordedAt, recordFailures, removeOwnOnNumbers, type Lock } from "./counters.ts";
 import type { BadgeSettings } from "./factors.ts";
 
 export const CALLBACK = "callback";
@@ -269,7 +269,7 @@ export async function applyCallbackOutcome(rt: EngineRuntime, outcome: CallbackO
   if (callId === null) return { applied: false };
   const done = await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
-    if (s.callback.status === "passed" && s.callback.forgetPending) return { passed: true, repeated: true, keys: s.callback.keys, at: s.callback.at! };
+    if (s.callback.status === "passed" && s.callback.forgetPending) return { passed: true, repeated: true, claimed: s.callback.forgetClaimed === true, keys: s.callback.keys, at: s.callback.at! };
     const passed = answered && confirmed;
     const factor = { kind: CALLBACK, passed, at: rt.now() };
     if (s.callback.status !== "dialed" || !canApply(draft.record.state, { type: "factor_recorded", factor })) return null;
@@ -280,14 +280,35 @@ export async function applyCallbackOutcome(rt: EngineRuntime, outcome: CallbackO
     draft.emit("verification.callback_finished", "system", { outcome: result, requestedOn: s.callback.callId });
     const lock = s.callback.lock;
     if (!passed && lock !== null) draft.emit("verification.locked", "code", { kind: CALLBACK, scope: lock.scope, hard: lock.hard, until: lock.until });
-    return { passed, repeated: false, keys: s.callback.keys, at: s.callback.at! };
+    return { passed, repeated: false, claimed: false, keys: s.callback.keys, at: s.callback.at! };
   });
   if (done === null) return { applied: false };
-  if (done.passed) {
-    await forgetPass(rt.adapter("counters"), done.keys, new Date(done.at));
-    await rt.update(callId, (draft) => {
-      draft.slice<BadgeSlice>(BADGE).callback.forgetPending = false;
-    });
+  const result: OutcomeResult = done.repeated ? { applied: false } : { applied: true, callId };
+  if (done.passed) await forgetCallbackPass(rt, callId, done);
+  return result;
+}
+
+/**
+ * The counters cleanup of a passed callback: the subject's part every time (safe to run again), and
+ * the own failure on the calling number at most once, claimed on the call first (`claimOnCall`). A
+ * claim not saved leaves it pending for the outcome's next delivery; a removal that fails after its
+ * claim is not run again, and that failure stays until it leaves the window (fail closed).
+ */
+async function forgetCallbackPass(rt: EngineRuntime, callId: string, done: { claimed: boolean; keys: AttemptCounterKey[]; at: string }): Promise<void> {
+  const counters = rt.adapter("counters");
+  const at = new Date(done.at);
+  await forgetPass(counters, done.keys, at);
+  if (!done.claimed) {
+    const take = (s: BadgeSlice): boolean => {
+      // Pending only on a passed callback, which stays passed.
+      if (!s.callback.forgetPending || s.callback.forgetClaimed === true) return false;
+      s.callback = { ...s.callback, forgetClaimed: true };
+      return true;
+    };
+    if (!(await claimOnCall(rt, callId, take, (s) => s.callback.forgetPending && s.callback.forgetClaimed === true))) return;
+    await removeOwnOnNumbers(counters, done.keys, at);
   }
-  return done.repeated ? { applied: false } : { applied: true, callId };
+  await rt.update(callId, (draft) => {
+    draft.slice<BadgeSlice>(BADGE).callback.forgetPending = false;
+  });
 }

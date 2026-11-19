@@ -72,7 +72,28 @@ describe("T8: hidden-counter cleanup is owed with a saved pass", () => {
     assert.equal((await t.counters.get(hidden, LONG_AGO)).length, 1, "the wrong guess stays hidden");
   });
 
-  it("a hidden cleanup that failed is retried before the call's next factor", async () => {
+  it("a cleanup whose claim was not saved runs, hidden counter included, before the call's next factor", async () => {
+    const t = await duressEngine(duressConfig());
+    await t.engine.submitPin(await pinCall(t), "1357");
+    const hidden = hiddenCounterKey("ws_test", "pin", OWNER);
+    const callId = await pinCall(t);
+    const cas = t.sessions.compareAndSet.bind(t.sessions);
+    let lose = true;
+    t.sessions.compareAndSet = async (workspaceId, id, version, record) => {
+      const owed = (record as unknown as { modules: { badge: { forgetOwed?: { claimed?: true } } } }).modules.badge.forgetOwed;
+      if (lose && owed?.claimed === true) {
+        lose = false;
+        throw new Error("store blip");
+      }
+      return cas(workspaceId, id, version, record);
+    };
+    assert.deepEqual(await t.engine.submitPin(callId, PIN), { matched: true, locked: false });
+    assert.equal((await t.counters.get(hidden, LONG_AGO)).length, 2, "not claimed, so not run");
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    assert.deepEqual(await t.counters.get(hidden, LONG_AGO), [], "run before the next factor");
+  });
+
+  it("a claimed cleanup whose hidden reset fails is not run again (at most once, fail closed)", async () => {
     let fail = true;
     class Flaky extends MemoryAttemptCounters {
       override async reset(key: AttemptCounterKey): Promise<void> {
@@ -90,8 +111,8 @@ describe("T8: hidden-counter cleanup is owed with a saved pass", () => {
     const hidden = hiddenCounterKey("ws_test", "pin", OWNER);
     const callId = await pinCall(t);
     await assert.rejects(t.engine.submitPin(callId, PIN), /counters down/);
-    assert.equal((await counters.get(hidden, LONG_AGO)).length, 2, "still counted");
     await t.engine.submitKeypad(callId, { dob: DOB });
-    assert.deepEqual(await counters.get(hidden, LONG_AGO), [], "cleaned up before the next factor");
+    assert.equal((await counters.get(hidden, LONG_AGO)).length, 2, "still counted until the window passes");
+    assert.equal(((await t.sessions.get("ws_test", callId))!.record as { modules: { badge: { forgetOwed?: unknown } } }).modules.badge.forgetOwed, undefined, "and no longer owed");
   });
 });
