@@ -11,7 +11,7 @@
 import { createPublicKey, type JsonWebKey } from "node:crypto";
 
 import type { IntakeRecord, SessionStore } from "./core/adapters.ts";
-import type { JsonValue } from "./core/canonical.ts";
+import { canonicalJson, type JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
 import { EngineError, NotImplementedError } from "./core/errors.ts";
@@ -144,7 +144,7 @@ export class Engine {
           : (value as { capabilities?: unknown }).capabilities;
     }
     this.#receiptModules = builtInModules(this.#badge);
-    this.registry = new ModuleRegistry({ adapters: present, capabilities, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
+    this.registry = new ModuleRegistry({ adapters: present, capabilities, reserved: BUILT_IN_MODULES, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
     this.#config = this.#prepare(options.config === undefined ? defaultConfig() : options.config);
     this.#rt = this.#runtime();
   }
@@ -632,6 +632,13 @@ export class Engine {
         // to be appended later, and a caller changing its object afterwards changes nothing.
         const copy = structuredClone(detail);
         if (detailCarriesCardNumber(copy)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
+        // The ledger hashes every entry as canonical JSON: detail it could not hash (a lone surrogate,
+        // a value JSON cannot carry) is refused here, or it would block the call's ledger for good.
+        try {
+          canonicalJson(copy);
+        } catch {
+          throw new EngineError("invalid_input", "audit detail must be canonical JSON");
+        }
         events.push({ name, actor, at: this.#now(), detail: copy });
       },
       step: () => currentStep(record),

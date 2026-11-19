@@ -24,7 +24,11 @@ export interface CarrierSignals {
 
 export type MessagePurpose = "identity_link" | "payment_link" | "one_time_code" | "reference";
 
-/** Texts sent by code. The destination is always the number on file, resolved by the engine. */
+/**
+ * Texts sent by code. The destination is always the number on file, resolved by the engine.
+ * `sendText` must settle (sent or failed) within 60 seconds: Paylink holds a payment link against a
+ * concurrent expiry for that long while it is being texted (its send lease).
+ */
 export interface MessageSender {
   sendText(input: { to: string; body: string; purpose: MessagePurpose; idempotencyKey: string }): Promise<{
     messageId: string;
