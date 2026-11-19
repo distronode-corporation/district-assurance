@@ -146,7 +146,7 @@ texts.
 ## 5. Keypad knowledge
 
 - Subject key: `HMAC-SHA256(knowledgeKey, "subject:" + accountNumber)`, hex. A host may instead
-  start verification with a subject key its own code chose (`{subjectKey}`, 64 lower-case hex);
+  start verification with a subject key its own code chose (`{subjectKey}`, a string of 64 lower-case hex, read once; anything else is `invalid_input`);
   choosing the subject is not a factor.
 - Field digest: `HMAC-SHA256(knowledgeKey, "field:" + field + ":" + value)`, hex.
 - An entry counts only if it is 1 to 32 ASCII digits.

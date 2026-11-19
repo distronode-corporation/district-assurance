@@ -301,8 +301,12 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
   rt.settings(BADGE);
   let subjectKey: string | null;
   if ("subjectKey" in input) {
-    if (!/^[0-9a-f]{64}$/.test(input.subjectKey)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
-    subjectKey = input.subjectKey;
+    // Read once and a string only: a regex test turns an array into its text, which would pass, be
+    // found by the record store as the subject, and then key no counter, so the PIN could be guessed
+    // without a lock; and a getter read again could swap the key after it was checked.
+    const given: unknown = input.subjectKey;
+    if (typeof given !== "string" || !/^[0-9a-f]{64}$/.test(given)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
+    subjectKey = given;
   } else {
     subjectKey = isKeypadEntry(input.accountNumber) ? rt.hmac(`subject:${input.accountNumber}`) : null;
   }
