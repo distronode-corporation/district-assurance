@@ -192,7 +192,8 @@ when there is a number.
   one atomic step; `removeFailure(key, at)` forgets one failure recorded at `at` and keeps every
   other, also in one atomic step (nothing when there is none); `reset(key)` forgets them all. `attemptCountersContract(factory)` in
   `district-assurance/testing` is the suite a store must pass; `MemoryAttemptCounters` is the
-  reference.
+  reference. The engine refuses (`invalid_input`) a `counters` adapter missing any of the four
+  methods when it is built, so a store written before `removeFailure` existed never reaches a pass.
 - Badge's `lockout` setting: `{backoffSeconds, lockAfterFailures, windowHours}`, defaults
   `[5, 15, 60, 300, 900]`, `10` and `24`, which are also floors: `backoffSeconds` lists 5 to 10
   whole seconds, each at least the default at its place (900 after the fifth) and at most 86400;
