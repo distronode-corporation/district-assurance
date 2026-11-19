@@ -159,8 +159,9 @@ export async function setIntakeField(rt: EngineRuntime, callId: string, key: str
 function digestValues(rt: EngineRuntime, recordId: string, form: IntakeForm, values: Readonly<Record<string, FieldValue>>): Record<string, FieldValue> {
   const covered = { ...values };
   for (const field of form.fields) {
-    const value = values[field.key];
-    if (field.sensitive === true && value !== undefined) covered[field.key] = rt.hmac(canonicalJson(["intake", recordId, field.key, value]));
+    if (field.sensitive === true && Object.hasOwn(values, field.key)) {
+      covered[field.key] = rt.hmac(canonicalJson(["intake", recordId, field.key, values[field.key]]));
+    }
   }
   return covered;
 }

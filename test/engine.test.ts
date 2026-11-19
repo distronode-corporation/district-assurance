@@ -533,6 +533,27 @@ describe("Engine file", () => {
       assert.equal(record.digest, expectedDigest(record.recordId, { issue: "Leak", sin: SIN, pets: 2 }));
     });
 
+    it("files a form whose optional sensitive field is named like an Object property and left empty", async () => {
+      const proto: IntakeForm = {
+        formId: "proto",
+        version: "1",
+        fields: [
+          { key: "issue", label: { en: "Issue", fr: "Problème" }, type: "text", required: true },
+          { key: "constructor", label: { en: "Note", fr: "Note" }, type: "text", required: false, sensitive: true },
+        ],
+      };
+      const config = testConfig((c) => (c.modules.dossier = { settings: { forms: [structuredClone(form), proto] } as unknown as JsonValue }));
+      const cipher = new FakeFieldCipher();
+      const t = setup({ config, adapters: { fieldCipher: cipher } });
+      const callId = await verifiedCall(t);
+      await t.engine.startIntake(callId, "proto");
+      await t.engine.setIntakeField(callId, "issue", "Leak");
+      const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+      assert.equal(Object.hasOwn(record.values, "constructor"), false);
+      assert.deepEqual(cipher.encrypted, []);
+      assert.equal(record.digest, intakeDigest(proto, { issue: "Leak" }));
+    });
+
     it("refuses a sensitive form without the cipher, and an engine without one never files it", async () => {
       assert.throws(() => setup({ config: withSecure() }), (e: unknown) => e instanceof ConfigError && e.problems.includes("modules.dossier: needs the fieldCipher adapter, which the engine does not have"));
       // Two engines on one store: the call keeps the secure form, the second engine has no cipher.
