@@ -199,7 +199,9 @@ one, for example `[pin, callback]` at level 2.
 **Caller ID attestation.** `startCall({attestation})` records, once, the STIR/SHAKEN result the
 host's carrier reported for the call: `A`, `B` or `C` only when the receiving carrier's check of
 the signature passed, `failed` when it failed, and `none` (the default) when there was no signature
-or no result. Any other value is refused (`invalid_input`), and nothing changes it later. It is
+or no result. Any other value is refused (`invalid_input`), and nothing changes it later. A Twilio `StirVerstat` of `TN-Validation-Passed-{A,B,C}-Diverted` or
+`-Passthrough` maps to `none`, because Twilio did not verify the original signer's attestation
+end to end (its `-Failed-` forms map to `failed`). The attestation is
 never a factor, never counts toward a factor set and never appears in `methods`. The policy's
 optional `attestationCaps` gives, per value, the highest level a call with it can reach (for
 example `{"C": 2, "none": 2, "failed": 1}`): `finishVerification` takes the lower of the level the

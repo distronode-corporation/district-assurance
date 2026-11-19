@@ -116,6 +116,8 @@ table does not list, a missing value and a value the host cannot read all map to
 | Twilio `StirVerstat`: `TN-Validation-Failed-A`, `-B`, `-C`, `TN-Validation-Failed`, `NULL` | `failed` |
 | Twilio `StirVerstat`: `TN-Validation-Failed-A-Diverted`, `-B-Diverted`, `-C-Diverted` | `failed` |
 | Twilio `StirVerstat`: `TN-Validation-Failed-A-Passthrough`, `-B-Passthrough`, `-C-Passthrough` | `failed` |
+| Twilio `StirVerstat`: `TN-Validation-Passed-A-Diverted`, `-B-Diverted`, `-C-Diverted` | `none` |
+| Twilio `StirVerstat`: `TN-Validation-Passed-A-Passthrough`, `-B-Passthrough`, `-C-Passthrough` | `none` |
 | Twilio `StirVerstat`: `No-TN-Validation`, or no `StirVerstat` | `none` |
 | Telnyx SIP `verstat=TN-Validation-Passed` | `A` |
 | Telnyx SIP `verstat=TN-Validation-Passed-B` | `B` |
@@ -127,7 +129,9 @@ table does not list, a missing value and a value the host cannot read all map to
 | Telnyx TeXML without `ShakenStirAttestation` | `none` |
 
 `A`, `B` or `C` means the receiving carrier's check of the signature passed; never pass a level
-from a signature that was not checked, or whose check failed. A level reported without its check
+from a signature that was not checked, or whose check failed. A Twilio Passed value with `-Diverted` or
+`-Passthrough` is `none`: Twilio checked a diverting provider's signature, or one passed through,
+not the original signer's attestation end to end. A level reported without its check
 result, such as `shaken_stir_attestation` in the Voice API's `call.initiated` screening result,
 is not listed here, so it maps to `none`; and a TeXML `ShakenStirAttestation` is never read
 without `ShakenStirValidated`. The Telnyx rows follow Telnyx's SIP header parameters page
