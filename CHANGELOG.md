@@ -14,6 +14,9 @@ All notable changes to this project are documented here. The format follows
   computes the digest, calls the controller and records its answer. `Engine.grantAccess`,
   `accessGrants` and `accessKeys`; the `access` and `accessSigner` adapters; `access.*` ledger
   events. `verifyAccessGrant` (bound to a workspace) and `SeenGrants` for the access side.
+- Cancel and expire open payment links (PAY-3): `Engine.cancelPaymentLink`, through the optional
+  `PaymentLinks.cancel` (else `expireLink`); `endCall` expires every open link, so the receipt shows
+  it `expired`; a payment made after the engine closed its link is recorded as paid, flagged `late`.
 - The signed-webhook relay adapter (GAT-2), `webhookRelay`, and an example door relay. An unlock
   is never retried; a lost answer is `unknown`.
 - `FakeAccessController` in `district-assurance/testing`.

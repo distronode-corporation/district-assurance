@@ -13,13 +13,15 @@
 // everywhere), created and texted, then committed. Once texted it lives `linkLifeMinutes` (15 by
 // default): the engine expires it itself at that deadline (`expirePaymentLinks`), because a
 // provider's shortest link life can be longer than a call. A failed create leaves the request open
-// to resume; once a link exists, only the provider's outcome or the engine's deadline settles it.
-import type { InstantPaymentMethod, PaymentLinkCapabilities, PaymentMode } from "../core/adapters.ts";
+// to resume; once a link exists, only the provider's outcome, the engine's deadline, a cancel or
+// the end of the call settles it. Money that moves after the engine closed a link is still
+// recorded as paid, and flagged in the ledger.
+import type { InstantPaymentMethod, PaymentLinkCapabilities, PaymentLinkClose, PaymentMode } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
-import type { CallDraft, EngineRuntime, Locale } from "../core/runtime.ts";
+import type { CallDraft, CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
 import type { SessionState } from "../core/session.ts";
 import { isIntegerIn, isObject, unknownKeys } from "../core/shape.ts";
 import { matchedSubject } from "../verify/badge.ts";
@@ -351,9 +353,10 @@ export async function requestPayment(
     const pending = find(draft, request.paymentId);
     pending.linkId = link.linkId;
     if (pending.textedAt !== null) return "sent";
-    // Another process settled the request while this one created the link (it took too long): the
-    // link is live at the provider but must never be texted.
-    if (pending.status !== "open") return "settled";
+    // Another process settled the request while this one created the link (it took too long), or
+    // the call ended meanwhile (its links are being closed): the link is live at the provider but
+    // must never be texted.
+    if (pending.status !== "open" || draft.record.state.phase === "ended") return "settled";
     const now = rt.clock.now().getTime();
     const leased = pending.sendingSince !== null && now - Date.parse(pending.sendingSince) < SEND_LEASE_MS;
     if (Date.parse(request.providerExpiresAt) - now >= MIN_LINK_LIFE_MINUTES * 60_000) {
@@ -368,7 +371,7 @@ export async function requestPayment(
   const tooLate = claim === "late" || (claim === "claimed" && Date.parse(request.providerExpiresAt) - rt.clock.now().getTime() < MIN_LINK_LIFE_MINUTES * 60_000);
   if (claim === "settled") {
     await expireAtProvider(rt, callId, request, link.linkId);
-    throw new EngineError("precondition_failed", "the payment request was settled while its link was created; the link was expired and never texted");
+    throw new EngineError("precondition_failed", "the payment request was closed while its link was created; the link was expired and never texted");
   }
   if (tooLate) {
     const answer = await expireAtProvider(rt, callId, request, link.linkId);
@@ -388,8 +391,12 @@ export async function requestPayment(
   });
   return rt.update(callId, (draft) => {
     const sent = find(draft, request.paymentId);
-    // Two resumes of one request can both get here: the first records the delivery, once.
-    if (sent.textedAt !== null) return { paymentId: request.paymentId, status: sent.status, expiresAt: sent.expiresAt };
+    // Two resumes of one request can both get here: the first records the delivery, once. A request
+    // the engine closed meanwhile (a cancel, or the call ended, after this sender's lease lapsed) had
+    // its link expired at the provider first, so the text carried a dead link: nothing is recorded,
+    // so no entry follows the close or the call's receipt.
+    const closed = sent.status === "expired" || draft.record.state.phase === "ended";
+    if (sent.textedAt !== null || closed) return { paymentId: request.paymentId, status: sent.status, expiresAt: sent.expiresAt };
     sent.textedAt = rt.now();
     // The link life counts from the text, but never past what the provider was asked for when the
     // link was created, so the engine never promises a deadline the link itself would not reach.
@@ -414,12 +421,17 @@ function paymentRef(payment: Pick<PaymentRequest, "connectedAccountId">, linkId:
 
 /** Asks the provider to expire a link, on the account the payment was taken on. */
 function expireAtProvider(rt: EngineRuntime, callId: string, payment: PaymentRequest, linkId: string): Promise<{ state: "expired" | "not_open" }> {
-  return rt.adapter("payments").expireLink({
+  return rt.adapter("payments").expireLink(closeInput(rt, callId, payment, linkId, "expire"));
+}
+
+/** The request to close a payment's link at the provider, on its account. The operation and the mode are part of the key. */
+function closeInput(rt: EngineRuntime, callId: string, payment: PaymentRequest, linkId: string, operation: "expire" | "cancel"): PaymentLinkClose {
+  return {
     linkId,
     mode: payment.mode,
     ...(payment.connectedAccountId === null ? {} : { connectedAccountId: payment.connectedAccountId }),
-    idempotencyKey: rt.idempotencyKey(callId, payment.paymentId, "expire", payment.mode),
-  });
+    idempotencyKey: rt.idempotencyKey(callId, payment.paymentId, operation, payment.mode),
+  };
 }
 
 function deadline(from: string, minutes: number): string {
@@ -444,6 +456,10 @@ function settle(rt: EngineRuntime, draft: CallDraft, paymentId: string, status: 
  * request settles once. An outcome from another account than the payment's (a connect-mode
  * payment's event without its connected account, or a platform payment's event from a connected
  * account) is ignored and written to the ledger.
+ *
+ * The one exception to settling once: a payment the engine closed (cancelled, its call ended, its
+ * deadline came) can still be paid at the provider, by a caller already on the page. The money
+ * moved, so it is recorded as paid, flagged `late` in the ledger. The session does not move.
  */
 export async function applyPaymentOutcome(rt: EngineRuntime, outcome: PaymentOutcome): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
   // A connect-mode payment is bound under its account, so two accounts' link ids never collide. A
@@ -500,6 +516,81 @@ export async function expirePaymentLinks(rt: EngineRuntime, callId: string): Pro
     if (settled) expired.push(payment.paymentId);
   }
   return { expired };
+}
+
+/**
+ * Closes one open payment for good: settles it `expired`, at the provider first when a link exists.
+ * Unlike the deadline, a `not_open` answer settles it too, because the engine stops waiting for
+ * it: a payment that went through after all is recorded by its webhook as a late payment. A
+ * request whose link was never created (or whose create was never answered) is settled here
+ * alone, in one write, and `requestPayment` closes the link at the provider if one comes back.
+ * Returns the payment's status, which is the one it had when it was no longer open.
+ */
+async function closePayment(rt: EngineRuntime, callId: string, paymentId: string, reason: "cancelled" | "call_ended"): Promise<PaymentStatus> {
+  const close = (draft: CallDraft, provider: "expired" | "not_open" | "not_created"): PaymentStatus => {
+    draft.emit("payment.link_expired", "code", { paymentId, provider, reason });
+    settle(rt, draft, paymentId, "expired");
+    return "expired";
+  };
+  const seen = await rt.update(callId, (draft) => {
+    const request = draft.slice<PaylinkSlice>(PAYLINK).payments.find((p) => p.paymentId === paymentId);
+    if (request === undefined) throw new EngineError("invalid_input", "no payment with that id on this call");
+    if (request.status !== "open") return request.status;
+    // The link id is written once, so a request without one here is closed before any link can be texted.
+    if (request.linkId === "") return close(draft, "not_created");
+    // A process is texting the link now: closing it under that sender would text a dead link.
+    if (sending(rt, request)) throw new EngineError("precondition_failed", "a payment link is being texted on this call; close it once it is sent");
+    return structuredClone(request);
+  });
+  if (typeof seen === "string") return seen;
+  const links = rt.adapter("payments");
+  const answer =
+    reason === "cancelled" && links.cancel !== undefined ? await links.cancel(closeInput(rt, callId, seen, seen.linkId, "cancel")) : await expireAtProvider(rt, callId, seen, seen.linkId);
+  return rt.update(callId, (draft) => {
+    const request = find(draft, paymentId);
+    return request.status === "open" ? close(draft, answer.state) : request.status;
+  });
+}
+
+/**
+ * Cancels a payment's link: the caller changed their mind. Through `PaymentLinks.cancel` when the
+ * adapter has it, else `expireLink`. The request settles `expired` (its flow step fails) and the
+ * session leaves `paying`. It needs no scope, since it only closes, and cancelling a payment that
+ * is no longer open changes nothing and returns its status.
+ */
+export async function cancelPaymentLink(rt: EngineRuntime, callId: string, paymentId: string): Promise<{ paymentId: string; status: PaymentStatus }> {
+  return { paymentId, status: await closePayment(rt, callId, paymentId, "cancelled") };
+}
+
+/**
+ * Expires every open payment of an ended call, at the provider first (`expireLink`), so the
+ * receipt shows them `expired` and no link outlives its call. Nothing to do on a call that
+ * started with Paylink off.
+ */
+export async function expireOpenPayments(rt: EngineRuntime, record: CallRecord): Promise<void> {
+  for (const payment of openPayments(record)) await closePayment(rt, record.state.callId, payment.paymentId, "call_ended");
+}
+
+/** Whether a process holds the lease to text this request's link now (it claimed it and has not recorded the text). */
+function sending(rt: EngineRuntime, payment: PaymentRequest): boolean {
+  return payment.textedAt === null && payment.sendingSince !== null && rt.clock.now().getTime() - Date.parse(payment.sendingSince) < SEND_LEASE_MS;
+}
+
+/**
+ * Refuses, inside the write that ends a call, while a payment link is being texted: the call ends
+ * once the text is recorded or the sender's lease lapses, so no text goes out, and no entry is
+ * written, after the call ended. Nothing to check on a call that started with Paylink off.
+ */
+export function assertNoSendInFlight(rt: EngineRuntime, record: CallRecord): void {
+  if (openPayments(record).some((p) => sending(rt, p))) {
+    throw new EngineError("precondition_failed", "a payment link is being texted on this call; end the call once it is sent");
+  }
+}
+
+/** A call's payments still open; none on a call that started with Paylink off. */
+export function openPayments(record: CallRecord): PaymentRequest[] {
+  const slice = record.modules[PAYLINK] as unknown as PaylinkSlice | undefined;
+  return (slice?.payments ?? []).filter((p) => p.status === "open");
 }
 
 /** Formats an amount in minor units with the currency's own number of decimals. */

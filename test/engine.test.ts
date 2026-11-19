@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
+import type { PaymentLinks } from "../src/core/adapters.ts";
 import { ConfigError } from "../src/core/config.ts";
 import { NotImplementedError } from "../src/core/errors.ts";
 import type { EngineEvent } from "../src/core/events.ts";
@@ -491,15 +492,228 @@ describe("Engine pay", () => {
     assert.deepEqual(receipt!.body.payments, [{ paymentId, status: "paid", amountMinor: 15000, currency: "cad", mode: "platform", providerRef: linkId }]);
   });
 
-  it("settles a payment after the call ended without moving the session", async () => {
+  it("expires an open link when the call ends, and records a late payment as paid, flagged", async () => {
     const t = setup();
     const callId = await verifiedCall(t, "fr");
-    await t.engine.requestPayment(callId, { ...request, amountMinor: 150, currency: "jpy" });
+    const { paymentId } = await t.engine.requestPayment(callId, { ...request, amountMinor: 150, currency: "jpy" });
     assert.equal(t.messages.sent.at(-1)!.body, `Votre lien de paiement sécurisé pour ${formatAmount("fr", 150, "jpy")} : https://pay.example.test/c/cs_fake_1`);
-    await t.engine.endCall(callId);
-    const result = await t.engine.applyPaymentOutcome({ kind: "expired", linkId: "cs_fake_1" });
-    assert.deepEqual(result, { applied: true, callId, status: "expired" });
+    const receipt = await t.engine.endCall(callId);
+    assert.deepEqual(t.payments.expired, [{ linkId: "cs_fake_1", mode: "platform" }], "closed at the provider");
+    assert.deepEqual(receipt!.body.payments.map((p) => p.status), ["expired"]);
+    const entries = await t.ledger.list();
+    const ended = entries.findIndex((e) => e.event === "call.ended");
+    assert.deepEqual(
+      entries.slice(ended).map((e) => [e.event, e.detail]),
+      [
+        ["call.ended", {}],
+        ["payment.link_expired", { paymentId, provider: "expired", reason: "call_ended" }],
+        ["payment.settled", { paymentId, status: "expired" }],
+        ["receipt.issued", entries.at(-1)!.detail],
+      ],
+    );
+    assert.equal(receipt!.body.ledger.seq, entries.at(-2)!.seq, "the receipt's head includes the expired link");
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "expired", linkId: "cs_fake_1" }), { applied: false }, "settled once");
+    // A caller already on the page paid as the call ended: the money moved, so it is recorded.
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" }), { applied: true, callId, status: "paid" });
+    assert.deepEqual((await t.ledger.list()).at(-1)!.detail, { paymentId, status: "paid", late: true });
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "async_succeeded", linkId: "cs_fake_1" }), { applied: false }, "recorded once");
     assert.equal((await t.engine.state(callId)).phase, "ended");
+    assert.deepEqual(await t.engine.receipt(callId), receipt, "the signed receipt is not changed; the ledger has the late payment");
+    assert.equal(verifyChain(await t.ledger.list()).ok, true);
+  });
+
+  it("settles a link the provider no longer holds as expired when the call ends", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const { paymentId } = await t.engine.requestPayment(callId, request);
+    t.payments.settle("cs_fake_1");
+    const receipt = await t.engine.endCall(callId);
+    assert.deepEqual(receipt!.body.payments.map((p) => p.status), ["expired"]);
+    assert.ok((await t.ledger.list()).some((e) => e.event === "payment.link_expired" && e.detail.provider === "not_open" && e.detail.paymentId === paymentId));
+    // Its webhook says why: an expiry changes nothing, a payment is recorded late.
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "async_failed", linkId: "cs_fake_1" }), { applied: false });
+    assert.equal((await t.engine.applyPaymentOutcome({ kind: "async_succeeded", linkId: "cs_fake_1" })).applied, true);
+  });
+
+  it("ends the call even when the provider fails to expire a link, and expires it on the next endCall", async () => {
+    for (const receipts of [true, false]) {
+      const t = setup({ config: testConfig((c) => (c.modules.trace = { settings: { receipts } })) });
+      const callId = await verifiedCall(t);
+      await t.engine.requestPayment(callId, request);
+      const expire = t.payments.expireLink.bind(t.payments);
+      t.payments.expireLink = async () => {
+        throw new Error("provider down");
+      };
+      await assert.rejects(t.engine.endCall(callId), /provider down/);
+      assert.equal((await t.engine.state(callId)).phase, "ended");
+      assert.equal(await t.engine.receipt(callId), null, "no receipt while a link is open");
+      t.payments.expireLink = expire;
+      const receipt = await t.engine.endCall(callId);
+      assert.deepEqual(receipt?.body.payments.map((p) => p.status) ?? null, receipts ? ["expired"] : null);
+      assert.equal(t.payments.expired.length, 1);
+      await assert.rejects(t.engine.endCall(callId), rejects("invalid_transition"), "nothing left to do");
+    }
+  });
+
+  it("cancels a link through expireLink, once, and the session leaves paying", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const { paymentId } = await t.engine.requestPayment(callId, request);
+    await assert.rejects(t.engine.cancelPaymentLink(callId, "pay_unknown"), rejects("invalid_input", /no payment with that id/));
+    assert.deepEqual(await t.engine.cancelPaymentLink(callId, paymentId), { paymentId, status: "expired" });
+    assert.deepEqual(t.payments.expired, [{ linkId: "cs_fake_1", mode: "platform" }]);
+    const state = await t.engine.state(callId);
+    assert.equal(state.phase, "open");
+    assert.equal(state.sensitive, null);
+    assert.deepEqual(await t.engine.cancelPaymentLink(callId, paymentId), { paymentId, status: "expired" }, "already closed: nothing changes");
+    assert.equal(t.payments.expired.length, 1);
+    const entries = await t.ledger.list();
+    assert.deepEqual(entries.filter((e) => e.event === "payment.link_expired").map((e) => e.detail), [{ paymentId, provider: "expired", reason: "cancelled" }]);
+    // The caller paid on the page anyway: recorded as paid, flagged, and the call has moved on.
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" }), { applied: true, callId, status: "paid" });
+    assert.deepEqual((await t.ledger.list()).at(-1)!.detail, { paymentId, status: "paid", late: true });
+    assert.equal((await t.engine.state(callId)).phase, "open");
+    assert.deepEqual(await t.engine.cancelPaymentLink(callId, paymentId), { paymentId, status: "paid" }, "a paid payment stays paid");
+    // A new payment can be asked for once the first is closed.
+    const second = await t.engine.requestPayment(callId, request);
+    assert.equal(second.status, "open");
+    const receipt = await t.engine.endCall(callId);
+    assert.deepEqual(receipt!.body.payments.map((p) => p.status), ["paid", "expired"]);
+  });
+
+  it("cancels through the adapter's cancel method when it has one, with its own key", async () => {
+    const t = setup({ config: testConfig((c) => (c.modules.paylink = { settings: { mode: "connect", connectedAccountId: "acct_biz" } })) });
+    const callId = await verifiedCall(t);
+    const { paymentId } = await t.engine.requestPayment(callId, request);
+    const asked: unknown[] = [];
+    (t.payments as PaymentLinks).cancel = async (input) => {
+      asked.push(input);
+      return { state: "not_open" };
+    };
+    assert.deepEqual(await t.engine.cancelPaymentLink(callId, paymentId), { paymentId, status: "expired" });
+    assert.deepEqual(asked, [{ linkId: "cs_fake_1", mode: "connect", connectedAccountId: "acct_biz", idempotencyKey: JSON.stringify(["ws_test", callId, paymentId, "cancel", "connect"]) }]);
+    assert.deepEqual(t.payments.expired, [], "not through expireLink");
+    assert.deepEqual((await t.ledger.list()).filter((e) => e.event === "payment.link_expired").at(-1)!.detail, { paymentId, provider: "not_open", reason: "cancelled" });
+  });
+
+  it("leaves a payment paid while its cancel was at the provider", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const { paymentId } = await t.engine.requestPayment(callId, request);
+    const expire = t.payments.expireLink.bind(t.payments);
+    t.payments.expireLink = async (input) => {
+      await t.engine.applyPaymentOutcome({ kind: "completed", linkId: input.linkId, paymentStatus: "paid" });
+      return expire(input);
+    };
+    assert.deepEqual(await t.engine.cancelPaymentLink(callId, paymentId), { paymentId, status: "paid" });
+    assert.equal((await t.ledger.list()).some((e) => e.event === "payment.link_expired"), false);
+  });
+
+  it("closes a request whose link is not created yet, and the link that comes back is never texted", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const create = t.payments.createLink.bind(t.payments);
+    t.payments.createLink = async () => {
+      throw new Error("provider timed out");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /provider timed out/);
+    // A create that was never answered: nothing to close at the provider, and nobody has the link.
+    assert.deepEqual(await t.engine.cancelPaymentLink(callId, "pay_1"), { paymentId: "pay_1", status: "expired" });
+    assert.deepEqual((await t.ledger.list()).filter((e) => e.event === "payment.link_expired").map((e) => e.detail), [{ paymentId: "pay_1", provider: "not_created", reason: "cancelled" }]);
+    // Cancelled while the provider creates the link: it is closed at the provider as it comes back.
+    t.payments.createLink = async (input) => {
+      assert.deepEqual(await t.engine.cancelPaymentLink(callId, input.paymentId), { paymentId: input.paymentId, status: "expired" });
+      return create(input);
+    };
+    const texts = t.messages.sent.length;
+    await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /closed while its link was created/));
+    assert.equal(t.messages.sent.length, texts, "never texted");
+    assert.deepEqual(t.payments.expired, [{ linkId: "cs_fake_1", mode: "platform" }]);
+    assert.equal((await t.engine.state(callId)).phase, "open");
+    // A late payment on it is still recorded.
+    assert.equal((await t.engine.applyPaymentOutcome({ kind: "async_succeeded", linkId: "cs_fake_1" })).applied, true);
+  });
+
+  /** Holds the payment text until told: the sender holds its lease meanwhile. */
+  function holdText(t: ReturnType<typeof setup>) {
+    let go: () => void = () => undefined;
+    let reached: () => void = () => undefined;
+    const atText = new Promise<void>((resolve) => (reached = resolve));
+    const send = t.messages.sendText.bind(t.messages);
+    t.messages.sendText = async (input) => {
+      reached();
+      await new Promise<void>((resolve) => (go = resolve));
+      return send(input);
+    };
+    return { atText, go: () => go() };
+  }
+
+  it("refuses to cancel a link or end the call while the link is being texted, and closes it once the text is recorded", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const held = holdText(t);
+    const sending = t.engine.requestPayment(callId, request);
+    await held.atText;
+    await assert.rejects(t.engine.cancelPaymentLink(callId, "pay_1"), rejects("precondition_failed", /being texted/));
+    await assert.rejects(t.engine.endCall(callId), rejects("precondition_failed", /being texted/));
+    assert.equal((await t.engine.state(callId)).phase, "paying", "the call did not end");
+    assert.deepEqual(t.payments.expired, [], "nothing closed under the sender");
+    held.go();
+    assert.equal((await sending).status, "open");
+    const receipt = await t.engine.endCall(callId);
+    assert.deepEqual(receipt!.body.payments.map((p) => p.status), ["expired"]);
+    const events = (await t.ledger.list()).map((e) => e.event);
+    assert.ok(events.indexOf("payment.link_sent") < events.indexOf("call.ended"));
+  });
+
+  it("ends the call once a stopped sender's lease lapsed, and that sender records nothing after the receipt", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const held = holdText(t);
+    const sending = t.engine.requestPayment(callId, request);
+    await held.atText;
+    t.clock.advance(60_000);
+    const receipt = await t.engine.endCall(callId);
+    assert.deepEqual(receipt!.body.payments.map((p) => p.status), ["expired"]);
+    assert.deepEqual(t.payments.expired, [{ linkId: "cs_fake_1", mode: "platform" }], "closed at the provider before the text");
+    const before = (await t.ledger.list()).length;
+    held.go();
+    assert.deepEqual(await sending, { paymentId: "pay_1", status: "expired", expiresAt: null });
+    assert.equal((await t.ledger.list()).length, before, "no entry after the receipt");
+    assert.equal((await t.ledger.list()).at(-1)!.event, "receipt.issued");
+  });
+
+  it("never texts a link whose create comes back after the call ended", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const create = t.payments.createLink.bind(t.payments);
+    let release: () => void = () => undefined;
+    let creating: () => void = () => undefined;
+    const atCreate = new Promise<void>((resolve) => (creating = resolve));
+    t.payments.createLink = async (input) => {
+      creating();
+      await new Promise<void>((resolve) => (release = resolve));
+      return create(input);
+    };
+    const sending = t.engine.requestPayment(callId, request);
+    await atCreate;
+    // The create answers right after the call's ending write, before the end closes the request.
+    const ledgerAppend = t.ledger.append.bind(t.ledger);
+    let raced: Promise<unknown> | null = null;
+    t.ledger.append = async (...args: Parameters<typeof ledgerAppend>) => {
+      const entry = await ledgerAppend(...args);
+      if (raced === null && entry.event === "call.ended") {
+        release();
+        raced = sending.catch((e: unknown) => e);
+        await raced;
+      }
+      return entry;
+    };
+    const receipt = await t.engine.endCall(callId);
+    assert.ok(rejects("precondition_failed", /closed while its link was created/)(await raced));
+    assert.equal(t.messages.sent.filter((m) => m.purpose === "payment_link").length, 0, "never texted");
+    assert.deepEqual(t.payments.expired, [{ linkId: "cs_fake_1", mode: "platform" }]);
+    assert.deepEqual(receipt!.body.payments.map((p) => p.status), ["expired"]);
   });
 
   it("refuses without the scope, without an amount, and refuses bad amounts and descriptions", async () => {
