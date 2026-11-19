@@ -368,6 +368,9 @@ export async function issueStepUpToken(rt: EngineRuntime, callId: string, input:
 export async function exchangeStepUpToken(rt: EngineRuntime, token: unknown, expect: { audience: string; subjectKey: string; nonce: string }): Promise<StepUpExchange> {
   const claims = readClaims(token);
   if (claims === null) return { ok: false, reason: "malformed" };
+  // The sign-in's expectations, read once before any wait: a host that reuses its object for the
+  // next sign-in while this one is looked up cannot have this token compared against that one.
+  const want = { audience: expect.audience, subjectKey: String(expect.subjectKey), nonce: String(expect.nonce) };
   const digest = sha256Hex(token as string);
   /** The token's record when the call holds these exact bytes; anything else is not a token of this engine's. */
   const issuedBytes = (record: CallRecord) => {
@@ -394,9 +397,9 @@ export async function exchangeStepUpToken(rt: EngineRuntime, token: unknown, exp
           ? "not_authorized"
           : Date.parse(record.expiresAt) <= Date.parse(rt.now())
             ? "expired"
-            : expect.audience !== record.audience ||
-                !hexDigestsEqual(stepUpSubject(String(expect.subjectKey), record.audience), record.subject) ||
-                !hexDigestsEqual(sha256Hex(String(expect.nonce)), sha256Hex(claims.nonce))
+            : want.audience !== record.audience ||
+                !hexDigestsEqual(stepUpSubject(want.subjectKey, record.audience), record.subject) ||
+                !hexDigestsEqual(sha256Hex(want.nonce), sha256Hex(claims.nonce))
               ? "mismatch"
               : null;
       if (reason === null) {
