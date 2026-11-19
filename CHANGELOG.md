@@ -28,6 +28,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `confirmIntake` refuses a `confirmedBy` other than `voice` or `keypad` (`invalid_input`) before
+  anything is written, so no host value reaches the record or the ledger unchecked.
+
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

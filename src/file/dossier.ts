@@ -155,6 +155,9 @@ export async function setIntakeField(rt: EngineRuntime, callId: string, key: str
  */
 export async function confirmIntake(rt: EngineRuntime, callId: string, input: { confirmedBy: "voice" | "keypad" }): Promise<IntakeRecord> {
   rt.settings(DOSSIER);
+  // The host's value goes into the record and the ledger as it is: refused before anything is written.
+  const confirmedBy: unknown = (input as { confirmedBy?: unknown } | null | undefined)?.confirmedBy;
+  if (confirmedBy !== "voice" && confirmedBy !== "keypad") throw new EngineError("invalid_input", "confirmedBy must be voice or keypad");
   const reserved = await rt.update(callId, (draft): { record: IntakeRecord; filed: boolean } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     const intake = s.intake;

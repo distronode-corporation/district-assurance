@@ -259,6 +259,32 @@ describe("flows", () => {
     assert.deepEqual([record.formVersion, record.values], ["1", { issue: "leak" }]);
   });
 
+  it("refuses a confirmedBy other than voice or keypad before anything is written", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const before = (await t.sessions.get("ws_test", callId))!.version;
+    const entries = (await t.ledger.list()).length;
+    // What a host bug could pass through: a channel name, the caller's number, a name and a date of birth.
+    const hostile: unknown[] = ["sms", "", "Voice", " voice", 1, null, { toString: () => "voice" }, ["voice"], "\ud800", "a".repeat(10_000), PHONE_ON_FILE, `Jane Doe ${DOB}`];
+    for (const confirmedBy of hostile) {
+      await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy } as never), rejects("invalid_input", /confirmedBy/), String(confirmedBy));
+    }
+    await assert.rejects(t.engine.confirmIntake(callId, null as never), rejects("invalid_input"));
+    await assert.rejects(t.engine.confirmIntake(callId, undefined as never), rejects("invalid_input"));
+    assert.equal((await t.sessions.get("ws_test", callId))!.version, before, "no write");
+    assert.equal((await t.ledger.list()).length, entries, "no ledger entry");
+    // The call record holds the number on file (Badge's subject); the ledger never does.
+    const ledgerText = JSON.stringify(await t.ledger.list());
+    for (const value of [PHONE_ON_FILE, "Jane Doe", "sms"]) assert.equal(ledgerText.includes(value), false, value);
+    assert.equal(JSON.stringify((await t.sessions.get("ws_test", callId))!.record).includes("Jane Doe"), false);
+    assert.equal((await t.engine.confirmIntake(callId, { confirmedBy: "keypad" })).confirmedBy, "keypad");
+  });
+
   it("completes a receipt step at once, and abandons a running flow when the call ends", async () => {
     const t = setup({ config: flowConfig() });
     const { callId } = await t.engine.startCall({ flow: "receipt-first" });
