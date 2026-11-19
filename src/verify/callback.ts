@@ -240,7 +240,7 @@ export async function applyCallbackOutcome(rt: EngineRuntime, outcome: CallbackO
   });
   if (done === null) return { applied: false };
   if (done.passed) {
-    await forgetPass(rt.adapter("counters"), lockoutOf(rt.settings<BadgeSettings>(BADGE).lockout), done.keys, new Date(done.at));
+    await forgetPass(rt.adapter("counters"), done.keys, new Date(done.at));
     await rt.update(callId, (draft) => {
       draft.slice<BadgeSlice>(BADGE).callback.forgetPending = false;
     });

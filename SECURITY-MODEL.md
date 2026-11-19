@@ -61,9 +61,9 @@ two engines racing). A locked line answers `locked` even to the right PIN, on an
 engine, until the window passes or the business resets the counter (tested). A pass resets the
 subject's counter but takes only its own failure off the number's: a line's failures against other
 accounts stay through a pass on its own account, so alternating with that pass does not escape
-the lock per calling number (tested). Taking it off is a reset and a rewrite, not one atomic step,
-so a failure another call records on the same number in that instant may be lost.
-Without this, a
+the lock per calling number (tested). Taking it off is one atomic step of the store
+(`removeFailure`), so a failure another call records on the same number meanwhile is never lost
+(tested, two engines). Without this, a
 4-digit PIN with 3 attempts per call fell within about 3,300 calls; now an attacker gets at most
 10 guesses per subject per 24 hours, about 3,650 a year against 10,000 PINs, so a 4-digit PIN
 still needs watching (`verification.locked` in the ledger) and a longer PIN where the risk is

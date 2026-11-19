@@ -171,21 +171,13 @@ export function recordedAt(failures: readonly string[], at: string): string[] | 
 
 /**
  * After a pass whose failure was recorded at `at`: forgets the subject's failures, and takes only
- * this attempt's own failure off the number's. The number's other failures may be against other
- * accounts, so they stay until they leave the window. The store has no single-entry delete, so the
- * number's counter is reset and the rest written back, with their times; a failure another attempt
- * records in between may be lost, and the list may come back out of order (`lockState` sorts it).
+ * this attempt's own failure off the number's, in one atomic step of the store. The number's other
+ * failures may be against other accounts, so they stay until they leave the window, and so does
+ * any failure another call records while the pass is being forgotten.
  */
-export async function forgetPass(counters: AttemptCounters, lockout: Lockout, keys: readonly AttemptCounterKey[], at: Date): Promise<void> {
-  const since = windowStart(lockout, at);
+export async function forgetPass(counters: AttemptCounters, keys: readonly AttemptCounterKey[], at: Date): Promise<void> {
   for (const key of keys) {
-    if (key.scope === "subject") {
-      await counters.reset(key);
-      continue;
-    }
-    const failures = await counters.get(key, since);
-    const own = failures.lastIndexOf(at.toISOString());
-    await counters.reset(key);
-    for (const [i, time] of failures.entries()) if (i !== own) await counters.recordFailure(key, time, since);
+    if (key.scope === "subject") await counters.reset(key);
+    else await counters.removeFailure(key, at.toISOString());
   }
 }

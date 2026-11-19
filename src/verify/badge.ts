@@ -443,7 +443,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   });
   // Only once the result is accepted. The number keeps its failures but this attempt's own: they
   // may be against other accounts, so a pass on this one must not clear them.
-  if (passed) await forgetPass(counters, lockout, keys, at);
+  if (passed) await forgetPass(counters, keys, at);
   return { matched: passed, locked: !passed && (reserved.last || hard !== null) };
 }
 
