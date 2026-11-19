@@ -50,11 +50,16 @@ export function verifyTwilioSignature(input: TwilioSignatureInput): TwilioSignat
   return { ok: true };
 }
 
-/** Form parameters as Twilio signs them: sorted by name, then by value for a repeated name. */
+/**
+ * Form parameters as Twilio signs them: sorted by name, then by value for a repeated name. A pair
+ * sent twice with the same value is signed once, as Twilio's own libraries do.
+ */
 function sortedParams(body: string): string {
   const pairs = [...new URLSearchParams(body)];
   pairs.sort(([ak, av], [bk, bv]) => (ak === bk ? compare(av, bv) : compare(ak, bk)));
-  return pairs.map(([k, v]) => k + v).join("");
+  // Sorted, a pair sent twice sits next to itself.
+  const distinct = pairs.filter(([k, v], i) => i === 0 || k !== pairs[i - 1]![0] || v !== pairs[i - 1]![1]);
+  return distinct.map(([k, v]) => k + v).join("");
 }
 
 /** Case-sensitive code-unit order, as Twilio's own libraries sort. */
@@ -64,7 +69,8 @@ function compare(a: string, b: string): number {
 
 /**
  * The URL as given, and the same URL with the scheme's default port added or removed: Twilio may
- * sign either form, and its own libraries accept both. A URL with another port has one form.
+ * sign either form, and its own libraries accept both. A URL with another port is also tried with
+ * the port removed, since Twilio drops it when signing HTTPS voice callbacks.
  */
 function urlVariants(url: string): string[] {
   const m = /^(https?):\/\/([^/?#]+)(.*)$/s.exec(url);
@@ -75,7 +81,8 @@ function urlVariants(url: string): string[] {
   const port = scheme === "https" ? "443" : "80";
   if (authority.endsWith(`:${port}`)) return [url, `${scheme}://${authority.slice(0, -port.length - 1)}${rest}`];
   // An IPv6 host ends in `]`, so its colons never read as a port here.
-  if (/:\d+$/.test(authority)) return [url];
+  const other = /:\d+$/.exec(authority);
+  if (other !== null) return [url, `${scheme}://${authority.slice(0, other.index)}${rest}`];
   return [url, `${scheme}://${authority}:${port}${rest}`];
 }
 

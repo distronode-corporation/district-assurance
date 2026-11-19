@@ -129,18 +129,24 @@ describe("verifyTwilioSignature", () => {
     const body = "a=%2B2&A=%2B3&A=b&a=%2B1";
     assert.equal(twilio(TWILIO_URL, body, sig(TWILIO_TOKEN, `${TWILIO_URL}a+1a+2A+3Ab`)).ok, false, "a before A is not code-unit order");
     assert.equal(twilio(TWILIO_URL, body, sig(TWILIO_TOKEN, `${TWILIO_URL}A+3Aba+1a+2`)).ok, true);
-    assert.equal(twilio(TWILIO_URL, "b=1&a=1&a=1", sig(TWILIO_TOKEN, `${TWILIO_URL}a1a1b1`)).ok, true, "a pair sent twice is signed twice");
+    assert.equal(twilio(TWILIO_URL, "b=1&a=1&a=1", sig(TWILIO_TOKEN, `${TWILIO_URL}a1b1`)).ok, true, "a pair sent twice is signed once");
+    assert.equal(twilio(TWILIO_URL, "b=1&a=1&a=1", sig(TWILIO_TOKEN, `${TWILIO_URL}a1a1b1`)).ok, false);
+    assert.equal(twilio(TWILIO_URL, "a=2&a=1&a=2", sig(TWILIO_TOKEN, `${TWILIO_URL}a1a2`)).ok, true, "distinct values all stay");
   });
 
-  it("accepts the URL with or without the scheme's default port, never another port", () => {
+  it("accepts the URL with or without the scheme's default port, and without another port", () => {
     const body = twilioForm("+12349013030");
     const signed = (url: string) => sig(TWILIO_TOKEN, url + PARAMS);
     assert.equal(twilio("https://mycompany.com:443/myapp.php?foo=1&bar=2", body, "0/KCTR6DLpKmkAf8muzZqo1nDgQ=").ok, true);
     assert.equal(twilio(TWILIO_URL, body, signed("https://mycompany.com:443/myapp.php?foo=1&bar=2")).ok, true);
     assert.equal(twilio("http://example.test/hook", body, signed("http://example.test:80/hook")).ok, true);
     assert.equal(twilio("http://[::1]/hook", body, signed("http://[::1]:80/hook")).ok, true);
-    assert.equal(twilio("https://mycompany.com:8443/myapp.php?foo=1&bar=2", body, "0/KCTR6DLpKmkAf8muzZqo1nDgQ=").ok, false);
+    // Twilio drops a nondefault port when signing HTTPS voice callbacks; it never adds one.
+    assert.equal(twilio("https://mycompany.com:8443/myapp.php?foo=1&bar=2", body, "0/KCTR6DLpKmkAf8muzZqo1nDgQ=").ok, true);
     assert.equal(twilio("https://mycompany.com:8443/x", body, signed("https://mycompany.com:8443/x")).ok, true);
+    assert.equal(twilio("http://[::1]:8080/hook", body, signed("http://[::1]/hook")).ok, true);
+    assert.equal(twilio(TWILIO_URL, body, signed("https://mycompany.com:8443/myapp.php?foo=1&bar=2")).ok, false);
+    assert.equal(twilio("https://mycompany.com:8443/x", body, signed("https://mycompany.com:9443/x")).ok, false);
     assert.equal(twilio("/myapp.php", body, signed("/myapp.php")).ok, true, "a URL that is not http(s) is signed as given");
   });
 

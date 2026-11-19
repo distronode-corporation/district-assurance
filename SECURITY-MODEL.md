@@ -78,8 +78,10 @@ id once; the engine applies each identity session and each payment settlement on
 Telnyx signatures (Ed25519) cover the timestamp and are refused outside a 300-second window
 (tested). Twilio signatures (HMAC-SHA1, compared in constant time) cover the URL and the body but
 no timestamp, so a captured Twilio request verifies again when replayed; the reference server only
-acknowledges carrier webhooks today, and a host that acts on one must apply each request once (by
-its call or message id) itself (left to the host). An unsigned or wrongly signed carrier request is
+acknowledges carrier webhooks today, and a host that acts on one must apply each event once itself
+(left to the host). The identity is the event, not the call or message: one call sends several
+callbacks with the same call id, so a host keys on the carrier's event id where there is one, and
+on `CallSid` plus `SequenceNumber` for Twilio call-progress callbacks. An unsigned or wrongly signed carrier request is
 refused, and a carrier with no key configured refuses everything (tested).
 Identity links are single-use by the provider. Left to the host: whether keypad tones arrive as
 out-of-band events or as in-band audio on each carrier bridge, since in-band tones can be replayed

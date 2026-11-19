@@ -404,10 +404,13 @@ the currency's own decimals.
 `verifyTwilioSignature` follows Twilio's published scheme: the `X-Twilio-Signature` header is
 `base64(HMAC-SHA1(auth token, URL + parameters))`, where URL is the full URL Twilio requested,
 query included, and parameters are the form parameters of the raw body, sorted by name (then by
-value for a repeated name, in code-unit order) and written as name then value with no separator.
+value for a repeated name, in code-unit order; a name and value sent twice count once) and written
+as name then value with no separator.
 When the URL has a `bodySHA256` query parameter, the URL alone is signed and the hex SHA-256 of
 the raw body must equal it (`body_hash_mismatch` otherwise). The URL is tried as given and with the
-scheme's default port (443 or 80) added or removed; another port is never changed. The check
+scheme's default port (443 or 80) added or removed; a URL with another port is also tried with
+that port removed (Twilio drops it for HTTPS voice callbacks), and no port but the default is ever
+added. The check
 passes if any configured auth token matches. Refusals: `no_secret`, `missing_header`,
 `no_matching_signature`, `body_hash_mismatch`. The scheme has no timestamp.
 
