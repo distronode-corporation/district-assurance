@@ -47,10 +47,11 @@ enforces it.
 
 ## 2. The call record and the SessionStore
 
-A call is one JSON record: `{v: 1, state, locale, revision, flow, modules}`, where `state` is the
-session above, `revision` the FlowConfig revision the call started under, `flow` the cursor of the
-flow it runs (or null), and `modules` each enabled module's own part, created by its `initCall`
-when the call starts. A module turned on after a call started has no part in it and is refused on
+A call is one JSON record: `{v: 1, state, locale, revision, flow, modules, signals, stepUps,
+outbox}`, where `state` is the session above, `revision` the FlowConfig revision the call started
+under, `flow` the cursor of the flow it runs (or null), `modules` each enabled module's own part,
+created by its `initCall` when the call starts, `signals` the host signals raised on the call and
+`stepUps` the step-up rules already written to the ledger (section 4). A module turned on after a call started has no part in it and is refused on
 that call (`module_disabled`).
 
 The record lives in a `SessionStore`:
@@ -119,9 +120,29 @@ of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:
   contact; `entry.`, `access.`: access; `status.`, `intake.`: none), what an installed module's
   manifest declares (`scopes.classes`), and the policy's own `scopeClasses`. Money, contact and
   access are at least level 2; none is at least 0;
-- `maxKeypadAttemptsPerCall` outside 1 to 5.
+- `maxKeypadAttemptsPerCall` outside 1 to 5;
+- a `timeZone` that is not an IANA time zone, and a malformed step-up rule (below).
 
 It checks every part in one pass: a malformed part is reported and the others are still checked.
+
+**Step-up rules** (`stepUp`, VER-13) raise one scope's minimum for one request. A rule is `{name,
+scope, level}` plus exactly one condition:
+
+- `amountOverMinor: {<currency>: <minor units>}`: the amount the request moves is over the
+  threshold for its currency. A currency the rule does not list, or an amount not known, counts as
+  over. Money scopes only.
+- `localTime: {from: "HH:MM", to: "HH:MM"}`: the time of day in the policy's `timeZone` (required
+  with such a rule) is in the window, `from` included and `to` excluded; when `from` is later than
+  `to` the window runs past midnight (`18:00` to `08:00` is after hours).
+- `signal: <name>`: the host's code raised that signal on the call with `raiseSignal(callId,
+  name)`. A signal no rule uses is refused; a raised signal is never cleared for the rest of the
+  call (not by a new verification, a new subject or a config change).
+
+`validatePolicy` refuses a rule whose name is not snake_case or is repeated, whose scope the policy
+does not list, whose level is outside 1 to 3 or not above the scope's minimum (rules only raise, so
+no rule brings a level below a floor), with no condition or more than one, or with a malformed
+condition. A scope's minimum for a request is the highest of its own and the levels of the rules
+that hold (`raiseMinimum`).
 
 The default policy: level 1 is keypad knowledge; level 2 is keypad plus a trusted texted code, or
 keypad plus carrier identity match, or a PIN plus a texted code; level 3 is keypad plus photo ID.
@@ -134,9 +155,14 @@ Badge's settings turn factors on (`factors`, at least one), set the grant lifeti
 A factor that is off is refused at every entry point. A planned factor cannot be turned on.
 
 A **grant** carries the level, the scopes at or below it (narrowed to the verify step's `scopes`
-when the step lists them), and an expiry. `authorize(callId, scope)` is true only for a scope the
-policy lists, on a call that has not ended, whose minimum is 0 or whose grant includes it, has not
-expired, and has a level at or above the scope's minimum under the config in force now.
+when the step lists them), and an expiry. `authorize(callId, scope, amount?)` is true only for a
+scope the policy lists, on a call that has not ended, whose minimum is 0 or whose grant includes
+it, has not expired, and has a level at or above the scope's minimum under the config in force
+now, raised by the step-up rules that hold now (`amount` is `{amountMinor, currency}`; in a flow it
+defaults to the current step's). The steps' own checks (a payment, an intake, an outside module's
+step) use the same raised minimum, for the request's own amount, so a grant already issued is held
+to it. The first time a rule raises a minimum on a call, it is written to the ledger by name
+(`policy.step_up`), never with the amount, the time or the signal's cause; `authorize` writes then.
 
 Links go only to the subject's number on file, and only after a `keypad_knowledge` or `pin`
 factor passed since verification last started from nothing. A plug-in's pass does not unlock
@@ -183,7 +209,9 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   "version": 1,
   "revision": "2026-11-18.1",
   "policy": { "version": "...", "levels": [], "scopes": {}, "keypadFields": [], "maxKeypadAttemptsPerCall": 2,
-              "simSwapWindowHours": 72, "trustTextCodeWithoutCarrierCheck": false },
+              "simSwapWindowHours": 72, "trustTextCodeWithoutCarrierCheck": false,
+              "timeZone": "America/Toronto", "stepUp": [{ "name": "large_payment", "scope": "payment.request",
+              "level": 3, "amountOverMinor": { "cad": 50000 } }] },
   "modules": { "<name>": { "enabled": true, "settings": {} } },
   "flows": { "<name>": { "summary": "...", "steps": [{ "type": "<module>.<step>" }] } }
 }
@@ -201,7 +229,9 @@ unknown fields at every level, the policy's shape and then its rules against the
 factors, every module's switch and settings, every adapter an enabled module's settings need,
 every step's module (installed and on) and the step itself, and, walking each flow in order, that
 every step needing a scope comes after a `badge.verify` step whose level reaches that scope's
-minimum and whose `scopes`, if listed, include it. Cross-checks against a module's settings or the
+minimum and whose `scopes`, if listed, include it, and that a step whose amount is sure to trigger
+an amount rule on that scope (over the threshold, a currency the rule does not list, or no amount)
+comes after a `badge.verify` step that reaches the rule's level. Cross-checks against a module's settings or the
 policy are skipped when those did not validate (their own problems are reported). The engine
 refuses a config with any problem (`ConfigError`, code `invalid_input`, with `problems`).
 
@@ -245,7 +275,12 @@ it), a consent for another purpose. During a `badge.verify` step, only its facto
 the level. Once the flow has ended (completed, failed or abandoned), every step method is refused
 on that call, an identity outcome is ignored, and an outside module's `updateModule` is refused;
 grants the flow issued stand, and a payment link already sent can still settle. An outside
-module's step is held by the engine to the scope its manifest needs. A step whose module was
+module's step is held by the engine to the scope its manifest needs. A flow cannot branch to ask
+for more (ADR-14): a step whose scope step-up rules raise above the level the call's verification
+reached fails (`flow.failed` with `rules`, the rules' names). This is checked when the step is
+entered, when a signal is raised, and by the step's own work (`requestPayment`, `updateModule`),
+which then also throws `scope_denied` naming the rules. Asking for an extra factor mid-flow waits
+for FlowConfig version 2. A step whose module was
 removed while the call ran fails. `endCall` abandons a running
 flow (`flow.abandoned`). `flowPosition(callId)` returns `{flow, revision, status, index, step}`.
 
@@ -259,7 +294,7 @@ answer on file, a phone number, a link or card data.
 |---|---|
 | `call.started` | `locale`, `revision` |
 | `flow.started` | `flow`, `revision`, `steps` (count) |
-| `flow.step_completed` / `flow.failed` | `flow`, `step` (index), `type` |
+| `flow.step_completed` / `flow.failed` | `flow`, `step` (index), `type`; `flow.failed` adds `rules` when step-up rules failed it |
 | `flow.completed` | `flow`, `steps` |
 | `flow.abandoned` | `flow`, `step` |
 | `verification.started` | `subject`: `account` or `host` |
@@ -268,6 +303,8 @@ answer on file, a phone number, a link or card data.
 | `identity.link_sent` | none |
 | `verification.finished` | `level`, `methods`, `discounted` |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt` |
+| `signal.raised` | `signal` (the name the policy's rule uses) |
+| `policy.step_up` | `rule`, `scope`, `level`: once per rule per call, the first time it raises a minimum |
 | `session.tainted` | `source` |
 | `sensitive.opened` / `sensitive.closed` | `reason` / none |
 | `intake.started` | `formId`, `version` |
@@ -359,7 +396,8 @@ is refused when a step needs a form or a wording the call did not keep.
 
 ## 14. Payments
 
-`requestPayment` needs `payment.request`, a positive integer amount in minor units up to
+`requestPayment` needs `payment.request` at its minimum for the amount asked (step-up rules,
+section 4), a positive integer amount in minor units up to
 Paylink's `maxAmountMinor` (at most 1,000,000), a lower-case ISO 4217 currency, a 1 to 200
 character description and an `amountSource` (`intake_record`, `business_endpoint` or
 `price_list`). In a flow they come from the `paylink.request` step and the host passes none;

@@ -97,6 +97,22 @@ scope has a class (by its name, a module's manifest, or the policy's `scopeClass
 winning), money, contact and access are never below level 2, and a scope with no class is refused
 (tested). Level 2 and above need a factor that is not something the caller knows (tested).
 
+### A risky request on a verification made for a small one
+
+A caller verified for a small deposit asks for a large one, or the call runs after hours when no
+one would notice, or the host's own code sees something wrong mid-call. **Controls:** the policy's
+step-up rules raise a scope's minimum for the amount asked (a currency a rule does not list, or an
+amount not known, counts as over), the time of day in the business's time zone, or a signal the
+host's code raised (tested). `authorize` and every step's own check use the raised minimum, for a
+grant already issued too, so the grant does not carry over to the larger request (tested). A raised
+signal is never cleared on the call, by any API (tested). Rules only raise: `validatePolicy` refuses
+one whose level is not above its scope's minimum, so no rule lowers a floor (tested). A flow cannot
+branch, so a flow step whose raised minimum its verification did not reach fails, naming the rule,
+and `validateConfig` refuses a flow whose step amount is sure to trigger an amount rule above its
+verification (tested). The rule that applied is on the ledger by name, without the amount or the
+time (tested). Left to the host: when to raise a signal, and keeping its own cause of the signal
+out of the ledger (the engine writes the signal's name only).
+
 ### Config tampering
 
 Someone who can edit a workspace's FlowConfig. **Controls:** the engine refuses any config with a

@@ -16,7 +16,8 @@ import type { JsonValue } from "./canonical.ts";
 import type { Clock, IdGenerator } from "./clock.ts";
 import type { Actor, EngineEventName } from "./events.ts";
 import type { FlowStep } from "./module.ts";
-import type { VerificationPolicy } from "./policy.ts";
+import type { EngineError } from "./errors.ts";
+import type { StepUpAmount, VerificationPolicy } from "./policy.ts";
 import type { SessionEvent, SessionState } from "./session.ts";
 
 export type Locale = "en" | "fr";
@@ -62,6 +63,10 @@ export interface CallRecord {
   flow: FlowCursor | null;
   /** Each module's own part, by module name. */
   modules: Record<string, JsonValue>;
+  /** Signals the host's code raised on the call, for step-up rules. Raised, never cleared. */
+  signals: string[];
+  /** Step-up rules already written to the ledger for this call, by name. */
+  stepUps: string[];
   /** Ledger entries saved with a change and not yet known to be appended. */
   outbox: Array<{ eventId: string; name: EngineEventName; actor: Actor; at: string; detail: { [key: string]: JsonValue } }>;
 }
@@ -93,8 +98,15 @@ export interface EngineRuntime {
   /** One step: read the call, change it with `fn`, write it with compare-and-set, retrying from a fresh read on conflict. */
   update<R>(callId: string, fn: (draft: CallDraft) => R): Promise<R>;
   read(callId: string): Promise<CallRecord>;
-  /** Whether the call's grant covers a scope now. */
+  /** Whether the call's grant covers a scope now, at its minimum raised by the policy's step-up rules. */
   authorized(record: CallRecord, scope: string): boolean;
+  /**
+   * Holds a step's own work to a scope at the minimum the step-up rules raise it to for `amount`.
+   * Null when the grant covers it. When step-up rules are why it does not, the running flow fails
+   * naming them and the refusal is returned, to be thrown once the change is saved, so the ledger
+   * keeps both; any other refusal throws `scope_denied` at once.
+   */
+  requireScope(draft: CallDraft, scope: string, amount: StepUpAmount | undefined): EngineError | null;
   bindRef(ref: string, callId: string): Promise<void>;
   /** An idempotency key for a provider call, unique across workspaces and stable across retries. */
   idempotencyKey(callId: string, ...parts: string[]): string;

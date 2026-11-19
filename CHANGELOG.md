@@ -25,6 +25,10 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Risk-based step-up rules (VER-13): the policy's `stepUp` raises a scope's minimum on the amount, the
+  time of day in its `timeZone`, or a signal the host raises with `raiseSignal`; `authorize` and the
+  steps use the raised minimum, a flow step it lifts fails naming the rule, and `policy.step_up`
+  records the rule by name.
 
 ### Changed
 

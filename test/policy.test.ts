@@ -4,13 +4,16 @@ import { describe, it } from "node:test";
 import {
   defaultVerificationPolicy,
   evaluateAssurance,
+  raiseMinimum,
   scopeFloor,
   scopesForLevel,
+  stepAmount,
   textCodeTrusted,
   validatePolicy,
   type CarrierSignalReport,
   type FactorKind,
   type FactorResult,
+  type StepUpRule,
   type VerificationPolicy,
 } from "../src/core/policy.ts";
 
@@ -213,5 +216,137 @@ describe("scopesForLevel", () => {
     assert.deepEqual(scopesForLevel(p, 0), ["hours.read"]);
     assert.deepEqual(scopesForLevel(p, 2), ["hours.read", "payment.request", "status.read"]);
     assert.deepEqual(scopesForLevel(p, 3), ["contact.update", "hours.read", "payment.request", "status.read"]);
+  });
+});
+
+describe("validatePolicy: step-up rules", () => {
+  const rules = (stepUp: unknown, patch: Partial<VerificationPolicy> = {}) => validatePolicy({ ...policy({ timeZone: "America/Toronto", ...patch }), stepUp });
+
+  it("accepts a rule of each kind, each above its scope's minimum", () => {
+    const stepUp: StepUpRule[] = [
+      { name: "large_payment", scope: "payment.request", level: 3, amountOverMinor: { cad: 50000, usd: 40000 } },
+      { name: "after_hours", scope: "intake.file", level: 2, localTime: { from: "18:00", to: "08:00" } },
+      { name: "flagged", scope: "status.read", level: 3, signal: "fraud_suspected" },
+    ];
+    assert.deepEqual(rules(stepUp), []);
+  });
+
+  it("refuses a rule that does not raise, or whose level is outside 1 to 3", () => {
+    assert.deepEqual(
+      rules([
+        { name: "same", scope: "payment.request", level: 2, signal: "s" },
+        { name: "lower", scope: "contact.update", level: 1, signal: "s" },
+        { name: "four", scope: "status.read", level: 4, signal: "s" },
+        { name: "zero", scope: "status.read", level: 0, signal: "s" },
+      ]),
+      [
+        "stepUp same: level 2 does not raise payment.request above its minimum of 2; a rule only raises",
+        "stepUp lower: level 1 does not raise contact.update above its minimum of 3; a rule only raises",
+        "stepUp four: level must be 1, 2 or 3",
+        "stepUp zero: level must be 1, 2 or 3",
+      ],
+    );
+  });
+
+  it("refuses malformed rules, each problem in one pass", () => {
+    assert.deepEqual(rules("all of them"), ["stepUp must be a list of rules"]);
+    assert.deepEqual(
+      rules([
+        null,
+        { scope: "status.read", level: 2, signal: "s" },
+        { name: "twice", scope: "status.read", level: 2, signal: "s" },
+        { name: "twice", scope: "status.read", level: 2, signal: "s", extra: true },
+        { name: "nowhere", scope: "refund.issue", level: 3, signal: "s" },
+        { name: "none", scope: "status.read", level: 2 },
+        { name: "both", scope: "status.read", level: 2, signal: "s", localTime: { from: "18:00", to: "08:00" } },
+        { name: "bad_signal", scope: "status.read", level: 2, signal: "Not-Snake" },
+      ]),
+      [
+        "stepUp[0] must be { name, scope, level } and one of amountOverMinor, localTime or signal",
+        "stepUp[1]: name must be 1 to 64 of a-z, 0-9 and _, starting with a letter",
+        "stepUp twice is defined twice",
+        "stepUp twice: extra is not a step-up rule field",
+        "stepUp nowhere: scope must be a scope the policy lists",
+        "stepUp none: needs exactly one of amountOverMinor, localTime or signal",
+        "stepUp both: needs exactly one of amountOverMinor, localTime or signal",
+        "stepUp bad_signal: signal must be 1 to 64 of a-z, 0-9 and _, starting with a letter",
+      ],
+    );
+  });
+
+  it("refuses bad thresholds, and an amount rule on a scope that moves no money", () => {
+    assert.deepEqual(
+      rules([
+        { name: "empty", scope: "payment.request", level: 3, amountOverMinor: {} },
+        { name: "upper", scope: "payment.request", level: 3, amountOverMinor: { CAD: 100 } },
+        { name: "negative", scope: "payment.request", level: 3, amountOverMinor: { cad: -1 } },
+        { name: "list", scope: "payment.request", level: 3, amountOverMinor: [100] },
+        { name: "intake", scope: "intake.file", level: 2, amountOverMinor: { cad: 100 } },
+      ]),
+      [
+        "stepUp empty: amountOverMinor must map lower-case currency codes to whole amounts in minor units",
+        "stepUp upper: amountOverMinor must map lower-case currency codes to whole amounts in minor units",
+        "stepUp negative: amountOverMinor must map lower-case currency codes to whole amounts in minor units",
+        "stepUp list: amountOverMinor must map lower-case currency codes to whole amounts in minor units",
+        "stepUp intake: an amount rule applies only to a money scope",
+      ],
+    );
+  });
+
+  it("refuses bad windows, a time rule without a time zone, and a zone that does not exist", () => {
+    const window = (name: string, localTime: unknown) => ({ name, scope: "status.read", level: 2, localTime });
+    const bad = (name: string) => `stepUp ${name}: localTime must be { from: "HH:MM", to: "HH:MM" }, two different times`;
+    assert.deepEqual(
+      rules([window("same", { from: "18:00", to: "18:00" }), window("late", { from: "24:00", to: "08:00" }), window("days", { from: "18:00", to: "08:00", days: 5 }), window("word", "night")]),
+      [bad("same"), bad("late"), bad("days"), bad("word")],
+    );
+    assert.deepEqual(validatePolicy({ ...policy(), stepUp: [window("w", { from: "18:00", to: "08:00" })] }), ["stepUp w: a localTime rule needs the policy's timeZone"]);
+    assert.deepEqual(validatePolicy(policy({ timeZone: "Mars/Olympus_Mons" })), ["timeZone must be an IANA time zone, for example America/Toronto"]);
+    assert.deepEqual(validatePolicy({ ...policy(), timeZone: 5 }), ["timeZone must be an IANA time zone, for example America/Toronto"]);
+  });
+
+  it("checks rules against what it can when the scopes are malformed", () => {
+    const errors = validatePolicy({ ...policy({ timeZone: "UTC" }), scopes: null, stepUp: [{ name: "r", scope: "status.read", level: 2, signal: "s" }] });
+    assert.deepEqual(errors, ["scopes must map scope names to levels", "stepUp r: scope must be a scope the policy lists"]);
+  });
+});
+
+describe("raiseMinimum", () => {
+  const p = policy({
+    timeZone: "America/Toronto",
+    stepUp: [
+      { name: "large", scope: "payment.request", level: 3, amountOverMinor: { cad: 50000 } },
+      { name: "morning", scope: "status.read", level: 2, localTime: { from: "08:00", to: "12:00" } },
+      { name: "flagged", scope: "status.read", level: 3, signal: "flagged" },
+    ],
+  });
+  const noon = new Date("2026-01-01T17:00:00Z"); // 12:00 in Toronto
+
+  it("keeps the policy's minimum when no rule holds", () => {
+    assert.deepEqual(raiseMinimum(p, "payment.request", { amount: { amountMinor: 50000, currency: "cad" }, at: noon, signals: [] }), { level: 2, rules: [] });
+    assert.deepEqual(raiseMinimum(p, "status.read", { at: noon, signals: ["other"] }), { level: 1, rules: [] });
+    assert.deepEqual(raiseMinimum(policy(), "status.read", { at: noon, signals: [] }), { level: 1, rules: [] });
+  });
+
+  it("raises to the highest rule that holds, and names every one", () => {
+    assert.deepEqual(raiseMinimum(p, "payment.request", { amount: { amountMinor: 50001, currency: "cad" }, at: noon, signals: [] }), { level: 3, rules: [{ name: "large", level: 3 }] });
+    assert.equal(raiseMinimum(p, "payment.request", { at: noon, signals: [] }).level, 3, "an amount not known counts as over");
+    const morning = new Date("2026-01-01T16:59:00Z"); // 11:59 in Toronto
+    assert.deepEqual(raiseMinimum(p, "status.read", { at: morning, signals: ["flagged"] }), {
+      level: 3,
+      rules: [
+        { name: "morning", level: 2 },
+        { name: "flagged", level: 3 },
+      ],
+    });
+    const reversed = { ...p, stepUp: [...p.stepUp!].reverse() };
+    assert.equal(raiseMinimum(reversed, "status.read", { at: morning, signals: ["flagged"] }).level, 3, "in any order");
+  });
+
+  it("reads a step's amount only when it names one", () => {
+    assert.deepEqual(stepAmount({ type: "paylink.request", amountMinor: 100, currency: "cad" }), { amountMinor: 100, currency: "cad" });
+    assert.equal(stepAmount({ type: "paylink.request", amountMinor: 100 }), undefined);
+    assert.equal(stepAmount({ type: "badge.verify" }), undefined);
+    assert.equal(stepAmount(null), undefined);
   });
 });

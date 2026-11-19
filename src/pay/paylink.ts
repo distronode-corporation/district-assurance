@@ -4,7 +4,8 @@
 //
 // The link is reserved in one write (the call enters `paying`, so a second request is refused
 // everywhere), created and texted, then committed. A failed create settles it as failed; once a
-// link exists, only the provider settles it.
+// link exists, only the provider settles it. The `payment.request` scope is held to its minimum for
+// the amount asked, which the policy's step-up rules can raise (a large amount, after hours).
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
@@ -140,18 +141,21 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
   const settings = rt.settings<PaylinkSettings>(PAYLINK) ?? {};
   const reserved = await rt.update(callId, (draft) => {
     const step = stepOfType<PaylinkRequestStep>(draft.record, "paylink.request");
-    if (!rt.authorized(draft.record, "payment.request")) throw new EngineError("scope_denied", "the grant does not cover payment.request");
+    const last = draft.slice<PaylinkSlice>(PAYLINK).payments.at(-1);
+    const resuming = draft.record.state.phase === "paying" && last !== undefined && last.status === "open" && last.textedAt === null ? last : null;
+    const chosen: PaymentInput | undefined = step ?? input;
+    // The scope is held to its minimum for this amount: a step-up rule can raise it (VER-13).
+    const refused = rt.requireScope(draft, "payment.request", resuming ?? chosen);
+    if (refused !== null) return { refused };
     if (step !== null && input !== undefined) throw new EngineError("invalid_input", "the flow step sets the amount; pass no input");
     const subject = matchedSubject(draft.record);
     const where = { phone: subject.phoneOnFile, locale: draft.record.locale };
-    const last = draft.slice<PaylinkSlice>(PAYLINK).payments.at(-1);
-    if (draft.record.state.phase === "paying" && last !== undefined && last.status === "open" && last.textedAt === null) {
-      if (input !== undefined && (input.amountMinor !== last.amountMinor || input.currency !== last.currency)) {
+    if (resuming !== null) {
+      if (input !== undefined && (input.amountMinor !== resuming.amountMinor || input.currency !== resuming.currency)) {
         throw new EngineError("invalid_input", "a payment link is still being sent on this call; resume it with the same amount");
       }
-      return { request: last, ...where };
+      return { request: resuming, ...where };
     }
-    const chosen: PaymentInput | undefined = step ?? input;
     if (chosen === undefined) throw new EngineError("invalid_input", "outside a flow, the amount, currency, description and amountSource are required");
     const errors = requestErrors({ ...chosen }, settings.maxAmountMinor);
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
@@ -173,6 +177,7 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
     draft.slice<PaylinkSlice>(PAYLINK).payments.push(request);
     return { request, ...where };
   });
+  if ("refused" in reserved) throw reserved.refused;
   const { request } = reserved;
   const link = await rt.adapter("payments").createLink({
     callId,

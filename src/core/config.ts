@@ -7,7 +7,7 @@
 import type { JsonValue } from "./canonical.ts";
 import { EngineError } from "./errors.ts";
 import type { FlowStep, ModuleRegistry, StepContext } from "./module.ts";
-import { validatePolicy, type VerificationPolicy } from "./policy.ts";
+import { amountOver, stepAmount, validatePolicy, type VerificationPolicy } from "./policy.ts";
 import { isIntegerIn, isObject, unknownKeys } from "./shape.ts";
 
 export const FLOW_CONFIG_VERSION = 1;
@@ -153,9 +153,18 @@ export function validateConfig(config: unknown, registry: ModuleRegistry): strin
       const scope = owner.manifest.scopes.needs[type];
       if (scope !== undefined && policy !== null) {
         const min = policy.scopes[scope];
+        // A flow cannot branch to ask for more (ADR-14): a step whose amount is sure to raise its
+        // scope's minimum must come after a verification that reaches the raised level.
+        const amount = stepAmount(step);
+        const raisedBy = (policy.stepUp ?? []).filter((rule) => rule.scope === scope && rule.amountOverMinor !== undefined && rule.level > level && amountOver(rule.amountOverMinor, amount));
         if (min === undefined) problems.push(`${stepAt} (${type}): needs the scope ${scope}, which the policy does not list`);
         else if (min > level) problems.push(`${stepAt} (${type}): needs the scope ${scope} at level ${min}, but the flow has verified to level ${level} at this point`);
         else if (granted !== null && !granted.includes(scope)) problems.push(`${stepAt} (${type}): needs the scope ${scope}, which the last verification step does not grant`);
+        else {
+          for (const rule of raisedBy) {
+            problems.push(`${stepAt} (${type}): its amount triggers the step-up rule ${rule.name}, which raises ${scope} to level ${rule.level}, but the flow has verified to level ${level} at this point`);
+          }
+        }
       }
       const reached = owner.stepLevel?.(step as FlowStep) ?? null;
       if (reached !== null) {
