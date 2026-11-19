@@ -413,14 +413,22 @@ function paymentRef(payment: Pick<PaymentRequest, "connectedAccountId">, linkId:
   return payment.connectedAccountId === null ? `payment:${linkId}` : `payment:${JSON.stringify([payment.connectedAccountId, linkId])}`;
 }
 
-/** Asks the provider to expire a link, on the account the payment was taken on. */
-function expireAtProvider(rt: EngineRuntime, callId: string, payment: PaymentRequest, linkId: string): Promise<{ state: "expired" | "not_open" }> {
-  return rt.adapter("payments").expireLink({
+/**
+ * Asks the provider to expire a link, on the account the payment was taken on. Its answer goes into
+ * the ledger (`payment.link_expired`'s `provider`), so it is read once and must be one of its two
+ * answers: anything else ("paid", a phone number, nothing) is a provider fault, thrown like one
+ * that throws, and the payment stays open.
+ */
+async function expireAtProvider(rt: EngineRuntime, callId: string, payment: PaymentRequest, linkId: string): Promise<{ state: "expired" | "not_open" }> {
+  const answer: unknown = await rt.adapter("payments").expireLink({
     linkId,
     mode: payment.mode,
     ...(payment.connectedAccountId === null ? {} : { connectedAccountId: payment.connectedAccountId }),
     idempotencyKey: rt.idempotencyKey(callId, payment.paymentId, "expire", payment.mode),
   });
+  const state: unknown = typeof answer === "object" && answer !== null ? (answer as { state?: unknown }).state : undefined;
+  if (state !== "expired" && state !== "not_open") throw new EngineError("precondition_failed", "the payment provider answered neither expired nor not_open; the link is still open");
+  return { state };
 }
 
 function deadline(from: string, minutes: number): string {
