@@ -1,6 +1,6 @@
 // The second hostile pass on #124 (VER-12 "flag until cleared"), kept as regressions: the ledger's
-// event ids, the alert outbox and clearDuress. Each attack asserts the safe behaviour; the todo is a
-// reported design question, not a defect fixed here.
+// event ids, the alert outbox and clearDuress. Each attack asserts the safe behaviour; Z12 pins the
+// fail-closed behaviour Sean accepted for a clearing that races an alert's delivery.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
@@ -334,7 +334,10 @@ describe("#124 slot 1: clearDuress", () => {
     assert.deepEqual(await t.engine.submitPin(await call(t), PIN), { matched: true, locked: false });
   });
 
-  it("Z12 an alert in delivery while the business clears the subject never sets the flag again over the clearing", { todo: "design: AttemptCounters has no compare-and-set, so the delivery's clearings read and flag write race a clearDuress (fail closed: the business clears again)" }, async () => {
+  // Sean, 2026-11-19: accepted and documented. AttemptCounters has no compare-and-set, so a clearing
+  // that lands between a delivery's read of the clearings and its write of the flag is undone: the
+  // subject stays flagged (fail closed), and clearing again works.
+  it("Z12 a clearing that lands during an alert's delivery may be undone: the subject stays flagged, and a second clearing holds", async () => {
     class Holding extends MemoryAttemptCounters {
       hold: { gate: Promise<void>; reached: () => void } | null = null;
       override async get(key: AttemptCounterKey, since: string): Promise<string[]> {
@@ -367,6 +370,11 @@ describe("#124 slot 1: clearDuress", () => {
     const owner = await call(t);
     await t.engine.submitPin(owner, PIN);
     await t.engine.finishVerification(owner);
-    assert.equal(await t.engine.authorize(owner, "owner.command"), true, "cleared stays cleared");
+    assert.equal(await t.engine.authorize(owner, "owner.command"), false, "fail closed: still flagged");
+    await t.engine.clearDuress(OWNER, "member-7");
+    const again = await call(t);
+    await t.engine.submitPin(again, PIN);
+    await t.engine.finishVerification(again);
+    assert.equal(await t.engine.authorize(again, "owner.command"), true, "the second clearing holds");
   });
 });

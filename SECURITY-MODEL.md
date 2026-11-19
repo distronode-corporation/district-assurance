@@ -236,6 +236,12 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 
 - Authorizing the member behind `clearDuress` and `resetPin`: the engine takes the member id as
   given, so only the host's staff tools, after their own sign-in, may call them.
+- Repeating a `clearDuress` that raced an alert's delivery: the counters store has no
+  compare-and-set, so a clearing that lands while an earlier entry's alert is delivered may be
+  undone, leaving the subject flagged (fail closed) until the business clears it again (tested).
+- Accepting that the hidden counter shows in the hard lock: because a duress entry never clears
+  earlier wrong guesses, a caller who counts guesses can see the hard lock come sooner after a
+  duress entry than after a real pass; waits and answers are unchanged (a kept trade-off).
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
   speech-to-text and the model while `sensitive` is set.
 - Keeping the knowledge key and the receipt signing key in a key store.
