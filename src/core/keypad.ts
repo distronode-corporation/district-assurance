@@ -74,6 +74,9 @@ export class KeypadCollector<R = void> {
       throw new EngineError("invalid_input", `idleTimeoutMs must be an integer from 1 to ${MAX_KEYPAD_IDLE_MS}`);
     }
     if (typeof options.onDigits !== "function") throw new EngineError("invalid_input", "onDigits must be a function");
+    if (options.clock !== undefined && !(isObject(options.clock) && typeof options.clock.now === "function")) {
+      throw new EngineError("invalid_input", "clock must be an object with a now function");
+    }
     this.#maxDigits = options.maxDigits;
     this.#idleTimeoutMs = options.idleTimeoutMs;
     this.#onDigits = options.onDigits;
@@ -111,10 +114,13 @@ export class KeypadCollector<R = void> {
 
   /**
    * Discards an unfinished entry (or ends a discarded one) whose last tone is `idleTimeoutMs` old
-   * or older. True when it did.
+   * or older, or newer than now (a clock set back), so an entry never outlives its timeout. True
+   * when it did.
    */
   expire(): boolean {
-    if ((this.#digits === "" && !this.#discarding) || this.#clock.now().getTime() - this.#lastAt < this.#idleTimeoutMs) return false;
+    if (this.#digits === "" && !this.#discarding) return false;
+    const idle = this.#clock.now().getTime() - this.#lastAt;
+    if (idle >= 0 && idle < this.#idleTimeoutMs) return false;
     this.clear();
     return true;
   }

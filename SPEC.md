@@ -415,7 +415,7 @@ the currency's own decimals.
 `KeypadCollector` is a helper for the host's keypad path (INT-1): it buffers the tones of one entry
 outside the model and hands them to the engine. It is pure: no timers and no I/O, time from the
 injected clock. Options: `maxDigits` (1 to 32), `idleTimeoutMs` (1 to 600,000), `onDigits` (the one
-callback) and an optional `clock`; anything else is refused with `EngineError("invalid_input")`.
+callback) and an optional `clock` (an object with `now()`); anything else is refused with `EngineError("invalid_input")`.
 `press(tone)` returns a status and never a digit:
 
 | Tone | Status | Effect |
@@ -428,8 +428,9 @@ callback) and an optional `clock`; anything else is refused with `EngineError("i
 | `*` | `cleared` | the entry is discarded |
 | anything else (`A` to `D`, several characters, not a string) | `rejected` | the entry is discarded |
 
-Before each tone, an entry whose last tone is `idleTimeoutMs` old or older is discarded, and the
-result says `timedOut: true`; the tone is then taken as the first of a new entry. A discarded entry
+Before each tone, an entry whose last tone is `idleTimeoutMs` old or older, or later than now (a
+clock set back), is discarded, and the result says `timedOut: true`; the tone is then taken as the
+first of a new entry. A discarded entry
 (after `overflow` or `rejected`) lasts until `#` (`empty`), `*`, `clear()` or the idle timeout ends
 it, so no tail of it is ever submitted: with `maxDigits` 4, `123456#` submits nothing. `expire()` does
 the same from the host's own timer and says whether it discarded anything; `clear()` discards the
