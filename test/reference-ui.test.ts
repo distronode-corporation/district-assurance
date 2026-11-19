@@ -220,7 +220,7 @@ describe("reference UI: demo routes", () => {
 
   it("lists the demo's two flows with their steps", async () => {
     const { flows } = (await (await fetch(`${s.base}/demo/flows`)).json()) as { flows: Array<{ flow: string; summary: string; steps: string[] }> };
-    assert.deepEqual(flows.map((f) => [f.flow, f.steps.length]), [["owner-command", 6], ["deposit", 11]]);
+    assert.deepEqual(flows.map((f) => [f.flow, f.steps.length]), [["owner-command", 6], ["deposit", 12]]);
     assert.match(flows[1]!.summary, /deposit/);
     assert.equal((await fetch(`${s.base}/demo/flows`, { method: "POST", headers: json, body: "{}" })).status, 405);
   });
@@ -335,7 +335,7 @@ describe("reference UI: DemoRuns", () => {
       const runs = new DemoRuns(s.world);
       const a = await runs.start("deposit");
       const b = await runs.start("deposit");
-      const payAt = SCRIPTS.deposit.findIndex((step) => step.label.startsWith("pay:"));
+      const payAt = SCRIPTS.deposit.findIndex((step) => step.label.startsWith("pay: link"));
       for (let i = 0; i <= payAt; i++) {
         await runs.step(a.runId);
         await runs.step(b.runId);

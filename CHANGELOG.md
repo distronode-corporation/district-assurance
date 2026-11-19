@@ -34,6 +34,10 @@ All notable changes to this project are documented here. The format follows
 
 - Breaking: the `AmountSource` string type (`intake_record`, `business_endpoint`, `price_list`) is
   renamed `AmountSourceKind`, and `AmountSource` is now the adapter interface (PAY-2).
+- Breaking: `requestPayment` sends no link without a read-back the caller confirmed, for a fixed
+  amount too. A host that calls it directly calls `readBackPayment`, speaks the text, and calls
+  `confirmPaymentAmount` on the caller's yes first (PAY-2). The demo's deposit reads its amount
+  back before the link.
 
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.

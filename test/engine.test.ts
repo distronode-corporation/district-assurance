@@ -15,7 +15,7 @@ import { verifyReceipt } from "../src/prove/receipt.ts";
 import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../src/testing/index.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, confirmAmount, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
 describe("Engine construction", () => {
   it("refuses a short key, an empty workspace, a missing ledger and a bad config", () => {
@@ -475,6 +475,7 @@ describe("Engine pay", () => {
   it("texts a link to the number on file and settles only on paid", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     const { paymentId } = await t.engine.requestPayment(callId, request);
     const state = await t.engine.state(callId);
     assert.equal(state.phase, "paying");
@@ -497,6 +498,7 @@ describe("Engine pay", () => {
   it("settles a payment after the call ended without moving the session", async () => {
     const t = setup();
     const callId = await verifiedCall(t, "fr");
+    await confirmAmount(t.engine, callId, { ...request, amountMinor: 150, currency: "jpy" });
     await t.engine.requestPayment(callId, { ...request, amountMinor: 150, currency: "jpy" });
     assert.equal(t.messages.sent.at(-1)!.body, `Votre lien de paiement sécurisé pour ${formatAmount("fr", 150, "jpy")} : https://pay.example.test/c/cs_fake_1`);
     await t.engine.endCall(callId);
@@ -505,17 +507,19 @@ describe("Engine pay", () => {
     assert.equal((await t.engine.state(callId)).phase, "ended");
   });
 
-  it("refuses without the scope, without an amount, and refuses bad amounts and descriptions", async () => {
+  it("refuses without the scope, without an amount, and refuses bad amounts and descriptions at the read-back", async () => {
     const t = setup({ config: testConfig((c) => (c.modules.paylink = { settings: { maxAmountMinor: 10000 } })) });
     const { callId } = await t.engine.startCall();
     await assert.rejects(t.engine.requestPayment(callId, request), rejects("scope_denied"));
+    await assert.rejects(t.engine.readBackPayment(callId, request), rejects("scope_denied"));
     const verified = await verifiedCall(t);
-    await assert.rejects(t.engine.requestPayment(verified), rejects("invalid_input", /outside a flow/));
-    await assert.rejects(t.engine.requestPayment(verified, request), /above the limit/);
-    await assert.rejects(t.engine.requestPayment(verified, { ...request, amountMinor: 100, description: "  " }), /description/);
-    await assert.rejects(t.engine.requestPayment(verified, { ...request, amountMinor: 100, description: "x".repeat(201) }), /description/);
-    await assert.rejects(t.engine.requestPayment(verified, { ...request, amountMinor: 100, amountSource: "model" as never }), /amountSource/);
-    await assert.rejects(t.engine.requestPayment(verified, { ...request, amountMinor: "100" as never }), /amountMinor and currency are required/);
+    await assert.rejects(t.engine.readBackPayment(verified), rejects("invalid_input", /outside a flow/));
+    await assert.rejects(t.engine.requestPayment(verified), rejects("precondition_failed", /read back and confirmed before/));
+    await assert.rejects(t.engine.readBackPayment(verified, request), /above the limit/);
+    await assert.rejects(t.engine.readBackPayment(verified, { ...request, amountMinor: 100, description: "  " }), /description/);
+    await assert.rejects(t.engine.readBackPayment(verified, { ...request, amountMinor: 100, description: "x".repeat(201) }), /description/);
+    await assert.rejects(t.engine.readBackPayment(verified, { ...request, amountMinor: 100, amountSource: "model" as never }), /amountSource/);
+    await assert.rejects(t.engine.readBackPayment(verified, { ...request, amountMinor: "100" as never }), /amountMinor and currency are required/);
   });
 
   it("keeps a request open when creating or texting its link fails, and resumes it with the same keys", async () => {
@@ -525,6 +529,7 @@ describe("Engine pay", () => {
     t.payments.createLink = async () => {
       throw new Error("provider timed out");
     };
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /provider timed out/);
     assert.equal((await t.engine.state(callId)).phase, "paying", "the provider may have created it: not failed");
     t.payments.createLink = create;
@@ -541,6 +546,7 @@ describe("Engine pay", () => {
     await assert.rejects(t.engine.requestPayment(callId, request), rejects("invalid_transition"), "delivered: no second link");
     // A provider that settles while the text is on its way: the result says so.
     await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" });
+    await confirmAmount(t.engine, callId, request);
     t.messages.sendText = async (input) => {
       await t.engine.applyPaymentOutcome({ kind: "completed", linkId: t.payments.created.at(-1)!.linkId, paymentStatus: "paid" });
       return send(input);
@@ -554,6 +560,7 @@ describe("Engine pay", () => {
   it("runs paylink without settings, at the package's own limit", async () => {
     const t = setup({ config: testConfig((c) => (c.modules.paylink = {})) });
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, { ...request, amountMinor: 1_000_000 });
     assert.equal((await t.engine.requestPayment(callId, { ...request, amountMinor: 1_000_000 })).status, "open");
   });
 
@@ -593,6 +600,28 @@ describe("Engine pay: amounts from code, read back first (PAY-2)", () => {
     await t.engine.applyIdentityOutcome({ sessionId: t.identity.created.at(-1)!.sessionId, status: "verified" });
     await t.engine.finishVerification(callId);
   }
+
+  it("never texts a link the caller has not heard and confirmed, whether the amount is fixed or not", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /read back and confirmed before/), "a fixed amount from the host");
+    await assert.rejects(t.engine.requestPayment(callId), rejects("precondition_failed", /read back and confirmed before/), "no request at all");
+    const back = await t.engine.readBackPayment(callId, request);
+    await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /not confirmed/), "read back, not yet confirmed");
+    await t.engine.confirmPaymentAmount(callId, { digest: back.digest, confirmedBy: "voice" });
+    assert.equal((await t.engine.requestPayment(callId, request)).status, "open");
+    // A fixed amount in a flow step is read back too.
+    const f = setup({
+      config: testConfig((c) => {
+        c.flows = { pay: { steps: [{ type: "badge.verify", level: 3, factors: ["keypad_knowledge", "photo_id"], scopes: ["payment.request"] }, { type: "paylink.request", ...request }] } };
+      }),
+    });
+    const { callId: inFlow } = await f.engine.startCall({ flow: "pay" });
+    await verify(f, inFlow);
+    await assert.rejects(f.engine.requestPayment(inFlow), rejects("precondition_failed", /read back and confirmed before/), "the step's own fixed amount");
+    assert.deepEqual(f.payments.created, [], "no link was created");
+    assert.deepEqual(f.messages.sent.map((m) => m.purpose), ["identity_link"], "and none was texted");
+  });
 
   it("reads a fixed amount back and sends the link only for the amount the caller confirmed", async () => {
     const t = setup();
@@ -790,7 +819,9 @@ describe("Engine pay: amounts from code, read back first (PAY-2)", () => {
     delete record.modules.paylink.quote;
     assert.equal((await t.sessions.compareAndSet("ws_test", callId, stored.version, record as never)).ok, true);
     await assert.rejects(t.engine.confirmPaymentAmount(callId, { digest: "0".repeat(64), confirmedBy: "voice" }), rejects("precondition_failed", /no amount was read back/));
-    assert.deepEqual(await t.engine.requestPayment(callId, request), { paymentId: "pay_1", status: "open" }, "a fixed amount still goes without a read-back");
+    await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /read back and confirmed before/), "no read-back, no link, on an older call too");
+    await confirmAmount(t.engine, callId, request);
+    assert.deepEqual(await t.engine.requestPayment(callId, request), { paymentId: "pay_1", status: "open" }, "a read-back works on an older call");
   });
 
   it("resumes a referenced payment with the same amountRef", async () => {
@@ -903,6 +934,7 @@ describe("Engine prove", () => {
   it("never writes a keyed value, an answer on file or a phone number to the ledger", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, { amountMinor: 100, currency: "cad", description: "x", amountSource: "intake_record" });
     await t.engine.requestPayment(callId, { amountMinor: 100, currency: "cad", description: "x", amountSource: "intake_record" });
     await t.engine.endCall(callId);
     const ledgerText = JSON.stringify(await t.ledger.list());

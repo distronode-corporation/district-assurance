@@ -123,18 +123,17 @@ amount read back and confirmed before it, so the caller hears it again (tested).
 ### Wrong or surprise amounts
 
 A link for an amount the caller never agreed to: a mistyped price, a business endpoint that
-answers wrong, or a request changed between what was said and what was sent. **Controls:** an
-amount from the `AmountSource` adapter is checked like any amount (a positive integer, a lower-case
-currency, under the limit) and is never texted until code has read it back in the caller's
-language and the caller confirmed that exact read-back, bound by its digest (tested). Once an
-amount is read back on a call, the next link must be for that request and confirmed, and is for the
+answers wrong, or a request changed between what was said and what was sent. **Controls:** no
+link is texted, for a fixed amount or one from the `AmountSource` adapter, until code has read the
+amount back in the caller's language and the caller confirmed that exact read-back, bound by its
+digest (tested). An amount from the adapter is checked like any amount (a positive integer, a
+lower-case currency, under the limit). The link must be for the request read back and is for the
 amount the caller heard; a different request, a stale digest or an unconfirmed read-back is
 refused (tested). A read-back is bound to the subject the lookup was for: a lookup that finishes
 after another subject was matched is refused, and so is a link for a read-back made for another
 subject (tested). The ledger records the read-back and the confirmation, with the amount and the
 digest but never the reference. Left to the host: speaking the read-back as built, and taking the
-caller's yes by keypad or voice outside the model. A fixed amount in the config or the host's
-code can still be sent without a read-back.
+caller's yes by keypad or voice outside the model.
 
 ### Card data and PCI DSS scope
 

@@ -8,7 +8,7 @@ import { ConfigError, validateConfig, type FlowConfig } from "../src/core/config
 import type { AssuranceModule } from "../src/core/module.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { TEST_KNOWLEDGE_KEY } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, confirmAmount, rejects, setup, testConfig } from "./helpers.ts";
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const pay = { type: "paylink.request", amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" } as const;
@@ -152,6 +152,7 @@ describe("flows", () => {
         await assert.rejects(t.engine.requestPayment(callId), rejects("precondition_failed"));
         assert.equal(t.messages.sent.length, 0, "no link was texted");
       } else {
+        await confirmAmount(t.engine, callId);
         assert.equal((await t.engine.requestPayment(callId)).status, "open");
       }
     }
@@ -184,6 +185,7 @@ describe("flows", () => {
     await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
     assert.equal((await t.engine.flowPosition(callId))!.step!.type, "paylink.request");
     await assert.rejects(t.engine.requestPayment(callId, { amountMinor: 1, currency: "cad", description: "x", amountSource: "price_list" }), rejects("invalid_input", /flow step sets the amount/));
+    await confirmAmount(t.engine, callId);
     await t.engine.requestPayment(callId);
     assert.equal(t.payments.created[0]!.amountMinor, 15000);
     assert.equal((await t.engine.flowPosition(callId))!.step!.type, "paylink.request", "waits for the payment to settle");
@@ -219,6 +221,7 @@ describe("flows", () => {
     await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
     await assert.rejects(t.engine.recordConsent(callId, { purpose: "calls", answer: "yes" }), rejects("precondition_failed", /consent to texts/));
     await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await confirmAmount(t.engine, callId);
     await t.engine.requestPayment(callId);
     await t.engine.applyPaymentOutcome({ kind: "expired", linkId: "cs_fake_1" });
     assert.equal((await t.engine.flowPosition(callId))!.status, "failed");

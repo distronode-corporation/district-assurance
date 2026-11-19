@@ -3,9 +3,9 @@
 // `AmountSource` adapter resolves, so it is checked when the config is saved; outside a flow the
 // host's code passes it. Either way it never comes from the model.
 //
-// Before the link, code can read the amount back to the caller (`readBackPayment`) and the caller
-// confirms it (`confirmPaymentAmount`); for an amount resolved by the AmountSource this is
-// required. The link is reserved in one write (the call enters `paying`, so a second request is
+// Before every link, code reads the amount back to the caller (`readBackPayment`) and the caller
+// confirms it (`confirmPaymentAmount`), whether the amount is fixed or resolved by the
+// AmountSource; no link is sent without that. The link is reserved in one write (the call enters `paying`, so a second request is
 // refused everywhere), created and texted, then committed. Once a link exists, only the provider
 // settles it.
 import type { SubjectRecord } from "../core/adapters.ts";
@@ -262,28 +262,22 @@ export async function confirmPaymentAmount(rt: EngineRuntime, callId: string, in
 }
 
 /**
- * The amount a new link is for. A read-back on the call must be confirmed and match the request;
- * an amount from the AmountSource is never sent without one.
+ * The read-back a new link is for. Every link needs one, confirmed by the caller and made for this
+ * request and this subject, fixed amount or not: the caller hears every amount before it is sent.
  */
-function confirmedAmount(quote: AmountQuote | null, spec: PaymentInput | undefined, subject: SubjectRecord): FixedPaymentInput {
-  if (quote !== null) {
-    if (quote.subjectKey !== subject.subjectKey) throw new EngineError("precondition_failed", "the amount was read back for another subject; read it back again");
-    if (spec !== undefined && specKey(spec) !== quote.spec) throw new EngineError("precondition_failed", "this request is not the amount read back; read it back again");
-    if (quote.confirmedAt === null) throw new EngineError("precondition_failed", "the caller has not confirmed the amount read back");
-    return { amountMinor: quote.amountMinor, currency: quote.currency, description: quote.description, amountSource: quote.amountSource };
-  }
-  if (spec === undefined) throw new EngineError("invalid_input", OUTSIDE_A_FLOW);
-  if ((spec as Partial<ReferencedPaymentInput>).amountRef !== undefined) {
-    throw new EngineError("precondition_failed", "an amount from the amount source is read back and confirmed before the link is sent");
-  }
-  return spec as FixedPaymentInput;
+function confirmedQuote(quote: AmountQuote | null, spec: PaymentInput | undefined, subject: SubjectRecord): AmountQuote {
+  if (quote === null) throw new EngineError("precondition_failed", "the amount is read back and confirmed before the link is sent");
+  if (quote.subjectKey !== subject.subjectKey) throw new EngineError("precondition_failed", "the amount was read back for another subject; read it back again");
+  if (spec !== undefined && specKey(spec) !== quote.spec) throw new EngineError("precondition_failed", "this request is not the amount read back; read it back again");
+  if (quote.confirmedAt === null) throw new EngineError("precondition_failed", "the caller has not confirmed the amount read back");
+  return quote;
 }
 
 /**
  * Texts a hosted payment link to the number on file. In a flow, the step sets the amount and
  * `input` must be left out; outside one, the host's code passes it (`amountSource` says where from).
- * When an amount was read back on the call, the caller must have confirmed it and the link is for
- * exactly that amount; an `amountRef` always needs a confirmed read-back.
+ * Every link needs a read-back on the call (`readBackPayment`) that the caller confirmed
+ * (`confirmPaymentAmount`), for this request, and the link is for exactly that amount.
  *
  * The request is reserved first. If creating or texting the link fails, the request stays open
  * (a provider can create a link and still fail to answer), and calling `requestPayment` again
@@ -308,9 +302,11 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
       }
       return { request: last, ...where };
     }
-    const spec = step ?? input;
-    const quote = slice.quote ?? null;
-    const chosen = confirmedAmount(quote, spec, subject);
+    // A link already out (or a call not open) is refused as a transition, before the read-back.
+    draft.assertCan({ type: "payment_requested", paymentId: "next" });
+    // A call saved before PAY-2 has no quote field: the same as no read-back.
+    const quote = confirmedQuote(slice.quote ?? null, step ?? input, subject);
+    const chosen: FixedPaymentInput = { amountMinor: quote.amountMinor, currency: quote.currency, description: quote.description, amountSource: quote.amountSource };
     const errors = requestErrors({ ...chosen }, settings.maxAmountMinor);
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     slice.quote = null;
@@ -328,8 +324,8 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
       requestedAt: rt.now(),
       settledAt: null,
       textedAt: null,
-      // Without a spec, confirmedAmount used the read-back, so the quote is there.
-      requestKey: spec === undefined ? quote!.spec : specKey(spec),
+      // The request the read-back was made for (confirmedQuote held any request named to it).
+      requestKey: quote.spec,
     };
     draft.slice<PaylinkSlice>(PAYLINK).payments.push(request);
     return { request, ...where };

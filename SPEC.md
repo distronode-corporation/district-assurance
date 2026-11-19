@@ -361,7 +361,7 @@ is refused when a step needs a form or a wording the call did not keep.
 
 ## 14. Payments
 
-`requestPayment` needs `payment.request`, a positive integer amount in minor units up to
+`requestPayment` needs `payment.request`, a confirmed amount read-back (below), a positive integer amount in minor units up to
 Paylink's `maxAmountMinor` (at most 1,000,000), a lower-case ISO 4217 currency, a 1 to 200
 character description and an `amountSource` (`intake_record`, `business_endpoint` or
 `price_list`). In a flow they come from the `paylink.request` step and the host passes none;
@@ -404,12 +404,15 @@ recordIds})` returns `{amountMinor, currency}` or null. `source` is the step's `
   `confirmedBy` is `voice` or `keypad` and `digest` a string, else `invalid_input`, before
   anything is written. A digest that is not the last read-back's is refused
   (`precondition_failed`); confirming twice is harmless.
-- `requestPayment`: with a read-back on the call, the request must be the one read back (or none,
-  outside a flow) and confirmed, else `precondition_failed`, and the link is for the amount the
-  caller heard, checked again against the limit in force. An `amountRef` without a confirmed
-  read-back is always refused. A read-back for another subject than the one matched now is
-  refused. A fixed amount with no read-back on the call is sent as before. A request still being
-  sent resumes with no input, the same amount, or the same `amountRef` request it was made for.
+- `requestPayment`: every link needs a read-back on the call that the caller confirmed, whether
+  the amount is fixed (in the step or the host's code) or comes from an `amountRef`; without one
+  it is `precondition_failed` and nothing is created or texted. The request must be the one read
+  back (or none, outside a flow), and the link is for the amount the caller heard, checked again
+  against the limit in force. A read-back for another subject than the one matched now is
+  refused. A call with a link already out is refused as before (`invalid_transition`). A request
+  still being sent resumes with no input, the same amount, or the same `amountRef` request it was
+  made for, without a new read-back. A host that calls `requestPayment` directly therefore calls
+  `readBackPayment`, speaks the text, and calls `confirmPaymentAmount` on the caller's yes first.
 
 ## 15. Stripe webhooks
 

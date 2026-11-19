@@ -85,7 +85,8 @@ The demo runs `owner-command` first: the owner of a line keys a PIN, on two engi
 session store as two processes of a host would; one wrong PIN, then the right one, and a grant for
 owner commands only. Then `deposit`: a made-up caller is verified to level 2 by keypad and a
 carrier match, files a repair request, has a card number read aloud removed from the transcript,
-receives a payment link for the amount the flow sets, pays (a signed Stripe webhook), consents, and
+hears the amount the flow sets read back and confirms it, receives a payment link for that amount,
+pays (a signed Stripe webhook), consents, and
 the signed receipt and the key set are fetched from the server and checked (and a one-byte change
 fails). Nothing leaves the machine.
 

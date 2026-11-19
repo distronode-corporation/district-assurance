@@ -99,7 +99,9 @@ running flow moves on when the module's `stepStatus` says its step is complete.
    for 15 minutes by default. The flow moves on.
 5. Dossier: `startIntake(formId)`, `setIntakeField`, `confirmIntake` need `intake.file`; the
    record is stored through `RecordStore` and its digest goes to the ledger and the receipt.
-6. Paylink: `requestPayment` needs `payment.request`; in a flow the step sets the amount. The link
+6. Paylink: `readBackPayment` builds the amount line the host speaks and `confirmPaymentAmount`
+   records the caller's yes; `requestPayment` needs `payment.request` and that confirmation, for
+   every link, and in a flow the step sets the amount. The link
    is texted to the number on file, the call enters `paying`, and `applyPaymentOutcome` settles it
    only on `paid`. The flow moves on when it is paid, and fails when it failed or expired.
 7. Trace: `recordConsent(purpose)` fingerprints the configured wording and stores the answer.
