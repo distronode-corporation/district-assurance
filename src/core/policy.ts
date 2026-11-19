@@ -4,7 +4,7 @@
 // from them here, and a scope is allowed only when the level reaches the scope's minimum. Caller
 // ID is not a factor kind at all, so no policy can count it, and no factor plug-in may take a name
 // that means it (FORBIDDEN_FACTOR_KINDS).
-import { isIntegerIn, isObject, unknownKeys } from "./shape.ts";
+import { isIntegerIn, isObject, isStringArray, unknownKeys } from "./shape.ts";
 
 export type AssuranceLevel = 0 | 1 | 2 | 3;
 
@@ -74,6 +74,12 @@ export interface VerificationPolicy {
   /** When the carrier could not answer, whether a texted code still counts. Default policy: no. */
   trustTextCodeWithoutCarrierCheck: boolean;
   /**
+   * Where a texted code may go: E.164 country calling codes, digits only (`"1"`, `"33"`), or a
+   * longer prefix that narrows one (`"1204"`, one area code), matched against the number on file.
+   * Absent, no code is texted anywhere, and a `badge.verify` step that uses `text_code` is refused.
+   */
+  textCodeCountryCodes?: string[];
+  /**
    * The class of each scope whose name does not imply one (SCOPE_PREFIX_CLASSES), for example
    * `{ "owner.command": "none" }`. A scope with no class is refused, so a new money scope cannot
    * slip under the floor by its name. A class here can make a scope stricter, never looser.
@@ -127,6 +133,44 @@ export const NON_KNOWLEDGE_FACTORS: readonly string[] = ["text_code", "carrier_i
  * the carrier rule (`textCodeTrusted`).
  */
 export const NUMBER_POSSESSION_FACTORS: readonly string[] = ["text_code", "callback"];
+
+/** A destination prefix in `textCodeCountryCodes`: digits that start with an assigned country code. */
+const COUNTRY_CODE = /^[1-9][0-9]{0,5}$/;
+
+/**
+ * The country calling codes ITU-T has assigned to countries and geographic areas (ITU-T
+ * Recommendation E.164, "List of ITU-T Recommendation E.164 assigned country codes", the complement
+ * ITU publishes with its Operational Bulletin). Spare and withdrawn codes are left out, and so are
+ * the codes for global services (800, 808, 870, 878, 881, 882, 883, 888, 979, and the trial code
+ * 991), which no number on file for a person's country carries: a texted code is never sent to
+ * one. 379, reserved for Vatican City with no numbers issued under it, is left out too. The list
+ * is prefix-free, as E.164 requires.
+ *
+ * Checked 2026-11-19 against Google libphonenumber's country-code map, which tracks ITU-T E.164
+ * assignments; re-check when ITU assigns or withdraws a code.
+ */
+export const E164_COUNTRY_CODES: readonly string[] = [
+  "1", "7", "20", "27", "30", "31", "32", "33", "34", "36", "39", "40", "41", "43", "44", "45",
+  "46", "47", "48", "49", "51", "52", "53", "54", "55", "56", "57", "58", "60", "61", "62", "63",
+  "64", "65", "66", "81", "82", "84", "86", "90", "91", "92", "93", "94", "95", "98", "211", "212",
+  "213", "216", "218", "220", "221", "222", "223", "224", "225", "226", "227", "228", "229", "230",
+  "231", "232", "233", "234", "235", "236", "237", "238", "239", "240", "241", "242", "243", "244",
+  "245", "246", "247", "248", "249", "250", "251", "252", "253", "254", "255", "256", "257", "258",
+  "260", "261", "262", "263", "264", "265", "266", "267", "268", "269", "290", "291", "297", "298",
+  "299", "350", "351", "352", "353", "354", "355", "356", "357", "358", "359", "370", "371", "372",
+  "373", "374", "375", "376", "377", "378", "380", "381", "382", "383", "385", "386", "387",
+  "389", "420", "421", "423", "500", "501", "502", "503", "504", "505", "506", "507", "508", "509",
+  "590", "591", "592", "593", "594", "595", "596", "597", "598", "599", "670", "672", "673", "674",
+  "675", "676", "677", "678", "679", "680", "681", "682", "683", "685", "686", "687", "688", "689",
+  "690", "691", "692", "850", "852", "853", "855", "856", "880", "886", "960", "961", "962", "963",
+  "964", "965", "966", "967", "968", "970", "971", "972", "973", "974", "975", "976", "977", "992",
+  "993", "994", "995", "996", "998",
+];
+
+/** Whether a destination prefix starts with an assigned country code: "44" and "4420" do, "4" and "42" do not. */
+export function isAssignedCountryPrefix(prefix: string): boolean {
+  return COUNTRY_CODE.test(prefix) && E164_COUNTRY_CODES.some((code) => prefix.startsWith(code));
+}
 
 /** The policy's limit on keypad attempts per call, like the PIN's. */
 export const MAX_KEYPAD_ATTEMPTS = 5;
@@ -228,6 +272,14 @@ export function validatePolicy(
   if (p.spoken !== undefined) errors.push(...spokenErrors(p.spoken, Array.isArray(p.keypadFields) ? p.keypadFields : []));
   if (typeof p.simSwapWindowHours !== "number" || !(p.simSwapWindowHours > 0)) errors.push("simSwapWindowHours must be a positive number");
   if (typeof p.trustTextCodeWithoutCarrierCheck !== "boolean") errors.push("trustTextCodeWithoutCarrierCheck must be true or false");
+  const countries = p.textCodeCountryCodes;
+  if (countries !== undefined) {
+    if (!isStringArray(countries) || countries.length === 0 || !countries.every((c) => isAssignedCountryPrefix(c))) {
+      errors.push("textCodeCountryCodes must list assigned E.164 country calling codes (or longer prefixes of one), 1 to 6 digits without the +");
+    } else if (new Set(countries).size !== countries.length) {
+      errors.push("textCodeCountryCodes has duplicates");
+    }
+  }
   return errors;
 }
 

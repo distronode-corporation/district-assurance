@@ -12,10 +12,11 @@ import { AMOUNT_READBACK_TEXT } from "../src/pay/amount.ts";
 import { AMOUNT_REGION, PAYMENT_TEXT } from "../src/pay/paylink.ts";
 import { IDENTITY_TEXT } from "../src/verify/badge.ts";
 import { ACCESS_CODE_TEXT } from "../src/gate/codes.ts";
+import { TEXT_CODE_TEXT } from "../src/verify/text-code.ts";
 import { rejects, setup } from "./helpers.ts";
 
 /** Every catalog in src/, by its exported name. The source scan below fails when one is missing here. */
-const CATALOGS: Record<string, Record<string, unknown>> = { IDENTITY_TEXT, PAYMENT_TEXT, AMOUNT_READBACK_TEXT, AMOUNT_REGION, DIGIT_WORDS_BY_LOCALE, ACCESS_CODE_TEXT };
+const CATALOGS: Record<string, Record<string, unknown>> = { IDENTITY_TEXT, PAYMENT_TEXT, AMOUNT_READBACK_TEXT, AMOUNT_REGION, DIGIT_WORDS_BY_LOCALE, ACCESS_CODE_TEXT, TEXT_CODE_TEXT };
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {

@@ -13,6 +13,7 @@ import {
   FakePaymentLinks,
   FakePinVerifier,
   FixedClock,
+  MemoryCodeStore,
   MemoryAttemptCounters,
   MemoryRecordStore,
   SequentialIds,
@@ -41,6 +42,7 @@ export interface TestEngine {
    * that passes its own `adapters.access` inspects its own controllers, not this one.
    */
   door: FakeAccessController;
+  codes: MemoryCodeStore;
   counters: AttemptCounters;
   dialer: FakeCallbackDialer;
 }
@@ -67,6 +69,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     sessions: new MemorySessionStore() as SessionStore,
     pinVerifier: new FakePinVerifier(),
     door: new FakeAccessController(),
+    codes: new MemoryCodeStore(),
     counters: new MemoryAttemptCounters() as AttemptCounters,
     dialer: new FakeCallbackDialer(),
   };
@@ -80,6 +83,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     ledger: parts.ledger,
     sessions: parts.sessions,
     pinVerifier: parts.pinVerifier,
+    codes: parts.codes,
     counters: parts.counters,
     dialer: parts.dialer,
     signer: generateTestSigner(),

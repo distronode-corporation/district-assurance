@@ -9,6 +9,7 @@ import type {
   AuditLedger,
   CallbackDialer,
   CarrierSignals,
+  CodeStore,
   DuressNotifier,
   IdentityProvider,
   MessageSender,
@@ -63,6 +64,8 @@ export interface EngineAdapters {
   accessSigner?: ReceiptSigner;
   /** Signs web sign-in step-up tokens. Its own key (its own `kid`), not the receipt or access key. */
   stepUpSigner?: ReceiptSigner;
+  /** Send limits for texted codes, shared by every engine of the workspace. */
+  codes?: CodeStore;
   /** Failures across calls, shared by every engine of the workspace. Badge needs it when a factor the caller enters is on; a PIN reset clears the subject's PIN counters. */
   counters?: AttemptCounters;
   /** Places callbacks to the number on file. Badge needs it when the `callback` factor is on. */

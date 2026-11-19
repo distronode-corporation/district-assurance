@@ -5,7 +5,6 @@ import { describe, it } from "node:test";
 import type { PaymentLinks } from "../src/core/adapters.ts";
 import type { JsonValue } from "../src/core/canonical.ts";
 import { ConfigError } from "../src/core/config.ts";
-import { NotImplementedError } from "../src/core/errors.ts";
 import type { EngineEvent } from "../src/core/events.ts";
 import { defaultVerificationPolicy } from "../src/core/policy.ts";
 import { createEngine } from "../src/engine.ts";
@@ -395,13 +394,29 @@ describe("Engine verify", () => {
     assert.deepEqual(await t.engine.applyIdentityOutcome({ sessionId: texted, status: "verified" }), { applied: false }, "single use");
   });
 
-  it("has a planned texted code, refused before a match", async () => {
-    const t = setup();
+  it("texts no code before a keypad match, nor after a wrong entry or for an unknown account", async () => {
+    const t = setup({ config: testConfig((c) => {
+      c.modules.badge = { settings: { factors: ["keypad_knowledge", "text_code"] } };
+      c.policy.textCodeCountryCodes = ["1"];
+    }) });
     const { callId } = await t.engine.startCall();
+    await assert.rejects(t.engine.sendTextCode(callId), rejects("precondition_failed"), "before verification");
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
-    await assert.rejects(t.engine.sendTextCode(callId), rejects("precondition_failed"));
-    await t.engine.submitKeypad(callId, { dob: DOB });
-    await assert.rejects(t.engine.sendTextCode(callId), (e: unknown) => e instanceof NotImplementedError && e.issue === "VER-2");
+    await assert.rejects(t.engine.sendTextCode(callId), rejects("precondition_failed"), "before any entry");
+    await t.engine.submitKeypad(callId, { dob: "19000101" });
+    await assert.rejects(t.engine.sendTextCode(callId), rejects("precondition_failed"), "after a wrong entry");
+    const other = await t.engine.startCall();
+    await t.engine.beginVerification(other.callId, { accountNumber: "99999999" });
+    await t.engine.submitKeypad(other.callId, { dob: DOB });
+    await assert.rejects(t.engine.sendTextCode(other.callId), rejects("precondition_failed"), "unknown account");
+    assert.equal(t.messages.sent.length, 0);
+    // Past the wait VER-1 puts after the wrong entry.
+    waitOut(t);
+    assert.equal((await t.engine.submitKeypad(callId, { dob: DOB })).matched, true);
+    assert.deepEqual(await t.engine.sendTextCode(callId), { sent: true });
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(t.messages.sent.length, 1);
+    assert.deepEqual({ to: t.messages.sent[0]!.to, purpose: t.messages.sent[0]!.purpose }, { to: PHONE_ON_FILE, purpose: "one_time_code" });
   });
 
   it("refuses factors that are turned off, and entries for factors the caller does not enter", async () => {

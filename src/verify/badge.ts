@@ -6,7 +6,7 @@
 // sent, so two processes running the same call can never get two attempts or two links for one.
 import type { AttemptCounterKey, SubjectRecord } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
-import { EngineError, NotImplementedError } from "../core/errors.ts";
+import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import { isStepLevel } from "../core/config.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
@@ -40,6 +40,7 @@ import {
 import { counterKeys, currentLock, isCallingNumber, lockoutOf, lockoutSettingsErrors, forgetPass, recordFailures, type Lock } from "./counters.ts";
 import { clearsSoFar, duressClearedData, duressFlagKey, flagDuress, hiddenCounterKey, hiddenHardLock, hiddenWindowStart, isUnderDuress, recordClear } from "./duress-flag.ts";
 import { isKeypadEntry } from "./knowledge.ts";
+import type { TextCodeState } from "./text-code.ts";
 
 export const BADGE = "badge";
 
@@ -55,7 +56,7 @@ export interface BadgeVerifyStep extends FlowStep {
 export interface BadgeSlice {
   subjectKey: string | null;
   subject: SubjectRecord | null;
-  /** The keyed hash of the calling number the host gave, for the counters across calls; null without one. */
+  /** The keyed hash of the calling number the host gave, for the counters and the send limits across calls; null without one. */
   numberKey: string | null;
   /** Judged attempts per factor kind on this call. */
   attempts: Record<string, number>;
@@ -88,10 +89,17 @@ export interface BadgeSlice {
    * A reserved or sent link resumes with the same idempotency keys after a failure.
    */
   identityLink: "none" | "reserved" | "sent" | "texted" | "void";
-  /** Goes up on every beginVerification, so a result judged for an earlier one is never applied. */
+  /** Goes up on every beginVerification and every taint, so a result judged before either is never applied. */
   epoch: number;
   /** Identity sessions whose outcome may still count. */
   identitySessions: string[];
+  /** The texted code this call holds: null before any send, and after a taint or a change of subject. */
+  textCode: TextCodeState | null;
+  /**
+   * A texted code's send whose ledger entry is not written yet (VER-2): the call does not end until
+   * it is, or until `until` passes, so no send's entry follows the receipt. Absent otherwise.
+   */
+  textSend?: { sendId: string; until: string };
   /** How many verifications finished on this call, and the last one's level and counted methods. */
   finished: number;
   lastLevel: AssuranceLevel;
@@ -265,6 +273,9 @@ export class BadgeModule implements AssuranceModule {
       const level = step.level;
       const reachable = ctx.policy.levels.some((rule) => rule.level >= level && rule.anyOf.some((set) => set.every((k) => factors.includes(k))));
       if (!reachable) errors.push(`level ${level} cannot be reached with [${factors.join(", ")}] under the policy`);
+      if (factors.includes("text_code") && ctx.policy.textCodeCountryCodes === undefined) {
+        errors.push("factor text_code needs the policy's textCodeCountryCodes, or no code is ever texted");
+      }
     }
     return errors;
   }
@@ -300,6 +311,7 @@ export class BadgeModule implements AssuranceModule {
       identityLink: "none",
       epoch: 0,
       identitySessions: [],
+      textCode: null,
       finished: 0,
       lastLevel: 0,
       lastMethods: [],
@@ -313,6 +325,11 @@ export class BadgeModule implements AssuranceModule {
     return (s as unknown as BadgeSlice).finished;
   }
 
+  blocksEnd(s: JsonValue, now: Date): string | null {
+    const send = (s as unknown as BadgeSlice).textSend;
+    return send !== undefined && now.getTime() < Date.parse(send.until) ? "a texted code is still being sent; end the call once it is sent" : null;
+  }
+
   stepStatus(step: FlowStep, view: StepView): StepStatus {
     const s = view.slice as unknown as BadgeSlice;
     if (s.finished <= (view.mark as number)) return "pending";
@@ -320,11 +337,13 @@ export class BadgeModule implements AssuranceModule {
   }
 
   onUntrusted(s: JsonValue): JsonValue {
-    // A photo ID link sent before the taint no longer counts, nor does a callback still ringing. One link per call still holds.
-    // The verification open now (or the last one) is void: it never grants a level. The next
-    // beginVerification bumps the epoch, so a new verification counts as usual.
+    // A photo ID link or a texted code sent before the taint no longer counts, nor does a callback
+    // still ringing. One link per call still holds. The epoch moves on too, so a result or a send
+    // decided before the taint is not applied after it, and the verification open now (or the last
+    // one) is void: it never grants a level. The next beginVerification moves it on again, so a new
+    // verification counts as usual.
     const badge = s as unknown as BadgeSlice;
-    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink), callback: voidedCallback(badge.callback), voidedEpoch: badge.epoch } as unknown as JsonValue;
+    return { ...badge, epoch: badge.epoch + 1, identitySessions: [], identityLink: voided(badge.identityLink), textCode: null, callback: voidedCallback(badge.callback), voidedEpoch: badge.epoch + 1 } as unknown as JsonValue;
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
@@ -355,7 +374,7 @@ function voidedCallback(callback: CallbackState): CallbackState {
 }
 
 /** Refuses to apply a result judged for an earlier verification of this call. */
-function assertSameVerification(s: BadgeSlice, epoch: number): void {
+export function assertSameVerification(s: BadgeSlice, epoch: number): void {
   if (s.epoch !== epoch) throw new EngineError("precondition_failed", "verification restarted while this result was on its way; it does not count");
 }
 
@@ -460,6 +479,7 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
       s.identitySessions = [];
       s.identityLink = voided(s.identityLink);
       s.callback = voidedCallback(s.callback);
+      s.textCode = null;
     }
     if (draft.record.state.factors.length === 0) {
       s.knowledgeMatched = false;
@@ -714,12 +734,6 @@ export async function checkCarrier(rt: EngineRuntime, callId: string): Promise<{
     draft.emit("verification.carrier_checked", "code", { checked: report.checked, textCodeTrusted: trusted, identityMatch: report.identityMatch });
   });
   return { textCodeTrusted: trusted };
-}
-
-/** The texted one-time code. Planned (VER-2): limits per subject and per number come first. */
-export async function sendTextCode(rt: EngineRuntime, callId: string): Promise<never> {
-  matchedSubject(await rt.read(callId));
-  throw new NotImplementedError("Engine.sendTextCode", "VER-2");
 }
 
 /**

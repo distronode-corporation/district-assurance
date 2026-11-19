@@ -44,6 +44,7 @@ import { pinTag, type BadgeSettings, type FactorEntry, type FactorPlugin, type P
 import { clearsSoFar, duressFlagKey, flagDuress } from "./verify/duress-flag.ts";
 import { knowledgeHmac, type KnowledgeHmac, type KnowledgeKey } from "./verify/knowledge.ts";
 import * as pin from "./verify/pin.ts";
+import * as textCode from "./verify/text-code.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
 export { SUPPORTED_LOCALES, isSupportedLocale } from "./core/runtime.ts";
@@ -604,8 +605,17 @@ export class Engine {
     return { subjectKey: subject.subjectKey, phoneOnFile: subject.phoneOnFile, locale: record.locale };
   }
 
-  sendTextCode(callId: string): Promise<never> {
-    return badge.sendTextCode(this.#rt, callId);
+  /**
+   * Texts a one-time code to the number on file, after a keypad or PIN match. Always `{ sent: true }`:
+   * a send refused by the country allow-list or a limit looks the same, so the host speaks one line.
+   */
+  sendTextCode(callId: string): Promise<{ sent: true }> {
+    return textCode.sendTextCode(this.#rt, callId);
+  }
+
+  /** Judges a texted code and records a `text_code` factor. 5 tries per code, 10 minutes, used once. */
+  checkTextCode(callId: string, code: string): Promise<badge.KeypadResult> {
+    return textCode.checkTextCode(this.#rt, callId, code);
   }
 
   startPhotoId(callId: string): Promise<{ sent: true }> {
@@ -866,7 +876,7 @@ export class Engine {
       const guards = [...this.#receiptModules, ...this.registry.list().filter((m) => !this.#receiptModules.includes(m))];
       for (const module of guards) {
         const slice = draft.record.modules[module.manifest.name];
-        const reason = slice === undefined ? null : (module.blocksEnd?.(slice) ?? null);
+        const reason = slice === undefined ? null : (module.blocksEnd?.(slice, this.#clock.now()) ?? null);
         if (reason !== null) throw new EngineError("precondition_failed", `the call cannot end yet: ${reason}`);
       }
       // Refused while a signed grant may still be acted on at its door; a grant reserved but not yet

@@ -60,8 +60,7 @@ All notable changes to this project are documented here. The format follows
   code for an access grant to the number on file instead of working a door; codes kept only as
   keyed hashes (`AccessCodeStore`, `MemoryAccessCodeStore`), redeemed once within the grant's
   lifetime for the signed grant, revocable; texts counted against VER-2's per-subject limit in its
-  `CodeStore` (`CodeStore`, `CodeSendKey` and `MemoryCodeStore` are a stand-in copy of VER-2's
-  shape until it lands); `Engine.numberOnFile`.
+  `CodeStore`; `Engine.numberOnFile`.
 - Paylink's two modes (PAY-7), `connect` and `platform`, per flow step; `linkLifeMinutes` (5 to 60,
   default 15) with the engine expiring links itself (`expirePaymentLinks`, `PaymentLinks.expireLink`);
   an allow-list of instant payment methods (card, Apple Pay, Google Pay, Link). Outcomes from
@@ -84,6 +83,10 @@ All notable changes to this project are documented here. The format follows
   only, live and restricted keys refused). The payment is read back from Stripe; Gate's grant goes
   to the example door relay; the call ends with a receipt the page verifies.
 
+- Texted one-time codes (VER-2): `Engine.sendTextCode` and `Engine.checkTextCode`, the `text_code`
+  factor in Badge's settings, a `CodeStore` adapter (`MemoryCodeStore`, `codeStoreContract`) for
+  send limits per subject and per calling number, and `textCodeCountryCodes` in the policy; a
+  refused send answers like a sent one.
 - The modular core. A module registry and module interface (what a module provides, the scopes it
   grants or needs, the adapters it requires, its settings validator); Badge, Dossier, Paylink and
   Trace as modules, switched on and off per workspace config; outside modules with `engine.use`.

@@ -18,7 +18,7 @@ function hole(): unknown[] {
   return list;
 }
 
-const ALL_ADAPTERS = ["ledger", "sessions", "records", "identity", "carrier", "messages", "payments", "signer", "pinVerifier", "counters"];
+const ALL_ADAPTERS = ["ledger", "sessions", "records", "identity", "carrier", "messages", "payments", "signer", "pinVerifier", "counters", "codes"];
 
 function registry(adapters: readonly string[] = ALL_ADAPTERS, extra: AssuranceModule[] = []): ModuleRegistry {
   return new ModuleRegistry({ adapters, modules: [...builtInModules(), ...extra] });
@@ -167,7 +167,6 @@ describe("validateConfig: modules", () => {
     assert.deepEqual(at({ factors: ["pin", "pin", "caller_id", "text_code", "spoken_knowledge"], grantTtlSeconds: 0 }), [
       "modules.badge.settings: factors has duplicates",
       "modules.badge.settings: factor caller_id is not installed",
-      "modules.badge.settings: factor text_code is not built yet (VER-2)",
       "modules.badge.settings: pin settings are required when the pin factor is on",
       "modules.badge.settings: grantTtlSeconds must be an integer from 1 to 3600",
     ]);
@@ -354,7 +353,19 @@ describe("validateConfig: flows", () => {
     assert.deepEqual(step({ level: 2, factors: ["pin", "pin", "text_code"] }), [
       "flows.f.steps[0] (badge.verify): factors has duplicates",
       "flows.f.steps[0] (badge.verify): factor text_code is turned off in the badge settings",
+      "flows.f.steps[0] (badge.verify): factor text_code needs the policy's textCodeCountryCodes, or no code is ever texted",
     ]);
+    const withCodes = (countries: string[] | undefined) =>
+      validateConfig(
+        config((c) => {
+          c.modules.badge.settings.factors.push("text_code");
+          if (countries !== undefined) c.policy.textCodeCountryCodes = countries;
+          c.flows = { f: { steps: [{ type: "badge.verify", level: 2, factors: ["keypad_knowledge", "text_code"] }] } };
+        }),
+        registry(),
+      );
+    assert.deepEqual(withCodes(["1", "33"]), []);
+    assert.deepEqual(withCodes(undefined), ["flows.f.steps[0] (badge.verify): factor text_code needs the policy's textCodeCountryCodes, or no code is ever texted"]);
     assert.deepEqual(step({ level: 3, factors: ["keypad_knowledge", "carrier_identity_match"] }), [
       "flows.f.steps[0] (badge.verify): level 3 cannot be reached with [keypad_knowledge, carrier_identity_match] under the policy",
     ]);

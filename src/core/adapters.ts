@@ -111,10 +111,10 @@ export interface CodeSendKey {
 
 /**
  * The send limits for texted codes, across calls: every engine of a workspace shares one, as they
- * share the SessionStore. It holds only when codes were sent, per subject and per calling number,
- * never a code. `MemoryCodeStore` in `district-assurance/testing` is the reference. A stand-in
- * copy of VER-2's interface (#79) for one-time access codes, until VER-2 lands with its contract
- * suite.
+ * share the SessionStore. The codes themselves live in the call record; this holds only when codes
+ * were sent, per subject and per calling number. `codeStoreContract` in
+ * `district-assurance/testing` is the suite a durable one must pass; `MemoryCodeStore` is the
+ * reference.
  */
 export interface CodeStore {
   /**

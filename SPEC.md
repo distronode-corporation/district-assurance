@@ -98,7 +98,7 @@ module the config has on.
 
 | Built-in | Steps | Needs | Adapters |
 |---|---|---|---|
-| `badge` | `badge.verify` | | `records`; `counters` with any factor the caller enters (`keypad_knowledge`, `pin`, plug-ins); `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `dialer`, `counters` with `callback`; `pinVerifier` with `pin` in verifier mode; `duressNotifier` with `pin.duress` |
+| `badge` | `badge.verify` | | `records`; `counters` with any factor the caller enters (`keypad_knowledge`, `pin`, plug-ins); `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `messages`, `codes` with `text_code`; `dialer`, `counters` with `callback`; `pinVerifier` with `pin` in verifier mode; `duressNotifier` with `pin.duress` |
 | `dossier` | `dossier.collect` | `intake.file` | `records` |
 | `paylink` | `paylink.request` | `payment.request` | `payments`, `messages`; `amounts` for a step with `amountRef` |
 | `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
@@ -124,7 +124,7 @@ for (an access grant's) are the engine's own (ADR-25).
 ## 4. Factors, levels and scopes
 
 Built-in factor kinds: `keypad_knowledge`, `pin`, `carrier_identity_match`, `photo_id`,
-`spoken_knowledge` (section 5), `callback` (section 6) and `text_code` (planned, VER-2). A
+`spoken_knowledge` (section 5), `callback` (section 6) and `text_code` (section 4, below). A
 **factor plug-in** adds a
 kind the caller enters and code judges: `{kind, summary, maxAttemptsPerCall (1 to 5), adapters,
 judge}`, installed with `badgeModule({ factors })`. Its kind is snake_case, 3 to 32 characters, not
@@ -154,6 +154,12 @@ of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:
   `us_zip_code` or `reference`, none of them a keypad field, and `maxAttemptsPerCall` is 1 to 5.
   So a spoken answer counts on its own only at level 1; above it, the rules above need another
   factor, and one that is not knowledge.
+- a `textCodeCountryCodes` that is not a list of distinct E.164 country calling codes (1 to 6
+  digits, no `+`), each starting with a country code ITU-T has assigned to a country or geographic
+  area (`E164_COUNTRY_CODES`; `"4"` and `"42"` are refused, `"44"` and `"4420"` accepted; spare
+  and withdrawn codes are not in it). The global-service codes 800, 808, 870, 878, 881, 882, 883,
+  888 and 979 (and the trial code 991) are always refused, and so is any longer prefix of one: no
+  texted code goes to a global-service number.
 
 It checks every part in one pass: a malformed part is reported and the others are still checked.
 
@@ -186,6 +192,46 @@ scope in the duress `refuseScopes`.
 Links and callbacks go only to the subject's number on file, and only after a `keypad_knowledge`
 or `pin` factor passed since verification last started from nothing. A plug-in's pass does not
 unlock texts or callbacks.
+
+**Texted codes** (`text_code`, needs the `messages` and `codes` adapters).
+`sendTextCode(callId)` needs the factor on (and listed by the current `badge.verify` step), a
+keypad or PIN match as above, and a call that is verifying. It sends only when, in order:
+
+1. the number on file starts with `+` and one of the policy's `textCodeCountryCodes` (a country
+   calling code such as `1` or `33`, or a longer prefix such as `1204`); without the list, nowhere;
+2. the `CodeStore` counts the send against the subject: at most 5 in 24 hours, and none in the 60
+   seconds before (`TEXT_CODE_LIMITS`);
+3. when the host gave a calling number to `beginVerification` (`callingNumber`, E.164; left out
+   when withheld), the `CodeStore` counts it against that number, kept as
+   `HMAC-SHA256(knowledgeKey, "number:" + number)`: at most 10 in 24 hours, none in 60 seconds.
+
+Both counts are always asked: a send the subject's limit refuses at step 2 is still counted against
+the calling number's limit at step 3, and a send counted at step 2 stays counted when step 3
+refuses it, or when the text fails. A send is
+6 random digits, kept in the call record only as `HMAC-SHA256(knowledgeKey, "text_code:" + callId
++ ":" + code)`, valid for 10 minutes and 5 tries, and replaces any earlier code on the call.
+Whether it sent or was refused, `sendTextCode` returns `{sent: true}`: a refused send leaves the
+call with a code that has no digest (it never matches) and the same expiry and tries, unless a code
+from an earlier send is still live, which it keeps. It answers without waiting for the SMS adapter:
+a sent send and a refused one take the same store steps up to the reply (only a country refusal, a
+property of the number on file, skips the `CodeStore`), and the text goes out after it. The
+ledger then says which (`verification.code_sent`, or `verification.code_refused` with `reason`:
+`country`, `subject_limit`, `number_limit`, or `send_failed` when the SMS adapter failed; the send
+stays counted and the host hears nothing of it). Until that entry is written, `endCall` refuses
+(`precondition_failed`), sent or refused alike, for at most `TEXT_SEND_HOLD_SECONDS` (30) after
+the send, so a send's entry never follows `receipt.issued`; an adapter that answers after the
+hold, once the call has ended, writes nothing.
+
+`checkTextCode(callId, code)` counts and judges a try in one write and records a `text_code`
+factor, passed or not. An entry that is not 6 ASCII digits is a try and fails. After the 5th try,
+after 10 minutes, or once the code matched (single use), it returns `locked` without judging or
+recording. Expiry is judged by the clock at the write, not when the check began. Without a code it
+is refused (`precondition_failed`). A taint or a change of subject drops the code, and a taint also
+refuses (`precondition_failed`) any send or factor result decided before it but not yet written.
+A passed code counts toward a level only under the carrier rule above.
+`codeStoreContract(factory)` in `district-assurance/testing` is the suite a durable `CodeStore`
+must pass (atomic counting, no count for a refusal, the minimum interval held even when it is
+longer than the window); `MemoryCodeStore` is the reference.
 
 ## 5. Keypad knowledge and spoken answers
 
@@ -573,7 +619,7 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   "version": 1,
   "revision": "2026-11-18.1",
   "policy": { "version": "...", "levels": [], "scopes": {}, "keypadFields": [], "maxKeypadAttemptsPerCall": 2,
-              "simSwapWindowHours": 72, "trustTextCodeWithoutCarrierCheck": false,
+              "simSwapWindowHours": 72, "trustTextCodeWithoutCarrierCheck": false, "textCodeCountryCodes": ["1"],
               "spoken": { "fields": { "postal_code": "ca_postal_code" }, "maxAttemptsPerCall": 2 } },
   "modules": { "<name>": { "enabled": true, "settings": {} } },
   "flows": { "<name>": { "summary": "...", "steps": [{ "type": "<module>.<step>" }] } }
@@ -600,7 +646,7 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 
 | Step | Fields |
 |---|---|
-| `badge.verify` | `level` 1 to 3; `factors`, at least one, each on in Badge's settings, together reaching `level` under the policy; optional `scopes`, each in the policy at or below `level` |
+| `badge.verify` | `level` 1 to 3; `factors`, at least one, each on in Badge's settings, together reaching `level` under the policy, and `text_code` only with the policy's `textCodeCountryCodes`; optional `scopes`, each in the policy at or below `level` |
 | `dossier.collect` | `form`, a form id in Dossier's settings |
 | `paylink.request` | `amountMinor` and `currency`, or instead `amountRef` (1 to 64 of letters, digits, `.`, `:`, `-`, `_`; needs the `amounts` adapter), never both; `description`, `amountSource` (section 14); optional `mode` (`connect` or `platform`; connect needs Paylink's `connectedAccountId`), `linkLifeMinutes` (5 to 60), `paymentMethods` (instant methods only) |
 | `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
@@ -680,6 +726,8 @@ answer on file, a phone number, a link or card data.
 | `verification.callback_finished` | `outcome`: `refused` on the call that asked; `passed`, `no_answer` or `no_confirmation` on the callback call, with `requestedOn`. Never the number |
 | `verification.unlocked` | `kind`, `scope`, `counter` (a keyed digest, `unlockedCounter`), `memberId`; call id null, actor `member`: never the key (section 6) |
 | `identity.link_sent` | none |
+| `verification.code_sent` | none |
+| `verification.code_refused` | `reason`: `country`, `subject_limit`, `number_limit` or `send_failed` |
 | `verification.finished` | `level`, `methods`, `discounted`, `policyVersion`, `configRevision`; `voidedByTaint: true` when a taint landed in that verification |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt`, `policyVersion`, `configRevision` |
 | `pin.enrolled` | none (never the digits, the digest or their length) |
@@ -1160,7 +1208,9 @@ words by comparing a locale instead, so a new locale grows every catalog. The de
 subject's number on file. Identity link: "Your one-time identity check link: URL" / "Votre lien
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
-the currency's own decimals. Access code (section 17): "Your one-time door code: CODE. It works
+the currency's own decimals. Texted code: "Your one-time verification code: CODE. It expires in 10
+minutes. Do not share it." / "Votre code de vérification à usage unique : CODE. Il expire dans 10
+minutes. Ne le communiquez à personne." Access code (section 17): "Your one-time door code: CODE. It works
 once, within N min." / "Votre code de porte, à usage unique : CODE. Valable une fois, dans les N
 min.", N being the minutes left on the access grant, rounded up, at least 1.
 
@@ -1406,10 +1456,9 @@ engine's `accessSigner`, so a relay checks a redeemed grant against `engine.acce
 - `limits` is VER-2's `CodeStore` (`take` counts one send atomically, or refuses and counts
   nothing; `MemoryCodeStore` in `district-assurance/testing` is the reference), the same instance
   the engine's texted codes count against, so both kinds of code share one budget per subject.
-  `ACCESS_CODE_SEND_LIMITS` is VER-2's subject limit: 5 sends in 24 hours, 60 seconds apart. Until
-  VER-2 (#79) lands, `CodeStore`, `CodeSendKey`, `MemoryCodeStore` and this constant are a stand-in
-  copy of its shape; VER-2's per-number limit and destination allow-list are not applied to access
-  codes yet.
+  `ACCESS_CODE_SEND_LIMITS` is VER-2's subject limit (`TEXT_CODE_LIMITS.subject`): 5 sends in 24
+  hours, 60 seconds apart. VER-2's per-number limit and destination allow-list are not applied to
+  access codes.
 revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), a
 Seam adapter (GAT-5), direct vendor adapters (GAT-6). Web sign-in step-up is section 18.
 
