@@ -110,10 +110,13 @@ export class KeypadCollector {
     }
   }
 
-  /** Drops a partial or overlong entry once the caller has been idle for the timeout. The host calls it from its own timer. */
+  /** Drops a partial or overlong entry once the caller has been idle for the timeout, or the clock went back. The host calls it from its own timer. */
   tick(nowMs: number): void {
     if (!Number.isFinite(nowMs)) throw new EngineError("invalid_input", "the time is a finite number of milliseconds");
-    if (this.collecting && nowMs - this.#lastAt >= this.#idleTimeoutMs) {
+    // A time before the last tone (a clock set back) also ends the entry, as INT-1's collector does:
+    // otherwise it would never time out until the clock caught up, and later digits would join it.
+    const idle = nowMs - this.#lastAt;
+    if (this.collecting && (idle < 0 || idle >= this.#idleTimeoutMs)) {
       this.#clear();
       this.#options.onTimeout?.();
     }
