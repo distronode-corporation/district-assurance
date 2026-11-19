@@ -5,7 +5,7 @@
 import { canonicalJson } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { sha256Hex } from "../core/hash.ts";
-import type { Locale } from "../core/runtime.ts";
+import { isSupportedLocale, type Locale } from "../core/runtime.ts";
 import { intakeDigest, shownValues, type FieldValue, type IntakeField, type IntakeForm } from "./intake.ts";
 
 export interface ReadBack {
@@ -24,7 +24,7 @@ export interface ReadBack {
   digest: string;
 }
 
-interface Wording {
+export interface Wording {
   opening: string;
   /** A label and its value, as one sentence. */
   line(label: string, value: string): string;
@@ -41,7 +41,8 @@ interface Wording {
   months: readonly string[];
 }
 
-const WORDING: Record<Locale, Wording> = {
+/** The read-back's words in each supported locale. */
+export const READ_BACK_WORDING: Record<Locale, Wording> = {
   en: {
     opening: "Here is what will be filed.",
     line: (label, value) => `${label}: ${value}`,
@@ -78,8 +79,8 @@ const WORDING: Record<Locale, Wording> = {
  * prompt. A field hidden by its `showIf` is neither read nor counted in the digest, as it is not filed.
  */
 export function buildReadBack(form: IntakeForm, values: Readonly<Record<string, FieldValue>>, locale: Locale): ReadBack {
-  if (locale !== "en" && locale !== "fr") throw new EngineError("invalid_input", "a read-back is in English (en) or French (fr)");
-  const w = WORDING[locale];
+  if (!isSupportedLocale(locale)) throw new EngineError("invalid_input", "a read-back is in English (en) or French (fr)");
+  const w = READ_BACK_WORDING[locale];
   const filed = shownValues(form, values);
   const lines: string[] = [];
   for (const field of form.fields) {

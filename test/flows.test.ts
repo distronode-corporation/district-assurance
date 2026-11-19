@@ -289,7 +289,7 @@ describe("flows", () => {
     const ledgerText = JSON.stringify(await t.ledger.list());
     for (const value of [PHONE_ON_FILE, "Jane Doe", "sms"]) assert.equal(ledgerText.includes(value), false, value);
     assert.equal(JSON.stringify((await t.sessions.get("ws_test", callId))!.record).includes("Jane Doe"), false);
-    assert.equal((await t.engine.confirmIntake(callId, { confirmedBy: "keypad" })).confirmedBy, "keypad");
+    assert.equal((await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack: await heard(t, callId) })).confirmedBy, "keypad");
   });
 
   it("completes a receipt step at once, and abandons a running flow when the call ends", async () => {

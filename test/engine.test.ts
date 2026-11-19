@@ -537,10 +537,11 @@ describe("Engine file: text the record cannot carry", () => {
     const t = setup();
     const callId = await verifiedCall(t);
     await t.engine.startIntake(callId, "repair");
-    await assert.rejects(t.engine.setIntakeField(callId, "issue", "leak \ud83d"), rejects("invalid_input", /lone surrogate/));
+    // #76: a lone surrogate is a refused answer (`not_text`), not a host error.
+    assert.deepEqual(await t.engine.setIntakeField(callId, "issue", "leak \ud83d"), { ok: false, reason: "not_text" });
     await assert.rejects(t.engine.setIntakeField(callId, "issue", 7 as never), rejects("invalid_input"));
     assert.deepEqual(await t.engine.setIntakeField(callId, "issue", "leak \ud83d\ude00"), { ok: true, value: "leak \ud83d\ude00" }, "a valid pair is fine");
-    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     assert.equal(record.values.issue, "leak \ud83d\ude00");
   });
 });

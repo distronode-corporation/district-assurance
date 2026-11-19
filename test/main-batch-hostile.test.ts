@@ -9,7 +9,7 @@ import type { Engine } from "../src/index.ts";
 import { FixedClock, createTestEngine } from "../src/testing/index.ts";
 import { REDACTION_MARKERS, applyFindings, findCardNumbers } from "../src/core/redaction.ts";
 import { signStripePayload, verifyStripeSignature } from "../src/webhooks/stripe.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, heard, rejects, setup } from "./helpers.ts";
 
 const SECRET = "whsec_test_not_a_secret";
 
@@ -28,7 +28,9 @@ describe("hostile: confirmIntake confirmedBy", () => {
   it("files the value it checked, not a getter's second answer", async () => {
     const { t, callId } = await openIntake();
     let reads = 0;
+    const readBack = await heard(t, callId);
     const input = {
+      readBack,
       get confirmedBy() {
         reads += 1;
         return reads === 1 ? "voice" : PHONE_ON_FILE;
@@ -43,7 +45,7 @@ describe("hostile: confirmIntake confirmedBy", () => {
 
   it("files the value it checked when the host changes the input object mid-call", async () => {
     const { t, callId } = await openIntake();
-    const input: { confirmedBy: string } = { confirmedBy: "keypad" };
+    const input: { confirmedBy: string; readBack: string } = { confirmedBy: "keypad", readBack: await heard(t, callId) };
     const pending = t.engine.confirmIntake(callId, input as never);
     input.confirmedBy = `Jane Doe ${DOB}`;
     const record = await pending;
@@ -73,8 +75,9 @@ describe("hostile: confirmIntake confirmedBy", () => {
       }
       return put(r);
     };
-    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /store down/);
-    const second = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
+    const readBack = await heard(t, callId);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack }), /store down/);
+    const second = await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack });
     assert.equal(second.confirmedBy, "voice", "the reservation keeps the channel the caller confirmed with");
     const confirmed = (await t.ledger.list()).filter((e) => e.event === "intake.confirmed");
     assert.equal(confirmed.length, 1);
