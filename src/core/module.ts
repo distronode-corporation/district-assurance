@@ -143,15 +143,21 @@ export class ModuleRegistry {
   /** Adapter name to what that adapter declares it can do (its `capabilities`), for the validator. */
   readonly capabilities: Readonly<Record<string, unknown>>;
   readonly #modules = new Map<string, AssuranceModule>();
+  /** Names only the constructor may install (an engine's built-in modules): refused later, even after a removal. */
+  readonly #reserved: ReadonlySet<string>;
+  #sealed = false;
 
-  constructor(options: { adapters?: Iterable<string>; capabilities?: Readonly<Record<string, unknown>>; modules?: readonly AssuranceModule[] } = {}) {
+  constructor(options: { adapters?: Iterable<string>; capabilities?: Readonly<Record<string, unknown>>; modules?: readonly AssuranceModule[]; reserved?: readonly string[] } = {}) {
     this.adapters = new Set(options.adapters ?? []);
     this.capabilities = structuredClone(options.capabilities ?? {});
+    this.#reserved = new Set(options.reserved ?? []);
     for (const module of options.modules ?? []) this.use(module);
+    this.#sealed = true;
   }
 
   /** Installs a module. Refuses a bad or clashing manifest with every problem. */
   use(module: AssuranceModule): this {
+    if (this.#sealed && this.#reserved.has(module.manifest.name)) throw new EngineError("invalid_input", `${module.manifest.name} is the name of a built-in module`);
     const errors = checkManifest(module.manifest, this.list());
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     this.#modules.set(module.manifest.name, module);

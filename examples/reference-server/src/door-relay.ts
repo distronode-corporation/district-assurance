@@ -16,7 +16,7 @@ export interface DoorRelayOptions {
   /** The engine's access key set (`engine.accessKeys()`). */
   keys: readonly JsonWebKey[];
   clock: Clock;
-  /** Works the door. Resolves once it moved. */
+  /** Works the door for a grant. Resolves once it moved. */
   open(target: string, grant: AccessGrantBody): Promise<void>;
 }
 
@@ -34,10 +34,16 @@ export function createDoorRelay(options: DoorRelayOptions): Server {
     let size = 0;
     req.on("data", (c: Buffer) => {
       size += c.length;
-      if (size <= MAX_BODY_BYTES) chunks.push(c);
+      if (size <= MAX_BODY_BYTES) {
+        chunks.push(c);
+        return;
+      }
+      // Over the limit: answer at once and stop reading, rather than wait for a body that may never end.
+      if (!res.headersSent) res.writeHead(413, { "content-type": "application/json", connection: "close" }).end(JSON.stringify({ error: "body_too_large" }));
+      req.destroy();
     });
     req.on("end", () => {
-      if (size > MAX_BODY_BYTES) return void answer(413, { error: "body_too_large" });
+      if (size > MAX_BODY_BYTES) return;
       let grant: unknown;
       try {
         grant = JSON.parse(Buffer.concat(chunks).toString("utf8"));

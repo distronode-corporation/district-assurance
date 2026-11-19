@@ -469,6 +469,19 @@ describe("Engine file", () => {
   });
 });
 
+describe("Engine ledger detail", () => {
+  it("refuses detail the ledger could not hash before it is saved, so the call's ledger never blocks (CodeRabbit on 699637f)", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await assert.rejects(t.engine.markUntrusted(callId, "x\ud800"), rejects("invalid_input", /canonical JSON/));
+    assert.equal((await t.engine.state(callId)).tainted, false, "nothing was saved");
+    // The call's ledger still takes entries.
+    await t.engine.markUntrusted(callId, "crm_note");
+    const events = (await t.ledger.list()).map((e) => e.event);
+    assert.deepEqual(events, ["call.started", "session.tainted"]);
+  });
+});
+
 describe("Engine pay", () => {
   const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
 
