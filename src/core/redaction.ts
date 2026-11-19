@@ -334,13 +334,20 @@ export function findHealthCardNumbers(text: string): RedactionFinding[] {
 
 export const healthCardRedactor: Redactor = redactorFor(findHealthCardNumbers);
 
-/** Words that mark a number after them as a bank number, in English and French, plurals too. */
+/**
+ * Words that mark a number after them as a bank number, in English, French and Spanish, plurals
+ * too, and Spanish with or without its accents. All three are read on every call: this file has no
+ * call language, and a Spanish word on an English call can only remove more, the safe side.
+ */
 const BANK_WORDS = new Set([
   "bank", "banks", "branch", "branches", "transit", "transits", "institution", "institutions", "account", "accounts",
   "banque", "banques", "bancaire", "bancaires", "succursale", "succursales", "compte", "comptes", "folio", "folios",
+  "banco", "bancos", "bancaria", "bancarias", "bancario", "bancarios", "sucursal", "sucursales", "cuenta", "cuentas",
+  "tránsito", "tránsitos", "transito", "transitos", "institución", "instituciones", "institucion",
 ]);
 
-const WORD = /\p{L}+/gu;
+/** A word, with any combining accents kept in it, so a decomposed "tránsito" is still one word. */
+const WORD = /[\p{L}\p{M}]+/gu;
 
 /**
  * Bank numbers: a digit run of 3 or more digits (an institution number is 3, a transit number 5,
@@ -356,7 +363,7 @@ export function findBankNumbers(text: string): RedactionFinding[] {
     const words = text.slice(from, first.start).match(WORD) ?? [];
     from = last.end;
     const digits = run.reduce((n, t) => n + t.digits.length, 0);
-    if (digits >= 3 && words.slice(-4).some((w) => BANK_WORDS.has(w.toLowerCase()))) {
+    if (digits >= 3 && words.slice(-4).some((w) => BANK_WORDS.has(w.normalize("NFC").toLowerCase()))) {
       findings.push({ kind: "bank_account", start: first.start, end: last.end });
     }
   }

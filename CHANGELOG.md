@@ -28,7 +28,7 @@ All notable changes to this project are documented here. The format follows
 - More redactors (PRV-6): `sinRedactor`, `healthCardRedactor` (Ontario, British Columbia, Quebec)
   and `bankAccountRedactor`, each its own `Redactor` over digits and English or French digit
   words, tested over a shared JSON corpus in `test/corpus/`; compose health card numbers before
-  SINs.
+  SINs. Bank words are English, French and Spanish, read on every call.
 - `SEPARATOR_CLASS`, exported from `district-assurance`: the characters that may lie between the
   groups of one number (spaces, any dash, the minus sign, dots, commas, slashes, underscores, middle
   dots, format characters and combining marks). Numerals in every script's decimal digits are read

@@ -25,7 +25,7 @@ import {
 interface Corpus {
   description: string;
   kind: RedactionKind;
-  cases: { lang: "en" | "fr"; text: string; found: string[] }[];
+  cases: { lang: "en" | "fr" | "es"; text: string; found: string[] }[];
 }
 
 const corpus = (name: string): Corpus =>
@@ -135,6 +135,23 @@ describe("findBankNumbers", () => {
 
   it("replaces a bank number with its marker", () => {
     assert.equal(bankAccountRedactor.redact("compte 1234567").text, `compte ${REDACTION_MARKERS.bank_account}`);
+  });
+
+  it("finds a number after every Spanish bank word, singular or plural, accented, bare or decomposed", () => {
+    const words = [
+      "banco", "bancos", "bancaria", "bancarias", "bancario", "bancarios", "sucursal", "sucursales", "cuenta", "cuentas",
+      "tránsito", "tránsitos", "transito", "transitos", "institución", "instituciones", "institucion",
+    ];
+    for (const word of [...words, ...words.map((w) => w.toUpperCase()), ...words.map((w) => w.normalize("NFD"))]) {
+      const text = `${word} 1234567`;
+      assert.deepEqual(findBankNumbers(text).map((f) => text.slice(f.start, f.end)), ["1234567"], word);
+    }
+  });
+
+  it("counts a decomposed accented word as one word in the look-back", () => {
+    // Split at its accent, "nu\u0301mero" would be two words and push "cuenta" out of the last 4.
+    const text = "cuenta nu\u0301mero de la 1234567";
+    assert.deepEqual(findBankNumbers(text).map((f) => text.slice(f.start, f.end)), ["1234567"]);
   });
 });
 
