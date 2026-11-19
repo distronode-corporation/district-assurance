@@ -221,18 +221,20 @@ export async function dialCallback(rt: EngineRuntime, callId: string): Promise<v
  * pass then forgets the callback's failure; until that is done, a repeated outcome retries only it.
  */
 export async function applyCallbackOutcome(rt: EngineRuntime, outcome: CallbackOutcome): Promise<OutcomeResult> {
-  const callId = await rt.resolveRef(`callback:${outcome.ref}`);
+  // Read once: the answer that decided the factor is the one the ledger's outcome names.
+  const { ref, answered, confirmed } = outcome;
+  const callId = await rt.resolveRef(`callback:${ref}`);
   if (callId === null) return { applied: false };
   const done = await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
     if (s.callback.status === "passed" && s.callback.forgetPending) return { passed: true, repeated: true, keys: s.callback.keys, at: s.callback.at! };
-    const passed = outcome.answered && outcome.confirmed;
+    const passed = answered && confirmed;
     const factor = { kind: CALLBACK, passed, at: rt.now() };
     if (s.callback.status !== "dialed" || !canApply(draft.record.state, { type: "factor_recorded", factor })) return null;
     s.callback = { ...s.callback, status: passed ? "passed" : "failed", forgetPending: passed };
     draft.apply({ type: "factor_recorded", factor });
     draft.emit("verification.factor", "system", { kind: CALLBACK, passed });
-    const result = passed ? "passed" : outcome.answered ? "no_confirmation" : "no_answer";
+    const result = passed ? "passed" : answered ? "no_confirmation" : "no_answer";
     draft.emit("verification.callback_finished", "system", { outcome: result, requestedOn: s.callback.callId });
     const lock = s.callback.lock;
     if (!passed && lock !== null) draft.emit("verification.locked", "code", { kind: CALLBACK, scope: lock.scope, hard: lock.hard, until: lock.until });
