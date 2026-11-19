@@ -313,6 +313,10 @@ export async function flowStartLimited(
 /**
  * Counts one flow start on every counter. Returns the scope of the first counter it took over its
  * limit (another start, on any call or engine, got in since the counters were read), or null.
+ * A write that fails passes its error on, after the starts already counted are taken back (by their
+ * time, which takes off the same as taking off these): the flow never attaches, as when the call
+ * refuses it. The failed write's own start may or may not have been kept, so it stays as the store
+ * left it, and so does one the store refuses to take back (fail closed).
  */
 export async function recordFlowStarts(
   counters: AttemptCounters,
@@ -321,8 +325,17 @@ export async function recordFlowStarts(
   now: Date,
 ): Promise<AttemptCounterKey["scope"] | null> {
   let over: AttemptCounterKey["scope"] | null = null;
+  const at = now.toISOString();
+  const counted: AttemptCounterKey[] = [];
   for (const key of keys) {
-    const starts = await counters.recordFailure(key, now.toISOString(), hourStart(now));
+    let starts: string[];
+    try {
+      starts = await counters.recordFailure(key, at, hourStart(now));
+    } catch (error) {
+      for (const done of counted) await counters.removeFailure(done, at).catch(() => undefined);
+      throw error;
+    }
+    counted.push(key);
     if (over === null && starts.length > limits[key.scope]) over = key.scope;
   }
   return over;

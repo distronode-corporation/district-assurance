@@ -467,7 +467,7 @@ when there is a number.
   with the pass, on the call, so a write that fails after the pass was saved (its ledger entry)
   still gets it, in the same `submitKeypad` or `submitPin` or before the call's next factor; a pass
   refused before it was saved owes none. The subject's part is safe to run again. The rest (the
-  pass's own failure off the number, and the hidden counter's reset or, after a duress entry, its
+  pass's own failure off the number, and the hidden counter's cleanup or, after a duress entry, its
   own failure) is claimed on the call in one more write before it runs, so it runs at most once: a
   replay never takes off another failure of the same millisecond. A claim that is not saved runs
   none of it, which stays owed; a removal that fails after its claim is not run again, and that
@@ -589,7 +589,10 @@ it), per calling number and per subject.
   limit refuses it too (that start stays counted). A start the call itself then refuses, because a
   concurrent `startFlow` attached a flow first or a concurrent `startCall` took the id first, is
   taken back off each counter (`removeFailure` at the time it was recorded); one whose write saved
-  and then failed (the ledger down) stays counted. A `callingNumber` that is not a string is
+  and then failed (the ledger down) stays counted. A counter write that fails while the start is
+  counted passes its error on, after the starts already counted are taken back; the failed write's
+  own (kept or not) and one the store refuses to take back stay as the store left them (fail
+  closed). A `callingNumber` that is not a string is
   `invalid_input`, like one that is not E.164.
 - A refused start throws `RateLimitedError` (an `EngineError` with code `rate_limited`) with one
   message, whichever limit was hit, and the `callId` of the call it was refused on, so a host that
@@ -656,7 +659,8 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   flag is set again only while that count is unchanged. A failure to set it leaves the alert owed. A duress entry resets the visible
   counters as a pass does, so it looks like one; every entered factor's failures on the subject are
   also counted in a hidden counter (kind `duress.hidden.<kind>`) that only a pass not under duress
-  resets (a duress entry takes off only its own failure), and that counter's hard lock (not its
+  clears, of the failures up to it (a later one, by another call, stays; a duress entry takes off
+  only its own failure; either takes one read and the same writes), and that counter's hard lock (not its
   waits) refuses like any lock. So a caller who knows the duress PIN gets no more guesses at the
   real PIN than one who does not. `clearDuress(subjectKey, memberId)` is a host-privileged call,
   like `resetPin`: the business's own tools, never a caller's request, once it knows the subject is
@@ -667,8 +671,11 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   subjectKey)` = `HMAC-SHA256(knowledgeKey, "duress.cleared:" + subjectKey)`, which the business can
   match and a reader of the ledger or an export cannot; then the count of clearings goes up, and the
   flag and the hidden counters of every installed factor (on or off) are cleared. A clearing that
-  lands while an earlier entry's alert is being delivered may be undone by that delivery's setting of
-  the flag (the counters store has no compare-and-set): the subject stays flagged, and the business
+  lands while an earlier entry's flag is being written (the entry's own write, or its alert's on
+  delivery) is never undone: the counters store has no compare-and-set, so the writer reads the
+  count of clearings again after the write and takes its write back if it went up (the clearing
+  counts before it clears, so it is either counted by then or clears the write itself). The alert
+  still goes out. A take-back that fails leaves the subject flagged (fail closed), and the business
   clears it again.
 - Every duress entry owes an alert: in the same write, Badge's part of the call record gets
   `duressAlerts` `{alertId, subjectKey, at, clears}` and `duress`, and the record `owesAlerts: true` until

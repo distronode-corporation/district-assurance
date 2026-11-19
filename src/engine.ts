@@ -41,7 +41,7 @@ import * as callback from "./verify/callback.ts";
 import type { CallbackOutcome } from "./verify/callback.ts";
 import { FLOW_START, claimNotice, counterKeys, flowStartLimited, hourStart, isCallingNumber, lockoutOf, recordFlowStarts, unlockCounter } from "./verify/counters.ts";
 import { pinTag, type BadgeSettings, type FactorEntry, type FactorPlugin, type PinOutcome } from "./verify/factors.ts";
-import { clearsSoFar, duressFlagKey, flagDuress } from "./verify/duress-flag.ts";
+import { flagDuressUnlessCleared } from "./verify/duress-flag.ts";
 import { knowledgeHmac, type KnowledgeHmac, type KnowledgeKey } from "./verify/knowledge.ts";
 import * as pin from "./verify/pin.ts";
 import * as textCode from "./verify/text-code.ts";
@@ -1477,10 +1477,7 @@ export class Engine {
         // write of it was lost (a failed store, a crash), unless the business cleared the subject
         // after the entry was judged. An engine that judged an entry has counters (Badge requires
         // them for every entered factor), and one without them fails here, leaving the alert owed.
-        const counters = this.#adapters.counters!;
-        if ((await clearsSoFar(counters, this.workspaceId, alert.subjectKey)) === alert.clears) {
-          await flagDuress(counters, duressFlagKey(this.workspaceId, alert.subjectKey), new Date(alert.at));
-        }
+        await flagDuressUnlessCleared(this.#adapters.counters!, this.workspaceId, alert.subjectKey, new Date(alert.at), alert.clears);
         await this.#withinNotifyTimeout(notifier.notify({ alertId: alert.alertId, workspaceId: this.workspaceId, subjectKey: alert.subjectKey, callId, at: alert.at }));
         await this.#acknowledgeDuressAlert(callId, alert.alertId);
         delivered++;

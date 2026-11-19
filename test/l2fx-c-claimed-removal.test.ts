@@ -14,7 +14,7 @@ const LINE = "+15555550142";
 const LONG_AGO = "1970-01-01T00:00:00.000Z";
 const numberKey: AttemptCounterKey = { workspaceId: "ws_test", factor: "keypad_knowledge", scope: "number", key: numberKeyFor(TEST_KNOWLEDGE_KEY, LINE) };
 
-type Badge = { modules: { badge: { forgetOwed?: unknown } } };
+type Badge = { modules: { badge: { forgetsOwed?: unknown } } };
 
 /** Refuses the next write that takes a call's owed cleanup off it, as a store blip would. */
 function loseClearOnce(t: TestEngine): void {
@@ -22,7 +22,7 @@ function loseClearOnce(t: TestEngine): void {
   let lose = true;
   t.sessions.compareAndSet = async (workspaceId, callId, version, record) => {
     const before = (await t.sessions.get(workspaceId, callId))?.record as Badge | undefined;
-    if (lose && before?.modules.badge.forgetOwed !== undefined && (record as unknown as Badge).modules.badge.forgetOwed === undefined) {
+    if (lose && before?.modules.badge.forgetsOwed !== undefined && (record as unknown as Badge).modules.badge.forgetsOwed === undefined) {
       lose = false;
       throw new Error("store blip");
     }
@@ -37,7 +37,7 @@ describe("T13: a replayed pass cleanup removes nothing more on the number", () =
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT, callingNumber: LINE });
     loseClearOnce(t);
     assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: true, locked: false });
-    assert.notEqual(((await t.sessions.get("ws_test", callId))!.record as Badge).modules.badge.forgetOwed, undefined, "the cleanup is still owed");
+    assert.notEqual(((await t.sessions.get("ws_test", callId))!.record as Badge).modules.badge.forgetsOwed, undefined, "the cleanup is still owed");
     assert.deepEqual(await t.counters.get(numberKey, LONG_AGO), [], "the pass took its own failure off the line");
     // Another account's failure from the same line, in the same millisecond as the pass.
     const at = t.clock.now().toISOString();
@@ -45,7 +45,7 @@ describe("T13: a replayed pass cleanup removes nothing more on the number", () =
     // The call's next factor runs the owed cleanup again.
     await t.engine.submitPin(callId, "0000");
     assert.deepEqual(await t.counters.get(numberKey, LONG_AGO), [at], "the replay removed nothing");
-    assert.equal(((await t.sessions.get("ws_test", callId))!.record as Badge).modules.badge.forgetOwed, undefined, "and the cleanup is no longer owed");
+    assert.equal(((await t.sessions.get("ws_test", callId))!.record as Badge).modules.badge.forgetsOwed, undefined, "and the cleanup is no longer owed");
   });
 });
 
@@ -55,7 +55,7 @@ describe("T13: a claim that is not this run's runs no removal", () => {
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT, callingNumber: LINE });
     return callId;
   }
-  const owedOf = async (t: TestEngine, callId: string) => ((await t.sessions.get("ws_test", callId))!.record as Badge).modules.badge.forgetOwed;
+  const owedOf = async (t: TestEngine, callId: string) => ((await t.sessions.get("ws_test", callId))!.record as Badge).modules.badge.forgetsOwed;
 
   it("a claim whose read of the call fails removes nothing, and the call's next factor runs the cleanup", async () => {
     const t = setup();
@@ -85,13 +85,13 @@ describe("T13: a claim that is not this run's runs no removal", () => {
     const callId = await passWith(t);
     const cas = t.sessions.compareAndSet.bind(t.sessions);
     t.sessions.compareAndSet = async (workspaceId, id, version, record) => {
-      const owed = (record as unknown as { modules: { badge: { forgetOwed?: { claimed?: true } } } }).modules.badge.forgetOwed;
+      const owed = (record as unknown as { modules: { badge: { forgetsOwed?: Array<{ claimed?: true }> } } }).modules.badge.forgetsOwed?.[0];
       if (owed?.claimed === true) {
         // Another run claimed, cleaned and cleared it in the meantime; this write fails unsaved.
         t.sessions.compareAndSet = cas;
         const stored = (await t.sessions.get(workspaceId, id))!;
         const done = structuredClone(stored.record) as unknown as Badge;
-        delete done.modules.badge.forgetOwed;
+        delete done.modules.badge.forgetsOwed;
         await cas(workspaceId, id, stored.version, done as unknown as JsonValue);
         throw new Error("store blip");
       }
@@ -116,9 +116,9 @@ describe("T13: another run took the cleanup while this one was about to claim it
         if (key.scope !== "subject" || !once) return;
         once = false;
         const stored = (await t.sessions.get("ws_test", callId))!;
-        const next = structuredClone(stored.record) as unknown as { modules: { badge: { forgetOwed?: { claimed?: true } } } };
-        if (other === "claimed it") next.modules.badge.forgetOwed!.claimed = true;
-        else delete next.modules.badge.forgetOwed;
+        const next = structuredClone(stored.record) as unknown as { modules: { badge: { forgetsOwed?: Array<{ claimed?: true }> } } };
+        if (other === "claimed it") next.modules.badge.forgetsOwed![0]!.claimed = true;
+        else delete next.modules.badge.forgetsOwed;
         await t.sessions.compareAndSet("ws_test", callId, stored.version, next as unknown as JsonValue);
       };
       await t.engine.submitKeypad(callId, { dob: DOB });

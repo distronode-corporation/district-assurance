@@ -10,7 +10,7 @@
 // engine shares, under kinds no factor kind can be (factor kinds are snake_case).
 import type { AttemptCounterKey, AttemptCounters } from "../core/adapters.ts";
 import { hmacSha256Hex } from "../core/hash.ts";
-import { lockState, type Lock, type Lockout } from "./counters.ts";
+import { DEFAULT_LOCKOUT, lockState, type Lock, type Lockout } from "./counters.ts";
 
 /** The flag's counter kind: one entry while the subject is under duress. */
 export const DURESS_FLAG = "duress.flag";
@@ -53,6 +53,22 @@ export function hiddenCounterKey(workspaceId: string, kind: string, subjectKey: 
   return { workspaceId, factor: `duress.hidden.${kind}`, scope: "subject", key: subjectKey };
 }
 
+/** The writes a hidden cleanup makes, whichever pass it follows: the most failures a window holds before its hard lock. */
+const HIDDEN_CLEANUP_WRITES = DEFAULT_LOCKOUT.lockAfterFailures;
+
+/**
+ * After a pass whose hidden failure was recorded at `at`: a pass not under duress takes off the
+ * hidden failures up to it (the latest first, a hard lock's worth), never a later one; a duress
+ * entry takes off only its own. Either way one read and the same number of writes, the rest taking
+ * off nothing (no failure is recorded at the epoch), so the round trips never tell a duress pass
+ * from another. Not safe to run twice: the caller claims it first.
+ */
+export async function forgetHidden(counters: AttemptCounters, key: AttemptCounterKey, at: string, duress: boolean): Promise<void> {
+  const failures = await counters.get(key, FOREVER);
+  const own = duress ? [at] : failures.filter((f) => Date.parse(f) <= Date.parse(at)).slice(-HIDDEN_CLEANUP_WRITES);
+  for (let i = 0; i < HIDDEN_CLEANUP_WRITES; i++) await counters.removeFailure(key, own[i] ?? FOREVER);
+}
+
 export async function isUnderDuress(counters: AttemptCounters, key: AttemptCounterKey): Promise<boolean> {
   return (await counters.get(key, FOREVER)).length > 0;
 }
@@ -60,6 +76,20 @@ export async function isUnderDuress(counters: AttemptCounters, key: AttemptCount
 /** Sets the flag. Setting it twice is harmless: it is cleared as a whole. */
 export async function flagDuress(counters: AttemptCounters, key: AttemptCounterKey, at: Date): Promise<void> {
   await counters.recordFailure(key, at.toISOString(), FOREVER);
+}
+
+/**
+ * Sets the flag for an entry judged when the subject had been cleared `clears` times, unless it was
+ * cleared since. The store has no compare-and-set, so the count is read again after the write, and
+ * a clearing that landed meanwhile has the write taken back: `clearDuress` counts the clearing
+ * before it clears the flag, so a clearing either is counted by then or clears this write itself.
+ * A failure to take it back leaves the subject flagged (fail closed), and the business clears again.
+ */
+export async function flagDuressUnlessCleared(counters: AttemptCounters, workspaceId: string, subjectKey: string, at: Date, clears: number): Promise<void> {
+  if ((await clearsSoFar(counters, workspaceId, subjectKey)) !== clears) return;
+  const key = duressFlagKey(workspaceId, subjectKey);
+  await flagDuress(counters, key, at);
+  if ((await clearsSoFar(counters, workspaceId, subjectKey)) !== clears) await counters.removeFailure(key, at.toISOString());
 }
 
 /** The hard lock the hidden failures hold now, or null: its waits are not applied, only its lock. */
