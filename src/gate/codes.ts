@@ -55,6 +55,8 @@ export interface AccessCodeEntry {
 export interface AccessCodeStore {
   /** Stores an entry. False, and nothing written, when an entry with this digest is live. */
   put(entry: AccessCodeEntry, now: Date): Promise<boolean>;
+  /** The entry with this digest, or null, leaving it in place. */
+  get(workspaceId: string, digest: string): Promise<AccessCodeEntry | null>;
   /** Removes and returns the entry with this digest, or null. Never returns one entry twice. */
   take(workspaceId: string, digest: string): Promise<AccessCodeEntry | null>;
   /** Removes the code for a grant. Success when it is already gone. */
@@ -71,6 +73,11 @@ export class MemoryAccessCodeStore implements AccessCodeStore {
     if (this.#entries.has(key)) return false;
     this.#entries.set(key, structuredClone(entry));
     return true;
+  }
+
+  async get(workspaceId: string, digest: string): Promise<AccessCodeEntry | null> {
+    const entry = this.#entries.get(JSON.stringify([workspaceId, digest]));
+    return entry === undefined ? null : structuredClone(entry);
   }
 
   async take(workspaceId: string, digest: string): Promise<AccessCodeEntry | null> {
@@ -174,9 +181,17 @@ export class AccessCodes {
    */
   async redeem(input: { workspaceId: string; audience: string; target: string; code: string }): Promise<RedeemResult> {
     const code = typeof input.code === "string" && input.code.length <= 32 ? input.code : "";
-    const entry = await this.#options.store.take(input.workspaceId, accessCodeDigest(this.#options.key, input, code));
-    if (entry === null || Date.parse(entry.body.expiresAt) <= this.#clock.now().getTime()) return { ok: false };
-    return { ok: true, grant: await signDocument(this.#options.signer, entry.body) };
+    const digest = accessCodeDigest(this.#options.key, input, code);
+    const store = this.#options.store;
+    const live = (e: AccessCodeEntry | null): e is AccessCodeEntry => e !== null && Date.parse(e.body.expiresAt) > this.#clock.now().getTime();
+    // Signed before the code is taken: a signer that fails throws and leaves the code to try again.
+    const seen = await store.get(input.workspaceId, digest);
+    if (!live(seen)) return { ok: false };
+    const grant = await signDocument(this.#options.signer, seen.body);
+    // Then taken, atomically, once: a code used or revoked meanwhile is refused and its signature dropped.
+    const taken = await store.take(input.workspaceId, digest);
+    if (!live(taken) || taken.grantId !== seen.grantId) return { ok: false };
+    return { ok: true, grant };
   }
 
   /** Removes a grant's code before its end. Success when it is already gone. */
@@ -196,10 +211,11 @@ export class AccessCodes {
       return { outcome: "refused", reason: "send_limit" };
     }
     let code: string | null = null;
+    let digest = "";
     for (let i = 0; i < CODE_TRIES && code === null; i++) {
       const candidate = this.#newCode();
       const entry: AccessCodeEntry = { workspaceId: body.workspaceId, digest: accessCodeDigest(this.#options.key, body, candidate), grantId: body.grantId, callId: pending.callId, body };
-      if (await this.#options.store.put(entry, now)) code = candidate;
+      if (await this.#options.store.put(entry, now)) [code, digest] = [candidate, entry.digest];
     }
     if (code === null) return { outcome: "refused", reason: "no_free_code" };
     const minutes = Math.max(1, Math.ceil((Date.parse(body.expiresAt) - now.getTime()) / 60_000));
@@ -216,10 +232,11 @@ export class AccessCodes {
       });
       return { outcome: "delivered", providerRef: messageId, confirmed: false };
     } catch {
-      // The text may or may not have gone out: the code is revoked, so the door certainly will not
-      // open with it. A revoke that fails is thrown, and Gate records the grant as unknown.
-      await this.#options.store.revoke(body.workspaceId, body.grantId);
-      return { outcome: "refused", reason: "text_failed" };
+      // The text may or may not have gone out. Taking the code back proves it was not redeemed, and
+      // the door certainly will not open with it: refused. Gone already (redeemed from a text that
+      // did arrive, or expired), or a store that fails: thrown, and Gate records the grant as unknown.
+      if ((await this.#options.store.take(body.workspaceId, digest)) !== null) return { outcome: "refused", reason: "text_failed" };
+      throw new EngineError("precondition_failed", "the access code text failed and its code was already gone");
     }
   }
 

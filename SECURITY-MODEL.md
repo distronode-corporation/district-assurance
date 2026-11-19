@@ -177,7 +177,9 @@ controller and the door, with the unsigned grant body: a stolen store yields nei
 grant a relay accepts (tested). Redeeming removes the code in the same step (single use), refuses
 it at another door, in another workspace, or after the grant's expiry, and answers the same for
 every refusal (tested); `revoke` removes a code early. The code is never in the ledger, an event,
-an error or the store (tested). A text that fails revokes its code (tested). 8 digits give one
+an error or the store (tested). A text that fails takes its code back, and its grant is `refused` only when that proves the
+code unused, else `unknown`, since the text may have arrived (tested). A signer that fails at
+redemption leaves the code redeemable, and a code is taken only after it is signed (tested). 8 digits give one
 chance in 100 million per live code per guess. Left to the host: a keypad that slows or stops
 after wrong entries, a durable `AccessCodeStore` whose `take` is atomic across processes, and
 keeping the codes' key in a key store. A code's grant is `delivered` once texted, so the call can

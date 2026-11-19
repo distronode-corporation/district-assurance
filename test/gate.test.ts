@@ -939,7 +939,7 @@ describe("gate: one-time access codes", () => {
     assert.equal(await send("a", 86_400), true, "a day after the first");
   });
 
-  it("revokes the code when its text fails, and records unknown when the revoke fails too", async () => {
+  it("takes the code back when its text fails, and records unknown when that cannot prove it unused", async () => {
     const failing: MessageSender = {
       sendText: async () => {
         throw new Error("the carrier is down");
@@ -952,13 +952,76 @@ describe("gate: one-time access codes", () => {
     assert.deepEqual(await t.codes.redeem({ ...keypadDoor, code: "24681357" }), { ok: false });
 
     const stuck = new (class extends MemoryAccessCodeStore {
-      override async revoke(): Promise<void> {
+      override async take(): Promise<AccessCodeEntry | null> {
         throw new Error("the store is down");
       }
     })();
     const u = codesSetup({ messages: failing, store: stuck });
     const other = await codeCall(u);
     assert.deepEqual(await u.codes.issue(u.engine, other), { grantId: "acc_1", status: "unknown", confirmed: false });
+  });
+
+  it("records unknown, not refused, when the text arrived and the code was redeemed before the send failed", async () => {
+    let codes: AccessCodes | null = null;
+    let redeemed: Awaited<ReturnType<AccessCodes["redeem"]>> | null = null;
+    const lateFailure: MessageSender = {
+      sendText: async (input) => {
+        // The text reached the phone and the code was used at the door; then the carrier's answer was lost.
+        redeemed = await codes!.redeem({ ...keypadDoor, code: TEXT.exec(input.body)![1]! });
+        throw new Error("the answer was lost");
+      },
+    };
+    const t = codesSetup({ messages: lateFailure });
+    codes = t.codes;
+    const callId = await codeCall(t);
+    assert.deepEqual(await t.codes.issue(t.engine, callId), { grantId: "acc_1", status: "unknown", confirmed: false });
+    assert.ok(redeemed!.ok, "the door may have opened");
+    assert.equal((await codeEvents(t)).at(-1)![0], "access.unknown");
+  });
+
+  it("keeps a code redeemable when signing fails, and never signs one used or revoked meanwhile", async () => {
+    const t = codesSetup({ newCode: () => "11112222" });
+    const callId = await codeCall(t);
+    await t.codes.issue(t.engine, callId);
+    const sign = t.accessSigner.sign.bind(t.accessSigner);
+    t.accessSigner.sign = async () => {
+      throw new Error("the key store is down");
+    };
+    await assert.rejects(t.codes.redeem({ ...keypadDoor, code: "11112222" }), /key store is down/);
+    t.accessSigner.sign = sign;
+    assert.ok((await t.codes.redeem({ ...keypadDoor, code: "11112222" })).ok, "the code survived the failed signature");
+
+    // Revoked while it was being signed: refused, and the signature is dropped.
+    const u = codesSetup({ newCode: () => "33334444" });
+    const second = await codeCall(u);
+    await u.codes.issue(u.engine, second);
+    u.accessSigner.sign = async (payload) => {
+      await u.codes.revoke("ws_test", "acc_1");
+      return sign(payload);
+    };
+    assert.deepEqual(await u.codes.redeem({ ...keypadDoor, code: "33334444" }), { ok: false });
+
+    // Expired while it was being signed.
+    const v = codesSetup({ newCode: () => "55556666" });
+    const third = await codeCall(v);
+    await v.codes.issue(v.engine, third);
+    v.accessSigner.sign = async (payload) => {
+      v.clock.advance(10 * 60_000);
+      return sign(payload);
+    };
+    assert.deepEqual(await v.codes.redeem({ ...keypadDoor, code: "55556666" }), { ok: false });
+
+    // Replaced by another grant's code under the same digest meanwhile: that grant was never signed, so refused.
+    const swapped = new (class extends MemoryAccessCodeStore {
+      override async take(workspaceId: string, digest: string): Promise<AccessCodeEntry | null> {
+        const entry = await super.take(workspaceId, digest);
+        return entry === null ? null : { ...entry, grantId: "acc_other" };
+      }
+    })();
+    const w = codesSetup({ store: swapped, newCode: () => "77778888" });
+    const fourth = await codeCall(w);
+    await w.codes.issue(w.engine, fourth);
+    assert.deepEqual(await w.codes.redeem({ ...keypadDoor, code: "77778888" }), { ok: false });
   });
 
   it("tries a new code when one is live for the same door, and frees a code once its grant expired", async () => {
