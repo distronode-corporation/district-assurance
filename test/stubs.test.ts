@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { NotImplementedError } from "../src/core/errors.ts";
-import { buildReadBack, createUploadLink, deliverRecord } from "../src/file/later.ts";
+import { buildReadBack, deliverRecord } from "../src/file/later.ts";
 import { cancelPaymentLink, chargeSavedCard, startKeypadCardCapture } from "../src/pay/later.ts";
 import { revokeConsent } from "../src/prove/consent.ts";
 import { exportLedger } from "../src/prove/later.ts";
@@ -24,7 +24,6 @@ const STUBS: Array<[string, () => unknown]> = [
   ["VER-6", () => enrolPin({ callId: "c" })],
   ["FIL-1", () => buildReadBack(form, {}, "fr")],
   ["FIL-3", () => deliverRecord({ workspaceId: "w", recordId: "r" })],
-  ["FIL-5", () => createUploadLink({ callId: "c", recordId: "r" })],
   ["PAY-3", () => cancelPaymentLink({ callId: "c", paymentId: "p" })],
   ["PAY-4", () => chargeSavedCard({ callId: "c", paymentId: "p" })],
   ["PAY-6", () => startKeypadCardCapture({ callId: "c", paymentId: "p" })],

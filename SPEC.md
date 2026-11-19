@@ -398,3 +398,40 @@ subject's number on file. Identity link: "Your one-time identity check link: URL
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
 the currency's own decimals.
+
+## 17. Document uploads
+
+A caller adds a photo or a PDF to a record they confirmed through a single-use link
+(`src/file/upload.ts`). The functions take a context: the workspace id, a `DocumentStore` and the
+clock, plus the `RecordStore` to create a link and an id generator and a `DocumentScanner` to
+accept an upload.
+
+- `createUploadLink({callId, recordId, locale?, allowedTypes?, maxBytes?})` refuses
+  (`invalid_input`) an empty id, a locale other than `en` or `fr`, `allowedTypes` that is empty,
+  repeats a type or names one outside `image/jpeg`, `image/png`, `application/pdf`, and a
+  `maxBytes` outside 1 to 26,214,400 (25 MiB); defaults are every type and 10 MiB. It refuses
+  (`precondition_failed`) a record the `RecordStore` does not have or that another call confirmed.
+  It returns `{token, expiresAt, allowedTypes, maxBytes}`: the token is `upl_` and 32 random bytes
+  in base64url, and expires 30 minutes (`UPLOAD_LINK_TTL_SECONDS`) after creation.
+- The store keeps `{workspaceId, tokenHash, callId, recordId, locale, allowedTypes, maxBytes,
+  createdAt, expiresAt, usedAt}`, where `tokenHash` is the SHA-256 hex of the token. The token is
+  never stored.
+- `openUploadLink(token)` returns `{locale, allowedTypes, maxBytes, expiresAt}` for a link that
+  exists in the workspace, is unused and has not expired (now before `expiresAt`), else null.
+- `acceptUpload({token, contentType, bytes})` checks, in order: the link is usable
+  (`link_not_usable`, for an unknown, malformed, used or expired token alike); the declared type,
+  without parameters and in any case, is one the link allows (`type_not_allowed`); the file is not
+  empty (`empty`) and at most `maxBytes` (`too_large`); the bytes start with the type's signature
+  (`FF D8 FF`, the PNG signature, `%PDF-`; else `content_mismatch`). None of these spends the
+  link. Then `DocumentStore.claimUploadLink` sets `usedAt` if it is still null, and only the one
+  claim that did goes on (a lost claim is `link_not_usable`); the scanner is asked, and anything but
+  `clean: true` is `scan_refused`; the document is stored as `{documentId, workspaceId, callId,
+  recordId, contentType, size, digest, receivedAt}` with `digest` the SHA-256 hex of the bytes.
+  From the claim on, the link is spent whatever happens.
+
+`MemoryDocumentStore` is the reference store. The reference server, given `uploads`, serves
+`GET /u/:token` (the upload page, in the link's language or `?lang=en|fr`, with a switch to the
+other) and `POST /u/:token` (a `multipart/form-data` body with a part named `file`, read up to the
+link's `maxBytes` plus 16 KiB). Answers: 201 received, 400 no file, 410 link not usable, 413 too
+large, 415 type, 422 scan refused, each as a page in the same language. Creating the link, texting
+it to the number on file and writing ledger entries for it are not wired into the engine yet.

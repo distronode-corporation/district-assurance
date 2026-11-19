@@ -6,7 +6,7 @@ import { after, before, describe, it } from "node:test";
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { runDemo } from "../examples/reference-server/src/demo.ts";
 import { StripeCheckoutLinks, StripeIdentityProvider } from "../examples/reference-server/src/stripe-adapters.ts";
-import { NotImplementedError, signStripePayload, type Engine } from "../src/index.ts";
+import { MemoryDocumentStore, NotImplementedError, createUploadLink, signStripePayload, type Engine } from "../src/index.ts";
 import { createTestEngine, type TestEngine } from "../src/testing/index.ts";
 
 const SECRET = "whsec_test_not_a_secret";
@@ -86,6 +86,137 @@ describe("reference server", () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/receipts/c1`);
     assert.deepEqual([res.status, await res.json()], [500, { error: "internal" }]);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+});
+
+describe("reference server: document uploads", () => {
+  const JPEG = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+  let t: TestEngine;
+  let documents: MemoryDocumentStore;
+  let scanner: { clean: boolean; scan(): Promise<{ clean: boolean }> };
+  let base = "";
+  let close: () => Promise<void>;
+
+  before(async () => {
+    t = createTestEngine();
+    documents = new MemoryDocumentStore();
+    scanner = {
+      clean: true,
+      async scan() {
+        return { clean: this.clean };
+      },
+    };
+    await t.records.putIntakeRecord({ recordId: "rec_1", workspaceId: t.engine.workspaceId, callId: "call_1", formId: "f", formVersion: "1", values: {}, digest: "0".repeat(64), confirmedBy: "voice", confirmedAt: "2026-01-01T00:00:00.000Z" });
+    const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [], payments: [] }, clock: t.clock, uploads: { documents, scanner, ids: t.ids } });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    close = () => new Promise((resolve) => server.close(() => resolve()));
+  });
+  after(() => close());
+
+  const link = async (input: { locale?: "en" | "fr"; maxBytes?: number; allowedTypes?: Array<"image/jpeg" | "image/png" | "application/pdf"> } = {}) =>
+    (await createUploadLink({ callId: "call_1", recordId: "rec_1", ...input }, { workspaceId: t.engine.workspaceId, documents, clock: t.clock, records: t.records })).token;
+  const send = (token: string, bytes: Uint8Array, type = "image/jpeg", query = "") => {
+    const body = new FormData();
+    body.append("note", "ignored");
+    body.append("file", new Blob([bytes], { type }), "photo.jpg");
+    return fetch(`${base}/u/${token}${query}`, { method: "POST", body });
+  };
+
+  it("serves the upload page in the link's language, with a switch, and strict headers", async () => {
+    const token = await link({ locale: "fr" });
+    let res = await fetch(`${base}/u/${token}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.equal(res.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(res.headers.get("cache-control"), "no-store");
+    assert.match(res.headers.get("content-security-policy")!, /default-src 'none';.*form-action 'self'; frame-ancestors 'none'/);
+    let html = await res.text();
+    assert.match(html, /<html lang="fr">/);
+    assert.match(html, /Ajouter un document/);
+    assert.match(html, /Acceptés : JPEG, PNG, PDF, jusqu'à 10 Mo\./);
+    assert.match(html, /accept="image\/jpeg,image\/png,application\/pdf"/);
+    assert.match(html, /href="\?lang=en"/);
+    assert.ok(!html.includes(token), "the page never repeats the token");
+    res = await fetch(`${base}/u/${token}?lang=en`);
+    html = await res.text();
+    assert.match(html, /<html lang="en">/);
+    assert.match(html, /Add a document/);
+    assert.match(html, /Accepted: JPEG, PNG, PDF, up to 10 MB\./);
+    html = await (await fetch(`${base}/u/${await link({ maxBytes: 2000, allowedTypes: ["application/pdf"] })}?lang=xx`)).text();
+    assert.match(html, /Accepted: PDF, up to 2 KB\./);
+  });
+
+  it("takes one upload per link, then answers that the link is used", async () => {
+    const token = await link();
+    let res = await send(token, JPEG);
+    assert.equal(res.status, 201);
+    assert.match(await res.text(), /Your document was received/);
+    assert.deepEqual([...documents.documents().at(-1)!.bytes], [...JPEG]);
+    res = await send(token, JPEG);
+    assert.equal(res.status, 410);
+    assert.match(await res.text(), /expired or was already used/);
+    res = await fetch(`${base}/u/${token}?lang=fr`);
+    assert.equal(res.status, 410);
+    assert.match(await res.text(), /Ce lien a expiré ou a déjà été utilisé/);
+  });
+
+  it("refuses an expired or unknown link the same way", async () => {
+    const token = await link();
+    t.clock.advance(30 * 60 * 1000);
+    for (const path of [`/u/${token}`, "/u/upl_unknown", "/u/"]) {
+      const res = await fetch(`${base}${path}`);
+      assert.equal(res.status, 410, path);
+    }
+    assert.equal((await send(token, JPEG)).status, 410);
+  });
+
+  it("refuses a wrong type, a mismatch, an empty or missing file and one over the cap, in the page's language", async () => {
+    const token = await link({ locale: "fr", maxBytes: JPEG.length, allowedTypes: ["image/jpeg"] });
+    let res = await send(token, JPEG, "image/png");
+    assert.equal(res.status, 415);
+    assert.match(await res.text(), /Ce type de fichier n'est pas accepté ici/);
+    res = await send(token, Uint8Array.from([1, 2, 3]), "image/jpeg", "?lang=en");
+    assert.equal(res.status, 415);
+    assert.match(await res.text(), /This type of file is not accepted here/);
+    assert.equal((await send(token, new Uint8Array(0))).status, 400);
+    assert.equal((await send(token, Uint8Array.from([...JPEG, 0]))).status, 413);
+    res = await fetch(`${base}/u/${token}`, { method: "POST", body: new Uint8Array(JPEG.length + 20 * 1024) });
+    assert.equal(res.status, 413);
+    assert.match(await res.text(), /Ce fichier est trop volumineux/);
+    for (const [type, body] of [
+      ["text/plain", "x"],
+      ["multipart/form-data; boundary=b", "nothing here"],
+      ["multipart/form-data; boundary=b", "--b\r\nno end of headers"],
+      ["multipart/form-data; boundary=b", "--b\r\ncontent-disposition: form-data; name=\"file\"\r\n\r\nno closing boundary"],
+      ["multipart/form-data; boundary=\"b\"", "--b\r\ncontent-disposition: form-data; name=\"other\"\r\n\r\nx\r\n--b--\r\n"],
+    ] as const) {
+      res = await fetch(`${base}/u/${token}`, { method: "POST", body, headers: { "content-type": type } });
+      assert.equal(res.status, 400, body);
+      assert.match(await res.text(), /Choisissez d'abord un fichier/);
+    }
+    assert.equal((await fetch(`${base}/u/${token}`, { method: "PUT" })).status, 405);
+    assert.equal((await send(token, JPEG)).status, 201, "none of those spent the link");
+  });
+
+  it("refuses what the scanner does not pass, and spends the link", async () => {
+    const token = await link();
+    scanner.clean = false;
+    const res = await send(token, JPEG);
+    scanner.clean = true;
+    assert.equal(res.status, 422);
+    const html = await res.text();
+    assert.match(html, /could not be accepted/);
+    assert.doesNotMatch(html, /<form/);
+    assert.equal((await send(token, JPEG)).status, 410);
+  });
+
+  it("is off without the uploads option", async () => {
+    const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [], payments: [] }, clock: t.clock });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/u/${await link()}`);
+    assert.deepEqual([res.status, await res.json()], [404, { error: "not_found" }]);
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 });

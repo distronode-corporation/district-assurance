@@ -25,6 +25,11 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Documents by text (FIL-5): `createUploadLink` makes a single-use, 30-minute link bound to a call
+  and a confirmed record, with allowed types and a size cap, storing only its token's hash;
+  `acceptUpload` checks type, size and leading bytes, spends the link and asks the host's
+  `DocumentScanner`; a `DocumentStore` adapter with `MemoryDocumentStore`; the reference server
+  serves an upload page in English and French at `/u/:token`.
 
 ### Changed
 
