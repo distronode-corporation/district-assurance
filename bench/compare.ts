@@ -84,11 +84,25 @@ export function readResults(path: string): BenchResults | string {
   } catch (e) {
     return `${path} cannot be read as JSON (${e instanceof Error ? e.message : String(e)})`;
   }
-  const r = parsed as Partial<BenchResults> | null;
-  if (r === null || typeof r !== "object" || r.format !== RESULTS_FORMAT || !Array.isArray(r.results)) {
-    return `${path} is not a results file of format ${RESULTS_FORMAT}`;
-  }
-  return r as BenchResults;
+  if (!isResults(parsed)) return `${path} is not a results file of format ${RESULTS_FORMAT}`;
+  return parsed;
+}
+
+const isText = (v: unknown): v is string => typeof v === "string";
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+/** A time in microseconds: a finite number, not below 0. NaN and Infinity are written to JSON as null. */
+const isTime = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
+
+/**
+ * Whether a parsed file holds everything the comparison and its report read: the format, the
+ * machine, and for each result its name and mean. Anything else would throw in the report, and a
+ * file the comparison cannot read is reported and skipped instead.
+ */
+function isResults(r: unknown): r is BenchResults {
+  if (!isRecord(r) || r.format !== RESULTS_FORMAT || !Array.isArray(r.results)) return false;
+  if (!isText(r.node) || !isRecord(r.os) || !isText(r.os.type) || !isText(r.os.arch) || !isRecord(r.cpu) || !isText(r.cpu.model)) return false;
+  if (!(r.commit === null || isText(r.commit)) || !(r.runner === null || isText(r.runner))) return false;
+  return r.results.every((x: unknown) => isRecord(x) && isText(x.name) && isTime(x.meanUs));
 }
 
 function main(): void {
