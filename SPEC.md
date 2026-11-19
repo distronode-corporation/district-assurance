@@ -321,7 +321,11 @@ Object keys sorted by UTF-16 code units, no whitespace, strings and numbers as E
 numbers, sparse array holes, objects whose prototype is not `Object.prototype` or `null`, and
 strings or property names holding a lone surrogate (RFC 8785, section 3.2.2.2); a valid surrogate
 pair is kept. The stand-alone verifier and the reference page refuse the same values, so a receipt
-body holding a lone surrogate is invalid (the engine cannot have signed it).
+body holding a lone surrogate is invalid (the engine cannot have signed it). So that no call is
+ever left with a ledger entry it cannot append, a step whose ledger detail canonical JSON refuses
+is refused with `invalid_input` before it is saved; `markUntrusted` replaces a lone surrogate in
+its label with U+FFFD, so the taint always lands; and `validateConfig` refuses a config holding a
+lone surrogate in any string or key.
 
 ## 12. Receipts
 

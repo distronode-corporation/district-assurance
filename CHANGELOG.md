@@ -40,7 +40,9 @@ All notable changes to this project are documented here. The format follows
 
 - `canonicalJson` refuses a string or property name holding a lone surrogate (RFC 8785, section
   3.2.2.2), as do the stand-alone verifier and the demo page; an intake text value holding one is
-  refused as `not_text`.
+  refused as `not_text`. A step whose ledger detail canonical JSON refuses (a lone surrogate, a
+  `Date`) is refused before it is saved, `markUntrusted` repairs a lone surrogate in its label, and
+  `validateConfig` refuses a config holding one.
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

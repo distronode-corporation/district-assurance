@@ -11,7 +11,7 @@
 import type { JsonWebKey } from "node:crypto";
 
 import type { IntakeRecord, SessionStore } from "./core/adapters.ts";
-import type { JsonValue } from "./core/canonical.ts";
+import { canonicalJson, type JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
 import { EngineError, NotImplementedError } from "./core/errors.ts";
@@ -214,6 +214,8 @@ export class Engine {
 
   /** Untrusted text (a business webhook reply, a document) entered the conversation. */
   async markUntrusted(callId: string, source: string): Promise<void> {
+    // The taint always lands: a label that is not Unicode text is repaired, never a reason to refuse.
+    source = String(source).toWellFormed();
     await this.#update(callId, (draft) => {
       draft.apply({ type: "untrusted_content", source });
       for (const module of this.registry.list()) {
@@ -574,6 +576,13 @@ export class Engine {
         // to be appended later, and a caller changing its object afterwards changes nothing.
         const copy = structuredClone(detail);
         if (detailCarriesCardNumber(copy)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
+        // The ledger hashes the entry as canonical JSON after the step is saved: a detail it would
+        // refuse (a lone surrogate, a Date) is refused here, or it would block every later write.
+        try {
+          canonicalJson(copy);
+        } catch {
+          throw new EngineError("invalid_input", "audit detail must be canonical JSON: plain data, no lone surrogate");
+        }
         events.push({ name, actor, at: this.#now(), detail: copy });
       },
       step: () => currentStep(record),
