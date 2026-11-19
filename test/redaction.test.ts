@@ -84,7 +84,8 @@ describe("findCardNumbers", () => {
 
   it("does not join digits across words or other punctuation", () => {
     assert.equal(redact("4242 4242 and 4242 4242"), "4242 4242 and 4242 4242");
-    assert.equal(redact("4242/4242/4242/4242"), "4242/4242/4242/4242");
+    assert.equal(redact("4242;4242;4242;4242"), "4242;4242;4242;4242");
+    assert.equal(redact("4242/4242/4242/4242"), M, "a slash joins a run");
     assert.equal(redact("4242 4242 4242 4242 is mine"), `${M} is mine`);
   });
 

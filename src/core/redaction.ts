@@ -1,8 +1,9 @@
 // Redaction of transcripts and any other text before it is stored or sent on.
 //
 // The first detector is card numbers (PANs): 13 to 19 digits that pass the Luhn check, written as
-// digits or spoken as single digit words in English or French, with separators between groups:
-// spaces, dashes, dots, commas and invisible characters (SEPARATOR_CLASS). A match is replaced by a fixed marker. Over-redaction is accepted; the
+// digits in any script or spoken as single digit words in English or French, with separators
+// between groups: spaces, dashes, dots, commas, slashes, underscores, middle dots and invisible
+// characters (SEPARATOR_CLASS). A match is replaced by a fixed marker. Over-redaction is accepted; the
 // risk this guards against is a card number reaching storage.
 //
 // Further detectors, each its own `Redactor` over the same digit runs (PRV-6): Canadian social
@@ -96,13 +97,34 @@ interface Token {
   end: number;
 }
 
-const TOKEN = /\d+|\p{L}+/gu;
+const TOKEN = /\p{Nd}+|\p{L}+/gu;
+const NUMERAL = /^\p{Nd}/u;
+const DECIMAL_DIGIT = /^\p{Nd}$/u;
+
+/**
+ * The value of one Unicode decimal digit. Unicode encodes every decimal digit in runs of ten, 0 to
+ * 9, so a digit's value is its distance from the first digit of its run, modulo 10.
+ */
+function digitValue(cp: number): number {
+  let first = cp;
+  while (DECIMAL_DIGIT.test(String.fromCodePoint(first - 1))) first--;
+  return (cp - first) % 10;
+}
+
+/** A numeral in any script as ASCII digits ("٤١" is "41", "４１" is "41"), for the checks; its span stays the original's. */
+function asciiDigits(raw: string): string {
+  let out = "";
+  for (const ch of raw) out += String(digitValue(ch.codePointAt(0)!));
+  return out;
+}
+
 /**
  * What may lie between the groups of one number: spaces, any dash (the hyphen-minus, en and em
- * dashes, the non-breaking hyphen), the minus sign, dots and commas, and what a reader never sees:
- * format characters (zero-width spaces and joiners, soft hyphens, bidi controls) and combining marks.
+ * dashes, the non-breaking hyphen), the minus sign, dots, commas, slashes, underscores and middle
+ * dots, and what a reader never sees: format characters (zero-width spaces and joiners, soft
+ * hyphens, bidi controls) and combining marks.
  */
-export const SEPARATOR_CLASS = String.raw`[\s\p{Pd}\u2212\p{Cf}\p{M}.,]`;
+export const SEPARATOR_CLASS = String.raw`[\s\p{Pd}\u2212\p{Cf}\p{M}.,/_\u00b7]`;
 const SEPARATOR = new RegExp(`^${SEPARATOR_CLASS}*$`, "u");
 
 /** Runs of digit tokens with only separators between them. */
@@ -113,7 +135,9 @@ function digitRuns(text: string): Token[][] {
   for (const match of text.matchAll(TOKEN)) {
     const raw = match[0];
     const start = match.index;
-    const digits = /^\d/.test(raw) ? raw : DIGIT_WORDS[raw.toLowerCase()];
+    // Own keys only: "constructor" or "toString" is a word, never an inherited function read as digits.
+    const word = raw.toLowerCase();
+    const digits = NUMERAL.test(raw) ? asciiDigits(raw) : Object.hasOwn(DIGIT_WORDS, word) ? DIGIT_WORDS[word] : undefined;
     const joined = run.length > 0 && SEPARATOR.test(text.slice(lastEnd, start));
     if (!joined && run.length > 0) {
       runs.push(run);
@@ -155,11 +179,22 @@ export function findCardNumbers(text: string): RedactionFinding[] {
   return findings;
 }
 
-/** Replaces each finding with its marker. Findings must be sorted and must not overlap. */
+/**
+ * Replaces each finding with its marker, in any order: the findings are sorted by position first,
+ * and overlapping ones are merged into one span, marked with the kind of the one that starts first
+ * (the longer at a tie), so no part of any finding is left in the text.
+ */
 export function applyFindings(text: string, findings: readonly RedactionFinding[]): string {
+  const sorted = [...findings].sort((a, b) => a.start - b.start || b.end - a.end);
+  const spans: RedactionFinding[] = [];
+  for (const f of sorted) {
+    const last = spans.at(-1);
+    if (last !== undefined && f.start < last.end) last.end = Math.max(last.end, f.end);
+    else spans.push({ ...f });
+  }
   let out = "";
   let at = 0;
-  for (const f of findings) {
+  for (const f of spans) {
     out += text.slice(at, f.start) + REDACTION_MARKERS[f.kind];
     at = f.end;
   }

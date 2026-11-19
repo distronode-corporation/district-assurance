@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 
 import {
   REDACTION_MARKERS,
+  applyFindings,
   bankAccountRedactor,
   cardNumberRedactor,
   composeRedactors,
@@ -62,5 +63,55 @@ describe("hostile #91: what holds", () => {
       assert.doesNotThrow(() => all.redact(text));
     }
     assert.equal(bankAccountRedactor.redact("constructor 12345678").findings.length, 0);
+  });
+});
+
+describe("hostile #91: more separators, decimal digits in any script, and words", () => {
+  const script = (zero: number) => (digits: string) => Array.from(digits, (d) => String.fromCodePoint(zero + Number(d))).join("");
+  for (const [name, sep] of Object.entries({ slash: "/", underscore: "_", "middle dot": "\u00b7" })) {
+    it(`redacts a SIN, a health card and a bank number grouped with a ${name}`, () => {
+      assert.equal(sinRedactor.redact([SIN.slice(0, 3), SIN.slice(3, 6), SIN.slice(6)].join(sep)).text, REDACTION_MARKERS.sin);
+      assert.equal(healthCardRedactor.redact(`TREM${sep}7501${sep}0112`).text, REDACTION_MARKERS.health_card);
+      assert.equal(bankAccountRedactor.redact(`account 1234${sep}5678`).text, `account ${REDACTION_MARKERS.bank_account}`);
+    });
+  }
+
+  for (const [name, write] of Object.entries({ fullwidth: script(0xff10), "Arabic-Indic": script(0x0660), Devanagari: script(0x0966), "mathematical bold (astral)": script(0x1d7ce) })) {
+    it(`reads ${name} digits by their values for every check, and removes the original span`, () => {
+      assert.equal(sinRedactor.redact(`sin ${write(SIN)} ok`).text, `sin ${REDACTION_MARKERS.sin} ok`);
+      assert.equal(healthCardRedactor.redact(`health ${write(ONTARIO)} ok`).text, `health ${REDACTION_MARKERS.health_card} ok`);
+      assert.equal(healthCardRedactor.redact(`TREM ${write("75010112")}`).text, REDACTION_MARKERS.health_card);
+      assert.equal(bankAccountRedactor.redact(`account ${write("12345678")}`).text, `account ${REDACTION_MARKERS.bank_account}`);
+      const bad = `${SIN.slice(0, 8)}${(Number(SIN[8]) + 1) % 10}`;
+      assert.equal(sinRedactor.redact(write(bad)).text, write(bad), "the Luhn check runs on the values");
+    });
+  }
+
+  it("reads prototype keys as words, never as inherited functions", () => {
+    for (const word of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"]) {
+      assert.equal(bankAccountRedactor.redact(`account ${word} 12345678`).text, `account ${word} ${REDACTION_MARKERS.bank_account}`, word);
+    }
+  });
+});
+
+describe("hostile #91: applyFindings takes findings in any order", () => {
+  it("applies composed findings in redactor order to the original, and nothing after the first kind leaks", () => {
+    const text = `card 4111 1111 1111 1111, health ${ONTARIO}, sin ${SIN}, account 12345678, card again 4111111111111111`;
+    const result = all.redact(text);
+    assert.deepEqual(result.findings.map((f) => f.kind), ["card_number", "card_number", "health_card", "sin", "bank_account"], "redactor order, as documented");
+    assert.equal(applyFindings(text, result.findings), result.text);
+    assert.equal(/\d{3}/.test(applyFindings(text, result.findings)), false);
+  });
+
+  it("merges overlapping findings, so no part of either is left", () => {
+    const text = "a 0123456789 b";
+    const findings = [
+      { kind: "sin" as const, start: 6, end: 12 },
+      { kind: "card_number" as const, start: 2, end: 8 },
+      { kind: "bank_account" as const, start: 2, end: 4 },
+    ];
+    assert.equal(applyFindings(text, findings), `a ${REDACTION_MARKERS.card_number} b`);
+    assert.equal(applyFindings(text, []), text);
+    assert.deepEqual(findings[1], { kind: "card_number", start: 2, end: 8 }, "the caller's findings are left as they were");
   });
 });

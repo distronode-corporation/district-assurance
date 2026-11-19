@@ -404,7 +404,10 @@ the currency's own decimals.
 Each detector is its own `Redactor`; a host composes the ones it wants with `composeRedactors`,
 card numbers first, then health card numbers, SINs and bank numbers (a 10-digit health card number
 can start with a valid SIN, so the health card pass must see it whole). Composed findings report
-offsets into the original input, in the order the redactors ran. The engine's default redactor
+offsets into the original input, in the order the redactors ran; `applyFindings(text, findings)`
+takes findings in any order (it sorts them by position and merges overlapping ones, marked with
+the kind of the one that starts first), so a host can apply composed findings to the original
+text as they come. The engine's default redactor
 is `cardNumberRedactor`. `Engine.redact` sets `interrupt` on any finding, whichever redactor found
 it, and returns `line`, the fixed line for the kind found (`INTERRUPT_LINES`, in the call's
 language; a card number first, then a health card number, a SIN, banking details; null when
@@ -412,9 +415,12 @@ nothing was found). Only the card number line offers a payment link. A match is 
 kind's marker; `redaction.applied` counts findings per kind.
 
 Digits are read in runs: digit groups or single digit words (English and French) with only
-separators between them: spaces, any dash, the minus sign, dots, commas, and the characters a
-reader never sees (zero-width spaces and joiners, soft hyphens, bidi controls, combining marks:
-`SEPARATOR_CLASS`). In each run, matches are taken leftmost first,
+separators between them: spaces, any dash, the minus sign, dots, commas, slashes, underscores,
+middle dots, and the characters a reader never sees (zero-width spaces and joiners, soft hyphens,
+bidi controls, combining marks: `SEPARATOR_CLASS`). A numeral is any run of Unicode decimal digits
+(fullwidth, Arabic-Indic and the rest), read by its values for every check, and the original span
+is what is removed. Joining this widely can join things that are not one number; over-redaction is
+the safe side, since the risk is a number reaching storage. In each run, matches are taken leftmost first,
 longest at each position, never overlapping. A format with groups accepts a written number only
 when its groups break where the format's do, or not at all; single digits (spoken digit words, or
 digits read one by one) may break anywhere.
