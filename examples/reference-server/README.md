@@ -115,7 +115,9 @@ table does not list, a missing value and a value the host cannot read all map to
 | Carrier value | `attestation` |
 |---|---|
 | Twilio `StirVerstat`: `TN-Validation-Passed-A`, `-B`, `-C` | `A`, `B`, `C` |
-| Twilio `StirVerstat`: `TN-Validation-Failed-A`, `-B`, `-C`, `TN-Validation-Failed` | `failed` |
+| Twilio `StirVerstat`: `TN-Validation-Failed-A`, `-B`, `-C`, `TN-Validation-Failed`, `NULL` | `failed` |
+| Twilio `StirVerstat`: `TN-Validation-Failed-A-Diverted`, `-B-Diverted`, `-C-Diverted` | `failed` |
+| Twilio `StirVerstat`: `TN-Validation-Failed-A-Passthrough`, `-B-Passthrough`, `-C-Passthrough` | `failed` |
 | Twilio `StirVerstat`: `No-TN-Validation`, or no `StirVerstat` | `none` |
 | Telnyx SIP `verstat=TN-Validation-Passed` | `A` |
 | Telnyx SIP `verstat=TN-Validation-Passed-B` | `B` |
