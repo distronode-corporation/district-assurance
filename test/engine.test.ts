@@ -757,7 +757,7 @@ describe("Engine in Spanish (FIL-6)", () => {
     assert.equal((await both.engine.startFlow(started.callId, "intake")).status, "running");
   });
 
-  it("files and consents in Spanish: a sí, a Spanish read-back, the call's locale on the consent", async () => {
+  it("files and consents in Spanish: a keypad yes, a Spanish read-back, the call's locale on the consent", async () => {
     const t = flowSetup({ form: true, wording: true });
     const { callId } = await t.engine.startCall({ locale: "es", flow: "intake" });
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
@@ -765,10 +765,10 @@ describe("Engine in Spanish (FIL-6)", () => {
     await t.engine.finishVerification(callId);
     await t.engine.startIntake(callId, "repair");
     await t.engine.setIntakeField(callId, "issue", "Fuga bajo el fregadero");
-    assert.deepEqual(await t.engine.setIntakeField(callId, "urgent", "Sí"), { ok: true, value: true });
+    assert.deepEqual(await t.engine.setIntakeField(callId, "urgent", "yes"), { ok: true, value: true });
     const readBack = await t.engine.intakeReadBack(callId);
-    assert.equal(readBack.text, "Esto es lo que vamos a registrar. Problema: Fuga bajo el fregadero. Urgente: sí. ¿Es correcto? Diga sí u oprima el 1 para confirmar.");
-    await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: readBack.digest });
+    assert.equal(readBack.text, "Esto es lo que vamos a registrar. Problema: Fuga bajo el fregadero. Urgente: sí. ¿Es correcto? Oprima el 1 para confirmar.");
+    await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack: readBack.digest });
     const consent = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
     assert.equal(consent.locale, "es");
     assert.equal((await t.engine.flowPosition(callId))!.status, "completed");

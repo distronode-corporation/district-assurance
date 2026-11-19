@@ -101,8 +101,8 @@ describe("file: intake forms", () => {
     assert.deepEqual(normaliseFieldValue(field("urgent"), "maybe"), { ok: false, reason: "not_yes_or_no" });
   });
 
-  it("takes sí, si and no in Spanish, any case, with the accent composed or not", () => {
-    for (const yes of ["sí", "si", "Sí", "SÍ", "SI", " si ", "sí"]) assert.deepEqual(normaliseFieldValue(field("urgent"), yes), { ok: true, value: true }, JSON.stringify(yes));
+  it("refuses sí and si (no reviewed Spanish vocabulary yet), and takes no, any case", () => {
+    for (const yes of ["sí", "si", "Sí", "SÍ", "SI", " si ", "sí"]) assert.deepEqual(normaliseFieldValue(field("urgent"), yes), { ok: false, reason: "not_yes_or_no" }, JSON.stringify(yes));
     for (const no of ["no", "No", "NO"]) assert.deepEqual(normaliseFieldValue(field("urgent"), no), { ok: true, value: false }, no);
     for (const other of ["sí sí", "sip", "s", "nó", "tal vez"]) assert.deepEqual(normaliseFieldValue(field("urgent"), other), { ok: false, reason: "not_yes_or_no" }, other);
   });

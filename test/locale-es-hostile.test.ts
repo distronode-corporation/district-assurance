@@ -2,7 +2,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { validateForm } from "../src/file/intake.ts";
+import { normaliseFieldValue, validateForm } from "../src/file/intake.ts";
 import { applyFindings, findCardNumbers } from "../src/core/redaction.ts";
 import { formatAmount } from "../src/pay/paylink.ts";
 import { ACCOUNT, DOB, form, rejects, setup, testConfig, wording } from "./helpers.ts";
@@ -97,5 +97,34 @@ describe("hostile #122: Spanish names for a social security number", () => {
     for (const [key, label] of [["business", "Negocio"], ["vinos", "Vinos"], ["seguridad", "Seguridad del edificio"]] as const) {
       assert.equal(refused(key, label), false, `${key} / ${label}`);
     }
+  });
+});
+
+describe("hostile #122: Spanish spoken answers are refused until a reviewed vocabulary exists", () => {
+  it("never takes sí or si as a spoken yes, and keeps the English words", () => {
+    const field = { key: "urgent", label: { en: "Urgent", fr: "Urgent", es: "Urgente" }, type: "yes_no" as const, required: false };
+    for (const word of ["sí", "si", "Sí", "SÍ", "sí"]) assert.deepEqual(normaliseFieldValue(field, word), { ok: false, reason: "not_yes_or_no" }, word);
+    assert.deepEqual(normaliseFieldValue(field, "yes"), { ok: true, value: true });
+    assert.deepEqual(normaliseFieldValue(field, "no"), { ok: true, value: false });
+  });
+
+  it("asks a Spanish caller to confirm on the keypad, and refuses a voice confirmation on a Spanish call", async () => {
+    const t = setup({
+      config: testConfig((c) => {
+        const f = structuredClone(form) as typeof form & { fields: Array<{ label: Record<string, string> }> };
+        for (const field of f.fields) field.label.es = field.key;
+        (c.modules.dossier!.settings as { forms: unknown[] }).forms = [f];
+      }),
+    });
+    const { callId } = await t.engine.startCall({ locale: "es" });
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "Fuga");
+    const readBack = await t.engine.intakeReadBack(callId);
+    assert.equal(readBack.prompt, "¿Es correcto? Oprima el 1 para confirmar.");
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: readBack.digest }), rejects("precondition_failed", /keypad/));
+    assert.equal((await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack: readBack.digest })).confirmedBy, "keypad");
   });
 });

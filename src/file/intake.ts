@@ -51,8 +51,10 @@ export type NormaliseResult =
     };
 
 const FIELD_KEY = /^[a-z][a-z0-9_]{0,63}$/;
-// Spoken answers in any locale: a caller may answer in English whatever the call's language.
-const YES = new Set(["yes", "y", "oui", "sí", "si"]);
+// Spoken answers in English or French, whatever the call's language. Spanish spoken answers are
+// refused until a reviewed Spanish vocabulary exists (Sean, 2026-11-19): "sí" is not a yes, and a
+// Spanish call answers on the keypad. ("no" is the English word.)
+const YES = new Set(["yes", "y", "oui"]);
 const NO = new Set(["no", "n", "non"]);
 const FIELD_SETTINGS = ["key", "label", "type", "required", "sensitive", "maxLength", "showIf", "min", "max", "pattern"];
 const DEFAULT_MAX_LENGTH = 500;
@@ -257,7 +259,7 @@ export function normaliseFieldValue(field: IntakeField, raw: string): NormaliseR
     case "date":
       return isCalendarDate(value) ? inRange(field, value) : { ok: false, reason: "not_a_date" };
     case "yes_no": {
-      // NFC, so a "sí" whose accent arrives as a separate mark is the same word.
+      // NFC, so an answer whose accent arrives as a separate mark reads as the same word.
       const word = value.normalize("NFC").toLowerCase();
       if (YES.has(word)) return { ok: true, value: true };
       if (NO.has(word)) return { ok: true, value: false };

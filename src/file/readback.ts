@@ -79,7 +79,8 @@ export const READBACK_WORDING: Record<Locale, ReadBackWording> = {
     line: (label, value) => `${label}: ${value}`,
     // "se proporcionó" agrees with any label, where "proporcionado" would not.
     withheld: (label) => `${label}: se proporcionó, pero no se lee en voz alta por su seguridad.`,
-    prompt: "¿Es correcto? Diga sí u oprima el 1 para confirmar.",
+    // The keypad only: Spanish spoken answers are refused until a reviewed vocabulary exists.
+    prompt: "¿Es correcto? Oprima el 1 para confirmar.",
     yes: "sí",
     no: "no",
     minus: "menos ",

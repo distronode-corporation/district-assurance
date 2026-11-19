@@ -412,8 +412,9 @@ refused (`precondition_failed`) for a form with any field that has no Spanish la
 
 Opening: "Here is what will be filed." / "Voici ce que nous allons enregistrer." / "Esto es lo que
 vamos a registrar." Prompt: "Is that correct? Say yes or press 1 to confirm." / "Est-ce exact?
-Dites oui ou appuyez sur le 1 pour confirmer." / "¿Es correcto? Diga sí u oprima el 1 para
-confirmar." Every string code builds exists in every locale (`LOCALES`), and a parity test fails
+Dites oui ou appuyez sur le 1 pour confirmer." / "¿Es correcto? Oprima el 1 para confirmar." (the
+keypad only: Spanish spoken answers are refused until a reviewed vocabulary exists, so a yes/no
+field takes no "sí" and a Spanish call's read-back is confirmed with `confirmedBy: "keypad"`). Every string code builds exists in every locale (`LOCALES`), and a parity test fails
 when one is missing or copies another locale's. A sensitive field's value is never in the read-back, its text or its lines. The
 `digest` is `SHA-256(canonicalJson({v: 1, locale, text, record}))`, where `record` is the record
 digest of the values that would be filed (section 12), so a change to any of them, a sensitive one

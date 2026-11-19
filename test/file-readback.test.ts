@@ -122,9 +122,9 @@ describe("file: read-back", () => {
     const es = buildReadBack(form, values, "es");
     assert.equal(
       es.text,
-      "Esto es lo que vamos a registrar. Problema: Leak. Desde: el martes primero de septiembre de 2026. Urgente: sí. ¿Es correcto? Diga sí u oprima el 1 para confirmar.",
+      "Esto es lo que vamos a registrar. Problema: Leak. Desde: el martes primero de septiembre de 2026. Urgente: sí. ¿Es correcto? Oprima el 1 para confirmar.",
     );
-    assert.equal(es.prompt, "¿Es correcto? Diga sí u oprima el 1 para confirmar.");
+    assert.equal(es.prompt, "¿Es correcto? Oprima el 1 para confirmar.");
     assert.equal(es.locale, "es");
     assert.deepEqual(buildReadBack(form, {}, "en").lines, []);
   });
@@ -210,10 +210,17 @@ describe("locales: parity of every string code builds", () => {
     }
   });
 
-  it("reads yes and no with words intake accepts back, and the prompt asks for its own yes", () => {
+  it("reads yes and no with words intake accepts back, and the prompt asks for its own yes; Spanish asks for the keypad", () => {
     const yesNo: IntakeField = { key: "ok", label: { en: "OK", fr: "OK", es: "OK" }, type: "yes_no", required: false };
     for (const locale of LOCALES) {
       const w = READBACK_WORDING[locale];
+      if (locale === "es") {
+        // Spanish spoken answers are refused until a reviewed vocabulary exists: no spoken yes is asked for or taken.
+        assert.deepEqual(normaliseFieldValue(yesNo, w.yes), { ok: false, reason: "not_yes_or_no" });
+        assert.equal(w.prompt.includes(w.yes), false);
+        assert.match(w.prompt, /Oprima el 1/);
+        continue;
+      }
       assert.deepEqual(normaliseFieldValue(yesNo, w.yes), { ok: true, value: true }, locale);
       assert.deepEqual(normaliseFieldValue(yesNo, w.no), { ok: true, value: false }, locale);
       assert.ok(w.prompt.includes(` ${w.yes} `), locale);

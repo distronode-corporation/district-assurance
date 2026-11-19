@@ -184,6 +184,11 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
     // entry, and the same record comes back.
     if (intake === null && s.confirmed !== null) return { record: s.confirmed, filed: true };
     if (intake === null) throw new EngineError("invalid_transition", "no intake is open on this call");
+    // A Spanish caller confirms on the keypad: Spanish spoken answers are refused until a reviewed
+    // vocabulary exists, and the Spanish read-back asks for the 1.
+    if (draft.record.locale === "es" && confirmedBy === "voice") {
+      throw new EngineError("precondition_failed", "a Spanish call confirms its read-back on the keypad (confirmedBy keypad)");
+    }
     const heard = buildReadBack(intake.form, intake.values, draft.record.locale).digest;
     if (typeof readBack !== "string" || !hexDigestsEqual(readBack, heard)) {
       throw new EngineError("precondition_failed", "the draft changed since the caller heard its read-back; read it back again");
