@@ -365,7 +365,16 @@ is dropped with its values (phase back to `open`, nothing kept in the clear), th
 reason code, never a value), and `confirmIntake` throws `precondition_failed` with the reason code;
 the cipher's own error is never passed on. Nothing was stored, since the cipher runs before the
 record store, so `endCall` can go ahead and the host collects the record again if it wants it. If
-another process sealed and filed the same record meanwhile, that record is returned instead. Until the
+another process sealed and filed the same record meanwhile, that record is returned instead. A
+process that sealed the record claims the filing before it writes it (`writingSince`, by the same
+compare-and-set as every write): while the claim is live, a process whose cipher fails releases
+nothing and logs nothing, and `confirmIntake` throws `conflict` ("another process is writing this
+record; confirm again for its outcome"), so a retry returns the winner's record. A writer that finds
+the filing already released writes nothing and throws the same `precondition_failed`, so
+`record.filing_failed` is never logged for a record that is stored. A writer whose write fails gives
+up its claim; a claim older than two minutes (`WRITE_CLAIM_MS`) is taken as a writer that died, so a
+failing cipher can release the filing and never holds the call open for good. Left open: a writer
+that takes longer than that to write can still store a record after another process released it. Until the
 record is filed, abandoned or the call ends (`endCall` drops an open draft, before `call.ended`
 and the receipt's ledger head, writing no event), the draft in the call record holds sensitive
 values in the clear; afterwards the call record keeps only the encrypted record.

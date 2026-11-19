@@ -178,3 +178,140 @@ describe("hostile #78: sensitive values", () => {
     assert.equal((await c.ledger.list()).filter((e) => e.event === "record.filing_failed").length, 1);
   });
 });
+
+describe("FIL-2: a failed filing is never logged for a record that ends up stored", () => {
+  /** Two engines on one session store, record store and ledger; B's write held until released. */
+  async function twoEngines() {
+    let fail!: () => void;
+    const slow = { encrypt: () => new Promise<string>((_, reject) => (fail = () => reject(new Error("timeout")))) };
+    const sessions = new MemorySessionStore();
+    const records = seeded(new MemoryRecordStore());
+    const a = setup({ config: config(), adapters: { fieldCipher: slow, sessions, records } });
+    const callId = await draftOn(a);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let entered!: () => void;
+    const inPut = new Promise<void>((r) => (entered = r));
+    const bRecords = Object.create(records) as MemoryRecordStore;
+    bRecords.putIntakeRecord = async (r: IntakeRecord) => {
+      entered();
+      await held;
+      return records.putIntakeRecord(r);
+    };
+    const b = setup({ config: config(), adapters: { fieldCipher: new FakeFieldCipher(), sessions, records: bRecords, ledger: a.ledger } });
+    return { a, b, callId, records, fail: () => fail(), release, inPut };
+  }
+  const events = async (t: ReturnType<typeof setup>) => (await t.ledger.list()).map((e) => e.event).filter((e) => e.startsWith("record.") || e.startsWith("intake."));
+
+  it("W1 one process's cipher fails while another has sealed the record and is writing it: nothing is logged as failed, the writer files it", async () => {
+    const w = await twoEngines();
+    const failing = w.a.engine.confirmIntake(w.callId, { confirmedBy: "voice" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const filing = w.b.engine.confirmIntake(w.callId, { confirmedBy: "voice" });
+    await w.inPut;
+    w.fail();
+    await assert.rejects(failing, rejects("conflict", /another process is writing this record/));
+    w.release();
+    const filed = await filing;
+    assert.notEqual(await w.records.getIntakeRecord("ws_test", filed.recordId), null);
+    assert.deepEqual(await events(w.a), ["intake.started", "intake.confirmed"], "no record.filing_failed");
+    assert.deepEqual(await w.a.engine.confirmIntake(w.callId, { confirmedBy: "voice" }), filed, "a retry gets the winner's record");
+  });
+
+  it("W2 the failing process released first: the other writes nothing and gets the same outcome", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const late = { encrypt: async (plain: string) => (await held, `sealed:${plain.length}`) };
+    let fail!: () => void;
+    const slow = { encrypt: () => new Promise<string>((_, reject) => (fail = () => reject(new Error("timeout")))) };
+    const sessions = new MemorySessionStore();
+    const records = seeded(new MemoryRecordStore());
+    const a = setup({ config: config(), adapters: { fieldCipher: slow, sessions, records } });
+    const callId = await draftOn(a);
+    const failing = a.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const b = setup({ config: config(), adapters: { fieldCipher: late, sessions, records, ledger: a.ledger } });
+    const sealing = b.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    await new Promise((resolve) => setImmediate(resolve));
+    fail();
+    await assert.rejects(failing, rejects("precondition_failed", /nothing was filed/));
+    release();
+    await assert.rejects(sealing, rejects("precondition_failed", /nothing was filed/));
+    const id = (await a.ledger.list()).find((e) => e.event === "record.filing_failed")!.detail.recordId as string;
+    assert.equal(await records.getIntakeRecord("ws_test", id), null, "the released record is never stored");
+    assert.deepEqual(await events(a), ["intake.started", "record.filing_failed"]);
+  });
+
+  it("W3 a writer whose write fails gives up its claim, so a later failing cipher releases the filing", async () => {
+    let fail = false;
+    const cipher = { encrypt: async (plain: string) => { if (fail) throw new Error("kms down"); return `sealed:${plain.length}`; } };
+    class Down extends MemoryRecordStore {
+      override async putIntakeRecord(): Promise<void> {
+        throw new Error("store down");
+      }
+    }
+    const t = setup({ config: config(), adapters: { fieldCipher: cipher, records: seeded(new Down()) } });
+    const callId = await draftOn(t);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /store down/);
+    fail = true;
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("precondition_failed", /nothing was filed/));
+    assert.deepEqual(await events(t), ["intake.started", "record.filing_failed"]);
+  });
+
+  it("W4 a claim left by a writer that never finished goes stale after two minutes, so a failing cipher never holds the call open for good", async () => {
+    const sessions = new MemorySessionStore();
+    class Stuck extends MemoryRecordStore {
+      override putIntakeRecord(): Promise<void> {
+        return new Promise<void>(() => undefined);
+      }
+    }
+    const records = seeded(new MemoryRecordStore());
+    const x = setup({ config: config(), adapters: { fieldCipher: new FakeFieldCipher(), sessions, records: seeded(new Stuck()) } });
+    const callId = await draftOn(x);
+    void x.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const failing = { encrypt: async () => { throw new Error("kms down"); } };
+    const y = setup({ config: config(), adapters: { fieldCipher: failing, sessions, records, ledger: x.ledger } });
+    y.clock.advance(119_000);
+    await assert.rejects(y.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("conflict"), "a live claim holds");
+    y.clock.advance(2_000);
+    await assert.rejects(y.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("precondition_failed", /nothing was filed/));
+    assert.equal((await y.engine.state(callId)).phase, "open", "the call can end");
+  });
+
+  it("W5 two processes seal the same record and one files it first: the other writes nothing again and returns the filed record", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const late = { encrypt: async (plain: string) => (await held, `late:${plain.length}`) };
+    const sessions = new MemorySessionStore();
+    const records = seeded(new MemoryRecordStore());
+    const a = setup({ config: config(), adapters: { fieldCipher: late, sessions, records } });
+    const callId = await draftOn(a);
+    const slow = a.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const b = setup({ config: config(), adapters: { fieldCipher: new FakeFieldCipher(), sessions, records, ledger: a.ledger } });
+    const filed = await b.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    release();
+    assert.deepEqual(await slow, filed, "the record the first writer stored, not a second ciphertext");
+    assert.deepEqual(await records.getIntakeRecord("ws_test", filed.recordId), filed);
+    assert.equal((await a.ledger.list()).filter((e) => e.event === "intake.confirmed").length, 1);
+  });
+
+  it("W6 the same, when the call has moved on to another intake: the slow writer still writes nothing again", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const late = { encrypt: async (plain: string) => (await held, `late:${plain.length}`) };
+    const sessions = new MemorySessionStore();
+    const records = seeded(new MemoryRecordStore());
+    const a = setup({ config: config(), adapters: { fieldCipher: late, sessions, records } });
+    const callId = await draftOn(a);
+    const slow = a.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const b = setup({ config: config(), adapters: { fieldCipher: new FakeFieldCipher(), sessions, records, ledger: a.ledger } });
+    const filed = await b.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    await b.engine.startIntake(callId, "secure");
+    release();
+    assert.equal((await slow).recordId, filed.recordId);
+    assert.deepEqual(await records.getIntakeRecord("ws_test", filed.recordId), filed, "the stored record is the first writer's");
+  });
+});
