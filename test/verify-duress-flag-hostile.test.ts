@@ -1,5 +1,5 @@
-// Hostile pass on #124 (jr/wp-au baec1c0, VER-12 "flag until cleared"). Each attack asserts the
-// safe behaviour; a failing one is a BREAK.
+// The hostile pass on #124 (VER-12 "flag until cleared"), kept as regressions: each attack asserts
+// the safe behaviour. C2 is a todo until Sean decides how the flag survives a failed write.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
