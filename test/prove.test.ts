@@ -1,12 +1,12 @@
 import { strict as assert } from "node:assert";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, sign, verify } from "node:crypto";
 import { describe, it } from "node:test";
 
-import type { AuditInput } from "../src/core/adapters.ts";
+import type { AuditInput, ReceiptSigner } from "../src/core/adapters.ts";
 import { EngineError } from "../src/core/errors.ts";
 import { wordingDigest } from "../src/prove/consent.ts";
 import { GENESIS_HASH, MemoryAuditLedger, chainEntry, detailCarriesCardNumber, hashEntry, verifyChain } from "../src/prove/ledger.ts";
-import { keyPairSigner, receiptDigest, receiptPayload, signReceipt, verifyReceipt, type ReceiptBody } from "../src/prove/receipt.ts";
+import { derToP1363, keyPairSigner, receiptDigest, receiptPayload, signReceipt, verifyReceipt, type ReceiptBody } from "../src/prove/receipt.ts";
 import { generateTestSigner } from "../src/testing/fakes.ts";
 
 const at = "2026-01-01T00:00:00.000Z";
@@ -132,6 +132,79 @@ describe("receipts", () => {
     assert.throws(() => keyPairSigner("x", p384), /P-256/);
     const ed = generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" }).toString();
     assert.throws(() => keyPairSigner("x", ed), /P-256/);
+  });
+});
+
+describe("receipt signer contract (INT-4)", () => {
+  const der = (...bytes: number[]): Uint8Array => Uint8Array.from(bytes);
+  const run = (length: number, byte: number): number[] => Array.from({ length }, () => byte);
+  const malformed = /DER-encoded ECDSA P-256 signature/;
+
+  it("keyPairSigner returns a 64-byte P1363 signature that node:crypto verifies", async () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+    const signer = keyPairSigner("k", privateKey.export({ format: "pem", type: "pkcs8" }).toString());
+    const payload = receiptPayload(body());
+    const signature = await signer.sign(payload);
+    assert.equal(signature.byteLength, 64);
+    assert.equal(verify("sha256", payload, { key: publicKey, dsaEncoding: "ieee-p1363" }, signature), true);
+  });
+
+  it("converts node:crypto's DER signatures to the P1363 form node:crypto verifies", () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+    const payload = receiptPayload(body());
+    const lengths = new Set<number>();
+    // Enough signatures to see an r or s with its sign-bit padding byte and without it.
+    for (let i = 0; i < 64; i++) {
+      const signature = sign("sha256", payload, { key: privateKey, dsaEncoding: "der" });
+      lengths.add(signature.length);
+      const p1363 = derToP1363(signature);
+      assert.equal(p1363.byteLength, 64);
+      assert.equal(verify("sha256", payload, { key: publicKey, dsaEncoding: "ieee-p1363" }, p1363), true);
+      assert.equal(verify("sha256", payload, { key: publicKey, dsaEncoding: "der" }, signature), true);
+    }
+    assert.ok(lengths.size > 1, "DER lengths vary with the integers' leading bytes");
+  });
+
+  it("left-pads short integers and drops the sign-bit padding byte", () => {
+    const expected = new Uint8Array(64);
+    expected[31] = 1;
+    expected[63] = 0x80;
+    assert.deepEqual(derToP1363(der(0x30, 0x07, 0x02, 0x01, 0x01, 0x02, 0x02, 0x00, 0x80)), expected);
+    const full = der(0x30, 0x45, 0x02, 0x21, 0x00, ...run(32, 0xff), 0x02, 0x20, ...run(32, 0x7f));
+    assert.deepEqual(derToP1363(full), Uint8Array.from([...run(32, 0xff), ...run(32, 0x7f)]));
+  });
+
+  it("refuses anything that is not a strict DER P-256 signature", () => {
+    const tooLong = der(0x30, 0x26, 0x02, 0x21, ...run(33, 0x01), 0x02, 0x01, 0x01);
+    for (const [name, bytes] of [
+      ["empty", der()],
+      ["not a sequence", der(0x31, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01)],
+      ["a wrong sequence length", der(0x30, 0x07, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01)],
+      ["an empty sequence", der(0x30, 0x00)],
+      ["no second integer", der(0x30, 0x03, 0x02, 0x01, 0x01)],
+      ["not an integer", der(0x30, 0x06, 0x04, 0x01, 0x01, 0x02, 0x01, 0x01)],
+      ["an empty integer", der(0x30, 0x05, 0x02, 0x00, 0x02, 0x01, 0x01)],
+      ["a truncated integer", der(0x30, 0x03, 0x02, 0x05, 0x01)],
+      ["a negative integer", der(0x30, 0x06, 0x02, 0x01, 0x80, 0x02, 0x01, 0x01)],
+      ["zero", der(0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x00)],
+      ["a needless leading zero", der(0x30, 0x07, 0x02, 0x02, 0x00, 0x01, 0x02, 0x01, 0x01)],
+      ["more than 32 bytes", tooLong],
+      ["bytes after the integers", der(0x30, 0x07, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01, 0x00)],
+      ["the long length form", der(0x30, 0x81, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01)],
+    ] as const) {
+      assert.throws(() => derToP1363(bytes), malformed, name);
+    }
+  });
+
+  it("a key store signer that returns DER works through derToP1363, and is refused without it", async () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+    // A stand-in for a KMS: it signs where the key lives and answers in DER.
+    const kmsSign = async (payload: Uint8Array): Promise<Uint8Array> => sign("sha256", payload, { key: privateKey, dsaEncoding: "der" });
+    const publicJwk = { ...publicKey.export({ format: "jwk" }), kid: "kms-1", alg: "ES256", use: "sig" };
+    const kmsSigner: ReceiptSigner = { keyId: "kms-1", algorithm: "ES256", sign: async (p) => derToP1363(await kmsSign(p)), publicJwk: () => publicJwk };
+    assert.equal(verifyReceipt(await signReceipt(kmsSigner, body()), [publicJwk]), true);
+    const raw: ReceiptSigner = { ...kmsSigner, sign: kmsSign };
+    await assert.rejects(signReceipt(raw, body()), (e: unknown) => e instanceof EngineError && e.code === "invalid_input" && /not a 64-byte P1363 signature/.test(e.message));
   });
 });
 

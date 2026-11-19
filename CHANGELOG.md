@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Key store contracts (INT-4): the knowledge key can be an opaque HMAC function that the engine and
+  every factor hash through, `signReceipt` refuses a signature that is not 64-byte P1363, and
+  `derToP1363` converts a key store's DER signature.
 
 ### Changed
 

@@ -144,11 +144,22 @@ of birth is reversed by trying every date; the caller's entries are never stored
 fields are refused by `validateConfig` until field encryption exists (FIL-2). PINs on file are
 HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode).
 
+### Theft of the keys
+
+**Controls:** neither key has to be in the engine's process. The knowledge key can be an opaque
+HMAC function that runs in the host's key store; the engine, the built-in factors and plug-ins all
+hash through that one function, and an answer that is not a 64-character lower-case hex digest is
+refused (tested). The receipt key stays behind `ReceiptSigner`; a signer that returns anything but
+a 64-byte P1363 signature is refused, and `derToP1363` converts a key store's DER answer, checked
+against `node:crypto` (tested). An HMAC function does not stop a process that can call it from
+computing digests, so who may call the key store remains the host's control.
+
 ## Left to the host
 
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
   speech-to-text and the model while `sensitive` is set.
-- Keeping the knowledge key and the receipt signing key in a key store.
+- Keeping the knowledge key and the receipt signing key in a key store, behind a `KnowledgeHmac`
+  function and a `ReceiptSigner`, and limiting who may call them.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
   guarantees (`sessionStoreContract` today; PRV-5 for the others).
 - Choosing the subject when it starts verification with a subject key (for example the owner of

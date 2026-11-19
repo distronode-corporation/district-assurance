@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
 
 import { ConfigError } from "../src/core/config.ts";
@@ -12,7 +13,7 @@ import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import { verifyReceipt } from "../src/prove/receipt.ts";
 import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
 describe("Engine construction", () => {
   it("refuses a short key, an empty workspace, a missing ledger and a bad config", () => {
@@ -34,6 +35,31 @@ describe("Engine construction", () => {
     assert.equal(engine.isEnabled("trace"), true, "the ledger is always on");
     assert.equal(engine.isEnabled("badge"), false);
     assert.deepEqual(engine.receiptKeys(), []);
+  });
+
+  it("takes the knowledge key as an opaque HMAC function, and uses it for its own hashing too", async () => {
+    // A stand-in for a key store: the engine gets the function, never the key.
+    const asked: string[] = [];
+    const keyStore = (data: string): string => {
+      asked.push(data.split(":")[0]!);
+      return createHmac("sha256", TEST_KNOWLEDGE_KEY).update(data).digest("hex");
+    };
+    const t = setup({ knowledgeKey: keyStore });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: true, locked: false });
+    assert.deepEqual(await t.engine.submitPin(callId, PIN), { matched: true, locked: false });
+    assert.deepEqual(asked, ["subject", "field", "pin"], "the subject key, the keypad field and the PIN all went through the function");
+    assert.equal((await t.engine.finishVerification(callId)).level, 1);
+    assert.equal(JSON.stringify(await t.ledger.list()).includes(DOB), false);
+  });
+
+  it("refuses an HMAC function whose answer is not 64 lower-case hex characters", async () => {
+    for (const answer of ["AB".repeat(32), "ab".repeat(31), 42 as unknown as string]) {
+      const t = setup({ knowledgeKey: () => answer });
+      const { callId } = await t.engine.startCall();
+      await assert.rejects(t.engine.beginVerification(callId, { accountNumber: ACCOUNT }), rejects("invalid_input", /knowledge HMAC function/));
+    }
   });
 
   it("checks a null config instead of using the default, and refuses one that is not plain data", () => {

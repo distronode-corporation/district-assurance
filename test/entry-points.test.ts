@@ -28,6 +28,8 @@ describe("entry points", () => {
       "signReceipt",
       "verifyReceipt",
       "keyPairSigner",
+      "derToP1363",
+      "knowledgeHmac",
       "verifyStripeSignature",
       "parseStripeEvent",
       "ENGINE_EVENTS",

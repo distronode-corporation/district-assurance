@@ -144,6 +144,13 @@ texts.
 
 ## 5. Keypad knowledge
 
+- The knowledge key (`EngineOptions.knowledgeKey`) is its bytes, at least 16, or an opaque
+  `KnowledgeHmac` function, `(data) => HMAC-SHA256(key, UTF-8 data)` as 64 lower-case hex, which
+  runs in the host's key store so the key never enters the engine's process. It is synchronous,
+  the same shape as a plug-in's `hmac`, and the engine's own hashing (subject keys, field and PIN
+  digests) goes through the same function. An answer that is not 64 lower-case hex is refused with
+  `invalid_input`. `subjectKeyFor`, `knowledgeDigest`, `pinDigest` and `judgeKeypadFactors` take
+  either form, and give the same digests for the same key.
 - Subject key: `HMAC-SHA256(knowledgeKey, "subject:" + accountNumber)`, hex. A host may instead
   start verification with a subject key its own code chose (`{subjectKey}`, 64 lower-case hex);
   choosing the subject is not a factor.
@@ -331,6 +338,15 @@ false. `endCall` returns it, or null. `verification` comes from Badge, `records`
 part. `ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
 the ended call issues the receipt later with the same head, without ending the call again. `verifyReceipt(receipt, keys)` picks the key by `kid`
 and returns false for any change, a wrong algorithm, a malformed signature or an unknown key.
+
+The `ReceiptSigner` contract: `sign(payload)` returns an ES256 (ECDSA P-256 with SHA-256)
+signature over exactly the payload bytes, in IEEE P1363 form: `r || s`, each a 32-byte big-endian
+integer, 64 bytes in all. `signReceipt` refuses any other length with `invalid_input`, so no
+receipt is issued that cannot verify. Most key management services return DER
+(`SEQUENCE { r INTEGER, s INTEGER }`); `derToP1363(der)` converts it, and throws a TypeError on
+anything that is not a minimal DER encoding of two positive integers of at most 32 bytes with
+nothing after them. `publicJwk()` returns the public key published in the key set.
+
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
 `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
 
