@@ -151,8 +151,9 @@ fields are refused by `validateConfig` until field encryption exists (FIL-2). PI
 HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode).
 The reference server's optional SQLite stores (SRV-4) keep subjects (HMACs and the number on
 file), confirmed intake values and the ledger in one file, unencrypted, created readable and
-writable by its owner only (tested); a `file:` URI, which would open a file other than the one
-given that mode, is refused (tested). Protecting that file, its backups and the disk under it is
+writable by its owner only, with SQLite's WAL and shared-memory files created alike (tested); a
+file that already exists readable or writable by others is refused, and so is a `file:` URI, which
+would open a file other than the one given that mode (tested). Protecting that file, its backups and the disk under it is
 left to the host.
 
 ## Left to the host
