@@ -120,24 +120,26 @@ export async function openUploadLink(token: string, context: UploadContext): Pro
 /**
  * Takes one upload on a token. The declared type, the size and the leading bytes are checked
  * first, and a refusal there leaves the link usable. Then the link is claimed, which spends it,
- * and only the one claim that won goes on to the scanner and the store.
+ * and only the one claim that won goes on to the scanner and the store. The bytes are copied
+ * before the first await, so a later write to the caller's array cannot change what was checked.
  */
 export async function acceptUpload(
   input: { token: string; contentType: string; bytes: Uint8Array },
   context: UploadContext & { ids: IdGenerator; scanner: DocumentScanner },
 ): Promise<UploadResult> {
+  const bytes = Uint8Array.from(input.bytes);
   const link = await usableLink(input.token, context);
   if (link === null) return { ok: false, reason: "link_not_usable" };
   const contentType = input.contentType.split(";")[0]!.trim().toLowerCase();
   if (!isDocumentType(contentType) || !link.allowedTypes.includes(contentType)) return { ok: false, reason: "type_not_allowed" };
-  if (input.bytes.length === 0) return { ok: false, reason: "empty" };
-  if (input.bytes.length > link.maxBytes) return { ok: false, reason: "too_large" };
-  if (!SIGNATURES[contentType].every((byte, i) => input.bytes[i] === byte)) return { ok: false, reason: "content_mismatch" };
+  if (bytes.length === 0) return { ok: false, reason: "empty" };
+  if (bytes.length > link.maxBytes) return { ok: false, reason: "too_large" };
+  if (!SIGNATURES[contentType].every((byte, i) => bytes[i] === byte)) return { ok: false, reason: "content_mismatch" };
 
   const now = context.clock.now().toISOString();
   if (!(await context.documents.claimUploadLink(context.workspaceId, link.tokenHash, now))) return { ok: false, reason: "link_not_usable" };
   const documentId = context.ids.next("doc");
-  const scan = await context.scanner.scan({ workspaceId: context.workspaceId, documentId, contentType, bytes: input.bytes });
+  const scan = await context.scanner.scan({ workspaceId: context.workspaceId, documentId, contentType, bytes });
   if (scan.clean !== true) return { ok: false, reason: "scan_refused" };
   const document: DocumentRecord = {
     documentId,
@@ -145,11 +147,11 @@ export async function acceptUpload(
     callId: link.callId,
     recordId: link.recordId,
     contentType,
-    size: input.bytes.length,
-    digest: sha256Hex(input.bytes),
+    size: bytes.length,
+    digest: sha256Hex(bytes),
     receivedAt: now,
   };
-  await context.documents.putDocument(document, input.bytes);
+  await context.documents.putDocument(document, bytes);
   return { ok: true, document };
 }
 

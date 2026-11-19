@@ -199,6 +199,18 @@ describe("acceptUpload", () => {
     assert.equal((await w.upload(token, JPEG)).ok, true, "exactly the cap is accepted");
   });
 
+  it("checks, scans and stores a copy of the bytes, taken before the first await", async () => {
+    const w = world();
+    const { token } = await w.link();
+    const bytes = Uint8Array.from(JPEG);
+    const pending = w.upload(token, bytes);
+    bytes.fill(0x3c);
+    const result = await pending;
+    assert.ok(result.ok);
+    assert.equal(result.document.digest, sha256Hex(JPEG));
+    assert.deepEqual(w.documents.documents().map((d) => [...d.bytes]), [[...JPEG]]);
+  });
+
   it("refuses what the scanner does not pass, and the link is spent", async () => {
     const w = world();
     const { token } = await w.link();
