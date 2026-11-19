@@ -104,13 +104,14 @@ interface Parsed {
 
 type Parser = (lx: readonly Lexeme[], i: number, first: boolean) => Parsed | undefined;
 
-const TOKEN = /\d+|\p{L}+/gu;
+/** A word or numeral, as runs are read (live-detector.ts counts words with it too). */
+export const LEXEME = /\d+|\p{L}+/gu;
 const SEPARATOR = /^[\s\-.,]*$/u;
 
 function lexemes(text: string): Lexeme[] {
   const out: Lexeme[] = [];
   let lastEnd = 0;
-  for (const match of text.matchAll(TOKEN)) {
+  for (const match of text.matchAll(LEXEME)) {
     const raw = match[0];
     const start = match.index;
     const joined = out.length > 0 && SEPARATOR.test(text.slice(lastEnd, start));

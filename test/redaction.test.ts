@@ -124,6 +124,58 @@ describe("LiveCardNumberDetector", () => {
     assert.deepEqual(other.push(""), { interrupt: false, digits: 0 });
   });
 
+  it("reads a long run one word at a time as it reads it whole", () => {
+    const detector = new LiveCardNumberDetector({ minDigits: 19 });
+    for (let n = 1; n <= 500; n++) {
+      assert.deepEqual(detector.push("four"), { interrupt: n >= 19, digits: n });
+    }
+    // A late scale word still changes only the unsettled end of the run.
+    assert.deepEqual(detector.push("hundred and"), { interrupt: true, digits: 502 });
+    assert.deepEqual(detector.push("two"), { interrupt: true, digits: 502 });
+    assert.deepEqual(detector.push("thanks"), { interrupt: false, digits: 0 });
+  });
+
+  it("agrees with a reader that keeps the whole open run", () => {
+    // The reader this detector replaced: it read the whole open run again on every push.
+    class WholeRun {
+      #tail = "";
+      push(chunk: string): { interrupt: boolean; digits: number } {
+        const text = this.#tail === "" ? chunk : `${this.#tail} ${chunk}`;
+        const fresh = text.length - chunk.length;
+        const runs = digitRuns(text);
+        const count = (run: Array<{ digits: string }>) => run.reduce((n, p) => n + p.digits.length, 0);
+        const interrupt = runs.some((run) => run.at(-1)!.end > fresh && count(run) >= 8);
+        const last = runs.at(-1);
+        if (last !== undefined && /^[\s\-.,]*(?:(?:and|et|double|triple)[\s\-.,]*)?$/iu.test(text.slice(last.at(-1)!.end))) {
+          this.#tail = text.slice(last[0]!.start);
+          return { interrupt, digits: count(last) };
+        }
+        const pending = /(?<!\p{L})(?:double|triple)[\s\-.,]*$/iu.exec(text);
+        this.#tail = pending === null ? "" : text.slice(pending.index);
+        return { interrupt, digits: 0 };
+      }
+    }
+    const vocabulary = [
+      "four", "two", "oh", "seven", "ten", "dix", "sept", "neuf", "seize", "forty", "twenty", "vingt", "vingts",
+      "quatre", "soixante", "quatre-vingt-dix-sept", "hundred", "cent", "cents", "thousand", "mille", "and", "et",
+      "un", "onze", "double", "triple", "4242", "7", "please", "-", ",", "/",
+    ];
+    let seed = 29;
+    const random = (n: number) => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % n;
+    };
+    for (let trial = 0; trial < 300; trial++) {
+      const live = new LiveCardNumberDetector();
+      const whole = new WholeRun();
+      for (let push = 0; push < 30; push++) {
+        const words = Array.from({ length: 1 + random(4) }, () => vocabulary[random(vocabulary.length)]!);
+        const chunk = words.join(random(3) === 0 ? "-" : " ");
+        assert.deepEqual(live.push(chunk), whole.push(chunk), `trial ${trial}, push ${push}: ${chunk}`);
+      }
+    }
+  });
+
   it("never returns the text it heard", () => {
     const detector = new LiveCardNumberDetector();
     const result = detector.push("4242 4242 4242 4242");
