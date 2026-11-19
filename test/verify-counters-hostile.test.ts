@@ -1,4 +1,5 @@
-// VER-1 counters under two engines and flawed stores, from the iMac's hostile pass on wp-a 607b324.
+// VER-1 counters under two engines and flawed or malformed stores, from the iMac's hostile passes on
+// wp-a 607b324 and 85e0766.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
@@ -100,14 +101,40 @@ describe("wp-a: flawed stores", () => {
     assert.equal(left.length, 1);
   });
 
-  it("refuses, when the engine is built, a host store written before removeFailure existed", () => {
+  it("a host store written before removeFailure existed: refused when the engine is built", async () => {
     const legacy = new MemoryAttemptCounters() as unknown as Record<string, unknown>;
     const store = {
-      get: (k: AttemptCounterKey, s: string) => (legacy.get as (k: AttemptCounterKey, s: string) => Promise<string[]>).call(legacy, k, s),
-      recordFailure: (k: AttemptCounterKey, at: string, s: string) => (legacy.recordFailure as (k: AttemptCounterKey, at: string, s: string) => Promise<string[]>).call(legacy, k, at, s),
-      reset: (k: AttemptCounterKey) => (legacy.reset as (k: AttemptCounterKey) => Promise<void>).call(legacy, k),
+      get: (k: AttemptCounterKey, s: string) => (legacy.get as Function).call(legacy, k, s),
+      recordFailure: (k: AttemptCounterKey, at: string, s: string) => (legacy.recordFailure as Function).call(legacy, k, at, s),
+      reset: (k: AttemptCounterKey) => (legacy.reset as Function).call(legacy, k),
     };
-    assert.throws(() => setup({ adapters: { counters: store as never } }), /counters adapter is missing removeFailure/);
+    assert.throws(() => setup({ adapters: { counters: store as never } }), (e: unknown) => /invalid_input/.test(String((e as { code?: string }).code)) && /removeFailure/.test(String(e)));
+  });
+
+  it("each method missing, or a non-function value, is refused at construction", () => {
+    const fn = async () => undefined;
+    const full = { get: fn, recordFailure: fn, removeFailure: fn, reset: fn };
+    const bads: unknown[] = [true, 1, "fn", {}, null, Object.create(null), { call: fn }, Symbol("x")];
+    for (const name of ["get", "recordFailure", "removeFailure", "reset"]) {
+      const { [name as keyof typeof full]: _drop, ...rest } = full;
+      assert.throws(() => setup({ adapters: { counters: rest as never } }), new RegExp(name), `missing ${name}`);
+      for (const bad of bads) assert.throws(() => setup({ adapters: { counters: { ...full, [name]: bad } as never } }), new RegExp(name), `${name}=${typeof bad}`);
+    }
+    // Prototype methods (a class instance) pass; a getter returning a function passes.
+    assert.doesNotThrow(() => setup({ adapters: { counters: new MemoryAttemptCounters() } }));
+  });
+
+  it("odd adapters: null, a primitive, a Proxy that throws", () => {
+    const out: string[] = [];
+    for (const counters of [null, 0, "x", new Proxy({}, { get() { throw new Error("trap"); } })]) {
+      try {
+        setup({ adapters: { counters: counters as never } });
+        out.push("ACCEPTED");
+      } catch (e) {
+        out.push(String((e as { code?: string }).code ?? (e as Error).name) + ": " + String((e as Error).message).slice(0, 60));
+      }
+    }
+    assert.deepEqual(out.map((o) => o.split(":")[0]), ["invalid_input", "invalid_input", "invalid_input", "invalid_input"], out.join(" | "));
   });
 
   it("contract suite vs a store whose removeFailure removes the OLDEST failure whatever `at`", async () => {
