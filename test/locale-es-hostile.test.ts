@@ -2,6 +2,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
+import { validateForm } from "../src/file/intake.ts";
 import { applyFindings, findCardNumbers } from "../src/core/redaction.ts";
 import { formatAmount } from "../src/pay/paylink.ts";
 import { ACCOUNT, DOB, form, rejects, setup, testConfig, wording } from "./helpers.ts";
@@ -70,5 +71,31 @@ describe("hostile #122: Spanish card numbers", () => {
   it("formats Spanish amounts in its region's currency style", () => {
     assert.match(formatAmount("es", 150050, "usd"), /1,500\.50/);
     assert.match(formatAmount("es", 150, "jpy"), /150/);
+  });
+});
+
+describe("hostile #122: Spanish names for a social security number", () => {
+  const refused = (key: string, label: string) =>
+    validateForm({ formId: "f", version: "1", fields: [{ key, label: { en: "Number", fr: "Numéro", es: label }, type: "text", required: false }] }).some((e) => /names a card/.test(e));
+
+  it("refuses NSS and its full names, as a word, run together, or in a label", () => {
+    for (const [key, label] of [
+      ["nss", "Número"],
+      ["nss_number", "Número"],
+      ["nssNumero", "Número"],
+      ["numero", "NSS"],
+      ["numero", "N.S.S."],
+      ["numero", "Número de seguridad social"],
+      ["numero", "número de seguro social"],
+      ["numerotarjeta", "Número"],
+    ] as const) {
+      assert.equal(refused(key, label), true, `${key} / ${label}`);
+    }
+  });
+
+  it("still takes words that only hold the letters", () => {
+    for (const [key, label] of [["business", "Negocio"], ["vinos", "Vinos"], ["seguridad", "Seguridad del edificio"]] as const) {
+      assert.equal(refused(key, label), false, `${key} / ${label}`);
+    }
   });
 });

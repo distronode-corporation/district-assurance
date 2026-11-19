@@ -147,7 +147,7 @@ still caught) and replaced, and the host is told to interrupt (tested). Intake r
 carrying a card number, and the ledger refuses detail carrying one (tested). A form cannot ask for
 a card or a national identity number at all: `validateConfig` refuses a field whose key or label,
 in English, French or Spanish, names one (`card`, `carte`, `tarjeta`, `cvv`, `PAN`, `cc`, `SIN`,
-`NAS`, `SSN`, `assurance sociale`, `seguro social` and so on, as a whole part of the name or
+`NAS`, `SSN`, `NSS`, `assurance sociale`, `seguro social` and so on, as a whole part of the name or
 run into one word as in `creditcard` or `ssnumber`), with case, accents and dots ignored (tested). The check reads names, not intent: a field named to slip past it
 is still caught by the card-number check on its value, but a SIN under another name is not. Keypad card capture is planned only
 through a PCI-certified carrier service on a call path where tones never reach this engine

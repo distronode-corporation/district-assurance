@@ -63,19 +63,22 @@ export const MAX_PATTERN_WORK = 100_000;
 /**
  * Words that name a card or a national identity number, in English, French or Spanish, in a key or
  * a label (accents and case ignored): a card, its number (PAN, cc), a Social Insurance Number (SIN,
- * NAS) or a Social Security Number (SSN). Each is a whole word of the name split at spaces, `_`,
+ * NAS), a Social Security Number (SSN) or a Spanish social security number (NSS, "número de
+ * seguro social" or "de seguridad social"). Each is a whole word of the name split at spaces, `_`,
  * `-` and camelCase humps, never a piece of one, so "account", "pancake" and "nasal" pass.
  */
-const FORBIDDEN_NAME = /\b(?:cards?|cartes?|tarjetas?|cardholder|cvv2?|cvc|sin|nas|ssn|pan|cc|social insurance|assurance sociale|social security|seguro social)\b/;
+const FORBIDDEN_NAME =
+  /\b(?:cards?|cartes?|tarjetas?|cardholder|cvv2?|cvc|sin|nas|ssn|nss|pan|cc|social insurance|assurance sociale|social security|seguro social|seguridad social)\b/;
 /**
  * The same names run together into one word, as snake_case keys and labels often write them
- * ("creditcard", "cardno", "sinnumber", "numerocarte"), without catching words
+ * ("creditcard", "cardno", "sinnumber", "numerocarte", "numerotarjeta"), without catching words
  * that merely hold the letters ("cardiology", "discard", "cartel", "business").
  */
 const FORBIDDEN_COMPOUND = [
   /^(?:credit|debit|bank|gift|payment|pay)?cards?(?:no|num|number|numbers|holders?|name)?$/,
   /^(?:no|num|numero)?cartes?(?:no|num|numero)?$/,
-  /^(?:sin|nas|ssn|ss|pan|cc)(?:no|num|number|numero)$/,
+  /^(?:no|num|numero)?tarjetas?(?:no|num|numero)?$/,
+  /^(?:sin|nas|ssn|nss|ss|pan|cc)(?:no|num|number|numero)$/,
 ];
 
 /** Every problem with a form, as sentences. */

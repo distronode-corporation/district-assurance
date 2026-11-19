@@ -374,11 +374,11 @@ Field rules (FIL-4), each checked by `validateConfig`, which reports every bad o
   `max` and `pattern`.
 - No field's key or label (any language; case, accents and dots ignored) names a card, its
   number or a national identity number: the words `card`, `carte`, `tarjeta`, `cardholder`, `cvv`,
-  `cvc`, `pan`, `cc`, `sin`, `nas`, `ssn`, `social insurance`, `assurance sociale`, `social
-  security` or `seguro social`, each a whole part of the name split at spaces,
+  `cvc`, `pan`, `cc`, `sin`, `nas`, `ssn`, `nss`, `social insurance`, `assurance sociale`, `social
+  security`, `seguro social` or `seguridad social`, each a whole part of the name split at spaces,
   `_`, `-` and camelCase humps (`panNumber`), never a piece of a longer word (`account`, `pancake`,
   `nasal` pass), or one of them run into one word with a number or kind (`creditcard`, `cardno`,
-  `numerocarte`, `sinnumber`, `ssnumber`, `pannumber`, `ccno`). The
+  `numerocarte`, `numerotarjeta`, `sinnumber`, `ssnumber`, `nssnumero`, `pannumber`, `ccno`). The
   card-number check on values still applies whatever a field is called.
 - `min` and `max` only on number fields (finite numbers) and date fields (`YYYY-MM-DD` dates),
   inclusive, with `min` at most `max`.
