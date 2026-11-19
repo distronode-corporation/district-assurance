@@ -55,7 +55,11 @@ const TEXT_HEADERS = {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** A URI of an allowed scheme, on one line of printable ASCII, so it can never add a field of its own. */
+/**
+ * A URI of an allowed scheme, on one line of printable ASCII, so it can never add a field of its
+ * own. A web URI must be written `https://` (RFC 9116): the URL parser repairs forms such as
+ * `https:example.org`, but the file carries the value as written, so those are refused.
+ */
 function checkUri(field: string, value: string, schemes: readonly string[]): void {
   let scheme = "";
   try {
@@ -63,7 +67,8 @@ function checkUri(field: string, value: string, schemes: readonly string[]): voi
   } catch {
     // Not a URI: refused below.
   }
-  if (!/^[\x21-\x7e]+$/.test(value) || !schemes.includes(scheme)) {
+  const malformedWeb = scheme === "https:" && !/^https:\/\/[^/]/i.test(value);
+  if (!/^[\x21-\x7e]+$/.test(value) || !schemes.includes(scheme) || malformedWeb) {
     throw new Error(`securityTxt: ${field} must be a ${schemes.join(" or ")} URI on one line`);
   }
 }
@@ -83,7 +88,9 @@ export function securityTxt(settings: SecurityTxtSettings, now: Date, warn: (mes
   yearAhead.setUTCFullYear(yearAhead.getUTCFullYear() + 1);
   if (Number.isNaN(expires) || expires <= now.getTime()) throw new Error("securityTxt: expires must be in the future");
   if (expires > yearAhead.getTime()) throw new Error("securityTxt: expires must be at most a year ahead");
-  const stamp = settings.expires.toISOString().replace(/\.\d{3}Z$/, "Z");
+  // Whole seconds drop the `.000`; any other milliseconds stay, so the file never advertises an
+  // expiry earlier than the one the route enforces.
+  const stamp = settings.expires.toISOString().replace(/\.000Z$/, "Z");
   if (expires - now.getTime() <= 30 * DAY_MS) warn(`security.txt expires at ${stamp}: renew it before then`);
   const lines = settings.contact.map((c) => `Contact: ${c}`);
   lines.push(`Expires: ${stamp}`);

@@ -136,6 +136,14 @@ describe("reference server security.txt", () => {
     await s.close();
   });
 
+  it("keeps nonzero milliseconds in Expires, so the file never claims an earlier expiry than the route enforces", async () => {
+    const clock = new FixedClock();
+    clock.advance(100);
+    const s = await start({ clock, securityTxt: { contact: ["tel:+1-555-0100"], expires: new Date("2026-01-01T00:00:00.900Z") } });
+    assert.equal(await (await s.get()).text(), "Contact: tel:+1-555-0100\nExpires: 2026-01-01T00:00:00.900Z\n");
+    await s.close();
+  });
+
   it("has no route without settings, and never a default address", async () => {
     const s = await start({ clock: new FixedClock() });
     const res = await s.get();
@@ -171,6 +179,11 @@ describe("reference server security.txt", () => {
     assert.throws(make({ contact: ["http://example.test/report"] }), /contact must be/);
     assert.throws(make({ contact: ["https://example.test/\nPolicy: https://evil.test/"] }), /contact must be/, "a line break would add a field");
     assert.throws(make({ contact: ["mailto:a b@example.test"] }), /contact must be/);
+    assert.throws(make({ contact: ["https:example.test/report"] }), /contact must be/, "the URL parser would repair this form");
+    assert.throws(make({ contact: ["https:/example.test/report"] }), /contact must be/);
+    assert.throws(make({ policy: "https:example.test/disclosure" }), /policy must be/);
+    assert.throws(make({ canonical: "https:///example.test/.well-known/security.txt" }), /canonical must be/);
+    assert.doesNotThrow(make({ contact: ["mailto:a@example.test", "tel:+1-555-0100", "https://example.test/report"] }));
     assert.throws(make({ policy: "mailto:a@example.test" }), /policy must be a https: URI/);
     assert.throws(make({ canonical: "http://example.test/.well-known/security.txt" }), /canonical must be a https: URI/);
   });
