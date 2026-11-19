@@ -444,8 +444,9 @@ when there is a number.
   failure on each counter, both before judging. If the lists `recordFailure` returned show a lock
   that was not there when the counters were read (another attempt, on any call or engine, got in
   first), the attempt is refused the same way: no counter after that one is recorded, and the
-  call's attempt is given back. A pass, once its result is accepted on the call, resets the
-  subject's counter and takes its own failure off the number's (`forgetPass`, with `removeFailure`,
+  call's attempt is given back. A pass, once its result is accepted on the call, takes off the
+  subject's failures recorded up to the pass (one by one, so a failure recorded after it, by
+  another call, stays and a replayed cleanup erases nothing new) and takes its own failure off the number's (`forgetPass`, with `removeFailure`,
   so a failure another call records meanwhile is kept); the number's other failures stay until
   they leave the window, so a pass on the caller's own account never clears failures the line ran
   up against others. A failure stands, and
@@ -458,7 +459,7 @@ when there is a number.
   wait is never skipped. It is timed, not held for the whole judgment: an entry that arrives after
   it ends is judged even if the first is still being judged. There is no free guess either way,
   since every entry records its own failure before it is judged, and only a pass takes it back. If
-  the first passes, its pass resets the subject's counter and the second may enter again at once;
+  the first passes, its pass takes off the subject's failures up to the pass and the second may enter again at once;
   if it fails, both failures stand and the second waits the longer wait for two.
 - The cleanup a pass owes (`forgetPass`) is saved with the pass, on the call, so a write that
   fails after the pass was saved (its ledger entry) still gets it, in the same `submitKeypad` or
@@ -533,7 +534,8 @@ the `dialer` (`CallbackDialer`) and `counters` adapters when it is on.
   callback stays unpassed and the next request resumes it).
   The first call never gains a level, a factor or a grant from the callback. Asked again, it gives
   the same answer, and a placed callback whose call or dial failed is resumed with the same ids and
-  idempotency key.
+  idempotency key. A resumed dial a day or more after it was counted is counted again toward the
+  daily limit first (`countedAt`), and refused without ringing when the subject is at the limit.
 - A placed callback creates the callback call (an id from the id source, the first call's locale
   and revision, and its flow's steps from the first step) and, in the same write, starts
   verification on it for the subject the first call matched, with no factors; choosing the subject
@@ -542,7 +544,12 @@ the `dialer` (`CallbackDialer`) and `counters` adapters when it is on.
   `to` is read from the `RecordStore` when it dials, and again on every retry, never from the copy
   taken when verification began, so a number the business changed since is the one rung; with no
   E.164 number on file then, the callback fails without ringing
-  (`verification.callback_finished` `refused`).
+  (`verification.callback_finished` `refused`). The dial is claimed in a write that checks the
+  callback is still dialing and keeps the number dialed (`to`): a callback voided while the store
+  was read never rings, and `checkCarrier` on the callback call asks about that number, never the
+  copy taken when verification began (and is refused while the callback is still dialing). A retry
+  to the same number reuses the idempotency key; a number changed between tries gets a key of its
+  own (`redials`), and only the dial to the number kept is bound.
 - `applyCallbackOutcome({ref, answered, confirmed})` records `callback` on the callback call:
   passed only when the number on file answered and the person keyed the confirmation. Keys, not
   speech: voicemail or an answering machine is `answered` without `confirmed`, and fails. An

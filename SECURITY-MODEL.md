@@ -73,8 +73,8 @@ crash, a failing verifier or a second process never gives a free try; the counte
 the attempt, and an attempt that finds a lock another engine just set is refused unjudged (tested,
 two engines racing). A locked line answers `locked` even to the right PIN, on any call and either
 engine, until the window passes or a member of the business lifts the lock with `unlock`
-(INT-7, below), which clears that one counter entirely (tested). A pass resets the subject's
-counter but takes only its own failure off the number's: a line's failures against other accounts
+(INT-7, below), which clears that one counter entirely (tested). A pass takes off the subject's
+failures recorded up to it (a later one, by another call, stays) but takes only its own failure off the number's: a line's failures against other accounts
 stay through a pass on its own account, so alternating with that pass does not escape the lock per
 calling number (tested). Taking it off is one atomic step of the store
 (`removeFailure`), so a failure another call records on the same number meanwhile is never lost
