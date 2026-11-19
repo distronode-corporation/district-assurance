@@ -233,8 +233,10 @@ when there is a number.
   (`invalid_input`) another workspace, a factor kind that is not installed, a scope other than
   `subject` or `number`, a key that is not 64 lower-case hex, and a `memberId` that is not 1 to 128
   of letters, digits, `.`, `_`, `:`, `@`, `-` or that carries a card number; an engine without
-  `counters` refuses with `precondition_failed`. It appends `verification.unlocked` (call id null,
-  actor `member`; the listener, which hears of calls, is not told), then clears that one counter
+  `counters` refuses with `precondition_failed`; anything but a string key or member id is
+  `invalid_input` too. It appends `verification.unlocked` (call id null, actor `member`, no event
+  id, so every unlock is its own entry whatever the host's id generator repeats; the listener,
+  which hears of calls, is not told), then clears that one counter
   and its notices, and nothing else: the other scope, other factor kinds and other subjects stay
   locked. Unlike a pass, which takes only its own failure off a number's counter, an unlock clears
   the whole counter it names, a number's failures against other accounts included: the business's

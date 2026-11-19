@@ -386,20 +386,24 @@ export class Engine {
    * the counter is cleared, so no unlock goes unrecorded.
    */
   async unlock(input: UnlockInput): Promise<void> {
+    if (typeof input !== "object" || input === null) throw new EngineError("invalid_input", "unlock takes the counter a lock notice named and the member");
     const errors: string[] = [];
     if (input.workspaceId !== this.workspaceId) errors.push("workspaceId is not this engine's workspace");
     if (!this.#badge.manifest.provides.factors.includes(input.factor)) errors.push("factor is not an installed factor kind");
     if (input.scope !== "subject" && input.scope !== "number") errors.push("scope must be subject or number");
-    if (!COUNTER_KEY.test(input.key)) errors.push("key must be 64 lower-case hex characters");
-    if (!MEMBER_ID.test(input.memberId)) errors.push("memberId must be 1 to 128 of letters, digits, '.', '_', ':', '@', '-'");
+    // Strings only: a regex test turns an array or an object into a string, which would pass here,
+    // be recorded, and then clear no counter.
+    if (typeof input.key !== "string" || !COUNTER_KEY.test(input.key)) errors.push("key must be 64 lower-case hex characters");
+    if (typeof input.memberId !== "string" || !MEMBER_ID.test(input.memberId)) errors.push("memberId must be 1 to 128 of letters, digits, '.', '_', ':', '@', '-'");
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     const counters = this.#adapters.counters;
     if (counters === undefined) throw new EngineError("precondition_failed", "the engine has no counters adapter, so nothing is locked");
     const detail = { kind: input.factor, scope: input.scope, memberId: input.memberId };
     if (detailCarriesCardNumber(detail)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
-    // An id the ledger appends once, in its own space: a call's ids are 4-tuples, this is a 3-tuple.
-    const eventId = JSON.stringify([this.workspaceId, null, this.#ids.next("unlock")]);
-    await this.#adapters.ledger.append({ eventId, callId: null, actor: "member", event: "verification.unlocked", at: this.#now(), detail });
+    // No event id: one from the id generator repeats when a host's generator does (a restart, a
+    // second process), and the ledger would take the repeat for an append already done, leaving this
+    // unlock unrecorded. Each unlock is its own entry, as a PIN reset is.
+    await this.#adapters.ledger.append({ callId: null, actor: "member", event: "verification.unlocked", at: this.#now(), detail });
     await unlockCounter(counters, { workspaceId: this.workspaceId, factor: input.factor, scope: input.scope, key: input.key });
   }
 
