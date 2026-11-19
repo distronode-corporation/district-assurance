@@ -312,9 +312,9 @@ answer on file, a phone number, a link or card data.
 | `intake.abandoned` | none |
 | `redaction.applied` | `kinds` (counts per kind) |
 | `payment.link_sent` | `paymentId`, `linkId`, `amountMinor`, `currency`, `amountSource`, `mode`, `expiresAt` |
-| `payment.link_expired` | `paymentId`, `provider` (`expired`, `not_open` or `not_created`), and `reason` (`not_sent_in_time`, `not_created_in_time`) when it was never texted: the engine's deadline came |
+| `payment.link_expired` | `paymentId`, `provider` (`expired`, `not_open`, or `not_created` when no link was created), and `reason`: none when the engine's deadline came, else `not_sent_in_time`, `not_created_in_time`, `cancelled` or `call_ended` |
 | `payment.outcome_ignored` | `paymentId`, `reason` (`account`): an outcome from another account |
-| `payment.settled` | `paymentId`, `status` |
+| `payment.settled` | `paymentId`, `status`, and `late: true` for a payment made after the engine closed its link |
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
@@ -381,6 +381,8 @@ FlowConfig revision that judged the call's last finished verification (whatever 
 both are absent when no verification finished on the call. They are optional, so the format stays
 at `v: 1`, and a reader that does not know them still checks the signature over the whole body.
 `ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
+part. `ledger` is the head after `call.ended` and the expiry of the call's open payment links
+(section 14), kept in the call record. If signing fails, `endCall` on
 the ended call issues the receipt later with the same head, without ending the call again. `verifyReceipt(receipt, keys)` picks the key by `kid`
 part. `ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
 the ended call issues the receipt later with the same head, without ending the call again.
@@ -464,6 +466,37 @@ deadline (`expireLink`): on `expired` the request settles `expired` (and its flo
 `not_open` it is left for the provider's webhook, which may still say paid. A link that was never
 texted never expires this way; it stays open to resume.
 
+**Cancel and call end.** `cancelPaymentLink(callId, paymentId)` closes a payment the caller no
+longer wants, through `PaymentLinks.cancel` when the adapter has it (idempotency key
+`[workspaceId, callId, paymentId, "cancel", mode]`), else through `expireLink` (key `[..., "expire",
+mode]`). It needs no scope, since it only closes; an unknown payment id is `invalid_input`, and a
+payment no longer open is left as it is and its status returned. `endCall`, once the call has
+ended, expires every payment still open through `expireLink`, so the receipt shows it `expired`.
+In both cases the payment settles `expired` whatever the provider answers (`expired` or
+`not_open`), the session leaves `paying`, its flow step fails, and `payment.link_expired` carries
+`reason` `cancelled` or `call_ended`. A request whose link was never created, or whose create was
+never answered, is settled without asking the provider (`provider: not_created`); if the create
+then answers, `requestPayment` expires that link at the provider, never texts it, and throws
+`precondition_failed`. The same holds for a create that answers after the call ended, even before
+the end closed its request. While a process is texting a link (it holds the send lease, 60
+seconds), `cancelPaymentLink` and `endCall` are refused with `precondition_failed`, so a link is
+never closed under its own text and no text goes out after the call ended; once the text is
+recorded, or the lease lapses (that sender stopped), they go ahead. A sender checks and renews
+its lease in a write right before the text, so one that stalled past its lease (binding the
+link's reference) never texts a request that was closed or a call that ended meanwhile: it expires
+the link at the provider and throws `precondition_failed`; one whose lease another sender took
+stops too. `endCall` appends any ledger entries still pending before it takes the receipt's head,
+so the head covers every entry the end wrote. A sender that comes back after
+its request was closed records nothing, so no entry follows the close or the receipt. If the
+provider fails while the call ends, the call stays ended without its receipt, and `endCall` again
+expires what is left and issues it.
+
+**Late payments.** A payment the engine settled `expired` (its deadline, a cancel, the end of
+the call, or a text that could not go out in time) can still be paid by a caller already on the
+page. The money moved, so a `paid` outcome for it is recorded: the payment becomes `paid` and
+`payment.settled` carries `late: true`. The session and the flow do not move, and a receipt
+already signed is not changed: the ledger is where the late payment shows.
+
 **Adapter capabilities.** `PaymentLinks.capabilities` declares `{modes, minLinkMinutes,
 maxLinkMinutes}`. When the config is saved, a step's mode (and Paylink's default mode) must be one
 the adapter takes, and the link life no longer than its maximum; malformed capabilities are a
@@ -492,9 +525,9 @@ Settlement:
 
 A payment recorded before modes existed (no `mode`) appears on its receipt as `platform`: it was
 taken on the host's own account. A request settles once; later outcomes are ignored, with one exception: money that moved is
-always recorded. A request the engine expired (its own deadline, a link too late to text, or a race
-with a slow create) that the provider then reports paid becomes `paid`, and `payment.settled`
-carries `late: true`.
+always recorded. A request the engine expired (its own deadline, a link too late to text, a race
+with a slow create, a cancel or the end of the call) that the provider then reports paid becomes
+`paid`, and `payment.settled` carries `late: true`.
 
 ## 15. Stripe webhooks
 

@@ -423,6 +423,12 @@ export class Engine {
     return paylink.expirePaymentLinks(this.#rt, callId);
   }
 
+  /** Cancels a payment's link (the caller changed their mind). It settles `expired`; a payment no longer open is left as it is. */
+  cancelPaymentLink(callId: string, paymentId: string): Promise<{ paymentId: string; status: PaymentStatus }> {
+    return paylink.cancelPaymentLink(this.#rt, callId, paymentId);
+  }
+
+  /** A provider's outcome. A payment the engine closed that is paid after all is recorded paid, flagged `late`. */
   applyPaymentOutcome(outcome: PaymentOutcome): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
     return paylink.applyPaymentOutcome(this.#rt, outcome);
   }
@@ -476,12 +482,17 @@ export class Engine {
     return trace.recordConsent(this.#rt, callId, input);
   }
 
-  /** Ends the call. A running flow is abandoned. Returns the signed receipt when the call gets one, else null. */
+  /**
+   * Ends the call. A running flow is abandoned, and every payment link still open is expired, at
+   * the provider first, so the receipt shows it `expired`. Returns the signed receipt when the call
+   * gets one, else null.
+   */
   async endCall(callId: string): Promise<SignedReceipt | null> {
-    // A call that ended without its receipt (the signer failed) gets it now, without ending again.
+    // A call that ended without its receipt (the signer failed) or with a link left open (the
+    // provider failed) gets them now, without ending again.
     const before = await this.#read(callId);
-    const pending = before.state.phase === "ended" && trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null;
-    const record = pending ? before : await this.#update(callId, (draft) => {
+    const pending = before.state.phase === "ended" && ((trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null) || paylink.openPayments(before).length > 0);
+    const ended = pending ? before : await this.#update(callId, (draft) => {
       // The built-in modules' guards run even after a module was removed, as their receipt parts do.
       const guards = [...this.#receiptModules, ...this.registry.list().filter((m) => !this.#receiptModules.includes(m))];
       for (const module of guards) {
@@ -495,6 +506,9 @@ export class Engine {
       gate.settleInFlight(this.#rt, draft, "call_ended");
       // Likewise a step-up token still being signed: it is failed, never handed out after the end.
       stepUp.settleStepUpInFlight(draft);
+      // Likewise a payment link being texted: the call ends once its text is recorded, so no text
+      // goes out after the call ended.
+      paylink.assertNoSendInFlight(this.#rt, draft.record);
       draft.apply({ type: "call_ended", at: this.#now() });
       const flow = draft.record.flow;
       if (flow !== null && flow.status === "running") {
@@ -504,7 +518,13 @@ export class Engine {
       draft.emit("call.ended", "system", {});
       return structuredClone(draft.record);
     });
+    // No new payment can start once the call ended, so this closes every link the call will have.
+    await paylink.expireOpenPayments(this.#rt, ended);
+    const record = paylink.openPayments(ended).length === 0 ? ended : await this.#read(callId);
     if (!trace.wantsReceipt(this.#rt, record)) return null;
+    // The head must cover every entry the end wrote, an expired link's among them, even one left
+    // pending by an earlier append that failed: they are appended first, or the receipt waits.
+    await this.flushLedger(callId);
     const head = await trace.endedHead(this.#rt, record, () => this.#adapters.ledger.head());
     const parts: Pick<ReceiptBody, "verification" | "records" | "payments" | "stepUp"> = { verification: { level: 0, methods: [] }, records: [], payments: [] };
     // The built-in contributors, not the registry: a module removed after this call filed or paid still appears on its receipt.

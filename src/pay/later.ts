@@ -13,8 +13,3 @@ export function chargeSavedCard(_input: { callId: string; paymentId: string }): 
 export function startKeypadCardCapture(_input: { callId: string; paymentId: string }): never {
   throw new NotImplementedError("startKeypadCardCapture", "PAY-6");
 }
-
-/** Cancels an open link (the caller changed their mind, the call dropped). */
-export function cancelPaymentLink(_input: { callId: string; paymentId: string }): never {
-  throw new NotImplementedError("cancelPaymentLink", "PAY-3");
-}

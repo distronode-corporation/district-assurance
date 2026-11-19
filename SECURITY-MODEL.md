@@ -264,7 +264,12 @@ link includes the mode.
 number. A link offers only methods that settle during the call (cards, Apple Pay, Google Pay,
 Link) and lives 15 minutes from the text by default (5 to 60); the engine expires it itself at
 that deadline, at the provider first, because a provider's shortest link life can be longer
-(tested). Card numbers in transcripts are detected (Luhn, digits and English or French digit words)
+(tested). A link never outlives its call: `endCall` expires every open link at the provider
+before the receipt is signed, and the caller can cancel one (`cancelPaymentLink`); a link
+created while its request was being closed, or after its call ended, is expired, never texted,
+and neither a cancel nor the end of the call closes a link while it is being texted (tested). Money that moves
+after the engine closed a link is still recorded as paid and flagged `late` in the ledger, so a
+late payment is never lost (tested). Card numbers in transcripts are detected (Luhn, digits and English or French digit words)
 and replaced, and the host is told to interrupt (tested). Intake refuses a value carrying a card
 number, and the ledger refuses detail carrying one (tested). Keypad card capture is planned only
 through a PCI-certified carrier service on a call path where tones never reach this engine
@@ -311,6 +316,12 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
   browser session that showed its nonce.
 - Calling `expirePaymentLinks` at each link's `expiresAt` (a timer or a sweep); until it does, a
   link lives as long as the provider keeps it.
+- Keeping the knowledge key, the receipt signing key and the access signing key in a key store, the access key
+  apart from the receipts'.
+- Calling `expirePaymentLinks` at each link's `expiresAt` (a timer or a sweep); until it does, or
+  the call ends, a link lives as long as the provider keeps it. Calling `endCall` again when it
+  failed at the provider, so the call's open links are expired and its receipt issued.
+- Refunding a late payment (one flagged `late` in the ledger) when the business does not want it.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
   guarantees (`sessionStoreContract` today; PRV-5 for the others).
 - Choosing the subject when it starts verification with a subject key (for example the owner of

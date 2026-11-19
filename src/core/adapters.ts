@@ -103,15 +103,29 @@ export interface CodeStore {
   take(input: { workspaceId: string; key: CodeSendKey; at: string; max: number; windowSeconds: number; minIntervalSeconds: number }): Promise<boolean>;
 }
 
+/** Which link to close, on whose account. `connectedAccountId` is present exactly in connect mode. */
+export interface PaymentLinkClose {
+  linkId: string;
+  mode: PaymentMode;
+  connectedAccountId?: string;
+  idempotencyKey: string;
+}
+
 /** Hosted payment pages (for example Stripe Checkout, on the business's account or the platform's). */
 export interface PaymentLinks {
   readonly capabilities: PaymentLinkCapabilities;
   createLink(input: PaymentLinkRequest): Promise<{ linkId: string; url: string }>;
   /**
-   * Expires an open link now. `expired` when it was open and is closed; `not_open` when the
-   * provider says it already completed or expired, in which case its webhook settles it.
+   * Expires an open link now (its deadline came, or the call ended). `expired` when it was open
+   * and is closed; `not_open` when the provider says it already completed or expired.
    */
-  expireLink(input: { linkId: string; mode: PaymentMode; connectedAccountId?: string; idempotencyKey: string }): Promise<{ state: "expired" | "not_open" }>;
+  expireLink(input: PaymentLinkClose): Promise<{ state: "expired" | "not_open" }>;
+  /**
+   * Cancels an open link because the caller changed their mind, with the same answers as
+   * `expireLink`. Optional: without it the engine cancels with `expireLink` (Stripe Checkout has
+   * one call for both). A provider that keeps a cancelled link apart from an expired one has it.
+   */
+  cancel?(input: PaymentLinkClose): Promise<{ state: "expired" | "not_open" }>;
 }
 
 /** The person on record, as the engine sees them: keyed digests, never the values. */
