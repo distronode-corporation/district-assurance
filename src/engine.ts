@@ -1163,12 +1163,9 @@ export class Engine {
       const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
       outcome.write = saved.ok ? "saved" : "none";
       if (saved.ok) {
-        try {
-          await this.#flush(callId, version, record);
-        } finally {
-          // Saved, so owed duress alerts go out even if the ledger is down.
-          this.#sendDuressAlertsSoon(callId, record);
-        }
+        // Saved, so owed duress alerts go out before the ledger is tried: one down or stalled never holds them.
+        this.#sendDuressAlertsSoon(callId, record);
+        await this.#flush(callId, version, record);
         return result;
       }
     }
@@ -1250,7 +1247,8 @@ export class Engine {
       } catch {
         // Ignored by design: the ledger is the record.
       }
-      if (queued.counter !== undefined) await this.#notifyLock(queued.counter, queued.detail);
+      // Not awaited: a notice store that stalls holds up neither the rest of the outbox nor the call. It never rejects.
+      if (queued.counter !== undefined) void this.#notifyLock(queued.counter, queued.detail);
     }
     await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue);
   }
@@ -1268,8 +1266,8 @@ export class Engine {
 
   /**
    * Tells the host's notifier of a lock whose ledger entry was just appended: once per lock and
-   * capped per workspace (`claimNotice`). Best effort, like the listener: the notifier is not
-   * awaited, and nothing it or the bookkeeping does, thrown or rejected, stops the call or the ledger.
+   * capped per workspace (`claimNotice`, before the notifier). Best effort, like the listener: neither
+   * it nor the notifier is awaited, and nothing either does, thrown or rejected, stops the call or the ledger.
    */
   async #notifyLock(counter: AttemptCounterKey, detail: { [key: string]: JsonValue }): Promise<void> {
     const notifier = this.#adapters.notifier;
@@ -1313,11 +1311,8 @@ export class Engine {
     const stored = await this.#sessions.get(this.workspaceId, callId);
     if (stored === null) throw new EngineError("unknown_call", "no such call");
     const record = structuredClone(stored.record) as unknown as CallRecord;
-    try {
-      await this.#flush(callId, stored.version, record);
-    } finally {
-      this.#sendDuressAlertsSoon(callId, record);
-    }
+    this.#sendDuressAlertsSoon(callId, record);
+    await this.#flush(callId, stored.version, record);
   }
 
   /**
@@ -1337,19 +1332,20 @@ export class Engine {
   async sweepAlerts(): Promise<{ sent: string[]; failed: string[] }> {
     const list = this.#sessions.listCallsOwingAlerts?.bind(this.#sessions);
     if (list === undefined) throw new EngineError("precondition_failed", "the session store cannot list the calls that owe alerts (listCallsOwingAlerts)");
-    const result = { sent: [] as string[], failed: [] as string[] };
-    for (const callId of await list(this.workspaceId)) {
-      let owed: boolean;
-      try {
-        await this.#sendDuressAlerts(callId);
-        owed = badge.owedDuressAlerts(await this.#read(callId)).length > 0;
-      } catch {
-        // A call the store cannot read now, or no longer holds, is reported, and the sweep goes on.
-        owed = true;
-      }
-      (owed ? result.failed : result.sent).push(callId);
-    }
-    return result;
+    const callIds = await list(this.workspaceId);
+    // Every call's send starts at once, so a notifier that never answers for one does not hold up the rest.
+    const owed = await Promise.all(
+      callIds.map(async (callId) => {
+        try {
+          await this.#sendDuressAlerts(callId);
+          return badge.owedDuressAlerts(await this.#read(callId)).length > 0;
+        } catch {
+          // A call the store cannot read now, or no longer holds, is reported, and the sweep goes on.
+          return true;
+        }
+      }),
+    );
+    return { sent: callIds.filter((_, i) => !owed[i]), failed: callIds.filter((_, i) => owed[i]) };
   }
 
   /** Off the caller's response path: after the reply, so neither the notifier's time nor its failure reaches the caller. */
