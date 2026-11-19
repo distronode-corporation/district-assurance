@@ -135,6 +135,30 @@ describe("step-up: config", () => {
     );
   });
 
+  it("refuses a flow with more step-up.issue steps than maxTokensPerCall, since it could never complete", () => {
+    const problems = (c: FlowConfig) => validateConfig(c, registry());
+    const issue = { type: "step-up.issue", site: "portal" };
+    const flow = (max: number | undefined, issues: number) =>
+      stepUpConfig((c) => {
+        c.modules["step-up"]!.settings = { issuer: ISSUER, sites: structuredClone(sites), ...(max === undefined ? {} : { maxTokensPerCall: max }) };
+        c.flows = { web: { steps: [webVerify as never, ...Array.from({ length: issues }, () => issue as never)] } };
+      });
+    assert.deepEqual(problems(flow(1, 1)), []);
+    assert.deepEqual(problems(flow(2, 2)), []);
+    assert.deepEqual(problems(flow(1, 2)), ["flows.web (step-up): 2 step-up.issue steps, but a call may have at most 1 step-up token (maxTokensPerCall)"]);
+    assert.deepEqual(problems(flow(undefined, 3)), []);
+    assert.deepEqual(problems(flow(undefined, 4)), ["flows.web (step-up): 4 step-up.issue steps, but a call may have at most 3 step-up tokens (maxTokensPerCall)"]);
+    // A step that is not an object is its own problem, and is not counted.
+    const junk = flow(1, 2);
+    junk.flows.web!.steps.push("step-up.issue" as never);
+    assert.deepEqual(problems(junk), [
+      "flows.web.steps[3]: a step is an object with a type",
+      "flows.web (step-up): 2 step-up.issue steps, but a call may have at most 1 step-up token (maxTokensPerCall)",
+    ]);
+    // Settings that did not validate are reported once, with no count problem on top.
+    assert.deepEqual(problems(flow(0, 2)), ["modules.step-up.settings: maxTokensPerCall must be an integer from 1 to 5"]);
+  });
+
   it("keeps the sites a call started with when the config changes", async () => {
     const t = stepUpSetup();
     const { callId } = await t.engine.startCall();

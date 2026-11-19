@@ -219,7 +219,9 @@ unknown fields at every level, the policy's shape and then its rules against the
 factors, every module's switch and settings, every adapter an enabled module's settings need,
 every step's module (installed and on) and the step itself, and, walking each flow in order, that
 every step needing a scope comes after a `badge.verify` step whose level reaches that scope's
-minimum and whose `scopes`, if listed, include it. Cross-checks against a module's settings or the
+minimum and whose `scopes`, if listed, include it, and that no flow has more `step-up.issue` steps
+than step-up's `maxTokensPerCall` (each completes only on a token of its own, so such a flow could
+never finish; a module's optional `validateFlow` makes such whole-flow checks). Cross-checks against a module's settings or the
 policy are skipped when those did not validate (their own problems are reported). The engine
 refuses a config with any problem (`ConfigError`, code `invalid_input`, with `problems`).
 

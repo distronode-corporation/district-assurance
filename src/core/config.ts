@@ -6,7 +6,7 @@
 // it is saved, never in the middle of a call. The engine refuses to run on a config with problems.
 import type { JsonValue } from "./canonical.ts";
 import { EngineError } from "./errors.ts";
-import type { FlowStep, ModuleRegistry, StepContext } from "./module.ts";
+import type { AssuranceModule, FlowStep, ModuleRegistry, StepContext } from "./module.ts";
 import { validatePolicy, type VerificationPolicy } from "./policy.ts";
 import { isIntegerIn, isObject, unknownKeys } from "./shape.ts";
 
@@ -132,6 +132,7 @@ export function validateConfig(config: unknown, registry: ModuleRegistry): strin
     if (flow.summary !== undefined && typeof flow.summary !== "string") problems.push(`${at}.summary: must be a string`);
     let level = 0;
     let granted: string[] | null = null;
+    const owners = new Set<AssuranceModule>();
     flow.steps.forEach((step: unknown, index: number) => {
       const stepAt = `${at}.steps[${index}]`;
       if (!isObject(step) || typeof step.type !== "string") {
@@ -149,6 +150,7 @@ export function validateConfig(config: unknown, registry: ModuleRegistry): strin
         problems.push(`${stepAt} (${type}): the ${ownerName} module is turned off`);
         return;
       }
+      owners.add(owner);
       const ctx: StepContext = { settings: validSettings.has(ownerName) ? validSettings.get(ownerName) : null, policy, adapters: registry.adapters, capabilities: registry.capabilities };
       problems.push(...owner.validateStep(step as FlowStep, ctx).map((e) => `${stepAt} (${type}): ${e}`));
       const scope = owner.manifest.scopes.needs[type];
@@ -164,6 +166,13 @@ export function validateConfig(config: unknown, registry: ModuleRegistry): strin
         granted = owner.stepGrants?.(step as FlowStep) ?? null;
       }
     });
+    // Whole-flow checks, for modules whose settings validated: a limit no single step can show.
+    for (const owner of owners) {
+      const ownerName = owner.manifest.name;
+      if (owner.validateFlow === undefined || !validSettings.has(ownerName)) continue;
+      const ctx: StepContext = { settings: validSettings.get(ownerName), policy, adapters: registry.adapters, capabilities: registry.capabilities };
+      problems.push(...owner.validateFlow(flow.steps as FlowStep[], ctx).map((e) => `${at} (${ownerName}): ${e}`));
+    }
   }
   return problems;
 }

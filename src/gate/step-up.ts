@@ -205,6 +205,14 @@ export const stepUpModule: AssuranceModule = {
     return errors;
   },
 
+  validateFlow(steps: readonly FlowStep[], ctx: StepContext): string[] {
+    // Each step-up.issue step completes only on a token of its own, and every token counts
+    // against the call's limit, so a flow with more such steps than the limit can never finish.
+    const max = (ctx.settings as StepUpSettings).maxTokensPerCall ?? DEFAULT_TOKENS_PER_CALL;
+    const issues = steps.filter((step) => isObject(step) && step.type === "step-up.issue").length;
+    return issues > max ? [`${issues} step-up.issue steps, but a call may have at most ${max} step-up token${max === 1 ? "" : "s"} (maxTokensPerCall)`] : [];
+  },
+
   initCall(settings: unknown): JsonValue {
     const s = settings as StepUpSettings;
     const slice: StepUpSlice = { issuer: s.issuer, sites: structuredClone(s.sites), maxTokensPerCall: s.maxTokensPerCall ?? DEFAULT_TOKENS_PER_CALL, tokens: [] };

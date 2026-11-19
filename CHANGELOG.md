@@ -16,6 +16,9 @@ All notable changes to this project are documented here. The format follows
   Refused after the call is tainted or verified again, including when the call ends: the end
   refuses every token its call no longer vouches for. Receipts list a call's tokens (`stepUp`,
   optional, so receipts stay at `v: 1`).
+- `validateConfig` refuses a flow with more `step-up.issue` steps than the step-up
+  `maxTokensPerCall`, which could never complete; modules gain an optional `validateFlow` hook for
+  such whole-flow checks.
 - Published key sets (`receiptKeys`, `accessKeys`, `stepUpKeys`) carry only public key members.
 - Gate, the fifth built-in module (GAT-1, ADR-25): signed, time-limited access grants (ES256 over
   canonical JSON, like receipts) after verification to `entry.open` (level 2 or more), delivered
