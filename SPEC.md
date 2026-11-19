@@ -68,7 +68,10 @@ then throws `EngineError("conflict")`. Ledger entries and listener events for a 
 only after its write succeeded. Steps with side effects use two writes or more: an attempt is
 counted before it is judged; a photo ID link and a payment link are reserved before the provider
 is called. `sessionStoreContract(factory)` in `district-assurance/testing` is the suite a store
-must pass; `MemorySessionStore` is the reference. Every keyed store's contract (session, ledger,
+must pass; `MemorySessionStore` is the reference. It also checks that every write copies its
+record in, that two creates of one id or two binds of one reference at once leave exactly one
+winner, and that a reference bound in one workspace never blocks the same reference in another.
+Every keyed store's contract (session, ledger,
 record) includes keys that differ only in a lone UTF-16 surrogate, and the replacement character
 U+FFFD: a store that encodes keys as UTF-8 (SQLite with a TEXT key) collapses them, and must not.
 
@@ -313,7 +316,7 @@ it starts at seq 0 and the genesis hash, appends one seq at a time with each ent
 `chainEntry` builds it, `list(fromSeq)` returns entries in order as a slice that continues the
 chain, `list(fromSeq, limit)` returns at most `limit` of them as one page and refuses a `limit`
 that is not an integer of 1 or more, entries are copied in and out and never change once appended, an `eventId` is appended
-once (a second append, concurrent or not, returns the first entry, and eventIds that differ only
+once (a second append, concurrent or not, returns a copy of the first entry, and eventIds that differ only
 in a lone surrogate are distinct), a detail carrying a card number
 is refused with nothing stored, and concurrent appends stay one valid chain.
 `recordStoreContract(factory)` is the suite a `RecordStore` must pass: subjects (seeded by the
