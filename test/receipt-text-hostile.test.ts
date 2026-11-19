@@ -7,7 +7,7 @@ import type { MessagePurpose } from "../src/core/adapters.ts";
 import type { FlowConfig } from "../src/core/config.ts";
 import type { AssuranceModule } from "../src/core/module.ts";
 import { TEST_KNOWLEDGE_KEY, testSubject, type TestEngine } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, wording } from "./helpers.ts";
+import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, rejects, setup, testConfig, wording } from "./helpers.ts";
 
 const NEW_PHONE = "+15555550199";
 const BUSINESS = "Maple Property Management";
@@ -90,6 +90,7 @@ async function verified(t: TestEngine, flow: string, locale: "en" | "fr" = "en")
 }
 
 async function paid(t: TestEngine, callId: string): Promise<void> {
+  await confirmAmount(t.engine, callId);
   await t.engine.requestPayment(callId);
   await t.engine.applyPaymentOutcome({ kind: "completed", linkId: t.payments.created.at(-1)!.linkId, paymentStatus: "paid" });
 }

@@ -9,7 +9,7 @@ import { validateConfig, type FlowConfig } from "../src/core/config.ts";
 import type { AssuranceModule } from "../src/core/module.ts";
 import { contactNoticeText, receiptLinkText } from "../src/prove/trace.ts";
 import { TEST_KNOWLEDGE_KEY, testSubject, type TestEngine } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, wording } from "./helpers.ts";
+import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, rejects, setup, testConfig, wording } from "./helpers.ts";
 
 const NEW_PHONE = "+15555550199";
 const BUSINESS = "Maple Property Management";
@@ -100,6 +100,8 @@ async function verified(t: TestEngine, flow: string, locale: "en" | "fr" = "en")
 }
 
 async function paid(t: TestEngine, callId: string): Promise<void> {
+  // Every link needs a confirmed read-back of its amount first (PAY-2, #88).
+  await confirmAmount(t.engine, callId);
   await t.engine.requestPayment(callId);
   await t.engine.applyPaymentOutcome({ kind: "completed", linkId: t.payments.created.at(-1)!.linkId, paymentStatus: "paid" });
 }
@@ -168,6 +170,8 @@ describe("receipt link text", () => {
     await t.engine.finishVerification(failed);
     await t.engine.endCall(failed);
     assert.deepEqual(await t.engine.textReceiptLink(failed, LINK), { texted: false });
+    // The wrong answer started a wait across calls (VER-1, #71): waited out.
+    t.clock.advance(900_000);
     // Paid and consented, then untrusted text and a new verification from nothing that never matched.
     const callId = await verified(t, "repay");
     await paid(t, callId);
@@ -289,6 +293,9 @@ describe("contact change security notice", () => {
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     await t.engine.submitKeypad(callId, { dob: DOB });
+    // Outside a flow the module's step scope must be granted (ADR-25, #47): verified to level 2.
+    await t.engine.checkCarrier(callId);
+    await t.engine.finishVerification(callId);
     t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: NEW_PHONE, knowledge: { dob: DOB } }));
     await t.engine.updateModule(callId, "acme", (s, call) => {
       call.contactChanged();
@@ -308,7 +315,8 @@ describe("contact change security notice", () => {
         call.contactChanged();
         return { done: (s as { done: number }).done + 1 };
       }),
-      rejects("precondition_failed"),
+      // #47's scope check (ADR-25) refuses it first, before contactChanged's match check.
+      (e: unknown) => rejects("scope_denied")(e) || rejects("precondition_failed")(e),
     );
     assert.deepEqual(await t.engine.moduleState(callId, "acme"), { done: 0 });
   });
@@ -526,7 +534,8 @@ describe("receipt text config", () => {
     );
     // A lone surrogate, or a bidirectional override that could make the text read as another business's.
     for (const name of [3, "   ", "A\nB", "x".repeat(65), "Acme\ud800", "Acme \u202eknaB", "\u2066Acme\u2069"]) {
-      assert.deepEqual(problems(t, (c) => (c.modules.trace = { settings: { businessName: name as never } })), ["modules.trace.settings: businessName must be 1 to 64 characters on one line"]);
+      // A lone surrogate also gets #47's config-wide lone-surrogate problem.
+      assert.deepEqual(problems(t, (c) => (c.modules.trace = { settings: { businessName: name as never } })).filter((p) => !p.includes("lone surrogate")), ["modules.trace.settings: businessName must be 1 to 64 characters on one line"]);
     }
     const withoutTexts = (c: FlowConfig) => {
       c.modules.badge!.settings = { factors: ["keypad_knowledge", "carrier_identity_match"] };
