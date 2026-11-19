@@ -2,6 +2,8 @@
 // Brivo, Avigilon Alta) through one API. The target's `ref` is the Seam `device_id`.
 //
 // Three steps, each one request:
+// 0. The grant must name the device it is asked to open (its signed `target`); otherwise it is
+//    "refused" (`target_mismatch`) and nothing is sent.
 // 1. Check the device: `POST /devices/get`. Unless Seam says it can unlock remotely and does not
 //    report it offline, the unlock is refused. Nothing has been sent to the lock yet, so any failure
 //    here (an error, no answer) is also "refused": the door certainly did not act.
@@ -163,10 +165,15 @@ export function seamAccessController(options: SeamAccessControllerOptions): Acce
   return {
     async unlock(input): Promise<UnlockResult> {
       const deviceId = input.target;
+      // The grant names the door it opens: a grant signed for another device opens nothing here,
+      // and nothing is sent, not even the device check.
+      if (deviceId !== input.grant.body.target) return { outcome: "refused", reason: "target_mismatch" };
       const refused = await cannotUnlock(deviceId);
       if (refused !== null) return { outcome: "refused", reason: refused };
-      // The grant's expiry is strict: an unlock is never sent with less than its timeout left.
-      if (Date.parse(input.grant.body.expiresAt) - clock.now().getTime() < timeoutMs) return { outcome: "refused", reason: "grant_expiring" };
+      // The grant's expiry is strict: an unlock is never sent with less than its timeout left, nor
+      // when the clock or the expiry cannot be read (NaN would pass the comparison).
+      const left = Date.parse(input.grant.body.expiresAt) - clock.now().getTime();
+      if (!(left >= timeoutMs)) return { outcome: "refused", reason: "grant_expiring" };
 
       // Step 2: once, never retried.
       const response = await post("/locks/unlock_door", { device_id: deviceId });
