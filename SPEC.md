@@ -29,7 +29,7 @@ recorded **factors**, the current **level** and an optional **grant**.
 | `factor_recorded {factor}` | verifying | factor appended |
 | `verification_finished {level, grant}` | verifying | phase `open`, level and grant set, sensitive cleared |
 | `sensitive_opened {reason: keypad}` | verifying | sensitive `keypad` |
-| `sensitive_closed` | verifying, paying | sensitive cleared |
+| `sensitive_closed` | verifying (never paying: the payment hold ends only when the payment settles or the call ends) | sensitive cleared |
 | `intake_started` | open | phase `filing` |
 | `intake_confirmed {recordId}` | filing | phase `open`, record id appended |
 | `intake_abandoned` | filing | phase `open` |

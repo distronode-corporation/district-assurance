@@ -31,6 +31,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `sensitive_closed` (`closeSensitive`) is refused while a payment is open (`invalid_transition`):
+  the payment hold ends only when the payment settles or fails, or the call ends, so a host cannot
+  resume forwarding while the caller may be reading out card details.
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

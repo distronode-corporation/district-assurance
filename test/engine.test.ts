@@ -476,6 +476,8 @@ describe("Engine pay", () => {
     const state = await t.engine.state(callId);
     assert.equal(state.phase, "paying");
     assert.equal(state.sensitive, "payment");
+    await assert.rejects(t.engine.closeSensitive(callId), rejects("invalid_transition"), "the payment hold cannot be lifted by the host");
+    assert.equal((await t.engine.state(callId)).sensitive, "payment");
     const text = t.messages.sent.at(-1)!;
     assert.equal(text.to, PHONE_ON_FILE);
     assert.equal(text.purpose, "payment_link");

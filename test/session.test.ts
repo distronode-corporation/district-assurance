@@ -141,6 +141,13 @@ describe("forwardingFor", () => {
     assert.deepEqual(forwardingFor(s), { ...none, heldFor: "ended" });
   });
 
+  it("keeps the payment hold: sensitive_closed is refused while paying", () => {
+    const s = reduce(newSession("c1", "w1", at), SAMPLES.payment_requested);
+    assert.equal(s.phase, "paying");
+    assert.throws(() => reduce(s, SAMPLES.sensitive_closed), (e: unknown) => e instanceof EngineError && e.code === "invalid_transition");
+    assert.deepEqual(forwardingFor(s), { ...none, heldFor: "payment" });
+  });
+
   it("fails closed with no state, or one the engine never writes", () => {
     const held = { ...none, heldFor: "unknown" };
     const s = newSession("c1", "w1", at);
