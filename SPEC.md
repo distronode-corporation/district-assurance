@@ -431,6 +431,7 @@ the receipt proves what was answered then, and the ledger proves the revocation.
 
 `isStopRequest(text)` is true when a text or a spoken answer, apart from spaces and a closing `.`
 or `!`, is STOP or one of its French forms ARRÊT, ARRÊTE, ARRÊTER, in any case, with or without
-accents. A word inside a longer message ("don't stop") is not a match. The host decides which
+accents. A word inside a longer message ("don't stop") is not a match, and a value that is not a
+string is false. The host decides which
 consents a match revokes (for example every consent texted to that number) and calls
 `revokeConsent` for each.

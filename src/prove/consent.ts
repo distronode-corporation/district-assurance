@@ -24,6 +24,8 @@ const STOP_WORDS: ReadonlySet<string> = new Set(["stop", "arret", "arrete", "arr
  * so "don't stop" never revokes anything.
  */
 export function isStopRequest(text: string): boolean {
+  // A host passes what its carrier's webhook carried: anything that is not text is never a stop.
+  if (typeof text !== "string") return false;
   const word = text
     .normalize("NFD")
     .replace(/\p{M}/gu, "")

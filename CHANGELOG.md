@@ -31,6 +31,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The `revokeConsent` stub in `prove/consent.ts` is replaced by `Engine.revokeConsent`, and
+  `ConsentRecord` moves to the adapter types (still exported from the root).
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

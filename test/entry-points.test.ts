@@ -45,6 +45,7 @@ describe("entry points", () => {
       "pinDigest",
       "PAYMENT_MODES",
       "formatAmount",
+      "isStopRequest",
     ]) {
       assert.ok(name in root, name);
     }
@@ -65,13 +66,14 @@ describe("entry points", () => {
       "TEST_KNOWLEDGE_KEY",
       "FakePinVerifier",
       "sessionStoreContract",
+      "MemoryConsentStore",
     ]) {
       assert.ok(name in testing, name);
     }
   });
 
   it("keeps the runtime functions of the modules out of the root", () => {
-    for (const name of ["submitFactor", "beginVerification", "requestPayment", "startIntake", "recordConsent"]) assert.equal(name in root, false, name);
+    for (const name of ["submitFactor", "beginVerification", "requestPayment", "startIntake", "recordConsent", "revokeConsent"]) assert.equal(name in root, false, name);
   });
 
   it("event names are unique and dotted", () => {

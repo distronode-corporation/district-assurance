@@ -57,7 +57,7 @@ engine, its inputs or its answers; it hears fixed lines the host speaks on the e
 | Badge | `src/verify/badge.ts`, `factors.ts`, `knowledge.ts` | factors (`keypad_knowledge`, `pin`, `carrier_identity_match`, `photo_id`, planned `text_code` and `spoken_knowledge`, plug-ins), the `badge.verify` step, grants | | `records`, plus per factor: `carrier`; `identity` and `messages`; `pinVerifier` in verifier mode |
 | Dossier | `src/file/dossier.ts`, `intake.ts` | the `dossier.collect` step, records | `intake.file` | `records` |
 | Paylink | `src/pay/paylink.ts`, `payment.ts` | the `paylink.request` step, payments | `payment.request` | `payments`, `messages` |
-| Trace | `src/prove/trace.ts`, `ledger.ts`, `receipt.ts`, `consent.ts` | the ledger (always on), the `trace.consent` and `trace.receipt` steps, receipts, consents | | `ledger`, and `signer` while receipts are on |
+| Trace | `src/prove/trace.ts`, `ledger.ts`, `receipt.ts`, `consent.ts` | the ledger (always on), the `trace.consent` and `trace.receipt` steps, receipts, consents | | `ledger`, `signer` while receipts are on, and optionally `consents` to revoke consents |
 | Gate | `src/gate/` | planned (GAT-1): the `gate.grant` step, signed access grants | `entry.*` | `accessController` |
 
 Each module is an object with a manifest and a few pure functions: `validateSettings`,
@@ -102,7 +102,9 @@ running flow moves on when the module's `stepStatus` says its step is complete.
 6. Paylink: `requestPayment` needs `payment.request`; in a flow the step sets the amount. The link
    is texted to the number on file, the call enters `paying`, and `applyPaymentOutcome` settles it
    only on `paid`. The flow moves on when it is paid, and fails when it failed or expired.
-7. Trace: `recordConsent(purpose)` fingerprints the configured wording and stores the answer.
+7. Trace: `recordConsent(purpose)` fingerprints the configured wording and stores the answer (in
+   the host's `ConsentStore` too, when it has one); `revokeConsent` withdraws it later by voice,
+   text or dashboard and writes `consent.revoked`.
 8. `endCall` closes the session (abandoning a flow still running) and, when the call gets a
    receipt, takes the ledger head and signs it.
 

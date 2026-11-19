@@ -676,6 +676,9 @@ describe("Engine consent revocation", () => {
   it("maps STOP and its French forms to revocation, and nothing else", () => {
     for (const text of ["STOP", "stop", " Stop. ", "STOP!", "ARRÊT", "arret", "Arrête", "ARRETER", "arrêter !"]) assert.equal(isStopRequest(text), true, text);
     for (const text of ["", "yes", "oui", "don't stop", "stop texting me please", "stopper", "arrêt maintenant", "ST0P"]) assert.equal(isStopRequest(text), false, text);
+    // From a host's webhook, anything at all: not text is never a stop, and never throws.
+    for (const value of [null, undefined, 42, ["STOP"], { text: "STOP" }]) assert.equal(isStopRequest(value as unknown as string), false, String(value));
+    assert.equal(isStopRequest("STOP\uD800"), false, "a lone surrogate is not part of a stop word");
   });
 
   it("stores each consent, and revokes one by text after the call ended, once, in the ledger", async () => {
