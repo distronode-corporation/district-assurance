@@ -220,7 +220,7 @@ describe("ledger entries saved with the step (review item 6)", () => {
     ledger.failures = 4;
     await assert.rejects(t.engine.finishVerification(callId), /ledger down/);
     await assert.rejects(t.engine.readBackPayment(callId, request), /ledger down/);
-    const { digest } = buildAmountReadBack("en", { amountMinor: 100, currency: "cad", description: "x" });
+    const { digest } = buildAmountReadBack("en", { amountMinor: 100, currency: "cad", description: "x" }, "amt_1");
     await assert.rejects(t.engine.confirmPaymentAmount(callId, { digest, confirmedBy: "keypad" }), /ledger down/);
     await assert.rejects(t.engine.requestPayment(callId, request), /ledger down/);
     assert.equal((await t.engine.state(callId)).phase, "paying", "reserved, no link yet");

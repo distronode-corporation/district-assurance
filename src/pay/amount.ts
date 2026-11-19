@@ -55,11 +55,12 @@ export const AMOUNT_READBACK_TEXT: Record<Locale, (amount: string, description: 
 
 /**
  * The amount read-back in the call's locale, and its digest:
- * `SHA-256(canonicalJson({amountMinor, currency, description, locale, text}))`.
+ * `SHA-256(canonicalJson({amountMinor, currency, description, locale, readBackId, text}))`, where
+ * `readBackId` is the engine's own id for this read-back, so two identical read-backs never share a digest.
  */
-export function buildAmountReadBack(locale: Locale, amount: { amountMinor: number; currency: string; description: string }): AmountReadBack {
+export function buildAmountReadBack(locale: Locale, amount: { amountMinor: number; currency: string; description: string }, readBackId: string): AmountReadBack {
   const text = AMOUNT_READBACK_TEXT[locale](formatAmount(locale, amount.amountMinor, amount.currency), amount.description);
-  const digest = sha256Hex(canonicalJson({ amountMinor: amount.amountMinor, currency: amount.currency, description: amount.description, locale, text }));
+  const digest = sha256Hex(canonicalJson({ amountMinor: amount.amountMinor, currency: amount.currency, description: amount.description, locale, readBackId, text }));
   return { text, digest, amountMinor: amount.amountMinor, currency: amount.currency, description: amount.description };
 }
 

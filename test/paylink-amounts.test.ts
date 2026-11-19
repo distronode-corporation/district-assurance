@@ -70,7 +70,7 @@ describe("Engine pay: amounts from code, read back first (PAY-2)", () => {
     const callId = await verifiedCall(t);
     const back = await t.engine.readBackPayment(callId, request);
     assert.equal(back.text, "The amount to pay is $150.00, for Deposit. Is that correct?");
-    assert.deepEqual(back, buildAmountReadBack("en", { amountMinor: 15000, currency: "cad", description: "Deposit" }));
+    assert.deepEqual(back, buildAmountReadBack("en", { amountMinor: 15000, currency: "cad", description: "Deposit" }, "amt_1"));
     assert.match(back.digest, /^[0-9a-f]{64}$/);
     await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /not confirmed/));
     await assert.rejects(t.engine.requestPayment(callId, { ...request, amountMinor: 100 }), rejects("precondition_failed", /not the amount read back/));

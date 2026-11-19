@@ -37,6 +37,8 @@ export interface PaymentRequest {
   providerExpiresAt: string;
   /** When a process last claimed the text of this link (a short lease), so another never expires it mid-send. */
   sendingSince: string | null;
+  /** When a close (a cancel, or the end of the call) began for a link that exists: it is never texted from then on. */
+  closingSince?: string;
 }
 
 /** Whose account takes the money, per flow step. */
