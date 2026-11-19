@@ -347,6 +347,30 @@ receipt is issued that cannot verify. Most key management services return DER
 anything that is not a minimal DER encoding of two positive integers of at most 32 bytes with
 nothing after them. `publicJwk()` returns the public key published in the key set.
 
+### Key sets and rotation
+
+`receiptKeyRing({ signers, active, retired? })` is a `ReceiptSigner` that holds several signers
+and signs with the one whose `keyId` is `active`; a receipt's `kid` names the key that signed it.
+`retired` are public JWKs, each with its `kid`, of keys that signed earlier receipts and sign no
+more; their private keys are not needed. `keySet()` lists the active key first, then the other
+signers' keys, then the retired ones, each as `{kty: "EC", crv: "P-256", x, y, kid, alg: "ES256",
+use: "sig"}` and nothing else. The ring throws a TypeError, when the host builds it, for an active
+kid no signer has, a key without a kid, two keys with one kid, a signer whose public key names
+another kid, a key with a private part (`d`), or a key that is not a P-256 public key.
+
+`engine.receiptKeys()` returns a key ring's whole `keySet()`, a single signer's one key, or `[]`
+without a signer. The reference server serves it at `GET /.well-known/receipt-keys.json` as
+`{"keys": [...]}`. To rotate without breaking old receipts:
+
+1. Add the new signer to every process's ring, still with the old `active`, so the new key is
+   published before it signs anything.
+2. Make the new key `active` in every process.
+3. Move the old key's public JWK to `retired`. Its private key can then be destroyed.
+
+A retired key stays in the key set for as long as receipts it signed must verify. A key that
+leaked is removed, not retired: every receipt it signed then fails to verify, as it should, since
+anyone holding the key could have signed it.
+
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
 `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
 

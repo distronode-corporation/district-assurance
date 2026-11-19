@@ -115,3 +115,72 @@ export function keyPairSigner(keyId: string, privateKey: string | JsonWebKey): R
     publicJwk: () => ({ ...publicJwk, kid: keyId, alg: "ES256", use: "sig" }) as JsonWebKey,
   };
 }
+
+/**
+ * A receipt signer that holds several keys and signs with one. Every receipt names its key by
+ * `kid`, so a key set that keeps the keys that signed before a rotation still verifies the
+ * receipts they signed. `keySet()` is what a host publishes.
+ */
+export interface ReceiptKeyRing extends ReceiptSigner {
+  /** The public keys a verifier needs: the active one first, then the other signers', then the retired ones. */
+  keySet(): JsonWebKey[];
+}
+
+export interface ReceiptKeyRingOptions {
+  /** The signers this process holds: the active one, and any next key published before it signs. */
+  signers: readonly ReceiptSigner[];
+  /** The `keyId` of the signer that signs new receipts. */
+  active: string;
+  /** The public keys, each with its `kid`, that signed earlier receipts and sign no more. Their private keys are not needed. */
+  retired?: readonly JsonWebKey[];
+}
+
+/**
+ * Builds a key ring. Strict: an active kid no signer has, a key without a kid, two keys with one
+ * kid, a signer whose public key names another kid, a key with a private part, or a key that is
+ * not a P-256 public key throws a TypeError, so a bad key set is refused when the host builds it.
+ * Published keys carry only their public members, `kid`, `alg` and `use`.
+ */
+export function receiptKeyRing(options: ReceiptKeyRingOptions): ReceiptKeyRing {
+  const active = options.signers.find((s) => s.keyId === options.active);
+  if (active === undefined) throw new TypeError(`receiptKeyRing: no signer has the active kid ${options.active}`);
+  const keys: JsonWebKey[] = [];
+  const add = (jwk: JsonWebKey, kid: unknown): void => {
+    if (typeof kid !== "string" || kid === "") throw new TypeError("receiptKeyRing: every key needs a kid");
+    if (keys.some((k) => k.kid === kid)) throw new TypeError(`receiptKeyRing: two keys have the kid ${kid}`);
+    keys.push(publishedKey(jwk, kid));
+  };
+  for (const signer of [active, ...options.signers.filter((s) => s !== active)]) add(signer.publicJwk(), signer.keyId);
+  for (const jwk of options.retired ?? []) add(jwk, jwk.kid);
+  const own = keys[0]!;
+  return {
+    keyId: active.keyId,
+    algorithm: "ES256",
+    sign: (payload) => active.sign(payload),
+    publicJwk: () => ({ ...own }),
+    keySet: () => keys.map((k) => ({ ...k })),
+  };
+}
+
+/** The keys to publish for a signer: a key ring's whole set, or a single signer's one key. Empty without a signer. */
+export function receiptKeySet(signer: ReceiptSigner | undefined): JsonWebKey[] {
+  if (signer === undefined) return [];
+  return typeof (signer as Partial<ReceiptKeyRing>).keySet === "function" ? (signer as ReceiptKeyRing).keySet() : [signer.publicJwk()];
+}
+
+function publishedKey(jwk: JsonWebKey, kid: string): JsonWebKey {
+  if (jwk.d !== undefined) throw new TypeError(`receiptKeyRing: the key ${kid} has a private part, which is never published`);
+  if (jwk.kid !== undefined && jwk.kid !== kid) throw new TypeError(`receiptKeyRing: the signer ${kid} publishes a key named ${String(jwk.kid)}`);
+  const key = { kty: "EC", crv: "P-256", x: String(jwk.x), y: String(jwk.y) };
+  if (jwk.kty !== "EC" || jwk.crv !== "P-256" || !isPublicKey(key)) throw new TypeError(`receiptKeyRing: the key ${kid} is not a P-256 public key`);
+  return { ...key, kid, alg: "ES256", use: "sig" };
+}
+
+function isPublicKey(jwk: JsonWebKey): boolean {
+  try {
+    createPublicKey({ key: jwk, format: "jwk" });
+    return true;
+  } catch {
+    return false;
+  }
+}

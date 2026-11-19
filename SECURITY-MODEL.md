@@ -132,7 +132,10 @@ depends on its whole call path.
 
 **Controls:** the ledger is hash-chained, and any changed, removed or reordered entry is detected
 (tested). Receipts are signed with ES256 over canonical JSON and carry the ledger head; one changed
-byte fails verification (tested). Planned: key rotation and a published key set history (PRV-1).
+byte fails verification (tested). Signing keys rotate with a key ring: one key signs, and the
+published key set keeps the public keys that signed before, so a receipt signed before a rotation
+still verifies after it (tested). The ring publishes only public P-256 members and refuses a key
+with a private part, two keys with one kid, or a kid that matches no signer (tested).
 A step's ledger entries are saved with the step itself (an outbox in the call record) and
 appended by event id, once each; a ledger that fails leaves them pending, and the next write or
 `flushLedger` appends them, so no saved step is ever missing from the ledger for good (tested).
@@ -152,7 +155,10 @@ hash through that one function, and an answer that is not a 64-character lower-c
 refused (tested). The receipt key stays behind `ReceiptSigner`; a signer that returns anything but
 a 64-byte P1363 signature is refused, and `derToP1363` converts a key store's DER answer, checked
 against `node:crypto` (tested). An HMAC function does not stop a process that can call it from
-computing digests, so who may call the key store remains the host's control.
+computing digests, so who may call the key store remains the host's control. A receipt key that
+leaked is removed from the key set, not retired, so the receipts it signed stop verifying; a
+receipt carries no proof of when its key was retired, so retiring a key does not limit what a
+thief can sign with it.
 
 ## Left to the host
 
@@ -160,6 +166,8 @@ computing digests, so who may call the key store remains the host's control.
   speech-to-text and the model while `sensitive` is set.
 - Keeping the knowledge key and the receipt signing key in a key store, behind a `KnowledgeHmac`
   function and a `ReceiptSigner`, and limiting who may call them.
+- Rotating receipt keys (publish the next key, then switch, then retire), keeping retired public
+  keys as long as their receipts matter, and removing a key that leaked.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
   guarantees (`sessionStoreContract` today; PRV-5 for the others).
 - Choosing the subject when it starts verification with a subject key (for example the owner of

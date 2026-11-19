@@ -6,8 +6,20 @@ import type { AuditInput, ReceiptSigner } from "../src/core/adapters.ts";
 import { EngineError } from "../src/core/errors.ts";
 import { wordingDigest } from "../src/prove/consent.ts";
 import { GENESIS_HASH, MemoryAuditLedger, chainEntry, detailCarriesCardNumber, hashEntry, verifyChain } from "../src/prove/ledger.ts";
-import { derToP1363, keyPairSigner, receiptDigest, receiptPayload, signReceipt, verifyReceipt, type ReceiptBody } from "../src/prove/receipt.ts";
+import {
+  derToP1363,
+  keyPairSigner,
+  receiptDigest,
+  receiptKeyRing,
+  receiptKeySet,
+  receiptPayload,
+  signReceipt,
+  verifyReceipt,
+  type ReceiptBody,
+  type ReceiptKeyRingOptions,
+} from "../src/prove/receipt.ts";
 import { generateTestSigner } from "../src/testing/fakes.ts";
+import { createTestEngine } from "../src/testing/index.ts";
 
 const at = "2026-01-01T00:00:00.000Z";
 const input = (event: AuditInput["event"], detail: AuditInput["detail"] = {}): AuditInput => ({ callId: "c1", actor: "code", event, at, detail });
@@ -205,6 +217,66 @@ describe("receipt signer contract (INT-4)", () => {
     assert.equal(verifyReceipt(await signReceipt(kmsSigner, body()), [publicJwk]), true);
     const raw: ReceiptSigner = { ...kmsSigner, sign: kmsSign };
     await assert.rejects(signReceipt(raw, body()), (e: unknown) => e instanceof EngineError && e.code === "invalid_input" && /not a 64-byte P1363 signature/.test(e.message));
+  });
+});
+
+describe("receipt key rings and rotation (PRV-1)", () => {
+  it("a receipt signed before rotation still verifies against the key set after it", async () => {
+    const k1 = generateTestSigner("k1");
+    const k2 = generateTestSigner("k2");
+    // Before: k1 signs, and k2 is published ahead of use, so cached key sets already hold it.
+    const before = createTestEngine({ adapters: { signer: receiptKeyRing({ signers: [k1, k2], active: "k1" }) } });
+    assert.deepEqual(before.engine.receiptKeys().map((k) => k.kid), ["k1", "k2"]);
+    const old = (await before.engine.endCall((await before.engine.startCall()).callId))!;
+    assert.equal(old.kid, "k1");
+    // After: k2 signs, and k1 is retired: only its public key is kept, its private key is gone.
+    const after = createTestEngine({ adapters: { signer: receiptKeyRing({ signers: [k2], active: "k2", retired: [k1.publicJwk()] }) } });
+    const fresh = (await after.engine.endCall((await after.engine.startCall()).callId))!;
+    assert.equal(fresh.kid, "k2");
+    const keys = after.engine.receiptKeys();
+    assert.deepEqual(keys.map((k) => k.kid), ["k2", "k1"]);
+    assert.equal(keys.every((k) => k.d === undefined && k.alg === "ES256" && k.use === "sig"), true);
+    assert.equal(verifyReceipt(old, keys), true);
+    assert.equal(verifyReceipt(fresh, keys), true);
+    assert.equal(verifyReceipt(old, [keys[0]!]), false, "without the retired key the old receipt does not verify");
+    const changed = { ...old, body: { ...old.body, endedAt: "2026-01-01T00:00:01.000Z" } };
+    assert.equal(verifyReceipt(changed, keys), false);
+  });
+
+  it("signs with the active key, publishes copies, and leaves a single signer's key set alone", async () => {
+    const k1 = generateTestSigner("k1");
+    const ring = receiptKeyRing({ signers: [k1], active: "k1" });
+    assert.equal(ring.keyId, "k1");
+    assert.equal(ring.algorithm, "ES256");
+    assert.equal(verifyReceipt(await signReceipt(ring, body()), [k1.publicJwk()]), true);
+    ring.publicJwk().kid = "x";
+    ring.keySet()[0]!.kid = "x";
+    assert.deepEqual([ring.publicJwk().kid, ring.keySet()[0]!.kid], ["k1", "k1"]);
+    assert.deepEqual(receiptKeySet(ring), ring.keySet());
+    assert.deepEqual(receiptKeySet(k1), [k1.publicJwk()]);
+    assert.deepEqual(receiptKeySet(undefined), []);
+  });
+
+  it("refuses a key ring it could not publish faithfully", () => {
+    const k1 = generateTestSigner("k1");
+    const { kty, crv, x, y } = k1.publicJwk();
+    const p384 = generateKeyPairSync("ec", { namedCurve: "P-384" }).publicKey.export({ format: "jwk" });
+    const renamed: ReceiptSigner = { ...k1, keyId: "k9" };
+    const leaky: ReceiptSigner = { ...generateTestSigner("k3"), publicJwk: () => generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ format: "jwk" }) };
+    for (const [name, options, message] of [
+      ["no active signer", { signers: [k1], active: "k2" }, /no signer has the active kid k2/],
+      ["a retired key without a kid", { signers: [k1], active: "k1", retired: [{ kty, crv, x, y }] }, /every key needs a kid/],
+      ["an empty kid", { signers: [k1], active: "k1", retired: [{ kty, crv, x, y, kid: "" }] }, /every key needs a kid/],
+      ["a retired key with the active kid", { signers: [k1], active: "k1", retired: [k1.publicJwk()] }, /two keys have the kid k1/],
+      ["two signers with one kid", { signers: [k1, generateTestSigner("k1")], active: "k1" }, /two keys have the kid k1/],
+      ["a signer whose key names another kid", { signers: [renamed], active: "k9" }, /the signer k9 publishes a key named k1/],
+      ["a private part", { signers: [leaky], active: "k3" }, /has a private part/],
+      ["another curve", { signers: [k1], active: "k1", retired: [{ ...p384, kid: "old" }] }, /old is not a P-256 public key/],
+      ["another key type", { signers: [k1], active: "k1", retired: [{ kty: "OKP", crv: "P-256", x, y, kid: "old" }] }, /not a P-256 public key/],
+      ["a point off the curve", { signers: [k1], active: "k1", retired: [{ kty, crv, x, y: x, kid: "old" }] }, /not a P-256 public key/],
+    ] as const) {
+      assert.throws(() => receiptKeyRing(options as ReceiptKeyRingOptions), (e: unknown) => e instanceof TypeError && message.test(e.message), name);
+    }
   });
 });
 

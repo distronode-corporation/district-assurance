@@ -28,6 +28,9 @@ All notable changes to this project are documented here. The format follows
 - Key store contracts (INT-4): the knowledge key can be an opaque HMAC function that the engine and
   every factor hash through, `signReceipt` refuses a signature that is not 64-byte P1363, and
   `derToP1363` converts a key store's DER signature.
+- Receipt key sets and rotation (PRV-1): `receiptKeyRing` holds several signers with one active and
+  publishes retired public keys, `engine.receiptKeys()` and the reference server's key set route
+  serve the whole history, so a receipt signed before a rotation still verifies.
 
 ### Changed
 

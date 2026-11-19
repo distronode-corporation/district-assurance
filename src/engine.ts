@@ -30,7 +30,7 @@ import * as paylink from "./pay/paylink.ts";
 import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
 import type { ConsentRecord } from "./prove/consent.ts";
 import { detailCarriesCardNumber } from "./prove/ledger.ts";
-import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
+import { receiptKeySet, type ReceiptBody, type SignedReceipt } from "./prove/receipt.ts";
 import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
 import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
@@ -418,9 +418,9 @@ export class Engine {
     return slice.receipt === null ? null : structuredClone(slice.receipt);
   }
 
-  /** The key set for verifying this engine's receipts (empty without a signer). */
+  /** The key set for verifying this engine's receipts: with a key ring, the retired keys too (empty without a signer). */
   receiptKeys(): JsonWebKey[] {
-    return this.#adapters.signer === undefined ? [] : [this.#adapters.signer.publicJwk()];
+    return receiptKeySet(this.#adapters.signer);
   }
 
   // ---- outside modules ---------------------------------------------------------------------
