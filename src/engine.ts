@@ -21,7 +21,7 @@ import { hmacSha256Hex } from "./core/hash.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
 import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
-import type { AdapterName, CallDraft, CallRecord, EngineAdapters, EngineRuntime, FlowStatus, Locale } from "./core/runtime.ts";
+import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
 import * as dossier from "./file/dossier.ts";
@@ -38,6 +38,7 @@ import * as badge from "./verify/badge.ts";
 import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
+export { SUPPORTED_LOCALES, isSupportedLocale } from "./core/runtime.ts";
 export type { EngineAdapters, Locale } from "./core/runtime.ts";
 export type { KeypadResult, OutcomeResult, VerificationResult } from "./verify/badge.ts";
 
@@ -202,14 +203,16 @@ export class Engine {
 
   /** Opens a call. With `flow`, the call runs that flow from its first step. */
   async startCall(input: { callId?: string; locale?: Locale; flow?: string } = {}): Promise<SessionState> {
+    // Each read once: a getter read again could change a value after it was checked.
+    const { callId: givenId, locale, flow }: { callId?: unknown; locale?: unknown; flow?: unknown } = input;
     // Everything the host gives here enters the ledger as it is, not through emit's checks: checked
     // now, before anything is saved, so no call's ledger can be blocked by a value it cannot hash.
-    if (input.callId !== undefined && (typeof input.callId !== "string" || input.callId === "" || input.callId.length > 200 || hasLoneSurrogate(input.callId))) {
+    if (givenId !== undefined && (typeof givenId !== "string" || givenId === "" || givenId.length > 200 || hasLoneSurrogate(givenId))) {
       throw new EngineError("invalid_input", "callId must be 1 to 200 characters the ledger can carry (no lone surrogate)");
     }
-    if (input.locale !== undefined && input.locale !== "en" && input.locale !== "fr") throw new EngineError("invalid_input", "locale must be en or fr");
-    if (input.flow !== undefined && typeof input.flow !== "string") throw new EngineError("invalid_input", "flow must name a flow");
-    const callId = input.callId ?? this.#ids.next("call");
+    if (locale !== undefined && !isSupportedLocale(locale)) throw new EngineError("invalid_input", `locale must be one of ${SUPPORTED_LOCALES.join(", ")}`);
+    if (flow !== undefined && typeof flow !== "string") throw new EngineError("invalid_input", "flow must name a flow");
+    const callId = (givenId as string | undefined) ?? this.#ids.next("call");
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
       const name = module.manifest.name;
@@ -218,7 +221,7 @@ export class Engine {
     const record: CallRecord = {
       v: 1,
       state: newSession(callId, this.workspaceId, this.#now()),
-      locale: input.locale ?? "en",
+      locale: (locale as Locale | undefined) ?? "en",
       revision: this.#config.revision,
       flow: null,
       modules,
@@ -227,9 +230,9 @@ export class Engine {
     // A call started with a flow is created with it attached, so no other process can start a
     // different flow on the same id in between.
     const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
-    if (input.flow !== undefined) {
+    if (flow !== undefined) {
       const draft = this.#draft(record, events);
-      this.#attachFlow(draft, input.flow, this.#flowDefinition(input.flow), this.#config.revision);
+      this.#attachFlow(draft, flow as string, this.#flowDefinition(flow as string), this.#config.revision);
       this.#advance(draft);
     }
     record.outbox = events.map((event, i) => ({ eventId: this.#eventId(callId, 1, i), ...event }));
@@ -460,8 +463,9 @@ export class Engine {
         const reason = slice === undefined ? null : (module.blocksEnd?.(slice) ?? null);
         if (reason !== null) throw new EngineError("precondition_failed", `the call cannot end yet: ${reason}`);
       }
-      // A grant still at its door when the call ends is settled now, as unknown, before the receipt's
-      // ledger head is taken: no access outcome can ever follow the receipt.
+      // Refused while a signed grant may still be acted on at its door; a grant reserved but not yet
+      // signed (or past its expiry) is settled now, as unknown, before the receipt's ledger head is
+      // taken: no access outcome can ever follow the receipt.
       gate.settleInFlight(this.#rt, draft, "call_ended");
       draft.apply({ type: "call_ended", at: this.#now() });
       const flow = draft.record.flow;
