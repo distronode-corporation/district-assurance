@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 
 import type { SignedAccessGrant } from "../src/gate/access.ts";
-import { vendorAccessController, type VendorAccessOptions } from "../src/gate/vendors.ts";
+import { VENDOR_HOSTS, vendorAccessController, type VendorAccessOptions } from "../src/gate/vendors.ts";
 import { FixedClock, generateTestSigner } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, setup, testConfig } from "./helpers.ts";
 
@@ -90,8 +90,8 @@ describe("vendorAccessController", () => {
     });
   });
   const hits = (prefix: string) => seen.filter((s) => s.path.startsWith(`${prefix}/`));
-  const kisi = (prefix: string, extra: Partial<VendorAccessOptions> = {}) => vendorAccessController({ vendor: "kisi", apiKey: API_KEY, baseUrl: `${base}${prefix}`, clock, ...extra });
-  const verkada = (prefix: string, extra: Partial<VendorAccessOptions> = {}) => vendorAccessController({ vendor: "verkada", apiKey: API_KEY, baseUrl: `${base}${prefix}`, clock, ...extra });
+  const kisi = (prefix: string, extra: Partial<VendorAccessOptions> = {}) => vendorAccessController({ vendor: "kisi", apiKey: API_KEY, baseUrl: `${base}${prefix}`, allowLoopbackForTests: true, clock, ...extra });
+  const verkada = (prefix: string, extra: Partial<VendorAccessOptions> = {}) => vendorAccessController({ vendor: "verkada", apiKey: API_KEY, baseUrl: `${base}${prefix}`, allowLoopbackForTests: true, clock, ...extra });
 
   before(async () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -102,22 +102,44 @@ describe("vendorAccessController", () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
+  it("sends each vendor's key only to its own hosts, or the loopback address with the test-only override (//host review)", () => {
+    assert.deepEqual(VENDOR_HOSTS, { kisi: ["api.kisi.io"], verkada: ["api.verkada.com", "api.eu.verkada.com", "api.au.verkada.com"] });
+    const refused: Array<[VendorAccessOptions["vendor"], string]> = [
+      ["kisi", "https://api.kisi.example.test"],
+      ["kisi", "https://api.kisi.io.evil.example"],
+      ["kisi", "https://api.kisi.io:8443"],
+      ["kisi", "https://api.verkada.com"],
+      ["verkada", "https://api.kisi.io"],
+      ["verkada", "https://api.us.verkada.com"],
+      ["verkada", "https://eu.verkada.com"],
+      ["verkada", "http://127.0.0.1:1"],
+      ["kisi", "https://localhost"],
+    ];
+    for (const [vendor, baseUrl] of refused) {
+      assert.throws(() => vendorAccessController({ vendor, apiKey: API_KEY, baseUrl }), (e: unknown) => e instanceof TypeError && /https baseUrl on/.test(e.message) && !e.message.includes(API_KEY), `${vendor} ${baseUrl}`);
+    }
+    assert.throws(() => vendorAccessController({ vendor: "kisi", apiKey: API_KEY, baseUrl: "https://api.example.test", allowLoopbackForTests: true }), /api\.kisi\.io/, "the override is for the loopback address only");
+  });
+
   it("refuses an unknown vendor, a bad API key, URLs that are not HTTPS (or loopback HTTP), and bad timeouts", () => {
     assert.throws(() => vendorAccessController({ vendor: "brivo" as never, apiKey: API_KEY }), /kisi or verkada/);
     for (const apiKey of ["", "two words", "line\nbreak", "x".repeat(501), 7 as never]) {
       assert.throws(() => vendorAccessController({ vendor: "kisi", apiKey }), /apiKey/);
     }
-    for (const baseUrl of ["http://api.kisi.example.test", "ftp://127.0.0.1"]) {
+    for (const baseUrl of ["http://api.kisi.example.test", "ftp://127.0.0.1", "http://api.kisi.io"]) {
       assert.throws(() => vendorAccessController({ vendor: "kisi", apiKey: API_KEY, baseUrl }), /https baseUrl/);
     }
-    for (const baseUrl of ["https://user:pw@api.example.test", "https://api.example.test/?key=1", "https://api.example.test/#x"]) {
+    for (const baseUrl of ["https://user:pw@api.verkada.com", "https://api.verkada.com/?key=1", "https://api.verkada.com/#x"]) {
       assert.throws(() => vendorAccessController({ vendor: "verkada", apiKey: API_KEY, baseUrl }), /no credentials, query or fragment/);
     }
     assert.throws(() => vendorAccessController({ vendor: "kisi", apiKey: API_KEY, timeoutMs: 99 }), /timeoutMs/);
     assert.throws(() => vendorAccessController({ vendor: "kisi", apiKey: API_KEY, timeoutMs: 30_001 }), /timeoutMs/);
     assert.throws(() => vendorAccessController({ vendor: "kisi", apiKey: API_KEY, timeoutMs: 1000.5 }), /timeoutMs/);
-    for (const baseUrl of [undefined, "https://api.eu.verkada.com", "http://localhost:1", "http://[::1]:1"]) {
+    for (const baseUrl of [undefined, "https://api.eu.verkada.com", "https://api.au.verkada.com/v1"]) {
       assert.ok(vendorAccessController({ vendor: "verkada", apiKey: API_KEY, ...(baseUrl === undefined ? {} : { baseUrl }) }));
+    }
+    for (const baseUrl of ["http://localhost:1", "http://[::1]:1", "https://127.0.0.1:1"]) {
+      assert.ok(vendorAccessController({ vendor: "verkada", apiKey: API_KEY, baseUrl, allowLoopbackForTests: true }));
     }
   });
 
@@ -234,8 +256,8 @@ describe("vendorAccessController", () => {
       calls.push(String(url));
       return String(url).endsWith("/token") ? new Response(JSON.stringify({ token: TOKEN }), { status: 200 }) : new Response(null, { status: 200 });
     };
-    await vendorAccessController({ vendor: "kisi", apiKey: API_KEY, baseUrl: "http://127.0.0.1//collector.example", fetch: record, clock }).unlock(kisiInput);
-    await vendorAccessController({ vendor: "verkada", apiKey: API_KEY, baseUrl: "http://127.0.0.1//collector.example/", fetch: record, clock }).unlock(verkadaInput);
+    await vendorAccessController({ vendor: "kisi", apiKey: API_KEY, baseUrl: "http://127.0.0.1//collector.example", allowLoopbackForTests: true, fetch: record, clock }).unlock(kisiInput);
+    await vendorAccessController({ vendor: "verkada", apiKey: API_KEY, baseUrl: "http://127.0.0.1//collector.example/", allowLoopbackForTests: true, fetch: record, clock }).unlock(verkadaInput);
     assert.deepEqual(calls.map((u) => new URL(u).host), ["127.0.0.1", "127.0.0.1", "127.0.0.1"]);
     assert.deepEqual(calls.map((u) => new URL(u).pathname), [`//collector.example/locks/${KISI_LOCK}/unlock`, "//collector.example/token", "//collector.example/access/v1/door/admin_unlock"]);
   });
@@ -249,7 +271,7 @@ describe("vendorAccessController", () => {
     const inTime = new FixedClock(new Date(Date.parse(kisiInput.grant.body.expiresAt) - 5_000));
     assert.equal((await kisi("/kisi-ok", { clock: inTime }).unlock(kisiInput)).outcome, "delivered");
     // The system clock is long past these grants' expiry.
-    assert.deepEqual(await vendorAccessController({ vendor: "kisi", apiKey: API_KEY, baseUrl: `${base}/kisi-ok` }).unlock(kisiInput), { outcome: "refused", reason: "grant_expiring" });
+    assert.deepEqual(await vendorAccessController({ vendor: "kisi", apiKey: API_KEY, baseUrl: `${base}/kisi-ok`, allowLoopbackForTests: true }).unlock(kisiInput), { outcome: "refused", reason: "grant_expiring" });
   });
 
   it("works as Gate's controller in the engine's access adapter, the API key never in the ledger", async () => {

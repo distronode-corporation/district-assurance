@@ -34,10 +34,13 @@ export interface VendorAccessOptions {
   apiKey: string;
   /**
    * The vendor's API. Default `https://api.kisi.io` for Kisi and `https://api.verkada.com` for
-   * Verkada (`https://api.eu.verkada.com` or `https://api.au.verkada.com` for those regions).
-   * HTTPS, or HTTP only to the loopback address (tests).
+   * Verkada (`https://api.eu.verkada.com` or `https://api.au.verkada.com` for those regions): the
+   * host must be one of the vendor's (`VENDOR_HOSTS`), over HTTPS on the default port. The loopback
+   * address, over HTTP or HTTPS, only with `allowLoopbackForTests`.
    */
   baseUrl?: string;
+  /** Test only: lets `baseUrl` be the loopback address (a local fake of the vendor). Never in production. */
+  allowLoopbackForTests?: boolean;
   /** How long to wait for the vendor, for the whole unlock, 100 to 30,000 ms. Default 5,000. */
   timeoutMs?: number;
   /** Default: the global `fetch`. */
@@ -50,6 +53,12 @@ const DEFAULT_BASE_URL = { kisi: "https://api.kisi.io", verkada: "https://api.ve
 
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
+/** The hosts each vendor's API key may be sent to. */
+export const VENDOR_HOSTS: Readonly<Record<VendorAccessOptions["vendor"], readonly string[]>> = Object.freeze({
+  kisi: Object.freeze(["api.kisi.io"]),
+  verkada: Object.freeze(["api.verkada.com", "api.eu.verkada.com", "api.au.verkada.com"]),
+});
+
 /** A Kisi lock id is a number; a Verkada door id is a UUID. Both go into the request as they are. */
 const TARGET = { kisi: /^[0-9]{1,20}$/, verkada: /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/ } as const;
 
@@ -61,8 +70,12 @@ export function vendorAccessController(options: VendorAccessOptions): AccessCont
     throw new TypeError("apiKey must be 1 to 500 printable characters with no spaces");
   }
   const base = new URL(options.baseUrl ?? DEFAULT_BASE_URL[vendor]);
-  if (base.protocol !== "https:" && !(base.protocol === "http:" && LOOPBACK.has(base.hostname))) {
-    throw new TypeError("vendorAccessController needs an https baseUrl (http only to the loopback address)");
+  // The key goes wherever the base URL points, so only the vendor's own hosts, or the loopback
+  // address when a test says so, are accepted: a mistyped or injected host never receives it.
+  const loopback = options.allowLoopbackForTests === true && LOOPBACK.has(base.hostname) && (base.protocol === "http:" || base.protocol === "https:");
+  const hosts = VENDOR_HOSTS[vendor];
+  if (!loopback && !(base.protocol === "https:" && hosts.includes(base.hostname) && base.port === "")) {
+    throw new TypeError(`vendorAccessController needs an https baseUrl on ${hosts.join(", ")} (the loopback address only with allowLoopbackForTests)`);
   }
   if (base.username !== "" || base.password !== "" || base.search !== "" || base.hash !== "") {
     throw new TypeError("vendorAccessController baseUrls carry no credentials, query or fragment");

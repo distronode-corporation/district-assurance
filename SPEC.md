@@ -601,7 +601,7 @@ when it did not act, optionally `{"error": "<code>"}` (`signature`, `workspace`,
 the door, so it is `unknown`. Anything else, including no answer, is `unknown` too. A relay checks the grant with `verifyAccessGrant` against
 `engine.accessKeys()`, its own workspace and its own audience, and refuses a grant id it has seen.
 
-**Direct vendor adapters** (`vendorAccessController({vendor, apiKey, baseUrl?, timeoutMs?, fetch?,
+**Direct vendor adapters** (`vendorAccessController({vendor, apiKey, baseUrl?, allowLoopbackForTests?, timeoutMs?, fetch?,
 clock?})`, `vendor` being `kisi` or `verkada`), named in the engine's `access` adapter like any
 controller: the controller's door ref is the vendor's own id, a Kisi lock
 id (digits) or a Verkada door id (a UUID). `unlock` first checks that the grant's `target` is the
@@ -622,8 +622,11 @@ or reports in its answer that the door moved, so neither is sent and a 2xx is `d
 (the vendor's text is never passed on); anything else throws (`unknown`). Never retried, no
 redirects, one timeout for the whole unlock (100 to 30,000 ms, default 5,000). `baseUrl` defaults
 to `https://api.kisi.io` or `https://api.verkada.com` (`https://api.eu.verkada.com` and
-`https://api.au.verkada.com` for those regions); HTTPS only, or HTTP to the loopback; no
-credentials, query or fragment. `apiKey` is 1 to 500 printable characters with no spaces.
+`https://api.au.verkada.com` for those regions), and its host must be one of the vendor's
+(`VENDOR_HOSTS`: `api.kisi.io`; `api.verkada.com`, `api.eu.verkada.com`, `api.au.verkada.com`), over
+HTTPS on the default port, with no credentials, query or fragment: the key goes nowhere else. The
+loopback address, over HTTP or HTTPS, only with `allowLoopbackForTests: true`, for tests and never
+for production. `apiKey` is 1 to 500 printable characters with no spaces.
 
 A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);
 revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS
