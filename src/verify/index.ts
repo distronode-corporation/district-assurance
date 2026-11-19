@@ -20,6 +20,7 @@ export {
   type TextCodeRefusal,
   type TextCodeState,
 } from "./text-code.ts";
+export { DEFAULT_LOCKOUT, counterKeys, lockState, lockoutOf, numberKeyFor, type Lock, type Lockout, type LockoutSettings } from "./counters.ts";
 export * from "./factors.ts";
 export * from "./knowledge.ts";
 export * from "./later.ts";

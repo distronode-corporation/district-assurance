@@ -9,9 +9,9 @@ import { defaultConfig } from "../src/modules.ts";
 import { formatAmount } from "../src/pay/paylink.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import { verifyReceipt } from "../src/prove/receipt.ts";
-import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
+import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryAttemptCounters, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall, waitOut } from "./helpers.ts";
 
 describe("Engine construction", () => {
   it("refuses a short key, an empty workspace, a missing ledger and a bad config", () => {
@@ -81,6 +81,7 @@ describe("Engine construction", () => {
         payments: new FakePaymentLinks(),
         records: new MemoryRecordStore(),
         ledger: new MemoryAuditLedger(),
+        counters: new MemoryAttemptCounters(),
         signer: generateTestSigner(),
       },
     });
@@ -187,7 +188,9 @@ describe("Engine verify", () => {
     await assert.rejects(t.engine.submitKeypad(callId, { dob: DOB }), rejects("invalid_transition"));
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     assert.deepEqual(await t.engine.submitKeypad(callId, { dob: "1" }), { matched: false, locked: false });
+    waitOut(t);
     assert.deepEqual(await t.engine.submitKeypad(callId, { dob: "2" }), { matched: false, locked: true });
+    waitOut(t);
     // Even the right answer is not judged now.
     assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: false, locked: true });
     assert.equal((await t.engine.state(callId)).factors.length, 2);
@@ -294,7 +297,9 @@ describe("Engine verify", () => {
     await t.engine.submitKeypad(other.callId, { dob: DOB });
     await assert.rejects(t.engine.sendTextCode(other.callId), rejects("precondition_failed"), "unknown account");
     assert.equal(t.messages.sent.length, 0);
-    await t.engine.submitKeypad(callId, { dob: DOB });
+    // Past the wait VER-1 puts after the wrong entry.
+    waitOut(t);
+    assert.equal((await t.engine.submitKeypad(callId, { dob: DOB })).matched, true);
     assert.deepEqual(await t.engine.sendTextCode(callId), { sent: true });
     for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
     assert.equal(t.messages.sent.length, 1);

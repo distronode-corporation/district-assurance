@@ -18,7 +18,7 @@ function hole(): unknown[] {
   return list;
 }
 
-const ALL_ADAPTERS = ["ledger", "sessions", "records", "identity", "carrier", "messages", "payments", "signer", "pinVerifier", "codes"];
+const ALL_ADAPTERS = ["ledger", "sessions", "records", "identity", "carrier", "messages", "payments", "signer", "pinVerifier", "counters", "codes"];
 
 function registry(adapters: readonly string[] = ALL_ADAPTERS, extra: AssuranceModule[] = []): ModuleRegistry {
   return new ModuleRegistry({ adapters, modules: [...builtInModules(), ...extra] });
@@ -147,6 +147,7 @@ describe("validateConfig: modules", () => {
     );
     assert.deepEqual(problems, [
       "modules.badge: needs the records adapter, which the engine does not have",
+      "modules.badge: needs the counters adapter, which the engine does not have",
       "modules.badge: needs the carrier adapter, which the engine does not have",
       "modules.badge: needs the identity adapter, which the engine does not have",
       "modules.badge: needs the messages adapter, which the engine does not have",
@@ -183,6 +184,44 @@ describe("validateConfig: modules", () => {
     assert.deepEqual(at({ factors: ["keypad_knowledge"], grantTtlSeconds: 3600 }), []);
     assert.deepEqual(at({ factors: ["keypad_knowledge", 3] }), ["modules.badge.settings: factors must list at least one factor"]);
     assert.deepEqual(at({ factors: hole() }), ["modules.badge.settings: factors must list at least one factor"], "a hole is not a factor");
+  });
+
+  it("checks badge lockout settings, whose defaults are floors (VER-1)", () => {
+    const at = (lockout: unknown) => validateConfig(config((c) => (c.modules.badge.settings.lockout = lockout)), registry());
+    assert.deepEqual(at({}), []);
+    assert.deepEqual(at({ backoffSeconds: [10, 30, 120, 600, 1800, 3600, 3600], lockAfterFailures: 3, windowHours: 168 }), [], "stricter is fine");
+    assert.deepEqual(at({ backoffSeconds: [5, 15, 60, 300, 900, 900, 900, 900, 900, 900], lockAfterFailures: 1, windowHours: 24 }), [], "the floors themselves");
+    assert.deepEqual(at("strict"), ["modules.badge.settings: lockout must be an object"]);
+    assert.deepEqual(at({ backoffSeconds: [5, 15, 60, 300], lockAfterFailures: 11, windowHours: 23, after: 1 }), [
+      "modules.badge.settings: lockout.after is not a lockout setting",
+      "modules.badge.settings: lockout.backoffSeconds must list 5 to 10 whole seconds, each at most 86400",
+      "modules.badge.settings: lockout.lockAfterFailures must be 1 to 10",
+      "modules.badge.settings: lockout.windowHours must be 24 to 168",
+    ]);
+    const tooLong = "modules.badge.settings: lockout.backoffSeconds must list 5 to 10 whole seconds, each at most 86400";
+    assert.deepEqual(at({ backoffSeconds: Array(11).fill(900) }), [tooLong]);
+    assert.deepEqual(at({ backoffSeconds: [5, 15, 60, 300, 86_401] }), [tooLong]);
+    assert.deepEqual(at({ backoffSeconds: [5, 15, 60, 300, 1.5] }), [tooLong]);
+    assert.deepEqual(at({ backoffSeconds: "5,15" }), [tooLong]);
+    assert.deepEqual(at({ backoffSeconds: [5, 15, 60, 300, ...hole()] }), [tooLong]);
+    const below = "modules.badge.settings: lockout.backoffSeconds must not go below 5, 15, 60, 300, 900 (900 after that)";
+    assert.deepEqual(at({ backoffSeconds: [4, 15, 60, 300, 900] }), [below]);
+    assert.deepEqual(at({ backoffSeconds: [5, 15, 60, 300, 899] }), [below]);
+    assert.deepEqual(at({ backoffSeconds: [5, 15, 60, 300, 900, 899] }), [below], "900 after the fifth");
+    assert.deepEqual(at({ lockAfterFailures: 0 }), ["modules.badge.settings: lockout.lockAfterFailures must be 1 to 10"]);
+    assert.deepEqual(at({ windowHours: 169 }), ["modules.badge.settings: lockout.windowHours must be 24 to 168"]);
+  });
+
+  it("needs the counters adapter whenever a factor the caller enters is on", () => {
+    const needs = (factors: string[]) =>
+      validateConfig(
+        config((c) => (c.modules.badge.settings.factors = factors)),
+        registry(ALL_ADAPTERS.filter((a) => a !== "counters")),
+      ).filter((p) => p.includes("counters"));
+    const missing = ["modules.badge: needs the counters adapter, which the engine does not have"];
+    assert.deepEqual(needs(["keypad_knowledge"]), missing);
+    assert.deepEqual(needs(["pin"]), missing);
+    assert.deepEqual(needs(["carrier_identity_match", "photo_id"]), [], "factors the caller does not enter are not counted");
   });
 
   it("checks dossier settings", () => {

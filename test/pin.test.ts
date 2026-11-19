@@ -4,9 +4,10 @@ import { describe, it } from "node:test";
 
 import { badgeModule } from "../src/verify/badge.ts";
 import type { FactorJudgeInput } from "../src/verify/factors.ts";
+import { numberKeyFor } from "../src/verify/counters.ts";
 import { pinDigest, subjectKeyFor } from "../src/verify/knowledge.ts";
-import { TEST_KNOWLEDGE_KEY, testSubject } from "../src/testing/index.ts";
-import { ACCOUNT, PIN, rejects, setup, testConfig } from "./helpers.ts";
+import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../src/testing/index.ts";
+import { ACCOUNT, PIN, rejects, setup, testConfig, waitOut } from "./helpers.ts";
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 
@@ -29,8 +30,11 @@ describe("PIN factor, keyed hash", () => {
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     assert.deepEqual(await t.engine.submitPin(callId, "12"), { matched: false, locked: false }, "too short");
+    waitOut(t);
     assert.deepEqual(await t.engine.submitPin(callId, "123456789"), { matched: false, locked: false }, "too long");
+    waitOut(t);
     assert.deepEqual(await t.engine.submitPin(callId, "48a6"), { matched: false, locked: true }, "not digits, and the third attempt");
+    waitOut(t);
     assert.deepEqual(await t.engine.submitPin(callId, PIN), { matched: false, locked: true }, "even the right PIN is not judged now");
     for (const account of ["99999999", "x"]) {
       const other = await t.engine.startCall();
@@ -45,8 +49,10 @@ describe("PIN factor, keyed hash", () => {
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { subjectKey: OWNER });
     assert.equal((await t.engine.submitPin(callId, PIN)).matched, false);
+    waitOut(t);
     assert.equal((await t.engine.submitFactor(callId, "pin", { pin: PIN })).matched, false);
     assert.equal((await t.engine.submitFactor(callId, "keypad_knowledge", "19850214")).matched, false, "keypad knowledge is a map of fields");
+    assert.equal((await t.engine.state(callId)).factors.length, 3, "each was judged, none refused by a wait");
   });
 
   it("binds the digest to the subject", () => {
@@ -74,7 +80,9 @@ describe("PIN factor, the host's verifier", () => {
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     assert.equal((await t.engine.submitPin(callId, "0000")).matched, false);
+    waitOut(t);
     assert.equal((await t.engine.submitPin(callId, "12")).matched, false);
+    waitOut(t);
     assert.equal((await t.engine.submitPin(callId, PIN)).matched, true);
     assert.deepEqual(t.pinVerifier.asked, [OWNER, OWNER, OWNER], "the malformed entry was asked too, as a stand-in");
     const other = await t.engine.startCall();
@@ -84,6 +92,7 @@ describe("PIN factor, the host's verifier", () => {
       return { matched: true }; // a verifier that says yes to a stand-in still never passes it
     };
     assert.equal((await t.engine.submitPin(other.callId, PIN)).matched, false);
+    waitOut(t);
     assert.equal((await t.engine.submitPin(other.callId, "1")).matched, false);
     assert.equal(t.pinVerifier.asked.length, 5);
   });
@@ -105,9 +114,101 @@ describe("PIN factor, the host's verifier", () => {
     };
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
-    for (let i = 0; i < 3; i++) await assert.rejects(t.engine.submitPin(callId, PIN), /pin store down/);
+    for (let i = 0; i < 3; i++) {
+      await assert.rejects(t.engine.submitPin(callId, PIN), /pin store down/);
+      waitOut(t);
+    }
     assert.deepEqual(await t.engine.submitPin(callId, PIN), { matched: false, locked: true });
     assert.equal((await t.engine.state(callId)).factors.length, 0);
+    const subject = { workspaceId: "ws_test", factor: "pin", scope: "subject" as const, key: OWNER };
+    assert.equal((await t.counters.get(subject, "2000-01-01T00:00:00.000Z")).length, 3, "each failed verifier call is a failure across calls too");
+  });
+});
+
+describe("PIN lockout across calls and engines (VER-1)", () => {
+  const CALLER = "+15555550142";
+
+  /** Process B: a second engine on the same session store, ledger, records and counters. */
+  function secondEngine(t: TestEngine) {
+    return createTestEngine({
+      config: testConfig(),
+      clock: t.clock,
+      ids: t.ids,
+      adapters: { sessions: t.sessions, ledger: t.ledger, records: t.records, counters: t.counters },
+    }).engine;
+  }
+
+  it("carries a PIN lock across two calls and two engines, and lifts it only when the window passes or the business resets it", async () => {
+    const t = setup();
+    const b = secondEngine(t);
+    const engines = [t.engine, b];
+    let failures = 0;
+    // Three wrong PINs per call, alternating engines and calls, the way an attacker calls back.
+    for (let c = 0; failures < 10; c++) {
+      const { callId } = await engines[c % 2]!.startCall();
+      await engines[(c + 1) % 2]!.beginVerification(callId, { subjectKey: OWNER, callingNumber: CALLER });
+      for (let i = 0; i < 3 && failures < 10; i++) {
+        waitOut(t);
+        const result = await engines[(c + i) % 2]!.submitPin(callId, String(1000 + failures).padStart(4, "0"));
+        failures++;
+        assert.equal(result.matched, false);
+        assert.equal(result.locked, i === 2 || failures === 10, `failure ${failures}`);
+      }
+    }
+    // A fresh call, on either engine, from another number: the subject is locked whatever the line.
+    for (const engine of engines) {
+      waitOut(t);
+      const { callId } = await engine.startCall();
+      await engine.beginVerification(callId, { subjectKey: OWNER, callingNumber: "+15555550199" });
+      assert.deepEqual(await engine.submitPin(callId, PIN), { matched: false, locked: true }, "the right PIN, not judged");
+      assert.deepEqual((await engine.state(callId)).factors, []);
+    }
+    const locks = (await t.ledger.list()).filter((e) => e.event === "verification.locked");
+    assert.deepEqual(
+      locks.map((e) => [e.detail.scope, e.detail.hard]),
+      [["subject", true], ["subject", true], ["subject", true]],
+      "the tenth failure locks the subject (its number too), and both refusals name the subject",
+    );
+    assert.equal(JSON.stringify(locks).includes(PIN) || JSON.stringify(locks).includes(CALLER), false);
+    // The business lifts the lock (both counters, as the owner's own number was counted too).
+    await t.counters.reset({ workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER });
+    await t.counters.reset({ workspaceId: "ws_test", factor: "pin", scope: "number", key: numberKeyFor(TEST_KNOWLEDGE_KEY, CALLER) });
+    const { callId } = await b.startCall();
+    await t.engine.beginVerification(callId, { subjectKey: OWNER, callingNumber: CALLER });
+    assert.deepEqual(await b.submitPin(callId, PIN), { matched: true, locked: false });
+  });
+
+  it("counts unknown subjects by the calling number, so trying one account after another from one line locks the line", async () => {
+    const t = setup();
+    const b = secondEngine(t);
+    // Ten calls, each to a different account that does not exist, and the last one with no account a keypad could produce.
+    for (let i = 0; i < 10; i++) {
+      waitOut(t);
+      const engine = i % 2 === 0 ? t.engine : b;
+      const { callId } = await engine.startCall();
+      await engine.beginVerification(callId, { accountNumber: i === 9 ? "not-digits" : `5000000${i}`, callingNumber: CALLER });
+      assert.deepEqual(await engine.submitPin(callId, PIN), { matched: false, locked: i === 9 });
+    }
+    assert.deepEqual((await t.ledger.list()).filter((e) => e.event === "verification.locked").map((e) => e.detail.scope), ["number"]);
+    // The real owner, from that line: refused. From their own line: judged.
+    waitOut(t);
+    const fromLine = await t.engine.startCall();
+    await t.engine.beginVerification(fromLine.callId, { subjectKey: OWNER, callingNumber: CALLER });
+    assert.deepEqual(await t.engine.submitPin(fromLine.callId, PIN), { matched: false, locked: true });
+    assert.equal((await t.ledger.list()).at(-1)!.detail.scope, "number");
+    const fromOwn = await b.startCall();
+    await b.beginVerification(fromOwn.callId, { subjectKey: OWNER, callingNumber: "+15555550101" });
+    assert.deepEqual(await b.submitPin(fromOwn.callId, PIN), { matched: true, locked: false });
+  });
+
+  it("refuses the second of two simultaneous wrong PINs on one call even when both engines read the counters first", async () => {
+    const t = setup();
+    const b = secondEngine(t);
+    const { callId } = await t.engine.startCall();
+    await b.beginVerification(callId, { subjectKey: OWNER });
+    const results = await Promise.all([t.engine.submitPin(callId, "0000"), b.submitPin(callId, "1111"), t.engine.submitPin(callId, PIN)]);
+    assert.equal(results.filter((r) => !r.locked).length, 1, "one judged; the others refused by the wait or the race");
+    assert.equal((await t.engine.state(callId)).factors.length, 1);
   });
 });
 

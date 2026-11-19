@@ -10,14 +10,13 @@ import { revokeConsent } from "../src/prove/consent.ts";
 import { exportLedger } from "../src/prove/later.ts";
 import { gateModule } from "../src/gate/later.ts";
 import { createTestEngine } from "../src/testing/index.ts";
-import { enrolPin, normaliseSpokenAnswer, recordSubjectFailure } from "../src/verify/later.ts";
+import { enrolPin, normaliseSpokenAnswer } from "../src/verify/later.ts";
 import { verifyTelnyxSignature, verifyTwilioSignature } from "../src/webhooks/carrier.ts";
 
 const form = { formId: "f", version: "1", fields: [] };
 const hook = { url: "https://example.test/", headers: {}, body: "", now: new Date(0) };
 
 const STUBS: Array<[string, () => unknown]> = [
-  ["VER-1", () => recordSubjectFailure({ workspaceId: "w", subjectKey: "s" })],
   ["VER-3", () => normaliseSpokenAnswer({ field: "postal", transcript: "", locale: "en" })],
   ["VER-6", () => enrolPin({ callId: "c" })],
   ["FIL-1", () => buildReadBack(form, {}, "fr")],

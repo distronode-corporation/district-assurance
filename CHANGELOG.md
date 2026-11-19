@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Lockouts across calls (VER-1): an `AttemptCounters` adapter (`MemoryAttemptCounters`,
+  `attemptCountersContract`) counts failures of every entered factor per subject and per calling
+  number (`beginVerification({ callingNumber })`, kept as a keyed hash), before judging; a wait of
+  5, 15, 60, 300 and 900 seconds and a hard lock after 10 failures in 24 hours, in Badge's
+  `lockout` setting as defaults and floors; a `verification.locked` event. Badge needs `counters`
+  when a factor the caller enters is on. A pass takes its own failure off the calling number with
+  `AttemptCounters.removeFailure`, one atomic step. `recordSubjectFailure` is gone.
 - Texted one-time codes (VER-2): `Engine.sendTextCode` and `Engine.checkTextCode`, the `text_code`
   factor in Badge's settings, a `CodeStore` adapter (`MemoryCodeStore`, `codeStoreContract`) for
   send limits per subject and per calling number, and `textCodeCountryCodes` in the policy; a
