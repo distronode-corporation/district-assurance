@@ -300,6 +300,11 @@ function isScore(value: unknown): value is number {
   return typeof value === "number" && value >= 0 && value <= 1;
 }
 
+/** A call's band. A call stored before VER-14 has none, and no score was reported on it: `clear`. */
+function bandOf(state: SessionState): SyntheticVoiceBand {
+  return state.syntheticVoice ?? "clear";
+}
+
 /** Whether a factor kind still counts toward a level under a call's synthetic voice band. */
 function countsUnder(kind: string, band: SyntheticVoiceBand): boolean {
   return kind !== "spoken_knowledge" || band === "clear";
@@ -499,6 +504,7 @@ export async function applyIdentityOutcome(rt: EngineRuntime, outcome: IdentityO
 export async function reportSyntheticVoice(rt: EngineRuntime, callId: string, input: { score: number; vendor: string }): Promise<void> {
   // Read the input once, before any wait, so a caller changing it during the update cannot split
   // the vendor whose thresholds set the band from the vendor the ledger names.
+  if (!isObject(input)) throw new EngineError("invalid_input", "a synthetic voice report is { score and vendor }");
   const { score, vendor } = input;
   const vendors = rt.settings<BadgeVoiceSettings>(BADGE).syntheticVoice ?? {};
   const thresholds = Object.hasOwn(vendors, vendor) ? vendors[vendor] : undefined;
@@ -507,7 +513,7 @@ export async function reportSyntheticVoice(rt: EngineRuntime, callId: string, in
   const band: SyntheticVoiceBand = score > thresholds.levelOneAbove ? "level_1" : score > thresholds.spokenKnowledgeAbove ? "spoken_off" : "clear";
   await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
-    const highest = higherBand(draft.record.state.syntheticVoice, band);
+    const highest = higherBand(bandOf(draft.record.state), band);
     // What the last verification reaches without the factors the band stops counting. Its other
     // methods are judged again only when one was dropped, so a score never moves a level otherwise.
     const kept = s.lastMethods.filter((kind) => countsUnder(kind, highest));
@@ -524,7 +530,7 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
   return rt.update(callId, (draft) => {
     const step = stepOfType<BadgeVerifyStep>(draft.record, "badge.verify");
     const s = draft.slice<BadgeSlice>(BADGE);
-    const band = draft.record.state.syntheticVoice;
+    const band = bandOf(draft.record.state);
     const factors = draft.record.state.factors.filter((f) => (step === null || step.factors.includes(f.kind)) && countsUnder(f.kind, band));
     const result = evaluateAssurance(rt.policy, factors, s.carrier);
     const level = heldLevel(result.level, band);

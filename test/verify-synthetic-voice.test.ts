@@ -224,6 +224,9 @@ describe("synthetic voice: refusals", () => {
   it("refuses a vendor without thresholds, a score outside 0 to 1, an ended call and Badge turned off", async () => {
     const t = setup({ config: voiceConfig() });
     const { callId } = await t.engine.startCall();
+    for (const bad of [null, undefined, "acme"]) {
+      await assert.rejects(t.engine.reportSyntheticVoice(callId, bad as never), rejects("invalid_input", /score and vendor/), String(bad));
+    }
     for (const vendor of ["other", "toString", "__proto__"]) {
       await assert.rejects(t.engine.reportSyntheticVoice(callId, { score: 0.5, vendor }), rejects("invalid_input", /no synthetic voice thresholds/));
     }
@@ -238,6 +241,21 @@ describe("synthetic voice: refusals", () => {
     const off = setup({ config: voiceConfig((c) => (c.modules.badge!.enabled = false)) });
     const offCall = await off.engine.startCall();
     await assert.rejects(off.engine.reportSyntheticVoice(offCall.callId, { score: 0.9, vendor: "acme" }), rejects("module_disabled"));
+  });
+
+  it("reads a call stored before synthetic voice scores as clear, so a spoken answer still counts", async () => {
+    const t = setup({ config: voiceConfig(spokenPolicy) });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await recordPassed(t, callId, ["spoken_knowledge"]);
+    const stored = (await t.sessions.get("ws_test", callId))!;
+    const record = structuredClone(stored.record) as unknown as CallRecord;
+    delete (record.state as Partial<CallRecord["state"]>).syntheticVoice;
+    assert.equal((await t.sessions.compareAndSet("ws_test", callId, stored.version, record as unknown as JsonValue)).ok, true);
+    assert.equal((await t.engine.finishVerification(callId)).level, 1, "no score was ever reported: no cap");
+    await t.engine.reportSyntheticVoice(callId, { score: 0.6, vendor: "acme" });
+    assert.equal((await t.engine.state(callId)).syntheticVoice, "spoken_off");
+    assert.equal((await t.engine.state(callId)).level, 0, "and a score on it caps it as on any call");
   });
 
   it("checks the thresholds when the config is saved", () => {

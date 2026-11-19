@@ -43,8 +43,11 @@ export interface SessionState {
   sensitive: SensitiveReason | null;
   /** Set once untrusted text (a webhook reply, a document) has entered the conversation. Sticky. */
   tainted: boolean;
-  /** The highest synthetic voice band any score reached on this call: `clear` when none was reported. Sticky. */
-  syntheticVoice: SyntheticVoiceBand;
+  /**
+   * The highest synthetic voice band any score reached on this call: `clear` when none was
+   * reported. Sticky. Absent on a call stored before VER-14, which reads as `clear`.
+   */
+  syntheticVoice?: SyntheticVoiceBand;
   recordIds: string[];
   paymentIds: string[];
   startedAt: string;
@@ -142,7 +145,7 @@ export function reduce(state: SessionState, event: SessionEvent): SessionState {
     case "synthetic_voice_scored":
       return {
         ...state,
-        syntheticVoice: higherBand(state.syntheticVoice, event.band),
+        syntheticVoice: higherBand(state.syntheticVoice ?? "clear", event.band),
         level: Math.min(state.level, event.ceiling) as AssuranceLevel,
         grant: heldTo(state.grant, event.ceiling, event.scopes),
       };
