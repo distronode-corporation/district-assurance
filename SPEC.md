@@ -398,3 +398,28 @@ subject's number on file. Identity link: "Your one-time identity check link: URL
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
 the currency's own decimals.
+
+## 17. Reference server limits and logs
+
+`examples/reference-server/src/app.ts`, not part of the package. Each request is handled in this
+order, and every refusal is JSON `{"error": code}`:
+
+- **Rate limit**, first, before any other work: each remote address, as the socket reports it,
+  gets `rateLimit.requests` requests per fixed window of `rateLimit.windowMs` on the server's clock
+  (default 300 a minute). Every request counts, whatever its route or answer. Over the limit:
+  `429 rate_limited` with `Retry-After` in whole seconds to the window's end. `X-Forwarded-For` is
+  never read. At most `rateLimit.addresses` addresses are tracked (default 10,000); to make room,
+  ended windows are dropped first, then the oldest.
+- **Body limits** per route: `stripeIdentity` and `stripePayments` 64 KiB each, `demo` 1 KiB
+  (`bodyLimits` overrides each). A declared `Content-Length` over the limit is refused before a byte
+  is read; a streamed body is cut off once it passes the limit. Either way: `413 body_too_large`.
+  The other routes never read a body.
+- **Timeouts**, `timeoutMs` (default 10 seconds): node:http answers `408` and closes the connection
+  when a request's headers and body are not all received in time; a request not answered within
+  `timeoutMs` of its headers gets `503 timeout`.
+- **Logs**: with `log`, one entry per answered request, after the answer is written:
+  `{time, address, method, route, status, error?, ms}`. `time` is from the server's clock;
+  `route` is the matched pattern (`/receipts/:callId`, `/demo/runs/:runId/next`) or `unmatched`,
+  never the path as sent; `error` is the answer's error code. An entry holds no header, query
+  string or body. `logJsonLines` writes each entry as one line of JSON on standard output, and
+  `npm run serve` uses it.

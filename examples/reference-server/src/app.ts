@@ -1,9 +1,12 @@
 // The reference server: a small node:http server around one Engine. It receives the Stripe
 // webhooks that finish a photo ID check and a payment, serves receipts and the receipt key set,
 // and answers 501 on the carrier webhooks that are not built yet. With `ui`, it also serves the
-// demo's browser UI and the routes that run the scripted demo one step at a time. Not hardened
-// for production; ROADMAP.md, "Reference server", lists what that takes.
+// demo's browser UI and the routes that run the scripted demo one step at a time. Each route has
+// its own body limit, every request has deadlines, each remote address has a rate limit, and each
+// answered request can be logged as one structured entry that never holds a body or a header.
+// Still not hardened for production; ROADMAP.md, "Reference server", lists what else that takes.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { performance } from "node:perf_hooks";
 
 import { EngineError, parseStripeEvent, verifyStripeSignature, type Clock, type Engine } from "../../../src/index.ts";
 import type { DemoRuns, RunAnswer } from "./demo-runs.ts";
@@ -15,10 +18,58 @@ export interface ReferenceServerOptions {
   /** Signing secrets per Stripe endpoint. Empty means the endpoint refuses everything. */
   stripeSecrets: { identity: readonly string[]; payments: readonly string[] };
   clock: Clock;
-  /** Default 64 KiB. */
-  maxBodyBytes?: number;
+  /** Body limits in bytes, per route that reads a body. Defaults in `DEFAULT_BODY_LIMITS`. */
+  bodyLimits?: Partial<BodyLimits>;
+  /**
+   * Milliseconds to receive a whole request, headers and body, and, counted from the end of the
+   * headers, to answer it. Headers that take too long get a 408 from node:http and the connection
+   * is closed; a request not answered in time gets a 503 (a body still arriving gets whichever
+   * comes first). Default 10 seconds.
+   */
+  timeoutMs?: number;
+  /**
+   * Requests per remote address per window, the window counted on `clock`, for at most
+   * `addresses` addresses at once. Default 300 a minute, 10,000 addresses.
+   */
+  rateLimit?: { requests: number; windowMs: number; addresses?: number };
+  /** Called once per answered request, after the answer is written. Absent means no logs. */
+  log?: (entry: RequestLog) => void;
   /** The demo's runs: serves the browser UI and the `/demo/*` routes. Off when absent. */
   ui?: DemoRuns;
+}
+
+/** The routes that read a body. Every other route answers without reading one. */
+export interface BodyLimits {
+  stripeIdentity: number;
+  stripePayments: number;
+  /** `POST /demo/runs` and `POST /demo/runs/:runId/next`, whose bodies are a flow name or nothing. */
+  demo: number;
+}
+
+export const DEFAULT_BODY_LIMITS: Readonly<BodyLimits> = { stripeIdentity: 64 * 1024, stripePayments: 64 * 1024, demo: 1024 };
+
+/**
+ * One answered request. It names the route by its pattern, never the path as sent, so the ids and
+ * tokens a path can carry stay out of the log, and it holds no header, no query string and no body.
+ */
+export interface RequestLog {
+  /** From the server's clock, ISO 8601. */
+  time: string;
+  /** The remote address the rate limit counts, as the socket reports it. */
+  address: string;
+  method: string;
+  /** `/receipts/:callId`, `/demo/runs/:runId/next` and so on; `unmatched` when no route matched. */
+  route: string;
+  status: number;
+  /** A refusal's error code, as in its answer. */
+  error?: string;
+  /** Wall time spent answering, in whole milliseconds. */
+  ms: number;
+}
+
+/** A `log` that writes each entry as one line of JSON on standard output. */
+export function logJsonLines(entry: RequestLog): void {
+  process.stdout.write(`${JSON.stringify(entry)}\n`);
 }
 
 type Json = Record<string, unknown>;
@@ -44,19 +95,74 @@ function isLocalHost(host: string, port: number): boolean {
 
 class HttpError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  readonly headers: Readonly<Record<string, string>>;
+  constructor(status: number, message: string, headers: Readonly<Record<string, string>> = {}) {
     super(message);
     this.status = status;
+    this.headers = headers;
   }
+}
+
+/**
+ * A fixed window per remote address, on the injected clock. The address is the socket's: the
+ * server never reads `X-Forwarded-For`, which any client can set, so behind a proxy every caller
+ * shares the proxy's address and the proxy has to do its own limiting.
+ */
+class RateLimit {
+  readonly #requests: number;
+  readonly #windowMs: number;
+  readonly #addresses: number;
+  readonly #clock: Clock;
+  readonly #windows = new Map<string, { start: number; count: number }>();
+
+  constructor(requests: number, windowMs: number, addresses: number, clock: Clock) {
+    this.#requests = requests;
+    this.#windowMs = windowMs;
+    this.#addresses = addresses;
+    this.#clock = clock;
+  }
+
+  /** Counts a request, and throws a 429 with `retry-after` in seconds once the address is over. */
+  take(address: string): void {
+    const now = this.#clock.now().getTime();
+    let window = this.#windows.get(address);
+    if (window === undefined || now - window.start >= this.#windowMs) {
+      // Deleted and set again, so the map stays in order of each window's start.
+      this.#windows.delete(address);
+      if (this.#windows.size >= this.#addresses) this.#forget(now);
+      window = { start: now, count: 0 };
+      this.#windows.set(address, window);
+    }
+    window.count += 1;
+    if (window.count > this.#requests) {
+      throw new HttpError(429, "rate_limited", { "retry-after": String(Math.ceil((window.start + this.#windowMs - now) / 1000)) });
+    }
+  }
+
+  /** Drops every ended window, and then the oldest if none had ended. */
+  #forget(now: number): void {
+    for (const [address, window] of this.#windows) {
+      if (now - window.start >= this.#windowMs) this.#windows.delete(address);
+    }
+    if (this.#windows.size >= this.#addresses) this.#windows.delete(this.#windows.keys().next().value!);
+  }
+}
+
+/** What routing learns about a request, for its log entry. */
+interface Seen {
+  route: string;
 }
 
 export function createReferenceServer(options: ReferenceServerOptions): Server {
   const processed = new Set<string>();
-  const maxBody = options.maxBodyBytes ?? 64 * 1024;
+  const limits: BodyLimits = { ...DEFAULT_BODY_LIMITS, ...options.bodyLimits };
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const rate = options.rateLimit ?? { requests: 300, windowMs: 60_000 };
+  const rateLimit = new RateLimit(rate.requests, rate.windowMs, rate.addresses ?? 10_000, options.clock);
   const files = options.ui === undefined ? new Map<string, StaticFile>() : loadStaticFiles();
 
   async function stripeWebhook(req: IncomingMessage, route: "identity" | "payments"): Promise<[number, Json]> {
-    const payload = await readBody(req, maxBody);
+    const payload = await readBody(req, route === "identity" ? limits.stripeIdentity : limits.stripePayments);
     const header = req.headers["stripe-signature"];
     const check = verifyStripeSignature({
       payload,
@@ -75,21 +181,24 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     return [200, { received: true, applied }];
   }
 
-  async function demoRoute(req: IncomingMessage, runs: DemoRuns, path: string, method: string): Promise<Answer> {
+  async function demoRoute(req: IncomingMessage, runs: DemoRuns, path: string, method: string, seen: Seen): Promise<Answer> {
     const host = req.headers.host!;
     const file = files.get(path);
     if (file !== undefined) {
+      seen.route = path;
       if (method !== "GET") throw new HttpError(405, "method_not_allowed");
       return file;
     }
     const answer = (a: RunAnswer): [number, Json] => (a.ok ? [200, a.view as unknown as Json] : [a.status, { error: a.error }]);
     if (path === "/demo/flows") {
+      seen.route = path;
       if (method !== "GET") throw new HttpError(405, "method_not_allowed");
       return [200, { flows: runs.flows() }];
     }
     const run = /^\/demo\/runs(?:\/(run_[A-Za-z0-9-]{1,64})(\/next)?)?$/.exec(path);
     if (run !== null) {
       const [, runId, next] = run;
+      seen.route = runId === undefined ? "/demo/runs" : next === undefined ? "/demo/runs/:runId" : "/demo/runs/:runId/next";
       const post = runId === undefined || next !== undefined;
       if (method !== (post ? "POST" : "GET")) throw new HttpError(405, "method_not_allowed");
       if (!post) return answer(await runs.view(runId as string));
@@ -98,7 +207,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       if (!(req.headers["content-type"] ?? "").startsWith("application/json")) throw new HttpError(415, "json_required");
       const origin = req.headers.origin;
       if (origin !== undefined && origin !== `http://${host}`) throw new HttpError(403, "cross_origin");
-      const body = await readBody(req, maxBody);
+      const body = await readBody(req, limits.demo);
       if (runId !== undefined) return answer(await runs.step(runId));
       let flow: unknown;
       try {
@@ -112,7 +221,9 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     return [404, { error: "not_found" }];
   }
 
-  async function route(req: IncomingMessage): Promise<Answer> {
+  async function route(req: IncomingMessage, seen: Seen): Promise<Answer> {
+    // First, so a flood is refused before any other work.
+    rateLimit.take(addressOf(req));
     if (options.ui !== undefined && !isLocalHost(req.headers.host ?? "", req.socket.localPort!)) throw new HttpError(403, "host_not_allowed");
     // Prefixed, so a path that starts with `//` stays a path instead of naming a host.
     const path = parseUrl(req.url!).pathname;
@@ -121,24 +232,29 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       if (method !== m) throw new HttpError(405, "method_not_allowed");
     };
     if (path === "/healthz") {
+      seen.route = path;
       expect("GET");
       return [200, { ok: true }];
     }
     if (path === "/.well-known/receipt-keys.json") {
+      seen.route = path;
       expect("GET");
       return [200, { keys: options.engine.receiptKeys() }];
     }
     if (path === "/webhooks/stripe/identity" || path === "/webhooks/stripe/payments") {
+      seen.route = path;
       expect("POST");
       return stripeWebhook(req, path.endsWith("identity") ? "identity" : "payments");
     }
     const carrier = /^\/webhooks\/(twilio|telnyx)$/.exec(path);
     if (carrier !== null) {
+      seen.route = path;
       expect("POST");
       return [501, { error: "not_implemented", issue: "SRV-1", carrier: carrier[1] }];
     }
     const receipt = /^\/receipts\/([A-Za-z0-9_-]{1,64})$/.exec(path);
     if (receipt !== null) {
+      seen.route = "/receipts/:callId";
       expect("GET");
       try {
         const found = await options.engine.receipt(receipt[1]!);
@@ -148,23 +264,52 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
         throw error;
       }
     }
-    if (options.ui !== undefined && (files.has(path) || path.startsWith("/demo/"))) return demoRoute(req, options.ui, path, method);
+    if (options.ui !== undefined && (files.has(path) || path.startsWith("/demo/"))) return demoRoute(req, options.ui, path, method, seen);
     return [404, { error: "not_found" }];
   }
 
-  return createServer((req: IncomingMessage, res: ServerResponse) => {
-    route(req)
-      .catch((error: unknown): Answer => (error instanceof HttpError ? [error.status, { error: error.message }] : [500, { error: "internal" }]))
-      .then((answer) => {
-        if (Array.isArray(answer)) {
-          res.writeHead(answer[0], JSON_HEADERS);
-          res.end(JSON.stringify(answer[1]));
-          return;
-        }
-        res.writeHead(200, { ...UI_HEADERS, "content-type": answer.contentType });
+  // node:http enforces the receive deadline itself, checking open connections at this interval.
+  const timeouts = { requestTimeout: timeoutMs, headersTimeout: timeoutMs, connectionsCheckingInterval: Math.min(timeoutMs, 1000) };
+  return createServer(timeouts, (req: IncomingMessage, res: ServerResponse) => {
+    const started = performance.now();
+    const seen: Seen = { route: "unmatched" };
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<Answer>((resolve) => {
+      timer = setTimeout(() => resolve([503, { error: "timeout" }]), timeoutMs);
+    });
+    const routed = route(req, seen).catch((error: unknown): Answer => {
+      if (!(error instanceof HttpError)) return [500, { error: "internal" }];
+      for (const [name, value] of Object.entries(error.headers)) res.setHeader(name, value);
+      return [error.status, { error: error.message }];
+    });
+    void Promise.race([routed, deadline]).then((answer) => {
+      clearTimeout(timer);
+      let status = 200;
+      let error: string | undefined;
+      if (Array.isArray(answer)) {
+        [status] = answer;
+        if (typeof answer[1].error === "string") error = answer[1].error;
+        res.writeHead(status, JSON_HEADERS);
+        res.end(JSON.stringify(answer[1]));
+      } else {
+        res.writeHead(status, { ...UI_HEADERS, "content-type": answer.contentType });
         res.end(answer.body);
+      }
+      options.log?.({
+        time: options.clock.now().toISOString(),
+        address: addressOf(req),
+        method: req.method ?? "GET",
+        route: seen.route,
+        status,
+        ...(error === undefined ? {} : { error }),
+        ms: Math.round(performance.now() - started),
       });
+    });
   });
+}
+
+function addressOf(req: IncomingMessage): string {
+  return req.socket.remoteAddress ?? "unknown";
 }
 
 /** The request target as a URL; a target that is not a path (an absolute URL, garbage) is a 400. */
@@ -173,8 +318,15 @@ function parseUrl(target: string): URL {
   return new URL(`http://x${target}`);
 }
 
+/** The body as text, refused with a 413 as soon as its declared or received size passes `max`. */
 function readBody(req: IncomingMessage, max: number): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (Number(req.headers["content-length"] ?? 0) > max) {
+      // Refused before a byte is buffered; drained so the 413 can still be written.
+      req.resume();
+      reject(new HttpError(413, "body_too_large"));
+      return;
+    }
     const chunks: Buffer[] = [];
     let size = 0;
     const onData = (chunk: Buffer) => {

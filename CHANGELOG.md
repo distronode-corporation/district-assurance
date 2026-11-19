@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Reference server limits and logging (SRV-2): a body limit per route, request timeouts (408 and
+  503), a per-address rate limit (429), and structured request logs by route pattern with no
+  headers or bodies (`logJsonLines`, on in `npm run serve`). `maxBodyBytes` is now `bodyLimits`.
 
 ### Changed
 
