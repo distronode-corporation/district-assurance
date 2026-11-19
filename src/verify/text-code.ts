@@ -24,6 +24,12 @@ export const TEXT_CODE_DIGITS = 6;
 /** How long a code may be used. */
 export const TEXT_CODE_TTL_SECONDS = 600;
 
+/**
+ * How long a send may hold the end of the call (VER-2): the SMS adapter's answer and the ledger
+ * entry after it are waited for this long, then the call may end, and a later answer writes nothing.
+ */
+export const TEXT_SEND_HOLD_SECONDS = 30;
+
 /** Tries per code; after the last, the code is not judged, even the right one. */
 export const TEXT_CODE_MAX_TRIES = 5;
 
@@ -118,6 +124,8 @@ export async function sendTextCode(rt: EngineRuntime, callId: string): Promise<{
       const expiresAt = new Date(now.getTime() + TEXT_CODE_TTL_SECONDS * 1000).toISOString();
       slice.textCode = { digest: code === null ? null : codeDigest(rt, callId, code), expiresAt, tries: 0 };
     }
+    // Sent or refused alike, so the steps are the same: the call ends only once its entry is written.
+    slice.textSend = { sendId, until: new Date(now.getTime() + TEXT_SEND_HOLD_SECONDS * 1000).toISOString() };
   });
   // After the reply, for a sent code and a refused one alike, so the SMS adapter's time never says which.
   setImmediate(() => void finishSend(rt, callId, code, refusal, { to: subject.phoneOnFile, locale: before.locale, sendId }).catch(() => undefined));
@@ -135,6 +143,10 @@ async function finishSend(rt: EngineRuntime, callId: string, code: string | null
       .catch(() => (outcome = "send_failed"));
   }
   await rt.update(callId, (draft) => {
+    const s = draft.slice<BadgeSlice>(BADGE);
+    if (s.textSend?.sendId === send.sendId) delete s.textSend;
+    // Past the hold the call may have ended: its receipt is the last entry, so nothing follows it.
+    if (draft.record.state.phase === "ended") return;
     if (outcome === null) draft.emit("verification.code_sent", "code", {});
     else draft.emit("verification.code_refused", "code", { reason: outcome });
   });

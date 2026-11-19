@@ -89,8 +89,8 @@ export interface AssuranceModule {
    * wording it does not have), or null. Checked when a flow is attached to a running call.
    */
   cannotRunStep?(step: FlowStep, slice: JsonValue): string | null;
-  /** Why the call cannot end now (work in progress that would be lost), or null. */
-  blocksEnd?(slice: JsonValue): string | null;
+  /** Why the call cannot end now (work in progress that would be lost, or still to be recorded), or null. `now` is the engine's clock. */
+  blocksEnd?(slice: JsonValue, now: Date): string | null;
   /** Untrusted text entered the call: drop anything that relied on trust. Returns the new slice. */
   onUntrusted?(slice: JsonValue): JsonValue;
   /** What this module puts in the call's receipt (built-in modules only: `verification`, `records`, `payments`). */

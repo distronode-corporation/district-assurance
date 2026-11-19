@@ -71,6 +71,11 @@ export interface BadgeSlice {
   identitySessions: string[];
   /** The texted code this call holds: null before any send, and after a taint or a change of subject. */
   textCode: TextCodeState | null;
+  /**
+   * A texted code's send whose ledger entry is not written yet (VER-2): the call does not end until
+   * it is, or until `until` passes, so no send's entry follows the receipt. Absent otherwise.
+   */
+  textSend?: { sendId: string; until: string };
   /** How many verifications finished on this call, and the last one's level and counted methods. */
   finished: number;
   lastLevel: AssuranceLevel;
@@ -242,6 +247,11 @@ export class BadgeModule implements AssuranceModule {
 
   enterStep(_step: FlowStep, s: JsonValue): JsonValue {
     return (s as unknown as BadgeSlice).finished;
+  }
+
+  blocksEnd(s: JsonValue, now: Date): string | null {
+    const send = (s as unknown as BadgeSlice).textSend;
+    return send !== undefined && now.getTime() < Date.parse(send.until) ? "a texted code is still being sent; end the call once it is sent" : null;
   }
 
   stepStatus(step: FlowStep, view: StepView): StepStatus {

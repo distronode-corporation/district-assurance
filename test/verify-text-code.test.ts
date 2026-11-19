@@ -399,7 +399,7 @@ describe("send limits", () => {
 describe("the country allow-list in the policy", () => {
   it("is checked by validatePolicy", () => {
     const at = (countries: unknown) => validatePolicy({ ...defaultVerificationPolicy(), textCodeCountryCodes: countries });
-    const shape = "textCodeCountryCodes must list E.164 country calling codes, 1 to 6 digits without the +";
+    const shape = "textCodeCountryCodes must list assigned E.164 country calling codes (or longer prefixes of one), 1 to 6 digits without the +";
     assert.deepEqual(at(["1", "33", "1204"]), []);
     for (const bad of [[], ["+1"], ["0"], ["1234567"], [1], "1"]) assert.deepEqual(at(bad), [shape], JSON.stringify(bad));
     assert.deepEqual(at(["1", "1"]), ["textCodeCountryCodes has duplicates"]);

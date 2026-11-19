@@ -121,7 +121,9 @@ of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:
   access are at least level 2; none is at least 0;
 - `maxKeypadAttemptsPerCall` outside 1 to 5;
 - a `textCodeCountryCodes` that is not a list of distinct E.164 country calling codes (1 to 6
-  digits, no `+`, not starting with 0).
+  digits, no `+`), each starting with a country code ITU-T has assigned to a country or geographic
+  area (`E164_COUNTRY_CODES`; `"4"` and `"42"` are refused, `"44"` and `"4420"` accepted; spare,
+  withdrawn and global-service codes such as 800 and 881 are not in it).
 
 It checks every part in one pass: a malformed part is reported and the others are still checked.
 
@@ -157,18 +159,22 @@ keypad or PIN match as above, and a call that is verifying. It sends only when, 
    when withheld), the `CodeStore` counts it against that number, kept as
    `HMAC-SHA256(knowledgeKey, "number:" + number)`: at most 10 in 24 hours, none in 60 seconds.
 
-A send counted at step 2 stays counted when step 3 refuses it, or when the text fails. A send is
+Both counts are always asked: a send the subject's limit refuses at step 2 is still counted against
+the calling number's limit at step 3, and a send counted at step 2 stays counted when step 3
+refuses it, or when the text fails. A send is
 6 random digits, kept in the call record only as `HMAC-SHA256(knowledgeKey, "text_code:" + callId
 + ":" + code)`, valid for 10 minutes and 5 tries, and replaces any earlier code on the call.
 Whether it sent or was refused, `sendTextCode` returns `{sent: true}`: a refused send leaves the
 call with a code that has no digest (it never matches) and the same expiry and tries, unless a code
 from an earlier send is still live, which it keeps. It answers without waiting for the SMS adapter:
-a sent send and a refused one take the same store steps up to the reply (both limits are asked
-every time, so a send the subject's limit refuses is also counted on the number; only a country
-refusal, a property of the number on file, skips the `CodeStore`), and the text goes out after it. The
+a sent send and a refused one take the same store steps up to the reply (only a country refusal, a
+property of the number on file, skips the `CodeStore`), and the text goes out after it. The
 ledger then says which (`verification.code_sent`, or `verification.code_refused` with `reason`:
 `country`, `subject_limit`, `number_limit`, or `send_failed` when the SMS adapter failed; the send
-stays counted and the host hears nothing of it).
+stays counted and the host hears nothing of it). Until that entry is written, `endCall` refuses
+(`precondition_failed`), sent or refused alike, for at most `TEXT_SEND_HOLD_SECONDS` (30) after
+the send, so a send's entry never follows `receipt.issued`; an adapter that answers after the
+hold, once the call has ended, writes nothing.
 
 `checkTextCode(callId, code)` counts and judges a try in one write and records a `text_code`
 factor, passed or not. An entry that is not 6 ASCII digits is a try and fails. After the 5th try,

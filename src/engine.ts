@@ -414,7 +414,7 @@ export class Engine {
       const guards = [...this.#receiptModules, ...this.registry.list().filter((m) => !this.#receiptModules.includes(m))];
       for (const module of guards) {
         const slice = draft.record.modules[module.manifest.name];
-        const reason = slice === undefined ? null : (module.blocksEnd?.(slice) ?? null);
+        const reason = slice === undefined ? null : (module.blocksEnd?.(slice, this.#clock.now()) ?? null);
         if (reason !== null) throw new EngineError("precondition_failed", `the call cannot end yet: ${reason}`);
       }
       draft.apply({ type: "call_ended", at: this.#now() });
