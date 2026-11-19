@@ -350,10 +350,10 @@ name a workspace, is counted only in `unattributed` (for its month), never anywh
 | `verifications.failedFactors` | `verification.factor` with `passed: false` |
 | `payments.sent` | `payment.link_sent`: `count` and `totals` in minor units by currency |
 | `payments.paid`, `.failed`, `.expired` | `payment.settled` by `status`, with the amount of the call's `payment.link_sent` for that payment, which may be in an earlier month |
-| `payments.unmatched` | a settlement whose link the ledger does not show |
+| `payments.unmatched` | a settlement whose link the ledger does not show, or whose status is not paid, failed or expired |
 | `consents` | `consent.recorded`, `{yes, no}` by `purpose` |
 | `lockouts` | `verification.locked` (VER-1), once written |
-| `access.granted`, `.refused`, `.revoked` | `gate.granted`, `gate.refused`, `gate.revoked` (GAT-1), once written |
+| `access.issued`, `.refused`, `.revoked` | `access.issued`, `access.refused` (GAT-1, as Gate writes them), and `access.revoked` once Gate has a revocation |
 
 The report also names `workspaceId`, `month`, `timeZone` and `ledger` (the seq and hash of the
 last entry read). It holds counts and totals only. `reportCsv(report)` writes it as RFC 4180

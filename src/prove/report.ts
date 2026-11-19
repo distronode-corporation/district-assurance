@@ -38,15 +38,18 @@ export interface MonthlyReport {
     paid: PaymentTally;
     failed: PaymentTally;
     expired: PaymentTally;
-    /** Settlements in the month whose link the ledger does not show: counted nowhere else. */
+    /** Settlements in the month whose link the ledger does not show, or with a status that is not paid, failed or expired: counted nowhere else. */
     unmatched: number;
   };
   /** Consent answers by purpose. */
   consents: Record<string, { yes: number; no: number }>;
   /** `verification.locked` entries (VER-1), once Badge writes them. */
   lockouts: number;
-  /** `gate.granted`, `gate.refused` and `gate.revoked` entries (GAT-1), once Gate writes them. */
-  access: { granted: number; refused: number; revoked: number };
+  /**
+   * Access grants (GAT-1) by the events Gate writes: `access.issued` and `access.refused`, and
+   * `access.revoked` once Gate has a revocation (it has none yet).
+   */
+  access: { issued: number; refused: number; revoked: number };
   /** Entries in the month with no workspace in their `eventId`: reported here, never counted above. */
   unattributed: number;
 }
@@ -83,6 +86,8 @@ function monthReader(timeZone: string): (at: string) => string {
     return `${part("year").padStart(4, "0")}-${part("month")}`;
   };
 }
+
+const SETTLED = ["paid", "failed", "expired"] as const;
 
 function tally(): PaymentTally {
   return { count: 0, totals: {} };
@@ -122,7 +127,7 @@ export async function monthlyReport(input: { ledger: AuditLedger; workspaceId: s
     payments: { sent: tally(), paid: tally(), failed: tally(), expired: tally(), unmatched: 0 },
     consents: {},
     lockouts: 0,
-    access: { granted: 0, refused: 0, revoked: 0 },
+    access: { issued: 0, refused: 0, revoked: 0 },
     unattributed: 0,
   };
   // Payment ids are unique per call, so links are keyed by call and payment.
@@ -164,8 +169,10 @@ export async function monthlyReport(input: { ledger: AuditLedger; workspaceId: s
         break;
       case "payment.settled": {
         const link = links.get(linkKey(entry));
-        if (link === undefined) report.payments.unmatched++;
-        else add(report.payments[d.status as "paid" | "failed" | "expired"], link);
+        // Only the three settled statuses are tallies; anything else is counted apart, never as `sent`.
+        const status = SETTLED.find((s) => s === d.status);
+        if (link === undefined || status === undefined) report.payments.unmatched++;
+        else add(report.payments[status], link);
         break;
       }
       case "consent.recorded": {
@@ -178,13 +185,13 @@ export async function monthlyReport(input: { ledger: AuditLedger; workspaceId: s
       case "verification.locked":
         report.lockouts++;
         break;
-      case "gate.granted":
-        report.access.granted++;
+      case "access.issued":
+        report.access.issued++;
         break;
-      case "gate.refused":
+      case "access.refused":
         report.access.refused++;
         break;
-      case "gate.revoked":
+      case "access.revoked":
         report.access.revoked++;
         break;
     }
@@ -227,7 +234,7 @@ export function reportRows(report: MonthlyReport): Array<[string, string | numbe
   for (const [purpose, c] of Object.entries(report.consents)) rows.push([`consents.${purpose}.yes`, c.yes], [`consents.${purpose}.no`, c.no]);
   rows.push(
     ["lockouts", report.lockouts],
-    ["access.granted", report.access.granted],
+    ["access.issued", report.access.issued],
     ["access.refused", report.access.refused],
     ["access.revoked", report.access.revoked],
     ["unattributed", report.unattributed],

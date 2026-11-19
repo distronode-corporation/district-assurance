@@ -63,7 +63,7 @@ function emptyReport(patch: Partial<MonthlyReport> = {}): MonthlyReport {
     },
     consents: {},
     lockouts: 0,
-    access: { granted: 0, refused: 0, revoked: 0 },
+    access: { issued: 0, refused: 0, revoked: 0 },
     unattributed: 0,
     ...patch,
   };
@@ -194,15 +194,20 @@ describe("monthly report", () => {
     const add = (event: string, detail: AuditInput["detail"] = {}) => ledger.append(entry(JSON.stringify(["ws_test", "c1", 1, n++]), event, at, detail));
     await add("verification.locked", { scope: "subject", kind: "pin" });
     await add("verification.locked", { scope: "number", kind: "pin" });
-    for (const event of ["gate.granted", "gate.granted", "gate.refused", "gate.revoked"]) await add(event);
+    // The names Gate (GAT-1) writes; `gate.*` names are nobody's and count nowhere.
+    for (const event of ["access.issued", "access.issued", "access.refused", "access.revoked", "access.delivered", "gate.granted"]) await add(event);
     await add("payment.settled", { paymentId: "pay_9", status: "paid" });
+    // A link that is known, with a settlement status that is not a tally (a property name included).
+    await add("payment.link_sent", { paymentId: "pay_1", amountMinor: 500, currency: "cad" });
+    for (const status of ["sent", "unmatched", "canceled"]) await add("payment.settled", { paymentId: "pay_1", status });
     await add("verification.finished", { level: 4, methods: [], discounted: false });
     await add("verification.factor", { kind: "pin", passed: true });
     await add("intake.started", { formId: "repair", version: "1" });
     const report = await monthlyReport({ ledger, workspaceId: "ws_test", month: "2026-01" });
     assert.equal(report.lockouts, 2);
-    assert.deepEqual(report.access, { granted: 2, refused: 1, revoked: 1 });
-    assert.equal(report.payments.unmatched, 1);
+    assert.deepEqual(report.access, { issued: 2, refused: 1, revoked: 1 });
+    assert.equal(report.payments.unmatched, 4);
+    assert.deepEqual(report.payments.sent, { count: 1, totals: { cad: 500 } }, "a settlement never counts as sent");
     assert.equal(report.payments.paid.count, 0);
     assert.equal(report.verifications.byLevel["4"], 1);
     assert.equal(report.verifications.failedFactors, 0);
