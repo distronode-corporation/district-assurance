@@ -293,7 +293,7 @@ export async function unlockCounter(counters: AttemptCounters, key: AttemptCount
 }
 
 /** The first instant of the hour that ends now: a start exactly an hour old has left it. */
-function hourStart(now: Date): string {
+export function hourStart(now: Date): string {
   return new Date(now.getTime() - HOUR_MS + 1).toISOString();
 }
 
