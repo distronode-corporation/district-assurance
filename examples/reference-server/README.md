@@ -113,8 +113,9 @@ How the answers are read:
 - **Identity match:** `match` when `summary_score` is at least `identityMinScore` (1 to 100, 80
   by default; anything else throws when the adapter is built), else `no_match`. The identity comes from the host's `identityFor(phoneNumber)`;
   without it only SIM Swap is asked. Twilio takes the identity in the query string.
-- **Porting:** `N` is none known; `Y` gives the hours from the end of the port date (Telnyx gives
-  a day, not a time), or 0 without a date; anything else is no answer.
+- **Porting:** `N` is none known; `Y` gives the hours from the last moment the port date ends
+  anywhere (Telnyx gives a day, with no time or zone, so noon UTC the next day), or 0 without a
+  date; anything else is no answer.
 - Hours are rounded down and never negative.
 
 Every failure answers `checked: false` with nothing known, and never throws into the call: a

@@ -355,8 +355,9 @@ export class TelnyxNumberLookupSignals extends LookupAdapter {
   }
 
   /**
-   * Hours since the last port. Telnyx gives a date without a time, so the hours run from the end of
-   * that day (a port is never reported older than it can be), and a port without a date is 0.
+   * Hours since the last port. Telnyx gives a date without a time or a zone, so the hours run from
+   * the last moment that date ends anywhere (noon UTC the next day, the end of the day at UTC-12),
+   * so a port is never reported older than it can be; a port without a date is 0.
    */
   #portHours(field: unknown): number | null | Omit<CarrierLookupFailure, "vendor"> {
     if (!isObject(field)) return { reason: "bad_response" };
@@ -365,7 +366,7 @@ export class TelnyxNumberLookupSignals extends LookupAdapter {
     if (status !== "Y") return { reason: "feature_unavailable" };
     const date = typeof field.ported_date === "string" ? field.ported_date : "";
     const dayOnly = /^\d{4}-\d{2}-\d{2}$/.test(date);
-    const at = dayOnly ? Date.parse(`${date}T00:00:00Z`) + 24 * HOUR_MS : Date.parse(date);
+    const at = dayOnly ? Date.parse(`${date}T00:00:00Z`) + 36 * HOUR_MS : Date.parse(date);
     return Number.isNaN(at) ? 0 : hoursSince(at, this.clock.now());
   }
 }

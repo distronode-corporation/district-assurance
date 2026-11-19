@@ -15,6 +15,7 @@ import {
   type CarrierLookupFailure,
   type TwilioLookupOptions,
 } from "../examples/reference-server/src/carrier-adapters.ts";
+import { defaultVerificationPolicy, textCodeTrusted } from "../src/index.ts";
 import { FixedClock } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, setup } from "./helpers.ts";
 
@@ -269,17 +270,17 @@ describe("carrier adapters", () => {
   });
 
   describe("Telnyx Number Lookup", () => {
-    it("maps a port to hours from the end of its day, and returns the carrier", async () => {
+    it("maps a port to hours from the last moment its day ends, and returns the carrier", async () => {
       replies.set("+15555550201", { body: telnyxBody({ portability: portability("Y", "2025-12-30") }) });
       const adapter = telnyx();
       assert.deepEqual(await adapter.lookup({ phoneNumber: "+15555550201" }), {
-        report: { checked: true, lastSimSwapHoursAgo: null, lastPortHoursAgo: 24, identityMatch: "unavailable" },
+        report: { checked: true, lastSimSwapHoursAgo: null, lastPortHoursAgo: 12, identityMatch: "unavailable" },
         carrier: { name: "Example Mobile", type: "mobile" },
       });
       assert.equal(requests[0]!.path, "/v2/number_lookup/%2B15555550201");
       assert.equal(requests[0]!.query.get("type"), "carrier");
       assert.equal(requests[0]!.authorization, `Bearer ${TELNYX_KEY}`);
-      assert.equal((await adapter.check({ phoneNumber: "+15555550201" })).lastPortHoursAgo, 24);
+      assert.equal((await adapter.check({ phoneNumber: "+15555550201" })).lastPortHoursAgo, 12);
     });
 
     it("reads not ported as none known, a port with a time as is, and a port with no date as just now", async () => {
@@ -292,6 +293,14 @@ describe("carrier adapters", () => {
       assert.equal((await adapter.check({ phoneNumber: "+15555550203" })).lastPortHoursAgo, 12);
       assert.equal((await adapter.check({ phoneNumber: "+15555550204" })).lastPortHoursAgo, 0);
       assert.equal((await adapter.check({ phoneNumber: "+15555550205" })).lastPortHoursAgo, 0, "a port today is just now");
+    });
+
+    it("counts a port date from the last moment that date ends anywhere, so a late port stays inside the window", async () => {
+      // 2025-12-28 23:00 in US Pacific time is 2025-12-29T07:00Z: 71 hours before this clock.
+      replies.set("+15555550219", { body: telnyxBody({ portability: portability("Y", "2025-12-28") }) });
+      const report = await telnyx({ clock: new FixedClock("2026-01-01T06:00:00Z") }).check({ phoneNumber: "+15555550219" });
+      assert.equal(report.lastPortHoursAgo, 66, "from 2025-12-29T12:00Z, the end of 2025-12-28 at UTC-12");
+      assert.equal(textCodeTrusted(defaultVerificationPolicy(), report), false, "a port that may be 71 hours old is inside the 72-hour window");
     });
 
     it("drops a carrier it cannot read without dropping the report", async () => {
@@ -309,7 +318,7 @@ describe("carrier adapters", () => {
       replies.set("+15555550209", { body: telnyxBody({ country_code: "CA", portability: portability("Y", "2025-12-30") }) });
       assert.deepEqual(await telnyx().lookup({ phoneNumber: "+15555550209" }), { report: uncheckedReport(), carrier: null });
       assert.deepEqual(failures, [{ vendor: "telnyx", reason: "unsupported_country" }]);
-      assert.equal((await telnyx({ countries: ["US", "ca"] }).check({ phoneNumber: "+15555550209" })).lastPortHoursAgo, 24, "once allowed");
+      assert.equal((await telnyx({ countries: ["US", "ca"] }).check({ phoneNumber: "+15555550209" })).lastPortHoursAgo, 12, "once allowed");
     });
 
     it("fails closed on errors, unknown porting status and malformed answers", async () => {

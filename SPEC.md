@@ -149,7 +149,8 @@ than `unavailable` records the `carrier_identity_match` factor. The reference se
 (`examples/reference-server/src/carrier-adapters.ts`, VER-4) map Twilio Lookup v2 (SIM Swap, and
 Identity Match by `summary_score`, 80 by default) and Telnyx Number Lookup (porting status and
 date; no SIM swap, identity match `unavailable`). They round hours down and read a change without
-a usable time as 0 hours ago (a Telnyx port date as the end of that day); a Twilio answer of no
+a usable time as 0 hours ago (a Telnyx port date from the last moment that date ends anywhere,
+noon UTC the next day); a Twilio answer of no
 SIM change within its `swapped_period` window gives that window as a lower bound, and the window is
 never read as the age of a change. A `baseUrl` override must be https (plain http only on
 loopback), and `timeoutMs` a whole number from 1 to 60000; anything else throws when the adapter
