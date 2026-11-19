@@ -71,8 +71,10 @@ business's deliberate act, recorded in the ledger.
 Lockout alerts (INT-7): after a `verification.locked` entry is written, the host's `Notifier` is
 told the counter (the subject key, or the keyed hash of the calling number), the factor kind and
 when the lock ends, never a value or a phone number (tested). A notice is told once per lock,
-across engines, and a workspace gets at most 20 an hour, the last marked `capped`, so an attack
-locking subject after subject cannot flood the owner; every lock stays in the ledger (tested). The
+across engines, and a workspace gets at most 20 an hour of hard locks and, apart, 20 of waits
+after a failure, the last of each marked `capped`, so an attack locking subject after subject cannot
+flood the owner, and waits, which come cheap, cannot use up the hard locks' notices to hide one
+(tested); every lock stays in the ledger (tested). The
 notifier is best effort and never awaited: one that throws, rejects or hangs never blocks the call
 or the ledger (tested). `unlock` is a host call with no call id, so no call path reaches it; it
 clears one counter (one factor kind, one scope, one key) and nothing else, writes

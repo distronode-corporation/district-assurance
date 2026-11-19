@@ -177,7 +177,11 @@ export async function forgetPass(counters: AttemptCounters, keys: readonly Attem
 // under `notice:` kinds no factor kind can be (kinds are snake_case), so they hold across processes
 // and use its one atomic step.
 
-/** Lock notices a workspace gets per hour, at most. Later locks in the hour are in the ledger only. */
+/**
+ * Lock notices a workspace gets per hour, at most, for hard locks and, apart, for waits after a
+ * failure: waits come cheap to an attacker, so they can never use up the notices of hard locks.
+ * Later locks in the hour are in the ledger only.
+ */
 export const NOTICES_PER_HOUR = 20;
 
 /** Where a counter's notices are kept: its own key, under the `notice:` kind of its factor. */
@@ -185,22 +189,22 @@ export function noticeKey(key: AttemptCounterKey): AttemptCounterKey {
   return { ...key, factor: `notice:${key.factor}` };
 }
 
-/** Where a workspace's notices of the last hour are counted. */
-function workspaceNoticeKey(workspaceId: string): AttemptCounterKey {
-  return { workspaceId, factor: "notice:*", scope: "subject", key: "0".repeat(64) };
+/** Where a workspace's notices of the last hour are counted: hard locks and waits apart. */
+function workspaceNoticeKey(workspaceId: string, hard: boolean): AttemptCounterKey {
+  return { workspaceId, factor: hard ? "notice:*" : "notice:*wait", scope: "subject", key: "0".repeat(64) };
 }
 
 /**
  * Whether a lock gets a notice: null when one went out for it already (or for a later lock of the
  * same counter), or when the workspace had its notices for the hour. A lock is its counter and its
  * end, so its notice counter records the end: of two engines refusing the same lock, one notifies.
- * `capped` is true on the hour's last notice.
+ * `capped` is true on the hour's last notice of its kind (hard locks, or waits).
  */
-export async function claimNotice(counters: AttemptCounters, key: AttemptCounterKey, until: string, now: Date): Promise<{ capped: boolean } | null> {
+export async function claimNotice(counters: AttemptCounters, key: AttemptCounterKey, until: string, now: Date, hard: boolean): Promise<{ capped: boolean } | null> {
   const seen = await counters.recordFailure(noticeKey(key), until, until);
   if (seen.length > 1) return null;
   const hourAgo = new Date(now.getTime() - 3_600_000 + 1).toISOString();
-  const sent = (await counters.recordFailure(workspaceNoticeKey(key.workspaceId), now.toISOString(), hourAgo)).length;
+  const sent = (await counters.recordFailure(workspaceNoticeKey(key.workspaceId, hard), now.toISOString(), hourAgo)).length;
   return sent > NOTICES_PER_HOUR ? null : { capped: sent === NOTICES_PER_HOUR };
 }
 

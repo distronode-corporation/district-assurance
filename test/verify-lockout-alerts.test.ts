@@ -131,15 +131,30 @@ describe("lock notices", () => {
     assert.equal(elsewhere.notifier.notices.length, 1, "another workspace has its own cap");
   });
 
+  it("keep the hard locks' notices apart from the waits', so waits an attacker runs up never hide a hard lock (review)", async () => {
+    const t = alerted(2);
+    const subjects = Array.from({ length: NOTICES_PER_HOUR + 3 }, (_, i) => i.toString(16).padStart(64, "d"));
+    for (const subjectKey of subjects) {
+      const callId = await call(t, { subjectKey });
+      await t.engine.submitPin(callId, "0000");
+      assert.deepEqual(await t.engine.submitPin(callId, "0000"), { matched: false, locked: true }, "inside the wait");
+    }
+    assert.equal(t.notifier.notices.length, NOTICES_PER_HOUR, "waits are capped");
+    assert.ok(t.notifier.notices.every((n) => !n.hard));
+    t.clock.advance(5_000);
+    assert.deepEqual(await t.engine.submitPin(await call(t, { subjectKey: subjects[0]! }), "0000"), { matched: false, locked: true });
+    assert.deepEqual(t.notifier.notices.at(-1)!, { workspaceId: "ws_test", factor: "pin", scope: "subject", key: subjects[0]!, hard: true, until: iso(T0 + 24 * HOUR), capped: false });
+  });
+
   it("keep their bookkeeping under notice kinds, apart from every factor's counter", async () => {
     const counters = new MemoryAttemptCounters();
     const key = counter("subject", SUBJECT);
     assert.deepEqual(noticeKey(key), { ...key, factor: "notice:pin" });
     const now = new Date(T0);
-    assert.deepEqual(await claimNotice(counters, key, iso(T0 + 5_000), now), { capped: false });
-    assert.equal(await claimNotice(counters, key, iso(T0 + 5_000), now), null, "the same lock");
-    assert.equal(await claimNotice(counters, key, iso(T0 + 1_000), now), null, "an earlier end: a lock already told");
-    assert.deepEqual(await claimNotice(counters, key, iso(T0 + 15_000), now), { capped: false }, "a later lock");
+    assert.deepEqual(await claimNotice(counters, key, iso(T0 + 5_000), now, false), { capped: false });
+    assert.equal(await claimNotice(counters, key, iso(T0 + 5_000), now, false), null, "the same lock");
+    assert.equal(await claimNotice(counters, key, iso(T0 + 1_000), now, false), null, "an earlier end: a lock already told");
+    assert.deepEqual(await claimNotice(counters, key, iso(T0 + 15_000), now, false), { capped: false }, "a later lock");
     assert.deepEqual(await counters.get(key, LONG_AGO), [], "the factor's counter is untouched");
   });
 });

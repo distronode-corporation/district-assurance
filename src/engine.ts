@@ -692,9 +692,10 @@ export class Engine {
     if (notifier === undefined) return;
     try {
       const until = detail.until as string;
-      const claim = await claimNotice(this.#adapters.counters!, counter, until, this.#clock.now());
+      const hard = detail.hard as boolean;
+      const claim = await claimNotice(this.#adapters.counters!, counter, until, this.#clock.now(), hard);
       if (claim === null) return;
-      const notice = { ...counter, hard: detail.hard as boolean, until, capped: claim.capped };
+      const notice = { ...counter, hard, until, capped: claim.capped };
       // An async wrapper turns a notifier that throws at once into a rejection, caught like the rest.
       void (async () => notifier.lockout(notice))().catch(() => undefined);
     } catch {

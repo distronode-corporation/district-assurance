@@ -222,9 +222,10 @@ when there is a number.
   Badge's part of the call as the entry is saved, and keeps it beside the entry in the outbox, never
   in the ledger. A lock is told once, on whichever engine refuses it first: its counter's
   `notice:<kind>` counter in the `AttemptCounters` store records the lock's end, and a lock ending
-  no later than one already told is not told again. A workspace gets at most 20 notices an hour
-  (`NOTICES_PER_HOUR`, counted under `notice:*`); the 20th has `capped: true`, and later locks in
-  the hour are in the ledger only. Best effort, like the listener: the notifier is not awaited,
+  no later than one already told is not told again. A workspace gets at most 20 notices an hour of
+  hard locks (`NOTICES_PER_HOUR`, counted under `notice:*`) and, apart, 20 of waits after a failure
+  (under `notice:*wait`), so waits, which come cheap, never use up the hard locks' notices; the 20th
+  of each has `capped: true`, and later locks of that kind in the hour are in the ledger only. Best effort, like the listener: the notifier is not awaited,
   and a notifier or a notice count that throws, rejects or hangs never fails the call or the ledger.
 - **Unlock (INT-7).** `unlock({workspaceId, factor, scope, key, memberId})`, a host call for a
   member of the business, takes no call, so nothing on a call reaches it. It refuses
