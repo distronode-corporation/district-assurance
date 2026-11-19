@@ -167,7 +167,8 @@ in `discounted`. The default policy has no `callback` set: a host that turns the
 one, for example `[pin, callback]` at level 2.
 
 Badge's settings turn factors on (`factors`, at least one), set the grant lifetime
-(`grantTtlSeconds`, default 900, at most 3600), the lockouts across calls (`lockout`, section 6)
+(`grantTtlSeconds`, default 900, at most 3600), the lockouts across calls and the hourly limits
+on flow starts (`lockout`, section 6)
 and, when `pin` is on, the PIN settings (section 6).
 A factor that is off is refused at every entry point. A planned factor cannot be turned on.
 
@@ -378,6 +379,8 @@ when there is a number.
   deliberate act, in the ledger. It grants nothing: no call changes, and the
   caller verifies from no factors like anyone else. It never lifts a duress PIN's hidden lock
   (VER-12): only `clearDuress` does, as the flag stays until the business clears it.
+- A counter is never keyed by flow or call, and no setting separates them: failures in one flow
+  count in every other flow and call (VER-15, tested).
 
 **Callback (VER-9).** A built-in factor, not a plug-in: the business calls back the number on
 file, which proves possession of that line whatever number the first call came from. Badge needs
@@ -428,6 +431,38 @@ the `dialer` (`CallbackDialer`) and `counters` adapters when it is on.
   ended, and one for a callback voided by untrusted content or a change of subject are ignored.
 - Its level and grant belong to the callback call alone: the caller there keys the PIN (or keypad
   knowledge) again, and the policy decides as for any call.
+
+**Limits across flows (VER-15).** A flow is *limited* when one of its steps needs a scope of class
+money, contact or access, or a `badge.verify` step can grant one (its `scopes`, or without them
+every scope its level reaches). Starts of limited flows are counted, whatever their outcome, in
+the same `AttemptCounters` store, under the kind `flow.start` (not snake_case, so no factor shares
+it), per calling number and per subject.
+
+- `startCall({flow, callingNumber})` and `startFlow(callId, name, {callingNumber})` take the
+  calling number like `beginVerification`, kept in Badge's part of the call. A limited start is
+  counted on the number's counter and, when the call already named a subject, the subject's.
+  `beginVerification` on a call running a limited flow counts it on the subject's counter (and on a
+  number given only then), once per counter per call: a restart for the same subject counts nothing.
+- Badge's `lockout.flowStartsPerHour`: `{subject, number}`, defaults `5` and `10`, which are also
+  the most a config may allow (1 up to the default); `validateConfig` refuses anything else. A
+  start exactly an hour old has left the hour. An engine with a limited flow in its config needs
+  the `counters` adapter (`ConfigError` otherwise).
+- The counters are read first: a counter already at its limit refuses the start without counting
+  it. Otherwise the start is counted on each counter, and one that a concurrent start took over the
+  limit refuses it too (that start stays counted). A start the call itself then refuses, because a
+  concurrent `startFlow` attached a flow first or a concurrent `startCall` took the id first, is
+  taken back off each counter (`removeFailure` at the time it was recorded); one whose write saved
+  and then failed (the ledger down) stays counted. A `callingNumber` that is not a string is
+  `invalid_input`, like one that is not E.164.
+- A refused start throws `RateLimitedError` (an `EngineError` with code `rate_limited`) with one
+  message, whichever limit was hit, and the `callId` of the call it was refused on, so a host that
+  let `startCall` choose the id can still end the call it opened.
+  The call keeps the flow, `failed` (on `startCall`, the call is still created), so no step runs and
+  no other flow starts on it; the host speaks its fixed line and ends the call. It writes
+  `flow.rate_limited` with the flow and the `scope` (`subject` or `number`), never a value.
+- Caller ID can be spoofed, so the per-number limit can lock out the real owner of a number. The
+  per-subject limit is the one that holds; the per-number one is a backstop. Lifting either early
+  is the host's: `AttemptCounters.reset` with `counterKeys(workspaceId, "flow.start", keys)`.
 
 ## 7. FlowConfig
 
@@ -489,7 +524,8 @@ ledger can carry (no lone surrogate), a `locale` not in `SUPPORTED_LOCALES` (`en
 name; the engine refuses a `workspaceId` with a lone surrogate. These enter the ledger directly, so
 no host value can block a call's ledger. `startCall({flow})` or `startFlow(callId, name)`, on an
 open call that has not run a flow, copies
-the flow's steps into the call record, so a later config change never moves a call. The first step
+the flow's steps into the call record, so a later config change never moves a call. A flow that
+needs a money, contact or access scope is limited per hour (section 6, "Limits across flows"). The first step
 is entered: its module's `enterStep` returns a mark. After every change to the call, the engine
 asks the current step's module for `stepStatus(step, {state, slice, mark})`:
 
@@ -532,6 +568,7 @@ answer on file, a phone number, a link or card data.
 | `flow.step_completed` / `flow.failed` | `flow`, `step` (index), `type` |
 | `flow.completed` | `flow`, `steps` |
 | `flow.abandoned` | `flow`, `step` |
+| `flow.rate_limited` | `flow`, `scope` (`subject` or `number`): never the subject key, the number or its hash |
 | `verification.started` | `subject`: `account`, `host` or `callback` (with `requestedOn`, the call that asked) |
 | `verification.factor` | `kind`, `passed` (and `status` for photo ID) |
 | `verification.factor_error` | `kind` (the judge threw; no factor recorded, the attempt stays counted) |

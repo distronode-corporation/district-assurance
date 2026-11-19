@@ -30,6 +30,8 @@ export type EngineErrorCode =
   | "precondition_failed"
   /** The module is installed but turned off in the workspace's config, or not installed. */
   | "module_disabled"
+  /** Too many flows that need a money, contact or access scope started this hour; the same answer whichever limit was hit (VER-15). */
+  | "rate_limited"
   /** Another process changed the call at the same time, every retry included (SessionStore). */
   | "conflict";
 
@@ -41,5 +43,19 @@ export class EngineError extends Error {
     super(message);
     this.name = "EngineError";
     this.code = code;
+  }
+}
+
+/**
+ * A flow start refused by its hourly limit (VER-15), with the call it was refused on: `startCall`
+ * still opens the call, with the flow failed, so the host needs its id to end it. The message is the
+ * same whichever limit was hit.
+ */
+export class RateLimitedError extends EngineError {
+  readonly callId: string;
+
+  constructor(callId: string) {
+    super("rate_limited", "too many flows of this kind started in the last hour; try again later");
+    this.callId = callId;
   }
 }

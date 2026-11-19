@@ -136,6 +136,26 @@ its own only at level 1; above it, the policy needs another factor that is not k
 spoken fields never judges one (tested). Left to the host: passing the caller's answer from its
 speech pipeline in a code path, never through the model, and keeping it out of stored transcripts.
 
+### Moving between flows
+
+Limits that reset between flows could be dodged by moving between them: an owner command, then a
+payment, then a door. **Controls (VER-15):** the counters are keyed by subject or calling-number
+hash and factor kind, never by flow or call, and no setting separates them, so failures in one
+flow count in every other (tested). Flows that need a money, contact or access scope are also
+limited per hour, whatever their outcome: 10 starts per calling number and, once verification
+names a subject, 5 per subject, as defaults a config can only lower (tested, a changed or withheld
+calling number does not lift the subject limit, and separate subjects stay separate). A refused
+start gives the host one answer, `rate_limited`, whichever limit was hit, and writes
+`flow.rate_limited` with the scope of the limit, never a value. Caller ID can be spoofed, so the
+per-number limit can lock out the real owner of a number for up to an hour: an attacker who
+spoofs a victim's number can spend its starts. The per-subject limit is the one that holds; the
+per-number one is a backstop against one line trying subject after subject. The subject's limit
+is counted for any account number keyed, real or not, so a caller who keys numbers at random learns
+nothing from it; one who keys a real account soon after that account's own five limited flows in
+the hour is refused, which says only that the account was busy, never its details. Lifting either
+early is the host's (`AttemptCounters.reset` on the `flow.start` counter); a pass never lifts a
+start limit, since it forgets only the failures of its own factor kind (`forgetPass`, tested).
+
 ### SIM swap and port-out
 
 An attacker who took over the number on file receives the texted code or link. **Controls:** a

@@ -14,11 +14,11 @@ import type { AttemptCounterKey, IntakeRecord, ReceiptSigner, SessionStore } fro
 import { canonicalJson, hasLoneSurrogate, type JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
-import { EngineError, NotImplementedError } from "./core/errors.ts";
+import { EngineError, NotImplementedError, RateLimitedError } from "./core/errors.ts";
 import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
 import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
-import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
+import { scopeClass, scopesForLevel, type AssuranceLevel, type ScopeClass, type VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
 import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
@@ -39,8 +39,8 @@ import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
 import * as callback from "./verify/callback.ts";
 import type { CallbackOutcome } from "./verify/callback.ts";
-import { claimNotice, unlockCounter } from "./verify/counters.ts";
-import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
+import { FLOW_START, claimNotice, counterKeys, flowStartLimited, isCallingNumber, lockoutOf, recordFlowStarts, unlockCounter } from "./verify/counters.ts";
+import type { BadgeSettings, FactorEntry, FactorPlugin } from "./verify/factors.ts";
 import { knowledgeHmac, type KnowledgeHmac, type KnowledgeKey } from "./verify/knowledge.ts";
 import * as pin from "./verify/pin.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
@@ -56,6 +56,16 @@ const COUNTER_METHODS = ["get", "recordFailure", "removeFailure", "reset"] as co
 
 /** Writes per step before the engine gives up with `conflict`. */
 export const MAX_WRITE_ATTEMPTS = 5;
+
+/** The scope classes whose flows are limited per hour (VER-15). */
+const LIMITED_CLASSES: ReadonlyArray<ScopeClass | null> = ["money", "contact", "access"];
+
+/** A flow start's count: the limit it hit, the counters it is on, and the starts it recorded (keys and time), to take back if the call then refuses it. */
+type FlowStart = { over: AttemptCounterKey["scope"] | null; counted: string[] | null; recorded: { keys: readonly AttemptCounterKey[]; at: string } | null };
+
+const UNCOUNTED: FlowStart = { over: null, counted: null, recorded: null };
+
+const counterId = (key: AttemptCounterKey): string => `${key.scope}:${key.key}`;
 
 export interface EngineOptions {
   workspaceId: string;
@@ -255,10 +265,15 @@ export class Engine {
 
   // ---- sessions ----------------------------------------------------------------------------
 
-  /** Opens a call. With `flow`, the call runs that flow from its first step. */
-  async startCall(input: { callId?: string; locale?: Locale; flow?: string } = {}): Promise<SessionState> {
-    // Each read once: a getter read again could change a value after it was checked.
-    const { callId: givenId, locale, flow }: { callId?: unknown; locale?: unknown; flow?: unknown } = input;
+  /**
+   * Opens a call. With `flow`, the call runs that flow from its first step. `callingNumber` (E.164,
+   * from the carrier, left out when withheld) keys the counters across calls and flows, never a factor.
+   * A flow over its hourly limit is refused with `rate_limited`, and the call is still opened, with
+   * that flow failed: the host speaks its fixed line and ends it.
+   */
+  async startCall(input: { callId?: string; locale?: Locale; flow?: string; callingNumber?: string } = {}): Promise<SessionState> {
+    // Each read once: a getter read again (the flow, after an await) could change a value after it was checked or counted.
+    const { callId: givenId, locale, flow, callingNumber }: { callId?: unknown; locale?: unknown; flow?: unknown; callingNumber?: unknown } = input;
     // Everything the host gives here enters the ledger as it is, not through emit's checks: checked
     // now, before anything is saved, so no call's ledger can be blocked by a value it cannot hash.
     if (givenId !== undefined && (typeof givenId !== "string" || givenId === "" || givenId.length > 200 || hasLoneSurrogate(givenId))) {
@@ -267,18 +282,30 @@ export class Engine {
     if (locale !== undefined && !isSupportedLocale(locale)) throw new EngineError("invalid_input", `locale must be one of ${SUPPORTED_LOCALES.join(", ")}`);
     if (flow !== undefined && typeof flow !== "string") throw new EngineError("invalid_input", "flow must name a flow");
     const callId = (givenId as string | undefined) ?? this.#ids.next("call");
+    const numberKey = await this.#numberKey(callingNumber as string | undefined);
     const flowName = flow as string | undefined;
     const attached = flowName === undefined ? null : { name: flowName, steps: this.#flowDefinition(flowName).steps, revision: this.#config.revision };
-    const created = await this.#create(callId, (locale as Locale | undefined) ?? "en", this.#config.revision, attached, () => undefined);
-    if (!created) throw new EngineError("invalid_input", "a call with that id exists");
+    const start = await this.#create(callId, (locale as Locale | undefined) ?? "en", this.#config.revision, attached, () => undefined, { numberKey, countStart: true });
+    if (start === null) throw new EngineError("invalid_input", "a call with that id exists");
+    // With the call's id: the call is open, its flow failed, and the host ends it.
+    if (start.over !== null) throw new RateLimitedError(callId);
     return this.state(callId);
   }
 
   /**
    * Creates a call at version 1, with its flow attached and `then` applied in the same write, so no
-   * other process can change it in between. False, and nothing written, when the id exists.
+   * other process can change it in between. Null, and nothing written, when the id exists. With
+   * `countStart`, a flow that needs a money, contact or access scope counts its start first (VER-15);
+   * the answer says whether it was over a limit. A start a racing duplicate beat is taken back.
    */
-  async #create(callId: string, locale: Locale, revision: string, flow: { name: string; steps: FlowStep[]; revision: string } | null, then: (draft: CallDraft) => void): Promise<boolean> {
+  async #create(
+    callId: string,
+    locale: Locale,
+    revision: string,
+    flow: { name: string; steps: FlowStep[]; revision: string } | null,
+    then: (draft: CallDraft) => void,
+    options: { numberKey?: string | null; countStart?: boolean } = {},
+  ): Promise<FlowStart | null> {
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
       const name = module.manifest.name;
@@ -293,15 +320,41 @@ export class Engine {
       modules,
       outbox: [],
     };
+    this.#keepNumber(record, options.numberKey ?? null);
     const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
+    let start: FlowStart = UNCOUNTED;
+    if (flow !== null && options.countStart === true) {
+      // A duplicate id is refused before its start is counted.
+      if ((await this.#sessions.get(this.workspaceId, callId)) !== null) return null;
+      start = await this.#countFlowStart(record, flow.name, { steps: flow.steps });
+    }
     const draft = this.#draft(record, events);
-    if (flow !== null) this.#attachFlow(draft, flow.name, { steps: flow.steps }, flow.revision);
+    if (flow !== null) this.#attachFlow(draft, flow.name, { steps: flow.steps }, flow.revision, start);
     then(draft);
     this.#advance(draft);
     record.outbox = events.map((event, i) => ({ eventId: this.#eventId(callId, 1, i), ...event }));
     const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
-    if (created) await this.#flush(callId, 1, record);
-    return created;
+    if (!created) {
+      // Another start took the id first (a duplicate delivery racing this one): this start is not counted.
+      await this.#uncount(start);
+      return null;
+    }
+    await this.#flush(callId, 1, record);
+    return start;
+  }
+
+  /** The keyed hash of a calling number, or null when the host gave none (withheld). */
+  async #numberKey(callingNumber: string | undefined): Promise<string | null> {
+    if (callingNumber === undefined) return null;
+    if (!isCallingNumber(callingNumber)) throw new EngineError("invalid_input", "callingNumber must be E.164; leave it out when the number is withheld");
+    // The same keyed hash as `numberKeyFor`, through the knowledge key's store (it may be a key store's HMAC, #72).
+    return this.#hmac(`number:${callingNumber}`);
+  }
+
+  /** Keeps the calling number's key in Badge's part of the call, for the counters; a later restart without one keeps it. */
+  #keepNumber(record: CallRecord, numberKey: string | null): void {
+    const slice = record.modules[badge.BADGE] as unknown as badge.BadgeSlice | undefined;
+    if (numberKey !== null && slice !== undefined) slice.numberKey = numberKey;
   }
 
   async state(callId: string): Promise<SessionState> {
@@ -361,15 +414,89 @@ export class Engine {
 
   // ---- flows -------------------------------------------------------------------------------
 
-  /** Starts a named flow on an open call. A call runs at most one flow; its steps are copied in now. */
-  async startFlow(callId: string, name: string): Promise<FlowPosition> {
+  /**
+   * Starts a named flow on an open call. A call runs at most one flow; its steps are copied in now.
+   * A flow over its hourly limit is refused with `rate_limited` and stays on the call, failed.
+   */
+  async startFlow(callId: string, name: string, input: { callingNumber?: string } = {}): Promise<FlowPosition> {
     const definition = this.#flowDefinition(name);
     const revision = this.#config.revision;
-    await this.#update(callId, (draft) => this.#attachFlow(draft, name, definition, revision));
+    const numberKey = await this.#numberKey(input.callingNumber);
+    const before = await this.#read(callId);
+    this.#keepNumber(before, numberKey);
+    const start = await this.#countFlowStart(before, name, definition);
+    // Set when the write's own check refused the flow (a concurrent start attached one first), so
+    // nothing was written: only then is the start taken back. A write that saved and then failed
+    // (the ledger down) keeps its count.
+    let refused = false;
+    try {
+      await this.#update(callId, (draft) => {
+        this.#keepNumber(draft.record, numberKey);
+        try {
+          this.#attachFlow(draft, name, definition, revision, start);
+        } catch (error) {
+          refused = true;
+          throw error;
+        }
+      });
+    } catch (error) {
+      if (refused) await this.#uncount(start);
+      throw error;
+    }
+    if (start.over !== null) throw new RateLimitedError(callId);
     return (await this.flowPosition(callId))!;
   }
 
-  #attachFlow(draft: CallDraft, name: string, definition: Pick<FlowConfig["flows"][string], "steps">, revision: string): void {
+  /**
+   * Checks that a flow can start on the call, then, when it needs a money, contact or access scope,
+   * counts its start on the number's and the subject's counters, whichever the call has. A start
+   * found over a limit is not counted; one that a concurrent start took over a limit is.
+   */
+  async #countFlowStart(record: CallRecord, name: string, definition: Pick<FlowConfig["flows"][string], "steps">): Promise<FlowStart> {
+    // Checked first on a copy, so a start the call would refuse anyway is never counted.
+    this.#attachFlow(this.#draft(structuredClone(record), []), name, definition, this.#config.revision, UNCOUNTED);
+    if (!this.#limited(definition.steps, this.#config.policy)) return UNCOUNTED;
+    const keys = counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice);
+    const { over, at } = await this.#countStarts(keys);
+    return { over, counted: keys.map(counterId), recorded: at === null ? null : { keys, at } };
+  }
+
+  /** Takes back the starts a start recorded, once the call refused it: one entry per counter, at the time it was recorded. */
+  async #uncount(start: FlowStart): Promise<void> {
+    if (start.recorded === null) return;
+    for (const key of start.recorded.keys) await this.#adapters.counters!.removeFailure(key, start.recorded.at);
+  }
+
+  /**
+   * Counts one flow start on each counter, unless one is already at its limit. `over`: the scope of
+   * the limit hit, or null; `at`: when the starts were recorded, or null when none was.
+   */
+  async #countStarts(keys: readonly AttemptCounterKey[]): Promise<{ over: AttemptCounterKey["scope"] | null; at: string | null }> {
+    const limits = lockoutOf(this.#rt.settings<BadgeSettings>(badge.BADGE).lockout).flowStartsPerHour;
+    const counters = this.#adapters.counters!;
+    const now = this.#clock.now();
+    const limited = await flowStartLimited(counters, limits, keys, now);
+    if (limited !== null) return { over: limited, at: null };
+    return { over: await recordFlowStarts(counters, limits, keys, now), at: now.toISOString() };
+  }
+
+  /**
+   * Whether a flow's starts are limited: a step needs a money, contact or access scope, or a
+   * verification step can grant one (its listed scopes, or every scope its level reaches).
+   */
+  #limited(steps: readonly FlowStep[], policy: VerificationPolicy): boolean {
+    const declared = this.registry.scopeClasses();
+    return steps.some((step) => {
+      const owner = this.registry.stepOwner(step.type)!;
+      const level = owner.stepLevel?.(step) ?? null;
+      const scopes = level === null ? [] : (owner.stepGrants?.(step) ?? scopesForLevel(policy, level as AssuranceLevel));
+      const need = owner.manifest.scopes.needs[step.type];
+      if (need !== undefined) scopes.push(need);
+      return scopes.some((scope) => LIMITED_CLASSES.includes(scopeClass(scope, policy.scopeClasses, declared)));
+    });
+  }
+
+  #attachFlow(draft: CallDraft, name: string, definition: Pick<FlowConfig["flows"][string], "steps">, revision: string, start: FlowStart): void {
     {
       const record = draft.record;
       if (record.flow !== null) throw new EngineError("precondition_failed", "this call already ran a flow");
@@ -387,10 +514,16 @@ export class Engine {
         const reason = module.cannotRunStep?.(step, slice) ?? null;
         if (reason !== null) throw new EngineError("precondition_failed", `${step.type} cannot run on this call: ${reason}`);
       }
+      if (start.over !== null) {
+        // Over an hourly limit: the call keeps the flow, failed, so nothing else starts on it.
+        record.flow = { name, revision, steps, index: 0, mark: null, status: "failed", counted: start.counted };
+        draft.emit("flow.rate_limited", "code", { flow: name, scope: start.over });
+        return;
+      }
       const first = steps[0]!;
       const firstOwner = this.registry.stepOwner(first.type)!;
       const mark = firstOwner.enterStep(first, record.modules[firstOwner.manifest.name]!);
-      record.flow = { name, revision, steps, index: 0, mark, status: "running" };
+      record.flow = { name, revision, steps, index: 0, mark, status: "running", counted: start.counted };
       draft.emit("flow.started", "code", { flow: name, revision, steps: steps.length });
     }
   }
@@ -409,8 +542,28 @@ export class Engine {
    * Starts (or restarts) verification, with the account number the caller keyed or a subject key
    * the host's code chose, and the calling number when it is not withheld (counted, never a factor).
    */
-  beginVerification(callId: string, input: badge.BeginVerificationInput): Promise<void> {
-    return badge.beginVerification(this.#rt, callId, input);
+  async beginVerification(callId: string, input: badge.BeginVerificationInput): Promise<void> {
+    await badge.beginVerification(this.#rt, callId, input);
+    // Once verification names a subject (or brings a number), a flow with an hourly limit is
+    // counted on that counter too, once per call; over the limit, the flow fails and the host gets
+    // the same `rate_limited` as a refused start.
+    const record = await this.#read(callId);
+    const flow = record.flow;
+    if (flow === null || flow.counted === null) return;
+    const keys = counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice).filter((key) => !flow.counted!.includes(counterId(key)));
+    if (keys.length === 0) return;
+    const { over } = await this.#countStarts(keys);
+    await this.#update(callId, (draft) => {
+      const current = draft.record.flow!;
+      if (over === null) {
+        current.counted!.push(...keys.map(counterId));
+        return;
+      }
+      // Fails closed, whatever another process did to the flow meanwhile.
+      current.status = "failed";
+      draft.emit("flow.rate_limited", "code", { flow: current.name, scope: over });
+    });
+    if (over !== null) throw new RateLimitedError(callId);
   }
 
   /** Judges every keypad field at once. The answer is the same for an unknown account and a wrong value. */
@@ -811,7 +964,16 @@ export class Engine {
     } catch {
       throw new ConfigError(["the config must be plain JSON data"]);
     }
-    return assertConfig(copy, this.registry);
+    const checked = assertConfig(copy, this.registry);
+    // The starts of flows that need a money, contact or access scope are counted (VER-15), even
+    // when no factor the caller enters is on to make Badge ask for the counters itself.
+    if (this.#adapters.counters === undefined) {
+      const problems = Object.entries(checked.flows)
+        .filter(([, flow]) => this.#limited(flow.steps, checked.policy))
+        .map(([name]) => `flows.${name}: needs the counters adapter: it needs a money, contact or access scope, so its starts are limited`);
+      if (problems.length > 0) throw new ConfigError(problems);
+    }
+    return checked;
   }
 
   #outsideModule(name: string): void {

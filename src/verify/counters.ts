@@ -11,6 +11,10 @@
 // Subjects are counted by subject key whether or not they exist, so a lock never says which
 // accounts are real. The calling number is counted as a keyed hash, never as the number.
 //
+// A counter is keyed by subject or number and factor kind, never by flow or call, so failures in
+// one flow count in every other (VER-15): an owner command, then a payment, then a door share one
+// count. The same store also counts flow starts (`FLOW_START`): flows that need a money, contact
+// or access scope are limited per hour, per number and per subject, whatever their outcome.
 // The business is told of each lock and may lift one early (INT-7): see "lock notices" below.
 import type { AttemptCounterKey, AttemptCounters } from "../core/adapters.ts";
 import { hmacSha256Hex } from "../core/hash.ts";
@@ -24,17 +28,31 @@ export interface LockoutSettings {
   lockAfterFailures?: number;
   /** The window, in hours. Default 24, from 24 to 168. */
   windowHours?: number;
+  /**
+   * How many flows that need a money, contact or access scope may start in an hour, per subject and
+   * per calling number (VER-15). Default, and the most a config may allow: 5 per subject, 10 per number.
+   */
+  flowStartsPerHour?: { subject?: number; number?: number };
 }
 
-export type Lockout = Required<LockoutSettings>;
+/** Flow starts allowed in an hour, by counter scope. */
+export type FlowStartLimits = Record<AttemptCounterKey["scope"], number>;
+
+export type Lockout = Required<Omit<LockoutSettings, "flowStartsPerHour">> & { flowStartsPerHour: FlowStartLimits };
 
 export const DEFAULT_LOCKOUT: Readonly<Lockout> = Object.freeze({
   backoffSeconds: Object.freeze([5, 15, 60, 300, 900]) as number[],
   lockAfterFailures: 10,
   windowHours: 24,
+  flowStartsPerHour: Object.freeze({ subject: 5, number: 10 }),
 });
 
-const LOCKOUT_KEYS = ["backoffSeconds", "lockAfterFailures", "windowHours"];
+/** The counter kind for flow starts. A factor kind is snake_case and this is not, so no plug-in shares its counters. */
+export const FLOW_START = "flow.start";
+
+const LOCKOUT_KEYS = ["backoffSeconds", "lockAfterFailures", "windowHours", "flowStartsPerHour"];
+const FLOW_START_SCOPES = ["subject", "number"] as const;
+const HOUR_MS = 3_600_000;
 const CALLING_NUMBER = /^\+[1-9][0-9]{1,14}$/;
 
 /** What a lock says: which counter, whether only the business (or time) lifts it, and until when. */
@@ -65,6 +83,18 @@ export function lockoutSettingsErrors(value: unknown): string[] {
   if (value.windowHours !== undefined && !isIntegerIn(value.windowHours, DEFAULT_LOCKOUT.windowHours, 168)) {
     errors.push("lockout.windowHours must be 24 to 168");
   }
+  errors.push(...flowStartErrors(value.flowStartsPerHour));
+  return errors;
+}
+
+function flowStartErrors(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!isObject(value)) return ["lockout.flowStartsPerHour must be an object"];
+  const errors = unknownKeys(value, FLOW_START_SCOPES).map((k) => `lockout.flowStartsPerHour.${k} is not a scope: subject or number`);
+  for (const scope of FLOW_START_SCOPES) {
+    const most = DEFAULT_LOCKOUT.flowStartsPerHour[scope];
+    if (value[scope] !== undefined && !isIntegerIn(value[scope], 1, most)) errors.push(`lockout.flowStartsPerHour.${scope} must be 1 to ${most}`);
+  }
   return errors;
 }
 
@@ -79,6 +109,10 @@ export function lockoutOf(settings: LockoutSettings | undefined): Lockout {
     backoffSeconds: [...(settings?.backoffSeconds ?? DEFAULT_LOCKOUT.backoffSeconds)],
     lockAfterFailures: settings?.lockAfterFailures ?? DEFAULT_LOCKOUT.lockAfterFailures,
     windowHours: settings?.windowHours ?? DEFAULT_LOCKOUT.windowHours,
+    flowStartsPerHour: {
+      subject: settings?.flowStartsPerHour?.subject ?? DEFAULT_LOCKOUT.flowStartsPerHour.subject,
+      number: settings?.flowStartsPerHour?.number ?? DEFAULT_LOCKOUT.flowStartsPerHour.number,
+    },
   };
 }
 
@@ -96,6 +130,7 @@ export function numberKeyFor(knowledgeKey: string | Uint8Array, callingNumber: s
 /**
  * The counters one attempt is counted under: the subject's, when there is a subject key, and the
  * number's, when the host gave one. An absent key (a call saved before numbers were kept) is none.
+ * Neither the flow nor the call is part of a key.
  */
 export function counterKeys(workspaceId: string, factor: string, keys: { subjectKey?: string | null; numberKey?: string | null }): AttemptCounterKey[] {
   const out: AttemptCounterKey[] = [];
@@ -236,4 +271,40 @@ export function unlockedCounter(knowledgeKey: string | Uint8Array, key: Pick<Att
 export async function unlockCounter(counters: AttemptCounters, key: AttemptCounterKey): Promise<void> {
   await counters.reset(key);
   await counters.reset(noticeKey(key));
+}
+
+/** The first instant of the hour that ends now: a start exactly an hour old has left it. */
+function hourStart(now: Date): string {
+  return new Date(now.getTime() - HOUR_MS + 1).toISOString();
+}
+
+/** The scope of the first counter already at its limit of flow starts this hour, read without writing anything. */
+export async function flowStartLimited(
+  counters: AttemptCounters,
+  limits: FlowStartLimits,
+  keys: readonly AttemptCounterKey[],
+  now: Date,
+): Promise<AttemptCounterKey["scope"] | null> {
+  for (const key of keys) {
+    if ((await counters.get(key, hourStart(now))).length >= limits[key.scope]) return key.scope;
+  }
+  return null;
+}
+
+/**
+ * Counts one flow start on every counter. Returns the scope of the first counter it took over its
+ * limit (another start, on any call or engine, got in since the counters were read), or null.
+ */
+export async function recordFlowStarts(
+  counters: AttemptCounters,
+  limits: FlowStartLimits,
+  keys: readonly AttemptCounterKey[],
+  now: Date,
+): Promise<AttemptCounterKey["scope"] | null> {
+  let over: AttemptCounterKey["scope"] | null = null;
+  for (const key of keys) {
+    const starts = await counters.recordFailure(key, now.toISOString(), hourStart(now));
+    if (over === null && starts.length > limits[key.scope]) over = key.scope;
+  }
+  return over;
 }
