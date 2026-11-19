@@ -1,5 +1,6 @@
 // Verify pieces that are planned and not built. Each throws NotImplementedError naming its issue.
 import { NotImplementedError } from "../core/errors.ts";
+import type { Locale } from "../core/runtime.ts";
 
 /**
  * Sends a one-time code by text to the number on file, only after the keypad checks matched, with
@@ -20,7 +21,7 @@ export function recordSubjectFailure(_input: { workspaceId: string; subjectKey: 
 }
 
 /** Normalises a spoken answer (a postal code, a name) for an exact comparison. Never fuzzy. */
-export function normaliseSpokenAnswer(_input: { field: string; transcript: string; locale: "en" | "fr" }): never {
+export function normaliseSpokenAnswer(_input: { field: string; transcript: string; locale: Locale }): never {
   throw new NotImplementedError("normaliseSpokenAnswer", "VER-3");
 }
 

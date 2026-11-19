@@ -416,14 +416,22 @@ function paymentRef(payment: Pick<PaymentRequest, "connectedAccountId">, linkId:
   return payment.connectedAccountId === null ? `payment:${linkId}` : `payment:${JSON.stringify([payment.connectedAccountId, linkId])}`;
 }
 
-/** Asks the provider to expire a link, on the account the payment was taken on. */
-function expireAtProvider(rt: EngineRuntime, callId: string, payment: PaymentRequest, linkId: string): Promise<{ state: "expired" | "not_open" }> {
-  return rt.adapter("payments").expireLink({
+/**
+ * Asks the provider to expire a link, on the account the payment was taken on. Its answer goes into
+ * the ledger (`payment.link_expired`'s `provider`), so it is read once and must be one of its two
+ * answers: anything else ("paid", a phone number, nothing) is a provider fault, thrown like one
+ * that throws, and the payment stays open.
+ */
+async function expireAtProvider(rt: EngineRuntime, callId: string, payment: PaymentRequest, linkId: string): Promise<{ state: "expired" | "not_open" }> {
+  const answer: unknown = await rt.adapter("payments").expireLink({
     linkId,
     mode: payment.mode,
     ...(payment.connectedAccountId === null ? {} : { connectedAccountId: payment.connectedAccountId }),
     idempotencyKey: rt.idempotencyKey(callId, payment.paymentId, "expire", payment.mode),
   });
+  const state: unknown = typeof answer === "object" && answer !== null ? (answer as { state?: unknown }).state : undefined;
+  if (state !== "expired" && state !== "not_open") throw new EngineError("precondition_failed", "the payment provider answered neither expired nor not_open; the link is still open");
+  return { state };
 }
 
 function deadline(from: string, minutes: number): string {
@@ -529,14 +537,22 @@ export async function expirePaymentLinks(rt: EngineRuntime, callId: string): Pro
   return { expired };
 }
 
+/** Where each supported locale's amounts are formatted. */
+export const AMOUNT_REGION: Record<Locale, string> = { en: "en-CA", fr: "fr-CA" };
+
+/** The payment link text, in every supported locale (SPEC.md section 16). */
+export const PAYMENT_TEXT: Record<Locale, (amount: string, url: string) => string> = {
+  en: (amount, url) => `Your secure payment link for ${amount}: ${url}`,
+  fr: (amount, url) => `Votre lien de paiement sécurisé pour ${amount} : ${url}`,
+};
+
 /** Formats an amount in minor units with the currency's own number of decimals. */
 export function formatAmount(locale: Locale, amountMinor: number, currency: string): string {
-  const format = new Intl.NumberFormat(locale === "fr" ? "fr-CA" : "en-CA", { style: "currency", currency: currency.toUpperCase() });
+  const format = new Intl.NumberFormat(AMOUNT_REGION[locale], { style: "currency", currency: currency.toUpperCase() });
   const digits = format.resolvedOptions().maximumFractionDigits as number;
   return format.format(amountMinor / 10 ** digits);
 }
 
 function paymentText(locale: Locale, url: string, amountMinor: number, currency: string): string {
-  const amount = formatAmount(locale, amountMinor, currency);
-  return locale === "fr" ? `Votre lien de paiement sécurisé pour ${amount} : ${url}` : `Your secure payment link for ${amount}: ${url}`;
+  return PAYMENT_TEXT[locale](formatAmount(locale, amountMinor, currency), url);
 }
