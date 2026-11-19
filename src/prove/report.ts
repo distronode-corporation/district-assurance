@@ -52,6 +52,8 @@ export interface MonthlyReport {
 }
 
 const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
+/** A ledger time as the engine writes it (`Date.prototype.toISOString`), always in UTC. */
+const LEDGER_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 
 /** The workspace an entry belongs to: the first element of its `eventId` tuple, or null. */
 export function entryWorkspace(entry: Pick<AuditEntry, "eventId">): string | null {
@@ -72,8 +74,10 @@ function monthReader(timeZone: string): (at: string) => string {
     throw new EngineError("invalid_input", "timeZone must be an IANA time zone");
   }
   return (at) => {
-    const ms = Date.parse(at);
-    if (Number.isNaN(ms)) throw new EngineError("invalid_input", "a ledger entry has no valid time");
+    // Date.parse rolls an impossible date (Feb 30, hour 24) into the next one, so the UTC date of
+    // the parsed instant must be the date written.
+    const ms = typeof at === "string" && LEDGER_TIME.test(at) ? Date.parse(at) : Number.NaN;
+    if (Number.isNaN(ms) || new Date(ms).toISOString().slice(0, 10) !== at.slice(0, 10)) throw new EngineError("invalid_input", "a ledger entry has no valid time");
     const parts = format.formatToParts(ms);
     const part = (type: "year" | "month"): string => parts.find((p) => p.type === type)!.value;
     return `${part("year").padStart(4, "0")}-${part("month")}`;
@@ -122,6 +126,9 @@ export async function monthlyReport(input: { ledger: AuditLedger; workspaceId: s
     unattributed: 0,
   };
   // Payment ids are unique per call, so links are keyed by call and payment.
+  // Consent counters live in a map until the end, so a purpose such as `constructor` or
+  // `__proto__` is counted like any other and never reaches an inherited property.
+  const consents = new Map<string, { yes: number; no: number }>();
   const links = new Map<string, { amountMinor: number; currency: string }>();
   const linkKey = (entry: AuditEntry): string => JSON.stringify([entry.callId, entry.detail.paymentId]);
   for (const entry of entries) {
@@ -163,9 +170,9 @@ export async function monthlyReport(input: { ledger: AuditLedger; workspaceId: s
       }
       case "consent.recorded": {
         const purpose = d.purpose as string;
-        const counts = report.consents[purpose] ?? { yes: 0, no: 0 };
+        const counts = consents.get(purpose) ?? { yes: 0, no: 0 };
         counts[d.answer as "yes" | "no"]++;
-        report.consents[purpose] = counts;
+        consents.set(purpose, counts);
         break;
       }
       case "verification.locked":
@@ -184,7 +191,7 @@ export async function monthlyReport(input: { ledger: AuditLedger; workspaceId: s
   }
   report.verifications.byLevel = sorted(report.verifications.byLevel);
   for (const t of [report.payments.sent, report.payments.paid, report.payments.failed, report.payments.expired]) t.totals = sorted(t.totals);
-  report.consents = sorted(report.consents);
+  report.consents = Object.fromEntries([...consents.keys()].sort().map((k) => [k, consents.get(k)!]));
   return report;
 }
 
@@ -271,7 +278,11 @@ async function signed(signer: ReceiptSigner, document: ReportDocument, content: 
 
 /** Signs the JSON report (for a PDF template) with the receipt signer. */
 export async function signReportJson(signer: ReceiptSigner, report: MonthlyReport): Promise<SignedReportJson> {
-  return { document: "monthly_report.json", report, ...(await signed(signer, "monthly_report.json", canonicalJson(report))) };
+  // A detached copy of exactly what is signed, so a change to the caller's object while the signer
+  // runs cannot break the envelope.
+  const content = canonicalJson(report);
+  const snapshot = JSON.parse(content) as MonthlyReport;
+  return { document: "monthly_report.json", report: snapshot, ...(await signed(signer, "monthly_report.json", content)) };
 }
 
 /** Signs the CSV of a report with the receipt signer. */
@@ -285,10 +296,10 @@ export async function signReportCsv(signer: ReceiptSigner, report: MonthlyReport
  * algorithm, a malformed signature or any change to the content. Never throws on bad input.
  */
 export function verifyReport(signedReport: SignedReport, keys: ReadonlyArray<JsonWebKey & { kid?: string }>): boolean {
-  if (signedReport.alg !== "ES256") return false;
-  const jwk = keys.find((k) => k.kid === signedReport.kid);
-  if (jwk === undefined) return false;
   try {
+    if (signedReport.alg !== "ES256") return false;
+    const jwk = keys.find((k) => k.kid === signedReport.kid);
+    if (jwk === undefined) return false;
     let payload: Uint8Array;
     if (signedReport.document === "monthly_report.json") payload = reportPayload(signedReport.document, canonicalJson(signedReport.report));
     else if (signedReport.document === "monthly_report.csv" && typeof signedReport.csv === "string") payload = reportPayload(signedReport.document, signedReport.csv);

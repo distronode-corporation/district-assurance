@@ -218,6 +218,33 @@ describe("monthly report", () => {
     await ledger.append(entry(undefined, "call.started", "yesterday"));
     await assert.rejects(monthlyReport(input), rejects("invalid_input", /valid time/));
   });
+
+  it("refuses an entry time that Date.parse would roll into another date, or not in UTC", async () => {
+    for (const at of ["2026-02-30T12:00:00.000Z", "2026-01-31T24:00:00.000Z", "2026-01-15T00:00:00.000+05:00", "2026-01-15", "2026-13-01T00:00:00.000Z"]) {
+      const ledger = new MemoryAuditLedger();
+      await ledger.append(entry(undefined, "call.started", at));
+      await assert.rejects(monthlyReport({ ledger, workspaceId: "ws_test", month: "2026-01" }), rejects("invalid_input", /valid time/), at);
+    }
+    const ledger = new MemoryAuditLedger();
+    await ledger.append(entry(undefined, "call.started", "2026-01-31T23:59:59Z"));
+    assert.equal((await monthlyReport({ ledger, workspaceId: "ws_test", month: "2026-01" })).unattributed, 1);
+  });
+
+  it("counts a consent purpose named like an Object property as any other", async () => {
+    const ledger = new MemoryAuditLedger();
+    const at = "2026-01-10T12:00:00.000Z";
+    let n = 0;
+    for (const [purpose, answer] of [["constructor", "yes"], ["constructor", "no"], ["__proto__", "yes"], ["toString", "no"], ["texts", "yes"]] as const) {
+      await ledger.append(entry(JSON.stringify(["ws_test", "c1", 1, n++]), "consent.recorded", at, { purpose, answer }));
+    }
+    const report = await monthlyReport({ ledger, workspaceId: "ws_test", month: "2026-01" });
+    assert.equal(Object.getPrototypeOf(report.consents), Object.prototype);
+    assert.deepEqual(Object.keys(report.consents), ["__proto__", "constructor", "texts", "toString"]);
+    assert.deepEqual(report.consents.constructor, { yes: 1, no: 1 });
+    assert.deepEqual(Object.getOwnPropertyDescriptor(report.consents, "__proto__")?.value, { yes: 1, no: 0 });
+    assert.deepEqual(report.consents.toString, { yes: 0, no: 1 });
+    assert.ok(reportCsv(report).includes("consents.constructor.no,1\r\n"));
+  });
 });
 
 describe("monthly report CSV", () => {
@@ -277,6 +304,22 @@ describe("signed monthly reports", () => {
     assert.equal(verifyReport({ ...json, kid: "k2" }, keys), false);
     assert.equal(verifyReport({ ...json, alg: "HS256" as "ES256" }, keys), false);
     assert.equal(verifyReport({ ...json, signature: json.signature.slice(4) }, keys), false);
+    assert.equal(verifyReport(null as unknown as SignedReport, keys), false);
+    assert.equal(verifyReport(undefined as unknown as SignedReport, keys), false);
+    assert.equal(verifyReport(json, null as unknown as typeof keys), false);
+    assert.equal(verifyReport(json, [null] as unknown as typeof keys), false);
+  });
+
+  it("signs and returns one detached snapshot of the report", async () => {
+    const signer = generateTestSigner("k1");
+    const keys = [signer.publicJwk()];
+    const report = emptyReport({ calls: { started: 3, ended: 3 } });
+    const pending = signReportJson(signer, report);
+    report.calls.started = 9;
+    const json = await pending;
+    assert.equal(json.report.calls.started, 3);
+    assert.notEqual(json.report, report);
+    assert.equal(verifyReport(json, keys), true);
   });
 
   it("never verifies as a receipt, and a receipt never verifies as a report", async () => {
