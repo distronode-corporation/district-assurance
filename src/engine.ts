@@ -387,10 +387,11 @@ export class Engine {
         const reason = slice === undefined ? null : (module.blocksEnd?.(slice) ?? null);
         if (reason !== null) throw new EngineError("precondition_failed", `the call cannot end yet: ${reason}`);
       }
-      for (const module of guards) {
-        const slice = draft.record.modules[module.manifest.name];
-        if (module.onEnd !== undefined && slice !== undefined) draft.record.modules[module.manifest.name] = module.onEnd(slice);
-      }
+      // The engine, not a module hook, drops Dossier's open draft, so its sensitive values never
+      // outlive the call in the clear. It runs before call.ended and before the receipt's ledger
+      // head is taken, and writes no event and no outcome.
+      const files = draft.record.modules[dossier.DOSSIER];
+      if (files !== undefined) draft.record.modules[dossier.DOSSIER] = dossier.withoutOpenDraft(files);
       draft.apply({ type: "call_ended", at: this.#now() });
       const flow = draft.record.flow;
       if (flow !== null && flow.status === "running") {

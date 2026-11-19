@@ -527,9 +527,11 @@ describe("Engine file", () => {
       const callId = await verifiedCall(t);
       await t.engine.startIntake(callId, "secure");
       await t.engine.setIntakeField(callId, "sin", SIN);
+      const before = (await t.ledger.list()).map((e) => e.event);
       await t.engine.endCall(callId);
       const stored = JSON.stringify([await t.sessions.get("ws_test", callId), await t.ledger.list()]);
       assert.equal(stored.includes(SIN), false, "the ended call record keeps no plain value");
+      assert.deepEqual((await t.ledger.list()).map((e) => e.event).slice(before.length), ["call.ended", "receipt.issued"], "dropping the draft writes no event of its own");
       await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }));
     });
 

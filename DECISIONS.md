@@ -245,5 +245,8 @@ workspace's knowledge key removes that, as it does for reference values (SPEC.md
 Binding it to the record and the field keeps two records with the same value apart, and the JSON
 tuple keeps it apart from the `subject:`, `field:` and `pin:` digests, so it never equals a value
 on file. A host checks a record against its receipt by decrypting it and computing the same HMAC.
+Rotating the knowledge key makes old receipts uncheckable against their records, since the old
+key is needed to recompute each sensitive value's HMAC; a host that rotates it keeps the old key
+for checking.
 **Revisit** if a third party without the knowledge key must check a record against its receipt:
 that needs a per-record salt published with the record instead.

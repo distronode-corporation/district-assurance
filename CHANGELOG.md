@@ -28,8 +28,8 @@ All notable changes to this project are documented here. The format follows
 - Encrypted sensitive intake fields (FIL-2): a `fieldCipher` adapter (`FieldCipher`, now in the
   core, and `FakeFieldCipher`) that Dossier needs once a form has a sensitive field; values are
   encrypted before `putIntakeRecord`, and the record digest keys them (ADR-21). A cipher answer
-  that is empty, not a string or the value itself is refused, and a new optional module hook,
-  `onEnd`, lets Dossier drop an open draft's values when the call ends.
+  that is empty, not a string or the value itself is refused, and `endCall` drops an open draft,
+  so its values never outlive the call in the clear.
 
 ### Changed
 

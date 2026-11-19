@@ -104,11 +104,6 @@ export const dossierModule: AssuranceModule = {
     return (s as unknown as DossierSlice).intake?.filing != null ? "a record is being filed; confirm it first" : null;
   },
 
-  /** An open draft is dropped when the call ends, so its sensitive values never outlive the call in the clear. */
-  onEnd(s: JsonValue): JsonValue {
-    return { ...(s as unknown as DossierSlice), intake: null } as unknown as JsonValue;
-  },
-
   stepStatus(step: FlowStep, view: StepView): StepStatus {
     const filed = (view.slice as unknown as DossierSlice).records.slice(view.mark as number);
     return filed.some((r) => r.formId === step.form) ? "complete" : "pending";
@@ -120,6 +115,15 @@ export const dossierModule: AssuranceModule = {
 };
 
 // ---- runtime -------------------------------------------------------------------------------
+
+/**
+ * The slice with no open draft, which endCall writes (engine-side, not a module hook) so a draft's
+ * sensitive values never outlive the call in the clear. Records, digests and the filed record are
+ * kept as they are. Not exported from the package.
+ */
+export function withoutOpenDraft(s: JsonValue): JsonValue {
+  return { ...(s as unknown as DossierSlice), intake: null } as unknown as JsonValue;
+}
 
 export async function startIntake(rt: EngineRuntime, callId: string, formId: string): Promise<void> {
   rt.settings(DOSSIER);

@@ -358,9 +358,9 @@ digest does not depend on the ciphertext, so it is the same when a retry encrypt
 engine without a cipher (another process on the same SessionStore), or a cipher that answers with
 an empty string, a non-string or the value itself, refuses to file such a record
 (`precondition_failed`, naming the field, never the value) and leaves it reserved. Until the
-record is filed, abandoned or the call ends (Dossier's `onEnd` drops an open draft), the draft in
-the call record holds sensitive values in the clear; afterwards the call record keeps only the
-encrypted record.
+record is filed, abandoned or the call ends (`endCall` drops an open draft, before `call.ended`
+and the receipt's ledger head, writing no event), the draft in the call record holds sensitive
+values in the clear; afterwards the call record keeps only the encrypted record.
 `startIntake(callId, formId)` names the form, and the draft keeps the form as it was then, so a
 config change mid-intake never changes what is filed; a call also keeps the forms (and Trace the
 wordings) in force when it started. A draft being filed refuses changes. A filing that failed
