@@ -8,7 +8,7 @@ import { ConfigError, validateConfig, type FlowConfig } from "../src/core/config
 import type { AssuranceModule } from "../src/core/module.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { TEST_KNOWLEDGE_KEY } from "../src/testing/index.ts";
-import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
+import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig, verifiedCall, waitOut } from "./helpers.ts";
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const pay = { type: "paylink.request", amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" } as const;
@@ -102,7 +102,11 @@ describe("flows", () => {
     t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
     const { callId } = await t.engine.startCall({ flow: "owner-command" });
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
-    for (let i = 0; i < 3; i++) await t.engine.submitPin(callId, "0000");
+    for (let i = 0; i < 3; i++) {
+      await t.engine.submitPin(callId, "0000");
+      waitOut(t);
+    }
+    assert.equal((await t.engine.state(callId)).factors.length, 3, "every attempt of the call was used");
     assert.equal((await t.engine.finishVerification(callId)).level, 0);
     assert.equal((await t.engine.flowPosition(callId))!.status, "failed");
     const ended = rejects("precondition_failed", /flow owner-command has failed/);

@@ -173,7 +173,7 @@ export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
     config,
     clock,
     ids: options.ids ?? t.ids,
-    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments, signer: generateTestSigner(), access: { lobby }, accessSigner },
+    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments, counters: t.counters, signer: generateTestSigner(), access: { lobby }, accessSigner },
   });
   let n = 0;
   const world: DemoWorld = {
@@ -278,7 +278,7 @@ const ownerCommand: ScriptStep[] = [
   {
     label: "owner-command: PIN on process B",
     async run(w, call) {
-      await w.other.beginVerification(call.callId, { subjectKey: subjectKeyFor(TEST_KNOWLEDGE_KEY, OWNER_ACCOUNT) });
+      await w.other.beginVerification(call.callId, { subjectKey: subjectKeyFor(TEST_KNOWLEDGE_KEY, OWNER_ACCOUNT), callingNumber: "+15555550101" });
       await w.other.openSensitive(call.callId, "keypad");
       const wrong = await w.other.submitPin(call.callId, "1111");
       return { detail: wrong.matched ? "MATCHED a wrong PIN" : "no match (one attempt used)", ok: !wrong.matched };

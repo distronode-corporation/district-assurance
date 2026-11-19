@@ -4,6 +4,7 @@
 import type {
   AccessController,
   AmountSource,
+  AttemptCounters,
   AuditLedger,
   CarrierSignals,
   IdentityProvider,
@@ -58,6 +59,8 @@ export interface EngineAdapters {
   accessSigner?: ReceiptSigner;
   /** Signs web sign-in step-up tokens. Its own key (its own `kid`), not the receipt or access key. */
   stepUpSigner?: ReceiptSigner;
+  /** Failures across calls, shared by every engine of the workspace. Badge needs it when a factor the caller enters is on. */
+  counters?: AttemptCounters;
 }
 
 export type AdapterName = keyof EngineAdapters;

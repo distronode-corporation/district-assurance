@@ -46,6 +46,9 @@ export type { EngineAdapters, Locale } from "./core/runtime.ts";
 export type { KeypadResult, OutcomeResult, VerificationResult } from "./verify/badge.ts";
 
 
+/** What an `AttemptCounters` store must have, checked when the engine is built. */
+const COUNTER_METHODS = ["get", "recordFailure", "removeFailure", "reset"] as const;
+
 /** Writes per step before the engine gives up with `conflict`. */
 export const MAX_WRITE_ATTEMPTS = 5;
 
@@ -124,6 +127,20 @@ export class Engine {
     errors.push(...distinctSigners(options.adapters));
     for (const module of options.modules ?? []) {
       if ((BUILT_IN_MODULES as readonly string[]).includes(module.manifest.name)) errors.push(`${module.manifest.name} is the name of a built-in module`);
+    }
+    // A store missing a method would fail only later, after a pass or a failure: refused now. A
+    // store written before removeFailure existed would leave a failure on the line after every pass.
+    const counters = options.adapters.counters as unknown as Record<string, unknown> | null | undefined;
+    if (counters !== undefined) {
+      // null, anything that is not an object, or an object whose reads throw, has none of them.
+      const missing = COUNTER_METHODS.filter((name) => {
+        try {
+          return typeof counters?.[name] !== "function";
+        } catch {
+          return true;
+        }
+      });
+      if (missing.length > 0) errors.push(`the counters adapter is missing ${missing.join(", ")}`);
     }
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     this.workspaceId = options.workspaceId;
@@ -344,8 +361,11 @@ export class Engine {
 
   // ---- Badge (verify) ----------------------------------------------------------------------
 
-  /** Starts (or restarts) verification, with the account number the caller keyed or a subject key the host's code chose. */
-  beginVerification(callId: string, input: { accountNumber: string } | { subjectKey: string }): Promise<void> {
+  /**
+   * Starts (or restarts) verification, with the account number the caller keyed or a subject key
+   * the host's code chose, and the calling number when it is not withheld (counted, never a factor).
+   */
+  beginVerification(callId: string, input: badge.BeginVerificationInput): Promise<void> {
     return badge.beginVerification(this.#rt, callId, input);
   }
 

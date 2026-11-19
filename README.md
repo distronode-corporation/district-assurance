@@ -21,7 +21,7 @@ added and removed per workspace config.
 
 | Module | What it does | Today |
 |---|---|---|
-| **Badge** (verify) | Who is calling, in levels. Factors are plug-ins: a PIN (against a keyed hash, or the host's own PIN store), keypad knowledge checked against the organisation's records, carrier signals on the number on file, a photo ID plus selfie by a texted link, and any factor a host adds. A flow can use a PIN only or all of them. | Built on fakes, with a Stripe Identity adapter for photo ID in the reference server. Texted codes, spoken answers and lockouts across calls are planned. |
+| **Badge** (verify) | Who is calling, in levels. Factors are plug-ins: a PIN (against a keyed hash, or the host's own PIN store), keypad knowledge checked against the organisation's records, carrier signals on the number on file, a photo ID plus selfie by a texted link, and any factor a host adds. A flow can use a PIN only or all of them. | Built on fakes, with lockouts across calls per subject and per calling number, and a Stripe Identity adapter for photo ID in the reference server. Texted codes and spoken answers are planned. |
 | **Dossier** (file) | Intake the caller confirms: forms the organisation defines, values normalised by code, a structured record with a fingerprint. | Built. Read-backs, encrypted fields and delivery are planned. |
 | **Paylink** (pay) | Payment by a secure link texted to the number on file (a hosted page such as Stripe Checkout), on the business's own account (`connect`) or the platform's (`platform`), chosen per flow. Only methods that settle during the call; the link lives 15 minutes after it is texted by default, and the host calls `expirePaymentLinks` at that deadline (a timer or a sweep) so the engine expires it. The engine never handles card numbers. | Built on fakes, both modes. The Stripe adapter is planned. |
 | **Trace** (prove) | The hash-chained audit ledger, which is always on and cannot be turned off, plus optional signed receipts (ES256 over canonical JSON) and consent records with fingerprinted wording. | Built, in memory. Export, key rotation and revocation are planned. |
@@ -139,15 +139,15 @@ import { createEngine, MemoryAuditLedger, keyPairSigner } from "district-assuran
 const engine = createEngine({
   workspaceId: "ws_123",
   knowledgeKey: process.env.KNOWLEDGE_KEY!, // per-workspace HMAC key, at least 16 bytes
-  adapters: { ledger: new MemoryAuditLedger(), sessions, records, carrier, messages, payments, signer },
+  adapters: { ledger: new MemoryAuditLedger(), sessions, counters, records, carrier, messages, payments, signer },
   config, // the workspace's FlowConfig; any problem throws a ConfigError listing all of them
   // A config that turns Gate on needs its adapters among the others:
   // access: { lobby: webhookRelay({ url }) }, accessSigner,
 });
 
 const { callId } = await engine.startCall({ locale: "fr", flow: "owner-command" });
-await engine.beginVerification(callId, { subjectKey: ownerSubjectKey }); // the host chose the subject
-const { matched } = await engine.submitPin(callId, digitsFromKeypad);  // limited attempts per call
+await engine.beginVerification(callId, { subjectKey: ownerSubjectKey, callingNumber }); // the host chose the subject
+const { matched } = await engine.submitPin(callId, digitsFromKeypad);  // limited per call, and locked out across calls
 await engine.finishVerification(callId);                               // the flow moves on by itself
 if (await engine.authorize(callId, "owner.command")) {
   // run the owner's command
