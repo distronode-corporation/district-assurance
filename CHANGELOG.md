@@ -16,6 +16,7 @@ All notable changes to this project are documented here. The format follows
   events. `verifyAccessGrant` (bound to a workspace) and `SeenGrants` for the access side.
 - The signed-webhook relay adapter (GAT-2), `webhookRelay`, and an example door relay. An unlock
   is never retried; a lost answer is `unknown`.
+- Direct vendor adapters (GAT-6), `vendorAccessController` for Kisi and Verkada, through each vendor's documented unlock call; never retried, a lost answer is `unknown`.
 - `FakeAccessController` in `district-assurance/testing`.
 - Paylink's two modes (PAY-7), `connect` and `platform`, per flow step; `linkLifeMinutes` (5 to 60,
   default 15) with the engine expiring links itself (`expirePaymentLinks`, `PaymentLinks.expireLink`);

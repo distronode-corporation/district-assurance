@@ -154,10 +154,21 @@ a lost answer (a timeout, a dropped connection, a 5xx) is recorded as `unknown`,
 is a fresh request with a new grant, up to `maxGrantsPerCall` (tested). The answer is recorded
 even if the caller's grant expired while the door answered (tested); one that arrives after the
 call ended is not (the grant was settled `unknown` at the end). The ledger
-holds each grant's digest and outcome, never the grant. Left to the host: a relay that keeps seen
-grant ids across restarts (or refuses every grant for 15 minutes plus the verifier's clock skew
-after one), a relay clock kept in sync with the engine's (a grant's expiry is strict, so a relay
-running behind accepts it that much longer), and the door's own safety
+holds each grant's digest and outcome, never the grant.
+**Direct vendor adapters** (Kisi, Verkada) are weaker on one point: the vendor cannot check the
+signed grant, so the vendor's API key opens the door on its own, and whoever holds it can open
+every door it reaches. The adapter sends nothing for a target its grant does not name or that is
+not the vendor's id format, nor for a grant with less than its timeout left (so the unlock never
+reaches the vendor after the grant expired, when the call may already have ended), keeps the API
+key out of errors, sends the unlock once (never retried, no redirects; a lost answer is
+`unknown`), and passes on only the HTTP status of a refusal, never the vendor's text (tested
+against a local fake server). Verkada's short-lived token is fetched for each unlock and never
+kept; a failed token call refuses, since no unlock was sent (tested). Left to the host: a relay
+that keeps seen grant ids across restarts (or refuses every grant for 15 minutes plus the
+verifier's clock skew after one), a relay clock kept in sync with the engine's (a grant's expiry
+is strict, so a relay running behind accepts it that much longer), keeping a vendor API key in its
+key store, scoped to as few doors as the vendor allows (a Kisi user or a Verkada key with door
+access to those doors only), and the door's own safety
 (an unlock pulse, not a latch).
 
 ### Money on the wrong account

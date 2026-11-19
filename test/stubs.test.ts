@@ -8,7 +8,7 @@ import { buildReadBack, createUploadLink, deliverRecord } from "../src/file/late
 import { cancelPaymentLink, chargeSavedCard, startKeypadCardCapture } from "../src/pay/later.ts";
 import { revokeConsent } from "../src/prove/consent.ts";
 import { exportLedger } from "../src/prove/later.ts";
-import { issueAccessCode, issueStepUpToken, seamAccessController, vendorAccessController } from "../src/gate/later.ts";
+import { issueAccessCode, issueStepUpToken, seamAccessController } from "../src/gate/later.ts";
 import { createTestEngine } from "../src/testing/index.ts";
 import { checkTextCode, enrolPin, normaliseSpokenAnswer, recordSubjectFailure, sendTextCode } from "../src/verify/later.ts";
 import { verifyTelnyxSignature, verifyTwilioSignature } from "../src/webhooks/carrier.ts";
@@ -35,7 +35,6 @@ const STUBS: Array<[string, () => unknown]> = [
   ["GAT-3", () => issueAccessCode({ callId: "c", target: "front-door" })],
   ["GAT-4", () => issueStepUpToken({ callId: "c", audience: "https://example.test", nonce: "4729" })],
   ["GAT-5", () => seamAccessController({ apiKey: "k" }).unlock({ grant: null as never, target: "d", idempotencyKey: "k" })],
-  ["GAT-6", () => vendorAccessController({ vendor: "kisi", apiKey: "k" })],
   ["MOD-3", () => createTestEngine().engine.useFactor({ kind: "x_factor", summary: "x", maxAttemptsPerCall: 1, adapters: [], judge: async () => false })],
 ];
 
