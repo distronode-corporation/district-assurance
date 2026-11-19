@@ -156,6 +156,8 @@ export async function setIntakeField(rt: EngineRuntime, callId: string, key: str
 export async function confirmIntake(rt: EngineRuntime, callId: string, input: { confirmedBy: "voice" | "keypad" }): Promise<IntakeRecord> {
   rt.settings(DOSSIER);
   // The host's value goes into the record and the ledger as it is: refused before anything is written.
+  // Read once: the checked value is the one filed, so a getter or a host changing the object while
+  // the update waits cannot swap it.
   const confirmedBy: unknown = (input as { confirmedBy?: unknown } | null | undefined)?.confirmedBy;
   if (confirmedBy !== "voice" && confirmedBy !== "keypad") throw new EngineError("invalid_input", "confirmedBy must be voice or keypad");
   const reserved = await rt.update(callId, (draft): { record: IntakeRecord; filed: boolean } => {
@@ -177,7 +179,7 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
       formVersion: intake.form.version,
       values: structuredClone(intake.values),
       digest: intakeDigest(intake.form, intake.values),
-      confirmedBy: input.confirmedBy,
+      confirmedBy,
       confirmedAt: rt.now(),
     };
     intake.filing = built;
