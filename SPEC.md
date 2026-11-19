@@ -493,7 +493,11 @@ in flight is resumed with its own key before the dispute check, which is for new
 the provider made whose answer was lost is learned even if a dispute opened since. An adapter
 answers a refund the provider refused as `failed` and throws only when the answer was lost: a
 refund that threw stays in flight and the next `refundPayment` resumes it with the same key, so
-an adapter that throws for a refusal blocks the payment's refunds. A `pending` refund counts
+an adapter that throws for a refusal blocks the payment's refunds. An answer that is not one of the
+provider's three (`pending`, `succeeded`, `failed`, with a refund id) is treated the same way, as a
+lost answer (`precondition_failed`): nothing is recorded or ledgered, the refund stays in flight,
+and while an adapter keeps answering that way every later refund of the payment is blocked, since
+one is in flight at a time. A refund the provider made is learned once the adapter answers properly. A `pending` refund counts
 toward the total; its later outcome at the provider is not tracked yet (#117), so one that fails
 later still counts until the business refunds the rest by hand at the provider.
 
