@@ -242,7 +242,10 @@ export async function runScript(script: Script): Promise<RunReport> {
 
   async function factorDetail(callId: string): Promise<JsonValue> {
     const entries = (await t.ledger.list()).filter((e) => e.callId === callId && e.event === "verification.factor");
-    return entries.at(-1)!.detail as JsonValue;
+    // A PIN entry's keyed tag (VER-12, #124) is bound to its event id, so it differs between two
+    // calls by design; only the key holder can read it. The rest must be the same.
+    const { tag: _tag, ...detail } = entries.at(-1)!.detail as Record<string, JsonValue>;
+    return detail;
   }
 
   async function version(callId: string): Promise<number> {
@@ -260,12 +263,18 @@ export async function runScript(script: Script): Promise<RunReport> {
     if (!authorized) return { line: "refused", result: { authorized } };
     if (name !== "send_payment_link") return { line: "done", result: { authorized } };
     const running = (await engine.flowPosition(call.callId))?.status === "running";
-    return attempt(async () => ({ line: "link_sent", result: (await engine.requestPayment(call.callId, running ? undefined : { ...PRICE_LIST_DEPOSIT })) as unknown as JsonValue }));
+    return attempt(async () => {
+      // The link's deadline (#47's paylink) depends on the clock the harness moves: left out.
+      const { expiresAt: _expiresAt, ...result } = (await engine.requestPayment(call.callId, running ? undefined : { ...PRICE_LIST_DEPOSIT })) as unknown as Record<string, JsonValue>;
+      return { line: "link_sent", result };
+    });
   }
 
   /** Sends a keypad or PIN entry to the call and to the mirror, and compares a failed answer with the mirror's. */
   async function entry(submit: (callId: string) => Promise<{ matched: boolean; locked: boolean }>, values: string[]): Promise<Outcome> {
     keyed.push(...values);
+    // A failure starts a wait across calls (VER-1, #71): each entry comes after it, as a caller's would.
+    t.clock.advance(900_000);
     const outcome = await attempt(async () => {
       const result = await submit(call.callId);
       return { line: result.matched ? "matched" : result.locked ? "locked" : "no_match", result: { ...result } };
