@@ -67,6 +67,8 @@ export function verifyChain(entries: readonly AuditEntry[], from: { seq: number;
   let expectedSeq = from.seq + 1;
   let prevHash = from.hash;
   for (const entry of entries) {
+    // Storage can hand back anything: an entry that is not an object is a break at the seq it holds, never a crash.
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return { ok: false, seq: expectedSeq, reason: "seq" };
     if (entry.seq !== expectedSeq) return { ok: false, seq: entry.seq, reason: "seq" };
     if (entry.prevHash !== prevHash) return { ok: false, seq: entry.seq, reason: "prev_hash" };
     const { hash, ...rest } = entry;

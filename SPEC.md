@@ -297,7 +297,9 @@ and best effort.
 
 Entry: `{seq, prevHash, eventId?, callId, actor, event, at, detail, hash}`. `seq` starts at 1; the first
 `prevHash` is 64 zeros; `hash` is SHA-256 over the canonical JSON of every other field.
-`verifyChain(entries, from?)` reports the first entry whose `seq`, `prevHash` or `hash` is wrong.
+`verifyChain(entries, from?)` reports the first entry whose `seq`, `prevHash` or `hash` is wrong;
+an entry that is not an object (storage can hand back anything) is reported at the seq it holds,
+as `seq`, never thrown on.
 An entry that canonical JSON cannot hash (a stored number changed to `1e999` reads as Infinity) is
 reported as a wrong `hash`, never thrown.
 `chainEntry` refuses a detail in which any string (other than a 64-character hex digest) contains
