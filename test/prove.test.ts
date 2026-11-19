@@ -2,12 +2,12 @@ import { strict as assert } from "node:assert";
 import { generateKeyPairSync } from "node:crypto";
 import { describe, it } from "node:test";
 
-import type { AuditInput } from "../src/core/adapters.ts";
+import type { AuditInput, ConsentRecord } from "../src/core/adapters.ts";
 import { EngineError } from "../src/core/errors.ts";
 import { wordingDigest } from "../src/prove/consent.ts";
 import { GENESIS_HASH, MemoryAuditLedger, chainEntry, detailCarriesCardNumber, hashEntry, verifyChain } from "../src/prove/ledger.ts";
 import { keyPairSigner, receiptDigest, receiptPayload, signReceipt, verifyReceipt, type ReceiptBody } from "../src/prove/receipt.ts";
-import { generateTestSigner } from "../src/testing/fakes.ts";
+import { MemoryConsentStore, generateTestSigner } from "../src/testing/fakes.ts";
 
 const at = "2026-01-01T00:00:00.000Z";
 const input = (event: AuditInput["event"], detail: AuditInput["detail"] = {}): AuditInput => ({ callId: "c1", actor: "code", event, at, detail });
@@ -141,5 +141,27 @@ describe("consent wording", () => {
     assert.match(wordingDigest(w), /^[0-9a-f]{64}$/);
     assert.notEqual(wordingDigest(w), wordingDigest({ ...w, version: "2" }));
     assert.notEqual(wordingDigest(w), wordingDigest({ ...w, text: { ...w.text, fr: "Autre" } }));
+  });
+});
+
+describe("memory consent store", () => {
+  it("keeps workspace and consent apart, whatever slashes they hold", async () => {
+    const store = new MemoryConsentStore();
+    const consent = (consentId: string, purpose: string): ConsentRecord => ({
+      consentId,
+      callId: "call_1",
+      purpose,
+      wordingVersion: "1",
+      wordingDigest: "0".repeat(64),
+      locale: "en",
+      answer: "yes",
+      channel: "call",
+      at: "2026-01-01T00:00:00.000Z",
+    });
+    await store.putConsent("a/b", consent("c", "first"));
+    await store.putConsent("a", consent("b/c", "second"));
+    assert.equal((await store.getConsent("a", "b/c"))?.consent.purpose, "second");
+    await store.revokeConsent("a", { consentId: "b/c", via: "text", at: "2026-01-02T00:00:00.000Z" });
+    assert.equal((await store.getConsent("a/b", "c"))?.revoked, null);
   });
 });

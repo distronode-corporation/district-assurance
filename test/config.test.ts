@@ -240,6 +240,7 @@ describe("validateConfig: modules", () => {
           { purpose: "Bad", version: "", text: { en: "", fr: "y" } },
           { purpose: "a", version: "1", text: { en: "x", fr: 1 } },
           { purpose: "a", version: "1", text: { en: "x", fr: "y" } },
+          { purpose: "b", version: "4111 1111 1111 1111", text: { en: "x", fr: "y" } },
         ],
       }),
       [
@@ -248,6 +249,7 @@ describe("validateConfig: modules", () => {
         "modules.trace.settings: wordings[1]: version is empty",
         "modules.trace.settings: wordings[1]: needs an English and a French text",
         "modules.trace.settings: wordings[2]: needs an English and a French text",
+        "modules.trace.settings: wordings[4]: purpose and version must not look like a card number",
         "modules.trace.settings: two wordings have the same purpose",
       ],
     );

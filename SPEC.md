@@ -216,7 +216,7 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
 until FIL-2); Paylink `{maxAmountMinor?}` (1 to 1,000,000); Trace `{receipts?, wordings?}`
 (`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr}}`, purposes
-unique).
+unique, no purpose or version that reads as a card number, since both go into the ledger).
 
 ## 8. Flow execution
 

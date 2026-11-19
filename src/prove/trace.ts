@@ -9,6 +9,7 @@ import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } fro
 import type { CallDraft, CallRecord, EngineRuntime } from "../core/runtime.ts";
 import { isObject, unknownKeys } from "../core/shape.ts";
 import { wordingDigest, type ConsentWording } from "./consent.ts";
+import { detailCarriesCardNumber } from "./ledger.ts";
 import { receiptDigest, signReceipt, type ReceiptBody, type SignedReceipt } from "./receipt.ts";
 
 export const TRACE = "trace";
@@ -46,6 +47,9 @@ function wordingErrors(wording: unknown, index: number): string[] {
   const errors: string[] = [];
   if (!/^[a-z][a-z0-9_]{0,63}$/.test(wording.purpose)) errors.push(`${at}: purpose must be snake_case`);
   if (wording.version === "") errors.push(`${at}: version is empty`);
+  // Both go into the ledger's consent.recorded detail, which refuses a card number: caught here,
+  // before a call can reserve a consent the ledger would then never accept.
+  if (detailCarriesCardNumber([wording.purpose, wording.version])) errors.push(`${at}: purpose and version must not look like a card number`);
   const text = wording.text;
   if (typeof text.en !== "string" || text.en.trim() === "" || typeof text.fr !== "string" || text.fr.trim() === "") errors.push(`${at}: needs an English and a French text`);
   return errors;
