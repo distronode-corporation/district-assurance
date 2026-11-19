@@ -5,7 +5,7 @@ import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
-import type { CallRecord, EngineRuntime } from "../core/runtime.ts";
+import { LOCALES, type CallRecord, type EngineRuntime, type Locale } from "../core/runtime.ts";
 import { isObject, unknownKeys } from "../core/shape.ts";
 import { wordingDigest, type ConsentRecord, type ConsentWording } from "./consent.ts";
 import { receiptDigest, signReceipt, type ReceiptBody, type SignedReceipt } from "./receipt.ts";
@@ -38,13 +38,16 @@ export interface TraceSlice {
 function wordingErrors(wording: unknown, index: number): string[] {
   const at = `wordings[${index}]`;
   if (!isObject(wording) || typeof wording.purpose !== "string" || typeof wording.version !== "string" || !isObject(wording.text)) {
-    return [`${at} must be { purpose, version, text: { en, fr } }`];
+    return [`${at} must be { purpose, version, text: { en, fr, es? } }`];
   }
   const errors: string[] = [];
   if (!/^[a-z][a-z0-9_]{0,63}$/.test(wording.purpose)) errors.push(`${at}: purpose must be snake_case`);
   if (wording.version === "") errors.push(`${at}: version is empty`);
   const text = wording.text;
   if (typeof text.en !== "string" || text.en.trim() === "" || typeof text.fr !== "string" || text.fr.trim() === "") errors.push(`${at}: needs an English and a French text`);
+  // Spanish is optional; when given it is a text like the others.
+  if (text.es !== undefined && (typeof text.es !== "string" || text.es.trim() === "")) errors.push(`${at}: the Spanish text (es), when given, must not be empty`);
+  errors.push(...unknownKeys(text, LOCALES).map((k) => `${at}: ${k} is not a locale (en, fr or es)`));
   return errors;
 }
 
@@ -106,9 +109,11 @@ export const traceModule: AssuranceModule = {
     return (s as unknown as TraceSlice).consents.length;
   },
 
-  cannotRunStep(step: FlowStep, s: JsonValue): string | null {
+  cannotRunStep(step: FlowStep, s: JsonValue, locale: Locale): string | null {
     if (step.type === "trace.receipt") return null;
-    return (s as unknown as TraceSlice).wordings.some((w) => w.purpose === step.purpose) ? null : `the call has no wording for ${String(step.purpose)}`;
+    const wording = (s as unknown as TraceSlice).wordings.find((w) => w.purpose === step.purpose);
+    if (wording === undefined) return `the call has no wording for ${String(step.purpose)}`;
+    return wording.text[locale] === undefined ? `the wording for ${wording.purpose} has no ${locale} text` : null;
   },
 
   stepStatus(step: FlowStep, view: StepView): StepStatus {
@@ -136,6 +141,8 @@ export async function recordConsent(
     const wording = draft.slice<TraceSlice>(TRACE).wordings.find((w) => w.purpose === purpose);
     if (wording === undefined) throw new EngineError("invalid_input", `no wording for ${purpose} in this call's trace settings`);
     if (draft.record.state.phase === "ended") throw new EngineError("invalid_transition", "the call has ended");
+    // The caller cannot have heard a wording that has no text in the call's language.
+    if (wording.text[draft.record.locale] === undefined) throw new EngineError("precondition_failed", `the wording for ${wording.purpose} has no ${draft.record.locale} text`);
     const step = stepOfType<TraceConsentStep>(draft.record, "trace.consent");
     if (step !== null && step.purpose !== purpose) throw new EngineError("precondition_failed", `the flow step asks for consent to ${step.purpose}`);
     const record: ConsentRecord = {

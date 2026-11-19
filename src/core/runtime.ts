@@ -32,13 +32,26 @@ import type { SessionEvent, SessionState } from "./session.ts";
  * the amounts it formats, the spoken digits it redacts) is a `Record<Locale, ...>` with one entry
  * for each, and a test checks it: adding a locale here makes every catalog grow with it.
  */
-export const SUPPORTED_LOCALES = Object.freeze(["en", "fr"] as const);
+export const SUPPORTED_LOCALES = Object.freeze(["en", "fr", "es"] as const);
 
 export type Locale = (typeof SUPPORTED_LOCALES)[number];
+
+/** The same list, by the name #122 (I18N) gave it. */
+export const LOCALES = SUPPORTED_LOCALES;
 
 /** Whether a host's value is a supported locale. */
 export function isSupportedLocale(value: unknown): value is Locale {
   return (SUPPORTED_LOCALES as readonly unknown[]).includes(value);
+}
+
+/**
+ * Words a workspace writes (a form's labels, a consent wording): English and French always,
+ * Spanish when the workspace offers it. A call in Spanish can use only those that have it.
+ */
+export interface LocalisedText {
+  en: string;
+  fr: string;
+  es?: string;
 }
 
 /**

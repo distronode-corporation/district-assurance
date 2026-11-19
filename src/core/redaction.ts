@@ -1,8 +1,8 @@
 // Redaction of transcripts and any other text before it is stored or sent on.
 //
 // The first detector is card numbers (PANs): 13 to 19 digits that pass the Luhn check, written as
-// digits or spoken as single digit words in English or French, with spaces, hyphens, dots or
-// commas between groups. A match is replaced by a fixed marker. Over-redaction is accepted; the
+// digits or spoken as single digit words in English, French or Spanish, with spaces, hyphens, dots
+// or commas between groups. A match is replaced by a fixed marker. Over-redaction is accepted; the
 // risk this guards against is a card number reaching storage.
 import type { Locale } from "./runtime.ts";
 
@@ -48,6 +48,7 @@ export function luhnValid(digits: string): boolean {
 export const DIGIT_WORDS_BY_LOCALE: Record<Locale, Readonly<Record<string, string>>> = {
   en: { zero: "0", oh: "0", one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9" },
   fr: { "zéro": "0", un: "1", une: "1", deux: "2", trois: "3", quatre: "4", cinq: "5", six: "6", sept: "7", huit: "8", neuf: "9" },
+  es: { cero: "0", uno: "1", una: "1", dos: "2", tres: "3", cuatro: "4", cinco: "5", seis: "6", siete: "7", ocho: "8", nueve: "9" },
 };
 
 const DIGIT_WORDS: Record<string, string> = Object.assign({}, ...Object.values(DIGIT_WORDS_BY_LOCALE));

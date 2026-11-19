@@ -772,6 +772,7 @@ export async function expirePaymentLinks(rt: EngineRuntime, callId: string): Pro
 export const PAYMENT_TEXT: Record<Locale, (amount: string, url: string) => string> = {
   en: (amount, url) => `Your secure payment link for ${amount}: ${url}`,
   fr: (amount, url) => `Votre lien de paiement sécurisé pour ${amount} : ${url}`,
+  es: (amount, url) => `Su enlace de pago seguro por ${amount}: ${url}`,
 };
 
 /**

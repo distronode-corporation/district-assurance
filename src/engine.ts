@@ -562,7 +562,7 @@ export class Engine {
         const slice = record.modules[owner];
         if (slice === undefined) throw new EngineError("module_disabled", `${owner} was off when this call started`);
         if (!this.isEnabled(owner)) throw new EngineError("module_disabled", `the ${owner} module is turned off`);
-        const reason = module.cannotRunStep?.(step, slice) ?? null;
+        const reason = module.cannotRunStep?.(step, slice, record.locale) ?? null;
         if (reason !== null) throw new EngineError("precondition_failed", `${step.type} cannot run on this call: ${reason}`);
       }
       if (start.over !== null) {

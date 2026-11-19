@@ -41,6 +41,23 @@ describe("findCardNumbers", () => {
     assert.equal(redact("oh zero zéro une un neuf huit sept six cinq trois deux 4"), "oh zero zéro une un neuf huit sept six cinq trois deux 4");
   });
 
+  it("finds numbers spoken as digit words in Spanish, alone or mixed with digits and other languages", () => {
+    const es = "cuatro dos cuatro dos cuatro dos cuatro dos cuatro dos cuatro dos cuatro dos cuatro dos";
+    assert.equal(redact(`mi tarjeta es ${es}, gracias`), `mi tarjeta es ${M}, gracias`);
+    // 4111 1111 1111 1111 with each Spanish word for one, and capitals.
+    assert.equal(redact("Cuatro uno una un 1111 uno-uno-uno-uno 1111"), M);
+    // 6011 1111 1111 1117 and 3782 8224 6310 005: seis, cero, siete, ocho, tres, dos, nueve aside.
+    assert.equal(redact("seis cero uno uno 1111 1111 uno uno uno siete"), M);
+    assert.equal(redact("tres siete ocho dos ocho dos dos cuatro seis tres uno cero cero cero cinco"), M);
+    // Each word maps to its digit: 13 to 19 of them that fail Luhn are left alone.
+    const nine = "cero uno dos tres cuatro cinco seis siete ocho nueve cero uno dos";
+    assert.equal(findCardNumbers(nine).length, 0, "0123456789012 fails Luhn");
+    assert.equal(redact("nueve nueve nueve nueve nueve nueve nueve nueve nueve nueve nueve nueve nueve"), "nueve nueve nueve nueve nueve nueve nueve nueve nueve nueve nueve nueve nueve");
+    // Words between the digits break the run, in Spanish as in English.
+    const split = "cuatro dos cuatro dos cuatro dos cuatro dos y cuatro dos cuatro dos cuatro dos cuatro dos";
+    assert.equal(redact(split), split);
+  });
+
   it("leaves numbers that fail Luhn or are too short or too long", () => {
     for (const text of ["4242424242424241", "424242424242", "phone 416 555 0100", "42424242424242424242", "order 2026-11-18"]) {
       assert.equal(redact(text), text, text);

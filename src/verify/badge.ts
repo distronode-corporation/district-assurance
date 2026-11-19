@@ -882,6 +882,7 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
 export const IDENTITY_TEXT: Record<Locale, (url: string) => string> = {
   en: (url) => `Your one-time identity check link: ${url}`,
   fr: (url) => `Votre lien de vérification d'identité, à usage unique : ${url}`,
+  es: (url) => `Su enlace de verificación de identidad, de un solo uso: ${url}`,
 };
 
 function identityText(locale: Locale, url: string): string {

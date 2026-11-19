@@ -3,12 +3,13 @@
 import { canonicalJson } from "../core/canonical.ts";
 import { NotImplementedError } from "../core/errors.ts";
 import { sha256Hex } from "../core/hash.ts";
-import type { Locale } from "../core/runtime.ts";
+import type { Locale, LocalisedText } from "../core/runtime.ts";
 
 export interface ConsentWording {
   purpose: string;
   version: string;
-  text: { en: string; fr: string };
+  /** English and French always; Spanish when the workspace offers it. */
+  text: LocalisedText;
 }
 
 export interface ConsentRecord {
@@ -23,8 +24,15 @@ export interface ConsentRecord {
   at: string;
 }
 
+/**
+ * The wording's fingerprint over its purpose, version and every text it has. A wording without a
+ * Spanish text is digested over `{en, fr}` exactly as before Spanish existed, so its digest, and
+ * every receipt that carries it, stays the same.
+ */
 export function wordingDigest(wording: ConsentWording): string {
-  return sha256Hex(canonicalJson({ purpose: wording.purpose, version: wording.version, text: wording.text }));
+  const { en, fr, es } = wording.text;
+  const text = es === undefined ? { en, fr } : { en, fr, es };
+  return sha256Hex(canonicalJson({ purpose: wording.purpose, version: wording.version, text }));
 }
 
 /** Revokes a consent by voice, text or dashboard. */

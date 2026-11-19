@@ -5,6 +5,7 @@ import type { JsonValue } from "../src/core/canonical.ts";
 import type { FlowConfig } from "../src/core/config.ts";
 import { EngineError, type EngineErrorCode } from "../src/core/errors.ts";
 import type { Engine } from "../src/engine.ts";
+import type { Locale } from "../src/core/runtime.ts";
 import type { IntakeForm } from "../src/file/intake.ts";
 import { defaultConfig } from "../src/modules.ts";
 import type { PaymentInput } from "../src/pay/paylink.ts";
@@ -68,7 +69,7 @@ export async function heard(t: TestEngine, callId: string): Promise<string> {
 }
 
 /** A call verified to level 3 by keypad and photo ID, in the open phase. */
-export async function verifiedCall(t: TestEngine, locale: "en" | "fr" = "en"): Promise<string> {
+export async function verifiedCall(t: TestEngine, locale: Locale = "en"): Promise<string> {
   const { callId } = await t.engine.startCall({ locale });
   await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
   assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: true, locked: false });
