@@ -1,6 +1,5 @@
 // Verify pieces that are planned and not built. Each throws NotImplementedError naming its issue.
 import { NotImplementedError } from "../core/errors.ts";
-import type { Locale } from "../core/runtime.ts";
 
 /**
  * Sends a one-time code by text to the number on file, only after the keypad checks matched, with
@@ -13,11 +12,6 @@ export function sendTextCode(_input: { callId: string }): never {
 /** Checks a keyed one-time code: single use, short-lived, bound to the call. */
 export function checkTextCode(_input: { callId: string; code: string }): never {
   throw new NotImplementedError("checkTextCode", "VER-2");
-}
-
-/** Normalises a spoken answer (a postal code, a name) for an exact comparison. Never fuzzy. */
-export function normaliseSpokenAnswer(_input: { field: string; transcript: string; locale: Locale }): never {
-  throw new NotImplementedError("normaliseSpokenAnswer", "VER-3");
 }
 
 /**

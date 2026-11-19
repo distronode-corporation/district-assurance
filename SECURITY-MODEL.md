@@ -43,16 +43,19 @@ Trying account numbers to learn which exist, or learning which factor failed. **
 keypad fields are judged together and give one answer; an unknown account, a wrong value and a
 non-keypad entry give the same result and the same ledger detail (tested), and the same holds for
 the PIN: an unknown subject, a subject with no PIN and a malformed entry do the same keyed-hash work
-and answer the same (tested); every field is compared even after a mismatch; nothing reads back a value on file; links go out only after a match, so a
-text never confirms an account. Failures are counted across calls per subject key, for unknown
-subjects too, so a lock never tells a real account from a made-up one (tested), and per calling
-number, so one line trying account after account is locked out (tested).
+and answer the same (tested), and for spoken answers: an unknown subject, a wrong answer and an
+unusable transcript give the same result and the same ledger detail (tested); every field is
+compared even after a mismatch; nothing reads back a value on file; links go out only after a
+match, so a text never confirms an account. Failures are counted across calls per subject key, for
+unknown subjects too, so a lock never tells a real account from a made-up one (tested), and per
+calling number, so one line trying account after account is locked out (tested).
 
 ### Guessing
 
 **Controls:** a per-call limit on judged attempts for every factor the caller enters (keypad
-knowledge, the PIN at 1 to 5, plug-ins at 1 to 5), after which the line stops judging, even the
-right answer (tested). Each attempt is counted in its own write before it is judged, so a crash, a
+knowledge, the PIN at 1 to 5, spoken answers at 1 to 5, plug-ins at 1 to 5), after which the line
+stops judging, even the right answer (tested). An unusable spoken answer is still an attempt
+(tested). Each attempt is counted in its own write before it is judged, so a crash, a
 failing PIN verifier or knowledge key store, an entry crafted to make a judge throw, or a second
 process never gives a free try (tested, two engines on one
 store). PINs are at least 4 digits, and keypad attempts are capped at 5 per call like the PIN's.
@@ -74,6 +77,25 @@ the lock per calling number (tested). Taking it off is one atomic step of the st
 still needs watching (`verification.locked` in the ledger) and a longer PIN where the risk is
 high. In `verifier` mode the host's PIN store is asked for every attempt, with a stand-in for a
 malformed entry, so timing does not tell them apart.
+
+### Spoken answers
+
+A postal code or a reference said aloud is heard by speech-to-text, can reach the model and the
+transcript, and is known to more people than a keypad value. A misrecognised transcript must never
+be read loosely into a pass. **Controls:** `normaliseSpokenAnswer` is exact: a fixed vocabulary per
+language, a fixed format per field, and anything else is `unusable`, never a near match (a corpus of
+English and French transcripts, misrecognitions included, is tested). **Limit:** the engine sees
+only the transcript, not what the caller said. At level 1 a spoken answer is accepted when its
+transcript is the stored value in the field's format; if speech-to-text turns a wrong answer into
+the stored value, the engine cannot tell and the factor passes. Speech-to-text accuracy is outside
+this engine and belongs to the host's speech handling. The engine offers no host control for such
+a substitution; a host that needs one must provide it (for example, reading the value back for the
+caller to confirm, or requiring another factor), or keep spoken answers off. The value is compared
+like a keypad field, as a keyed digest in constant time, and never stored or logged. A spoken answer counts on
+its own only at level 1; above it, the policy needs another factor that is not knowledge
+(tested). A spoken match does not unlock texts to the number on file (tested). A policy without
+spoken fields never judges one (tested). Left to the host: passing the caller's answer from its
+speech pipeline in a code path, never through the model, and keeping it out of stored transcripts.
 
 ### SIM swap and port-out
 

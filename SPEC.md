@@ -124,7 +124,7 @@ for (an access grant's) are the engine's own (ADR-25).
 ## 4. Factors, levels and scopes
 
 Built-in factor kinds: `keypad_knowledge`, `pin`, `carrier_identity_match`, `photo_id`,
-`text_code` (planned, VER-2) and `spoken_knowledge` (planned, VER-3). A **factor plug-in** adds a
+`spoken_knowledge` (section 5) and `text_code` (planned, VER-2). A **factor plug-in** adds a
 kind the caller enters and code judges: `{kind, summary, maxAttemptsPerCall (1 to 5), adapters,
 judge}`, installed with `badgeModule({ factors })`. Its kind is snake_case, 3 to 32 characters, not
 a built-in kind, and never `caller_id`, `calling_number`, `ani` or `cli`. Its judge gets the
@@ -146,7 +146,12 @@ of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:
   contact; `entry.`, `access.`: access; `status.`, `intake.`: none), what an installed module's
   manifest declares (`scopes.classes`), and the policy's own `scopeClasses`. Money, contact and
   access are at least level 2; none is at least 0;
-- `maxKeypadAttemptsPerCall` outside 1 to 5.
+- `maxKeypadAttemptsPerCall` outside 1 to 5;
+- a set with `spoken_knowledge` when the policy has no `spoken`, and a `spoken` that is not
+  `{fields, maxAttemptsPerCall}`: `fields` maps at least one field name to `ca_postal_code`,
+  `us_zip_code` or `reference`, none of them a keypad field, and `maxAttemptsPerCall` is 1 to 5.
+  So a spoken answer counts on its own only at level 1; above it, the rules above need another
+  factor, and one that is not knowledge.
 
 It checks every part in one pass: a malformed part is reported and the others are still checked.
 
@@ -173,7 +178,7 @@ Links go only to the subject's number on file, and only after a `keypad_knowledg
 factor passed since verification last started from nothing. A plug-in's pass does not unlock
 texts.
 
-## 5. Keypad knowledge
+## 5. Keypad knowledge and spoken answers
 
 - The knowledge key (`EngineOptions.knowledgeKey`) is its bytes, at least 16 (a string or a
   `Uint8Array`; anything else is `invalid_input` when the engine is built), or an opaque
@@ -195,6 +200,34 @@ texts.
   mismatch, and records one factor: passed only if the subject exists and every field matched.
 - After `maxKeypadAttemptsPerCall` judged attempts, further submissions return `locked` without
   judging. Failures also count across calls (section 6, "Lockouts across calls").
+
+**Spoken answers** (`spoken_knowledge`) are for values a keypad cannot enter. The host submits one
+transcript per field in the policy's `spoken.fields`: `submitFactor(callId, "spoken_knowledge",
+{postal_code: "K one A zero B one"})`.
+
+- `normaliseSpokenAnswer({field, transcript, locale})` (`field` is the format) returns
+  `{status: "normalised", value}` or `{status: "unusable"}`. The transcript is lower-cased and
+  its accents removed; it may hold only letters, digits, spaces and `. , ; : ! ? ' " -`, and at most
+  200 characters. Each token is read exactly: digits, one letter, letters and digits written
+  together (`K1A`), or a word of the call's language: digit words (`zero` to `nine`, `niner`;
+  `zéro` to `neuf`), letter names (`kay`, `zed`, `double u`; `ka`, `zède`, `double vé`, `i grec`),
+  the NATO alphabet in both, and the traditional French alphabet in French (`Anatole` to `Zoé`).
+  `as in` or `for` (English), `comme` or `comme dans` (French) after a letter must be followed by
+  a word starting with that letter, which confirms it. Any other word, `oh` in a digit's place,
+  number words such as `ninety`, or a result not of the format is `unusable`. Nothing is guessed.
+- Formats, as normalised: `ca_postal_code` letter, digit, letter, digit, letter, digit, without
+  D, F, I, O, Q, U, and without W or Z first (`K1A0B1`); `us_zip_code` five digits (ZIP+4 is
+  unusable); `reference` 4 to 12 upper-case letters and digits.
+- Each field is compared like a keypad field: `HMAC-SHA256(knowledgeKey, "field:" + field + ":"
+  + value)` against `SubjectRecord.knowledge[field]`, in constant time, every field even after a
+  mismatch. The host must store the value on file in the same normalised form (`K1A0B1`, not
+  `K1A 0B1` or `k1a0b1`), or no answer ever matches; an unusable answer does the same work and fails. One factor: passed only if the
+  subject exists and every field matched.
+- Each attempt is counted before it is judged, an unusable one included; after
+  `spoken.maxAttemptsPerCall`, submissions return `locked` without judging. Without `spoken` in
+  the policy, every submission is `locked` and nothing is judged. A host can call
+  `normaliseSpokenAnswer` itself first to ask again before an attempt is used.
+- A spoken match does not unlock texts to the number on file (section 4).
 
 ## 6. PIN
 
@@ -285,7 +318,8 @@ when there is a number.
   "version": 1,
   "revision": "2026-11-18.1",
   "policy": { "version": "...", "levels": [], "scopes": {}, "keypadFields": [], "maxKeypadAttemptsPerCall": 2,
-              "simSwapWindowHours": 72, "trustTextCodeWithoutCarrierCheck": false },
+              "simSwapWindowHours": 72, "trustTextCodeWithoutCarrierCheck": false,
+              "spoken": { "fields": { "postal_code": "ca_postal_code" }, "maxAttemptsPerCall": 2 } },
   "modules": { "<name>": { "enabled": true, "settings": {} } },
   "flows": { "<name>": { "summary": "...", "steps": [{ "type": "<module>.<step>" }] } }
 }

@@ -4,3 +4,4 @@ export { DEFAULT_LOCKOUT, counterKeys, lockState, lockoutOf, numberKeyFor, type 
 export * from "./factors.ts";
 export * from "./knowledge.ts";
 export * from "./later.ts";
+export * from "./spoken.ts";

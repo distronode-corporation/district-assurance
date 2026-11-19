@@ -9,7 +9,7 @@ import { chargeSavedCard, startKeypadCardCapture } from "../src/pay/later.ts";
 import { revokeConsent } from "../src/prove/consent.ts";
 import { exportLedger } from "../src/prove/later.ts";
 import { createTestEngine } from "../src/testing/index.ts";
-import { checkTextCode, enrolPin, normaliseSpokenAnswer, sendTextCode } from "../src/verify/later.ts";
+import { checkTextCode, enrolPin, sendTextCode } from "../src/verify/later.ts";
 import { verifyTelnyxSignature, verifyTwilioSignature } from "../src/webhooks/carrier.ts";
 
 const form = { formId: "f", version: "1", fields: [] };
@@ -18,7 +18,6 @@ const hook = { url: "https://example.test/", headers: {}, body: "", now: new Dat
 const STUBS: Array<[string, () => unknown]> = [
   ["VER-2", () => sendTextCode({ callId: "c" })],
   ["VER-2", () => checkTextCode({ callId: "c", code: "1" })],
-  ["VER-3", () => normaliseSpokenAnswer({ field: "postal", transcript: "", locale: "en" })],
   ["VER-6", () => enrolPin({ callId: "c" })],
   ["FIL-1", () => buildReadBack(form, {}, "fr")],
   ["FIL-3", () => deliverRecord({ workspaceId: "w", recordId: "r" })],
@@ -33,7 +32,7 @@ const STUBS: Array<[string, () => unknown]> = [
 ];
 
 /** Planned work a validator refuses by id (so a config can never reach it mid-call). */
-const REFUSED_BY_VALIDATORS = ["VER-2", "VER-3", "FIL-2"];
+const REFUSED_BY_VALIDATORS = ["VER-2", "FIL-2"];
 
 /** One `new NotImplementedError(<string literal>, "<ID>")`, whatever the quotes, commas or escapes in the first argument. */
 const STUB_CALL = /new NotImplementedError\(\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)\s*,\s*["'`]([A-Z]{3}-\d+)["'`]\s*\)/g;
