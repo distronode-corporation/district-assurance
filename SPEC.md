@@ -402,7 +402,9 @@ the currency's own decimals.
 ## 17. Redaction
 
 Each detector is its own `Redactor`; a host composes the ones it wants with `composeRedactors`,
-card numbers first. The engine's default redactor is `cardNumberRedactor`, and `Engine.redact`
+card numbers first, then health card numbers, SINs and bank numbers (a 10-digit health card number
+can start with a valid SIN, so the health card pass must see it whole). Composed findings report
+offsets into the original input, in the order the redactors ran. The engine's default redactor is `cardNumberRedactor`, and `Engine.redact`
 sets `interrupt` on any finding, whichever redactor found it. A match is replaced by its kind's
 marker; `redaction.applied` counts findings per kind.
 

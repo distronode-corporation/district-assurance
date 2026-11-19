@@ -7,7 +7,8 @@
 //
 // Further detectors, each its own `Redactor` over the same digit runs (PRV-6): Canadian social
 // insurance numbers, provincial health card numbers, and bank transit and account numbers. A
-// host composes the ones it wants with `composeRedactors`, card numbers first.
+// host composes the ones it wants with `composeRedactors`, card numbers first, then health card
+// numbers, SINs and bank numbers.
 
 export type RedactionKind = "card_number" | "sin" | "health_card" | "bank_account";
 
@@ -279,19 +280,66 @@ export function findBankNumbers(text: string): RedactionFinding[] {
 
 export const bankAccountRedactor: Redactor = redactorFor(findBankNumbers);
 
+/** A marker in the composed text so far, with the span of the original input it replaced. */
+interface Replaced {
+  start: number;
+  end: number;
+  originalStart: number;
+  originalEnd: number;
+}
+
 /**
- * Runs redactors in order, each over the previous one's output. Finding offsets refer to the text
- * each redactor saw, so they are reported per stage, in order.
+ * Maps an offset in the composed text back to the original input. An offset inside a marker maps
+ * to the start or the end of what the marker replaced, so a finding over it covers all of it.
+ */
+function toOriginal(at: number, replaced: readonly Replaced[], side: "start" | "end"): number {
+  let shift = 0;
+  for (const r of replaced) {
+    if (at <= r.start) break;
+    if (at < r.end) return side === "start" ? r.originalStart : r.originalEnd;
+    shift = r.originalEnd - r.end;
+  }
+  return at + shift;
+}
+
+/**
+ * Runs redactors in order, each over the previous one's output, and reports their findings in that
+ * order, with offsets into the original input. Each redactor must replace each of its findings
+ * with its kind's marker and leave the rest of the text as it was, as the redactors here do, and
+ * report its findings sorted and not overlapping. A composed redactor does not, so list every
+ * redactor in one call rather than composing compositions.
+ *
+ * Put health card numbers before SINs: a 10-digit health card number can start with a valid SIN,
+ * and a SIN pass run first would replace that prefix and leave the last digit.
  */
 export function composeRedactors(...redactors: Redactor[]): Redactor {
   return {
     redact(text) {
       let current = text;
+      let replaced: Replaced[] = [];
       const findings: RedactionFinding[] = [];
       for (const r of redactors) {
         const result = r.redact(current);
+        const next: Replaced[] = [];
+        let delta = 0;
+        let k = 0;
+        for (const f of result.findings) {
+          // Earlier markers before this finding move by the length change so far; any it covers go.
+          for (; k < replaced.length && replaced[k]!.start < f.end; k++) {
+            const old = replaced[k]!;
+            if (old.end <= f.start) next.push({ ...old, start: old.start + delta, end: old.end + delta });
+          }
+          const originalStart = toOriginal(f.start, replaced, "start");
+          const originalEnd = toOriginal(f.end, replaced, "end");
+          const start = f.start + delta;
+          const end = start + REDACTION_MARKERS[f.kind].length;
+          next.push({ start, end, originalStart, originalEnd });
+          findings.push({ kind: f.kind, start: originalStart, end: originalEnd });
+          delta = end - f.end;
+        }
+        for (const old of replaced.slice(k)) next.push({ ...old, start: old.start + delta, end: old.end + delta });
+        replaced = next;
         current = result.text;
-        findings.push(...result.findings);
       }
       return { text: current, findings };
     },

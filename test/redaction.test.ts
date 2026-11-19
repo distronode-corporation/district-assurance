@@ -139,15 +139,37 @@ describe("findBankNumbers", () => {
 
 describe("the redactors together", () => {
   it("compose, card numbers first, and their markers trip none of the others", () => {
-    const all = composeRedactors(cardNumberRedactor, sinRedactor, healthCardRedactor, bankAccountRedactor);
+    const all = composeRedactors(cardNumberRedactor, healthCardRedactor, sinRedactor, bankAccountRedactor);
     const text = "card 4242 4242 4242 4242, SIN 046 454 286, OHIP 1234 567 897, account 1234567";
     const result = all.redact(text);
     assert.equal(
       result.text,
       `card ${M}, SIN ${REDACTION_MARKERS.sin}, OHIP ${REDACTION_MARKERS.health_card}, account ${REDACTION_MARKERS.bank_account}`,
     );
-    assert.deepEqual(result.findings.map((f) => f.kind), ["card_number", "sin", "health_card", "bank_account"]);
+    assert.deepEqual(result.findings.map((f) => f.kind), ["card_number", "health_card", "sin", "bank_account"]);
+    for (const f of result.findings) assert.ok(/^[\d ]+$/.test(text.slice(f.start, f.end)));
     for (const marker of Object.values(REDACTION_MARKERS)) assert.deepEqual(all.redact(`account ${marker}`).findings, []);
+  });
+
+  it("keep a health card number whole when it starts with a valid SIN", () => {
+    const all = composeRedactors(cardNumberRedactor, healthCardRedactor, sinRedactor, bankAccountRedactor);
+    const text = "one two three four five six seven eight two two";
+    assert.equal(luhnValid("123456782"), true);
+    assert.equal(luhnValid("1234567822"), true);
+    assert.deepEqual(all.redact(text), {
+      text: REDACTION_MARKERS.health_card,
+      findings: [{ kind: "health_card", start: 0, end: text.length }],
+    });
+    // A SIN alone is still found.
+    assert.equal(all.redact("SIN 046 454 286").text, `SIN ${REDACTION_MARKERS.sin}`);
+  });
+
+  it("report offsets into the original input", () => {
+    const all = composeRedactors(cardNumberRedactor, healthCardRedactor, sinRedactor, bankAccountRedactor);
+    assert.deepEqual(all.redact("4242424242424242 046454286").findings, [
+      { kind: "card_number", start: 0, end: 16 },
+      { kind: "sin", start: 17, end: 26 },
+    ]);
   });
 
   it("each finds only its own kind", () => {
@@ -170,5 +192,43 @@ describe("applyFindings and composeRedactors", () => {
     assert.equal(result.text, `PAN ${M.toUpperCase()}`);
     assert.equal(result.findings.length, 1);
     assert.deepEqual(composeRedactors().redact("x"), { text: "x", findings: [] });
+  });
+
+  it("maps a later finding that covers an earlier marker to all it replaced", () => {
+    // A later stage that takes everything from "<" to ">", markers included.
+    const wide: Redactor = {
+      redact(text) {
+        const start = text.indexOf("<");
+        const end = text.indexOf(">") + 1;
+        const findings: RedactionFinding[] = [{ kind: "bank_account", start, end }];
+        return { text: applyFindings(text, findings), findings };
+      },
+    };
+    const text = "046454286 a 4242424242424242 < 4242424242424242 c 046454286 > 046454286";
+    const inner = composeRedactors(cardNumberRedactor, sinRedactor, wide).redact(text);
+    assert.equal(inner.text, `${REDACTION_MARKERS.sin} a ${M} ${REDACTION_MARKERS.bank_account} ${REDACTION_MARKERS.sin}`);
+    const b = text.indexOf("<");
+    const d = text.indexOf(">") + 1;
+    assert.deepEqual(inner.findings, [
+      { kind: "card_number", start: 12, end: 28 },
+      { kind: "card_number", start: 31, end: 47 },
+      { kind: "sin", start: 0, end: 9 },
+      { kind: "sin", start: 50, end: 59 },
+      { kind: "sin", start: 62, end: 71 },
+      { kind: "bank_account", start: b, end: d },
+    ]);
+    // A finding that starts or ends inside a marker covers all the marker replaced.
+    const inside: Redactor = {
+      redact(text) {
+        const findings: RedactionFinding[] = [{ kind: "bank_account", start: 3, end: text.length - 3 }];
+        return { text: applyFindings(text, findings), findings };
+      },
+    };
+    const sins = "046454286 x 046454286";
+    assert.deepEqual(composeRedactors(sinRedactor, inside).redact(sins).findings.at(-1), {
+      kind: "bank_account",
+      start: 0,
+      end: sins.length,
+    });
   });
 });
