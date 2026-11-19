@@ -37,7 +37,8 @@ export interface ReferenceServerOptions {
   rateLimit?: { requests: number; windowMs: number; addresses?: number; clock?: Clock };
   /**
    * Called once per answered request, after the answer is written, including the refusals of
-   * requests node:http could not read. Absent means no logs. If it throws, the entry is dropped.
+   * requests node:http could not read. Absent means no logs. If it throws, or answers a promise
+   * that rejects, the entry is dropped.
    */
   log?: (entry: RequestLog) => void;
   /** The demo's runs: serves the browser UI and the `/demo/*` routes. Off when absent. */
@@ -300,7 +301,8 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   /** Logs one answered request. A `log` that throws loses its entry, never the server. */
   function record(exchange: Exchange, address: string, status: number, error: string | undefined): void {
     try {
-      options.log?.({
+      // An async sink answers a promise: a rejected one is caught too, never an unhandled rejection.
+      const written: unknown = options.log?.({
         time: options.clock.now().toISOString(),
         address,
         method: exchange.method,
@@ -309,6 +311,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
         ...(error === undefined ? {} : { error }),
         ms: Math.round(performance.now() - exchange.started),
       });
+      Promise.resolve(written).catch(() => undefined);
     } catch {
       // The answer is already written, and a failing log sink has nowhere to report to.
     }
@@ -317,7 +320,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   // node:http enforces the receive deadline itself, checking open connections at this interval.
   const timeouts = { requestTimeout: timeoutMs, headersTimeout: timeoutMs, connectionsCheckingInterval: Math.min(timeoutMs, 1000) };
   const server = createServer(timeouts, (req: IncomingMessage, res: ServerResponse) => {
-    const exchange: Exchange = { started: performance.now(), method: req.method ?? "GET", seen: { route: "unmatched" }, done: false };
+    const exchange: Exchange = { started: performance.now(), method: req.method ?? "GET", seen: { route: "unmatched" }, done: false, req };
     const socket = req.socket;
     inFlight.set(socket, exchange);
     // Kept while its body is unread, so node:http timing that body out after the answer is not
@@ -357,8 +360,11 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   // node:http's own refusals (headers or body too slow, headers too large, a malformed request)
   // reach this instead of the listener. Answered as node:http would, but in JSON, and logged.
   server.on("clientError", (err: NodeJS.ErrnoException, socket: Socket) => {
-    const exchange = inFlight.get(socket);
+    const held = inFlight.get(socket);
     inFlight.delete(socket);
+    // A request received in full is over, even before its stream says so: an error after it is the
+    // next request's (one the client sent right behind a body drained after its answer), answered too.
+    const exchange = held?.req!.complete === true ? undefined : held;
     // A reset socket takes no answer, and one whose answer is already written cannot take another.
     if (err.code !== "ECONNRESET" && socket.writable && exchange?.done !== true) {
       const [status, code] = CLIENT_ERRORS[err.code ?? ""] ?? [400, "bad_request"];
@@ -366,7 +372,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       const headers = { ...JSON_HEADERS, "content-length": String(Buffer.byteLength(body)), connection: "close" };
       const head = Object.entries(headers).map(([name, value]) => `${name}: ${value}\r\n`);
       socket.write(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\n${head.join("")}\r\n${body}`);
-      const answered = exchange ?? { started: performance.now(), method: "unknown", seen: { route: "unmatched" }, done: false };
+      const answered = exchange ?? { started: performance.now(), method: "unknown", seen: { route: "unmatched" }, done: false, req: null };
       answered.done = true;
       record(answered, rateLimitKey(socket.remoteAddress ?? "unknown"), status, code);
     }
@@ -382,6 +388,8 @@ interface Exchange {
   seen: Seen;
   /** Answered, by the listener or by `clientError`. */
   done: boolean;
+  /** The request; null for one node:http refused before its headers were read. */
+  req: IncomingMessage | null;
 }
 
 /** node:http's client error codes and the answer each gets; any other is `400 bad_request`. */
