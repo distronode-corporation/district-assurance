@@ -704,7 +704,6 @@ describe("reference UI: the demo world's adapters and clock (review of #50)", ()
     const pins: string[] = [];
     const submit = world.engine.submitPin.bind(world.engine);
     world.engine.submitPin = (callId, pin) => (pins.push(pin), submit(callId, pin));
-    mock.timers.enable({ apis: ["setTimeout"] });
     try {
       const right = steps[2]!.run(world, call);
       await new Promise<void>((resolve) => setImmediate(resolve));
