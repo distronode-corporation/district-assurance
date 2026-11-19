@@ -54,6 +54,7 @@ export function formatAmount(locale: Locale, amountMinor: number, currency: stri
 export const AMOUNT_READBACK_TEXT: Record<Locale, (amount: string, description: string) => string> = {
   en: (amount, description) => `The amount to pay is ${amount}, for ${description}. Is that correct?`,
   fr: (amount, description) => `Le montant à payer est de ${amount}, pour ${description}. Est-ce exact ?`,
+  es: (amount, description) => `El importe a pagar es de ${amount}, por ${description}. ¿Es correcto?`,
 };
 
 /**

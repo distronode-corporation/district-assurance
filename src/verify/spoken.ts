@@ -72,7 +72,11 @@ interface Vocabulary {
   connectors: ReadonlyArray<readonly string[]>;
 }
 
-const VOCABULARIES: Readonly<Record<Locale, Vocabulary>> = {
+/**
+ * The words understood, by locale. Spanish (#122) has none yet, so a spoken answer on a Spanish
+ * call is refused until a reviewed Spanish vocabulary is added here (Sean's decision 6).
+ */
+const VOCABULARIES: { readonly [L in Locale]?: Vocabulary } = {
   en: { words: new Map([...NATO, ...ENGLISH]), connectors: [["as", "in"], ["for"]] },
   fr: { words: new Map([...NATO, ...FRENCH]), connectors: [["comme", "dans"], ["comme"]] },
 };
@@ -86,12 +90,12 @@ const UNUSABLE: SpokenAnswer = { status: "unusable" };
  */
 export function normaliseSpokenAnswer(input: { field: SpokenFormat; transcript: string; locale: Locale }): SpokenAnswer {
   if (!(SPOKEN_FORMATS as readonly string[]).includes(input.field)) throw new EngineError("invalid_input", `field must be one of ${SPOKEN_FORMATS.join(", ")}`);
-  if (!isSupportedLocale(input.locale)) throw new EngineError("invalid_input", "locale must be en or fr");
+  if (!isSupportedLocale(input.locale) || VOCABULARIES[input.locale] === undefined) throw new EngineError("invalid_input", "a spoken answer is read in en or fr");
   const { transcript } = input;
   if (typeof transcript !== "string" || transcript.length > MAX_SPOKEN_TRANSCRIPT) return UNUSABLE;
   const folded = transcript.toLowerCase().normalize("NFD").replace(/\p{M}/gu, "");
   if (!ALLOWED.test(folded)) return UNUSABLE;
-  const chars = readTokens(folded.split(SEPARATORS).filter((t) => t !== ""), VOCABULARIES[input.locale]);
+  const chars = readTokens(folded.split(SEPARATORS).filter((t) => t !== ""), VOCABULARIES[input.locale]!);
   if (chars === null) return UNUSABLE;
   const value = chars.join("");
   return FORMATS[input.field].test(value) ? { status: "normalised", value } : UNUSABLE;

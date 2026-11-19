@@ -144,6 +144,7 @@ export class MemoryAccessCodeStore implements AccessCodeStore {
 export const ACCESS_CODE_TEXT: Record<Locale, (code: string, minutes: number) => string> = {
   en: (code, minutes) => `Your one-time door code: ${code}. It works once, within ${minutes} min.`,
   fr: (code, minutes) => `Votre code de porte, à usage unique : ${code}. Valable une fois, dans les ${minutes} min.`,
+  es: (code, minutes) => `Su código de puerta de un solo uso: ${code}. Sirve una vez, dentro de ${minutes} min.`,
 };
 
 /**

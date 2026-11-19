@@ -14,6 +14,9 @@ import { buildReadBack, type ReadBack } from "./readback.ts";
 
 export const DOSSIER = "dossier";
 
+/** The locales whose callers may confirm a read-back by voice: not Spanish, whose spoken answers are refused (#84, Sean). */
+const VOICE_CONFIRM_LOCALES: ReadonlySet<Locale> = new Set(["en", "fr"]);
+
 export interface DossierSettings {
   forms: IntakeForm[];
 }
@@ -191,7 +194,7 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
     if (intake === null) throw new EngineError("invalid_transition", "no intake is open on this call");
     // A Spanish caller confirms on the keypad: Spanish spoken answers are refused until a reviewed
     // vocabulary exists, and the Spanish read-back asks for the 1.
-    if (draft.record.locale === "es" && confirmedBy === "voice") {
+    if (!VOICE_CONFIRM_LOCALES.has(draft.record.locale) && confirmedBy === "voice") {
       throw new EngineError("precondition_failed", "a Spanish call confirms its read-back on the keypad (confirmedBy keypad)");
     }
     const heard = buildReadBack(intake.form, intake.values, draft.record.locale).digest;

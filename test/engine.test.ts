@@ -1316,7 +1316,7 @@ describe("Engine in Spanish (FIL-6)", () => {
 
   it("starts a call in en, fr or es and refuses any other locale", async () => {
     const t = setup();
-    await assert.rejects(t.engine.startCall({ locale: "de" as "en" }), rejects("invalid_input", /locale must be en, fr or es/));
+    await assert.rejects(t.engine.startCall({ locale: "de" as "en" }), rejects("invalid_input", /locale must be one of en, fr, es/));
     await t.engine.startCall({ callId: "call_es", locale: "es" });
     assert.deepEqual((await t.ledger.list()).map((e) => [e.event, e.detail.locale]), [["call.started", "es"]]);
   });
@@ -1371,7 +1371,9 @@ describe("Engine in Spanish (FIL-6)", () => {
     const t = setup();
     const callId = await verifiedCall(t, "es");
     assert.match(t.messages.sent[0]!.body, /^Su enlace de verificación de identidad, de un solo uso: https:/);
-    await t.engine.requestPayment(callId, { amountMinor: 150050, currency: "usd", description: "Depósito", amountSource: "price_list" });
+    const deposit = { amountMinor: 150050, currency: "usd", description: "Depósito", amountSource: "price_list" } as const;
+    await confirmAmount(t.engine, callId, deposit);
+    await t.engine.requestPayment(callId, deposit);
     assert.equal(t.messages.sent.at(-1)!.body, "Su enlace de pago seguro por $1,500.50: https://pay.example.test/c/cs_fake_1");
   });
 });

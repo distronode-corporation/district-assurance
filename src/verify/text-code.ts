@@ -61,6 +61,7 @@ export function textCodeDestinationAllowed(policy: VerificationPolicy, phoneOnFi
 export const TEXT_CODE_TEXT: Record<Locale, (code: string) => string> = {
   en: (code) => `Your one-time verification code: ${code}. It expires in 10 minutes. Do not share it.`,
   fr: (code) => `Votre code de vérification à usage unique : ${code}. Il expire dans 10 minutes. Ne le communiquez à personne.`,
+  es: (code) => `Su código de verificación de un solo uso: ${code}. Caduca en 10 minutos. No lo comparta con nadie.`,
 };
 
 /** The text, built by code in the call's locale. */
