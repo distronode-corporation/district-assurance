@@ -545,6 +545,29 @@ when it did not act, optionally `{"error": "<code>"}` (`replay`, `signature`, ..
 including no answer, is `unknown`. A relay checks the grant with `verifyAccessGrant` against
 `gate.keys()`, its own workspace and its own audience, and refuses a grant id it has seen.
 
+**The Seam adapter** (`seamAccessController({apiKey, baseUrl?, timeoutMs?, confirmWithinMs?,
+pollIntervalMs?})`): the target's `ref` is the Seam `device_id`. `baseUrl` defaults to
+`https://connect.getseam.com` (HTTPS only, or HTTP to the loopback address; no credentials in the
+URL); `timeoutMs` is per request, 100 to 30,000 (default 5,000); `confirmWithinMs` 0 to 30,000
+(default 10,000) and `pollIntervalMs` 10 to 5,000 (default 1,000). Every request is a `POST` with
+`authorization: Bearer <apiKey>` and a JSON body, redirects not followed. No idempotency key is
+sent: Seam documents none on unlock.
+
+1. `POST /devices/get {device_id}`. Unless the answer names the same device with
+   `can_remotely_unlock: true` and not `properties.online: false`, the result is `refused`:
+   `cannot_unlock_remotely`, `device_offline`, `device_unreadable`, Seam's error type on a 4xx
+   (`device_not_found`, ...) or `http_<status>`, and `seam_unavailable` on a 5xx or no answer.
+   Nothing was sent to the lock.
+2. `POST /locks/unlock_door {device_id}`, once, never retried. A 4xx is `refused` (Seam's error
+   type when it is a short code, otherwise `http_<status>`); a 5xx, a timeout, a dropped connection,
+   a redirect, or a 2xx without an action attempt (`action_attempt_id` 1 to 200 characters, `status`
+   `pending`, `success` or `error`) throws, which Gate records as `unknown`.
+3. While the attempt is `pending`: `POST /action_attempts/get {action_attempt_id}` every
+   `pollIntervalMs`, at most `confirmWithinMs / pollIntervalMs` times (rounded up). `success` is
+   `delivered` with `confirmed: true`; `error` throws (`unknown`: a lock that timed out may still
+   have moved); still `pending`, or an answer that cannot be read, is `delivered` with
+   `confirmed: false`. `providerRef` is the action attempt id.
+
 A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);
 revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS
-(GAT-4), a Seam adapter (GAT-5), direct vendor adapters (GAT-6).
+(GAT-4), direct vendor adapters (GAT-6).

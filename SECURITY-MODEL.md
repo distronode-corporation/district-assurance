@@ -141,7 +141,14 @@ without a grant, and none reaches the ledger after a call ended with nothing in 
 a lost answer (a timeout, a dropped connection, a 5xx) is recorded as `unknown`, and opening again
 is a fresh request with a new grant, up to `maxGrantsPerCall` (tested). The answer is recorded
 even if the caller's grant expired or the call ended while the door answered (tested). The ledger
-holds each grant's digest and outcome, never the grant. Left to the host: a relay that keeps seen
+holds each grant's digest and outcome, never the grant. The Seam adapter (`seamAccessController`)
+keeps the same rule: Seam documents no idempotency key on unlock, so it sends the unlock once and
+never again, only after Seam says the device can unlock remotely; any failure before the unlock is
+`refused` (nothing was sent), a lost or unreadable answer to the unlock, or an attempt Seam reports
+failed, is `unknown`, and `confirmed` only when Seam reports the attempt succeeded (tested against
+a local server replaying Seam's answers). Its API key goes only in the authorization header, never
+into a result, an error or the ledger (tested). Seam itself is trusted to unlock only the device it
+was asked to, as any controller is. Left to the host: a relay that keeps seen
 grant ids across restarts (or refuses every grant for 15 minutes plus twice the verifier's clock
 skew after one), and the door's own safety
 (an unlock pulse, not a latch).
@@ -196,8 +203,9 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
   record, so a refund or a dispute lands on the platform's account, not the business's. Who
   carries them, and on what terms, is a legal and payment provider question that is not decided.
   The engine has no refund or dispute code in either mode; a host handles both at the provider.
-- **Seam in the door path.** A paid third party between the engine and a door (GAT-5) waits on its
-  pricing and its handling of Canadian data being checked.
+- **Seam in the door path.** The adapter is built (GAT-5), but putting a paid third party between
+  the engine and a door in production still waits on its pricing and its handling of Canadian data
+  being checked, and on one unlock proven by hand in Seam's sandbox.
 
 ## Left to the host
 

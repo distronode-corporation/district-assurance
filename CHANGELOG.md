@@ -14,6 +14,7 @@ All notable changes to this project are documented here. The format follows
   outside module path. `verifyAccessGrant` and `SeenGrants` for the access side.
 - The signed-webhook relay adapter (GAT-2), `webhookRelay`, and an example door relay. An unlock
   is never retried; a lost answer is `unknown`.
+- The Seam adapter (GAT-5), `seamAccessController`: checks the device can unlock remotely, unlocks once with no retry, `confirmed` only when Seam reports success, a lost answer `unknown`.
 - `FakeAccessController` in `district-assurance/testing`.
 - Paylink's two modes (PAY-7), `connect` and `platform`, per flow step; `linkLifeMinutes` (5 to 60,
   default 15) with the engine expiring links itself (`expirePaymentLinks`, `PaymentLinks.expireLink`);
