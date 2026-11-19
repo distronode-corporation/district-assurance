@@ -182,7 +182,8 @@ workspace shares. A counter is keyed by workspace, factor kind, and scope: `subj
 key, whether or not the subject exists, so a lock never says which accounts are real) or `number`
 (`numberKeyFor(knowledgeKey, callingNumber)` = `HMAC-SHA256(knowledgeKey, "number:" + number)`,
 so the store never holds a phone number). `beginVerification(callId, {..., callingNumber})` takes
-the calling number, E.164, from the carrier; a withheld number is left out, and a restart that
+the calling number, an E.164 string, from the carrier (anything else is `invalid_input`); a
+withheld number is left out, and a restart that
 leaves it out keeps the one given before. The number only keys a counter: it is never a factor.
 An attempt is counted under the subject's counter when there is a subject key, and the number's
 when there is a number.
