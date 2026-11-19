@@ -64,8 +64,10 @@ The record lives in a `SessionStore`:
 - Optional: `pendingCalls(workspaceId, limit)` lists up to `limit` calls whose latest write had the
   hint `{ledgerPending: true}` (its outbox is not empty, section 9). The engine sends the hint with
   every write; a store that lists keeps the mark in the same write as the record, and a write
-  without a hint leaves the mark as it was. The in-memory store rotates the list (listed calls go
-  to the back), so a call that keeps failing cannot starve the others.
+  without a hint leaves the mark as it was. A store lists the calls listed least recently first:
+  the in-memory store rotates the list (listed calls go to the back), so a call that keeps failing
+  cannot starve the others, and a durable store that always listed the same first `limit` would
+  let up to `limit` failing calls hold back every other one. The contract does not check the order.
 
 Every engine step reads the record, applies one pure change, and writes it with compare-and-set.
 On `{ok: false}` the step starts again from a fresh read, up to 5 attempts (`MAX_WRITE_ATTEMPTS`),

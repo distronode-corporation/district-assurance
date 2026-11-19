@@ -105,6 +105,8 @@ export interface SessionStore {
    * Optional (INT-5). Up to `limit` ids of the workspace's calls whose latest write said
    * `ledgerPending`, for a background flush (`Engine.flushPending`). A store that has it keeps the
    * mark with the record, in the same write; a write without a hint leaves the mark as it was.
+   * List the calls listed least recently first (`MemorySessionStore` rotates them): a store that
+   * always lists the same first `limit` lets calls that keep failing hold back every other one.
    */
   pendingCalls?(workspaceId: string, limit: number): Promise<string[]>;
   /** Points a provider reference (an identity session, a payment link) at a call. The first binding wins. */
