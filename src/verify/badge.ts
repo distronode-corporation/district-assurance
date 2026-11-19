@@ -369,9 +369,16 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     const s = draft.slice<BadgeSlice>(BADGE);
     const max = maxAttempts(rt, module, kind);
     const used = s.attempts[kind] ?? 0;
-    if (used >= max) return null;
+    // A spoken answer that carries keypad fields is a guess at those fields too: it also counts
+    // against keypad_knowledge, so the keypad and the voice share one budget for them per call.
+    const shared = kind === "spoken_knowledge" && spokenKeypadFields(rt).length > 0;
+    const keypadMax = rt.policy.maxKeypadAttemptsPerCall;
+    const keypadUsed = s.attempts.keypad_knowledge ?? 0;
+    if (used >= max || (shared && keypadUsed >= keypadMax)) return null;
     s.attempts[kind] = used + 1;
-    return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch, locale: draft.record.locale };
+    if (shared) s.attempts.keypad_knowledge = keypadUsed + 1;
+    const last = used + 1 >= max || (shared && keypadUsed + 1 >= keypadMax);
+    return { subjectKey: s.subjectKey, subject: s.subject, last, epoch: s.epoch, locale: draft.record.locale };
   });
   if (reserved === null) return { matched: false, locked: true };
   const input = { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey, subject: reserved.subject, entry, hmac: (d: string) => rt.hmac(d), locale: reserved.locale };

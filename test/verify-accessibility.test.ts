@@ -68,15 +68,30 @@ describe("a keypad field said instead of keyed", () => {
     assert.equal(JSON.stringify(await t.ledger.list()).includes("1985"), false, "no value in the ledger");
   });
 
-  it("stays within the policy's spoken attempt limit, and the keypad's own limit is untouched", async () => {
-    const t = accessibleSetup();
+  it("stays within the policy's spoken attempt limit, and shares the keypad's budget for the fields it carries", async () => {
+    const t = accessibleSetup(accessibleConfig(undefined, (c) => (c.policy.maxKeypadAttemptsPerCall = 3)));
     const callId = await verifying(t);
     const wrong = { postal_code: "K1A 0B1", dob: "11111111" };
     assert.deepEqual(await t.engine.submitFactor(callId, "spoken_knowledge", wrong), { matched: false, locked: false });
     assert.deepEqual(await t.engine.submitFactor(callId, "spoken_knowledge", wrong), { matched: false, locked: true });
     assert.deepEqual(await t.engine.submitFactor(callId, "spoken_knowledge", { postal_code: "K1A 0B1", dob: DOB }), { matched: false, locked: true }, "even the right answer");
-    assert.deepEqual((await attempts(t, callId)).attempts, { spoken_knowledge: 2 });
-    assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: true, locked: false }, "keypad attempts are their own");
+    assert.deepEqual((await attempts(t, callId)).attempts, { spoken_knowledge: 2, keypad_knowledge: 2 }, "each spoken guess at the date of birth is a keypad guess too");
+    assert.deepEqual(await t.engine.submitKeypad(callId, { dob: "11111111" }), { matched: false, locked: true }, "3 guesses at the date of birth on this call, not 3 plus 2");
+    assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: false, locked: true });
+  });
+
+  it("is refused once the keypad used up the budget it shares, and counts only the spoken limit without keypad fields", async () => {
+    const t = accessibleSetup(accessibleConfig(undefined, (c) => (c.policy.maxKeypadAttemptsPerCall = 2)));
+    const callId = await verifying(t);
+    assert.deepEqual(await t.engine.submitKeypad(callId, { dob: "11111111" }), { matched: false, locked: false });
+    assert.deepEqual(await t.engine.submitFactor(callId, "spoken_knowledge", { postal_code: "K1A 0B1", dob: "11111111" }), { matched: false, locked: true }, "the last shared guess");
+    assert.deepEqual(await t.engine.submitFactor(callId, "spoken_knowledge", { postal_code: "K1A 0B1", dob: DOB }), { matched: false, locked: true }, "spoken limit left, keypad budget gone");
+    assert.deepEqual((await attempts(t, callId)).attempts, { keypad_knowledge: 2, spoken_knowledge: 1 });
+
+    const plain = accessibleSetup(accessibleConfig({}));
+    const other = await verifying(plain);
+    await plain.engine.submitFactor(other, "spoken_knowledge", { postal_code: "K1A 0B1" });
+    assert.deepEqual((await attempts(plain, other)).attempts, { spoken_knowledge: 1 }, "no keypad field said, no keypad guess");
   });
 
   it("is never judged when the policy has no spoken fields", async () => {
@@ -137,7 +152,7 @@ describe("a spoken PIN", () => {
     for (const bad of [null, { postal_code: "K1A0B1", dob: 19850214 }]) {
       assert.equal((await t.engine.submitFactor(callId, "spoken_knowledge", bad as never)).matched, false, JSON.stringify(bad));
     }
-    assert.deepEqual((await attempts(t, callId)).attempts, { spoken_knowledge: 2 }, "a number is never read as its digits");
+    assert.deepEqual((await attempts(t, callId)).attempts, { spoken_knowledge: 2, keypad_knowledge: 2 }, "a number is never read as its digits");
     assert.deepEqual((await t.ledger.list()).filter((e) => e.event === "verification.factor").map((e) => e.detail), [
       { kind: "spoken_knowledge", passed: false },
       { kind: "spoken_knowledge", passed: false },

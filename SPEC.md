@@ -205,7 +205,10 @@ maxKeypadIdleSeconds?}`.
   compared as `HMAC-SHA256(knowledgeKey, "field:" + field + ":" + value)`, so only the digits on
   file match. The factor recorded is `spoken_knowledge`, never
   `keypad_knowledge`: it reaches only what the policy's sets give `spoken_knowledge`, under
-  `spoken.maxAttemptsPerCall`, and without `spoken` in the policy it is never judged.
+  `spoken.maxAttemptsPerCall`, and without `spoken` in the policy it is never judged. Each such
+  answer is also a guess at the keypad fields, so it counts against `keypad_knowledge` too
+  (`maxKeypadAttemptsPerCall`): the keypad and the voice share one budget for those fields per
+  call, and a spoken answer is refused, even the right one, once either limit is used up.
 - `keypadIdleSeconds` (5 to 60, default 10) is a call's keypad idle timeout;
   `maxKeypadIdleSeconds` (`keypadIdleSeconds` to 300, default `keypadIdleSeconds`) is the most it
   may be lengthened to. `keypadTiming(callId)` returns `{idleTimeoutMs, maxIdleTimeoutMs}` for

@@ -83,7 +83,9 @@ lowered for anyone, and a mark that says a caller uses a relay or a TTY can reve
 **Controls:** a keypad field said instead of keyed (Badge's `spokenKeypadFields`) is judged in
 the `spoken_knowledge` factor, so it reaches only what the policy gives a spoken answer (alone,
 level 1 at most), under the spoken attempt limit, and never unlocks texts; without spoken fields
-in the policy it is never judged (tested). The PIN is never taken by speech: the setting refuses
+in the policy it is never judged (tested). It also counts against the keypad's own limit, so
+saying a field never adds guesses at it: the keypad and the voice share one budget per call
+(tested). The PIN is never taken by speech: the setting refuses
 it and a spoken entry carrying one is refused before it is counted (tested). A keypad `repeat` or
 `slower` request hands the host no digits, so it never uses, adds or gives back an attempt
 (tested). A call marked relay or TTY gets a longer keypad timeout, up to Badge's limit, and
