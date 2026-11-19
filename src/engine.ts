@@ -402,11 +402,18 @@ export class Engine {
       if ((await this.#sessions.get(this.workspaceId, callId)) !== null) return null;
       start = await this.#countFlowStart(record, flow.name, { steps: flow.steps });
     }
-    const draft = this.#draft(record, events);
-    if (flow !== null) this.#attachFlow(draft, flow.name, { steps: flow.steps }, flow.revision, start);
-    then(draft);
-    this.#advance(draft);
-    record.outbox = await Promise.all(events.map((event, i) => this.#outboxEntry(callId, 1, i, event)));
+    try {
+      const draft = this.#draft(record, events);
+      // Checked again for real: a module can be turned off while the start was being counted.
+      if (flow !== null) this.#attachFlow(draft, flow.name, { steps: flow.steps }, flow.revision, start);
+      then(draft);
+      this.#advance(draft);
+      record.outbox = await Promise.all(events.map((event, i) => this.#outboxEntry(callId, 1, i, event)));
+    } catch (error) {
+      // Nothing was written: the start is given back.
+      await this.#uncount(start);
+      throw error;
+    }
     let created: boolean;
     try {
       created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
