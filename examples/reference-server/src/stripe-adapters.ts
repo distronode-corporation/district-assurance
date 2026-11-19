@@ -7,6 +7,8 @@
 // The Checkout URL is returned to the engine and never logged here.
 //
 // StripeIdentityProvider (VER-5) is not built yet and throws NotImplementedError.
+import { createHash } from "node:crypto";
+
 import {
   NotImplementedError,
   type IdentityProvider,
@@ -196,7 +198,7 @@ export class StripeCheckoutLinks implements PaymentLinks {
     options: { form?: Array<[string, string]>; idempotencyKey?: string; account?: string | undefined; signal?: AbortSignal | undefined },
   ): Promise<{ status: number; body: Record<string, unknown> }> {
     const headers: Record<string, string> = { authorization: `Bearer ${this.#apiKey}` };
-    if (options.idempotencyKey !== undefined) headers["idempotency-key"] = options.idempotencyKey;
+    if (options.idempotencyKey !== undefined) headers["idempotency-key"] = stripeIdempotencyKey(options.idempotencyKey);
     if (options.account !== undefined) headers["stripe-account"] = options.account;
     const timeout = AbortSignal.timeout(this.#timeoutMs);
     const init: RequestInit = { method, headers, redirect: "error", signal: options.signal === undefined ? timeout : AbortSignal.any([timeout, options.signal]) };
@@ -218,16 +220,35 @@ export class StripeCheckoutLinks implements PaymentLinks {
   }
 }
 
+/**
+ * The engine's idempotency key as Stripe's `Idempotency-Key` header: printable ASCII of at most 255
+ * characters, Stripe's limit. The engine's key is a JSON tuple of workspace, call and payment ids,
+ * which may hold any text: a header carries bytes, so fetch throws on a character past U+00FF
+ * before anything is sent (no link could ever be created for such a call), and sends U+0080 to
+ * U+00FF as one raw byte each. A key that is not short printable ASCII goes as `sha256-` and the
+ * SHA-256 of its JSON string (JSON keeps a lone surrogate apart), the same for every retry.
+ */
+export function stripeIdempotencyKey(key: string): string {
+  return /^[\x20-\x7e]{1,255}$/.test(key) ? key : `sha256-${createHash("sha256").update(JSON.stringify(key), "utf8").digest("hex")}`;
+}
+
+/** Stripe's error types and codes are short snake_case words; anything else, a key above all, is left out. */
+const ERROR_WORD = /^[a-z][a-z0-9_]{0,79}$/;
+const KEY_PREFIX = /^(sk|rk|pk)_/;
+
 function checkedSessionId(linkId: string): string {
   if (!SESSION_ID.test(linkId)) throw new TypeError("not a test-mode Checkout Session id");
   return linkId;
 }
 
-/** The HTTP status and Stripe's error type and code: never its message, which can quote a key. */
+/** The HTTP status and Stripe's error type and code, when they are plain words: never its message, which can quote a key. */
 function describeError(res: { status: number; body: Record<string, unknown> }): string {
   const error = res.body.error;
   const e = typeof error === "object" && error !== null ? (error as Record<string, unknown>) : {};
   const parts = [`HTTP ${res.status}`];
-  for (const key of ["type", "code"]) if (typeof e[key] === "string") parts.push(`${key} ${String(e[key]).slice(0, 80)}`);
+  for (const key of ["type", "code"]) {
+    const word = e[key];
+    if (typeof word === "string" && ERROR_WORD.test(word) && !KEY_PREFIX.test(word)) parts.push(`${key} ${word}`);
+  }
   return parts.join(", ");
 }
