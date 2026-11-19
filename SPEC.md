@@ -89,7 +89,7 @@ module the config has on.
 
 | Built-in | Steps | Needs | Adapters |
 |---|---|---|---|
-| `badge` | `badge.verify` | | `records`; `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `pinVerifier` with `pin` in verifier mode |
+| `badge` | `badge.verify` | | `records`; `counters` with any factor the caller enters (`keypad_knowledge`, `pin`, plug-ins); `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `pinVerifier` with `pin` in verifier mode |
 | `dossier` | `dossier.collect` | `intake.file` | `records` |
 | `paylink` | `paylink.request` | `payment.request` | `payments`, `messages` |
 | `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
@@ -130,7 +130,8 @@ Scopes: `status.read` 1, `intake.file` 1, `payment.request` 2, `contact.update` 
 no SIM change or port in the last 72 hours.
 
 Badge's settings turn factors on (`factors`, at least one), set the grant lifetime
-(`grantTtlSeconds`, default 900, at most 3600) and, when `pin` is on, the PIN settings (section 6).
+(`grantTtlSeconds`, default 900, at most 3600), the lockouts across calls (`lockout`, section 6)
+and, when `pin` is on, the PIN settings (section 6).
 A factor that is off is refused at every entry point. A planned factor cannot be turned on.
 
 A **grant** carries the level, the scopes at or below it (narrowed to the verify step's `scopes`
@@ -152,7 +153,7 @@ texts.
 - `submitKeypad` compares every configured field, in constant time per field, even after a
   mismatch, and records one factor: passed only if the subject exists and every field matched.
 - After `maxKeypadAttemptsPerCall` judged attempts, further submissions return `locked` without
-  judging.
+  judging. Failures also count across calls (section 6, "Lockouts across calls").
 
 ## 6. PIN
 
@@ -174,7 +175,7 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   applied (`precondition_failed`), and a change of subject drops pending photo ID checks.
 - The photo ID link is reserved, created, enrolled and texted in turn; after a failure,
   `startPhotoId` resumes with the same idempotency keys, so a call never has two links. After `maxAttemptsPerCall`,
-  `submitPin` returns `locked` without judging. Across calls: planned (VER-1).
+  `submitPin` returns `locked` without judging. Across calls: below.
 - Enrolment: `enrolPin(callId, {pin, confirm})` lets a caller choose a PIN, keyed twice. It needs
   the `pin` factor on in `keyed_hash` mode (in `verifier` mode the host's own store enrols, and
   `enrolPin` refuses with `precondition_failed`), a call with no running or ended flow
@@ -205,9 +206,48 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   caller's request, and needs the `pin` factor on. In `keyed_hash` mode it removes the digest
   (`putPinDigest` with null), so the subject has no PIN until they enrol again at level 2; in
   `verifier` mode the host's store resets its own PIN. Either way it clears the subject's PIN
-  failure counters when the engine has a `counters` adapter (VER-1; a stand-in with only `reset`,
-  in VER-1's shape `reset({workspaceId, factor: "pin", scope: "subject", key})`, until VER-1
-  lands), and appends `pin.reset` to the ledger with no call.
+  failure counters when the engine has a `counters` adapter (VER-1), and appends `pin.reset` to the ledger with no call.
+
+**Lockouts across calls (VER-1).** Every factor the caller enters (keypad knowledge, the PIN,
+plug-ins) is also counted across calls, in an `AttemptCounters` store every engine of the
+workspace shares. A counter is keyed by workspace, factor kind, and scope: `subject` (the subject
+key, whether or not the subject exists, so a lock never says which accounts are real) or `number`
+(`numberKeyFor(knowledgeKey, callingNumber)` = `HMAC-SHA256(knowledgeKey, "number:" + number)`,
+so the store never holds a phone number). `beginVerification(callId, {..., callingNumber})` takes
+the calling number, E.164, from the carrier; a withheld number is left out, and a restart that
+leaves it out keeps the one given before. The number only keys a counter: it is never a factor.
+An attempt is counted under the subject's counter when there is a subject key, and the number's
+when there is a number.
+
+- `AttemptCounters`: `get(key, since)` returns the failure times at or after `since`, in the order
+  recorded; `recordFailure(key, at, since)` adds one and returns the same list, this one last, in
+  one atomic step; `removeFailure(key, at)` forgets one failure recorded at `at` and keeps every
+  other, also in one atomic step (nothing when there is none); `reset(key)` forgets them all. `attemptCountersContract(factory)` in
+  `district-assurance/testing` is the suite a store must pass; `MemoryAttemptCounters` is the
+  reference. The engine refuses (`invalid_input`) a `counters` adapter missing any of the four
+  methods when it is built, so a store written before `removeFailure` existed never reaches a pass.
+- Badge's `lockout` setting: `{backoffSeconds, lockAfterFailures, windowHours}`, defaults
+  `[5, 15, 60, 300, 900]`, `10` and `24`, which are also floors: `backoffSeconds` lists 5 to 10
+  whole seconds, each at least the default at its place (900 after the fifth) and at most 86400;
+  `lockAfterFailures` is 1 to 10; `windowHours` 24 to 168. `validateConfig` refuses anything else.
+- With `n` failures in the window (the last `windowHours`, a failure exactly that old excluded):
+  `n >= lockAfterFailures` is a hard lock until the oldest of the last `lockAfterFailures` failures
+  leaves the window; otherwise, for `n >= 1`, a wait of `backoffSeconds[min(n, length) - 1]` after
+  the latest failure.
+- `submitFactor` (and `submitKeypad`, `submitPin`) reads the counters first. While either is
+  locked, it returns `{matched: false, locked: true}` without judging and without using the call's
+  attempt, and writes `verification.locked`. Otherwise it counts the call's attempt, then records a
+  failure on each counter, both before judging. If the lists `recordFailure` returned show a lock
+  that was not there when the counters were read (another attempt, on any call or engine, got in
+  first), the attempt is refused the same way: no counter after that one is recorded, and the
+  call's attempt is given back. A pass, once its result is accepted on the call, resets the
+  subject's counter and takes its own failure off the number's (`forgetPass`, with `removeFailure`,
+  so a failure another call records meanwhile is kept); the number's other failures stay until
+  they leave the window, so a pass on the caller's own account never clears failures the line ran
+  up against others. A failure stands, and
+  one that starts a hard lock returns `locked: true` and writes `verification.locked`. A judge or
+  verifier that throws leaves its failure counted.
+- Lifting a lock early is the host's: `AttemptCounters.reset` with the keys (`counterKeys`).
 
 ## 7. FlowConfig
 
@@ -298,6 +338,7 @@ answer on file, a phone number, a link or card data.
 | `verification.started` | `subject`: `account` or `host` |
 | `verification.factor` | `kind`, `passed` (and `status` for photo ID) |
 | `verification.carrier_checked` | `checked`, `textCodeTrusted`, `identityMatch` |
+| `verification.locked` | `kind`, `scope` (`subject` or `number`), `hard`, `until`: never the subject key, the number or its hash |
 | `identity.link_sent` | none |
 | `verification.finished` | `level`, `methods`, `discounted` |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt` |

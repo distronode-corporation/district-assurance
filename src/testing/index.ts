@@ -1,5 +1,5 @@
 // `district-assurance/testing`: fakes, contract suites and a ready-wired engine for tests and demos.
-import type { SessionStore } from "../core/adapters.ts";
+import type { AttemptCounters, SessionStore } from "../core/adapters.ts";
 import type { EngineAdapters } from "../core/runtime.ts";
 import { MemorySessionStore } from "../core/session-store.ts";
 import { createEngine, type Engine, type EngineOptions } from "../engine.ts";
@@ -11,6 +11,7 @@ import {
   FakePaymentLinks,
   FakePinVerifier,
   FixedClock,
+  MemoryAttemptCounters,
   MemoryRecordStore,
   SequentialIds,
   generateTestSigner,
@@ -33,6 +34,7 @@ export interface TestEngine {
   ledger: MemoryAuditLedger;
   sessions: SessionStore;
   pinVerifier: FakePinVerifier;
+  counters: AttemptCounters;
 }
 
 export type TestEngineOptions = Partial<Omit<EngineOptions, "adapters">> & {
@@ -56,6 +58,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     ledger: new MemoryAuditLedger(),
     sessions: new MemorySessionStore() as SessionStore,
     pinVerifier: new FakePinVerifier(),
+    counters: new MemoryAttemptCounters() as AttemptCounters,
   };
   const { adapters: overrides = {}, ...rest } = options;
   const adapters = {
@@ -67,10 +70,12 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     ledger: parts.ledger,
     sessions: parts.sessions,
     pinVerifier: parts.pinVerifier,
+    counters: parts.counters,
     signer: generateTestSigner(),
     ...overrides,
   } as EngineAdapters;
   if (overrides.sessions !== undefined) parts.sessions = overrides.sessions;
+  if (overrides.counters !== undefined) parts.counters = overrides.counters;
   const engine = createEngine({ workspaceId: "ws_test", knowledgeKey: TEST_KNOWLEDGE_KEY, clock: parts.clock, ids: parts.ids, ...rest, adapters });
   return { engine, ...parts };
 }

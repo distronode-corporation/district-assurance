@@ -40,7 +40,9 @@ keypad fields are judged together and give one answer; an unknown account, a wro
 non-keypad entry give the same result and the same ledger detail (tested), and the same holds for
 the PIN: an unknown subject, a subject with no PIN and a malformed entry do the same keyed-hash work
 and answer the same (tested); every field is compared even after a mismatch; nothing reads back a value on file; links go out only after a match, so a
-text never confirms an account. Planned: per-subject and per-number counters across calls (VER-1).
+text never confirms an account. Failures are counted across calls per subject key, for unknown
+subjects too, so a lock never tells a real account from a made-up one (tested), and per calling
+number, so one line trying account after account is locked out (tested).
 
 ### Guessing
 
@@ -49,11 +51,24 @@ knowledge, the PIN at 1 to 5, plug-ins at 1 to 5), after which the line stops ju
 right answer (tested). Each attempt is counted in its own write before it is judged, so a crash, a
 failing PIN verifier or a second process never gives a free try (tested, two engines on one
 store). PINs are at least 4 digits, and keypad attempts are capped at 5 per call like the PIN's.
-**Hard gate:** durable lockout across calls (VER-1) must be merged before any host runs the
-owner-command flow, or any PIN factor, on a live line. Without it, a 4-digit PIN with 3 attempts
-per call falls within about 3,300 calls, half that on average. In `verifier` mode the host's PIN
-store is asked for every attempt, with a stand-in for a malformed entry, so timing does not tell
-them apart. A PIN a caller chooses (`enrolPin`) is refused when every digit is the same, when it is
+Across calls (VER-1), every entered factor is counted per subject and per calling number in an
+`AttemptCounters` store all engines share: a wait after each failure (5, 15, 60, 300, then 900
+seconds) and a hard lock after 10 failures in 24 hours; a config can make these stricter, never
+looser (tested). The failure is recorded before the entry is judged, like the call's attempt, so a
+crash, a failing verifier or a second process never gives a free try; the counters are read before
+the attempt, and an attempt that finds a lock another engine just set is refused unjudged (tested,
+two engines racing). A locked line answers `locked` even to the right PIN, on any call and either
+engine, until the window passes or the business resets the counter (tested). A pass resets the
+subject's counter but takes only its own failure off the number's: a line's failures against other
+accounts stay through a pass on its own account, so alternating with that pass does not escape
+the lock per calling number (tested). Taking it off is one atomic step of the store
+(`removeFailure`), so a failure another call records on the same number meanwhile is never lost
+(tested, two engines). Without this, a
+4-digit PIN with 3 attempts per call fell within about 3,300 calls; now an attacker gets at most
+10 guesses per subject per 24 hours, about 3,650 a year against 10,000 PINs, so a 4-digit PIN
+still needs watching (`verification.locked` in the ledger) and a longer PIN where the risk is
+high. In `verifier` mode the host's PIN store is asked for every attempt, with a stand-in for a
+malformed entry, so timing does not tell them apart. A PIN a caller chooses (`enrolPin`) is refused when every digit is the same, when it is
 a run (1234, 4321, 7890), or when it equals the account number or any keypad knowledge on file,
 with one answer (`weak`) for all three, so a try never says which value is on file (tested).
 
@@ -130,7 +145,9 @@ it ran under. Who may edit a config, and how its history is kept, is the host's 
 Two processes acting on one call at once. **Controls:** every change is a compare-and-set on the
 call's version, retried from a fresh read; links are reserved before they are created, so two
 processes cannot both send one; a lost race writes nothing to the ledger (tested). A durable store
-must pass `sessionStoreContract`.
+must pass `sessionStoreContract`. Failure counters across calls are recorded in one atomic step
+that returns what came before, so of two attempts racing on one subject only one is judged
+(tested); a durable counter store must pass `attemptCountersContract`.
 
 ### Prompt injection
 
@@ -171,7 +188,15 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
   speech-to-text and the model while `sensitive` is set.
 - Keeping the knowledge key and the receipt signing key in a key store.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
-  guarantees (`sessionStoreContract` today; PRV-5 for the others).
+  guarantees (`sessionStoreContract` today; PRV-5 for the others), and one durable
+  `AttemptCounters` store shared by every process of a workspace (`attemptCountersContract`).
+- Passing the calling number from the carrier to `beginVerification`, never one the caller or the
+  model gives. Caller ID can be spoofed, so the number's counter is a brake on one line, not a
+  control; the subject's counter is what bounds guessing, and a withheld number skips the
+  number's counter.
+- A lockout is also a way to lock someone out: anyone who knows a subject (the owner of a line)
+  can spend its 10 failures. Watching `verification.locked`, the person path for a locked caller,
+  and who may lift a lock (`AttemptCounters.reset`) are the host's.
 - Choosing the subject when it starts verification with a subject key (for example the owner of
   the line it was called on). That choice is not a factor: the PIN or other factors still decide.
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.

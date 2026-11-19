@@ -42,7 +42,7 @@ export function createDemoWorld(): DemoWorld {
     config: demoConfig(),
     clock: t.clock,
     ids: t.ids,
-    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments: t.payments, signer: generateTestSigner() },
+    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments: t.payments, counters: t.counters, signer: generateTestSigner() },
   });
   let n = 0;
   const world: DemoWorld = {
@@ -95,7 +95,7 @@ const ownerCommand: ScriptStep[] = [
   {
     label: "owner-command: PIN on process B",
     async run(w, call) {
-      await w.other.beginVerification(call.callId, { subjectKey: subjectKeyFor(TEST_KNOWLEDGE_KEY, OWNER_ACCOUNT) });
+      await w.other.beginVerification(call.callId, { subjectKey: subjectKeyFor(TEST_KNOWLEDGE_KEY, OWNER_ACCOUNT), callingNumber: "+15555550101" });
       await w.other.openSensitive(call.callId, "keypad");
       const wrong = await w.other.submitPin(call.callId, "1111");
       return { detail: wrong.matched ? "MATCHED a wrong PIN" : "no match (one attempt used)", ok: !wrong.matched };
@@ -104,6 +104,8 @@ const ownerCommand: ScriptStep[] = [
   {
     label: "owner-command: PIN on process A",
     async run(w, call) {
+      // A failure starts a wait (5 seconds after the first) that holds across calls and engines; the owner keys again after it.
+      w.t.clock.advance(15_000);
       const right = await w.engine.submitPin(call.callId, OWNER_PIN);
       return { detail: right.matched ? "matched" : "no match", ok: right.matched };
     },
