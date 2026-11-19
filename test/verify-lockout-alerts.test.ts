@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 
 import type { AttemptCounterKey, AttemptCounters, AuditInput, LockNotice } from "../src/core/adapters.ts";
 import { MemoryAuditLedger } from "../src/prove/ledger.ts";
-import { NOTICES_PER_HOUR, claimNotice, noticeKey, numberKeyFor } from "../src/verify/counters.ts";
+import { NOTICES_PER_HOUR, claimNotice, noticeKey, numberKeyFor, unlockedCounter } from "../src/verify/counters.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { FakeNotifier, MemoryAttemptCounters, TEST_KNOWLEDGE_KEY, createTestEngine, type TestEngine } from "../src/testing/index.ts";
 import { ACCOUNT, PHONE_ON_FILE, PIN, rejects, setup, testConfig } from "./helpers.ts";
@@ -179,7 +179,13 @@ describe("unlock", () => {
     const entry = (await t.ledger.list()).at(-1)!;
     assert.deepEqual(
       { callId: entry.callId, actor: entry.actor, event: entry.event, at: entry.at, detail: entry.detail },
-      { callId: null, actor: "member", event: "verification.unlocked", at: iso(T0 + 60_000), detail: { kind: "pin", scope: "subject", memberId: "member_42" } },
+      {
+        callId: null,
+        actor: "member",
+        event: "verification.unlocked",
+        at: iso(T0 + 60_000),
+        detail: { kind: "pin", scope: "subject", counter: unlockedCounter(TEST_KNOWLEDGE_KEY, counter("subject", SUBJECT)), memberId: "member_42" },
+      },
     );
     assert.equal(JSON.stringify(entry).includes(SUBJECT), false, "the ledger never holds the key");
 
@@ -199,7 +205,7 @@ describe("unlock", () => {
 
   it("refuses another workspace, an unknown factor or scope, a malformed key or member, and card data", async () => {
     const t = alerted(1);
-    const ok = { workspaceId: "ws_test", factor: "pin", scope: "subject" as const, key: SUBJECT, memberId: "m-1@example.test" };
+    const ok = { workspaceId: "ws_test", factor: "pin", scope: "subject" as const, key: SUBJECT, memberId: "m-1.ops_7" };
     const cases: Array<[object, RegExp]> = [
       [{ workspaceId: "ws_other" }, /workspace/],
       [{ factor: "caller_id" }, /factor/],
@@ -207,6 +213,9 @@ describe("unlock", () => {
       [{ key: SUBJECT.toUpperCase() }, /key/],
       [{ memberId: "" }, /memberId/],
       [{ memberId: "a b" }, /memberId/],
+      [{ memberId: "m-1@example.test" }, /memberId/],
+      [{ memberId: "x".repeat(65) }, /memberId/],
+      [{ memberId: "ops:7" }, /memberId/],
       [{ memberId: "4242424242424242" }, /card number/],
     ];
     const entries = (await t.ledger.list()).length;

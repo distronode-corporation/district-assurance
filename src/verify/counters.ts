@@ -208,6 +208,14 @@ export async function claimNotice(counters: AttemptCounters, key: AttemptCounter
   return sent > NOTICES_PER_HOUR ? null : { capped: sent === NOTICES_PER_HOUR };
 }
 
+/**
+ * What the ledger's `verification.unlocked` names the counter by: a keyed digest of its factor kind,
+ * scope and key, which the business can match with its knowledge key, and no one else can.
+ */
+export function unlockedCounter(knowledgeKey: string | Uint8Array, key: Pick<AttemptCounterKey, "factor" | "scope" | "key">): string {
+  return hmacSha256Hex(knowledgeKey, JSON.stringify(["verification.unlocked", key.factor, key.scope, key.key]));
+}
+
 /** Lifts one lock: forgets the counter's failures and its notices, so a later lock is told again. */
 export async function unlockCounter(counters: AttemptCounters, key: AttemptCounterKey): Promise<void> {
   await counters.reset(key);

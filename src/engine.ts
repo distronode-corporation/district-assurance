@@ -34,7 +34,7 @@ import { detailCarriesCardNumber } from "./prove/ledger.ts";
 import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
 import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
-import { claimNotice, unlockCounter } from "./verify/counters.ts";
+import { claimNotice, unlockCounter, unlockedCounter } from "./verify/counters.ts";
 import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
@@ -101,11 +101,11 @@ export interface UnlockInput {
   scope: AttemptCounterKey["scope"];
   /** The notice's key: the subject key or the keyed hash of the calling number. */
   key: string;
-  /** The host's id for the member, written in the ledger. 1 to 128 of letters, digits, `.`, `_`, `:`, `@`, `-`. */
+  /** The host's opaque id for the member, written in the ledger. 1 to 64 of letters, digits, `.`, `_`, `-`: no `@` and no space, so no email address or name reaches the ledger (as for `clearDuress`). */
   memberId: string;
 }
 
-const MEMBER_ID = /^[A-Za-z0-9._:@-]{1,128}$/;
+const MEMBER_ID = /^[A-Za-z0-9._-]{1,64}$/;
 const COUNTER_KEY = /^[0-9a-f]{64}$/;
 
 export class Engine {
@@ -394,12 +394,15 @@ export class Engine {
     // Strings only: a regex test turns an array or an object into a string, which would pass here,
     // be recorded, and then clear no counter.
     if (typeof input.key !== "string" || !COUNTER_KEY.test(input.key)) errors.push("key must be 64 lower-case hex characters");
-    if (typeof input.memberId !== "string" || !MEMBER_ID.test(input.memberId)) errors.push("memberId must be 1 to 128 of letters, digits, '.', '_', ':', '@', '-'");
+    if (typeof input.memberId !== "string" || !MEMBER_ID.test(input.memberId)) errors.push("memberId must be an opaque id: 1 to 64 of letters, digits, '.', '_', '-'");
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     const counters = this.#adapters.counters;
     if (counters === undefined) throw new EngineError("precondition_failed", "the engine has no counters adapter, so nothing is locked");
-    const detail = { kind: input.factor, scope: input.scope, memberId: input.memberId };
-    if (detailCarriesCardNumber(detail)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
+    // Checked before the digest goes in: the digest is the engine's own hex, never card data.
+    if (detailCarriesCardNumber({ memberId: input.memberId })) throw new EngineError("invalid_input", "audit detail must never carry a card number");
+    // The counter by a keyed digest only the business can match (unlockedCounter with its knowledge
+    // key), never the key itself, as duress.cleared names its subject.
+    const detail = { kind: input.factor, scope: input.scope, counter: unlockedCounter(this.#key, input), memberId: input.memberId };
     // No event id: one from the id generator repeats when a host's generator does (a restart, a
     // second process), and the ledger would take the repeat for an append already done, leaving this
     // unlock unrecorded. Each unlock is its own entry, as a PIN reset is.

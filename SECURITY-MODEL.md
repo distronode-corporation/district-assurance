@@ -78,7 +78,8 @@ flood the owner, and waits, which come cheap, cannot use up the hard locks' noti
 notifier is best effort and never awaited: one that throws, rejects or hangs never blocks the call
 or the ledger (tested). `unlock` is a host call with no call id, so no call path reaches it; it
 clears one counter (one factor kind, one scope, one key) and nothing else, writes
-`verification.unlocked` with the member's id before clearing, and grants nothing: the caller still
+`verification.unlocked` with the member's opaque id and the counter as a keyed digest (never the
+key) before clearing, and grants nothing: the caller still
 verifies from no factors (tested). An unlock gives whoever is calling a fresh set of tries on
 that counter, so who may make it is the host's. Without this, a
 4-digit PIN with 3 attempts per call fell within about 3,300 calls; now an attacker gets at most

@@ -80,6 +80,24 @@ describe("#118 hostile: unlock input", () => {
   });
 });
 
+describe("#118 hostile: the unlock's ledger entry", () => {
+  it("R9 names the counter by a keyed digest that differs per factor, scope and key, and is never refused as card data", async () => {
+    const t = alerted();
+    const seen = new Set<unknown>();
+    for (let i = 0; i < 200; i++) {
+      const key = i.toString(16).padStart(64, "0");
+      for (const scope of ["subject", "number"] as const) await t.engine.unlock({ ...OK, scope, key });
+    }
+    await t.engine.unlock({ ...OK, factor: "keypad_knowledge" });
+    for (const e of (await t.ledger.list()).filter((x) => x.event === "verification.unlocked")) {
+      assert.match(String(e.detail.counter), /^[0-9a-f]{64}$/);
+      seen.add(e.detail.counter);
+    }
+    assert.equal(seen.size, 401);
+    assert.equal(seen.has(SUBJECT), false);
+  });
+});
+
 describe("#118 hostile: notices", () => {
   it("R5 two workspaces on one counters store keep their own caps: one's flood never silences the other", async () => {
     const counters = new MemoryAttemptCounters();
