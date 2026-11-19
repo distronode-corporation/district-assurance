@@ -69,6 +69,14 @@ export interface BadgeSlice {
   finished: number;
   lastLevel: AssuranceLevel;
   lastMethods: FactorKind[];
+  /** The policy version and config revision that judged the last one; null until one finished. */
+  lastJudgedBy: JudgedBy | null;
+}
+
+/** Which policy and which FlowConfig revision judged a verification. */
+export interface JudgedBy {
+  policyVersion: string;
+  configRevision: string;
 }
 
 export interface KeypadResult {
@@ -214,6 +222,7 @@ export class BadgeModule implements AssuranceModule {
       finished: 0,
       lastLevel: 0,
       lastMethods: [],
+      lastJudgedBy: null,
     };
     return initial as unknown as JsonValue;
   }
@@ -235,7 +244,19 @@ export class BadgeModule implements AssuranceModule {
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
-    return { verification: { level: state.level, methods: state.level === 0 ? [] : (s as unknown as BadgeSlice).lastMethods } };
+    const badge = s as unknown as BadgeSlice;
+    // No verification finished (or the record predates `lastJudgedBy`): the receipt names neither
+    // field. Only the two fields are taken, after level and methods are set, so nothing stored
+    // beside them can change what the receipt says about the verification.
+    // Each field only when the store holds it as text: a damaged record that lacks one (or holds
+    // something else) drops that field, never an undefined the receipt could not be signed with.
+    const judged: unknown = badge.lastJudgedBy;
+    const by: { policyVersion?: string; configRevision?: string } = {};
+    if (isObject(judged)) {
+      if (typeof judged.policyVersion === "string") by.policyVersion = judged.policyVersion;
+      if (typeof judged.configRevision === "string") by.configRevision = judged.configRevision;
+    }
+    return { verification: { ...by, level: state.level, methods: state.level === 0 ? [] : badge.lastMethods } };
   }
 }
 
@@ -444,8 +465,11 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
     const step = stepOfType<BadgeVerifyStep>(draft.record, "badge.verify");
     const s = draft.slice<BadgeSlice>(BADGE);
     const factors = draft.record.state.factors.filter((f) => step === null || step.factors.includes(f.kind));
-    const result = evaluateAssurance(rt.policy, factors, s.carrier);
-    const scopes = scopesForLevel(rt.policy, result.level).filter((scope) => step?.scopes === undefined || step.scopes.includes(scope));
+    // The policy and revision in force now judge, read together inside this write.
+    const policy = rt.policy;
+    const judgedBy: JudgedBy = { policyVersion: policy.version, configRevision: rt.revision };
+    const result = evaluateAssurance(policy, factors, s.carrier);
+    const scopes = scopesForLevel(policy, result.level).filter((scope) => step?.scopes === undefined || step.scopes.includes(scope));
     const issuedAt = rt.clock.now();
     const grant =
       result.level === 0
@@ -454,6 +478,7 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
             grantId: rt.ids.next("grant"),
             level: result.level,
             scopes,
+            ...judgedBy,
             issuedAt: issuedAt.toISOString(),
             expiresAt: new Date(issuedAt.getTime() + ttlMs).toISOString(),
           };
@@ -461,8 +486,9 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
     s.finished++;
     s.lastLevel = result.level;
     s.lastMethods = result.counted;
-    draft.emit("verification.finished", "code", { level: result.level, methods: result.counted, discounted: result.discounted.map((d) => d.kind) });
-    if (grant !== null) draft.emit("grant.issued", "code", { grantId: grant.grantId, level: grant.level, scopes, expiresAt: grant.expiresAt });
+    s.lastJudgedBy = judgedBy;
+    draft.emit("verification.finished", "code", { level: result.level, methods: result.counted, discounted: result.discounted.map((d) => d.kind), ...judgedBy });
+    if (grant !== null) draft.emit("grant.issued", "code", { grantId: grant.grantId, level: grant.level, scopes, expiresAt: grant.expiresAt, ...judgedBy });
     return { level: result.level, scopes: grant === null ? [] : scopes };
   });
 }

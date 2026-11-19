@@ -32,6 +32,8 @@ All notable changes to this project are documented here. The format follows
 - The reference server's Connect webhook route; the demo takes a deposit in each mode and opens a
   door through the relay.
 - ADR-21 to ADR-25.
+- Grants, `verification.finished`, `grant.issued` and receipts name the `policyVersion` and
+  `configRevision` that judged the caller (VER-8); optional on receipts, which stay at `v: 1`.
 
 - The modular core. A module registry and module interface (what a module provides, the scopes it
   grants or needs, the adapters it requires, its settings validator); Badge, Dossier, Paylink and

@@ -180,7 +180,7 @@ describe("demo and Stripe adapters", () => {
     assert.equal(result.ownerReceipt, null, "owner-command has no receipt step");
     assert.equal(result.tamperedFails, true);
     assert.equal(result.chainOk, true);
-    assert.deepEqual(result.receipt.body.verification, { level: 2, methods: ["carrier_identity_match", "keypad_knowledge"] });
+    assert.deepEqual(result.receipt.body.verification, { level: 2, methods: ["carrier_identity_match", "keypad_knowledge"], policyVersion: "demo-1", configRevision: "demo-2026-11" });
     assert.equal(result.receipt.body.payments[0]!.status, "paid");
     assert.equal(result.receipt.body.consents[0]!.purpose, "repair_texts");
   });

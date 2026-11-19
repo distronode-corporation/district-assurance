@@ -542,6 +542,9 @@ export class Engine {
       get policy() {
         return config().policy;
       },
+      get revision() {
+        return config().revision;
+      },
       now: () => this.#now(),
       hmac: (data) => hmacSha256Hex(this.#key, data),
       settings: <T>(name: string): T => {

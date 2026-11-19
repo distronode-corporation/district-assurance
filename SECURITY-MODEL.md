@@ -107,7 +107,10 @@ problem, Trace (the ledger) cannot be turned off, the floors cannot be lowered (
 an access scope, never below level 2), planned factors cannot be turned on, a payment link can
 offer only instant methods and live 5 to 60 minutes, connect mode cannot run without a connected
 account, and every call's ledger entries carry the config revision
-it ran under. Who may edit a config, and how its history is kept, is the host's (left to the host).
+it ran under. Every grant, its `verification.finished` and `grant.issued` entries and the signed
+receipt name the policy version and the config revision that judged the caller, so a verification
+judged under a config changed mid-call is told apart from one judged under the call's own (tested).
+Who may edit a config, and how its history is kept, is the host's (left to the host).
 
 ### Races across processes
 
