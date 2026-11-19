@@ -115,17 +115,19 @@ function sorted<T>(record: Record<string, T>): Record<string, T> {
  * earlier one, and its amount is taken from its `payment.link_sent` entry.
  */
 export async function monthlyReport(input: { ledger: AuditLedger; workspaceId: string; month: string; timeZone?: string }): Promise<MonthlyReport> {
-  if (typeof input.workspaceId !== "string" || input.workspaceId === "") throw new EngineError("invalid_input", "workspaceId is empty");
-  if (!MONTH.test(input.month)) throw new EngineError("invalid_input", "month must be YYYY-MM");
-  const timeZone = input.timeZone ?? "UTC";
+  // Read once: the workspace and month checked are the ones every entry is filtered by and the report names.
+  const { ledger, workspaceId, month: wanted, timeZone: zone } = input;
+  if (typeof workspaceId !== "string" || workspaceId === "") throw new EngineError("invalid_input", "workspaceId is empty");
+  if (!MONTH.test(wanted)) throw new EngineError("invalid_input", "month must be YYYY-MM");
+  const timeZone = zone ?? "UTC";
   const monthOf = monthReader(timeZone);
-  const entries = await input.ledger.list();
+  const entries = await ledger.list();
   const last = entries.at(-1);
   const report: MonthlyReport = {
     v: 1,
     document: "monthly_report",
-    workspaceId: input.workspaceId,
-    month: input.month,
+    workspaceId,
+    month: wanted,
     timeZone,
     ledger: { seq: last?.seq ?? 0, hash: last?.hash ?? GENESIS_HASH },
     calls: { started: 0, ended: 0 },
@@ -152,12 +154,12 @@ export async function monthlyReport(input: { ledger: AuditLedger; workspaceId: s
       continue;
     }
     const workspace = entryWorkspace(entry);
-    const inMonth = month === input.month;
+    const inMonth = month === wanted;
     if (workspace === null) {
       if (inMonth) report.unattributed++;
       continue;
     }
-    if (workspace !== input.workspaceId) continue;
+    if (workspace !== workspaceId) continue;
     // Events other packages will add (VER-1, GAT-1) are matched by name.
     const name: string = entry.event;
     const d = entry.detail;
