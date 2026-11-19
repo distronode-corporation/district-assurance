@@ -167,6 +167,13 @@ describe("the module contract catches", () => {
       broken({ validateStep: (step) => (step.window === undefined || (step.window as string).length > 0 ? [] : []) }),
       /^validateStep, stepLevel.*validateStep with callback.book.window spoiled, as .*window: null.*, threw/,
     ],
+    ["step validation that changes the context", broken({ validateStep: (_step, ctx) => { (ctx as { settings: unknown }).settings = null; return []; } }), /^accepts its sample settings.*validateStep\(callback.book\) threw: Cannot assign to read only property 'settings'/],
+    ["step validation that adds an adapter", broken({ validateStep: (_step, ctx) => { (ctx.adapters as Set<string>).add("records"); return []; } }), /^accepts its sample settings.*must not change the adapters it is given/],
+    [
+      "step validation that changes the adapters on garbage",
+      broken({ validateStep: (step, ctx) => { if (step.window === null) (ctx.adapters as Set<string>).add("records"); return []; } }),
+      /^validateStep, stepLevel.*validateStep with callback.book.window spoiled.*must not change the adapters it is given/,
+    ],
     ["stepLevel that throws on garbage", broken({ stepLevel: (step) => (step.window === undefined ? null : (step.window as string).length) }), /stepLevel with callback.book.window spoiled, as .*window: null.*, threw/],
     ["stepLevel that is not a level", broken({ stepLevel: () => 0.5 }), /stepLevel with .* must return a level or null/],
     ["stepGrants that is not a list", broken({ stepGrants: () => "status.read" as unknown as string[] }), /stepGrants with .* must return a list of strings/],

@@ -233,8 +233,16 @@ export function moduleContract(module: AssuranceModule, options: ModuleContractO
   const steps = options.steps ?? manifest.provides.steps.map((type) => ({ type }));
   const policy = options.policy ?? defaultVerificationPolicy();
   const installed = options.installed ?? builtInModules();
-  const goodContext = (): StepContext => ({ settings: frozen(settings), policy: frozen(policy), adapters: new Set(module.requiredAdapters(frozen(settings))) });
-  const emptyContext = (): StepContext => ({ settings: null, policy: null, adapters: new Set() });
+  const goodContext = (): StepContext =>
+    Object.freeze({ settings: frozen(settings), policy: frozen(policy), adapters: new Set(module.requiredAdapters(frozen(settings))) });
+  const emptyContext = (): StepContext => Object.freeze({ settings: null, policy: null, adapters: new Set<string>() });
+  /** validateStep on a frozen context. A host shares its adapter set, so a change to it fails the case. */
+  const validateStep = (step: FlowStep, ctx: StepContext, what: string): string[] => {
+    const before = [...ctx.adapters];
+    const problems = mustNotThrow(what, () => module.validateStep(frozen(step), ctx));
+    assert.deepEqual([...ctx.adapters], before, `${what} must not change the adapters it is given`);
+    return problems;
+  };
 
   const cases: Array<[string, () => void]> = [
     [
@@ -254,7 +262,7 @@ export function moduleContract(module: AssuranceModule, options: ModuleContractO
         for (const type of manifest.provides.steps) assert.ok(steps.some((s) => s.type === type), `no sample step of type ${type}`);
         for (const step of steps) {
           assert.ok(manifest.provides.steps.includes(step.type), `the sample step ${step.type} is not one the module provides`);
-          assert.deepEqual(module.validateStep(frozen(step), goodContext()), [], `the sample step ${show(step)}`);
+          assert.deepEqual(validateStep(step, goodContext(), `validateStep(${step.type})`), [],`the sample step ${show(step)}`);
         }
       },
     ],
@@ -275,7 +283,7 @@ export function moduleContract(module: AssuranceModule, options: ModuleContractO
             const bad = value as FlowStep;
             const what = `with ${at} spoiled, as ${show(value)},`;
             for (const ctx of [goodContext(), emptyContext()]) {
-              assertSentences(mustNotThrow(`validateStep ${what}`, () => module.validateStep(frozen(bad), ctx)), `validateStep ${what}`);
+              assertSentences(validateStep(bad, ctx, `validateStep ${what}`), `validateStep ${what}`);
             }
             // validateConfig asks for a step's level and grants even when the step has problems.
             const level = mustNotThrow(`stepLevel ${what}`, () => module.stepLevel?.(frozen(bad)) ?? null);
