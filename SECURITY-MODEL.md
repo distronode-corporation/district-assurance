@@ -136,6 +136,10 @@ byte fails verification (tested). Planned: key rotation and a published key set 
 A step's ledger entries are saved with the step itself (an outbox in the call record) and
 appended by event id, once each; a ledger that fails leaves them pending, and the next write or
 `flushLedger` appends them, so no saved step is ever missing from the ledger for good (tested).
+The reference server's optional SQLite ledger (SRV-4) adds triggers that refuse any UPDATE or
+DELETE of an entry from any connection, and takes the database's write lock for each append, so
+two processes on one file keep one chain (tested). Someone who can write the file itself can still
+rewrite it; the hash chain and signed receipts are what detect that.
 
 ### Breach of stored data
 
@@ -143,6 +147,10 @@ appended by event id, once each; a ledger that fails leaves them pending, and th
 of birth is reversed by trying every date; the caller's entries are never stored. Sensitive intake
 fields are refused by `validateConfig` until field encryption exists (FIL-2). PINs on file are
 HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode).
+The reference server's optional SQLite stores (SRV-4) keep subjects (HMACs and the number on
+file), confirmed intake values and the ledger in one file, unencrypted, created readable and
+writable by its owner only (tested). Protecting that file, its backups and the disk under it is
+left to the host.
 
 ## Left to the host
 
@@ -150,7 +158,9 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
   speech-to-text and the model while `sensitive` is set.
 - Keeping the knowledge key and the receipt signing key in a key store.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
-  guarantees (`sessionStoreContract` today; PRV-5 for the others).
+  guarantees (`sessionStoreContract` today; PRV-5 for the others). The reference server's
+  `SqliteRecordStore` and `SqliteAuditLedger` (SRV-4) are an example that passes the PRV-5 suites,
+  not a production store.
 - Choosing the subject when it starts verification with a subject key (for example the owner of
   the line it was called on). That choice is not a factor: the PIN or other factors still decide.
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.

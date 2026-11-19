@@ -299,6 +299,17 @@ Entry: `{seq, prevHash, eventId?, callId, actor, event, at, detail, hash}`. `seq
 `chainEntry` refuses a detail in which any string (other than a 64-character hex digest) contains
 a card number.
 
+The reference server has optional SQLite stores on `node:sqlite` (SRV-4,
+`examples/reference-server/src/sqlite-stores.ts`; no dependency). `SqliteAuditLedger` keeps each
+entry as `chainEntry` built it, as JSON, in a table whose `seq` is the primary key and whose
+`eventId` is unique; triggers refuse UPDATE and DELETE. Each append runs in a `BEGIN IMMEDIATE`
+transaction (a repeated `eventId` returns the first entry; a refused entry rolls back with nothing
+stored), so connections in several processes keep one chain. `SqliteRecordStore` keys subjects and
+intake records by (workspace, id) as two columns; `putIntakeRecord` keeps the first filing of a
+`recordId`, and `putSubject` adds or replaces a subject. `openSqliteStores(path)` opens both on one
+file in WAL mode, created with mode 0600, with a 5-second busy timeout. Both pass
+`auditLedgerContract` and `recordStoreContract` (PRV-5) and keep what they hold across a restart.
+
 ## 11. Canonical JSON
 
 Object keys sorted by UTF-16 code units, no whitespace, strings and numbers as ECMAScript
