@@ -504,6 +504,10 @@ describe("text wording", () => {
     assert.equal(receiptLinkText("en", "B", ["money", "contact"], LINK), `Receipt from B for a payment and a change to your contact details on your call: ${LINK}`);
     assert.equal(receiptLinkText("fr", "B", ["access"], LINK), `Reçu de B pour une demande d'accès lors de votre appel : ${LINK}`);
     assert.equal(contactNoticeText("fr", null).startsWith("Avis de sécurité : "), true);
+    // Without a business name each locale opens on its own generic sender (Spanish copy unreviewed, #122).
+    assert.equal(contactNoticeText("en", null).startsWith("Security notice: "), true);
+    assert.equal(contactNoticeText("es", null).startsWith("Aviso de seguridad: "), true);
+    assert.equal(contactNoticeText("es", "B").startsWith("B: "), true);
   });
 });
 

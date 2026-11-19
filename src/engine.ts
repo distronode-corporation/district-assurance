@@ -509,7 +509,8 @@ export class Engine {
     const amount = typeof given === "object" && given !== null ? { amountMinor: given.amountMinor, currency: given.currency } : (given ?? undefined);
     const record = await this.#read(callId);
     const check = this.#cover(record, scope, amount);
-    if (check.applied.every((name) => (record.stepUps ?? []).includes(name))) return check.ok;
+    // A rule in `applied` was walked by #cover, which set `stepUps` on this read copy (`??=`).
+    if (check.applied.every((name) => record.stepUps!.includes(name))) return check.ok;
     return this.#update(callId, (draft) => this.#authorized(draft.record, scope, amount));
   }
 

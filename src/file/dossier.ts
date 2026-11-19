@@ -401,15 +401,13 @@ export async function confirmIntake(
     throw error;
   }
   const stored = (await records.getIntakeRecord(record.workspaceId, record.recordId)) !== null;
-  const filed = await rt.update(callId, (draft): "filed" | "released" | "abandoned" | "erased" => {
+  const filed = await rt.update(callId, (draft): "filed" | "abandoned" | "erased" => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     if (s.records.some((r) => r.recordId === record.recordId)) return "filed";
-    // Released meanwhile (this write's claim went stale): the record was deleted by id, and this
-    // write stored nothing or was deleted, so nothing is filed.
     // Abandoned while it was written (abandonIntake deleted the record by id, so the late write
-    // stored nothing), or released by a failing cipher in another process: nothing is filed.
-    if (s.intake?.filing?.recordId !== record.recordId) return "abandoned";
-    if (s.intake.releasing !== undefined) return "released";
+    // stored nothing), or released by a failing cipher in another process (this write's claim went
+    // stale, and the record was deleted by id): nothing is filed.
+    if (s.intake?.filing?.recordId !== record.recordId || s.intake.releasing !== undefined) return "abandoned";
     // The store kept nothing (the subject was erased): the call files nothing either, and drops
     // the draft that holds the values.
     if (!stored) {
@@ -425,7 +423,6 @@ export async function confirmIntake(
     draft.emit("intake.confirmed", "caller", { recordId: record.recordId, formId: record.formId, digest: record.digest, confirmedBy: record.confirmedBy });
     return "filed";
   });
-  if (filed === "released") throw new EngineError("precondition_failed", "the fieldCipher could not seal the record in another process; nothing was filed and the draft is gone");
   if (filed === "abandoned") throw new EngineError("precondition_failed", "the filing was abandoned while it was written, or released by a failing fieldCipher; nothing was filed");
   if (filed === "erased") throw new EngineError("precondition_failed", "the subject was erased while this record was filed; nothing was filed");
   return record;
