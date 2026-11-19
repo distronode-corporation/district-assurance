@@ -34,6 +34,9 @@ All notable changes to this project are documented here. The format follows
 - Read-backs in English and French (FIL-1): `buildReadBack` and `engine.intakeReadBack` speak each
   field by type (dates in full, yes and no, numbers) with a fixed confirm prompt and never read a
   sensitive value; `confirmIntake` now requires the read-back's digest and refuses a draft changed since.
+- Conditional fields and validation rules (FIL-4): `showIf` (asked, read back and filed only while
+  another field holds a value), `min` and `max` for numbers and dates, and a bounded `pattern` for
+  text; `validateConfig` refuses unknown field settings, `showIf` cycles, and fields that name a card or a SIN.
 
 ### Changed
 

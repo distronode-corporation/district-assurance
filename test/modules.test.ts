@@ -5,8 +5,10 @@ import { describe, it } from "node:test";
 import {
   intakeDigest,
   isCalendarDate,
+  isShown,
   missingRequired,
   normaliseFieldValue,
+  shownValues,
   validateForm,
   type IntakeField,
   type IntakeForm,
@@ -113,6 +115,90 @@ describe("file: intake forms", () => {
     const a = intakeDigest(form, { issue: "leak", since: "2026-09-01" });
     assert.equal(a, intakeDigest(form, { since: "2026-09-01", issue: "leak" }));
     assert.notEqual(a, intakeDigest({ ...form, version: "2" }, { issue: "leak", since: "2026-09-01" }));
+  });
+});
+
+describe("file: field rules and conditional fields", () => {
+  const f = (key: string, type: IntakeField["type"], extra: Partial<IntakeField> = {}): IntakeField => ({ key, label: { en: key, fr: key }, type, required: false, ...extra });
+
+  it("holds numbers and dates to min and max, inclusive", () => {
+    const units = f("units", "number", { min: -1, max: 10.5 });
+    assert.deepEqual(normaliseFieldValue(units, "-1"), { ok: true, value: -1 });
+    assert.deepEqual(normaliseFieldValue(units, "10.5"), { ok: true, value: 10.5 });
+    assert.deepEqual(normaliseFieldValue(units, "-1.5"), { ok: false, reason: "below_min" });
+    assert.deepEqual(normaliseFieldValue(units, "11"), { ok: false, reason: "above_max" });
+    assert.deepEqual(normaliseFieldValue(f("floor", "number", { min: 0 }), "99999"), { ok: true, value: 99999 });
+    const since = f("since", "date", { min: "2026-01-01", max: "2026-12-31" });
+    assert.deepEqual(normaliseFieldValue(since, "2026-01-01"), { ok: true, value: "2026-01-01" });
+    assert.deepEqual(normaliseFieldValue(since, "2025-12-31"), { ok: false, reason: "below_min" });
+    assert.deepEqual(normaliseFieldValue(since, "2027-01-01"), { ok: false, reason: "above_max" });
+    assert.deepEqual(normaliseFieldValue(f("until", "date", { max: "2026-12-31" }), "2020-02-29"), { ok: true, value: "2020-02-29" });
+  });
+
+  it("matches a text pattern against the whole value, in Unicode mode", () => {
+    const postal = f("postal", "text", { pattern: "[A-Z]\\d[A-Z] ?\\d[A-Z]\\d" });
+    assert.deepEqual(normaliseFieldValue(postal, " H2X 1Y4 "), { ok: true, value: "H2X 1Y4" });
+    assert.deepEqual(normaliseFieldValue(postal, "H2X 1Y4 extra"), { ok: false, reason: "no_match" });
+    assert.deepEqual(normaliseFieldValue(f("either", "text", { pattern: "oui|non" }), "ouinon"), { ok: false, reason: "no_match" }, "anchored around alternatives");
+    assert.deepEqual(normaliseFieldValue(f("name", "text", { pattern: "\\p{L}+" }), "Éloïse"), { ok: true, value: "Éloïse" });
+    assert.deepEqual(validateForm({ formId: "x", version: "1", fields: [f("a", "text", { pattern: "[(]+(?:ab)?(?=c)[\\]]c{2}" })] }), [], "brackets in a class and lookarounds are fine");
+  });
+
+  it("refuses fields that name a card or a Social Insurance Number, in either language, and nothing else", () => {
+    const named = (key: string, en: string, fr: string) => validateForm({ formId: "x", version: "1", fields: [{ key, label: { en, fr }, type: "text", required: false }] }).length;
+    for (const [key, en, fr] of [
+      ["sin", "Number", "Numéro"],
+      ["nas", "Number", "Numéro"],
+      ["cvv", "Code", "Code"],
+      ["ref", "Card number", "Numéro"],
+      ["ref", "Number", "Numéro de carte de crédit"],
+      ["ref", "Social Insurance Number", "Numéro"],
+      ["ref", "Number", "NUMÉRO D’ASSURANCE-SOCIALE"],
+      ["ref", "Cardholder name", "Nom"],
+    ]) assert.equal(named(key!, en!, fr!), 1, `${key} / ${en} / ${fr}`);
+    for (const [key, en, fr] of [
+      ["since", "Since", "Depuis"],
+      ["business_name", "Business name", "Nom de l'entreprise"],
+      ["discard", "Discarded items", "Articles jetés"],
+      ["insurance", "Insurance provider", "Assureur"],
+    ]) assert.equal(named(key!, en!, fr!), 0, `${key} / ${en} / ${fr}`);
+  });
+
+  const branching: IntakeForm = {
+    formId: "repair",
+    version: "1",
+    fields: [
+      f("issue", "text", { required: true }),
+      f("urgent", "yes_no", { required: true }),
+      f("since", "date", { required: true, showIf: { field: "urgent", equals: true } }),
+      f("access", "yes_no", { showIf: { field: "urgent", equals: true } }),
+      f("code", "number", { required: true, showIf: { field: "access", equals: true } }),
+    ],
+  };
+  const shown = (values: Record<string, string | number | boolean>) => branching.fields.filter((x) => isShown(branching, values, x)).map((x) => x.key);
+
+  it("shows a field only while the field it names holds its value and is shown itself", () => {
+    assert.deepEqual(validateForm(branching), []);
+    assert.deepEqual(shown({}), ["issue", "urgent"]);
+    assert.deepEqual(shown({ urgent: false, access: true }), ["issue", "urgent"], "a chain through a hidden field stays hidden");
+    assert.deepEqual(shown({ urgent: true }), ["issue", "urgent", "since", "access"]);
+    assert.deepEqual(shown({ urgent: true, access: true }), ["issue", "urgent", "since", "access", "code"]);
+  });
+
+  it("files and requires only shown fields", () => {
+    assert.deepEqual(missingRequired(branching, { urgent: false }), ["issue"]);
+    assert.deepEqual(missingRequired(branching, { urgent: true, access: true }), ["issue", "since", "code"]);
+    const values = { code: 42, issue: "leak", urgent: false, since: "2026-09-01", stray: "x" };
+    assert.deepEqual(shownValues(branching, values), { issue: "leak", urgent: false });
+    assert.deepEqual(Object.keys(shownValues(branching, { ...values, urgent: true, access: true })), ["issue", "urgent", "since", "access", "code"], "in form order");
+  });
+
+  it("hides a field whose chain comes back on itself, and follows a chain off the form as far as it goes", () => {
+    const cyclic: IntakeForm = { formId: "x", version: "1", fields: [f("a", "yes_no", { showIf: { field: "b", equals: true } }), f("b", "yes_no", { showIf: { field: "a", equals: true } })] };
+    assert.equal(isShown(cyclic, { a: true, b: true }, cyclic.fields[0]!), false);
+    const dangling = f("c", "text", { showIf: { field: "ghost", equals: true } });
+    assert.equal(isShown({ formId: "x", version: "1", fields: [dangling] }, { ghost: true }, dangling), true);
+    assert.equal(isShown({ formId: "x", version: "1", fields: [dangling] }, {}, dangling), false);
   });
 });
 

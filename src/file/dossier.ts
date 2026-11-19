@@ -9,7 +9,7 @@ import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } fro
 import type { EngineRuntime } from "../core/runtime.ts";
 import type { SessionState } from "../core/session.ts";
 import { isDenseArray, isObject, unknownKeys } from "../core/shape.ts";
-import { intakeDigest, missingRequired, normaliseFieldValue, validateForm, type FieldValue, type IntakeForm, type NormaliseResult } from "./intake.ts";
+import { intakeDigest, isShown, missingRequired, normaliseFieldValue, shownValues, validateForm, type FieldValue, type IntakeForm, type NormaliseResult } from "./intake.ts";
 import { buildReadBack, type ReadBack } from "./readback.ts";
 
 export const DOSSIER = "dossier";
@@ -144,6 +144,7 @@ export async function setIntakeField(rt: EngineRuntime, callId: string, key: str
     const intake = openIntake(draft.slice<DossierSlice>(DOSSIER));
     const field = intake.form.fields.find((f) => f.key === key);
     if (field === undefined) throw new EngineError("invalid_input", `the form has no field ${key}`);
+    if (!isShown(intake.form, intake.values, field)) throw new EngineError("precondition_failed", `field ${key} is not asked: its showIf does not hold`);
     const result = normaliseFieldValue(field, raw);
     if (result.ok) intake.values[key] = result.value;
     return result;
@@ -184,14 +185,16 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
     if (!rt.authorized(draft.record, "intake.file")) throw new EngineError("scope_denied", "the grant does not cover intake.file");
     const missing = missingRequired(intake.form, intake.values);
     if (missing.length > 0) throw new EngineError("invalid_input", `required fields missing: ${missing.join(", ")}`);
+    // Only shown fields are filed: a value given before its showIf stopped holding stays out.
+    const values = shownValues(intake.form, intake.values);
     const built: IntakeRecord = {
       recordId: rt.ids.next("rec"),
       workspaceId: rt.workspaceId,
       callId,
       formId: intake.form.formId,
       formVersion: intake.form.version,
-      values: structuredClone(intake.values),
-      digest: intakeDigest(intake.form, intake.values),
+      values,
+      digest: intakeDigest(intake.form, values),
       confirmedBy: input.confirmedBy,
       confirmedAt: rt.now(),
     };

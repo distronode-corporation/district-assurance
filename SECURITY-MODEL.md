@@ -114,7 +114,12 @@ than the record digest the ledger and the receipt already carry.
 Someone who can edit a workspace's FlowConfig. **Controls:** the engine refuses any config with a
 problem, Trace (the ledger) cannot be turned off, the floors cannot be lowered, planned factors
 and payment modes cannot be turned on, and every call's ledger entries carry the config revision
-it ran under. Who may edit a config, and how its history is kept, is the host's (left to the host).
+it ran under. A form's text `pattern` cannot stall the engine on a caller's value: a
+backreference, a repeated group that repeats or alternates, and a pattern with more than 100,000
+ways to try a value are refused (tested). A `showIf` cycle is refused, and a `showIf` cannot
+depend on a sensitive field, whose value the questions asked would otherwise tell (tested); a
+hidden field's value is never read back or filed (tested). Who may edit a config, and how its
+history is kept, is the host's (left to the host).
 
 ### Races across processes
 
@@ -135,7 +140,11 @@ the host's code with an `amountSource`, and destinations come from the subject r
 **Controls:** Pay is by a hosted payment page; the engine sees a link id and a status, never a card
 number. Card numbers in transcripts are detected (Luhn, digits and English or French digit words)
 and replaced, and the host is told to interrupt (tested). Intake refuses a value carrying a card
-number, and the ledger refuses detail carrying one (tested). Keypad card capture is planned only
+number, and the ledger refuses detail carrying one (tested). A form cannot ask for a card or a
+Social Insurance Number at all: `validateConfig` refuses a field whose key or label, in English or
+French, names one (`card`, `carte`, `cvv`, `SIN`, `NAS`, `assurance sociale` and so on), with case,
+accents and dots ignored (tested). The check reads names, not intent: a field named to slip past it
+is still caught by the card-number check on its value, but a SIN under another name is not. Keypad card capture is planned only
 through a PCI-certified carrier service on a call path where tones never reach this engine
 (PAY-6), after an assessor's scoping. Nothing here is a PCI DSS attestation; a host's scope
 depends on its whole call path.

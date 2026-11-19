@@ -1,12 +1,13 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
+import type { JsonValue } from "../src/core/canonical.ts";
 import { ConfigError } from "../src/core/config.ts";
 import { NotImplementedError } from "../src/core/errors.ts";
 import type { EngineEvent } from "../src/core/events.ts";
 import { defaultVerificationPolicy } from "../src/core/policy.ts";
 import { createEngine } from "../src/engine.ts";
-import { intakeDigest } from "../src/file/intake.ts";
+import { intakeDigest, type IntakeForm } from "../src/file/intake.ts";
 import { defaultConfig } from "../src/modules.ts";
 import { formatAmount } from "../src/pay/paylink.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
@@ -423,6 +424,33 @@ describe("Engine file", () => {
     const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: after.digest });
     assert.deepEqual(record.values, { issue: "Fuite", urgent: true });
     assert.equal(record.digest, intakeDigest(form, record.values));
+  });
+
+  it("asks, reads back and files a conditional field only while its showIf holds", async () => {
+    const branching: IntakeForm = {
+      formId: "repair",
+      version: "1",
+      fields: [
+        ...form.fields,
+        { key: "since", label: { en: "Since", fr: "Depuis" }, type: "date", required: true, showIf: { field: "urgent", equals: true }, min: "2026-01-01" },
+      ],
+    };
+    const t = setup({ config: testConfig((c) => (c.modules.dossier = { settings: { forms: [branching] } as unknown as JsonValue })) });
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    await assert.rejects(t.engine.setIntakeField(callId, "since", "2026-09-01"), rejects("precondition_failed", /since is not asked/));
+    await t.engine.setIntakeField(callId, "urgent", "yes");
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), rejects("invalid_input", /required fields missing: since/));
+    assert.deepEqual(await t.engine.setIntakeField(callId, "since", "2025-12-31"), { ok: false, reason: "below_min" });
+    await t.engine.setIntakeField(callId, "since", "2026-09-01");
+    assert.match((await t.engine.intakeReadBack(callId)).text, /Since: Tuesday, September 1, 2026\./);
+    await t.engine.setIntakeField(callId, "urgent", "no");
+    const readBack = await t.engine.intakeReadBack(callId);
+    assert.doesNotMatch(readBack.text, /Since/, "a hidden field is not read back");
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: readBack.digest });
+    assert.deepEqual(record.values, { issue: "leak", urgent: false }, "nor filed");
+    assert.equal(record.digest, intakeDigest(branching, record.values));
   });
 
   it("refuses a read-back on a call that started without Dossier", async () => {

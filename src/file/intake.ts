@@ -1,9 +1,12 @@
 // Intake forms: the fields a business defines, and the values a caller gives during the call. A
 // value is normalised by code before it reaches the draft, and a free-text value that carries a
-// card number is refused, so intake can never become a way to store one.
+// card number is refused, so intake can never become a way to store one. A form cannot ask for a
+// card or a Social Insurance Number at all, and a field can be asked only when another field's
+// value says so (`showIf`).
 import { canonicalJson } from "../core/canonical.ts";
 import { sha256Hex } from "../core/hash.ts";
 import { findCardNumbers } from "../core/redaction.ts";
+import { isObject, unknownKeys } from "../core/shape.ts";
 
 export type FieldType = "text" | "number" | "date" | "yes_no";
 
@@ -11,11 +14,23 @@ export interface IntakeField {
   key: string;
   label: { en: string; fr: string };
   type: FieldType;
+  /** Required while the field is shown. */
   required: boolean;
   /** Stored encrypted (FIL-2). Forms with sensitive fields are refused until that is built. */
   sensitive?: boolean;
   /** Text fields only. Default 500. */
   maxLength?: number;
+  /**
+   * The field is asked, read back and filed only while another field's value equals `equals`,
+   * and that field is shown itself. Otherwise its value, if any, stays out of the record.
+   */
+  showIf?: { field: string; equals: FieldValue };
+  /** The smallest value allowed: a number for number fields, a YYYY-MM-DD date for date fields. */
+  min?: number | string;
+  /** The largest value allowed, as `min`. */
+  max?: number | string;
+  /** Text fields only: a regular expression (Unicode mode) the whole value must match. */
+  pattern?: string;
 }
 
 export interface IntakeForm {
@@ -28,11 +43,22 @@ export type FieldValue = string | number | boolean;
 
 export type NormaliseResult =
   | { ok: true; value: FieldValue }
-  | { ok: false; reason: "empty" | "too_long" | "not_a_number" | "not_a_date" | "not_yes_or_no" | "card_number" };
+  | {
+      ok: false;
+      reason: "empty" | "too_long" | "not_a_number" | "not_a_date" | "not_yes_or_no" | "card_number" | "below_min" | "above_max" | "no_match";
+    };
 
 const FIELD_KEY = /^[a-z][a-z0-9_]{0,63}$/;
 const YES = new Set(["yes", "y", "oui"]);
 const NO = new Set(["no", "n", "non"]);
+const FIELD_SETTINGS = ["key", "label", "type", "required", "sensitive", "maxLength", "showIf", "min", "max", "pattern"];
+const DEFAULT_MAX_LENGTH = 500;
+/** Longest pattern a form may set. */
+export const MAX_PATTERN_LENGTH = 200;
+/** The most ways a pattern may have to try a value: about 100,000 paths of at most a value's length each. */
+export const MAX_PATTERN_WORK = 100_000;
+/** Words that name a card or a Social Insurance Number, in English or French, in a key or a label (accents and case ignored). */
+const FORBIDDEN_NAME = /\b(?:cards?|cartes?|cardholder|cvv2?|cvc|sin|nas|social insurance|assurance sociale)\b/;
 
 /** Every problem with a form, as sentences. */
 export function validateForm(form: IntakeForm): string[] {
@@ -44,8 +70,129 @@ export function validateForm(form: IntakeForm): string[] {
     if (keys.has(field.key)) errors.push(`field ${field.key} is defined twice`);
     keys.add(field.key);
     if (field.label.en.trim() === "" || field.label.fr.trim() === "") errors.push(`field ${field.key} needs an English and a French label`);
+    for (const k of unknownKeys(field as unknown as Record<string, unknown>, FIELD_SETTINGS)) errors.push(`field ${field.key}: ${k} is not a field setting`);
+    if ([field.key.replaceAll("_", " "), field.label.en, field.label.fr].some(namesForbidden)) {
+      errors.push(`field ${field.key} names a card or a Social Insurance Number, which intake never collects`);
+    }
+    errors.push(...rangeErrors(field).map((e) => `field ${field.key}: ${e}`));
+    if (field.pattern !== undefined) {
+      const longest = typeof field.maxLength === "number" ? field.maxLength : DEFAULT_MAX_LENGTH;
+      const problem = field.type === "text" ? patternProblem(field.pattern, longest) : "pattern is for text fields only";
+      if (problem !== null) errors.push(`field ${field.key}: ${problem}`);
+    }
+    if (field.showIf !== undefined) {
+      const problem = showIfProblem(form, field);
+      if (problem !== null) errors.push(`field ${field.key}: ${problem}`);
+    }
   }
   return errors;
+}
+
+function namesForbidden(name: string): boolean {
+  // Accents, case and dots go first, so "S.I.N." and "Numéro d'assurance sociale" are caught.
+  const plain = name.normalize("NFD").replace(/[\p{M}.]/gu, "").toLowerCase().replace(/[^a-z0-9]+/g, " ");
+  return FORBIDDEN_NAME.test(plain);
+}
+
+function rangeErrors(field: IntakeField): string[] {
+  if (field.min === undefined && field.max === undefined) return [];
+  if (field.type !== "number" && field.type !== "date") return ["min and max are for number and date fields only"];
+  const ok = field.type === "number" ? (v: unknown) => typeof v === "number" && Number.isFinite(v) : (v: unknown) => typeof v === "string" && isCalendarDate(v);
+  const what = field.type === "number" ? "a number" : "a YYYY-MM-DD date";
+  const errors: string[] = [];
+  for (const bound of ["min", "max"] as const) {
+    if (field[bound] !== undefined && !ok(field[bound])) errors.push(`${bound} must be ${what}`);
+  }
+  if (errors.length === 0 && field.min !== undefined && field.max !== undefined && (field.min as number) > (field.max as number)) errors.push("min is above max");
+  return errors;
+}
+
+/**
+ * Why a text pattern is refused, or null. A config must not be able to stall the engine on a
+ * caller's value, so besides being a valid regular expression, a pattern must not use a
+ * backreference or repeat a group that itself repeats or alternates (`(a+)+`, `(a|b)*`), and the
+ * number of ways it can try to match a value of the field's longest length (the product of the
+ * choices each repetition and alternative gives) must stay within `MAX_PATTERN_WORK`.
+ */
+function patternProblem(pattern: unknown, longest: number): string | null {
+  if (typeof pattern !== "string" || pattern.length === 0 || pattern.length > MAX_PATTERN_LENGTH) return `pattern must be 1 to ${MAX_PATTERN_LENGTH} characters`;
+  try {
+    new RegExp(pattern, "u");
+  } catch {
+    return "pattern is not a valid regular expression";
+  }
+  // One flag per open group: whether it holds a repetition or an alternation.
+  const groups: boolean[] = [];
+  let inClass = false;
+  let work = 1;
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern.charAt(i);
+    let choices = 0;
+    if (c === "\\") {
+      const next = pattern.charAt(i + 1);
+      if (/[1-9k]/.test(next)) return "pattern must not use a backreference";
+      // The braces of \p{...}, \P{...} and \u{...} belong to the escape.
+      i = /[pPu]/.test(next) && pattern.charAt(i + 2) === "{" ? pattern.indexOf("}", i) : i + 1;
+    } else if (inClass) {
+      inClass = c !== "]";
+    } else if (c === "[") {
+      inClass = true;
+    } else if (c === "(") {
+      groups.push(false);
+      if (pattern.charAt(i + 1) === "?") i++;
+    } else if (c === ")") {
+      if (groups.pop() === true && /[*+{]/.test(pattern.charAt(i + 1))) return "pattern repeats a group that repeats or alternates, which can take too long to check";
+    } else if (c === "|" || c === "?") {
+      choices = 2;
+    } else if (c === "*" || c === "+") {
+      choices = longest + 1;
+    } else if (c === "{") {
+      // In Unicode mode an unescaped brace outside a class is always a valid {m}, {m,} or {m,n}.
+      const [whole, lo, comma, hi] = /^\{(\d+)(,?)(\d*)\}/.exec(pattern.slice(i))!;
+      choices = Math.max((comma === "" ? Number(lo) : hi === "" ? longest : Number(hi)) - Number(lo), 0) + 1;
+      i += whole.length - 1;
+    }
+    if (choices > 0) {
+      groups.fill(true);
+      work *= choices;
+      // A lazy quantifier's ? is part of it.
+      if (c !== "|" && pattern.charAt(i + 1) === "?") i++;
+    }
+  }
+  return work > MAX_PATTERN_WORK ? "pattern can match in too many ways to check quickly; bound its repetitions, for example {1,40} for +" : null;
+}
+
+function showIfProblem(form: IntakeForm, field: IntakeField): string | null {
+  const rule: unknown = field.showIf;
+  if (!isObject(rule) || typeof rule.field !== "string" || !("equals" in rule) || unknownKeys(rule, ["field", "equals"]).length > 0) {
+    return "showIf must be { field, equals }";
+  }
+  const target = form.fields.find((f) => f.key === rule.field);
+  if (target === undefined) return `showIf names no field ${rule.field}`;
+  if (target.sensitive === true) return `showIf depends on ${target.key}, which is sensitive, so the questions asked would tell its value`;
+  if (!acceptsValue(target, rule.equals)) return `showIf.equals is not a value field ${target.key} can take`;
+  // Follow the chain: a field that comes back to itself is never shown.
+  const chain = [field.key];
+  for (let next: IntakeField | undefined = target; next !== undefined; next = form.fields.find((f) => f.key === next!.showIf?.field)) {
+    if (next.key === field.key) return `showIf goes round in a cycle: ${[...chain, field.key].join(" > ")}`;
+    if (chain.includes(next.key)) return null;
+    chain.push(next.key);
+  }
+  return null;
+}
+
+/** Whether a stored value is one the field could hold after normalisation (its bounds aside). */
+function acceptsValue(field: IntakeField, value: unknown): boolean {
+  switch (field.type) {
+    case "text":
+      return typeof value === "string" && value.trim() === value && value !== "";
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "date":
+      return typeof value === "string" && isCalendarDate(value);
+    default:
+      return typeof value === "boolean";
+  }
 }
 
 export function normaliseFieldValue(field: IntakeField, raw: string): NormaliseResult {
@@ -54,12 +201,13 @@ export function normaliseFieldValue(field: IntakeField, raw: string): NormaliseR
   switch (field.type) {
     case "text":
       if (findCardNumbers(value).length > 0) return { ok: false, reason: "card_number" };
-      if (value.length > (field.maxLength ?? 500)) return { ok: false, reason: "too_long" };
+      if (value.length > (field.maxLength ?? DEFAULT_MAX_LENGTH)) return { ok: false, reason: "too_long" };
+      if (field.pattern !== undefined && !new RegExp(`^(?:${field.pattern})$`, "u").test(value)) return { ok: false, reason: "no_match" };
       return { ok: true, value };
     case "number":
-      return /^-?\d+(\.\d+)?$/.test(value) ? { ok: true, value: Number(value) } : { ok: false, reason: "not_a_number" };
+      return /^-?\d+(\.\d+)?$/.test(value) ? inRange(field, Number(value)) : { ok: false, reason: "not_a_number" };
     case "date":
-      return isCalendarDate(value) ? { ok: true, value } : { ok: false, reason: "not_a_date" };
+      return isCalendarDate(value) ? inRange(field, value) : { ok: false, reason: "not_a_date" };
     case "yes_no": {
       const word = value.toLowerCase();
       if (YES.has(word)) return { ok: true, value: true };
@@ -69,6 +217,14 @@ export function normaliseFieldValue(field: IntakeField, raw: string): NormaliseR
   }
 }
 
+/** Bounds are inclusive. YYYY-MM-DD dates compare in calendar order as strings. */
+function inRange(field: IntakeField, value: number | string): NormaliseResult {
+  // A validated form's bounds have the field's own type, so these compare numbers or dates.
+  if (field.min !== undefined && (value as number) < (field.min as number)) return { ok: false, reason: "below_min" };
+  if (field.max !== undefined && (value as number) > (field.max as number)) return { ok: false, reason: "above_max" };
+  return { ok: true, value };
+}
+
 /** YYYY-MM-DD that names a real day. */
 export function isCalendarDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -76,9 +232,31 @@ export function isCalendarDate(value: string): boolean {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
-/** Required fields without a value, in form order. */
+/**
+ * Whether a field is shown, given the draft's values: it has no `showIf`, or the field it names
+ * holds the value it waits for and is shown itself. A chain that comes back on itself is hidden.
+ */
+export function isShown(form: IntakeForm, values: Readonly<Record<string, FieldValue>>, field: IntakeField): boolean {
+  const seen = new Set<string>();
+  for (let rule = field.showIf; rule !== undefined; rule = form.fields.find((f) => f.key === rule!.field)?.showIf) {
+    if (seen.has(rule.field) || values[rule.field] !== rule.equals) return false;
+    seen.add(rule.field);
+  }
+  return true;
+}
+
+/** The values that will be filed: those of shown fields, in form order. A hidden field's value stays out. */
+export function shownValues(form: IntakeForm, values: Readonly<Record<string, FieldValue>>): Record<string, FieldValue> {
+  const shown: Record<string, FieldValue> = {};
+  for (const field of form.fields) {
+    if (Object.hasOwn(values, field.key) && isShown(form, values, field)) shown[field.key] = values[field.key]!;
+  }
+  return shown;
+}
+
+/** Required fields that are shown and have no value, in form order. */
 export function missingRequired(form: IntakeForm, values: Readonly<Record<string, FieldValue>>): string[] {
-  return form.fields.filter((f) => f.required && !(f.key in values)).map((f) => f.key);
+  return form.fields.filter((f) => f.required && !(f.key in values) && isShown(form, values, f)).map((f) => f.key);
 }
 
 /** The fingerprint a receipt carries for a confirmed record. */

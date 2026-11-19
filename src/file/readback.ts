@@ -6,7 +6,7 @@ import { canonicalJson } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { sha256Hex } from "../core/hash.ts";
 import type { Locale } from "../core/runtime.ts";
-import { intakeDigest, type FieldValue, type IntakeField, type IntakeForm } from "./intake.ts";
+import { intakeDigest, shownValues, type FieldValue, type IntakeField, type IntakeForm } from "./intake.ts";
 
 export interface ReadBack {
   locale: Locale;
@@ -73,18 +73,22 @@ const WORDING: Record<Locale, Wording> = {
   },
 };
 
-/** The read-back of a draft: every field with a value, in form order, then the fixed confirm prompt. */
+/**
+ * The read-back of a draft: every shown field with a value, in form order, then the fixed confirm
+ * prompt. A field hidden by its `showIf` is neither read nor counted in the digest, as it is not filed.
+ */
 export function buildReadBack(form: IntakeForm, values: Readonly<Record<string, FieldValue>>, locale: Locale): ReadBack {
   if (locale !== "en" && locale !== "fr") throw new EngineError("invalid_input", "a read-back is in English (en) or French (fr)");
   const w = WORDING[locale];
+  const filed = shownValues(form, values);
   const lines: string[] = [];
   for (const field of form.fields) {
-    if (!Object.hasOwn(values, field.key)) continue;
+    if (!Object.hasOwn(filed, field.key)) continue;
     const label = field.label[locale].trim();
-    lines.push(field.sensitive === true ? w.withheld(label) : sentence(w.line(label, spoken(field, values[field.key]!, w))));
+    lines.push(field.sensitive === true ? w.withheld(label) : sentence(w.line(label, spoken(field, filed[field.key]!, w))));
   }
   const text = [w.opening, ...lines, w.prompt].join(" ");
-  const digest = sha256Hex(canonicalJson({ v: 1, locale, text, record: intakeDigest(form, values) }));
+  const digest = sha256Hex(canonicalJson({ v: 1, locale, text, record: intakeDigest(form, filed) }));
   return { locale, lines, prompt: w.prompt, text, digest };
 }
 
