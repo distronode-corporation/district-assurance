@@ -58,19 +58,28 @@ export function verifyAccessGrant(
   expect: { workspaceId: string; audience: string; now: Date; clockSkewSeconds?: number },
 ): AccessGrantCheck {
   if (typeof grant !== "object" || grant === null) return { ok: false, reason: "malformed" };
-  const g = grant as Record<string, unknown>;
-  if (typeof g.kid !== "string" || typeof g.signature !== "string" || !isAccessGrantBody(g.body)) return { ok: false, reason: "malformed" };
-  if (!verifyDocument(grant as SignedAccessGrant, keys)) return { ok: false, reason: "signature" };
-  const body = g.body;
-  if (typeof expect.workspaceId !== "string" || expect.workspaceId === "" || body.workspaceId !== expect.workspaceId) return { ok: false, reason: "workspace" };
-  if (body.audience !== expect.audience) return { ok: false, reason: "audience" };
-  const seconds: unknown = expect.clockSkewSeconds === undefined ? 30 : expect.clockSkewSeconds;
+  // One copy of the grant, read once (a getter's every value is taken now), and only that copy is
+  // checked, verified and returned: a body that changed after its signature passed is never seen.
+  let copy: { kid: unknown; alg: unknown; signature: unknown; body: unknown };
+  try {
+    const { kid, alg, signature, body } = grant as Record<string, unknown>;
+    copy = { kid, alg, signature, body: structuredClone(body) };
+  } catch {
+    return { ok: false, reason: "malformed" };
+  }
+  if (typeof copy.kid !== "string" || typeof copy.signature !== "string" || !isAccessGrantBody(copy.body)) return { ok: false, reason: "malformed" };
+  if (!verifyDocument(copy as SignedAccessGrant, keys)) return { ok: false, reason: "signature" };
+  const body = copy.body;
+  const { workspaceId, audience, now: clock, clockSkewSeconds }: { workspaceId?: unknown; audience?: unknown; now?: unknown; clockSkewSeconds?: unknown } = expect;
+  if (typeof workspaceId !== "string" || workspaceId === "" || body.workspaceId !== workspaceId) return { ok: false, reason: "workspace" };
+  if (body.audience !== audience) return { ok: false, reason: "audience" };
+  const seconds: unknown = clockSkewSeconds === undefined ? 30 : clockSkewSeconds;
   // A skew that is not a finite, non-negative number would turn the not-before check off (NaN) or
   // accept anything (Infinity): refused, so the check fails closed.
   if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return { ok: false, reason: "invalid_options" };
   const skew = seconds * 1000;
   // An unusable clock reading would make both time checks false and let an expired grant through.
-  const now = expect.now instanceof Date ? expect.now.getTime() : Number.NaN;
+  const now = clock instanceof Date ? clock.getTime() : Number.NaN;
   if (!Number.isFinite(now)) return { ok: false, reason: "invalid_options" };
   const issued = Date.parse(body.issuedAt);
   const expires = Date.parse(body.expiresAt);
@@ -98,6 +107,8 @@ export class SeenGrants {
 
   /** True the first time a grant id is offered while it is valid; false for a replay. */
   accept(body: AccessGrantBody, now: Date): boolean {
+    // Each read once: a getter read again could change an id or an expiry after it was checked.
+    const grantId = body.grantId;
     const expires = Date.parse(body.expiresAt);
     const at = now.getTime();
     // A grant whose expiry cannot be read, or a clock that cannot be read, is refused: NaN would be
@@ -114,8 +125,8 @@ export class SeenGrants {
     // A grant that expired by the time ids were last forgotten may have been accepted and then
     // forgotten: refused, even if the clock has since moved back to inside its validity.
     if (expires <= this.#forgotUpTo) return false;
-    if (this.#until.has(body.grantId)) return false;
-    this.#until.set(body.grantId, expires);
+    if (this.#until.has(grantId)) return false;
+    this.#until.set(grantId, expires);
     this.#latestExpiry = Math.max(this.#latestExpiry, expires);
     return true;
   }
