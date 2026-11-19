@@ -72,6 +72,52 @@ describe("KeypadCollector", () => {
     assert.deepEqual(received, []);
   });
 
+  it("ignores the rest of an overflowed entry until # ends it", () => {
+    const { keypad, received, keyAll } = collector({ maxDigits: 4 });
+    assert.deepEqual(keyAll("123456"), ["buffering", "buffering", "buffering", "buffering", "overflow", "discarding"]);
+    assert.equal(keypad.press("#").status, "empty", "no tail of the long entry is submitted");
+    keyAll("12");
+    keypad.press("#");
+    assert.deepEqual(received, ["12"], "the next entry is taken whole");
+  });
+
+  it("ignores the rest of a rejected entry until # ends it", () => {
+    const { keypad, received, keyAll } = collector();
+    assert.deepEqual(keyAll("12A3B4"), ["buffering", "buffering", "rejected", "discarding", "discarding", "discarding"]);
+    assert.equal(keypad.press("#").status, "empty");
+    assert.deepEqual(keyAll("A5"), ["rejected", "discarding"], "a rejected first tone discards the entry too");
+    assert.equal(keypad.press("#").status, "empty");
+    assert.deepEqual(received, []);
+  });
+
+  it("starts over on * or clear after a discarded entry", () => {
+    const { keypad, received, keyAll } = collector({ maxDigits: 2 });
+    assert.deepEqual(keyAll("123*45"), ["buffering", "buffering", "overflow", "cleared", "buffering", "buffering"]);
+    keypad.press("#");
+    keyAll("1A");
+    keypad.clear();
+    keyAll("67");
+    keypad.press("#");
+    assert.deepEqual(received, ["45", "67"]);
+  });
+
+  it("ends a discarded entry after idleTimeoutMs, each ignored tone restarting it", () => {
+    const { keypad, clock, received, keyAll } = collector({ idleTimeoutMs: 5000 });
+    keyAll("1A");
+    clock.advance(4999);
+    assert.deepEqual(keypad.press("2"), { status: "discarding", timedOut: false });
+    clock.advance(4999);
+    assert.equal(keypad.expire(), false);
+    clock.advance(1);
+    assert.equal(keypad.expire(), true);
+    assert.equal(keypad.expire(), false);
+    keyAll("1A");
+    clock.advance(5000);
+    assert.deepEqual(keypad.press("3"), { status: "buffering", timedOut: true }, "the tone starts a new entry");
+    keypad.press("#");
+    assert.deepEqual(received, ["3"]);
+  });
+
   it("discards an entry left idle for idleTimeoutMs, on the next tone or on expire", () => {
     const { keypad, clock, received, keyAll } = collector({ idleTimeoutMs: 5000 });
     keyAll("12");
@@ -153,11 +199,16 @@ describe("KeypadCollector", () => {
       { maxDigits: 4, idleTimeoutMs: MAX_KEYPAD_IDLE_MS + 1, onDigits },
       { maxDigits: 4, idleTimeoutMs: Number.NaN, onDigits },
       { maxDigits: 4, idleTimeoutMs: 1000, onDigits: "not a function" as unknown as () => void },
+      { maxDigits: 4, idleTimeoutMs: 1000, onDigits, maxDigit: 8 },
+      { maxDigits: 4, idleTimeoutMs: 1000, onDigits, clock: new FixedClock(), logDigits: true },
+      null,
+      [],
     ]) {
-      assert.throws(() => new KeypadCollector(options), (e: unknown) => e instanceof EngineError && e.code === "invalid_input", JSON.stringify(options));
+      assert.throws(() => new KeypadCollector(options as KeypadCollectorOptions<void>),(e: unknown) => e instanceof EngineError && e.code === "invalid_input", JSON.stringify(options));
     }
     assert.doesNotThrow(() => new KeypadCollector({ maxDigits: MAX_KEYPAD_DIGITS, idleTimeoutMs: MAX_KEYPAD_IDLE_MS, onDigits }));
     assert.doesNotThrow(() => new KeypadCollector({ maxDigits: 1, idleTimeoutMs: 1, onDigits }));
+    assert.doesNotThrow(() => new KeypadCollector({ maxDigits: 4, idleTimeoutMs: 1000, onDigits, clock: new FixedClock() }));
   });
 
   it("uses the system clock when none is given", () => {
