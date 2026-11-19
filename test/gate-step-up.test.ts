@@ -79,7 +79,7 @@ describe("step-up: config", () => {
   const stepUp = stepUpModule;
 
   it("needs an https issuer", () => {
-    for (const issuer of ["http://verify.example.test", "https://verify.example.test/?x=1", "https://user@verify.example.test", "https://", 7, undefined]) {
+    for (const issuer of ["http://verify.example.test", "https://verify.example.test/?x=1", "https://verify.example.test/?", "https://verify.example.test/#", "https://user@verify.example.test", "https://", "https:///", "https://verify .example.test", "not a url", 7, undefined]) {
       assert.deepEqual(stepUp.validateSettings({ issuer, sites }), ["issuer must be an https URL without a query, a fragment or credentials"], String(issuer));
     }
     assert.deepEqual(stepUp.validateSettings({ issuer: "https://verify.example.test/ws_test", sites }), []);
@@ -316,7 +316,7 @@ describe("step-up: tokens", () => {
       assert.deepEqual(await t.engine.exchangeStepUpToken(bad, portal), { ok: false, reason: "malformed" }, String(bad));
     }
     const claims = decode(token.split(".")[1]!);
-    for (const bad of [forged(claims), forged({ ...claims, sid: "call_unknown" }), forged({ ...claims, jti: "stu_9" }), `${token.slice(0, -2)}AA`]) {
+    for (const bad of [forged(claims), forged({ ...claims, sid: "call_unknown" }), forged({ ...claims, jti: "stu_9" }), `${token.slice(0, -2)}${token.endsWith("AA") ? "BB" : "AA"}`]) {
       assert.deepEqual(await t.engine.exchangeStepUpToken(bad, portal), { ok: false, reason: "unknown" });
     }
     // No module code can reach step-up's part of a call, to write a token or read one (ADR-25).
@@ -470,6 +470,22 @@ describe("step-up: tokens", () => {
     assert.equal((await t.engine.issueStepUpToken(callId, { nonce: NONCE, site: "portal" })).tokenId, "stu_2");
     assert.deepEqual((await stepUpTokens(t, callId)).map((r) => r.status), ["failed", "issued"]);
     assert.deepEqual((await stepUpEvents(t)).find(([e]) => e === "stepup.failed")![1], { tokenId: "stu_1", reason: "not_issued_in_time" });
+  });
+
+  it("signs the nonce it checked, even when the caller changes its input object meanwhile", async () => {
+    const t = stepUpSetup();
+    const callId = await webVerified(t, null);
+    const input = { nonce: NONCE, site: "portal" };
+    const append = t.ledger.append.bind(t.ledger);
+    t.ledger.append = async (...args: Parameters<typeof append>) => {
+      if (args[0].event === "stepup.issued") Object.assign(input, { nonce: "not checked", site: "shop" });
+      return append(...args);
+    };
+    const { token } = await t.engine.issueStepUpToken(callId, input);
+    assert.equal(input.nonce, "not checked", "the object did change during the reservation");
+    assert.deepEqual([decode(token.split(".")[1]!).nonce, decode(token.split(".")[1]!).aud], [NONCE, PORTAL]);
+    assert.equal((await t.engine.exchangeStepUpToken(token, portal)).ok, true);
+    await assert.rejects(t.engine.issueStepUpToken(callId, null as never), rejects("invalid_input", /6 to 12 digits/));
   });
 
   it("answers unknown for a token naming a call that started with step-up off", async () => {

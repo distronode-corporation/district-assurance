@@ -180,7 +180,7 @@ refused, on any process (tested). An exchange after the call was tainted, while 
 after expiry, or for another site, subject or nonce is refused and uses the token up; a forged or
 altered token is refused without using up the real one (tested). The ledger holds the token's
 digest and outcome, never the token, the nonce or the subject handle, and the call record keeps
-no nonce (tested). `sub` is a handle per site, so two sites cannot link one person (tested).
+no nonce (tested). `sub` is a handle per site, so a `sub` alone cannot link one person across sites (tested); `sid` (the call) and `grant` are the same in every token of one call, so two sites given tokens from the same call can link those tokens.
 Hanging up never revives a token: the write that ends the call refuses every issued token whose
 call is tainted, has a new verification running or no longer holds the token's grant (verified
 again, as that subject or another), since the ended call holds no grant to judge it by later

@@ -35,7 +35,17 @@ export const MAX_TOKENS_PER_CALL = 5;
 const SITE_ID = /^[a-z][a-z0-9-]{0,63}$/;
 /** The nonce the site showed, as the caller keys it. */
 const NONCE = /^[0-9]{6,12}$/;
-const ISSUER = /^https:\/\/[^\s?#@]+$/;
+/** An https URL with a host, and no credentials, query or fragment (the tokens' `iss`). */
+function isIssuer(value: unknown): boolean {
+  if (typeof value !== "string" || /\s/.test(value)) return false;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return url.protocol === "https:" && url.hostname !== "" && url.username === "" && url.password === "" && url.search === "" && url.hash === "" && !/[?#]/.test(value);
+}
 
 /** A site that may ask for a step-up: Gate's id for it, and the `aud` its tokens carry (its client id or origin). */
 export interface StepUpSite {
@@ -138,7 +148,7 @@ export function stepUpAcr(level: AssuranceLevel): string {
   return `urn:district-assurance:level:${level}`;
 }
 
-/** The `sub` of a site's tokens for a subject: a handle per site, so two sites cannot link a person. */
+/** The `sub` of a site's tokens for a subject: a handle per site, so a `sub` alone never links a person across sites. */
 export function stepUpSubject(subjectKey: string, audience: string): string {
   return sha256Hex(canonicalJson(["step-up", audience, subjectKey]));
 }
@@ -156,7 +166,7 @@ export const stepUpModule: AssuranceModule = {
   validateSettings(settings: unknown): string[] {
     if (!isObject(settings)) return ["must be an object with the issuer and the sites"];
     const errors = unknownKeys(settings, ["issuer", "sites", "maxTokensPerCall"]).map((k) => `${k} is not a step-up setting`);
-    if (typeof settings.issuer !== "string" || !ISSUER.test(settings.issuer)) errors.push("issuer must be an https URL without a query, a fragment or credentials");
+    if (!isIssuer(settings.issuer)) errors.push("issuer must be an https URL without a query, a fragment or credentials");
     if (settings.maxTokensPerCall !== undefined && !isIntegerIn(settings.maxTokensPerCall, 1, MAX_TOKENS_PER_CALL)) {
       errors.push(`maxTokensPerCall must be an integer from 1 to ${MAX_TOKENS_PER_CALL}`);
     }
@@ -265,6 +275,9 @@ export function settleStepUpInFlight(draft: CallDraft): void {
  */
 export async function issueStepUpToken(rt: EngineRuntime, callId: string, input: { nonce: string; site?: string; lifetimeSeconds?: number }): Promise<StepUpToken> {
   rt.settings(STEP_UP);
+  // The input is copied before any wait, so a caller that changes its object meanwhile never puts
+  // an unchecked nonce, site or lifetime into the token: what is checked is what is signed.
+  const asked = isObject(input) ? { nonce: input.nonce, site: input.site, lifetimeSeconds: input.lifetimeSeconds } : input;
   // A token left reserved past its expiry (the process signing it stopped before its last write)
   // is failed in a write of its own, so it never blocks the call's next request. One still within
   // its life is a live signing, and keeps blocking.
@@ -278,7 +291,7 @@ export async function issueStepUpToken(rt: EngineRuntime, callId: string, input:
       }
     });
   }
-  const { record, issuer } = await rt.update(callId, (draft) => reserve(rt, draft, input));
+  const { record, issuer } = await rt.update(callId, (draft) => reserve(rt, draft, asked));
   const claims: StepUpClaims = {
     iss: issuer,
     aud: record.audience,
@@ -288,7 +301,7 @@ export async function issueStepUpToken(rt: EngineRuntime, callId: string, input:
     auth_time: seconds(record.authTime),
     jti: record.tokenId,
     acr: stepUpAcr(record.level),
-    nonce: input.nonce,
+    nonce: asked.nonce,
     sid: callId,
     grant: record.verificationGrantId,
   };
@@ -386,7 +399,7 @@ export async function exchangeStepUpToken(rt: EngineRuntime, token: unknown, exp
 }
 
 /** The one write that reserves a token: checked against the call, the step and the limits. */
-function reserve(rt: EngineRuntime, draft: CallDraft, input: { nonce: string; site?: string; lifetimeSeconds?: number }): { record: StepUpRecord & { subjectKey: string }; issuer: string } {
+function reserve(rt: EngineRuntime, draft: CallDraft, input: { nonce: string; site?: string | undefined; lifetimeSeconds?: number | undefined }): { record: StepUpRecord & { subjectKey: string }; issuer: string } {
   const step = stepOfType<StepUpIssueStep>(draft.record, "step-up.issue");
   if (!rt.authorized(draft.record, SIGN_IN_SCOPE)) throw new EngineError("scope_denied", `the grant does not cover ${SIGN_IN_SCOPE}`);
   // A grant covering an access scope is level 2 or more; while a new verification runs, its subject is not yet the grant's.

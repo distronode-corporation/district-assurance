@@ -667,7 +667,8 @@ the end at all is a pending decision. The receipt lists the call's tokens as the
 
 `sub` is `stepUpSubject(subjectKey, audience)`, the SHA-256 of the canonical JSON of
 `["step-up", audience, subjectKey]`, for the subject the call's verification grant was issued
-for: a handle per site, so two sites cannot link one person. `acr` is `stepUpAcr(level)`;
+for: a handle per site, so a `sub` alone never links one person across sites (`sid` and
+`grant` are the same in every token of one call). `acr` is `stepUpAcr(level)`;
 `auth_time` is when the verification grant was issued; `grant` names it.
 
 `engine.exchangeStepUpToken(token, {audience, subjectKey, nonce})` is the host's web sign-in
