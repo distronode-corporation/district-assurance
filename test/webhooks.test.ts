@@ -3,6 +3,7 @@ import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
 
 import { parseStripeEvent, signStripePayload, verifyStripeSignature } from "../src/webhooks/stripe.ts";
+import { rejects } from "./helpers.ts";
 
 const secret = "whsec_test_not_a_secret";
 const payload = '{"id":"evt_1","type":"checkout.session.completed"}';
@@ -39,6 +40,22 @@ describe("verifyStripeSignature", () => {
     assert.equal(check({ now: new Date(now.getTime() + 301_000), toleranceSeconds: 600 }).ok, true);
     assert.deepEqual(check({ payload: `${payload} ` }), { ok: false, reason: "no_matching_signature" });
     assert.deepEqual(check({ secrets: ["whsec_other"] }), { ok: false, reason: "no_matching_signature" });
+  });
+
+  it("refuses a tolerance or a clock that would accept any age, before checking anything", () => {
+    // A signature from a year ago: only a broken tolerance or clock would let it through.
+    const old = signStripePayload(payload, secret, t - 365 * 86_400);
+    const check = (patch: Partial<Parameters<typeof verifyStripeSignature>[0]>) => () =>
+      verifyStripeSignature({ payload, header: old, secrets: [secret], now, ...patch });
+    for (const toleranceSeconds of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 86_401, "300", null]) {
+      assert.throws(check({ toleranceSeconds: toleranceSeconds as number }), rejects("invalid_input", /toleranceSeconds/), String(toleranceSeconds));
+    }
+    for (const bad of [new Date(Number.NaN), new Date(8.64e15 + 1), null, undefined, 1_767_225_600_000, "2026-01-01"]) {
+      assert.throws(check({ now: bad as Date }), rejects("invalid_input", /now/), String(bad));
+    }
+    // The bounds themselves are fine: 0 accepts only this second, 86,400 a day either way.
+    assert.equal(verifyStripeSignature({ payload, header: signStripePayload(payload, secret, t), secrets: [secret], now, toleranceSeconds: 0 }).ok, true);
+    assert.deepEqual(verifyStripeSignature({ payload, header: old, secrets: [secret], now, toleranceSeconds: 86_400 }), { ok: false, reason: "timestamp_out_of_tolerance" });
   });
 });
 

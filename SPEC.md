@@ -386,7 +386,9 @@ A request settles once; later outcomes are ignored.
 `verifyStripeSignature` follows Stripe's published scheme: the `Stripe-Signature` header has
 `t=<unix seconds>` and one or more `v1=<hex>`; each `v1` is `HMAC-SHA256(secret, t + "." + raw
 body)`. The check passes if any `v1` matches any configured secret and `t` is within 300 seconds
-of now, either way. `parseStripeEvent` maps
+of now, either way. A host may set `toleranceSeconds`, an integer from 0 to 86,400; any other
+tolerance, or a `now` that is not a valid `Date`, throws `invalid_input` before anything is
+checked, since a NaN or an Infinity would let a replay of any age pass. `parseStripeEvent` maps
 `identity.verification_session.{verified,requires_input,canceled}` and
 `checkout.session.{completed,async_payment_succeeded,async_payment_failed,expired}`; other types
 are reported as ignored, and a body that is not a well-formed event is `null`.

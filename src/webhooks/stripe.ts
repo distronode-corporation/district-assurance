@@ -2,6 +2,7 @@
 // outcomes. The signature scheme is Stripe's published one: the `Stripe-Signature` header carries
 // `t=<unix seconds>` and one or more `v1=<hex>`, each an HMAC-SHA256 of `<t>.<raw body>` under the
 // endpoint's signing secret. Nothing here calls Stripe.
+import { EngineError } from "../core/errors.ts";
 import { hexDigestsEqual, hmacSha256Hex } from "../core/hash.ts";
 import type { PaymentOutcome } from "../pay/payment.ts";
 
@@ -16,11 +17,26 @@ export interface StripeSignatureInput {
   /** The endpoint's signing secrets; more than one while a secret is rolled. */
   secrets: readonly string[];
   now: Date;
-  /** Default 300 seconds, Stripe's own default. Applies to the past and the future. */
+  /** Default 300 seconds, Stripe's own default; an integer from 0 to 86,400. Applies to the past and the future. */
   toleranceSeconds?: number;
 }
 
+/** The widest tolerance a host may set: a day. */
+const MAX_TOLERANCE_SECONDS = 86_400;
+
+/**
+ * Checks a Stripe webhook signature. A tolerance that is not an integer from 0 to 86,400, or a
+ * `now` that is not a valid date, throws `invalid_input` before anything is checked: a NaN or an
+ * Infinity in either would make every timestamp look fresh, so a replay of any age would pass.
+ */
 export function verifyStripeSignature(input: StripeSignatureInput): SignatureCheck {
+  // Only a missing tolerance takes the default: null, a string or NaN is a host bug, refused.
+  const tolerance: unknown = input.toleranceSeconds === undefined ? 300 : input.toleranceSeconds;
+  if (!Number.isSafeInteger(tolerance) || (tolerance as number) < 0 || (tolerance as number) > MAX_TOLERANCE_SECONDS) {
+    throw new EngineError("invalid_input", "toleranceSeconds must be an integer from 0 to 86400");
+  }
+  const nowMs = input.now instanceof Date ? input.now.getTime() : Number.NaN;
+  if (!Number.isFinite(nowMs)) throw new EngineError("invalid_input", "now must be a valid Date");
   const secrets = input.secrets.filter((s) => s.length > 0);
   if (secrets.length === 0) return { ok: false, reason: "no_secret" };
   if (input.header === null || input.header === undefined || input.header === "") return { ok: false, reason: "missing_header" };
@@ -35,8 +51,7 @@ export function verifyStripeSignature(input: StripeSignatureInput): SignatureChe
     if (key === "v1") signatures.push(value);
   }
   if (timestamp === null || signatures.length === 0) return { ok: false, reason: "malformed_header" };
-  const tolerance = input.toleranceSeconds ?? 300;
-  if (Math.abs(Math.floor(input.now.getTime() / 1000) - timestamp) > tolerance) {
+  if (Math.abs(Math.floor(nowMs / 1000) - timestamp) > (tolerance as number)) {
     return { ok: false, reason: "timestamp_out_of_tolerance" };
   }
   const signed = `${timestamp}.${input.payload}`;
