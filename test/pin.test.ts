@@ -22,7 +22,9 @@ describe("PIN factor, keyed hash", () => {
     assert.deepEqual(await t.engine.finishVerification(callId), { level: 1, scopes: ["intake.file", "status.read"] });
     const entries = await t.ledger.list();
     assert.deepEqual(entries[1]!.detail, { subject: "host" });
-    assert.deepEqual(entries[2]!.detail, { kind: "pin", passed: true });
+    const { tag, ...detail } = entries[2]!.detail;
+    assert.deepEqual(detail, { kind: "pin", passed: true });
+    assert.match(String(tag), /^[0-9a-f]{64}$/, "every PIN entry carries a keyed tag (VER-12)");
     assert.equal(JSON.stringify(entries).includes(`"${PIN}"`), false, "the PIN is never written");
   });
 

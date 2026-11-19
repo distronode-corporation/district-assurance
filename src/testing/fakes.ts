@@ -4,6 +4,7 @@ import { generateKeyPairSync } from "node:crypto";
 
 import type {
   CarrierSignals,
+  DuressNotifier,
   IdentityProvider,
   IntakeRecord,
   MessagePurpose,
@@ -17,6 +18,7 @@ import type {
 import type { Clock, IdGenerator } from "../core/clock.ts";
 import type { CarrierSignalReport } from "../core/policy.ts";
 import { keyPairSigner } from "../prove/receipt.ts";
+import { duressDigest } from "../verify/factors.ts";
 import { knowledgeDigest, pinDigest, subjectKeyFor } from "../verify/knowledge.ts";
 
 /** A clock that only moves when told to. */
@@ -146,6 +148,13 @@ export class MemoryRecordStore implements RecordStore {
     else subject.pinDigest = digest;
     return true;
   }
+
+  async putDuressDigest(workspaceId: string, subjectKey: string, digest: string | null): Promise<void> {
+    const subject = this.#subjects.get(`${workspaceId}/${subjectKey}`);
+    if (subject === undefined) return;
+    if (digest === null) delete subject.duressDigest;
+    else subject.duressDigest = digest;
+  }
 }
 
 /**
@@ -155,27 +164,44 @@ export class MemoryRecordStore implements RecordStore {
 export class FakePinVerifier implements PinVerifier {
   readonly asked: string[] = [];
   readonly #pins = new Map<string, string>();
+  readonly #duress = new Map<string, string>();
 
   set(workspaceId: string, subjectKey: string, pin: string): void {
     this.#pins.set(`${workspaceId}/${subjectKey}`, pin);
   }
 
-  async verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean }> {
+  /** The subject's duress PIN (VER-12). */
+  setDuress(workspaceId: string, subjectKey: string, pin: string): void {
+    this.#duress.set(`${workspaceId}/${subjectKey}`, pin);
+  }
+
+  async verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean; duress?: boolean }> {
     this.asked.push(input.subjectKey);
-    return { matched: this.#pins.get(`${input.workspaceId}/${input.subjectKey}`) === input.pin };
+    const key = `${input.workspaceId}/${input.subjectKey}`;
+    return { matched: this.#pins.get(key) === input.pin, duress: this.#duress.get(key) === input.pin };
+  }
+}
+
+/** Keeps what it is told of duress PIN entries (VER-12). */
+export class FakeDuressNotifier implements DuressNotifier {
+  readonly told: Array<{ workspaceId: string; subjectKey: string; callId: string; at: string }> = [];
+
+  async notify(input: { workspaceId: string; subjectKey: string; callId: string; at: string }): Promise<void> {
+    this.told.push({ ...input });
   }
 }
 
 /** A subject record built from plain values, hashed the way the engine compares them. */
 export function testSubject(
   knowledgeKey: string | Uint8Array,
-  input: { accountNumber: string; phoneOnFile: string; knowledge: Record<string, string>; pin?: string },
+  input: { accountNumber: string; phoneOnFile: string; knowledge: Record<string, string>; pin?: string; duressPin?: string },
 ): SubjectRecord {
   const knowledge: Record<string, string> = {};
   for (const [field, value] of Object.entries(input.knowledge)) knowledge[field] = knowledgeDigest(knowledgeKey, field, value);
   const subjectKey = subjectKeyFor(knowledgeKey, input.accountNumber);
   const subject: SubjectRecord = { subjectKey, phoneOnFile: input.phoneOnFile, knowledge };
   if (input.pin !== undefined) subject.pinDigest = pinDigest(knowledgeKey, subjectKey, input.pin);
+  if (input.duressPin !== undefined) subject.duressDigest = duressDigest(knowledgeKey, subjectKey, input.duressPin);
   return subject;
 }
 

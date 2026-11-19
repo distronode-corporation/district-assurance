@@ -55,6 +55,8 @@ export interface SubjectRecord {
   knowledge: Record<string, string>;
   /** The HMAC of the subject's PIN (`pinDigest`), for the PIN factor in `keyed_hash` mode. */
   pinDigest?: string;
+  /** The HMAC of the subject's duress PIN (`duressDigest`), set only by the business (VER-12). */
+  duressDigest?: string;
 }
 
 /**
@@ -64,7 +66,20 @@ export interface SubjectRecord {
  * subject exists, and should take the same time either way.
  */
 export interface PinVerifier {
-  verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean }>;
+  /**
+   * `duress: true` when the entry is the subject's duress PIN (VER-12): the call then looks like a
+   * pass to the caller, and `matched` is ignored. It counts only while Badge's `pin.duress` is set.
+   */
+  verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean; duress?: boolean }>;
+}
+
+/**
+ * Told when a caller enters a duress PIN (VER-12), once per call, after the call's write. Best
+ * effort: the engine does not wait for it, and a failure, thrown or rejected, changes nothing on the
+ * call. Never given the PIN. The host alerts whoever the business named, away from the call.
+ */
+export interface DuressNotifier {
+  notify(input: { workspaceId: string; subjectKey: string; callId: string; at: string }): Promise<void>;
 }
 
 /** A stored call session and its version. The version goes up by one on every write. */
@@ -121,6 +136,11 @@ export interface RecordStore {
    * alone, and the answer is false.
    */
   putPinDigest(workspaceId: string, subjectKey: string, digest: string | null): Promise<boolean>;
+  /**
+   * Stores a subject's duress PIN digest (`duressDigest`), replacing any (the business changes it),
+   * or removes it with null. Never given the PIN itself. A subject the store does not have is left alone.
+   */
+  putDuressDigest(workspaceId: string, subjectKey: string, digest: string | null): Promise<void>;
 }
 
 /**

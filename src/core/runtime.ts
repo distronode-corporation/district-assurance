@@ -5,6 +5,7 @@ import type {
   AttemptCounters,
   AuditLedger,
   CarrierSignals,
+  DuressNotifier,
   IdentityProvider,
   MessageSender,
   PaymentLinks,
@@ -39,6 +40,8 @@ export interface EngineAdapters {
   pinVerifier?: PinVerifier;
   /** Failure counters across calls (VER-1). A PIN reset clears the subject's PIN counters. */
   counters?: AttemptCounters;
+  /** Told of a duress PIN entry (VER-12). Needed while Badge's `pin.duress` is set. */
+  duressNotifier?: DuressNotifier;
 }
 
 export type AdapterName = keyof EngineAdapters;
@@ -76,8 +79,11 @@ export interface CallDraft {
   slice<T>(module: string): T;
   apply(event: SessionEvent): void;
   assertCan(event: SessionEvent): void;
-  /** Queues a ledger entry, written once the change is saved. */
-  emit(name: EngineEventName, actor: Actor, detail: { [key: string]: JsonValue }): void;
+  /**
+   * Queues a ledger entry, written once the change is saved. With `tag` (a PIN outcome, VER-12) the
+   * entry gets a `tag` field, an HMAC of its event id and that outcome; the outcome is never saved.
+   */
+  emit(name: EngineEventName, actor: Actor, detail: { [key: string]: JsonValue }, tag?: string): void;
   /** The flow step the call is on, or null when no flow is running. */
   step(): FlowStep | null;
 }

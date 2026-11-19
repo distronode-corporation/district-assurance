@@ -26,6 +26,7 @@ All notable changes to this project are documented here. The format follows
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
 - PIN enrolment and reset (VER-6): `enrolPin` lets a caller verified to level 2 on the call choose a PIN, keyed twice, weak PINs refused, stored through the new `RecordStore.putPinDigest`; `resetPin` is the business's host call; `pin.enrolled` and `pin.reset` events.
+- Duress PIN (VER-12), off by default (`pin.duress`): the business enrols it with `enrolDuressPin`, stored through the new `RecordStore.putDuressDigest`; a duress entry passes like the PIN to the caller while `authorize` refuses money, contact, access and `refuseScopes`, and the new `DuressNotifier` adapter is told; every PIN ledger entry carries a keyed `tag` that `readPinTag` reads.
 
 ### Changed
 

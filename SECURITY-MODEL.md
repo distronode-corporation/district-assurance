@@ -67,10 +67,35 @@ and the two digests compared in constant time; only a subject with no PIN on fil
 caller can never replace a PIN: changing one is `resetPin`, a host call from the business's own
 tools (tested). The store writes a digest only if none is on file, in one atomic step, so of two
 enrolments at once one wins and the other is refused without replacing it (tested). The PIN factor
-reads the digest from the store on every attempt, so after a reset the old PIN fails even on a call
-that began verification before it (tested). In `verifier` mode the engine never enrols. `pin.enrolled` and `pin.reset` carry no
+reads both digests (the PIN's and the duress PIN's) from the store on every attempt, so after a
+reset or a removed duress PIN the old one fails even on a call that began verification before it
+(tested). In `verifier` mode the engine never enrols. `pin.enrolled` and `pin.reset` carry no
 digits (tested). Who may call `resetPin`, and how the business confirms the request first, is the
 host's (left to the host).
+
+### Coercion (duress PIN)
+
+An owner made to call under pressure, with the person forcing them listening beside them.
+**Controls (VER-12, off unless Badge's `pin.duress` is set):** the business enrols a second,
+duress PIN for the subject with a host call, never a caller one, stored as its own keyed digest
+and refused when it equals the PIN, the account number or any keypad knowledge (tested). Every PIN
+entry is compared with both digests, whether or not a duress PIN is on file, so the work, the time
+and the answer are the same (tested). A duress entry gets the same answer, level, grant, events
+and receipt as the PIN (tested); the duress state is kept only in the call record. On that call
+`authorize` refuses every money, contact and access scope and the scopes the business lists in
+`refuseScopes` (for example `owner.command`), with the same `false` as a scope with no grant
+(tested). After the write the host's `DuressNotifier` is told once per call, without the call
+waiting, and a notifier that fails changes nothing (tested). Every PIN ledger entry carries a
+`tag` keyed to its event id and outcome, so only the holder of the knowledge key can tell a duress
+pass from a normal one (tested); enrolling or removing a duress PIN writes nothing to the ledger.
+A PIN reset removes the duress PIN too.
+
+**Limits.** It does not stop someone who knows both PINs, or who makes the owner say which is
+which. The code is public, so an attacker can learn exactly how a duress call behaves. A refused
+action can itself be noticed by someone watching: the host speaks the same fixed line it uses for
+any scope without a grant, but a payment that never happens is still visible. The notifier is best
+effort; who it alerts, and how fast, is the host's. Anything the host sends after the call (PRV-10)
+must follow the same rule as on a normal call, or it gives the duress away.
 
 ### SIM swap and port-out
 
@@ -173,7 +198,12 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.
 - Calling `resetPin` only from the business's own staff tools, after the business has confirmed
   the request, never from a path a caller or the model can reach; and a `RecordStore.putPinDigest`
-  that stores only the digest it is given, and only if the subject has none, atomically.
+  that stores only the digest it is given, and only if the subject has none, atomically. The same
+  for `enrolDuressPin`, `removeDuressPin` and `putDuressDigest`, which stores only the duress
+  digest it is given and replaces one on file (only the business sets it).
+- A `DuressNotifier` that alerts someone the business named, away from the call, and never
+  through anything the caller or the person beside them can see; and, in `verifier` mode, a
+  `PinVerifier` that answers a duress PIN in the same time as any other entry.
 - Who may edit a workspace's FlowConfig, and keeping its revisions.
 - Outside modules: their code runs inside the engine's writes and is part of the host's security
   model.

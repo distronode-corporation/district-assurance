@@ -10,7 +10,7 @@
 // throws NotImplementedError. SPEC.md describes the flow.
 import type { JsonWebKey } from "node:crypto";
 
-import type { IntakeRecord, SessionStore } from "./core/adapters.ts";
+import type { AuditEntry, IntakeRecord, SessionStore } from "./core/adapters.ts";
 import type { JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
@@ -19,7 +19,7 @@ import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
 import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
 import { hmacSha256Hex } from "./core/hash.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
-import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
+import { scopeClass, type AssuranceLevel, type VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
 import type { AdapterName, CallDraft, CallRecord, EngineAdapters, EngineRuntime, FlowStatus, Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
@@ -34,13 +34,13 @@ import { detailCarriesCardNumber } from "./prove/ledger.ts";
 import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
 import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
-import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
+import { pinTag, type FactorEntry, type FactorPlugin, type PinOutcome } from "./verify/factors.ts";
 import * as pin from "./verify/pin.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
 export type { EngineAdapters, Locale } from "./core/runtime.ts";
 export type { KeypadResult, OutcomeResult, VerificationResult } from "./verify/badge.ts";
-export type { PinEnrolmentResult } from "./verify/pin.ts";
+export type { DuressEnrolmentResult, PinEnrolmentResult } from "./verify/pin.ts";
 
 
 /** Writes per step before the engine gives up with `conflict`. */
@@ -87,6 +87,8 @@ interface QueuedEvent {
   actor: Actor;
   at: string;
   detail: { [key: string]: JsonValue };
+  /** A PIN outcome to tag the entry with (VER-12). Never saved. */
+  tag?: string | undefined;
 }
 
 export class Engine {
@@ -196,7 +198,7 @@ export class Engine {
       this.#attachFlow(draft, input.flow, this.#flowDefinition(input.flow), this.#config.revision);
       this.#advance(draft);
     }
-    record.outbox = events.map((event, i) => ({ eventId: this.#eventId(callId, 1, i), ...event }));
+    record.outbox = events.map((event, i) => this.#outboxEntry(callId, 1, i, event));
     const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
     if (!created) throw new EngineError("invalid_input", "a call with that id exists");
     await this.#flush(callId, 1, record);
@@ -350,9 +352,27 @@ export class Engine {
     return pin.enrolPin(this.#rt, callId, input);
   }
 
-  /** The business resets a subject's PIN. A host call from the business's own tools, never on a caller's request. */
+  /** The business resets a subject's PIN (and removes any duress PIN). A host call from the business's own tools, never on a caller's request. */
   resetPin(subjectKey: string): Promise<void> {
     return pin.resetPin(this.#rt, subjectKey, this.#adapters.counters);
+  }
+
+  /**
+   * The business enrols or replaces a subject's duress PIN (VER-12). A host call from its own tools,
+   * never on a caller's request; `keyed_hash` mode with `pin.duress` on, for a subject with a PIN.
+   */
+  enrolDuressPin(subjectKey: string, duressPin: string): Promise<pin.DuressEnrolmentResult> {
+    return pin.enrolDuressPin(this.#rt, subjectKey, duressPin);
+  }
+
+  /** The business removes a subject's duress PIN (VER-12). A host call. */
+  removeDuressPin(subjectKey: string): Promise<void> {
+    return pin.removeDuressPin(this.#rt, subjectKey);
+  }
+
+  /** What a `pin` factor ledger entry's keyed `tag` says (VER-12), or null. Only this key's holder can read it. */
+  readPinTag(entry: Pick<AuditEntry, "eventId" | "event" | "detail">): PinOutcome | null {
+    return pin.readPinTag((d) => this.#rt.hmac(d), entry);
   }
 
   // ---- Dossier (file) ----------------------------------------------------------------------
@@ -533,6 +553,8 @@ export class Engine {
   #authorized(record: CallRecord, scope: string): boolean {
     const min: AssuranceLevel | undefined = Object.hasOwn(this.#config.policy.scopes, scope) ? this.#config.policy.scopes[scope] : undefined;
     if (min === undefined || record.state.phase === "ended") return false;
+    // A duress call (VER-12) refuses money, contact and access, and the scopes Badge's settings named, as if ungranted.
+    if (badge.duressRefuses(record, scope, scopeClass(scope, this.#config.policy.scopeClasses, this.registry.scopeClasses()))) return false;
     if (min === 0) return true;
     const grant = record.state.grant;
     // The grant's level is checked against today's minimum too, so a stricter config applies to grants already issued.
@@ -557,7 +579,7 @@ export class Engine {
       // The step's ledger entries are saved with the step, then appended: a ledger that fails
       // leaves them in the record, and the next write (or flushLedger) appends them, once each.
       const version = stored.version + 1;
-      events.forEach((event, i) => record.outbox.push({ eventId: this.#eventId(callId, version, i), ...event }));
+      events.forEach((event, i) => record.outbox.push(this.#outboxEntry(callId, version, i, event)));
       const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
       if (saved.ok) {
         await this.#flush(callId, version, record);
@@ -577,12 +599,12 @@ export class Engine {
       assertCan: (event) => {
         if (!canApply(record.state, event)) throw new EngineError("invalid_transition", `${event.type} is not allowed while ${record.state.phase}`);
       },
-      emit: (name, actor, detail) => {
+      emit: (name, actor, detail, tag) => {
         // A copy, checked here, inside the step, so an entry the ledger would refuse is never saved
         // to be appended later, and a caller changing its object afterwards changes nothing.
         const copy = structuredClone(detail);
         if (detailCarriesCardNumber(copy)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
-        events.push({ name, actor, at: this.#now(), detail: copy });
+        events.push({ name, actor, at: this.#now(), detail: copy, tag });
       },
       step: () => currentStep(record),
     };
@@ -635,6 +657,17 @@ export class Engine {
       }
     }
     await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue);
+  }
+
+  /**
+   * A queued event as the outbox keeps it, with its event id. A tagged event (a PIN factor, VER-12)
+   * gets its keyed `tag` here, now that its id is known; the outcome itself is never kept.
+   */
+  #outboxEntry(callId: string, version: number, index: number, queued: QueuedEvent): CallRecord["outbox"][number] {
+    const { tag, ...event } = queued;
+    const eventId = this.#eventId(callId, version, index);
+    if (tag !== undefined) event.detail = { ...event.detail, tag: pinTag((d) => hmacSha256Hex(this.#key, d), eventId, tag as PinOutcome) };
+    return { eventId, ...event };
   }
 
   /** A ledger event id, unique across workspaces sharing one ledger: a JSON tuple, so no two ids collide. */

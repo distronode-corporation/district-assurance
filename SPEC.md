@@ -89,7 +89,7 @@ module the config has on.
 
 | Built-in | Steps | Needs | Adapters |
 |---|---|---|---|
-| `badge` | `badge.verify` | | `records`; `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `pinVerifier` with `pin` in verifier mode |
+| `badge` | `badge.verify` | | `records`; `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `pinVerifier` with `pin` in verifier mode; `duressNotifier` with `pin.duress` |
 | `dossier` | `dossier.collect` | `intake.file` | `records` |
 | `paylink` | `paylink.request` | `payment.request` | `payments`, `messages` |
 | `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
@@ -136,7 +136,9 @@ A factor that is off is refused at every entry point. A planned factor cannot be
 A **grant** carries the level, the scopes at or below it (narrowed to the verify step's `scopes`
 when the step lists them), and an expiry. `authorize(callId, scope)` is true only for a scope the
 policy lists, on a call that has not ended, whose minimum is 0 or whose grant includes it, has not
-expired, and has a level at or above the scope's minimum under the config in force now.
+expired, and has a level at or above the scope's minimum under the config in force now. On a
+duress call (section 6) it is also false for every scope whose class is not `none` and for every
+scope in the duress `refuseScopes`.
 
 Links go only to the subject's number on file, and only after a `keypad_knowledge` or `pin`
 factor passed since verification last started from nothing. A plug-in's pass does not unlock
@@ -156,7 +158,9 @@ texts.
 
 ## 6. PIN
 
-Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsPerCall (1 to 5)}`.
+Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsPerCall (1 to 5),
+duress?}`. `duress` is `{refuseScopes}`, a list of scopes without duplicates (it may be empty);
+the duress PIN is off unless it is set.
 
 - An entry is well formed when it is ASCII digits with a length from `minDigits` to `maxDigits`.
   A malformed entry is still an attempt, and fails.
@@ -199,7 +203,50 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   (`putPinDigest` with null), so the subject has no PIN until they enrol again at level 2; in
   `verifier` mode the host's store resets its own PIN. Either way it clears the subject's PIN
   failure counters when the engine has a `counters` adapter (VER-1; a stand-in with only `reset`
-  until VER-1 lands), and appends `pin.reset` to the ledger with no call.
+  until VER-1 lands), and appends `pin.reset` to the ledger with no call. In `keyed_hash` mode it
+  also removes the duress PIN (`putDuressDigest` with null).
+
+### Duress PIN (VER-12)
+
+A second PIN that an owner made to call under pressure enters instead of the PIN. Off unless
+`pin.duress` is set; then Badge needs the `duressNotifier` adapter.
+
+- Enrolment: `enrolDuressPin(subjectKey, pin)` is a host call for the business's own tools, never
+  a caller's. It needs the `pin` factor on (`precondition_failed`), `keyed_hash` mode
+  (`precondition_failed`; in `verifier` mode the host's store keeps its own duress PIN), a 64
+  lower-case hex subject key (`invalid_input`), `pin.duress` set (`precondition_failed`) and a
+  subject on file with a PIN (`precondition_failed`). Answers: `malformed` (not digits of a length
+  from `minDigits` to `maxDigits`), `weak` (equal to the PIN on file, the account number or any
+  keypad knowledge, compared as keyed hashes; every digit the same; a run; `weak` does not say
+  which), or `{enrolled: true}` once `RecordStore.putDuressDigest(workspaceId, subjectKey,
+  digest)` stored `duressDigest(knowledgeKey, subjectKey, pin)` = `HMAC-SHA256(knowledgeKey,
+  "duress:" + subjectKey + ":" + pin)`, in `SubjectRecord.duressDigest`. A second enrolment
+  replaces it. `removeDuressPin(subjectKey)` removes it (same checks, except `pin.duress` may be
+  off). Neither writes to the ledger. `enrolPin` answers `weak` for a PIN equal to a duress PIN on
+  file.
+- Judging: in `keyed_hash` mode every PIN entry is hashed as both a PIN and a duress PIN and
+  compared with both digests (an empty one when none is on file), whatever the subject, the entry
+  or the setting, so the work and the time are the same. Both digests are read from the store on
+  every entry, never from the call's copy, so a duress PIN removed, or a PIN reset (which removes
+  both), counts even on a call that began verification before it. In `verifier` mode `PinVerifier.verify`
+  may answer `{duress: true}`, and `matched` is then ignored. A duress match counts only on a
+  subject on file, with a well-formed entry, while `pin.duress` is set; otherwise it fails like a
+  wrong PIN. Where both would match, duress wins.
+- A duress entry is a pass everywhere the caller can reach: the same `submitPin` answer, the same
+  factor, level, grant, state, events and receipt as the PIN. The call record's Badge part gets
+  `duress: {refuseScopes}` (the setting as it was then), which nothing clears for the rest of the
+  call, and `authorize` refuses as section 4 says, with the same `false` as a scope with no grant
+  (so `requestPayment` is refused with `scope_denied`). Anything sent after the call (PRV-10)
+  follows the same rule as on a normal call.
+- After the write that recorded the first duress entry of a call, the engine calls
+  `DuressNotifier.notify({workspaceId, subjectKey, callId, at})` without waiting for it. A
+  notifier that throws, rejects or never answers changes nothing on the call.
+- The ledger tag: every `verification.factor` entry with `kind: "pin"` carries `tag` =
+  `HMAC-SHA256(knowledgeKey, JSON.stringify(["pin.tag", eventId, outcome]))`, outcome `fail`,
+  `pass` or `duress`, whether or not the duress PIN is on. `readPinTag(entry)` on the engine (and
+  `readPinTag(hmac, entry)`) returns the outcome, or null for another entry, a wrong key or a
+  changed entry. The ledger otherwise holds the same entries; the receipt's ledger head and the
+  `receipt.issued` digest differ only as the tag's bytes do.
 
 ## 7. FlowConfig
 
@@ -288,7 +335,7 @@ answer on file, a phone number, a link or card data.
 | `flow.completed` | `flow`, `steps` |
 | `flow.abandoned` | `flow`, `step` |
 | `verification.started` | `subject`: `account` or `host` |
-| `verification.factor` | `kind`, `passed` (and `status` for photo ID) |
+| `verification.factor` | `kind`, `passed` (and `status` for photo ID, `tag` for the PIN, section 6) |
 | `verification.carrier_checked` | `checked`, `textCodeTrusted`, `identityMatch` |
 | `identity.link_sent` | none |
 | `verification.finished` | `level`, `methods`, `discounted` |

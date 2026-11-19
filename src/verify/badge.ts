@@ -18,6 +18,7 @@ import {
   type AssuranceLevel,
   type CarrierSignalReport,
   type FactorKind,
+  type ScopeClass,
 } from "../core/policy.ts";
 import type { CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
 import { canApply, type SessionState } from "../core/session.ts";
@@ -32,6 +33,7 @@ import {
   type BadgeSettings,
   type FactorEntry,
   type FactorPlugin,
+  type PinOutcome,
   type PinSettings,
 } from "./factors.ts";
 import { isKeypadEntry } from "./knowledge.ts";
@@ -56,6 +58,12 @@ export interface BadgeSlice {
   pinEnrolments?: number;
   /** A PIN digest this call is storing and has not yet recorded as enrolled (`pin.enrolled`). Never the digits. */
   pinPending?: { subjectKey: string; digest: string };
+  /**
+   * Set once a duress PIN passed on this call (VER-12), and never cleared: the scopes refused on
+   * top of money, contact and access, as Badge's settings named them then. The only place the
+   * duress state is kept. Absent on every other call.
+   */
+  duress?: { refuseScopes: string[] };
   /** A keypad or PIN factor matched since verification last started from nothing. */
   knowledgeMatched: boolean;
   carrier: CarrierSignalReport | null;
@@ -90,7 +98,7 @@ export interface VerificationResult {
 export type OutcomeResult = { applied: false } | { applied: true; callId: string };
 
 const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin"];
-const PIN_KEYS = ["mode", "minDigits", "maxDigits", "maxAttemptsPerCall"];
+const PIN_KEYS = ["mode", "minDigits", "maxDigits", "maxAttemptsPerCall", "duress"];
 
 /** The subject whose number links may go to: only once a keypad or PIN factor matched. */
 export function matchedSubject(record: CallRecord): SubjectRecord {
@@ -160,6 +168,7 @@ export class BadgeModule implements AssuranceModule {
       for (const a of BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS]?.adapters ?? this.#plugins.get(kind)!.adapters) adapters.add(a);
     }
     if (s.pin?.mode === "verifier" && s.factors.includes("pin")) adapters.add("pinVerifier");
+    if (s.pin?.duress !== undefined && s.factors.includes("pin")) adapters.add("duressNotifier");
     return [...adapters];
   }
 
@@ -260,7 +269,35 @@ function pinSettingsErrors(pin: unknown): string[] {
   if (!isIntegerIn(pin.minDigits, 4, 12)) errors.push("pin.minDigits must be 4 to 12");
   else if (!isIntegerIn(pin.maxDigits, pin.minDigits, 12)) errors.push("pin.maxDigits must be from minDigits to 12");
   if (!isIntegerIn(pin.maxAttemptsPerCall, 1, 5)) errors.push("pin.maxAttemptsPerCall must be 1 to 5");
+  if (pin.duress !== undefined) errors.push(...duressSettingsErrors(pin.duress));
   return errors;
+}
+
+function duressSettingsErrors(duress: unknown): string[] {
+  if (!isObject(duress)) return ["pin.duress must be an object with refuseScopes"];
+  const errors = unknownKeys(duress, ["refuseScopes"]).map((k) => `pin.duress.${k} is not a duress setting`);
+  if (!isStringArray(duress.refuseScopes)) errors.push("pin.duress.refuseScopes must list scopes (it may be empty)");
+  else if (new Set(duress.refuseScopes).size !== duress.refuseScopes.length) errors.push("pin.duress.refuseScopes has duplicates");
+  return errors;
+}
+
+/**
+ * Whether a duress call refuses a scope (VER-12): every scope whose class is not `none` (money,
+ * contact, access, or no class at all), and the scopes Badge's settings named. False on any other call.
+ */
+export function duressRefuses(record: CallRecord, scope: string, cls: ScopeClass | null): boolean {
+  const duress = (record.modules[BADGE] as unknown as BadgeSlice | undefined)?.duress;
+  return duress !== undefined && (cls !== "none" || duress.refuseScopes.includes(scope));
+}
+
+/** Tells the host's notifier of a duress entry, without waiting; a failure, thrown or rejected, changes nothing. */
+function notifyDuress(rt: EngineRuntime, input: { workspaceId: string; subjectKey: string; callId: string; at: string }): void {
+  try {
+    const told: unknown = rt.adapter("duressNotifier").notify(input);
+    if (told instanceof Promise) told.catch(() => undefined);
+  } catch {
+    // Ignored by design: the call goes on exactly as it would.
+  }
 }
 
 // ---- runtime -------------------------------------------------------------------------------
@@ -335,19 +372,25 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   });
   if (reserved === null) return { matched: false, locked: true };
   const input = { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey, subject: reserved.subject, entry, hmac: (d: string) => rt.hmac(d) };
-  const passed =
-    kind === "keypad_knowledge"
-      ? await judgeKeypad(rt.policy, input)
-      : kind === "pin"
-        ? await judgePin(rt, rt.settings<BadgeSettings>(BADGE).pin as PinSettings, input)
-        : (await plugin!.judge(input)) === true;
-  await rt.update(callId, (draft) => {
-    assertSameVerification(draft.slice<BadgeSlice>(BADGE), reserved.epoch);
-    const factor = { kind, passed, at: rt.now() };
-    draft.apply({ type: "factor_recorded", factor });
-    if (passed && KNOWLEDGE_FACTORS.includes(kind)) draft.slice<BadgeSlice>(BADGE).knowledgeMatched = true;
-    draft.emit("verification.factor", "code", { kind, passed });
+  const settings = rt.settings<BadgeSettings>(BADGE);
+  let outcome: PinOutcome;
+  if (kind === "pin") outcome = await judgePin(rt, settings.pin as PinSettings, input);
+  else outcome = (kind === "keypad_knowledge" ? await judgeKeypad(rt.policy, input) : (await plugin!.judge(input)) === true) ? "pass" : "fail";
+  // A duress entry is a pass everywhere the caller can reach: the factor, the level, the grant, the
+  // events and the receipt. Only the call record's `duress` and the PIN entry's keyed tag differ.
+  const passed = outcome !== "fail";
+  const told = await rt.update(callId, (draft) => {
+    const s = draft.slice<BadgeSlice>(BADGE);
+    assertSameVerification(s, reserved.epoch);
+    const at = rt.now();
+    draft.apply({ type: "factor_recorded", factor: { kind, passed, at } });
+    if (passed && KNOWLEDGE_FACTORS.includes(kind)) s.knowledgeMatched = true;
+    const first = outcome === "duress" && s.duress === undefined;
+    if (first) s.duress = { refuseScopes: [...settings.pin!.duress!.refuseScopes] };
+    draft.emit("verification.factor", "code", { kind, passed }, kind === "pin" ? outcome : undefined);
+    return first ? at : null;
   });
+  if (told !== null) notifyDuress(rt, { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey!, callId, at: told });
   return { matched: passed, locked: !passed && reserved.last };
 }
 
