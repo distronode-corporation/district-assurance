@@ -598,8 +598,9 @@ It, and `engine.receiptKeys()`, publish only a key's public members (`kty`, `crv
 never has it published.
 
 **The relay contract, version 1** (`webhookRelay({url, timeoutMs?})`): `POST <url>` with
-`content-type: application/json`, `idempotency-key: <the key above>` and the signed grant as
-canonical JSON. HTTPS only, or HTTP to `127.0.0.1`, `localhost` or `[::1]`; no credentials in the
+`content-type: application/json`, `idempotency-key: <the key above>` (as printable ASCII: any
+other character is written as a JSON `\uXXXX` escape, so the header parses to the same tuple; a
+header cannot carry a character past U+00FF) and the signed grant as canonical JSON. HTTPS only, or HTTP to `127.0.0.1`, `localhost` or `[::1]`; no credentials in the
 URL; redirects are not followed; the timeout is 100 to 30,000 ms (default 5,000). The relay
 answers 2xx after it worked the door, optionally `{"state": "confirmed", "ref": "<its id>"}`; 4xx
 when it did not act, optionally `{"error": "<code>"}` (`signature`, `workspace`, ...). A 409

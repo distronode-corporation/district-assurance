@@ -321,8 +321,10 @@ module's `updateModule` is held by the engine to its manifest's scopes on every 
 the current step's; outside a flow, all of them. Ending a call settles a grant still in flight as
 `unknown` if it was not yet signed, and is refused while a signed grant is at its door (until its
 answer is recorded or it expires, after which a relay refuses it), so no access outcome ever
-follows `receipt.issued` and no door acts on a grant after it (re-issuing a receipt is not
-supported, so nothing is ever appended under one). Holding the end, rather than a lock across
+follows `receipt.issued` (re-issuing a receipt is not supported, so nothing is ever appended under
+one). No door acts on a grant after the receipt only while the relay keeps accurate time: the
+relay judges the expiry by its own clock, so a relay whose clock runs behind the engine's accepts
+a grant for that much longer (SPEC.md, section 17). Holding the end, rather than a lock across
 the unlock, keeps the engine free of locks: the wait is bounded by the controller's timeout, or by
 the grant's lifetime (at most 15 minutes) if its process stopped. Built-in module names are the
 engine's for good, and the access signer must be a key of its own.

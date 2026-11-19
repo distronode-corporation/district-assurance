@@ -23,6 +23,17 @@ export interface WebhookRelayOptions {
 
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
+/**
+ * The idempotency key as a header value: printable ASCII. A header carries bytes, so fetch throws
+ * on a character past U+00FF before sending (Gate would record a grant it never sent as unknown),
+ * and sends U+0080 to U+00FF as one raw byte, not UTF-8. Every other character is written as a
+ * JSON escape: the engine's key is a JSON tuple, so the relay parses the same tuple, and an ASCII
+ * key goes out unchanged.
+ */
+function headerSafe(key: string): string {
+  return key.replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 /** The relay contract, version 1: SPEC.md, section 17. */
 export function webhookRelay(options: WebhookRelayOptions): AccessController {
   const url = new URL(options.url);
@@ -37,7 +48,7 @@ export function webhookRelay(options: WebhookRelayOptions): AccessController {
     async unlock(input): Promise<UnlockResult> {
       const response = await send(url, {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": input.idempotencyKey },
+        headers: { "content-type": "application/json", "idempotency-key": headerSafe(input.idempotencyKey) },
         body: canonicalJson(input.grant),
         redirect: "error",
         signal: AbortSignal.timeout(timeoutMs),
