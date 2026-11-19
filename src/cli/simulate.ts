@@ -319,8 +319,26 @@ async function readJson(path: string): Promise<{ value: unknown } | { error: str
   }
 }
 
+/**
+ * A line as the terminal may show it. A config or a script file is text from someone else: a
+ * character the terminal acts on (C0 and C1 controls, so escape sequences) or one that reorders or
+ * hides text (bidi controls and marks) is written as a `\u` escape, so a file can never move the
+ * cursor, set the title or make one result read as another.
+ */
+export function terminalSafe(line: string): string {
+  let safe = "";
+  for (const c of line) {
+    const n = c.codePointAt(0)!;
+    const unsafe = n <= 0x1f || (n >= 0x7f && n <= 0x9f) || n === 0x61c || n === 0x200e || n === 0x200f || (n >= 0x202a && n <= 0x202e) || (n >= 0x2066 && n <= 0x2069);
+    safe += unsafe ? `\\u${n.toString(16).padStart(4, "0")}` : c;
+  }
+  return safe;
+}
+
 /** The command line. Exit codes: 0 the flow ran (whatever its outcome), 1 a refused config, flow or script, 2 bad usage. */
-export async function main(args: readonly string[], output: Output): Promise<number> {
+export async function main(args: readonly string[], given: Output): Promise<number> {
+  // Every line leaves through here, escaped.
+  const output: Output = { out: (line) => given.out(terminalSafe(line)), err: (line) => given.err(terminalSafe(line)) };
   let parsed;
   try {
     parsed = parseArgs({ args: [...args], allowPositionals: true, strict: true, options: { flow: { type: "string" }, script: { type: "string" } } });

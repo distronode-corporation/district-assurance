@@ -444,4 +444,7 @@ Output, one line each: the headings `simulate:`, `script:`, `call:`, `step <n>/<
 engine's answer or `  refused:` its refusal; `    event <name> (<actor>) <detail>` for every ledger
 entry, as it is appended. Then the signed receipt as JSON, checked against the engine's key set, or
 `receipt: none`. Nothing the caller keys is printed: events carry no values (section 9) and
-decisions say right or wrong, never the digits.
+decisions say right or wrong, never the digits. A config and a script file are someone else's
+text, so every line, on standard output and standard error, writes C0 and C1 control characters
+and bidi controls and marks as `\u` escapes (`terminalSafe`): a file can never move the cursor,
+set the terminal's title or make one result read as another.
