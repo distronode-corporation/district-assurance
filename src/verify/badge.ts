@@ -106,9 +106,10 @@ export interface BadgeSlice {
   /**
    * The texted code sends whose ledger entries are not written yet (VER-2), one hold per send: the
    * call does not end while any is held, each until its own entry is written or its `until` passes,
-   * so no send's entry follows the receipt. Absent until the first send.
+   * so no send's entry follows the receipt. `sending` once the send claimed its dispatch to the SMS
+   * adapter, which renewed `until` from the claim. Absent until the first send.
    */
-  textSends?: Array<{ sendId: string; until: string }>;
+  textSends?: Array<{ sendId: string; until: string; sending?: true }>;
   /** How many verifications finished on this call, and the last one's level and counted methods. */
   finished: number;
   lastLevel: AssuranceLevel;
