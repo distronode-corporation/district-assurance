@@ -18,6 +18,7 @@ import {
   signDelivery,
   timerSleep,
   type DeliverRecordInput,
+  type DeliveryDestination,
   type RecordDeliveryBody,
 } from "../src/file/delivery.ts";
 import { verifyChain } from "../src/prove/ledger.ts";
@@ -172,6 +173,12 @@ describe("deliverRecord", () => {
       [{ retry: { baseDelayMs: 0.5 } }, /baseDelayMs/],
       [{ retry: { baseDelayMs: 5000, maxDelayMs: 4000 } }, /maxDelayMs/],
       [{ retry: { maxDelayMs: 3_600_001 } }, /maxDelayMs/],
+      // From the host's configuration, so anything at all: never a TypeError, never a number as a secret.
+      [{ destination: null as unknown as DeliveryDestination }, /destination must be/],
+      [{ destination: { ...destination, secret: 1234567890123456 as unknown as string } }, /secret must be/],
+      [{ destination: { ...destination, secret: Array.from({ length: 16 }, () => "x") as unknown as string } }, /secret must be/],
+      [{ destination: { ...destination, url: 42 as unknown as string } }, /url must be/],
+      [{ destination: { ...destination, destinationId: ["crm"] as unknown as string } }, /destinationId/],
       [{ recordId: "rec_404" }, /no record rec_404/],
       [{ workspaceId: "ws_other" }, /no record/],
     ];

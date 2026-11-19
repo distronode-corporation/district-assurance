@@ -33,6 +33,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The `deliverRecord` stub in `file/later.ts` is replaced by `deliverRecord` in `file/delivery.ts`,
+  which takes the destination, the stores, the clock and the retry settings (SPEC.md, Record
+  delivery).
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

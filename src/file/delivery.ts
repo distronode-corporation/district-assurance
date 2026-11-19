@@ -8,7 +8,7 @@ import { canonicalJson } from "../core/canonical.ts";
 import type { Clock } from "../core/clock.ts";
 import { EngineError } from "../core/errors.ts";
 import { hmacSha256Hex, sha256Hex } from "../core/hash.ts";
-import { isIntegerIn } from "../core/shape.ts";
+import { isIntegerIn, isObject } from "../core/shape.ts";
 
 /** The request header that carries the signature. */
 export const DELIVERY_SIGNATURE_HEADER = "district-signature";
@@ -101,8 +101,11 @@ export function timerSleep(ms: number): Promise<void> {
 }
 
 function destinationProblem(d: DeliveryDestination): string | null {
-  if (!DESTINATION_ID.test(d.destinationId)) return "destinationId must be lower-case letters, digits, hyphens or underscores";
-  if (d.secret.length < 16) return "the destination secret must be at least 16 characters";
+  // From the host's configuration, read with no type guarantee: each field is checked for its type first.
+  if (!isObject(d)) return "the destination must be an object with destinationId, url and secret";
+  if (typeof d.destinationId !== "string" || !DESTINATION_ID.test(d.destinationId)) return "destinationId must be lower-case letters, digits, hyphens or underscores";
+  if (typeof d.secret !== "string" || d.secret.length < 16) return "the destination secret must be a string of at least 16 characters";
+  if (typeof d.url !== "string") return "the destination url must be a string";
   const url = URL.parse(d.url);
   if (url === null) return "the destination url is not a URL";
   if (url.username !== "" || url.password !== "") return "the destination url must not carry credentials";

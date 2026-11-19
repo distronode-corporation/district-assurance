@@ -409,7 +409,8 @@ It is a library call the host makes after `confirmIntake` (for example from a jo
 flow step. A destination is `{ destinationId, url, secret }` from the host's own configuration:
 the id is lower case, digits, `-` and `_` (it goes in the ledger, the URL never does), the URL is
 `https:`, or `http:` on `localhost`, `127.0.0.1` or `[::1]`, without credentials, and the secret
-has at least 16 characters.
+is a string of at least 16 characters; a destination that is not an object, or a field of the
+wrong type, is refused like a bad value.
 
 The body is the canonical JSON of `{ v: 1, type: "record.confirmed", idempotencyKey,
 destinationId, record }`, the same bytes on every attempt. The idempotency key is
@@ -424,6 +425,7 @@ Retries: a 2xx delivers; no answer (the adapter rejects), 408, 429 or 5xx waits
 `min(maxDelayMs, baseDelayMs * 2^(attempt - 1))` and tries again, up to `maxAttempts`; any other
 status fails at once. Defaults: 5 attempts, 1 second, 60 seconds; allowed: 1 to 10 attempts, a
 base from 0 to 600,000 ms and a cap from the base to 3,600,000 ms. Each attempt appends one
-`delivery.attempted` entry on the record's call, after the post. `deliverRecord` returns
+`delivery.attempted` entry on the record's call, after the post, straight to the `ledger` it is
+given: no engine is involved, so an engine's `onEvent` listener does not see these entries. `deliverRecord` returns
 `{ delivered, attempts, status, idempotencyKey }`; it throws `invalid_input` for a bad destination
 or retry setting or an unknown record, before posting, and passes a ledger failure through.
