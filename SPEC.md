@@ -350,7 +350,9 @@ and returns false for any change, a wrong algorithm, a malformed signature or an
 
 The `ReceiptSigner` contract: `sign(payload)` returns an ES256 (ECDSA P-256 with SHA-256)
 signature over exactly the payload bytes, in IEEE P1363 form: `r || s`, each a 32-byte big-endian
-integer, 64 bytes in all. `signReceipt` refuses any other length with `invalid_input`, so no
+integer, 64 bytes in all. `signReceipt` refuses any other length with `invalid_input`, and then
+verifies the signature against the signer's own `publicJwk()` (with `verifyReceipt`), refusing one
+that does not verify (a wrong key, a 64-byte DER signature, bytes that are not a signature), so no
 receipt is issued that cannot verify. Most key management services return DER
 (`SEQUENCE { r INTEGER, s INTEGER }`); `derToP1363(der)` converts it, and throws a TypeError on
 anything that is not a minimal DER encoding of two positive integers of at most 32 bytes with

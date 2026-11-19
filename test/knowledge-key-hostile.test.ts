@@ -81,3 +81,19 @@ describe("#72 hostile: derToP1363", () => {
     }
   });
 });
+
+describe("#72 hostile: signReceipt", () => {
+  it("K6 refuses a 64-byte signature that does not verify against the signer's own key, so no receipt is issued that cannot verify", async () => {
+    const { signReceipt, verifyReceipt } = await import("../src/prove/receipt.ts");
+    const { generateTestSigner } = await import("../src/testing/index.ts");
+    const good = generateTestSigner("k1");
+    const other = generateTestSigner("k1");
+    const body = { v: 1 } as never;
+    const signed = await signReceipt(good, body);
+    assert.equal(verifyReceipt(signed, [{ ...good.publicJwk(), kid: "k1" }]), true);
+    const junk = { ...good, keyId: "k1", algorithm: "ES256" as const, sign: async () => randomBytes(64), publicJwk: () => good.publicJwk() };
+    await assert.rejects(signReceipt(junk, body), rejects("invalid_input", /does not verify/));
+    const wrongKey = { keyId: "k1", algorithm: "ES256" as const, sign: (p: Uint8Array) => other.sign(p), publicJwk: () => good.publicJwk() };
+    await assert.rejects(signReceipt(wrongKey, body), rejects("invalid_input", /does not verify/));
+  });
+});
