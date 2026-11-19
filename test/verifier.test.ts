@@ -20,8 +20,10 @@ const RETIRED_AT = "2026-06-01T00:00:00.000Z";
 const SCRIPT = fileURLToPath(new URL("../scripts/verify-receipt.mjs", import.meta.url));
 
 function run(args: string[], stdin = ""): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [SCRIPT, ...args]);
+    // A child that cannot start rejects this run, rather than throwing out of the test.
+    child.on("error", reject);
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
@@ -39,9 +41,9 @@ describe("stand-alone receipt verifier (PRV-2)", () => {
   let keys: JsonWebKey[] = [];
   let keysFile = "";
   let base = "";
-  let close: () => Promise<void>;
+  let close: (() => Promise<void>) | undefined;
   let padded = "";
-  let closePadded: () => Promise<void>;
+  let closePadded: (() => Promise<void>) | undefined;
   const file = (name: string, value: unknown): string => {
     const path = join(dir, name);
     writeFileSync(path, typeof value === "string" ? value : JSON.stringify(value));
@@ -62,22 +64,26 @@ describe("stand-alone receipt verifier (PRV-2)", () => {
     const leaked = createTestEngine({ adapters: { signer: k1 }, clock: new FixedClock("2026-07-01T00:00:00.000Z") });
     late = (await leaked.engine.endCall((await leaked.engine.startCall()).callId))!;
     const server = createReferenceServer({ engine: later.engine, stripeSecrets: { identity: [], payments: [] }, clock: later.clock });
+    close = () => new Promise((resolve) => server.close(() => resolve()));
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    close = () => new Promise((resolve) => server.close(() => resolve()));
     // A valid key set padded with multi-byte characters past 1 MiB of UTF-8.
     const big = createServer((_req, res) => {
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ keys, padding: "é".repeat(600_000) }));
     });
+    closePadded = () => new Promise((resolve) => big.close(() => resolve()));
     await new Promise<void>((resolve) => big.listen(0, "127.0.0.1", resolve));
     padded = `http://127.0.0.1:${(big.address() as AddressInfo).port}`;
-    closePadded = () => new Promise((resolve) => big.close(() => resolve()));
   });
+  // Each handle is set as soon as it is acquired, so a setup that failed part way still cleans up.
   after(async () => {
-    await close();
-    await closePadded();
-    rmSync(dir, { recursive: true, force: true });
+    try {
+      await close?.();
+      await closePadded?.();
+    } finally {
+      if (dir !== "") rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("prints valid for a receipt and its key set, from a file, standard input or the key set URL", async () => {
@@ -88,15 +94,15 @@ describe("stand-alone receipt verifier (PRV-2)", () => {
     assert.deepEqual(await run([receiptFile, `${base}/.well-known/receipt-keys.json`]), { code: 0, stdout: VALID, stderr: "" });
     // Key order and whitespace do not matter: the signature is over the canonical JSON.
     const reordered = file("reordered.json", `{"signature":"${receipt.signature}","kid":"k1","alg":"ES256",\n "body": ${JSON.stringify(receipt.body, null, 2)}}`);
-    assert.equal((await run([reordered, keysFile])).stdout, VALID);
+    assert.deepEqual(await run([reordered, keysFile]), { code: 0, stdout: VALID, stderr: "" });
     // A bare list of keys works as well as a JWK set; an empty one verifies nothing.
-    assert.equal((await run([reordered, file("bare-keys.json", keys)])).stdout, VALID);
+    assert.deepEqual(await run([reordered, file("bare-keys.json", keys)]), { code: 0, stdout: VALID, stderr: "" });
     assert.deepEqual(await run([reordered, file("no-keys.json", [])]), { code: 1, stdout: 'invalid: no key with kid "k1" in the key set\n', stderr: "" });
     // The active key's receipt is plainly valid; one the retired key signed after its retirement is not.
     assert.deepEqual(await run([file("fresh.json", fresh), keysFile]), { code: 0, stdout: "valid\n", stderr: "" });
     assert.deepEqual(await run([file("late.json", late), keysFile]), { code: 1, stdout: `invalid: signed with a key retired at ${RETIRED_AT}, at or after its retirement\n`, stderr: "" });
     const badTime = keys.map((k) => (k.kid === "k1" ? { ...k, retiredAt: "June" } : k));
-    assert.equal((await run([receiptFile, file("bad-time.json", badTime)])).stdout, "invalid: the key's retiredAt is not an ISO 8601 UTC time\n");
+    assert.deepEqual(await run([receiptFile, file("bad-time.json", badTime)]), { code: 1, stdout: "invalid: the key's retiredAt is not an ISO 8601 UTC time\n", stderr: "" });
   });
 
   it("prints invalid, and exits 1, for a tampered receipt or one the key set cannot verify", async () => {
@@ -160,16 +166,26 @@ describe("stand-alone receipt verifier (PRV-2)", () => {
     );
   });
 
-  it("stops reading standard input past 1 MiB, without waiting for it to end", { timeout: 30_000 }, async () => {
+  it("stops reading standard input past 1 MiB, without waiting for it to end", { timeout: 30_000 }, async (t) => {
     // A stream that never ends (a pipe left open, /dev/zero): the limit must cut it off while reading.
-    const child = spawn(process.execPath, [SCRIPT, "-", keysFile]);
-    let stderr = "";
-    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-    child.stdin.on("error", () => undefined);
-    child.stdin.write(Buffer.alloc(2 * 1024 * 1024, 0x20));
-    const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
-    child.stdin.destroy();
-    assert.equal(code, 2);
-    assert.match(stderr, /the receipt is larger than 1 MiB/);
+    // The test's signal kills the child if the test times out, so a verifier that waits for the end
+    // of input fails the test without leaving the child behind.
+    const child = spawn(process.execPath, [SCRIPT, "-", keysFile], { signal: t.signal });
+    try {
+      const exited = new Promise<number | null>((resolve, reject) => {
+        child.on("error", reject);
+        child.on("close", resolve);
+      });
+      let stderr = "";
+      child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+      child.stdin.on("error", () => undefined);
+      // Standard input stays open until the verifier exits.
+      child.stdin.write(Buffer.alloc(2 * 1024 * 1024, 0x20));
+      assert.equal(await exited, 2);
+      assert.match(stderr, /the receipt is larger than 1 MiB/);
+    } finally {
+      child.stdin.destroy();
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+    }
   });
 });
