@@ -366,7 +366,7 @@ export const PAGE_TEXT = {
       spoken_knowledge: "spoken answers",
     } as Record<string, string>,
     status: { open: "open", paid: "paid", failed: "failed", expired: "expired" } as Record<string, string>,
-    answer: { yes: "yes", no: "no" },
+    answer: { yes: "yes", no: "no", not_recorded: "not recorded" },
   },
   fr: {
     title: "Reçu d'appel",
@@ -396,7 +396,7 @@ export const PAGE_TEXT = {
       spoken_knowledge: "réponses de vive voix",
     } as Record<string, string>,
     status: { open: "en cours", paid: "payé", failed: "échoué", expired: "expiré" } as Record<string, string>,
-    answer: { yes: "oui", no: "non" },
+    answer: { yes: "oui", no: "non", not_recorded: "non enregistrée" },
   },
 } as const;
 
