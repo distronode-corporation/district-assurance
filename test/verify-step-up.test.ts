@@ -176,6 +176,20 @@ describe("step-up on a host signal", () => {
     assert.deepEqual(await entries(t, "policy.step_up"), [{ rule: "intake_flagged", scope: "intake.file", level: 2 }], "on the ledger without an authorize call");
   });
 
+  it("refuses to file an intake opened before the signal, naming the rule", async () => {
+    const t = stepUpSetup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    await t.engine.raiseSignal(callId, "intake_flagged");
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("scope_denied", /intake_flagged/));
+    assert.equal((await t.ledger.list()).some((e) => e.event === "intake.confirmed"), false);
+    assert.deepEqual(await entries(t, "policy.step_up"), [{ rule: "intake_flagged", scope: "intake.file", level: 2 }]);
+  });
+
   for (const [name, interrupt, why] of [
     ["a signal is raised", (t: TestEngine, callId: string) => t.engine.raiseSignal(callId, "caller_flagged"), /caller_flagged/],
     ["the call is tainted", (t: TestEngine, callId: string) => t.engine.markUntrusted(callId, "crm note"), /does not cover payment.request$/],

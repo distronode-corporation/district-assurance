@@ -508,7 +508,6 @@ export class Engine {
       adapter: <K extends AdapterName>(name: K) => this.#adapters[name]!,
       update: (callId, fn) => this.#update(callId, fn),
       read: (callId) => this.#read(callId),
-      authorized: (record, scope) => this.#authorized(record, scope),
       requireScope: (draft, scope, amount) => this.#requireScope(draft, scope, amount),
       bindRef: async (ref, callId) => {
         await this.#sessions.bindRef(this.workspaceId, ref, callId);

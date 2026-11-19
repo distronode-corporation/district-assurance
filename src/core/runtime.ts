@@ -98,8 +98,6 @@ export interface EngineRuntime {
   /** One step: read the call, change it with `fn`, write it with compare-and-set, retrying from a fresh read on conflict. */
   update<R>(callId: string, fn: (draft: CallDraft) => R): Promise<R>;
   read(callId: string): Promise<CallRecord>;
-  /** Whether the call's grant covers a scope now, at its minimum raised by the policy's step-up rules. */
-  authorized(record: CallRecord, scope: string): boolean;
   /**
    * Holds a step's own work to a scope at the minimum the step-up rules raise it to for `amount`.
    * Null when the grant covers it. When step-up rules are why it does not, the running flow fails
