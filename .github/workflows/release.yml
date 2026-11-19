@@ -243,7 +243,9 @@ jobs:
       github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && inputs.publish
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # Waits for the environment's required reviewers: the last person in the loop.
+    # Waits for the environment's required reviewers: the last person in the loop. One maintainer
+    # today, so self-review is allowed; a second reviewer is required once there is one
+    # (SECURITY-MODEL.md, "Supply chain and releases").
     environment: npm-publish
     permissions:
       contents: read
@@ -256,6 +258,8 @@ jobs:
       # Reads the npm-publish environment's protection rules back (the first step).
       actions: read
     steps:
+      # Audit, not block, until the first real publish: its audit log gives the endpoint list, and
+      # the policy switches to block with that list before the second publish (SECURITY-MODEL.md).
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: audit

@@ -164,7 +164,11 @@ that built it. The same job writes a CycloneDX SBOM of the published package, re
 names any runtime dependency, and signs an SBOM attestation for the tarball through Sigstore
 before publishing; a separate job with `contents: write` and no OIDC token attaches the tarball,
 the SBOM and the attestation's bundle to the tag's GitHub release. `npm audit signatures` and
-`gh attestation verify` check them (README.md, "Checking a release").
+`gh attestation verify` check them (README.md, "Checking a release"). Today one maintainer can
+approve a publish, so the environment does not prevent self-review; once there is a second
+maintainer, a second reviewer is required (the environment's "prevent self-review" on). The
+runners' egress is audited, not blocked (harden-runner); before the second publish it switches to
+block, allowing only the endpoints the first real publish run's audit log shows.
 
 ## Left to the host
 
