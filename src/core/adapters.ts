@@ -98,6 +98,12 @@ export interface IntakeRecord {
   recordId: string;
   workspaceId: string;
   callId: string;
+  /**
+   * The subject Badge matched on the call (a keypad or PIN match) when the record was filed, or
+   * null when none had. A record filed under null cannot be found for a subject's access or
+   * deletion request.
+   */
+  subjectKey: string | null;
   formId: string;
   formVersion: string;
   values: Record<string, string | number | boolean>;
@@ -113,6 +119,12 @@ export interface RecordStore {
   /** Idempotent by `recordId`: the engine retries a write whose outcome it could not see, with the same record. */
   putIntakeRecord(record: IntakeRecord): Promise<void>;
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
+  /** The intake records filed under a subject key. Records filed under null are never listed. */
+  listIntakeRecords(workspaceId: string, subjectKey: string): Promise<IntakeRecord[]>;
+  /** Deletes intake records by id. Idempotent: an id already gone is skipped. */
+  deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void>;
+  /** Removes the subject's `pinDigest` and keeps the rest of the subject record, which is the host's. Idempotent. */
+  deletePinDigest(workspaceId: string, subjectKey: string): Promise<void>;
 }
 
 export interface AuditInput {

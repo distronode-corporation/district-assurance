@@ -137,6 +137,18 @@ export class MemoryRecordStore implements RecordStore {
     const record = this.#records.get(`${workspaceId}/${recordId}`);
     return record === undefined ? null : structuredClone(record);
   }
+
+  async listIntakeRecords(workspaceId: string, subjectKey: string): Promise<IntakeRecord[]> {
+    return [...this.#records.values()].filter((r) => r.workspaceId === workspaceId && r.subjectKey === subjectKey).map((r) => structuredClone(r));
+  }
+
+  async deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void> {
+    for (const recordId of recordIds) this.#records.delete(`${workspaceId}/${recordId}`);
+  }
+
+  async deletePinDigest(workspaceId: string, subjectKey: string): Promise<void> {
+    delete this.#subjects.get(`${workspaceId}/${subjectKey}`)?.pinDigest;
+  }
 }
 
 /**

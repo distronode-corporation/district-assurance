@@ -144,6 +144,29 @@ of birth is reversed by trying every date; the caller's entries are never stored
 fields are refused by `validateConfig` until field encryption exists (FIL-2). PINs on file are
 HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode).
 
+### Access and deletion requests
+
+A person asks the business what it holds about them, or asks it to delete that (PIPEDA, and
+Quebec's private-sector law as amended by Law 25). **Controls:** `exportSubject` and `eraseSubject`
+are host calls the business makes with a subject key; they take no call id and no flow step names
+them, so nothing a caller or the model says reaches them. An intake record carries the subject the
+call matched by keypad or PIN, never a subject only claimed, so one caller cannot file records into
+another person's export. The export says whether a PIN digest is on file and never carries the
+digest; it is signed with the receipt key under its own domain (the signed bytes name the document
+type), so an export never verifies as a receipt and a receipt never as an export (tested). The
+erase deletes the subject's records, the call's copy of their values and the PIN digest through the
+stores, appends `subject.erased` (record ids and whether a PIN digest went; no subject key), and
+never changes a ledger entry or a receipt, so the chain and every signature still verify (tested).
+
+**What stays, plainly:** the ledger entries and receipts keep each record's SHA-256 digest, as
+integrity records for the retention period: changing them would break the chain and the
+signatures. They hold no value, but the digest is unkeyed, so a short or guessable record (a
+yes/no answer, a date, a short phrase) can be confirmed by anyone who holds the ledger or a
+receipt, guesses the values and hashes them. Treat the ledger and receipts as personal
+information for retention and access control. The export lists these as kept, with that reason.
+Records filed on a call with no matched subject cannot be found by subject; the export says so.
+Consents stay in their call records until PRV-3's `ConsentStore`; counters across calls are VER-1's.
+
 ## Left to the host
 
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
@@ -161,3 +184,7 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 - Disclosure that an automated assistant answers and that the call is transcribed.
 - Deciding who may switch these modules on (business verification), so the line cannot be used to
   run a phishing operation.
+- Access and deletion requests: confirming who is asking before calling `exportSubject` or
+  `eraseSubject`, deciding what the law requires in each case (and passing what it must keep, with
+  the reason, as `kept`), the subject record itself, session and ledger retention, and a
+  `RecordStore` whose deletes really delete (backups included).

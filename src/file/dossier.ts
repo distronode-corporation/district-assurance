@@ -5,7 +5,7 @@ import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
-import type { EngineRuntime } from "../core/runtime.ts";
+import type { CallRecord, EngineRuntime } from "../core/runtime.ts";
 import type { SessionState } from "../core/session.ts";
 import { isDenseArray, isObject, unknownKeys } from "../core/shape.ts";
 import { intakeDigest, missingRequired, normaliseFieldValue, validateForm, type FieldValue, type IntakeForm, type NormaliseResult } from "./intake.ts";
@@ -152,8 +152,15 @@ export async function setIntakeField(rt: EngineRuntime, callId: string, key: str
  * Files the draft once the caller confirmed the read-back: reserved, stored, then recorded. A
  * filing that failed anywhere after the reservation (the store, a lost write) resumes with the
  * same record on the next call; the draft stays closed to changes until it is filed.
+ * `subjectOf` names the subject the call matched (or null), which the record is filed under: the
+ * engine passes it, so Dossier never reads Badge's part of the call itself.
  */
-export async function confirmIntake(rt: EngineRuntime, callId: string, input: { confirmedBy: "voice" | "keypad" }): Promise<IntakeRecord> {
+export async function confirmIntake(
+  rt: EngineRuntime,
+  callId: string,
+  input: { confirmedBy: "voice" | "keypad" },
+  subjectOf: (record: CallRecord) => string | null,
+): Promise<IntakeRecord> {
   rt.settings(DOSSIER);
   const reserved = await rt.update(callId, (draft): { record: IntakeRecord; filed: boolean } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
@@ -170,6 +177,7 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
       recordId: rt.ids.next("rec"),
       workspaceId: rt.workspaceId,
       callId,
+      subjectKey: subjectOf(draft.record),
       formId: intake.form.formId,
       formVersion: intake.form.version,
       values: structuredClone(intake.values),
@@ -207,5 +215,21 @@ export async function abandonIntake(rt: EngineRuntime, callId: string): Promise<
     s.intake = null;
     s.confirmed = null;
     draft.emit("intake.abandoned", "code", {});
+  });
+}
+
+/**
+ * Drops a call's own copy of records being erased: the last confirmed record, which the call keeps
+ * so a retried confirmation gets it back. The digests in `records` stay, as on the receipt.
+ * Refused while one of them is being filed, since finishing the filing would store it again. Runs
+ * whether or not Dossier is on now: the call filed the record when it was.
+ */
+export async function forgetRecords(rt: EngineRuntime, callId: string, recordIds: readonly string[]): Promise<void> {
+  await rt.update(callId, (draft) => {
+    const s = draft.slice<DossierSlice>(DOSSIER);
+    if (s.intake?.filing != null && recordIds.includes(s.intake.filing.recordId)) {
+      throw new EngineError("precondition_failed", "a record of this subject is being filed on a call; confirm it first");
+    }
+    if (s.confirmed !== null && recordIds.includes(s.confirmed.recordId)) s.confirmed = null;
   });
 }

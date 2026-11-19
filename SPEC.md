@@ -280,6 +280,7 @@ answer on file, a phone number, a link or card data.
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
+| `subject.erased` | `recordIds`, `pinDigest` (whether one was deleted); `callId` null, actor `member` (section 17) |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
 A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
@@ -351,7 +352,9 @@ config change mid-intake never changes what is filed; a call also keeps the form
 wordings) in force when it started. A draft being filed refuses changes. A filing that failed
 after its reservation (the store refused it, or the last write was lost) stays reserved and
 resumes with the same record on the next `confirmIntake`, so `RecordStore.putIntakeRecord` must be
-idempotent by `recordId`; two confirmations at once file one record. A confirmation retried after its record was
+idempotent by `recordId`; two confirmations at once file one record. A record carries the
+`subjectKey` Badge matched on the call when it was filed (a keypad or PIN match), or null when
+none had. A confirmation retried after its record was
 filed (its ledger entry failed) returns the same record. `endCall` is refused while a record is
 being filed. Provider idempotency keys are JSON tuples of the workspace, the call and the
 operation, so workspaces sharing an adapter never share a key. A flow attached to a running call
@@ -398,3 +401,64 @@ subject's number on file. Identity link: "Your one-time identity check link: URL
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
 the currency's own decimals.
+
+## 17. Subject requests: access and deletion
+
+Two `Engine` methods the business calls from its own code, for one person's access or deletion
+request. They take no call id and are no flow step, so nothing on a call reaches them. Both take
+`{workspaceId, subjectKey}`: the engine's own workspace and a 64 lower-case hex subject key, else
+`invalid_input`; both need the `records` adapter, else `precondition_failed`. What the law requires
+in a given case is the business's to decide.
+
+The `RecordStore` lists a subject's intake records (`listIntakeRecords(workspaceId, subjectKey)`),
+deletes records by id (`deleteIntakeRecords(workspaceId, recordIds)`) and removes a subject's PIN
+digest, keeping the rest of the subject record (`deletePinDigest(workspaceId, subjectKey)`); the
+deletes are idempotent. A record filed under no subject is never listed.
+
+`exportSubject({workspaceId, subjectKey, kept?})` needs the `signer` adapter and returns:
+
+```json
+{
+  "body": {
+    "v": 1, "type": "subject_export", "exportId": "...", "workspaceId": "...", "subjectKey": "...", "issuedAt": "...",
+    "intakeRecords": [{ "recordId": "...", "subjectKey": "...", "values": {}, "...": "..." }],
+    "pinDigestOnFile": true,
+    "consents": [{ "consentId": "...", "callId": "...", "purpose": "...", "answer": "yes", "...": "..." }],
+    "calls": ["..."],
+    "ledgerEntries": [{ "seq": 12, "hash": "...", "event": "intake.confirmed", "callId": "..." }],
+    "receipts": [{ "receiptId": "...", "callId": "..." }],
+    "heldByHost": [{ "what": "subject record", "reason": "..." }],
+    "kept": [{ "what": "ledger entries", "reason": "..." }],
+    "limits": ["..."]
+  },
+  "alg": "ES256", "kid": "...", "signature": "<base64url of the 64-byte r||s signature>"
+}
+```
+
+- `intakeRecords` are the subject's, values included; `pinDigestOnFile` says whether a digest is
+  on file, never the digest.
+- `calls` are the calls those records name. `consents` and `receipts` are the ones those call
+  records hold (a call record that is gone is skipped). Consents join from PRV-3's `ConsentStore`
+  once it exists.
+- `ledgerEntries` are this workspace's entries (by the workspace in their `eventId`) whose
+  `detail.recordId`, `detail.consentId` or `detail.receiptId` names one of the above: ids only.
+- `heldByHost` lists the subject record, which is the host's data. `kept` lists, with the reason,
+  what an erase keeps: ledger entries and receipts (append-only and signed; they hold ids and
+  digests, kept as integrity records for the retention period; an unkeyed SHA-256 of a short value
+  can be confirmed by guessing), call records and consents, then each `{what, reason}` the business
+  passes in `kept` (non-empty text, else `invalid_input`). `limits` says what the export cannot
+  find, including a record filed on a call with no matched subject.
+- The signature is ES256 over `"district-assurance/subject-export/v1\n" + canonicalJson(body)`.
+  The signed bytes name the document type, so an export never verifies as a receipt (signed over
+  `canonicalJson(body)`, which starts with `{`) and a receipt never as an export.
+  `verifySubjectExport(exported, keys)` checks it as `verifyReceipt` checks a receipt.
+
+`eraseSubject({workspaceId, subjectKey})` lists the subject's records and whether a PIN digest is
+on file. With neither, it does nothing and returns `{erased: false}`. Otherwise it drops each named
+call record's copy of the last confirmed record (refused with `precondition_failed` while one of
+the subject's records is still being filed on a call; a call record that is gone is skipped),
+appends `subject.erased` with an event id keyed on what is deleted, then deletes the records and
+the PIN digest. A retry after a failed delete finds the same entry and finishes. It never changes
+or removes a ledger entry or a receipt, so `verifyChain` and every receipt still verify. The
+listener is not told (the entry names no call). Attempt counts live per call in the call record;
+counters per subject across calls are VER-1's, and the erase resets them once they exist.

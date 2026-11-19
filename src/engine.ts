@@ -32,6 +32,7 @@ import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
 import type { ConsentRecord } from "./prove/consent.ts";
 import { detailCarriesCardNumber } from "./prove/ledger.ts";
 import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
+import * as subject from "./prove/subject.ts";
 import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
 import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
@@ -350,8 +351,9 @@ export class Engine {
     return dossier.setIntakeField(this.#rt, callId, key, raw);
   }
 
+  /** Files the draft, under the subject Badge matched on the call (a keypad or PIN match), or under none. */
   confirmIntake(callId: string, input: { confirmedBy: "voice" | "keypad" }): Promise<IntakeRecord> {
-    return dossier.confirmIntake(this.#rt, callId, input);
+    return dossier.confirmIntake(this.#rt, callId, input, matchedSubjectKey);
   }
 
   abandonIntake(callId: string): Promise<void> {
@@ -410,6 +412,21 @@ export class Engine {
   async receipt(callId: string): Promise<SignedReceipt | null> {
     const slice = (await this.#read(callId)).modules[trace.TRACE] as unknown as trace.TraceSlice;
     return slice.receipt === null ? null : structuredClone(slice.receipt);
+  }
+
+  // ---- subject requests (the business's, never a call's) -----------------------------------
+
+  /**
+   * An access request: what the engine stored about one subject, signed as a subject export
+   * (never verifiable as a receipt). `kept` lists what the business must keep by law, with why.
+   */
+  exportSubject(input: subject.SubjectRequest & { kept?: subject.KeptItem[] }): Promise<subject.SignedSubjectExport> {
+    return subject.exportSubject(this.#rt, input);
+  }
+
+  /** A deletion request: the subject's intake records and PIN digest go; the ledger and receipts stay whole. */
+  eraseSubject(input: subject.SubjectRequest): Promise<subject.ErasureResult> {
+    return subject.eraseSubject(this.#rt, input, (callId, recordIds) => dossier.forgetRecords(this.#rt, callId, recordIds));
   }
 
   /** The key set for verifying this engine's receipts (empty without a signer). */
@@ -633,6 +650,13 @@ export class Engine {
     if (stored === null) throw new EngineError("unknown_call", "no such call");
     await this.#flush(callId, stored.version, structuredClone(stored.record) as unknown as CallRecord);
   }
+}
+
+/** The subject Badge matched on a call (a keypad or PIN match), or null: what an intake record is filed under. */
+function matchedSubjectKey(record: CallRecord): string | null {
+  const slice = record.modules[badge.BADGE] as unknown as badge.BadgeSlice | undefined;
+  // A keypad or PIN factor passes only against a subject on file, so a match always has one.
+  return slice?.knowledgeMatched === true ? slice.subject!.subjectKey : null;
 }
 
 export function createEngine(options: EngineOptions): Engine {
