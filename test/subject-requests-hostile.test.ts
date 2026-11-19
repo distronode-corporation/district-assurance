@@ -99,7 +99,7 @@ describe("#105 hostile: store faults during an erase", () => {
     assert.deepEqual([await events(t, "subject.erased"), await events(t, "subject.erasure_completed")], [1, 1]);
   });
 
-  it("S5 an erase while another call files a record of the subject erases what is on file; the late record waits for the next erase", async () => {
+  it("S5 an erase while another call files a record of the subject erases what is on file; the late record is never stored", async () => {
     const t = setup();
     await filedCall(t);
     const callId = await verifiedCall(t);
@@ -110,24 +110,22 @@ describe("#105 hostile: store faults during an erase", () => {
     const held = new Promise<void>((r) => (release = r));
     let entered!: () => void;
     const inPut = new Promise<void>((r) => (entered = r));
-    t.records.putIntakeRecord = async (r) => {
+    t.records.putIntakeRecord = async (r, erasuresSeen) => {
       entered();
       await held;
-      return put(r);
+      return put(r, erasuresSeen);
     };
     const confirming = t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     await inPut;
-    const before = (await t.ledger.list()).length;
     // The new record is not listed yet, so only the first call's copy is forgotten; the erase goes
-    // ahead with what is on file. Then the late filing lands under the subject for a later erase.
+    // ahead with what is on file. The late write was reserved before the erase, so the store keeps
+    // it out and the call files nothing: an erased subject files nothing.
     const result = await t.engine.eraseSubject(request);
     assert.equal(result.erased, true);
     release();
-    const late = await confirming;
-    assert.notEqual(await t.records.getIntakeRecord("ws_test", late.recordId), null, "a record filed after the plan is kept for the next erase");
-    const again = await t.engine.eraseSubject(request);
-    assert.deepEqual(again.recordIds, [late.recordId]);
-    assert.ok((await t.ledger.list()).length > before);
+    await assert.rejects(confirming, rejects("precondition_failed", /subject was erased while this record was filed/));
+    assert.deepEqual((await t.engine.state(callId)).recordIds, []);
+    assert.equal((await t.engine.eraseSubject(request)).erased, false, "nothing of the late filing is left to erase");
   });
 });
 

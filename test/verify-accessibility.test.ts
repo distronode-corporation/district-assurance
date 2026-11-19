@@ -157,10 +157,11 @@ describe("a keypad field said instead of keyed", () => {
     assert.deepEqual(await t.engine.submitFactor(callId, "spoken_knowledge", { postal_code: POSTAL, dob: "A123" }), { matched: false, locked: true }, "a letter");
   });
 
-  it("only counts the policy's keypad fields, whatever a step-less config lists", async () => {
+  it("is refused, never judged, when a step-less config lists a field the policy does not key", async () => {
     const t = accessibleSetup(accessibleConfig({ spokenKeypadFields: ["dob", "pet_name"] }));
     const callId = await verifying(t);
-    assert.deepEqual(await t.engine.submitFactor(callId, "spoken_knowledge", { postal_code: "K1A0B1", dob: DOB }), { matched: true, locked: false });
+    await assert.rejects(t.engine.submitFactor(callId, "spoken_knowledge", { postal_code: "K1A0B1", dob: DOB }), rejects("precondition_failed", /pet_name/));
+    assert.deepEqual(await attempts(t, callId).then((s) => (s as unknown as { attempts: unknown }).attempts), {}, "nothing counted");
   });
 
   it("does not unlock texts to the number on file", async () => {

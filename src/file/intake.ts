@@ -98,6 +98,9 @@ export function validateForm(form: IntakeForm): string[] {
     if (es !== undefined && (typeof es !== "string" || es.trim() === "")) errors.push(`field ${field.key}: the Spanish label (es), when given, must not be empty`);
     for (const k of unknownKeys(field.label as unknown as Record<string, unknown>, LOCALES)) errors.push(`field ${field.key}: label ${k} is not a locale (en, fr or es)`);
     for (const k of unknownKeys(field as unknown as Record<string, unknown>, FIELD_SETTINGS)) errors.push(`field ${field.key}: ${k} is not a field setting`);
+    // Only `true` marks a field sensitive: any other value ("true", 1) would file it in the clear.
+    const sensitive: unknown = field.sensitive;
+    if (sensitive !== undefined && typeof sensitive !== "boolean") errors.push(`field ${field.key}: sensitive must be true or false`);
     if ([field.key.replaceAll("_", " "), field.label.en, field.label.fr, typeof es === "string" ? es : ""].some(namesForbidden)) {
       errors.push(`field ${field.key} names a card or a Social Insurance Number, which intake never collects`);
     }

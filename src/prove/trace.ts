@@ -220,7 +220,7 @@ export async function recordConsent(
   if (channel !== undefined && !CHANNELS.includes(channel)) throw new EngineError("invalid_input", "channel must be call, text or web");
   const store = consentStore(rt);
   const reserved = await rt.update(callId, (draft): ConsentRecord => {
-    const s = draft.slice<TraceSlice>(TRACE);
+    const s = consentsOf(draft.slice<TraceSlice>(TRACE));
     if (s.storing !== null) {
       if (s.storing.purpose !== purpose || s.storing.answer !== answer) {
         throw new EngineError("precondition_failed", `a consent to ${s.storing.purpose} is being stored; record it again first`);
@@ -276,11 +276,19 @@ export async function recordConsent(
  * reservation finds it gone and records nothing; a revocation of it is refused.
  */
 export function settleUnrecorded(draft: CallDraft): void {
-  const s = draft.slice<TraceSlice>(TRACE);
+  const s = consentsOf(draft.slice<TraceSlice>(TRACE));
   if (s.storing === null) return;
   s.unrecorded.push(s.storing);
   draft.emit("consent.unrecorded", "system", { purpose: s.storing.purpose });
   s.storing = null;
+}
+
+/** A call stored before PRV-3 has no consent being stored and none unrecorded: it loads with none. */
+function consentsOf(s: TraceSlice): TraceSlice {
+  const legacy = s as Partial<TraceSlice>;
+  legacy.storing ??= null;
+  legacy.unrecorded ??= [];
+  return s;
 }
 
 function commitConsent(draft: CallDraft, record: ConsentRecord): void {
@@ -379,7 +387,7 @@ export async function issueReceipt(
   parts: Pick<ReceiptBody, "verification" | "records" | "payments" | "stepUp">,
 ): Promise<SignedReceipt> {
   const callId = record.state.callId;
-  const slice = record.modules[TRACE] as unknown as TraceSlice;
+  const slice = consentsOf(record.modules[TRACE] as unknown as TraceSlice);
   const body: ReceiptBody = {
     v: 1,
     receiptId: rt.ids.next("rcpt"),
@@ -451,17 +459,27 @@ export function noticeDue(record: CallRecord): boolean {
  * sent again. A retry after a failure sends again with the same idempotency key, one key per notice.
  */
 export async function sendContactNotice(rt: EngineRuntime, callId: string): Promise<void> {
+  // Each owed notice is tried once a run: one the adapter refuses stays owed for the next run, and
+  // the notices after it still go. The first failure is passed on once every notice was tried.
+  const tried = new Set<number>();
+  const failures: unknown[] = [];
   for (;;) {
     const record = await rt.read(callId);
-    const index = textsOf(record).notices.findIndex((n) => !n.sent);
-    if (index === -1) return;
+    const index = textsOf(record).notices.findIndex((n, i) => !n.sent && !tried.has(i));
+    if (index === -1) break;
+    tried.add(index);
     const slice = record.modules[TRACE] as unknown as TraceSlice;
-    await rt.adapter("messages").sendText({
-      to: slice.texts.notices[index]!.to,
-      body: contactNoticeText(record.locale, slice.businessName),
-      purpose: "contact_changed",
-      idempotencyKey: rt.idempotencyKey(callId, "contact-notice", String(index), "text"),
-    });
+    try {
+      await rt.adapter("messages").sendText({
+        to: slice.texts.notices[index]!.to,
+        body: contactNoticeText(record.locale, slice.businessName),
+        purpose: "contact_changed",
+        idempotencyKey: rt.idempotencyKey(callId, "contact-notice", String(index), "text"),
+      });
+    } catch (error) {
+      failures.push(error);
+      continue;
+    }
     await rt.update(callId, (draft) => {
       const kept = textsOf(draft.record).notices[index]!;
       // Two processes can both send (one text, by its key): the first records it, once.
@@ -470,6 +488,7 @@ export async function sendContactNotice(rt: EngineRuntime, callId: string): Prom
       draft.emit("contact.notice_sent", "code", {});
     });
   }
+  if (failures.length > 0) throw failures[0];
 }
 
 /**
@@ -498,6 +517,13 @@ export async function textReceiptLink(
   // Answers are appended: a later "no" withdraws an earlier "yes".
   const consented = slice.consents.findLast((c) => c.purpose === consent)?.answer === "yes";
   if (consent === undefined || texts.receiptLink === "sent" || texts.actions.length === 0 || !consented) return { texted: false };
+  // A revocation is kept in the ConsentStore, not on the call: the yes is read back from the store
+  // first, and one revoked, or not found there, sends nothing. A read that fails sends nothing too.
+  const store = consentStore(rt);
+  if (store !== null) {
+    const latest = slice.consents.findLast((c) => c.purpose === consent)!;
+    if ((await store.getConsent(rt.workspaceId, latest.consentId))?.revoked !== null) return { texted: false };
+  }
   const current = subject(record);
   const kept = texts.notices.find((n) => n.subjectKey === current.subjectKey);
   const to = kept?.to ?? current.numberOnFile;

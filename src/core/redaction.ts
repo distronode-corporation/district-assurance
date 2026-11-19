@@ -627,6 +627,7 @@ const BANK_WORD_SETS: Record<Locale, ReadonlySet<string>> = {
 
 /** A word, with any combining accents kept in it, so a decomposed "tránsito" is still one word. */
 const WORD = /[\p{L}\p{M}]+/gu;
+const MARKER_TEXTS = Object.values(REDACTION_MARKERS);
 
 /**
  * Bank numbers: a digit run of 3 or more digits (an institution number is 3, a transit number 5,
@@ -640,7 +641,8 @@ export function findBankNumbers(text: string, languages: readonly NumberLanguage
   for (const run of digitRuns(text, languages)) {
     const first = run[0]!;
     const last = run[run.length - 1]!;
-    const words = text.slice(from, first.start).match(WORD) ?? [];
+    // A marker an earlier redactor left (composeRedactors) is not words: the bank word before it still counts.
+    const words = MARKER_TEXTS.reduce((gap, marker) => gap.replaceAll(marker, " "), text.slice(from, first.start)).match(WORD) ?? [];
     from = last.end;
     const digits = run.reduce((n, t) => n + t.digits.length, 0);
     if (digits >= 3 && words.slice(-4).some(isBankWord)) {

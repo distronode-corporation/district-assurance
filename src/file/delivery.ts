@@ -137,7 +137,10 @@ function retryProblem(r: DeliveryRetry): string | null {
  */
 export async function deliverRecord(input: DeliverRecordInput): Promise<DeliveryResult> {
   // Read once: the record fetched is the one whose key and ledger entries are built.
-  const { destination, clock, workspaceId, recordId, records, delivery, ledger } = input;
+  const { destination: given, clock, workspaceId, recordId, records, delivery, ledger } = input;
+  // Copied once, before it is checked: every attempt goes to the url, with the secret, that the
+  // body and the idempotency key were built for, whatever the host changes on its object meanwhile.
+  const destination: DeliveryDestination = isObject(given) ? { destinationId: given.destinationId, url: given.url, secret: given.secret } : given;
   const retry: DeliveryRetry = { ...DEFAULT_DELIVERY_RETRY, ...input.retry };
   const problem = destinationProblem(destination) ?? retryProblem(retry);
   if (problem !== null) throw new EngineError("invalid_input", problem);

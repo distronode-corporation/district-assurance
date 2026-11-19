@@ -317,7 +317,8 @@ describe("eraseSubject", () => {
     assert.equal(writes, 2);
     assert.deepEqual((await t.engine.eraseSubject(request)).recordIds, [fast.recordId]);
     release();
-    assert.deepEqual(await slow, fast);
+    // The record is erased: the late confirmation gets no locally sealed copy back in its place.
+    await assert.rejects(slow, rejects("precondition_failed", /subject was erased while this record was filed/));
     assert.equal(await t.records.getIntakeRecord("ws_test", fast.recordId), null, "the late write stored nothing");
     assert.deepEqual(await t.records.listIntakeRecords("ws_test", SUBJECT), []);
   });

@@ -245,7 +245,9 @@ export class MemoryRecordStore implements RecordStore {
   async putIntakeRecord(record: IntakeRecord, erasuresSeen?: number): Promise<void> {
     const key = scoped(record.workspaceId, record.recordId);
     if (this.#deleted.has(key)) return;
-    if (erasuresSeen !== undefined && record.subjectKey !== null && (await this.subjectErasures(record.workspaceId, record.subjectKey)) > erasuresSeen) return;
+    // Checked and stored in one step, with no await between: an erasure or a delete that starts
+    // while this write is in the adapter either sees the record or keeps it out.
+    if (erasuresSeen !== undefined && record.subjectKey !== null && (this.#erasures.get(scoped(record.workspaceId, record.subjectKey)) ?? 0) > erasuresSeen) return;
     this.#records.set(key, structuredClone(record));
   }
 

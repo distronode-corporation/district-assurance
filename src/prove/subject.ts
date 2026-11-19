@@ -343,15 +343,22 @@ export async function eraseSubject(
   if (recordIds.length === 0 && !pinDigest) return finished ?? { erased: false, recordIds, pinDigest, entry: null };
   for (const callId of callsOf(found)) await unlessGone(forget(callId, recordIds));
   // Two erasures at once append the same id: the first plan appended is the one both carry out.
-  const entry = await ledger.append({
-    eventId: await erasureEventId(rt, subjectKey, n, "subject.erased"),
-    callId: null,
-    actor: "member",
-    event: "subject.erased",
-    at: rt.now(),
-    detail: { recordIds, pinDigest },
-  });
-  const fresh = await carryOut(rt, records, subjectKey, n, entry);
+  // A plan that does not cover what this erasure found (another erasure's, which read the same
+  // number before a record was filed) is carried out, and this one takes the next number.
+  let fresh: ErasureResult;
+  for (;;) {
+    const entry = await ledger.append({
+      eventId: await erasureEventId(rt, subjectKey, n, "subject.erased"),
+      callId: null,
+      actor: "member",
+      event: "subject.erased",
+      at: rt.now(),
+      detail: { recordIds, pinDigest },
+    });
+    fresh = await carryOut(rt, records, subjectKey, n, entry);
+    if (recordIds.every((id) => fresh.recordIds.includes(id)) && (fresh.pinDigest || !pinDigest)) break;
+    n++;
+  }
   if (finished === null) return fresh;
   return { erased: true, recordIds: [...finished.recordIds, ...fresh.recordIds], pinDigest: finished.pinDigest || fresh.pinDigest, entry: fresh.entry };
 }

@@ -49,6 +49,8 @@ export interface DossierSlice {
     releasing?: FilingFailure;
     /** The subject's erasure count read before `filing` was reserved (RecordStore.subjectErasures). Absent on calls saved before PRV-7. */
     erasuresSeen?: number;
+    /** Set when abandonIntake claimed the filing to release it: no write claims or files it from then on. */
+    abandoning?: true;
   } | null;
   records: Array<{ recordId: string; formId: string; digest: string }>;
   /** The record the last confirmation filed, until another intake starts: a retried confirmation gets it back. */
@@ -295,18 +297,20 @@ export async function confirmIntake(
   const readKey = subjectOf(call);
   const seen = readKey === null ? 0 : await records.subjectErasures(rt.workspaceId, readKey);
   const open = before?.intake ?? null;
-  let prepared: { recordId: string; shown: string; covered: Record<string, FieldValue> } | null = null;
+  let prepared: { recordId: string; form: string; shown: string; covered: Record<string, FieldValue> } | null = null;
   if (open !== null && open.filing === null) {
     const recordId = rt.ids.next("rec");
     const shown = shownValues(open.form, open.values);
-    prepared = { recordId, shown: canonicalJson(shown), covered: await digestValues(rt, recordId, open.form, shown) };
+    // The form too: the keyed digests follow its sensitive fields, so a draft started again on
+    // another form with the same values is not filed under digests taken for this one.
+    prepared = { recordId, form: canonicalJson(open.form), shown: canonicalJson(shown), covered: await digestValues(rt, recordId, open.form, shown) };
   }
-  const reserved = await rt.update(callId, (draft): { record: IntakeRecord; form: IntakeForm | null; erasuresSeen: number | undefined } | { refused: EngineError } => {
+  const reserved = await rt.update(callId, (draft): { record: IntakeRecord; form: IntakeForm | null; erasuresSeen: number } | { refused: EngineError } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     const intake = s.intake;
     // Filed already (a retry after the last write's ledger entry failed): this write appends that
     // entry, and the same record comes back.
-    if (intake === null && s.confirmed !== null) return { record: s.confirmed, form: null, erasuresSeen: undefined };
+    if (intake === null && s.confirmed !== null) return { record: s.confirmed, form: null, erasuresSeen: seen };
     if (intake === null) throw new EngineError("invalid_transition", "no intake is open on this call");
     // A Spanish caller confirms on the keypad: Spanish spoken answers are refused until a reviewed
     // vocabulary exists, and the Spanish read-back asks for the 1.
@@ -321,12 +325,19 @@ export async function confirmIntake(
     // reservation holds it. A refused resume keeps the reservation; abandonIntake releases it.
     const refused = rt.requireScope(draft, "intake.file", undefined);
     if (refused !== null) return { refused };
-    if (intake.filing !== null) return { record: intake.filing, form: intake.form, erasuresSeen: intake.erasuresSeen };
+    if (intake.filing !== null) {
+      // A filing reserved before PRV-7 has no erasure count, so the store could not keep it out once
+      // its subject is erased: it is never filed (fail closed). abandonIntake releases it.
+      if (intake.erasuresSeen === undefined) {
+        throw new EngineError("precondition_failed", "this filing was reserved before subject erasures were counted, so it is not filed; abandon the intake and collect it again");
+      }
+      return { record: intake.filing, form: intake.form, erasuresSeen: intake.erasuresSeen };
+    }
     const missing = missingRequired(intake.form, intake.values);
     if (missing.length > 0) throw new EngineError("invalid_input", `required fields missing: ${missing.join(", ")}`);
     // Only shown fields are filed: a value given before its showIf stopped holding stays out.
     const values = shownValues(intake.form, intake.values);
-    if (prepared === null || canonicalJson(values) !== prepared.shown) throw new EngineError("conflict", "the draft changed while it was being filed; confirm again");
+    if (prepared === null || canonicalJson(intake.form) !== prepared.form || canonicalJson(values) !== prepared.shown) throw new EngineError("conflict", "the draft changed while it was being filed; confirm again");
     const recordId = prepared.recordId;
     const built: IntakeRecord = {
       recordId,
@@ -370,47 +381,53 @@ export async function confirmIntake(
   // cipher fails meanwhile then releases nothing, so no failure is logged for a record that ends up
   // stored. A filing already released (that process failed first) is never written.
   const writer = randomUUID();
-  const claim = await rt.update(callId, (draft): "claimed" | "released" | { filed: IntakeRecord } | { releasing: FilingFailure } => {
+  const claim = await rt.update(callId, (draft): "claimed" | "released" | "filed" | "abandoning" | { releasing: FilingFailure } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
-    // Filed meanwhile by another process: its record (its ciphertexts) is the answer, and nothing is written again.
-    if (s.records.some((r) => r.recordId === record.recordId)) return { filed: s.confirmed?.recordId === record.recordId ? s.confirmed : record };
+    // Filed meanwhile by another process: the record the store kept (its ciphertexts) is the answer, and nothing is written again.
+    if (s.records.some((r) => r.recordId === record.recordId)) return "filed";
     if (s.intake?.filing?.recordId !== record.recordId) return "released";
     // A release that stopped part way (its delete failed): this confirmation carries it on.
     if (s.intake.releasing !== undefined) return { releasing: s.intake.releasing };
+    // An abandonment that stopped part way (its delete failed): nothing is written; abandonIntake finishes it.
+    if (s.intake.abandoning === true) return "abandoning";
     s.intake.writers = { ...s.intake.writers, [writer]: rt.now() };
     return "claimed";
   });
-  if (typeof claim === "object" && "releasing" in claim) await releaseFailedFiling(rt, callId, record, reserved.form, claim.releasing);
-  if (typeof claim === "object" && "filed" in claim) return claim.filed;
-  if (claim !== "claimed") throw new EngineError("precondition_failed", "the fieldCipher could not seal the record in another process; nothing was filed and the draft is gone");
-  try {
-    // A write that lands after the record was erased stores nothing (RecordStore.deleteIntakeRecords),
-    // nor one whose subject was erased since the count was read (RecordStore.markSubjectErased).
-    await records.putIntakeRecord(record, reserved.erasuresSeen);
-  } catch (error) {
-    // The reservation is kept for a retry (the write may have landed); the claim is given up, so a
-    // failing cipher is not held off by a writer that is no longer writing. Best effort.
-    // Only this write's own claim: another write may hold it now. A release after this deletes the
-    // record by id first, so a write that did land is never left behind a released filing.
-    await rt
-      .update(callId, (draft) => {
-        const intake = draft.slice<DossierSlice>(DOSSIER).intake;
-        if (intake?.writers !== undefined) delete intake.writers[writer];
-      })
-      .catch(() => undefined);
-    throw error;
+  if (typeof claim === "object") await releaseFailedFiling(rt, callId, record, reserved.form, claim.releasing);
+  if (claim === "abandoning") throw new EngineError("precondition_failed", "the intake is being abandoned; abandon it again to finish");
+  if (claim !== "claimed" && claim !== "filed") throw new EngineError("precondition_failed", "the fieldCipher could not seal the record in another process; nothing was filed and the draft is gone");
+  if (claim === "claimed") {
+    try {
+      // A write that lands after the record was erased stores nothing (RecordStore.deleteIntakeRecords),
+      // nor one whose subject was erased since the count was read (RecordStore.markSubjectErased).
+      await records.putIntakeRecord(record, reserved.erasuresSeen);
+    } catch (error) {
+      // The reservation is kept for a retry (the write may have landed); the claim is given up, so a
+      // failing cipher is not held off by a writer that is no longer writing. Best effort.
+      // Only this write's own claim: another write may hold it now. A release after this deletes the
+      // record by id first, so a write that did land is never left behind a released filing.
+      await rt
+        .update(callId, (draft) => {
+          const intake = draft.slice<DossierSlice>(DOSSIER).intake;
+          if (intake?.writers !== undefined) delete intake.writers[writer];
+        })
+        .catch(() => undefined);
+      throw error;
+    }
   }
-  const stored = (await records.getIntakeRecord(record.workspaceId, record.recordId)) !== null;
+  // The record the store kept is the one filed and returned: an idempotent store keeps the first
+  // write of a record id, so a retry's fresh ciphertexts are not what it holds.
+  const kept = await records.getIntakeRecord(record.workspaceId, record.recordId);
   const filed = await rt.update(callId, (draft): "filed" | "abandoned" | "erased" => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     if (s.records.some((r) => r.recordId === record.recordId)) return "filed";
     // Abandoned while it was written (abandonIntake deleted the record by id, so the late write
     // stored nothing), or released by a failing cipher in another process (this write's claim went
     // stale, and the record was deleted by id): nothing is filed.
-    if (s.intake?.filing?.recordId !== record.recordId || s.intake.releasing !== undefined) return "abandoned";
+    if (s.intake?.filing?.recordId !== record.recordId || s.intake.releasing !== undefined || s.intake.abandoning === true) return "abandoned";
     // The store kept nothing (the subject was erased): the call files nothing either, and drops
     // the draft that holds the values.
-    if (!stored) {
+    if (kept === null) {
       draft.apply({ type: "intake_abandoned" });
       s.intake = null;
       draft.emit("intake.abandoned", "code", {});
@@ -418,14 +435,15 @@ export async function confirmIntake(
     }
     draft.apply({ type: "intake_confirmed", recordId: record.recordId });
     s.intake = null;
-    s.confirmed = record;
+    s.confirmed = kept;
     s.records.push({ recordId: record.recordId, formId: record.formId, digest: record.digest });
     draft.emit("intake.confirmed", "caller", { recordId: record.recordId, formId: record.formId, digest: record.digest, confirmedBy: record.confirmedBy });
     return "filed";
   });
   if (filed === "abandoned") throw new EngineError("precondition_failed", "the filing was abandoned while it was written, or released by a failing fieldCipher; nothing was filed");
-  if (filed === "erased") throw new EngineError("precondition_failed", "the subject was erased while this record was filed; nothing was filed");
-  return record;
+  // The subject was erased (after another process filed it, too): no locally sealed copy stands in for it.
+  if (kept === null) throw new EngineError("precondition_failed", "the subject was erased while this record was filed; nothing was filed");
+  return kept;
 }
 
 /**
@@ -481,7 +499,18 @@ async function releaseFailedFiling(
  */
 export async function abandonIntake(rt: EngineRuntime, callId: string): Promise<void> {
   rt.settings(DOSSIER);
-  const reserved = ((await rt.read(callId)).modules[DOSSIER] as unknown as DossierSlice | undefined)?.intake?.filing ?? null;
+  const seen = ((await rt.read(callId)).modules[DOSSIER] as unknown as DossierSlice | undefined)?.intake?.filing ?? null;
+  // Claimed before the delete, by compare-and-set: a confirmation that committed the filing first
+  // keeps its stored record, and one that has not yet committed never files it from here on.
+  const reserved =
+    seen === null
+      ? null
+      : await rt.update(callId, (draft) => {
+          const intake = draft.slice<DossierSlice>(DOSSIER).intake;
+          if (intake?.filing?.recordId !== seen.recordId) return null;
+          intake.abandoning = true;
+          return intake.filing;
+        });
   if (reserved !== null) await rt.adapter("records").deleteIntakeRecords(rt.workspaceId, [reserved.recordId]);
   await rt.update(callId, (draft) => {
     const s = draft.slice<DossierSlice>(DOSSIER);

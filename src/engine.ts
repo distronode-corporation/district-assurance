@@ -1606,9 +1606,9 @@ export class Engine {
       callIds.map(async (callId) => {
         try {
           // One outbox for both kinds (#112's contact notices, #124's duress alerts): the index lists a
-          // call while it owes either (decision 8).
-          await this.#deliverAlerts(callId);
-          await this.#sendDuressAlerts(callId);
+          // call while it owes either (decision 8). The two run apart: a contact notice that fails or
+          // never answers never holds back a duress alert, nor the other way round.
+          await Promise.allSettled([this.#deliverAlerts(callId), this.#sendDuressAlerts(callId)]);
           const now = await this.#read(callId);
           return badge.owedDuressAlerts(now).length > 0 || trace.noticeDue(now);
         } catch {
