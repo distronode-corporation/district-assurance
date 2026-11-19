@@ -13,6 +13,7 @@ import { MemorySessionStore } from "../src/core/session-store.ts";
 import { SeenGrants, accessGrantDigest, verifyAccessGrant, type AccessGrantBody, type SignedAccessGrant } from "../src/gate/access.ts";
 import { gateModule } from "../src/gate/gate.ts";
 import { builtInModules } from "../src/modules.ts";
+import { MemoryAuditLedger } from "../src/prove/ledger.ts";
 import { keyPairSigner } from "../src/prove/receipt.ts";
 import { FakeAccessController, FakeMessageSender, FixedClock, generateTestSigner } from "../src/testing/index.ts";
 import type { CodeStore, MessageSender } from "../src/core/adapters.ts";
@@ -883,10 +884,12 @@ function codesSetup(options: { limits?: CodeStore; newCode?: () => string; messa
   const texts = new FakeMessageSender();
   const store = options.store ?? new MemoryAccessCodeStore();
   const accessSigner = generateTestSigner("gate-key-1");
+  const ledger = new MemoryAuditLedger();
   const codes = accessCodes({
     key: CODE_KEY,
     signer: accessSigner,
     store,
+    ledger,
     messages: options.messages ?? texts,
     limits: options.limits ?? new MemoryCodeStore(),
     clock,
@@ -895,14 +898,14 @@ function codesSetup(options: { limits?: CodeStore; newCode?: () => string; messa
   const door = new FakeAccessController();
   const t = setup({
     clock,
-    adapters: { access: { lobby: door, keypad: codes.controller }, accessSigner },
+    adapters: { access: { lobby: door, keypad: codes.controller }, accessSigner, ledger },
     config: gateConfig((c) => {
       c.modules.gate = { settings: { targets: [...structuredClone(targets), keypadTarget] } };
       c.flows["code-entry"] = { steps: [verify as never, { type: "gate.grant", target: "side-door", lifetimeSeconds: 600 }] };
     }),
   });
   t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
-  return { ...t, clock, door, codes, texts, store, accessSigner };
+  return { ...t, ledger, clock, door, codes, texts, store, accessSigner };
 }
 
 type CodesSetup = ReturnType<typeof codesSetup>;
@@ -965,7 +968,7 @@ describe("gate: one-time access codes", () => {
     await t.codes.issue(t.engine, callId);
     const code = textedCode(t);
     const [entry] = put;
-    assert.deepEqual(Object.keys(entry!).sort(), ["body", "callId", "digest", "grantId", "workspaceId"]);
+    assert.deepEqual(Object.keys(entry!).sort(), ["body", "callId", "digest", "grantId", "misses", "workspaceId"]);
     assert.equal(entry!.digest, accessCodeDigest(CODE_KEY, keypadDoor, code));
     assert.ok(!JSON.stringify(entry).includes(code));
     assert.ok(!("signature" in entry!.body));
@@ -1223,7 +1226,7 @@ describe("gate: one-time access codes", () => {
     const open = await t.engine.startCall({});
     await assert.rejects(t.codes.issue(t.engine, open.callId, { target: "side-door" }), rejects("scope_denied"));
     assert.equal(t.texts.sent.length, 0);
-    const parts = { signer: generateTestSigner(), store: new MemoryAccessCodeStore(), messages: t.texts, limits: new MemoryCodeStore() };
+    const parts = { signer: generateTestSigner(), store: new MemoryAccessCodeStore(), ledger: t.ledger, messages: t.texts, limits: new MemoryCodeStore() };
     assert.throws(() => accessCodes({ key: "short", ...parts }), /at least 16 bytes/);
     assert.ok(accessCodes({ key: new Uint8Array(16), ...parts }) instanceof AccessCodes);
   });

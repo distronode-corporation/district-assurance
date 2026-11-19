@@ -309,6 +309,7 @@ answer on file, a phone number, a link or card data.
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
 | `access.issued` | `grantId`, `target`, `controller`, `scope`, `level`, `verificationGrantId`, `expiresAt` (section 17) |
 | `access.delivered` / `access.refused` / `access.unknown` / `access.failed` | `grantId`, `digest` and `kid` once signed, `confirmed` or `reason` (written by the engine only) |
+| `access.code_spent` | `grantId`, `reason` (`wrong_guesses`), `guesses`: a one-time code spent by wrong guesses at its door, never the guess |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
@@ -608,13 +609,18 @@ revoking an issued code belongs to one-time codes, below. Planned: web sign-in s
 (GAT-4), a Seam adapter (GAT-5), direct vendor adapters (GAT-6).
 
 **One-time access codes** (`src/gate/codes.ts`), for a door whose controller cannot be called
-live: `accessCodes({key, signer, store, messages, limits, clock?, newCode?})`. `key` is the codes'
-own HMAC key, at least 16 bytes (else `invalid_input`); `signer` is the engine's `accessSigner`, so
-a relay checks a redeemed grant against `engine.accessKeys()`. Its `controller` is an
+live: `accessCodes({key, signer, store, ledger, messages, limits, maxWrongGuesses?, clock?, newCode?})`.
+`key` is the codes' own HMAC key, at least 16 bytes (else `invalid_input`); `signer` is the
+engine's `accessSigner`, so a relay checks a redeemed grant against `engine.accessKeys()`;
+`ledger` is the engine's, for `access.code_spent`; `maxWrongGuesses` is 1 to 10, default 5 (else
+`invalid_input`). Its `controller` is an
 `AccessController` that the engine's `access` adapter names like any other
 (`access: { keypad: codes.controller }`), and a target names that controller.
 
-- `codes.issue(engine, callId, input?)` runs `engine.grantAccess(callId, input)` with the same
+- `codes.issue(engine, callId, input?)` first draws its 3 candidate codes from `newCode`; any that
+  is not exactly 8 digits (`ACCESS_CODE_DIGITS`) fails the issue with `invalid_input`, a host
+  fault, before anything is reserved, counted, stored or texted. It then runs
+  `engine.grantAccess(callId, input)` with the same
   input, steps and refusals, so the engine reserves the grant, holds it to `entry.open`, checks it
   again before it is sent, limits it per call, writes it to the ledger as above, never lets it
   outlive the verification grant, and records the controller's answer itself (ADR-25): the codes
@@ -629,8 +635,8 @@ a relay checks a redeemed grant against `engine.accessKeys()`. Its `controller` 
   3. `limits.take({workspaceId, key: {scope: "subject", key: subjectKey}, at, ...ACCESS_CODE_SEND_LIMITS})`
      counts the text against VER-2's `CodeStore`; false refuses it (`send_limit`) and nothing is
      texted.
-  4. A code of 8 random digits is drawn and stored with `store.put` as an `AccessCodeEntry`:
-     `{workspaceId, digest, grantId, callId, body}`, the digest being
+  4. A drawn code is stored with `store.put` as an `AccessCodeEntry`:
+     `{workspaceId, digest, grantId, callId, body, misses: 0}`, the digest being
      `HMAC-SHA256(key, JSON.stringify(["access-code", workspaceId, audience, target, code]))`
      (`accessCodeDigest`) and `body` the grant's body, unsigned. A digest already live for that
      door draws a new code, up to 3 times, then the request is refused (`no_free_code`).
@@ -652,7 +658,11 @@ a relay checks a redeemed grant against `engine.accessKeys()`. Its `controller` 
   body signed again by `signer`, then `store.take` of the digest, so a code is redeemed once;
   only for the grant that was signed (an entry another grant holds under that digest by then stays);
   `{ok: true, grant}`, or `{ok: false}`, the same for a wrong, used, revoked, expired or malformed
-  code (a code that is not a string of at most 32 characters is hashed as an empty one). Signing
+  code (a code that is not a string of at most 32 characters is hashed as an empty one). A guess
+  that matches no live code at that door (`audience` and `target`) is a wrong guess: it counts
+  against every code live there (`store.miss`), and a code that reaches `maxWrongGuesses` is spent,
+  removed, and recorded on its call as `access.code_spent` `{grantId, reason: "wrong_guesses",
+  guesses}`, never with the guess or the code. Signing
   comes before the take, so a signer that throws leaves the code redeemable; a code taken, revoked
   or expired while it was signed is refused and its signature dropped. A code expires with its grant's
   `expiresAt`. The door's relay checks the grant with `verifyAccessGrant` (audience `audience`)
@@ -660,7 +670,9 @@ a relay checks a redeemed grant against `engine.accessKeys()`. Its `controller` 
 - `codes.revoke(workspaceId, grantId)` removes a grant's code; one already gone is success.
 - `AccessCodeStore`: `put(entry, now)` (false when the digest is live), `get(workspaceId,
   digest)` (reads, leaving it), `take(workspaceId, digest, grantId?)` (removes and returns,
-  atomically: never one entry twice; with `grantId`, only that grant's entry), `revoke(workspaceId, grantId)`. `MemoryAccessCodeStore` is the in-memory reference, dropping expired entries on `put`.
+  atomically: never one entry twice; with `grantId`, only that grant's entry), `revoke(workspaceId, grantId)`,
+  `miss(workspaceId, {audience, target}, limit, now)` (one wrong guess counted against every live
+  entry for that door, atomically, removing and returning those at `limit`). `MemoryAccessCodeStore` is the in-memory reference, dropping expired entries on `put`.
 - `limits` is VER-2's `CodeStore` (`take` counts one send atomically, or refuses and counts
   nothing; `MemoryCodeStore` in `district-assurance/testing` is the reference), the same instance
   the engine's texted codes count against, so both kinds of code share one budget per subject.

@@ -180,8 +180,12 @@ every refusal (tested); `revoke` removes a code early. The code is never in the 
 an error or the store (tested). A text that fails takes its code back, and its grant is `refused` only when that proves the
 code unused, else `unknown`, since the text may have arrived (tested). A signer that fails at
 redemption leaves the code redeemable, and a code is taken only after it is signed (tested). 8 digits give one
-chance in 100 million per live code per guess. Left to the host: a keypad that slows or stops
-after wrong entries, a durable `AccessCodeStore` whose `take` is atomic across processes, and
+chance in 100 million per live code per guess, and 5 wrong guesses at a door (configurable, 1 to
+10) spend every code live there, recorded as `access.code_spent` without the guess (tested). The
+trade-off: someone at the keypad can spend the codes of a door with a few wrong guesses, and the
+caller then asks for a new one. A `newCode` that is not exactly 8 digits fails the issue before
+anything is stored (tested). Left to the host: a keypad that slows after wrong entries, a durable
+`AccessCodeStore` whose `take` and `miss` are atomic across processes, and
 keeping the codes' key in a key store. A code's grant is `delivered` once texted, so the call can
 end and its receipt be issued while the code is still live: unlike a relay grant, it may open the
 door after the receipt, until its expiry, and that redemption is not in the call's ledger (the
@@ -248,8 +252,8 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
   speech-to-text and the model while `sensitive` is set.
 - Keeping the knowledge key, the receipt signing key, the access signing key and the access code
   key in a key store, the access key apart from the receipts'.
-- A door keypad that slows or stops after wrong access codes, and a durable `AccessCodeStore`
-  whose `take` is atomic across processes.
+- A door keypad that slows after wrong access codes, and a durable `AccessCodeStore` whose
+  `take` and `miss` are atomic across processes.
 - Calling `expirePaymentLinks` at each link's `expiresAt` (a timer or a sweep); until it does, a
   link lives as long as the provider keeps it.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same

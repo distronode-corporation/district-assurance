@@ -22,7 +22,7 @@
 // (the engine's `codes` adapter once VER-2 lands): give both the same store, so they share a budget.
 import { randomInt } from "node:crypto";
 
-import type { CodeStore, MessageSender, ReceiptSigner } from "../core/adapters.ts";
+import type { AuditLedger, CodeStore, MessageSender, ReceiptSigner } from "../core/adapters.ts";
 import { systemClock, type Clock } from "../core/clock.ts";
 import { EngineError } from "../core/errors.ts";
 import { hmacSha256Hex } from "../core/hash.ts";
@@ -37,6 +37,13 @@ export const ACCESS_CODE_DIGITS = 8;
 /** New codes tried when one is already live for the same door, before the request is refused. */
 const CODE_TRIES = 3;
 
+/** Wrong guesses at a door that spend each code live there: 5 by default, 1 to 10. */
+export const ACCESS_CODE_WRONG_GUESSES = 5;
+export const MAX_ACCESS_CODE_WRONG_GUESSES = 10;
+
+/** What `newCode` must answer: exactly `ACCESS_CODE_DIGITS` digits. */
+const CODE_SHAPE = new RegExp(`^[0-9]{${ACCESS_CODE_DIGITS}}$`);
+
 /** One live code, as the engine stores it: its keyed hash and the grant it stands for. */
 export interface AccessCodeEntry {
   workspaceId: string;
@@ -46,6 +53,8 @@ export interface AccessCodeEntry {
   callId: string;
   /** The access grant's body, unsigned. Its `expiresAt` ends the code. */
   body: AccessGrantBody;
+  /** Wrong guesses at this code's door since it was stored. At the limit the code is spent. */
+  misses: number;
 }
 
 /**
@@ -65,6 +74,12 @@ export interface AccessCodeStore {
   take(workspaceId: string, digest: string, grantId?: string): Promise<AccessCodeEntry | null>;
   /** Removes the code for a grant. Success when it is already gone. */
   revoke(workspaceId: string, grantId: string): Promise<void>;
+  /**
+   * Counts one wrong guess against every live entry for this door (the grant body's `audience`
+   * and `target`), and removes and returns those that reached `limit`, atomically: two wrong
+   * guesses at once count twice, and an entry is returned once.
+   */
+  miss(workspaceId: string, door: { audience: string; target: string }, limit: number, now: Date): Promise<AccessCodeEntry[]>;
 }
 
 /** The reference `AccessCodeStore`, in memory: one process only. */
@@ -96,6 +111,18 @@ export class MemoryAccessCodeStore implements AccessCodeStore {
     for (const [key, e] of this.#entries) if (e.workspaceId === workspaceId && e.grantId === grantId) this.#entries.delete(key);
   }
 
+  async miss(workspaceId: string, door: { audience: string; target: string }, limit: number, now: Date): Promise<AccessCodeEntry[]> {
+    const spent: AccessCodeEntry[] = [];
+    for (const [key, e] of this.#entries) {
+      if (e.workspaceId !== workspaceId || e.body.audience !== door.audience || e.body.target !== door.target || Date.parse(e.body.expiresAt) <= now.getTime()) continue;
+      e.misses += 1;
+      if (e.misses < limit) continue;
+      this.#entries.delete(key);
+      spent.push(structuredClone(e));
+    }
+    return spent;
+  }
+
   /** How many entries are held, live or not yet pruned. */
   get size(): number {
     return this.#entries.size;
@@ -115,13 +142,17 @@ export interface AccessCodeOptions {
   /** Signs a redeemed grant for the door's relay: the engine's `accessSigner`, so relays check it with `engine.accessKeys()`. */
   signer: ReceiptSigner;
   store: AccessCodeStore;
+  /** Where a code spent by wrong guesses is recorded (`access.code_spent`): the engine's ledger. */
+  ledger: AuditLedger;
+  /** Wrong guesses at a door that spend the codes live there. 1 to 10, default 5. */
+  maxWrongGuesses?: number;
   /** Texts the code. The destination is always the number on file, from the engine. */
   messages: MessageSender;
   /** VER-2's send limits store, the same instance the engine's texted codes count against. */
   limits: CodeStore;
   /** Default: the system clock. */
   clock?: Clock;
-  /** Default: `ACCESS_CODE_DIGITS` random digits from node:crypto. */
+  /** Default: `ACCESS_CODE_DIGITS` random digits from node:crypto. Anything but exactly that many digits fails the issue. */
   newCode?: () => string;
 }
 
@@ -143,6 +174,8 @@ export function accessCodes(options: AccessCodeOptions): AccessCodes {
 interface Pending {
   engine: AccessCodeHost;
   callId: string;
+  /** The codes this issue may store, drawn and checked before the engine reserved anything. */
+  candidates: string[];
 }
 
 export class AccessCodes {
@@ -151,12 +184,18 @@ export class AccessCodes {
   readonly #options: AccessCodeOptions;
   readonly #clock: Clock;
   readonly #newCode: () => string;
+  readonly #maxWrongGuesses: number;
   /** The `issue` calls running in this process: the only ones the controller texts for. */
   readonly #pending = new Set<Pending>();
 
   constructor(options: AccessCodeOptions) {
     const keyLength = typeof options.key === "string" ? Buffer.byteLength(options.key) : options.key.byteLength;
     if (keyLength < 16) throw new EngineError("invalid_input", "the access code key must be at least 16 bytes");
+    const guesses = options.maxWrongGuesses ?? ACCESS_CODE_WRONG_GUESSES;
+    if (!Number.isSafeInteger(guesses) || guesses < 1 || guesses > MAX_ACCESS_CODE_WRONG_GUESSES) {
+      throw new EngineError("invalid_input", `maxWrongGuesses must be an integer from 1 to ${MAX_ACCESS_CODE_WRONG_GUESSES}`);
+    }
+    this.#maxWrongGuesses = guesses;
     this.#options = options;
     this.#clock = options.clock ?? systemClock;
     this.#newCode = options.newCode ?? (() => String(randomInt(0, 10 ** ACCESS_CODE_DIGITS)).padStart(ACCESS_CODE_DIGITS, "0"));
@@ -170,7 +209,15 @@ export class AccessCodes {
    * code is then revoked), `unknown` when that is not known.
    */
   async issue(engine: AccessCodeHost, callId: string, input?: { target: string; lifetimeSeconds?: number }): Promise<AccessResult> {
-    const pending: Pending = { engine, callId };
+    // The host's generator is checked before anything is reserved, counted or stored: a code that
+    // is not exactly its digits would shrink the guess space, or match a malformed guess.
+    const candidates: string[] = [];
+    for (let i = 0; i < CODE_TRIES; i++) {
+      const code: unknown = this.#newCode();
+      if (typeof code !== "string" || !CODE_SHAPE.test(code)) throw new EngineError("invalid_input", `newCode must answer exactly ${ACCESS_CODE_DIGITS} digits`);
+      candidates.push(code);
+    }
+    const pending: Pending = { engine, callId, candidates };
     this.#pending.add(pending);
     try {
       return await engine.grantAccess(callId, input);
@@ -194,13 +241,35 @@ export class AccessCodes {
     const live = (e: AccessCodeEntry | null): e is AccessCodeEntry => e !== null && Date.parse(e.body.expiresAt) > this.#clock.now().getTime();
     // Signed before the code is taken: a signer that fails throws and leaves the code to try again.
     const seen = await store.get(workspaceId, digest);
-    if (!live(seen)) return { ok: false };
+    if (!live(seen)) {
+      await this.#wrongGuess(workspaceId, audience, target);
+      return { ok: false };
+    }
     const grant = await signDocument(this.#options.signer, seen.body);
     // Then taken, atomically, once: a code used or revoked meanwhile is refused and its signature dropped.
     // Only the entry that was signed: one another grant holds under this digest meanwhile stays.
     const taken = await store.take(workspaceId, digest, seen.grantId);
     if (!live(taken)) return { ok: false };
     return { ok: true, grant };
+  }
+
+  /**
+   * A guess that matched no live code at this door counts against every code live there; those at
+   * the limit are spent, each recorded in the ledger by its grant, never with the guess.
+   */
+  async #wrongGuess(workspaceId: string, audience: string, target: string): Promise<void> {
+    const now = this.#clock.now();
+    const spent = await this.#options.store.miss(workspaceId, { audience, target }, this.#maxWrongGuesses, now);
+    for (const entry of spent) {
+      await this.#options.ledger.append({
+        eventId: JSON.stringify(["access.code_spent", entry.workspaceId, entry.grantId]),
+        callId: entry.callId,
+        actor: "system",
+        event: "access.code_spent",
+        at: now.toISOString(),
+        detail: { grantId: entry.grantId, reason: "wrong_guesses", guesses: this.#maxWrongGuesses },
+      });
+    }
   }
 
   /** Removes a grant's code before its end. Success when it is already gone. */
@@ -221,9 +290,9 @@ export class AccessCodes {
     }
     let code: string | null = null;
     let digest = "";
-    for (let i = 0; i < CODE_TRIES && code === null; i++) {
-      const candidate = this.#newCode();
-      const entry: AccessCodeEntry = { workspaceId: body.workspaceId, digest: accessCodeDigest(this.#options.key, body, candidate), grantId: body.grantId, callId: pending.callId, body };
+    for (const candidate of pending.candidates) {
+      if (code !== null) break;
+      const entry: AccessCodeEntry = { workspaceId: body.workspaceId, digest: accessCodeDigest(this.#options.key, body, candidate), grantId: body.grantId, callId: pending.callId, body, misses: 0 };
       if (await this.#options.store.put(entry, now)) [code, digest] = [candidate, entry.digest];
     }
     if (code === null) return { outcome: "refused", reason: "no_free_code" };

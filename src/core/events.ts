@@ -32,6 +32,7 @@ export const ENGINE_EVENTS = [
   "access.refused",
   "access.unknown",
   "access.failed",
+  "access.code_spent",
   "call.ended",
   "receipt.issued",
   "module.event",
