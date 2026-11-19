@@ -407,8 +407,9 @@ compiled `dist/` (JavaScript and declarations) and the documents `files` names. 
 `package.json` is `"private": true` until a release is decided (ADR-12). A release is a version tag
 `vX.Y.Z` matching `package.json`, run by `.github/workflows/release.yml`: the CI workflow and the
 supply-chain checks on the tag, two builds that must pack to the same bytes, a check of the file
-list, and a smoke test that installs the tarball in an empty project, imports each entry point
-and type-checks a strict consumer. Only then, in this repository and after the `npm-publish`
-environment's reviewers approve, is that tarball published with npm provenance. A version with a
-pre-release part goes to the `next` dist-tag. In a fork, or a manual run without `publish`, the
-same run is a dry run.
+list, and a smoke test that unpacks the tarball into an empty project, imports each entry point
+and type-checks a strict consumer. The tagged commit must be on main. A tag push is always a dry
+run. Only a manual run on the tag with `publish` ticked, in this repository and after the
+`npm-publish` environment's reviewers approve, publishes that tarball with npm provenance. A
+version with a pre-release part goes to the `next` dist-tag. In a fork, or a manual run without
+`publish`, the same run is a dry run.

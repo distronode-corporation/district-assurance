@@ -152,11 +152,12 @@ top-level token is read-only or empty with each job granted only the scopes it u
 package-manager cache is restored. npm audit and
 osv-scanner check the lockfile on every pull request, weekly, and on each release tag
 (`supply-chain.yml`). Nothing publishes on its own: `"private": true` makes `npm publish` refuse
-until a release is decided (ADR-12), a release needs a person to push a version tag or start the
-workflow, and the publish job waits for the `npm-publish` environment's reviewers. It runs only
-in this repository, after CI and the supply-chain checks pass on the tag. The tarball must be
+until a release is decided (ADR-12), a tag push is only ever a dry run, publishing needs a person
+to start the workflow by hand on a tag with `publish` ticked, and the publish job waits for the
+`npm-publish` environment's reviewers. It runs only in this repository, on a tagged commit that
+is on main, after CI and the supply-chain checks pass on the tag. The tarball must be
 byte-identical across two builds and a third on a fresh runner, holds only `dist/` and the listed
-documents, and passes an install-and-import smoke test before it is published (`release.yml`).
+documents, and passes an unpack-and-import smoke test before it is published (`release.yml`).
 There is no npm token: trusted publishing uses the publish job's short-lived OIDC token, the only
 job granted `id-token: write`, and npm provenance ties the tarball to the commit and workflow
 that built it.

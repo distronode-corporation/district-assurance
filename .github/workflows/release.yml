@@ -1,20 +1,31 @@
 name: Release
 
-# Publishes the package to npm, with provenance, from a version tag. Nothing here runs on its
-# own: a person pushes a tag `vX.Y.Z` that matches package.json, or starts the workflow by
-# hand on such a tag. Every run, in this repository or a fork, does all of this:
+# Checks a version tag and, only when a person asks for it, publishes it to npm with provenance.
+# Nothing here runs on its own: a person pushes a tag `vX.Y.Z` that matches package.json, or
+# starts the workflow by hand on such a tag. Every run, in this repository or a fork, does all
+# of this:
 #   ci            the CI workflow (ci.yml) on the tagged commit: lint, typecheck, 100% coverage,
 #                 build and demo, on every system and Node version it covers.
 #   supply-chain  npm audit and osv-scanner on the tagged lockfile (supply-chain.yml).
-#   pack          builds and packs twice and requires the same bytes (a reproducible pack),
-#                 checks the file list, and installs the tarball in an empty project to import
-#                 and type-check its three entry points (the exports smoke test).
+#   pack          requires the tagged commit to be on main, builds and packs twice and requires
+#                 the same bytes (a reproducible pack), checks the file list, and unpacks the
+#                 tarball into an empty project to import and type-check its three entry points
+#                 (the exports smoke test).
 # Then exactly one of:
-#   publish       this repository only, on a tag push or a manual run with `publish` ticked,
-#                 and only after the `npm-publish` environment's reviewers approve. It rebuilds,
-#                 requires the pack job's SHA-256, and publishes that tarball.
-#   dry-run       everywhere else (a fork, or a manual run without `publish`): the same rebuild
-#                 and comparison, and `npm publish --dry-run` once the package is not private.
+#   publish       this repository only, on a manual run on a tag with `publish` ticked, and only
+#                 after the `npm-publish` environment's reviewers approve. It rebuilds, requires
+#                 the pack job's SHA-256, and publishes that tarball.
+#   dry-run       everything else (a tag push, a fork, or a manual run without `publish`): the
+#                 same rebuild and comparison, and `npm publish --dry-run` once the package is
+#                 not private.
+#
+# A tag push never publishes. Publishing takes three separate acts by people: a manual run with
+# `publish` ticked, an approval in the `npm-publish` environment, and a merged pull request that
+# removes `"private": true`. The tagged commit must also be on main.
+#
+# The `npm-publish` environment does not exist yet. GitHub creates an environment named by a job
+# the first time that job runs, WITHOUT protection rules, so create it with required reviewers
+# and a `v*` tag rule before the first manual publish run.
 #
 # The package is private until a release is decided (DECISIONS.md, ADR-12), so the publish
 # job fails while package.json has `"private": true`. That line goes only in the pull request
@@ -35,8 +46,9 @@ on:
         type: boolean
         default: false
 
-# Nothing at the top level, so each job names the scopes it needs.
-permissions: {}
+# Read-only at the top level; each job names the scopes it needs.
+permissions:
+  contents: read
 
 # One release per tag at a time, never cancelled half way.
 concurrency:
@@ -70,6 +82,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The whole history, for the check that the tagged commit is on main.
+          fetch-depth: 0
       # No package-manager cache anywhere in this file: a restored cache is one more input to
       # what gets published.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -94,6 +108,14 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Only a commit already on main is released: a tag on a side branch stops here.
+      - name: The tagged commit is on main
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::The tagged commit $GITHUB_SHA is not on main."
+            exit 1
+          fi
       # Development dependencies only (the package has no runtime dependency), with no install
       # scripts: nothing runs before the build but the compiler.
       - run: npm ci --ignore-scripts
@@ -142,7 +164,9 @@ jobs:
             package/dist/testing/index.d.ts package/package.json package/LICENSE package/NOTICE; do
             grep -qxF "$required" "$RUNNER_TEMP/contents.txt" || { echo "::error::$required is missing."; exit 1; }
           done
-      # The tarball installed in an empty project, as a user gets it. The two entry points and
+      # The tarball unpacked into an empty project's node_modules, as an install lays it out
+      # (the package has no dependency, so there is nothing else to install and no registry
+      # call). The two entry points and
       # package.json import, a path inside dist/ is refused, the testing entry builds an engine,
       # and a strict TypeScript consumer type-checks against the published declarations, the
       # library's own included (skipLibCheck is off).
@@ -156,7 +180,8 @@ jobs:
           mkdir -p "$smoke"
           cd "$smoke"
           printf '{ "name": "smoke", "private": true, "type": "module" }\n' > package.json
-          npm install --ignore-scripts --no-audit --no-fund --no-package-lock "$RUNNER_TEMP/release/$FILE"
+          mkdir -p node_modules/district-assurance
+          tar -xzf "$RUNNER_TEMP/release/$FILE" -C node_modules/district-assurance --strip-components=1
           cat > smoke.mjs <<'EOF'
           import assert from "node:assert/strict";
           import * as root from "district-assurance";
@@ -198,10 +223,11 @@ jobs:
 
   publish:
     needs: [ci, supply-chain, pack]
-    # Upstream only, so a fork never tries. A manual run publishes only with the box ticked.
+    # Upstream only, so a fork never tries, and only a manual run on a tag with the box ticked:
+    # a tag push is a dry run.
     if: >-
       github.repository == 'distronode-corporation/district-assurance' &&
-      (github.event_name == 'push' || inputs.publish)
+      github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && inputs.publish
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # Waits for the environment's required reviewers: the last person in the loop.
@@ -268,7 +294,7 @@ jobs:
     needs: [ci, supply-chain, pack]
     if: >-
       ${{ !(github.repository == 'distronode-corporation/district-assurance' &&
-        (github.event_name == 'push' || inputs.publish)) }}
+        github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && inputs.publish) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
