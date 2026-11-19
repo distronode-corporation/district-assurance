@@ -6,9 +6,9 @@ import { describe, it } from "node:test";
 
 import type { FlowConfig } from "../src/core/config.ts";
 import type { PinSettings } from "../src/verify/factors.ts";
-import { duressClearedSubject } from "../src/verify/duress-flag.ts";
+import { duressClearedSubject, hiddenCounterKey } from "../src/verify/duress-flag.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
-import { FakeDuressNotifier, TEST_KNOWLEDGE_KEY, type TestEngine } from "../src/testing/index.ts";
+import { FakeDuressNotifier, FakeNotifier, TEST_KNOWLEDGE_KEY, type TestEngine } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig } from "./helpers.ts";
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
@@ -23,9 +23,9 @@ const cfg = () =>
   });
 const WRONG = ["1357", "2468", "3579", "4680", "5791", "6802", "7913", "8024", "9135", "0246", "1470", "2581", "3692", "4703", "5814", "6925", "8147", "9258", "0369", "1593"];
 
-async function mk(): Promise<{ t: TestEngine; n: FakeDuressNotifier }> {
+async function mk(notifier?: FakeNotifier): Promise<{ t: TestEngine; n: FakeDuressNotifier }> {
   const n = new FakeDuressNotifier();
-  const t = setup({ config: cfg(), adapters: { duressNotifier: n } });
+  const t = setup({ config: cfg(), adapters: { duressNotifier: n, ...(notifier === undefined ? {} : { notifier }) } });
   t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
   assert.deepEqual(await t.engine.enrolDuressPin(OWNER, DURESS), { enrolled: true });
   return { t, n };
@@ -133,5 +133,37 @@ describe("duress and the counters across calls (flag until cleared)", () => {
     await t.engine.submitPin(await call(t), DURESS);
     await t.engine.clearDuress(OWNER, "member_1");
     assert.equal((await t.engine.submitPin(await call(t), WRONG[9]!)).locked, false, "the 10th wrong guess after the clearing does not lock");
+  });
+
+  it("never lifts the hidden hard lock by unlock, the counter a lock notice named included; only clearing the duress flag does (#118, #124)", async () => {
+    const notices = new FakeNotifier();
+    const { t } = await mk(notices);
+    // The attack above: 2 wrong guesses and a duress entry per call, until the hidden count locks hard.
+    for (let c = 0; c < 10; c++) {
+      const callId = await call(t);
+      for (let g = 0; g < 2; g++) {
+        t.clock.advance(900_000);
+        await t.engine.submitPin(callId, WRONG[c * 2 + g]!);
+      }
+      t.clock.advance(900_000);
+      await t.engine.submitPin(callId, DURESS);
+    }
+    await tick();
+    assert.deepEqual(await t.engine.submitPin(await call(t), PIN), { matched: false, locked: true }, "the hidden hard lock holds");
+    // The business lifts every lock it was told of, and the subject's PIN counter in any case.
+    const told = notices.notices.map(({ workspaceId, factor, scope, key }) => ({ workspaceId, factor, scope, key }));
+    for (const counter of [...told, { workspaceId: "ws_test", factor: "pin", scope: "subject" as const, key: OWNER }]) await t.engine.unlock({ ...counter, memberId: "member_1" });
+    assert.ok((await t.ledger.list()).some((e) => e.event === "verification.unlocked"), "the unlocks are recorded");
+    const since = new Date(0).toISOString();
+    assert.deepEqual(await t.counters.get({ workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER }, since), [], "the counter unlock names is cleared");
+    assert.ok((await t.counters.get(hiddenCounterKey("ws_test", "pin", OWNER), since)).length >= 10, "the hidden count is not");
+    assert.deepEqual(await t.engine.submitPin(await call(t), PIN), { matched: false, locked: true }, "unlock never lifts the hidden lock");
+    // The hidden counter is not an installed factor kind, so unlock cannot name it.
+    const hidden = hiddenCounterKey("ws_test", "pin", OWNER);
+    await assert.rejects(t.engine.unlock({ ...hidden, memberId: "member_1" }), rejects("invalid_input", /factor/));
+    assert.deepEqual(await t.engine.submitPin(await call(t), PIN), { matched: false, locked: true }, "still locked");
+    // Clearing the duress flag is what lifts it: the real PIN is then a normal pass.
+    await t.engine.clearDuress(OWNER, "member_1");
+    assert.deepEqual(await t.engine.submitPin(await call(t), PIN), { matched: true, locked: false }, "lifted by clearDuress");
   });
 });
