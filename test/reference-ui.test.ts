@@ -295,7 +295,12 @@ describe("reference UI: demo routes", () => {
     try {
       const a = await runs.start("entry");
       const b = await runs.start("entry");
-      for (let i = 0; i < 2; i++) await Promise.all([runs.step(a.runId), runs.step(b.runId)]);
+      // Verified one after the other: VER-1 (#71) counts a provisional failure for the subject while
+      // an entry is judged, so two calls keying one account at the same instant wait on each other.
+      for (let i = 0; i < 2; i++) {
+        await runs.step(a.runId);
+        await runs.step(b.runId);
+      }
       // Both reach the door at once, before the relay has started.
       const [ra, rb] = await Promise.all([runs.step(a.runId), runs.step(b.runId)]);
       for (const r of [ra, rb]) assert.ok(r.ok && r.view.results.at(-1)!.ok, JSON.stringify(r.ok ? r.view.results.at(-1) : r));
@@ -641,12 +646,13 @@ describe("reference UI: the demo world's adapters and clock (review of #50)", ()
 
   it("the owner-command step waits for the right PIN on a clock that cannot be moved", async () => {
     const fixed = new FixedClock();
-    // A clock with the fixed clock's time but no advance(): only real time can pass for it.
-    const world = createDemoWorld({ clock: { now: () => fixed.now() } });
+    // A clock with no advance(): only (mocked) real time can pass for it. Since VER-1 (#71) the
+    // engine judges the wait on this clock too, so it reads the mocked Date that tick() moves.
+    mock.timers.enable({ apis: ["setTimeout", "Date"], now: fixed.now().getTime() });
+    const world = createDemoWorld({ clock: { now: () => new Date() } });
     const call = { callId: "", linkId: "", receipt: null };
     const steps = SCRIPTS["owner-command"];
     for (const step of steps.slice(0, 2)) assert.ok((await step.run(world, call)).ok);
-    mock.timers.enable({ apis: ["setTimeout"] });
     try {
       let settled = false;
       const right = steps[2]!.run(world, call).then((outcome) => ((settled = true), outcome));

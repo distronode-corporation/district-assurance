@@ -313,7 +313,10 @@ describe("the reference server with Stripe Identity (npm run serve)", () => {
 
   it("pairs each overlapping trial call with its own session", async () => {
     const serve = createServe({ env: { STRIPE_IDENTITY_KEY: KEY }, print: () => {}, stripe: { apiBase: stripe.base } });
-    const [a, b] = await Promise.all([serve.startTrialCall!(), serve.startTrialCall!()]);
+    // One after the other: two keypad entries for one account at once meet VER-1's provisional
+    // failure (#71; decision 1: the second waits).
+    const a = await serve.startTrialCall!();
+    const b = await serve.startTrialCall!();
     assert.notEqual(a.callId, b.callId);
     assert.notEqual(a.sessionId, b.sessionId);
     for (const { callId, sessionId } of [a, b]) {

@@ -105,7 +105,7 @@ function holdSigner(t: GateTest) {
   return { signing, go: () => go() };
 }
 
-const registry = (adapters = ["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "pinVerifier", "access", "accessSigner"], capabilities: Record<string, unknown> = {}) =>
+const registry = (adapters = ["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "pinVerifier", "access", "accessSigner", "counters"], capabilities: Record<string, unknown> = {}) =>
   new ModuleRegistry({ adapters, capabilities, modules: builtInModules() });
 
 describe("gate: config", () => {
@@ -135,7 +135,7 @@ describe("gate: config", () => {
 
   it("needs the access adapters, and holds targets to the controllers the engine has", () => {
     assert.deepEqual(validateConfig(gateConfig(), registry()), [], "a registry that knows only adapter names skips the controller check");
-    assert.deepEqual(validateConfig(gateConfig(), registry(["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "pinVerifier"])), [
+    assert.deepEqual(validateConfig(gateConfig(), registry(["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "pinVerifier", "counters"])), [
       "modules.gate: needs the access adapter, which the engine does not have",
       "modules.gate: needs the accessSigner adapter, which the engine does not have",
     ]);
