@@ -2,8 +2,8 @@
 //
 // The first detector is card numbers (PANs): 13 to 19 digits that pass the Luhn check, written as
 // digits or spoken in English or French (digit by digit, as numbers such as "forty two" or
-// "quarante-deux", or with "double" and "triple"), with spaces, hyphens, dots or commas between
-// groups. The same reading of spoken numbers feeds the live detector (live-detector.ts). A match
+// "quarante-deux", or with "double" and "triple"), with separators between groups: spaces, dashes,
+// dots, commas and invisible characters (SEPARATOR_CLASS). The same reading of spoken numbers feeds the live detector (live-detector.ts). A match
 // is replaced by a fixed marker. Over-redaction is accepted; the risk this guards against is a card
 // number reaching storage.
 
@@ -110,7 +110,14 @@ type Parser = (lx: readonly Lexeme[], i: number, first: boolean) => Parsed | und
  * combining marks, so "zéro" written decomposed (e and U+0301) is one word, not "ze" and "ro".
  */
 export const LEXEME = /\d+|\p{L}[\p{L}\p{M}]*/gu;
-const SEPARATOR = /^[\s\-.,]*$/u;
+/**
+ * What may lie between the groups of one number: spaces, any dash (the hyphen-minus, en and em
+ * dashes, the non-breaking hyphen), the minus sign, dots and commas, and what a reader never sees:
+ * format characters (zero-width spaces and joiners, soft hyphens, bidi controls) and combining marks.
+ * The live detector uses the same class, so both read one run alike.
+ */
+export const SEPARATOR_CLASS = String.raw`[\s\p{Pd}\u2212\p{Cf}\p{M}.,]`;
+const SEPARATOR = new RegExp(`^${SEPARATOR_CLASS}*$`, "u");
 
 function lexemes(text: string): Lexeme[] {
   const out: Lexeme[] = [];

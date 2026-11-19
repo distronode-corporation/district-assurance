@@ -402,8 +402,10 @@ the currency's own decimals.
 ## 17. Card numbers in transcripts
 
 **Runs of digits.** `digitRuns(text)` reads a text into runs of digits. A run is numerals and spoken
-numbers in English or French with only spaces, hyphens, dots or commas between them; any other
-word or punctuation ends it. Spoken numbers are read as people say them:
+numbers in English or French with only separators between them: spaces, any dash (hyphen, en and
+em dashes, the non-breaking hyphen), the minus sign, dots, commas, and the characters a reader never
+sees (zero-width spaces and joiners, soft hyphens, bidi controls, combining marks:
+`SEPARATOR_CLASS`). Any other word or punctuation ends it. Spoken numbers are read as people say them:
 
 | Spoken | Digits |
 |---|---|
