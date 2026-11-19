@@ -6,7 +6,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+/** Line endings as the checks expect them: a Windows checkout can hold the file with CRLF. */
+const lf = (text: string): string => text.replace(/\r\n/g, "\n");
+const raw = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+const workflow = lf(raw);
+
+/** Every `run:` script, single line or block, each as its lines. */
+function runScripts(text: string): string[][] {
+  const lines = text.split("\n");
+  const scripts: string[][] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(\s*)(?:- )?run: (.*)$/.exec(lines[i]!);
+    if (m === null) continue;
+    const body = [m[2]!];
+    if (m[2] === "|") for (let j = i + 1; j < lines.length && (lines[j]!.trim() === "" || lines[j]!.search(/\S/) > m[1]!.length); j++) body.push(lines[j]!);
+    scripts.push(body);
+  }
+  return scripts;
+}
 
 /** The `node -e '...'` script of the step whose name is given, as the runner gets it. */
 function nodeScript(step: string): string {
@@ -68,17 +85,13 @@ describe("hostile #119: the npm version check", () => {
 describe("hostile #119: what the workflow can be made to run", () => {
   it("never interpolates a ref name, a version or an input into a shell line", () => {
     // Every `run:` script, single line or block: values reach them through `env:`, never `${{ }}`.
-    const lines = workflow.split("\n");
-    let scripts = 0;
-    for (let i = 0; i < lines.length; i++) {
-      const m = /^(\s*)(?:- )?run: (.*)$/.exec(lines[i]!);
-      if (m === null) continue;
-      scripts++;
-      const body = [m[2]!];
-      if (m[2] === "|") for (let j = i + 1; j < lines.length && (lines[j]!.trim() === "" || lines[j]!.search(/\S/) > m[1]!.length); j++) body.push(lines[j]!);
-      for (const line of body) assert.doesNotMatch(line, /\$\{\{/, line);
-    }
-    assert.ok(scripts >= 10, `found ${scripts} run scripts`);
+    const scripts = runScripts(workflow);
+    for (const line of scripts.flat()) assert.doesNotMatch(line, /\$\{\{/, line);
+    assert.ok(scripts.length >= 10, `found ${scripts.length} run scripts`);
+  });
+
+  it("reads the workflow the same with CRLF line endings, as a Windows checkout may hold it", () => {
+    assert.deepEqual(runScripts(lf(raw.replace(/\r?\n/g, "\r\n"))), runScripts(workflow));
   });
 
   it("publishes only from a manual run on a tag of this repository, and a tag push never does", () => {
