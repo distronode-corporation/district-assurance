@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- An adversarial suite in English and Canadian French (VER-7): scripted dialogues run through a
+  scripted host, checking no grant without factors, no text before a match, identical answers for
+  unknown and wrong, and no grant after a taint.
 
 ### Changed
 

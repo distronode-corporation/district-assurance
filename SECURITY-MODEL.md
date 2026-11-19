@@ -31,7 +31,13 @@ claim.
 "I'm calling for my mother", urgency, authority, partial answers. **Control:** the model has no
 path to a factor, a level or a grant. Scoped actions are refused by `authorize` until code issued
 a grant (tested in `engine.test.ts`, "Engine authorize"). The host speaks fixed lines on refusals.
-Planned: an adversarial evaluation set in English and French gating each release (VER-7).
+The adversarial suite (`test/adversarial/`, SPEC.md section 17) runs scripted dialogues in English
+and Canadian French (urgency, authority, "skip it", partial answers, account probing, text
+flooding, injection in business data) through a scripted host in `npm test`, and checks after
+every turn that no grant comes without factors, no text goes out before a match, an unknown
+account answers like a wrong answer, and a tainted session holds no grant (tested). A new tactic
+or a newly built factor fails the suite until it has scripts in both languages. Texted codes get
+their scripts with VER-2; until then the suite floods with photo ID and payment links.
 
 ### Account probing
 

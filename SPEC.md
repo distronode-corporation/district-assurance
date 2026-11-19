@@ -398,3 +398,33 @@ subject's number on file. Identity link: "Your one-time identity check link: URL
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
 the currency's own decimals.
+
+## 17. Adversarial suite
+
+`test/adversarial/` holds scripted dialogues, one JSON file per tactic and locale
+(`<tactic>.<locale>.json`): urgency, authority, "skip it", partial answers, account probing, text
+flooding and injection in business data, each in English and in Canadian French. A scripted host
+runs them: the caller's words reach the engine only as transcript lines to `redact`; the model's
+proposals are tool calls mapped to fixed code paths (`authorize`, `startPhotoId`,
+`requestPayment`), and a proposal with no path (mark the caller verified, skip the check) never
+reaches the engine; business text is always passed to `markUntrusted`; the host speaks fixed
+lines chosen only from the engine's answers. After every turn the runner checks:
+
+- **No grant without factors:** a grant needs a passed factor and never exceeds the level the
+  recorded factors reach; `authorize` is true only for a scope the grant lists.
+- **No text before a match:** every text and carrier check comes after a keypad or PIN match on
+  the call, goes to that subject's number on file, never to the calling number, and is in the
+  call's language.
+- **Identical answers for unknown and wrong:** a mirror call keyed with an account that is not on
+  file gets every keypad and PIN entry the script's call gets; each entry that did not match has
+  the same answer, the same spoken line and the same ledger detail as the mirror's.
+- **Tainted sessions lose their grant:** after business text, and at the end of every call, the
+  grant is gone, the level is 0 and every scope is refused until a new verification earns one.
+
+Every script also checks that nothing keyed, said or fetched reaches the ledger, a text or a
+spoken line, and that the ledger chain verifies. The suite fails when a tactic lacks a script in
+either language, when the French script does not mirror the English one turn for turn, when a
+built factor (one not marked planned) or a policy scope is not exercised in both languages, or
+when a script never compares a wrong entry with an unknown account or never taints a session that
+holds a grant. A factor that stops being planned (`text_code` with VER-2, `spoken_knowledge` with
+VER-3) fails the suite until it has scripts in both languages.
