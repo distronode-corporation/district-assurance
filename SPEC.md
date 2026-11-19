@@ -419,7 +419,7 @@ digits read one by one) may break anywhere.
 | `card_number` | `cardNumberRedactor` | 13 to 19 digits, Luhn | `[card number removed]` |
 | `sin` | `sinRedactor` | 9 digits, Luhn, groups 3-3-3 | `[SIN removed]` |
 | `health_card` | `healthCardRedactor` | Ontario: 10 digits, Luhn, groups 4-3-3 (a version code after it is kept). British Columbia: 10 digits starting with 9, mod 11 check digit (weights 2, 4, 8, 5, 10, 9, 7, 3 on digits 2 to 9), groups 4-3-3. Quebec: four letters right before the run, as one word or spelled one by one, then 8 digits whose 3rd to 6th give a month (or month plus 50) and a day, groups 4-4; the letters are removed too | `[health card number removed]` |
-| `bank_account` | `bankAccountRedactor` | a whole run of 3 or more digits with a bank word among the last 4 words before it, counting only words after the previous run. English: bank, branch, transit, institution, account; French: banque, bancaire, succursale, compte, folio | `[banking details removed]` |
+| `bank_account` | `bankAccountRedactor` | a whole run of 3 or more digits with a bank word among the last 4 words before it, counting only words after the previous run. English: bank, branch, transit, institution, account; French: banque, bancaire, succursale, compte, folio; each also in the plural | `[banking details removed]` |
 
 Bank numbers carry no check digit, so a bank word is what marks them; an account number read
 with no bank word before it is not found. Health card numbers of other provinces are not found

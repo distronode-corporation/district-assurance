@@ -1,5 +1,5 @@
 {
-  "description": "Canadian bank numbers: institution (3 digits), transit (5 digits) and account (7 to 12 digits) numbers, alone or read together. They carry no check digit, so a run of 3 or more digits counts only with a bank word (English: bank, branch, transit, institution, account; French: banque, bancaire, succursale, compte, folio) among the last 4 words before it, and none of those words may be before an earlier digit run. Digits may be spoken as digit words in English or French. Each case lists the exact substrings a redactor must find, in order. Every number is made up.",
+  "description": "Canadian bank numbers: institution (3 digits), transit (5 digits) and account (7 to 12 digits) numbers, alone or read together. They carry no check digit, so a run of 3 or more digits counts only with a bank word (English: bank, branch, transit, institution, account; French: banque, bancaire, succursale, compte, folio; each also in the plural) among the last 4 words before it, and none of those words may be before an earlier digit run. Digits may be spoken as digit words in English or French. Each case lists the exact substrings a redactor must find, in order. Every number is made up.",
   "kind": "bank_account",
   "cases": [
     { "lang": "en", "text": "my account number is 1234567", "found": ["1234567"] },
@@ -12,10 +12,12 @@
     { "lang": "fr", "text": "mon folio est le 123456", "found": ["123456"] },
     { "lang": "fr", "text": "compte bancaire numéro 0012 3456 789", "found": ["0012 3456 789"] },
     { "lang": "en", "text": "account 1234567 and 7654321", "found": ["1234567"] },
+    { "lang": "en", "text": "both accounts: 1234567", "found": ["1234567"] },
+    { "lang": "fr", "text": "mes comptes bancaires, 7654321", "found": ["7654321"] },
     { "lang": "en", "text": "my account is fine and we talked 1234567", "found": [] },
     { "lang": "en", "text": "account for 3 months", "found": [] },
     { "lang": "en", "text": "account 12", "found": [] },
-    { "lang": "en", "text": "I have 2 accounts 1234567", "found": [] },
+    { "lang": "en", "text": "I have 2 accounts 1234567", "found": ["1234567"] },
     { "lang": "en", "text": "1234567", "found": [] },
     { "lang": "en", "text": "phone 416 555 0100", "found": [] }
   ]

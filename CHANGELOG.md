@@ -27,11 +27,13 @@ All notable changes to this project are documented here. The format follows
   `npm run demo` and the UI.
 - More redactors (PRV-6): `sinRedactor`, `healthCardRedactor` (Ontario, British Columbia, Quebec)
   and `bankAccountRedactor`, each its own `Redactor` over digits and English or French digit
-  words, tested over a shared JSON corpus in `test/corpus/`. `composeRedactors` now reports
-  finding offsets into the original input; compose health card numbers before SINs.
+  words, tested over a shared JSON corpus in `test/corpus/`; compose health card numbers before
+  SINs.
 
 ### Changed
 
+- `composeRedactors` reports finding offsets into the original input, no longer into the text each
+  redactor saw (PRV-6).
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

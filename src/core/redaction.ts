@@ -249,10 +249,10 @@ export function findHealthCardNumbers(text: string): RedactionFinding[] {
 
 export const healthCardRedactor: Redactor = redactorFor(findHealthCardNumbers);
 
-/** Words that mark a number after them as a bank number, in English and French. */
+/** Words that mark a number after them as a bank number, in English and French, plurals too. */
 const BANK_WORDS = new Set([
-  "bank", "branch", "transit", "institution", "account",
-  "banque", "bancaire", "succursale", "compte", "folio",
+  "bank", "banks", "branch", "branches", "transit", "transits", "institution", "institutions", "account", "accounts",
+  "banque", "banques", "bancaire", "bancaires", "succursale", "succursales", "compte", "comptes", "folio", "folios",
 ]);
 
 const WORD = /\p{L}+/gu;
