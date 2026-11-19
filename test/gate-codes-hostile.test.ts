@@ -176,6 +176,7 @@ describe("hostile #100: wrong guesses spend a code", () => {
     assert.deepEqual(await v.codes.redeem({ ...door, code: second.code }), { ok: false }, "spent: the right code no longer opens");
     const spent = (await v.ledger.list()).filter((e) => e.event === "access.code_spent");
     assert.deepEqual(spent.map((e) => [e.callId, e.detail]), [[second.callId, { grantId: "acc_1", reason: "wrong_guesses", guesses: 5 }]]);
+    assert.equal((JSON.parse(spent[0]!.eventId!) as string[])[0], "ws_test", "the event id names the workspace first, as reports read it");
     const text = JSON.stringify(await v.ledger.list());
     assert.equal(text.includes(wrong), false, "never the guess");
     assert.equal(text.includes(second.code), false, "never the code");

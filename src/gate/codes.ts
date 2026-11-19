@@ -262,7 +262,8 @@ export class AccessCodes {
     const spent = await this.#options.store.miss(workspaceId, { audience, target }, this.#maxWrongGuesses, now);
     for (const entry of spent) {
       await this.#options.ledger.append({
-        eventId: JSON.stringify(["access.code_spent", entry.workspaceId, entry.grantId]),
+        // The workspace first, as every engine event id has it, so reports attribute the entry (PRV-8).
+        eventId: JSON.stringify([entry.workspaceId, "access.code_spent", entry.grantId]),
         callId: entry.callId,
         actor: "system",
         event: "access.code_spent",
