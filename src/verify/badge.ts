@@ -343,7 +343,8 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     draft.assertCan({ type: "factor_recorded", factor: { kind, passed: false, at: rt.now() } });
     const s = draft.slice<BadgeSlice>(BADGE);
     const max = maxAttempts(rt, module, kind);
-    const used = s.attempts[kind] ?? 0;
+    // Own keys only: an inherited one (`constructor`) must never stand in for a count.
+    const used = Object.hasOwn(s.attempts, kind) ? s.attempts[kind]! : 0;
     if (used >= max) return null;
     s.attempts[kind] = used + 1;
     return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch };

@@ -85,9 +85,10 @@ A module is an `AssuranceModule`: a `manifest` and pure functions.
 `ModuleRegistry.use` refuses a manifest with a bad or reserved name, a name or factor already
 installed, a factor kind that is not snake_case of 3 to 32 characters or is a name for caller ID
 (section 4), a step not prefixed with the module's name, a scope need for a step it does not
-provide, or a second `alwaysOn` module. A module may supply `factorPlugins`, the judges for the
-factors its manifest provides: exactly one per factor, none for a factor it does not provide, each
-with `maxAttemptsPerCall` 1 to 5 and a `judge` function. `replace` swaps an installed module for a
+provide, or a second `alwaysOn` module. A module whose manifest provides factors supplies
+`factorPlugins`, the judges for them: exactly one per factor, none for a factor it does not provide,
+each with `maxAttemptsPerCall` 1 to 5 and a `judge` function. A module that leaves the list out is
+refused if it provides any factor; only Badge, whose own code judges its factors, is exempt. `replace` swaps an installed module for a
 new build under the same name, checked against the others the same way, in its place. `remove`
 refuses Trace. `Engine.remove` also refuses a module the config has on, and a module supplying a
 factor the config in force names (in the policy or Badge's `factors`).

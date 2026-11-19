@@ -164,14 +164,18 @@ function judgeErrors(plugin: FactorPlugin): string[] {
   return errors;
 }
 
+/** The one module whose own code judges the factors it provides, so it supplies no judges. */
+const SELF_JUDGING_MODULE = "badge";
+
 /**
  * Every problem with the judges a module supplies: exactly one for each factor its manifest
- * provides. The kinds' names and clashes are checked with the manifest.
+ * provides, whether or not it gives a list (only Badge judges its own). The kinds' names and
+ * clashes are checked with the manifest.
  */
 export function checkFactorPlugins(module: AssuranceModule): string[] {
-  const plugins = module.factorPlugins;
-  if (plugins === undefined) return [];
   const { name, provides } = module.manifest;
+  if (module.factorPlugins === undefined && name === SELF_JUDGING_MODULE) return [];
+  const plugins = module.factorPlugins ?? [];
   const errors: string[] = [];
   const judged: string[] = [];
   for (const plugin of plugins) {

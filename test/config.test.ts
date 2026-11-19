@@ -530,7 +530,9 @@ describe("module registry", () => {
     ]);
     const supplying = (factors: string[], factorPlugins: FactorPlugin[]): AssuranceModule => ({ ...outside("x1"), manifest: manifest(factors), factorPlugins });
     const plugin = (kind: string, patch: Partial<FactorPlugin> = {}): FactorPlugin => ({ kind, summary: "x", maxAttemptsPerCall: 1, adapters: [], judge, ...patch });
-    assert.deepEqual(checkFactorPlugins(outside("x1")), [], "a module without judges supplies none");
+    assert.deepEqual(checkFactorPlugins(outside("x1")), [], "a module without factors needs no judges");
+    assert.deepEqual(checkFactorPlugins({ ...outside("x1"), manifest: manifest(["desk_code"]) }), ["module x1: factor desk_code has no judge"], "a missing list judges nothing");
+    assert.deepEqual(checkFactorPlugins(installed.find((m) => m.manifest.name === "badge")!), [], "Badge judges its own factors");
     assert.deepEqual(checkFactorPlugins(supplying(["desk_code"], [plugin("desk_code")])), []);
     assert.deepEqual(
       checkFactorPlugins(supplying(["desk_code", "token_code"], [plugin("desk_code"), plugin("desk_code", { maxAttemptsPerCall: 6 }), plugin("other_code", { judge: "yes" as unknown as FactorPlugin["judge"] })])),

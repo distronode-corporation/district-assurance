@@ -217,6 +217,23 @@ describe("factor plug-ins added after the engine is built (MOD-3)", () => {
     assert.equal(JSON.stringify(entries).includes("246810"), false, "the entry is never written");
   });
 
+  it("useFactor: a kind named like an inherited key (constructor) still stops at its attempt limit", async () => {
+    const judged: FactorJudgeInput[] = [];
+    const t = setup();
+    t.engine.useFactor({ ...token(judged), kind: "constructor", maxAttemptsPerCall: 1 });
+    t.engine.configure(
+      testConfig((c) => {
+        c.policy.levels[0] = { level: 1, anyOf: [["keypad_knowledge"], ["constructor"]] };
+        (c.modules.badge!.settings as { factors: string[] }).factors.push("constructor");
+      }),
+    );
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    assert.deepEqual(await t.engine.submitFactor(callId, "constructor", "000000"), { matched: false, locked: true });
+    assert.deepEqual(await t.engine.submitFactor(callId, "constructor", "246810"), { matched: false, locked: true }, "not judged past the limit");
+    assert.equal(judged.length, 1);
+  });
+
   it("useFactor: the registry refuses clashes and caller-ID names, and nothing changes", () => {
     const t = setup();
     t.engine.use(tokenModule());
@@ -276,6 +293,9 @@ describe("factor plug-ins added after the engine is built (MOD-3)", () => {
     assert.throws(() => t.engine.use({ ...tokenModule(), manifest: { ...tokenModule().manifest, name: "pin-two", provides: { factors: ["pin"], steps: [], outcomes: [] } } }), rejects("invalid_input", /factor pin is already provided by badge/));
     assert.throws(() => t.engine.use(tokenModule({ ...token(), kind: "ani" })), rejects("invalid_input", /factor kind ani would make caller ID a factor/));
     assert.throws(() => t.engine.use({ ...tokenModule(), manifest: { ...tokenModule().manifest, name: "no-judge" }, factorPlugins: [] }), rejects("invalid_input", /factor hardware_token is already provided by token-check; module no-judge: factor hardware_token has no judge/));
+    const { factorPlugins: _omitted, ...withoutList } = tokenModule({ ...token(), kind: "desk_code" });
+    assert.throws(() => t.engine.use({ ...withoutList, manifest: { ...withoutList.manifest, name: "no-list" } }), rejects("invalid_input", /module no-list: factor desk_code has no judge/));
+    assert.equal(t.engine.registry.get("no-list"), undefined);
   });
 
   it("remove: refuses a module whose factor the config names, then takes its factor away", async () => {
