@@ -185,17 +185,20 @@ export class AccessCodes {
    * are the door's controller name and ref, as in the grant. Never throws for a bad code.
    */
   async redeem(input: { workspaceId: string; audience: string; target: string; code: string }): Promise<RedeemResult> {
-    const code = typeof input.code === "string" && input.code.length <= 32 ? input.code : "";
-    const digest = accessCodeDigest(this.#options.key, input, code);
+    // Read once: the door and code hashed are the ones looked up and taken, and a code passes its
+    // length check with the value it is hashed with.
+    const { workspaceId, audience, target, code: given } = input;
+    const code = typeof given === "string" && given.length <= 32 ? given : "";
+    const digest = accessCodeDigest(this.#options.key, { workspaceId, audience, target }, code);
     const store = this.#options.store;
     const live = (e: AccessCodeEntry | null): e is AccessCodeEntry => e !== null && Date.parse(e.body.expiresAt) > this.#clock.now().getTime();
     // Signed before the code is taken: a signer that fails throws and leaves the code to try again.
-    const seen = await store.get(input.workspaceId, digest);
+    const seen = await store.get(workspaceId, digest);
     if (!live(seen)) return { ok: false };
     const grant = await signDocument(this.#options.signer, seen.body);
     // Then taken, atomically, once: a code used or revoked meanwhile is refused and its signature dropped.
     // Only the entry that was signed: one another grant holds under this digest meanwhile stays.
-    const taken = await store.take(input.workspaceId, digest, seen.grantId);
+    const taken = await store.take(workspaceId, digest, seen.grantId);
     if (!live(taken)) return { ok: false };
     return { ok: true, grant };
   }

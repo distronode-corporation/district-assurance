@@ -1228,3 +1228,22 @@ describe("gate: one-time access codes", () => {
     assert.ok(accessCodes({ key: new Uint8Array(16), ...parts }) instanceof AccessCodes);
   });
 });
+
+describe("one-time codes: redeem reads its input once", () => {
+  it("looks up and takes the code in the workspace it hashed it for", async () => {
+    const t = codesSetup();
+    const callId = await codeCall(t);
+    await t.codes.issue(t.engine, callId);
+    const code = textedCode(t);
+    let reads = 0;
+    const input = {
+      ...keypadDoor,
+      code,
+      get workspaceId() {
+        reads += 1;
+        return reads === 1 ? "ws_test" : "ws_other";
+      },
+    };
+    assert.equal((await t.codes.redeem(input)).ok, true, "one workspace, from the hash to the take");
+  });
+});
