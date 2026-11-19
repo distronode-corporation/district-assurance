@@ -854,12 +854,15 @@ describe("Engine pay: amounts from code, read back first (PAY-2)", () => {
     const call = await verifiedCall(plain);
     const heard = await plain.engine.readBackPayment(call, byRef);
     await plain.engine.confirmPaymentAmount(call, { digest: heard.digest, confirmedBy: "voice" });
+    const plainSend = plain.messages.sendText.bind(plain.messages);
     plain.messages.sendText = async () => {
       throw new Error("carrier down");
     };
     await assert.rejects(plain.engine.requestPayment(call), /carrier down/);
-    plain.messages.sendText = send;
+    plain.messages.sendText = plainSend;
+    const sentBefore = plain.messages.sent.length;
     assert.equal((await plain.engine.requestPayment(call, byRef)).paymentId, "pay_1");
+    assert.equal(plain.messages.sent.length, sentBefore + 1, "the retry texted through this fixture's own sender");
   });
 });
 

@@ -194,8 +194,11 @@ function readBackSpec(rt: EngineRuntime, record: CallRecord, input: PaymentInput
  * checked like any amount. The read-back replaces any earlier one on the call and waits for
  * `confirmPaymentAmount`. Its ledger entry carries the amount and the digest, never the reference.
  */
-export async function readBackPayment(rt: EngineRuntime, callId: string, input?: PaymentInput): Promise<AmountReadBack> {
+export async function readBackPayment(rt: EngineRuntime, callId: string, given?: PaymentInput): Promise<AmountReadBack> {
   const settings = rt.settings<PaylinkSettings>(PAYLINK) ?? {};
+  // Read once, before the lookup: the request checked, looked up and quoted is one snapshot, so a
+  // host changing its object (an amountRef) while the amount is looked up changes nothing.
+  const input = given === undefined ? undefined : ({ ...given } as PaymentInput);
   const before = await rt.read(callId);
   const { spec, subject } = readBackSpec(rt, before, input, settings.maxAmountMinor);
   const fixed = spec as Partial<FixedPaymentInput & ReferencedPaymentInput>;

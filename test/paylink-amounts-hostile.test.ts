@@ -162,6 +162,22 @@ describe("hostile #88: AmountSource answers", () => {
 });
 
 describe("hostile #88: races around the lookup", () => {
+  it("reads the request once: a host changing its object while the amount is looked up changes nothing", async () => {
+    const held = new HeldAmounts();
+    const t = setup({ adapters: { amounts: held } });
+    const callId = await verifiedCall(t);
+    const input = { ...byRef };
+    const pending = t.engine.readBackPayment(callId, input);
+    await tick();
+    assert.equal(held.pending[0]!.input.reference, "deposit.standard");
+    input.amountRef = "deposit.other";
+    held.pending[0]!.answer.resolve({ amountMinor: 12500, currency: "cad" });
+    const back = await pending;
+    await t.engine.confirmPaymentAmount(callId, { digest: back.digest, confirmedBy: "voice" });
+    await assert.rejects(t.engine.requestPayment(callId, { ...byRef, amountRef: "deposit.other" }), (e: unknown) => rejects("precondition_failed")(e) || rejects("invalid_input")(e), "the quote is for deposit.standard");
+    assert.equal((await t.engine.requestPayment(callId, byRef)).status, "open");
+  });
+
   it("endCall while the amount is looked up leaves no read-back and no link", async () => {
     const held = new HeldAmounts();
     const t = setup({ adapters: { amounts: held } });
