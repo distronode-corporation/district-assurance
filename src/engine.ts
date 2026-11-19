@@ -209,6 +209,7 @@ export class Engine {
       flow: null,
       modules,
       outbox: [],
+      ledgerWrites: 1,
     };
     // A call started with a flow is created with it attached, so no other process can start a
     // different flow on the same id in between.
@@ -380,7 +381,7 @@ export class Engine {
    * call, never a caller's, written to the ledger with the member (`duress.cleared`).
    */
   clearDuress(subjectKey: string, memberId: string): Promise<void> {
-    return badge.clearDuress(this.#rt, subjectKey, memberId);
+    return badge.clearDuress(this.#rt, this.#badge, subjectKey, memberId);
   }
 
   /** The business resets a subject's PIN (and removes any duress PIN). A host call from the business's own tools, never on a caller's request. */
@@ -610,7 +611,11 @@ export class Engine {
       // The step's ledger entries are saved with the step, then appended: a ledger that fails
       // leaves them in the record, and the next write (or flushLedger) appends them, once each.
       const version = stored.version + 1;
-      events.forEach((event, i) => record.outbox.push(this.#outboxEntry(callId, version, i, event)));
+      // Entries are numbered by the writes that queue them, not by the store's version, so a write
+      // with none (a duress alert's acknowledgement, VER-12) leaves no gap a ledger reader could see.
+      // A record from before the count continues from its version, above every id it used.
+      if (events.length > 0) record.ledgerWrites = (record.ledgerWrites ?? stored.version) + 1;
+      events.forEach((event, i) => record.outbox.push(this.#outboxEntry(callId, record.ledgerWrites!, i, event)));
       markOwedAlerts(record);
       const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
       if (saved.ok) {
@@ -743,9 +748,15 @@ export class Engine {
     if (list === undefined) throw new EngineError("precondition_failed", "the session store cannot list the calls that owe alerts (listCallsOwingAlerts)");
     const result = { sent: [] as string[], failed: [] as string[] };
     for (const callId of await list(this.workspaceId)) {
-      await this.#sendDuressAlerts(callId);
-      const owed = badge.owedDuressAlerts(await this.#read(callId)).length;
-      (owed === 0 ? result.sent : result.failed).push(callId);
+      let owed: boolean;
+      try {
+        await this.#sendDuressAlerts(callId);
+        owed = badge.owedDuressAlerts(await this.#read(callId)).length > 0;
+      } catch {
+        // A call the store cannot read now, or no longer holds, is reported, and the sweep goes on.
+        owed = true;
+      }
+      (owed ? result.failed : result.sent).push(callId);
     }
     return result;
   }

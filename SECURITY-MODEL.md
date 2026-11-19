@@ -122,14 +122,16 @@ digest of the subject, so neither the ledger nor an export shows who was under d
 later pass on the subject, on any call, is a duress entry, refused the same scopes, and alerted
 once a call (tested). The flag holds after a config turns the duress PIN off, refusing every scope
 (tested); a lost write of the flag is made good when the entry's alert is delivered, never over a
-clearing that came after the entry (tested); a clearing that lands while a pass is judged stays
+clearing that came after the entry (tested), though a clearing that lands during that delivery may
+need repeating; a duress PIN entry whose own write fails still flags its subject (tested); a clearing that lands while a pass is judged stays
 cleared (tested). A duress
 entry resets the visible counters as any pass does, but the subject's failures are also counted
 where only a pass not under duress resets them, and their hard lock holds: an attacker who knows
 the duress PIN gets no more guesses at the real PIN than one who does not, and the real PIN, when
 it passes, alerts (tested, 20 wrong guesses between duress entries over 10 calls). Every PIN ledger entry carries a
-`tag` keyed to its event id and outcome, so only the holder of the knowledge key can tell a duress
-pass from a normal one (tested); enrolling or removing a duress PIN writes nothing to the ledger.
+`tag` keyed to its event id and outcome, and the event ids of a duress call run as a normal call's
+(an alert's acknowledgement is not counted), so only the holder of the knowledge key can tell a
+duress pass from a normal one (tested); enrolling or removing a duress PIN writes nothing to the ledger.
 A PIN reset removes the duress PIN too.
 
 **Limits.** It does not stop someone who knows both PINs, or who makes the owner say which is

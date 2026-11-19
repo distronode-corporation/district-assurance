@@ -71,6 +71,11 @@ export interface CallRecord {
   /** Ledger entries saved with a change and not yet known to be appended. */
   outbox: Array<{ eventId: string; name: EngineEventName; actor: Actor; at: string; detail: { [key: string]: JsonValue } }>;
   /**
+   * The writes so far that queued ledger entries, numbering their event ids. Absent on a record
+   * saved before it was kept, which continues from its version.
+   */
+  ledgerWrites?: number;
+  /**
    * Present, and true, while the call owes an alert to a host adapter (a duress alert, VER-12), so a
    * session store can index the calls a sweep must visit (`SessionStore.listCallsOwingAlerts`).
    */

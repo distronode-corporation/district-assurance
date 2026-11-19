@@ -480,38 +480,46 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   // entry's keyed tag differ.
   const passed = outcome !== "fail";
   const hard = passed ? null : (recorded.hard ?? (hiddenAfter === null ? null : hiddenHardLock(lockout, hiddenAfter, at)));
-  const stale = await rt.update(callId, (draft) => {
-    const s = draft.slice<BadgeSlice>(BADGE);
-    const now = rt.now();
-    const factor = { kind, passed, at: now };
-    // A duress entry is recorded against the call, not the verification: it stands, and its alert is
-    // owed, even if verification restarted or the call moved on while it was judged. The engine sends
-    // the alert after this write (and retries it until the notifier answers).
-    if (outcome === "duress") {
-      // With the duress PIN turned off since the flag was set, its list of scopes to refuse is gone:
-      // every scope of the policy is refused (fail closed).
-      s.duress ??= { refuseScopes: settings.pin?.duress === undefined ? Object.keys(rt.policy.scopes) : [...settings.pin.duress.refuseScopes] };
-      // Every entry of the duress PIN alerts. A pass that is duress only by the flag alerts once a
-      // call: the first, so a flagged owner's call always raises one, and a run of passes on one
-      // call does not flood the business.
-      if (pinDuress || s.duressEntries === undefined) {
-        // Unique without the id generator: the call and the number of this alert on it, which the
-        // compare-and-set write makes one per entry across every engine.
-        s.duressEntries = (s.duressEntries ?? 0) + 1;
-        const alert = { alertId: JSON.stringify(["duress", rt.workspaceId, callId, s.duressEntries]), subjectKey: reserved.subjectKey!, at: now, clears };
-        s.duressAlerts = [...(s.duressAlerts ?? []), alert];
+  let stale: EngineError | null;
+  try {
+    stale = await rt.update(callId, (draft) => {
+      const s = draft.slice<BadgeSlice>(BADGE);
+      const now = rt.now();
+      const factor = { kind, passed, at: now };
+      // A duress entry is recorded against the call, not the verification: it stands, and its alert is
+      // owed, even if verification restarted or the call moved on while it was judged. The engine sends
+      // the alert after this write (and retries it until the notifier answers).
+      if (outcome === "duress") {
+        // With the duress PIN turned off since the flag was set, its list of scopes to refuse is gone:
+        // every scope of the policy is refused (fail closed).
+        s.duress ??= { refuseScopes: settings.pin?.duress === undefined ? Object.keys(rt.policy.scopes) : [...settings.pin.duress.refuseScopes] };
+        // Every entry of the duress PIN alerts. A pass that is duress only by the flag alerts once a
+        // call: the first, so a flagged owner's call always raises one, and a run of passes on one
+        // call does not flood the business.
+        if (pinDuress || s.duressEntries === undefined) {
+          // Unique without the id generator: the call and the number of this alert on it, which the
+          // compare-and-set write makes one per entry across every engine.
+          s.duressEntries = (s.duressEntries ?? 0) + 1;
+          const alert = { alertId: JSON.stringify(["duress", rt.workspaceId, callId, s.duressEntries]), subjectKey: reserved.subjectKey!, at: now, clears };
+          s.duressAlerts = [...(s.duressAlerts ?? []), alert];
+        }
       }
-    }
-    // Otherwise the result is applied only to the verification it was judged for, as for any factor;
-    // a stale one is refused with the same error either way, after the write.
-    if (s.epoch !== reserved.epoch) return new EngineError("precondition_failed", "verification restarted while this result was on its way; it does not count");
-    if (!canApply(draft.record.state, { type: "factor_recorded", factor })) return new EngineError("invalid_transition", `factor_recorded is not allowed while ${draft.record.state.phase}`);
-    draft.apply({ type: "factor_recorded", factor });
-    if (passed && KNOWLEDGE_FACTORS.includes(kind)) s.knowledgeMatched = true;
-    draft.emit("verification.factor", "code", { kind, passed }, kind === "pin" ? outcome : undefined);
-    if (hard !== null) draft.emit("verification.locked", "code", { kind, scope: hard.scope, hard: true, until: hard.until });
-    return null;
-  });
+      // Otherwise the result is applied only to the verification it was judged for, as for any factor;
+      // a stale one is refused with the same error either way, after the write.
+      if (s.epoch !== reserved.epoch) return new EngineError("precondition_failed", "verification restarted while this result was on its way; it does not count");
+      if (!canApply(draft.record.state, { type: "factor_recorded", factor })) return new EngineError("invalid_transition", `factor_recorded is not allowed while ${draft.record.state.phase}`);
+      draft.apply({ type: "factor_recorded", factor });
+      if (passed && KNOWLEDGE_FACTORS.includes(kind)) s.knowledgeMatched = true;
+      draft.emit("verification.factor", "code", { kind, passed }, kind === "pin" ? outcome : undefined);
+      if (hard !== null) draft.emit("verification.locked", "code", { kind, scope: hard.scope, hard: true, until: hard.until });
+      return null;
+    });
+  } catch (error) {
+    // The entry could not be recorded (a store fault, a conflict on every try), so no alert is owed
+    // for it: a duress PIN entry still flags its subject, and the subject's next pass alerts.
+    if (pinDuress) await flagDuress(counters, flag!, at);
+    throw error;
+  }
   // A duress PIN entry flags its subject, even a stale one: durable and hidden, before the visible reset.
   if (pinDuress) await flagDuress(counters, flag!, at);
   // A stale entry's failure stays counted across calls, as for any entry that was not accepted.
@@ -537,8 +545,8 @@ const MEMBER_ID = /^[A-Za-z0-9._-]{1,64}$/;
  * member before the flag and the hidden counters are cleared, so no clearing goes unrecorded. Until
  * then every pass on the subject is a duress entry.
  */
-export async function clearDuress(rt: EngineRuntime, subjectKey: string, memberId: string): Promise<void> {
-  const settings = rt.settings<BadgeSettings>(BADGE);
+export async function clearDuress(rt: EngineRuntime, module: BadgeModule, subjectKey: string, memberId: string): Promise<void> {
+  rt.settings<BadgeSettings>(BADGE);
   const errors: string[] = [];
   if (typeof subjectKey !== "string" || !/^[0-9a-f]{64}$/.test(subjectKey)) errors.push("subjectKey must be 64 lower-case hex characters");
   if (typeof memberId !== "string" || !MEMBER_ID.test(memberId)) errors.push("memberId must be an opaque id: 1 to 64 of letters, digits, '.', '_', '-'");
@@ -550,7 +558,9 @@ export async function clearDuress(rt: EngineRuntime, subjectKey: string, memberI
   // Counted before the flag goes, so an alert of an earlier entry, delivered later, never sets it again.
   await recordClear(counters, rt.workspaceId, subjectKey, rt.clock.now());
   await counters.reset(duressFlagKey(rt.workspaceId, subjectKey));
-  for (const kind of settings.factors) await counters.reset(hiddenCounterKey(rt.workspaceId, kind, subjectKey));
+  // Every installed factor's hidden counter, not only those on now: a factor turned off while the
+  // subject is cleared keeps no hidden lock to hold when it is turned on again.
+  for (const kind of module.manifest.provides.factors) await counters.reset(hiddenCounterKey(rt.workspaceId, kind, subjectKey));
 }
 
 /** Asks the carrier about the number on file, never the calling number. Only after a keypad or PIN match. */

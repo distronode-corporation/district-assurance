@@ -321,7 +321,10 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   written to the ledger first, naming the subject only by `duressClearedSubject(knowledgeKey,
   subjectKey)` = `HMAC-SHA256(knowledgeKey, "duress.cleared:" + subjectKey)`, which the business can
   match and a reader of the ledger or an export cannot; then the count of clearings goes up, and the
-  flag and the hidden counters are cleared.
+  flag and the hidden counters of every installed factor (on or off) are cleared. A clearing that
+  lands while an earlier entry's alert is being delivered may be undone by that delivery's setting of
+  the flag (the counters store has no compare-and-set): the subject stays flagged, and the business
+  clears it again.
 - Every duress entry owes an alert: in the same write, Badge's part of the call record gets
   `duressAlerts` `{alertId, subjectKey, at, clears}` and `duress`, and the record `owesAlerts: true` until
   none is owed; `alertId` is `JSON.stringify(["duress", workspaceId, callId, n])` for the call's `n`th duress
@@ -335,7 +338,8 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   answers how many were acknowledged), or `sweepAlerts()`, which finds the calls without their ids
   through the optional `SessionStore.listCallsOwingAlerts(workspaceId)` (the calls whose record has
   `owesAlerts: true`; `precondition_failed` without it) and answers `{sent, failed}`: the calls that
-  owe nothing now, and those that still owe one; one engine sends an alert once at a time, again after 30
+  owe nothing now, and those that still owe one or could not be read (a listed call the store cannot
+  read, or no longer holds, is reported and the sweep goes on); one engine sends an alert once at a time, again after 30
   seconds without an answer. So `notify` may see an `alertId` more than once. A notifier that throws,
   rejects or never answers changes nothing on the call; it must not block.
 - The ledger tag: every `verification.factor` entry with `kind: "pin"` carries `tag` =
@@ -456,8 +460,10 @@ answer on file, a phone number, a link or card data.
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
 A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
-with an `eventId` (the JSON tuple `[workspaceId, callId, version, index]`, unique on a ledger that
-several workspaces share), then appended in order; an entry the ledger would refuse (card data) is
+with an `eventId` (the JSON tuple `[workspaceId, callId, n, index]` for the call's `n`th write that
+queued entries, unique on a ledger that several workspaces share; numbered by those writes, not the
+store's version, so a write that queues none, such as a duress alert's acknowledgement, leaves no
+gap in the ids), then appended in order; an entry the ledger would refuse (card data) is
 refused before it is saved; the outbox is cleared by
 a further write if nobody wrote since. A failed append leaves them pending, and the next write or
 `flushLedger(callId)` appends them. A ledger appends an `eventId` once (a second append returns the
