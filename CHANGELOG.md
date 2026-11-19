@@ -25,6 +25,10 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- A synthetic voice signal (VER-14): `reportSyntheticVoice(callId, {score, vendor})` and per-vendor
+  thresholds in Badge's `syntheticVoice` setting stop spoken answers counting or hold the call to
+  level 1, at once and for grants already issued; the ledger records the vendor and band, never the
+  score, and the receipt neither.
 
 ### Changed
 

@@ -20,7 +20,7 @@ import {
   type FactorKind,
 } from "../core/policy.ts";
 import type { CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
-import { canApply, type SessionState } from "../core/session.ts";
+import { canApply, higherBand, type SessionState, type SyntheticVoiceBand } from "../core/session.ts";
 import { isIntegerIn, isObject, isStringArray, unknownKeys } from "../core/shape.ts";
 import type { IdentityOutcome } from "../webhooks/stripe.ts";
 import {
@@ -85,8 +85,23 @@ export interface VerificationResult {
 
 export type OutcomeResult = { applied: false } | { applied: true; callId: string };
 
-const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin"];
+/**
+ * One speech vendor's two thresholds, each from 0 to 1 (VER-14). Vendors' scores are not
+ * comparable, so each vendor has its own. A score above `spokenKnowledgeAbove` stops
+ * `spoken_knowledge` counting toward a level; above `levelOneAbove`, the call is held to level 1.
+ */
+export interface SyntheticVoiceThresholds {
+  spokenKnowledgeAbove: number;
+  levelOneAbove: number;
+}
+
+/** Badge's settings with the synthetic voice thresholds, by vendor name. No vendor listed: no score is taken. */
+export type BadgeVoiceSettings = BadgeSettings & { syntheticVoice?: Record<string, SyntheticVoiceThresholds> };
+
+const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin", "syntheticVoice"];
 const PIN_KEYS = ["mode", "minDigits", "maxDigits", "maxAttemptsPerCall"];
+const THRESHOLD_KEYS = ["spokenKnowledgeAbove", "levelOneAbove"];
+const VENDOR_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 
 /** The subject whose number links may go to: only once a keypad or PIN factor matched. */
 export function matchedSubject(record: CallRecord): SubjectRecord {
@@ -146,6 +161,7 @@ export class BadgeModule implements AssuranceModule {
     if (settings.grantTtlSeconds !== undefined && !isIntegerIn(settings.grantTtlSeconds, 1, 3600)) {
       errors.push("grantTtlSeconds must be an integer from 1 to 3600");
     }
+    if (settings.syntheticVoice !== undefined) errors.push(...syntheticVoiceErrors(settings.syntheticVoice));
     return errors;
   }
 
@@ -257,6 +273,41 @@ function pinSettingsErrors(pin: unknown): string[] {
   else if (!isIntegerIn(pin.maxDigits, pin.minDigits, 12)) errors.push("pin.maxDigits must be from minDigits to 12");
   if (!isIntegerIn(pin.maxAttemptsPerCall, 1, 5)) errors.push("pin.maxAttemptsPerCall must be 1 to 5");
   return errors;
+}
+
+function syntheticVoiceErrors(vendors: unknown): string[] {
+  if (!isObject(vendors)) return ["syntheticVoice must map each vendor's name to its thresholds"];
+  const errors: string[] = [];
+  for (const [vendor, thresholds] of Object.entries(vendors)) {
+    const at = `syntheticVoice.${vendor}`;
+    if (!VENDOR_NAME.test(vendor)) errors.push(`syntheticVoice vendor ${JSON.stringify(vendor)} must be 1 to 32 lower-case letters, digits, "-" or "_", starting with a letter`);
+    if (!isObject(thresholds)) {
+      errors.push(`${at} must be {spokenKnowledgeAbove, levelOneAbove}`);
+      continue;
+    }
+    errors.push(...unknownKeys(thresholds, THRESHOLD_KEYS).map((k) => `${at}.${k} is not a threshold`));
+    const bad = THRESHOLD_KEYS.filter((k) => !isScore(thresholds[k]));
+    for (const k of bad) errors.push(`${at}.${k} must be a number from 0 to 1`);
+    if (bad.length === 0 && (thresholds.levelOneAbove as number) < (thresholds.spokenKnowledgeAbove as number)) {
+      errors.push(`${at}.levelOneAbove must not be below spokenKnowledgeAbove`);
+    }
+  }
+  return errors;
+}
+
+/** A number from 0 to 1. NaN, infinities and strings are not. */
+function isScore(value: unknown): value is number {
+  return typeof value === "number" && value >= 0 && value <= 1;
+}
+
+/** Whether a factor kind still counts toward a level under a call's synthetic voice band. */
+function countsUnder(kind: string, band: SyntheticVoiceBand): boolean {
+  return kind !== "spoken_knowledge" || band === "clear";
+}
+
+/** A level held to a band: at most 1 in `level_1`. */
+function heldLevel(level: AssuranceLevel, band: SyntheticVoiceBand): AssuranceLevel {
+  return band === "level_1" ? (Math.min(level, 1) as AssuranceLevel) : level;
 }
 
 // ---- runtime -------------------------------------------------------------------------------
@@ -437,33 +488,63 @@ export async function applyIdentityOutcome(rt: EngineRuntime, outcome: IdentityO
   });
 }
 
-/** Computes the level from the recorded factors (only the step's, in a flow) and issues the grant. */
+/**
+ * A speech vendor's score of how likely the caller's voice is synthetic (VER-14), at any point in
+ * the call, in or out of a flow. It is judged against that vendor's thresholds in Badge's settings
+ * and kept only as a band; the call keeps its highest band. It can only lower what the call may do:
+ * above the first threshold `spoken_knowledge` stops counting, above the second the call is held to
+ * level 1, and a level or grant already issued is lowered at once. The ledger gets the vendor and
+ * the band, never the score.
+ */
+export async function reportSyntheticVoice(rt: EngineRuntime, callId: string, input: { score: number; vendor: string }): Promise<void> {
+  const vendors = rt.settings<BadgeVoiceSettings>(BADGE).syntheticVoice ?? {};
+  const thresholds = Object.hasOwn(vendors, input.vendor) ? vendors[input.vendor] : undefined;
+  if (thresholds === undefined) throw new EngineError("invalid_input", "this vendor has no synthetic voice thresholds in the badge settings");
+  if (!isScore(input.score)) throw new EngineError("invalid_input", "score must be a number from 0 to 1");
+  const band: SyntheticVoiceBand =
+    input.score > thresholds.levelOneAbove ? "level_1" : input.score > thresholds.spokenKnowledgeAbove ? "spoken_off" : "clear";
+  await rt.update(callId, (draft) => {
+    const s = draft.slice<BadgeSlice>(BADGE);
+    const highest = higherBand(draft.record.state.syntheticVoice, band);
+    // What the last verification reaches without the factors the band stops counting. Its other
+    // methods are judged again only when one was dropped, so a score never moves a level otherwise.
+    const kept = s.lastMethods.filter((kind) => countsUnder(kind, highest));
+    const reached = kept.length === s.lastMethods.length ? 3 : evaluateAssurance(rt.policy, kept.map((kind) => ({ kind, passed: true, at: rt.now() })), s.carrier).level;
+    const ceiling = heldLevel(reached, highest);
+    draft.apply({ type: "synthetic_voice_scored", band, ceiling, scopes: scopesForLevel(rt.policy, ceiling) });
+    draft.emit("verification.synthetic_voice", "system", { vendor: input.vendor, band });
+  });
+}
+
+/** Computes the level from the recorded factors (only the step's, in a flow, and only those the synthetic voice band counts), held to the band, and issues the grant. */
 export async function finishVerification(rt: EngineRuntime, callId: string): Promise<VerificationResult> {
   const ttlMs = (rt.settings<BadgeSettings>(BADGE).grantTtlSeconds ?? 900) * 1000;
   return rt.update(callId, (draft) => {
     const step = stepOfType<BadgeVerifyStep>(draft.record, "badge.verify");
     const s = draft.slice<BadgeSlice>(BADGE);
-    const factors = draft.record.state.factors.filter((f) => step === null || step.factors.includes(f.kind));
+    const band = draft.record.state.syntheticVoice;
+    const factors = draft.record.state.factors.filter((f) => (step === null || step.factors.includes(f.kind)) && countsUnder(f.kind, band));
     const result = evaluateAssurance(rt.policy, factors, s.carrier);
-    const scopes = scopesForLevel(rt.policy, result.level).filter((scope) => step?.scopes === undefined || step.scopes.includes(scope));
+    const level = heldLevel(result.level, band);
+    const scopes = scopesForLevel(rt.policy, level).filter((scope) => step?.scopes === undefined || step.scopes.includes(scope));
     const issuedAt = rt.clock.now();
     const grant =
-      result.level === 0
+      level === 0
         ? null
         : {
             grantId: rt.ids.next("grant"),
-            level: result.level,
+            level,
             scopes,
             issuedAt: issuedAt.toISOString(),
             expiresAt: new Date(issuedAt.getTime() + ttlMs).toISOString(),
           };
-    draft.apply({ type: "verification_finished", level: result.level, grant });
+    draft.apply({ type: "verification_finished", level, grant });
     s.finished++;
-    s.lastLevel = result.level;
+    s.lastLevel = level;
     s.lastMethods = result.counted;
-    draft.emit("verification.finished", "code", { level: result.level, methods: result.counted, discounted: result.discounted.map((d) => d.kind) });
+    draft.emit("verification.finished", "code", { level, methods: result.counted, discounted: result.discounted.map((d) => d.kind) });
     if (grant !== null) draft.emit("grant.issued", "code", { grantId: grant.grantId, level: grant.level, scopes, expiresAt: grant.expiresAt });
-    return { level: result.level, scopes: grant === null ? [] : scopes };
+    return { level, scopes: grant === null ? [] : scopes };
   });
 }
 

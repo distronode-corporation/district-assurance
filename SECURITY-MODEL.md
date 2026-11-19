@@ -63,6 +63,22 @@ policy window (72 hours by default); without a carrier answer it does not count 
 says so (tested). A texted code is never a factor alone, and level 3 requires a photo ID plus
 selfie, which a stolen SIM alone does not pass. Contact and payout scopes default to level 3.
 
+### Cloned and synthetic voices
+
+A cloned voice answers spoken questions in the account holder's voice. No factor uses the voice
+itself (no voice biometrics), so a clone gains nothing from sounding right. **Controls:** a host
+whose speech vendor scores how likely a voice is synthetic passes the score in
+(`reportSyntheticVoice`), judged against that vendor's own two thresholds in Badge's settings.
+Above the first, a spoken answer stops counting toward a level; above the second, the call is
+held to level 1, so no money, contact or access scope is reachable. The cap applies at once, to a
+grant already issued too; the call keeps its highest band, so a later, lower score lifts nothing;
+and a score can only lower a level, never raise one or stand in for a factor (tested). The ledger
+records the vendor and the band, never the audio or the score; the receipt records neither,
+because a receipt can reach the caller and would tell an attacker their voice was caught (tested).
+**Left to the host:** choosing a vendor, its thresholds, and scoring the audio; no score means no
+cap. A host that refuses an action should speak the same fixed line whatever the reason, though a
+caller can still see that a capped grant does less than the factors they gave would reach.
+
 ### Text flooding and SMS pumping
 
 Repeated calls triggering texts to a real customer, or to premium numbers. **Controls:** texts go

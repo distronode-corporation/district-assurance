@@ -21,6 +21,7 @@ const SAMPLES: Record<SessionEvent["type"], SessionEvent> = {
   payment_requested: { type: "payment_requested", paymentId: "p1" },
   payment_settled: { type: "payment_settled", paymentId: "p1" },
   untrusted_content: { type: "untrusted_content", source: "endpoint" },
+  synthetic_voice_scored: { type: "synthetic_voice_scored", band: "level_1", ceiling: 1, scopes: ["status.read"] },
   call_ended: { type: "call_ended", at },
 };
 
