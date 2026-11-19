@@ -461,9 +461,16 @@ when there is a number.
   since every entry records its own failure before it is judged, and only a pass takes it back. If
   the first passes, its pass takes off the subject's failures up to the pass and the second may enter again at once;
   if it fails, both failures stand and the second waits the longer wait for two.
-- The cleanup a pass owes (`forgetPass`) is saved with the pass, on the call, so a write that
-  fails after the pass was saved (its ledger entry) still gets it, in the same `submitKeypad` or
-  `submitPin` or before the call's next factor; a pass refused before it was saved owes none.
+- The cleanup a pass owes (`forgetPass`, and with the duress PIN on its hidden counter) is saved
+  with the pass, on the call, so a write that fails after the pass was saved (its ledger entry)
+  still gets it, in the same `submitKeypad` or `submitPin` or before the call's next factor; a pass
+  refused before it was saved owes none. The subject's part is safe to run again. The rest (the
+  pass's own failure off the number, and the hidden counter's reset or, after a duress entry, its
+  own failure) is claimed on the call in one more write before it runs, so it runs at most once: a
+  replay never takes off another failure of the same millisecond. A claim that is not saved runs
+  none of it, which stays owed; a removal that fails after its claim is not run again, and that
+  failure stays until it leaves the window (fail closed). A flagged pass and an unflagged one make
+  the same store round trips.
 - **Lock notices (INT-7).** With a `notifier` adapter, after a `verification.locked` entry is
   appended (by the step's write, or later by `flushLedger`), the engine calls
   `Notifier.lockout({workspaceId, factor, scope, key, hard, until, capped})`: the counter that

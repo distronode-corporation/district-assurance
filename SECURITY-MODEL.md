@@ -366,7 +366,10 @@ wait), the second is judged too. That is never a free guess, since every entry r
 failure before it is judged, and only a pass takes it back. A pass by the first lifts the wait at
 once; a failure makes it the wait after two failures (tested). A pass that was saved owes its
 counters cleanup with it, so a correct entry whose ledger write then fails still has its
-provisional failures taken back (tested). Two callers for one
+provisional failures taken back (tested). The removals that are not safe to repeat (its own
+failure off the number, the hidden counter's) are claimed on the call before they run, so a
+cleanup run again after a lost write never takes off another failure of the same millisecond
+(tested); one that fails after its claim leaves that failure to the window. Two callers for one
 account at the same moment are rare, and the cost is a wait of seconds and the second caller
 entering the answer again.
 

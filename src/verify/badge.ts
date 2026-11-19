@@ -120,9 +120,11 @@ export interface BadgeSlice {
    * write that fails after the pass was saved (its ledger entry) still gets the cleanup, in the same
    * call to `submitFactor` or the call's next. Absent when nothing is owed. `hidden` is the duress
    * PIN's hidden counter (VER-12), when it is on: a pass not under duress resets it, a duress entry
-   * takes off only its own failure. Absent on a pass saved before it was kept here.
+   * takes off only its own failure. Absent on a pass saved before it was kept here. `claimed` is set
+   * on the call before the removals that are not safe to run twice (the number's own failure, the
+   * hidden counter's) run, so a replay skips them.
    */
-  forgetOwed?: { keys: AttemptCounterKey[]; at: string; hidden?: { key: AttemptCounterKey; duress: boolean } };
+  forgetOwed?: { keys: AttemptCounterKey[]; at: string; hidden?: { key: AttemptCounterKey; duress: boolean }; claimed?: true };
   /** The callback this call asked for, or the one it is (callback.ts). Absent on calls saved before: read it with `callbackOf`. */
   callback: CallbackState;
   /** Untrusted content seen on this call so far (onUntrusted counts it), so an entry judged across one is known. Absent on calls saved before. */
@@ -719,26 +721,56 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
 
 /**
  * Runs the counters cleanup a saved pass owes, if the call still owes the one made at `at`, then
- * takes it off the call. The cleanup is idempotent, so running it again after a lost write is safe;
- * a failure to take it off leaves it owed for the call's next factor.
+ * takes it off the call; a failure to take it off leaves it owed for the call's next factor. The
+ * subject's part is safe to run again. The rest is not (a removal by time can take another
+ * failure of the same millisecond, a reset a later failure), so it is claimed on the call first
+ * and runs at most once: a claim that is not saved runs none of it, and one that is saved and
+ * then fails leaves those failures until they leave the window (fail closed).
  */
 async function settleForget(rt: EngineRuntime, callId: string, at: string): Promise<void> {
   const owed = (await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice;
   if (owed.forgetOwed?.at !== at) return;
   const counters = rt.adapter("counters");
-  await forgetPass(counters, owed.forgetOwed.keys, new Date(at));
-  // The hidden counter forgets only on a pass that is not under duress; a duress entry takes off its
-  // own failure, as a pass does, and keeps the rest. One write either way, so the round trips never
-  // tell a duress pass from another.
-  const hidden = owed.forgetOwed.hidden;
-  if (hidden?.duress === true) await counters.removeFailure(hidden.key, at);
-  else if (hidden !== undefined) await counters.reset(hidden.key);
+  const { keys, hidden } = owed.forgetOwed;
+  await forgetPass(counters, keys.filter((k) => k.scope === "subject"), new Date(at));
+  if (owed.forgetOwed.claimed !== true) {
+    // Not claimed (or claimed by another run first): this run leaves the rest to the run that holds it, or the next.
+    if (!(await claimForget(rt, callId, at))) return;
+    for (const key of keys) if (key.scope === "number") await counters.removeFailure(key, at);
+    // The hidden counter forgets only on a pass that is not under duress; a duress entry takes off its
+    // own failure, as a pass does, and keeps the rest. One write either way, so the round trips never
+    // tell a duress pass from another.
+    if (hidden?.duress === true) await counters.removeFailure(hidden.key, at);
+    else if (hidden !== undefined) await counters.reset(hidden.key);
+  }
   await rt
     .update(callId, (draft) => {
       const s = draft.slice<BadgeSlice>(BADGE);
       if (s.forgetOwed?.at === at) delete s.forgetOwed;
     })
     .catch(() => undefined);
+}
+
+/**
+ * Claims the removals of the cleanup owed at `at` on the call: true when this run's write saved the
+ * claim. A write that saved and then failed (the ledger, appended after the save) still claimed it;
+ * one that did not save, or a claim another run made first, did not.
+ */
+async function claimForget(rt: EngineRuntime, callId: string, at: string): Promise<boolean> {
+  let mine = false;
+  try {
+    return await rt.update(callId, (draft) => {
+      const s = draft.slice<BadgeSlice>(BADGE);
+      mine = s.forgetOwed?.at === at && s.forgetOwed.claimed !== true;
+      if (mine) s.forgetOwed!.claimed = true;
+      return mine;
+    });
+  } catch {
+    // Not saved before the write failed, or saved and then the ledger failed: the call says which.
+    if (!mine) return false;
+    const now = (await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice;
+    return now.forgetOwed?.at === at && now.forgetOwed.claimed === true;
+  }
 }
 
 /** An opaque member id: no "@" and no space, so no email address or name reaches the ledger. */
