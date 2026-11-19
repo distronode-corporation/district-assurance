@@ -122,6 +122,25 @@ describe("hostile #89: Spanish numbers, read as people say them", () => {
     for (const [text, digits] of cases) assert.deepEqual(runs(text), [digits], text);
   });
 
+  it("never multiplies a Spanish hundred word: cuatro doscientos is 4 then 200", () => {
+    assert.deepEqual(runs("cuatro doscientos"), ["4200"]);
+    assert.deepEqual(runs("tres quinientos"), ["3500"]);
+    assert.deepEqual(runs("cuatro ciento once"), ["4111"]);
+    assert.deepEqual(runs("four hundred"), ["400"], "a multiplier scale still multiplies");
+    assert.deepEqual(runs("dos mil"), ["2000"]);
+    const pan = "cuatro doscientos 4200 4200 4200";
+    assert.equal(redacted(pan), MARKER, "4200420042004200 is a card number");
+  });
+
+  it("reads a combining mark after a number word as a separator, and keeps a decomposed accent inside a word", () => {
+    const marked = Array(8).fill("four\u0301 two\u0301").join(" ");
+    assert.deepEqual(runs(marked), ["4242424242424242"]);
+    assert.equal(redacted(marked).includes("four"), false, "redacted");
+    const live = new LiveCardNumberDetector();
+    assert.equal(live.push(marked).interrupt, true);
+    assert.deepEqual(runs("veintiu\u0301n"), ["21"], "an accent inside a word is still part of it");
+  });
+
   it("redacts and interrupts a card number read in Spanish pairs or groups", () => {
     const pairs = "cuarenta y uno once, once once, once once, once once";
     assert.equal(redacted(`es ${pairs} gracias`), `es ${MARKER} gracias`);

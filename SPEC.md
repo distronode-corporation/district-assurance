@@ -402,14 +402,18 @@ the currency's own decimals.
 ## 17. Card numbers in transcripts
 
 **Runs of digits.** `digitRuns(text)` reads a text into runs of digits. A run is numerals and spoken
-numbers in English, French or Spanish with only separators between them: spaces, any dash (hyphen, en and
+numbers in English, French or Spanish with only separators between them (Spanish hundreds,
+`doscientos` and the rest, are whole numbers no count multiplies): spaces, any dash (hyphen, en and
 em dashes, the non-breaking hyphen), the minus sign, dots, commas, slashes, underscores, middle
 dots, and the characters a reader never sees (zero-width spaces and joiners, soft hyphens, bidi
 controls, combining marks: `SEPARATOR_CLASS`). A numeral is any run of Unicode decimal digits
 (fullwidth, Arabic-Indic and the rest), read by its values for the checks, and the original span
 is what is removed. English and French number words are read on every call, since callers switch
 between them; Spanish words only on a Spanish call (`Engine.redact` and a `LiveCardNumberDetector`
-given its `locale`), so on an English call "once" and "y" are words. Text redacted with no call
+given its `locale`), so on an English call "once" and "y" are words. A call is Spanish only once
+the engine takes the `es` locale (#122, which lands with or after this); until then `startCall`
+takes `en` and `fr`, and Spanish is read by a `LiveCardNumberDetector` given `locale: "es"` and by
+text redacted with no call. Text redacted with no call
 reads every language. Any other word or punctuation ends a run. Joining this widely can join things
 that are not one number (a date beside an amount); over-redaction is the safe side, since the risk
 is a number reaching storage. Spoken numbers are read as people say them:

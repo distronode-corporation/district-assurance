@@ -120,6 +120,9 @@ const SPANISH: WordList = [
   ...each("thousand", [["mil", 1000]]),
 ];
 
+/** Spanish hundreds are whole numbers ("doscientos" is 200), never a scale a count multiplies: "cuatro doscientos" is 4, 200. */
+const SPANISH_HUNDREDS: ReadonlySet<string> = new Set(SPANISH.filter(([kind]) => kind === "hundred").map(([, w]) => w));
+
 // Maps, not object literals, so that a word such as "constructor" is never read as a number.
 const NUMBER_WORDS: Readonly<Record<NumberLanguage, ReadonlyMap<string, NumberWord>>> = {
   en: new Map(ENGLISH.map(([kind, w, value]) => [w, { kind, value }])),
@@ -221,10 +224,17 @@ function lexemes(text: string, vocab: Vocabulary): Lexeme[] {
   const out: Lexeme[] = [];
   let lastEnd = 0;
   for (const match of text.matchAll(LEXEME)) {
-    const raw = match[0];
+    let raw = match[0];
     const start = match.index;
     const joined = out.length > 0 && SEPARATOR.test(text.slice(lastEnd, start));
-    const word = raw.normalize("NFC").toLowerCase();
+    let word = raw.normalize("NFC").toLowerCase();
+    // Marks after a word that is no word with them ("four" and U+0301) are separators, as marks
+    // between words are; a decomposed accent inside a word ("veintiu" U+0301 "n") stays part of it.
+    const bare = raw.replace(/\p{M}+$/u, "");
+    if (bare !== raw && vocab.number(word) === undefined && vocab.number(bare.normalize("NFC").toLowerCase()) !== undefined) {
+      raw = bare;
+      word = bare.normalize("NFC").toLowerCase();
+    }
     out.push({ raw, digits: NUMERAL.test(raw) ? asciiDigits(raw) : null, word, number: vocab.number(word), connects: vocab.connects(word), start, end: start + raw.length, joined });
     lastEnd = start + raw.length;
   }
@@ -310,7 +320,7 @@ function scaled(kind: "hundred" | "thousand", below: Parser): Parser {
       const count = below(lx, i, first);
       if (count === undefined) return undefined;
       const scale = numberWord(lx, count.next, false);
-      if (scale?.kind !== kind) return count;
+      if (scale?.kind !== kind || SPANISH_HUNDREDS.has(lx[count.next]!.word)) return count;
       value = count.value * scale.value;
       next = count.next + 1;
     }
