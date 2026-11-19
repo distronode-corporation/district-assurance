@@ -78,6 +78,20 @@ export async function flagDuress(counters: AttemptCounters, key: AttemptCounterK
   await counters.recordFailure(key, at.toISOString(), FOREVER);
 }
 
+/**
+ * Sets the flag for an entry judged when the subject had been cleared `clears` times, unless it was
+ * cleared since. The store has no compare-and-set, so the count is read again after the write, and
+ * a clearing that landed meanwhile has the write taken back: `clearDuress` counts the clearing
+ * before it clears the flag, so a clearing either is counted by then or clears this write itself.
+ * A failure to take it back leaves the subject flagged (fail closed), and the business clears again.
+ */
+export async function flagDuressUnlessCleared(counters: AttemptCounters, workspaceId: string, subjectKey: string, at: Date, clears: number): Promise<void> {
+  if ((await clearsSoFar(counters, workspaceId, subjectKey)) !== clears) return;
+  const key = duressFlagKey(workspaceId, subjectKey);
+  await flagDuress(counters, key, at);
+  if ((await clearsSoFar(counters, workspaceId, subjectKey)) !== clears) await counters.removeFailure(key, at.toISOString());
+}
+
 /** The hard lock the hidden failures hold now, or null: its waits are not applied, only its lock. */
 export function hiddenHardLock(lockout: Lockout, failures: readonly string[], now: Date): Lock | null {
   const state = lockState(lockout, failures, now);

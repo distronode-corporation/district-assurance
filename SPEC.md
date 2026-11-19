@@ -668,8 +668,11 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   subjectKey)` = `HMAC-SHA256(knowledgeKey, "duress.cleared:" + subjectKey)`, which the business can
   match and a reader of the ledger or an export cannot; then the count of clearings goes up, and the
   flag and the hidden counters of every installed factor (on or off) are cleared. A clearing that
-  lands while an earlier entry's alert is being delivered may be undone by that delivery's setting of
-  the flag (the counters store has no compare-and-set): the subject stays flagged, and the business
+  lands while an earlier entry's flag is being written (the entry's own write, or its alert's on
+  delivery) is never undone: the counters store has no compare-and-set, so the writer reads the
+  count of clearings again after the write and takes its write back if it went up (the clearing
+  counts before it clears, so it is either counted by then or clears the write itself). The alert
+  still goes out. A take-back that fails leaves the subject flagged (fail closed), and the business
   clears it again.
 - Every duress entry owes an alert: in the same write, Badge's part of the call record gets
   `duressAlerts` `{alertId, subjectKey, at, clears}` and `duress`, and the record `owesAlerts: true` until

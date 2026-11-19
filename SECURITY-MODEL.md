@@ -646,9 +646,11 @@ the key set URL or refreshes the copy.
 
 - Authorizing the member behind `clearDuress` and `resetPin`: the engine takes the member id as
   given, so only the host's staff tools, after their own sign-in, may call them.
-- Repeating a `clearDuress` that raced an alert's delivery: the counters store has no
-  compare-and-set, so a clearing that lands while an earlier entry's alert is delivered may be
-  undone, leaving the subject flagged (fail closed) until the business clears it again (tested).
+- Repeating a `clearDuress` only when a flag write's take-back fails: the counters store has no
+  compare-and-set, so a flag written for an earlier entry (its own write, or its alert's) reads the
+  count of clearings again afterwards and takes itself back over a clearing that landed meanwhile
+  (tested); if that removal fails, the subject stays flagged (fail closed) until the business
+  clears it again.
 - Accepting that the hidden counter shows in the hard lock: because a duress entry never clears
   earlier wrong guesses, a caller who counts guesses can see the hard lock come sooner after a
   duress entry than after a real pass; waits and answers are unchanged (a kept trade-off).

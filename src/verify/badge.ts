@@ -40,7 +40,7 @@ import {
   type PinSettings,
 } from "./factors.ts";
 import { counterKeys, currentLock, isCallingNumber, lockoutOf, lockoutSettingsErrors, forgetPass, recordFailures, removeOwnOnNumbers, type Lock } from "./counters.ts";
-import { clearsSoFar, duressClearedData, duressFlagKey, flagDuress, forgetHidden, hiddenCounterKey, hiddenHardLock, hiddenWindowStart, isUnderDuress, recordClear } from "./duress-flag.ts";
+import { clearsSoFar, duressClearedData, duressFlagKey, flagDuressUnlessCleared, forgetHidden, hiddenCounterKey, hiddenHardLock, hiddenWindowStart, isUnderDuress, recordClear } from "./duress-flag.ts";
 import { isKeypadEntry } from "./knowledge.ts";
 import type { TextCodeState } from "./text-code.ts";
 
@@ -747,7 +747,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     failed = { error };
   }
   // A duress PIN entry flags its subject, even a stale one: durable and hidden, before the visible reset.
-  if (pinDuress) await flagDuress(counters, flag!, at);
+  if (pinDuress) await flagDuressUnlessCleared(counters, rt.workspaceId, current.subjectKey!, at, clears);
   // A stale entry's failure stays counted across calls, as for any entry that was not accepted.
   if (stale !== null) throw stale;
   // Only once the result is saved: a write that failed after saving it (the ledger) still owes the
