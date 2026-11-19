@@ -69,6 +69,8 @@ export interface BadgeSlice {
   finished: number;
   lastLevel: AssuranceLevel;
   lastMethods: FactorKind[];
+  /** Untrusted content seen on this call so far (onUntrusted counts it), so an entry judged across one is known. Absent on calls saved before. */
+  taints?: number;
 }
 
 export interface KeypadResult {
@@ -214,6 +216,7 @@ export class BadgeModule implements AssuranceModule {
       finished: 0,
       lastLevel: 0,
       lastMethods: [],
+      taints: 0,
     };
     return initial as unknown as JsonValue;
   }
@@ -233,7 +236,7 @@ export class BadgeModule implements AssuranceModule {
     // keypad or PIN match before the taint no longer unlocks anything sent out (a text, a carrier
     // check, a payment link) until a fresh verification matches again.
     const badge = s as unknown as BadgeSlice;
-    return { ...badge, knowledgeMatched: false, identitySessions: [], identityLink: voided(badge.identityLink) } as unknown as JsonValue;
+    return { ...badge, knowledgeMatched: false, identitySessions: [], identityLink: voided(badge.identityLink), taints: (badge.taints ?? 0) + 1 } as unknown as JsonValue;
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
@@ -329,7 +332,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     const used = s.attempts[kind] ?? 0;
     if (used >= max) return null;
     s.attempts[kind] = used + 1;
-    return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch, tainted: draft.record.state.tainted };
+    return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch, taints: s.taints };
   });
   if (reserved === null) return { matched: false, locked: true };
   const input = { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey, subject: reserved.subject, entry, hmac: (d: string) => rt.hmac(d) };
@@ -339,16 +342,20 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
       : kind === "pin"
         ? await judgePin(rt, rt.settings<BadgeSettings>(BADGE).pin as PinSettings, input)
         : (await plugin!.judge(input)) === true;
-  await rt.update(callId, (draft) => {
-    assertSameVerification(draft.slice<BadgeSlice>(BADGE), reserved.epoch);
+  const counted = await rt.update(callId, (draft) => {
+    const s = draft.slice<BadgeSlice>(BADGE);
+    assertSameVerification(s, reserved.epoch);
+    // Untrusted content that entered the call while this entry was judged (any taint, the first or
+    // a later one): a pass from before it neither counts toward a grant nor restores the match. The
+    // attempt stays used, so this is no free guess; a failure is recorded as any failure is.
+    if (passed && s.taints !== reserved.taints) return false;
     const factor = { kind, passed, at: rt.now() };
     draft.apply({ type: "factor_recorded", factor });
-    // An entry made before a taint that landed while it was judged is a match from before the taint:
-    // it never unlocks anything sent out (onUntrusted cleared the match, and this must not restore it).
-    const taintedSince = draft.record.state.tainted && !reserved.tainted;
-    if (passed && KNOWLEDGE_FACTORS.includes(kind) && !taintedSince) draft.slice<BadgeSlice>(BADGE).knowledgeMatched = true;
+    if (passed && KNOWLEDGE_FACTORS.includes(kind)) s.knowledgeMatched = true;
     draft.emit("verification.factor", "code", { kind, passed });
+    return true;
   });
+  if (!counted) throw new EngineError("precondition_failed", "untrusted content entered the call while this entry was judged, so it does not count; verify again");
   return { matched: passed, locked: !passed && reserved.last };
 }
 

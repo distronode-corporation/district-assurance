@@ -62,4 +62,57 @@ describe("hostile #86: a taint and the match", () => {
     await t.engine.submitPin(callId, "0000");
     assert.deepEqual(await t.engine.submitPin(callId, PIN), { matched: false, locked: true }, "the taint gives no new guesses");
   });
+
+  it("a second taint while a PIN is judged on an already tainted call: the pass neither counts nor restores the match", async () => {
+    const held = heldVerifier(PIN);
+    const t = setup({
+      adapters: { pinVerifier: held.verifier },
+      config: testConfig((c) => {
+        (c.modules.badge!.settings as { pin: { mode: string } }).pin.mode = "verifier";
+      }),
+    });
+    t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+    const { callId } = await t.engine.startCall();
+    await t.engine.markUntrusted(callId, "crm_note");
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    const judged = t.engine.submitPin(callId, PIN);
+    await held.started;
+    await t.engine.markUntrusted(callId, "transcript");
+    held.release();
+    await assert.rejects(judged, rejects("precondition_failed", /untrusted content entered the call while this entry was judged/));
+    await assert.rejects(t.engine.checkCarrier(callId), rejects("precondition_failed"), "no carrier check on the stale match");
+    assert.equal((await t.engine.state(callId)).factors.length, 0, "the pass is not recorded");
+  });
+
+  it("a pass judged across a taint never counts toward a grant issued after it", async () => {
+    const held = heldVerifier(PIN);
+    const t = setup({
+      adapters: { pinVerifier: held.verifier },
+      config: testConfig((c) => {
+        (c.modules.badge!.settings as { pin: { mode: string } }).pin.mode = "verifier";
+      }),
+    });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    const judged = t.engine.submitPin(callId, PIN);
+    await held.started;
+    await t.engine.markUntrusted(callId, "crm_note");
+    held.release();
+    await assert.rejects(judged, rejects("precondition_failed"));
+    assert.equal((await t.engine.finishVerification(callId)).level, 0, "no factor from before the taint counts");
+  });
+
+  it("counts the taints of a call saved before taints were counted", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    const stored = (await t.sessions.get("ws_test", callId))!;
+    const record = structuredClone(stored.record) as { modules: { badge: { taints?: number } } };
+    delete record.modules.badge.taints;
+    assert.equal((await t.sessions.compareAndSet("ws_test", callId, stored.version, record as never)).ok, true);
+    await t.engine.markUntrusted(callId, "crm_note");
+    const after = (await t.sessions.get("ws_test", callId))!.record as { modules: { badge: { taints?: number } } };
+    assert.equal(after.modules.badge.taints, 1);
+    assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: true, locked: false }, "an entry after the taint counts");
+  });
 });

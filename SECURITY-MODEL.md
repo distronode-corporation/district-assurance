@@ -123,7 +123,9 @@ A webhook reply, a CRM note or a document says "ignore the rules". **Controls:**
 taints the session, drops the grant and sets the level to 0; the next verification starts from no
 factors, a photo ID link sent before the taint no longer counts, and the keypad or PIN match made
 before the taint no longer unlocks a text, a carrier check or a payment link until a fresh
-verification matches (tested). Fetched text never chooses a tool, a recipient or an amount:
+verification matches (tested). An entry judged while any taint lands (the first or a later one,
+counted per call) is not recorded as a pass, never restores the match and never counts toward a
+grant; its attempt stays used, so it is no free guess (tested). Fetched text never chooses a tool, a recipient or an amount:
 amounts come from the host's code with an `amountSource`, and destinations come from the subject
 record.
 
