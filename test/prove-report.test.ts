@@ -65,6 +65,7 @@ function emptyReport(patch: Partial<MonthlyReport> = {}): MonthlyReport {
     lockouts: 0,
     access: { issued: 0, refused: 0, revoked: 0 },
     unattributed: 0,
+    malformed: { count: 0, firstSeq: null },
     ...patch,
   };
 }
@@ -213,23 +214,37 @@ describe("monthly report", () => {
     assert.equal(report.verifications.failedFactors, 0);
   });
 
-  it("refuses a bad workspace, month, time zone or entry time", async () => {
+  it("refuses a bad workspace, month or time zone", async () => {
     const ledger = new MemoryAuditLedger();
     const input = { ledger, workspaceId: "ws_test", month: "2026-01" };
     await assert.rejects(monthlyReport({ ...input, workspaceId: "" }), rejects("invalid_input", /workspaceId/));
     await assert.rejects(monthlyReport({ ...input, workspaceId: 7 as unknown as string }), rejects("invalid_input", /workspaceId/));
     for (const month of ["2026-1", "2026-13", "2026-00", "202601", "2026-01-01"]) await assert.rejects(monthlyReport({ ...input, month }), rejects("invalid_input", /YYYY-MM/), month);
     await assert.rejects(monthlyReport({ ...input, timeZone: "Mars/Olympus" }), rejects("invalid_input", /time zone/));
-    await ledger.append(entry(undefined, "call.started", "yesterday"));
-    await assert.rejects(monthlyReport(input), rejects("invalid_input", /valid time/));
   });
 
-  it("refuses an entry time that Date.parse would roll into another date, or not in UTC", async () => {
-    for (const at of ["2026-02-30T12:00:00.000Z", "2026-01-31T24:00:00.000Z", "2026-01-15T00:00:00.000+05:00", "2026-01-15", "2026-13-01T00:00:00.000Z"]) {
-      const ledger = new MemoryAuditLedger();
-      await ledger.append(entry(undefined, "call.started", at));
-      await assert.rejects(monthlyReport({ ledger, workspaceId: "ws_test", month: "2026-01" }), rejects("invalid_input", /valid time/), at);
+  it("counts an entry whose time does not read as malformed, for no workspace, and every report still builds", async () => {
+    const bad = ["yesterday", "2026-02-30T12:00:00.000Z", "2026-01-31T24:00:00.000Z", "2026-01-15T00:00:00.000+05:00", "2026-01-15", "2026-13-01T00:00:00.000Z"];
+    const shared = new MemoryAuditLedger();
+    const good = "2026-01-10T12:00:00.000Z";
+    await shared.append(entry(JSON.stringify(["ws_test", "c1", 1, 0]), "call.started", good));
+    // Another workspace's entries, and one with no workspace, all with times that do not read.
+    for (const [i, at] of bad.entries()) {
+      await shared.append(entry(i % 2 === 0 ? JSON.stringify(["ws_other", "c9", 1, i]) : undefined, "call.started", at));
     }
+    await shared.append(entry(JSON.stringify(["ws_test", "c1", 1, 1]), "call.started", "not a time"));
+    await shared.append(entry(JSON.stringify(["ws_other", "c8", 1, 0]), "call.started", good));
+    for (const [workspaceId, started] of [["ws_test", 1], ["ws_other", 1]] as const) {
+      const report = await monthlyReport({ ledger: shared, workspaceId, month: "2026-01" });
+      assert.equal(report.calls.started, started, workspaceId);
+      assert.equal(report.unattributed, 0, "a malformed entry is never unattributed either");
+      assert.deepEqual(report.malformed, { count: bad.length + 1, firstSeq: 2 }, "counted for no workspace, first seq only");
+      const csv = reportCsv(report);
+      assert.match(csv, /\r\nmalformed\.count,7\r\nmalformed\.first_seq,2\r\n/);
+      assert.equal(csv.includes("yesterday") || csv.includes("c9"), false, "no content of a malformed entry");
+    }
+    const clean = await monthlyReport({ ledger: new MemoryAuditLedger(), workspaceId: "ws_test", month: "2026-01" });
+    assert.match(reportCsv(clean), /\r\nmalformed\.first_seq,\r\n/);
     const ledger = new MemoryAuditLedger();
     await ledger.append(entry(undefined, "call.started", "2026-01-31T23:59:59Z"));
     assert.equal((await monthlyReport({ ledger, workspaceId: "ws_test", month: "2026-01" })).unattributed, 1);

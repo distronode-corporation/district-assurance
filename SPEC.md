@@ -340,8 +340,12 @@ Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording 
 workspace's calendar month. `month` is `YYYY-MM` read in `timeZone` (an IANA name, `UTC` by
 default); an entry belongs to the month its `at` falls in, in that zone. An entry belongs to the
 workspace named first in its `eventId` tuple; an entry with no `eventId`, or one that does not
-name a workspace, is counted only in `unattributed` (for its month), never anywhere else. A bad
-`workspaceId`, `month`, `timeZone` or entry time is refused with `invalid_input`.
+name a workspace, is counted only in `unattributed` (for its month), never anywhere else. An entry
+whose `at` is not a UTC time as the engine writes it (`toISOString`), or names a date that does
+not exist, has no month: it is counted in `malformed.count` (across the whole ledger, whatever
+workspace it names) with the first one's `seq` in `malformed.firstSeq` (null when none), never
+anywhere else and never for a workspace, so one bad entry in a shared ledger never stops any
+workspace's report. A bad `workspaceId`, `month` or `timeZone` is refused with `invalid_input`.
 
 | Field | From |
 |---|---|

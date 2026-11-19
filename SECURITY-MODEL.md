@@ -141,7 +141,8 @@ with a line naming the document type, so a signed report never verifies as a rec
 never as a report, and a JSON report never as a CSV one (tested). A report carries counts and
 totals only, and counts an entry for a workspace only when its `eventId` names that workspace;
 an entry without one is reported as unattributed, so one business never sees another's calls
-(tested).
+(tested). An entry whose time does not read is counted as malformed, by its `seq` only, for no
+workspace: one tenant's bad entry never stops another tenant's report (tested).
 
 ### Breach of stored data
 

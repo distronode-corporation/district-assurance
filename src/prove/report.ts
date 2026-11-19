@@ -52,6 +52,12 @@ export interface MonthlyReport {
   access: { issued: number; refused: number; revoked: number };
   /** Entries in the month with no workspace in their `eventId`: reported here, never counted above. */
   unattributed: number;
+  /**
+   * Entries anywhere in the ledger whose time does not read (any workspace's, or none): their month
+   * is unknown, so they are counted here, never above and never for a workspace. Only the first
+   * one's `seq` is given, never its content, so one bad entry never stops any workspace's report.
+   */
+  malformed: { count: number; firstSeq: number | null };
 }
 
 const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -69,7 +75,7 @@ export function entryWorkspace(entry: Pick<AuditEntry, "eventId">): string | nul
   }
 }
 
-function monthReader(timeZone: string): (at: string) => string {
+function monthReader(timeZone: string): (at: string) => string | null {
   let format: Intl.DateTimeFormat;
   try {
     format = new Intl.DateTimeFormat("en-US", { timeZone, calendar: "gregory", numberingSystem: "latn", year: "numeric", month: "2-digit" });
@@ -80,7 +86,7 @@ function monthReader(timeZone: string): (at: string) => string {
     // Date.parse rolls an impossible date (Feb 30, hour 24) into the next one, so the UTC date of
     // the parsed instant must be the date written.
     const ms = typeof at === "string" && LEDGER_TIME.test(at) ? Date.parse(at) : Number.NaN;
-    if (Number.isNaN(ms) || new Date(ms).toISOString().slice(0, 10) !== at.slice(0, 10)) throw new EngineError("invalid_input", "a ledger entry has no valid time");
+    if (Number.isNaN(ms) || new Date(ms).toISOString().slice(0, 10) !== at.slice(0, 10)) return null;
     const parts = format.formatToParts(ms);
     const part = (type: "year" | "month"): string => parts.find((p) => p.type === type)!.value;
     return `${part("year").padStart(4, "0")}-${part("month")}`;
@@ -129,6 +135,7 @@ export async function monthlyReport(input: { ledger: AuditLedger; workspaceId: s
     lockouts: 0,
     access: { issued: 0, refused: 0, revoked: 0 },
     unattributed: 0,
+    malformed: { count: 0, firstSeq: null },
   };
   // Payment ids are unique per call, so links are keyed by call and payment.
   // Consent counters live in a map until the end, so a purpose such as `constructor` or
@@ -137,8 +144,15 @@ export async function monthlyReport(input: { ledger: AuditLedger; workspaceId: s
   const links = new Map<string, { amountMinor: number; currency: string }>();
   const linkKey = (entry: AuditEntry): string => JSON.stringify([entry.callId, entry.detail.paymentId]);
   for (const entry of entries) {
+    const month = monthOf(entry.at);
+    if (month === null) {
+      // A ledger can hold several workspaces: one entry another wrote badly must not stop this report.
+      report.malformed.count++;
+      report.malformed.firstSeq ??= entry.seq;
+      continue;
+    }
     const workspace = entryWorkspace(entry);
-    const inMonth = monthOf(entry.at) === input.month;
+    const inMonth = month === input.month;
     if (workspace === null) {
       if (inMonth) report.unattributed++;
       continue;
@@ -238,6 +252,8 @@ export function reportRows(report: MonthlyReport): Array<[string, string | numbe
     ["access.refused", report.access.refused],
     ["access.revoked", report.access.revoked],
     ["unattributed", report.unattributed],
+    ["malformed.count", report.malformed.count],
+    ["malformed.first_seq", report.malformed.firstSeq ?? ""],
   );
   return rows;
 }
