@@ -30,6 +30,8 @@ export const MIN_STEP_UP_SECONDS = 120;
 export const MAX_STEP_UP_SECONDS = 300;
 export const DEFAULT_STEP_UP_SECONDS = 120;
 export const DEFAULT_TOKENS_PER_CALL = 3;
+/** The largest token an exchange reads. An issued token is well under 1 KiB; anything bigger is refused unparsed. */
+export const MAX_STEP_UP_TOKEN_BYTES = 4096;
 export const MAX_TOKENS_PER_CALL = 5;
 
 const SITE_ID = /^[a-z][a-z0-9-]{0,63}$/;
@@ -460,7 +462,8 @@ function find(draft: CallDraft, tokenId: string): StepUpRecord {
 
 /** The claims a compact token carries, read without trusting them: only to find its call and its id. */
 function readClaims(token: unknown): Pick<StepUpClaims, "sid" | "jti" | "nonce"> | null {
-  if (typeof token !== "string") return null;
+  // The size first, so an oversized token costs no split, decode or parse.
+  if (typeof token !== "string" || token.length > MAX_STEP_UP_TOKEN_BYTES || Buffer.byteLength(token) > MAX_STEP_UP_TOKEN_BYTES) return null;
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   let claims: unknown;

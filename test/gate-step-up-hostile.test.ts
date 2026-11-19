@@ -7,6 +7,7 @@ import type { ReceiptSigner } from "../src/core/adapters.ts";
 import type { FlowConfig } from "../src/core/config.ts";
 import { hmacSha256Hex } from "../src/core/hash.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
+import { MAX_STEP_UP_TOKEN_BYTES } from "../src/gate/step-up.ts";
 import { TEST_KNOWLEDGE_KEY, generateTestSigner, testSubject } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, setup, testConfig } from "./helpers.ts";
 
@@ -149,5 +150,32 @@ describe("hostile #101: issue", () => {
     const { token } = await t.engine.issueStepUpToken(callId, { nonce: NONCE });
     assert.deepEqual(await t.engine.exchangeStepUpToken(token, { ...portal, nonce: "000000" }), { ok: false, reason: "mismatch" });
     assert.equal((await t.engine.exchangeStepUpToken(token, portal)).ok, false);
+  });
+});
+
+describe("hostile #101: token size", () => {
+  it("refuses a token over 4 KiB as malformed, without parsing it or reading any call", async () => {
+    const t = world();
+    const callId = await verified(t);
+    const { token } = await t.engine.issueStepUpToken(callId, { nonce: NONCE });
+    assert.ok(Buffer.byteLength(token) < 1024, "an issued token is well under the cap");
+    const claims = Buffer.from(JSON.stringify({ sid: callId, jti: "stu_1", nonce: NONCE, pad: "x".repeat(MAX_STEP_UP_TOKEN_BYTES) })).toString("base64url");
+    const parse = JSON.parse;
+    let parses = 0;
+    let reads = 0;
+    const get = t.sessions.get.bind(t.sessions);
+    t.sessions.get = async (w, c) => (reads++, get(w, c));
+    JSON.parse = ((text: string, reviver?: never) => (parses++, parse(text, reviver))) as typeof JSON.parse;
+    try {
+      for (const big of [`e30.${claims}.c2ln`, "\u00e9".repeat(MAX_STEP_UP_TOKEN_BYTES / 2 + 1)]) {
+        assert.deepEqual(await t.engine.exchangeStepUpToken(big, portal), { ok: false, reason: "malformed" });
+      }
+    } finally {
+      JSON.parse = parse;
+    }
+    assert.deepEqual([parses, reads], [0, 0], "no parse, no read");
+    const exact = "a".repeat(MAX_STEP_UP_TOKEN_BYTES);
+    assert.deepEqual(await t.engine.exchangeStepUpToken(exact, portal), { ok: false, reason: "malformed" }, "at the cap it is read, and is not a token");
+    assert.equal((await t.engine.exchangeStepUpToken(token, portal)).ok, true);
   });
 });

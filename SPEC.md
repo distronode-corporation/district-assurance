@@ -700,7 +700,9 @@ exchanging a token, once, on any process of the workspace, in one engine write (
 after the call ended). It returns `{ok: true, claims}` or `{ok: false, reason}` and never throws
 for a bad token; a write that fails is thrown as it is.
 
-- `malformed`: not three base64url parts with `sid`, `jti` and `nonce` claims.
+- `malformed`: longer than 4,096 bytes (`MAX_STEP_UP_TOKEN_BYTES`, refused before it is split or
+  parsed; an issued token is well under 1 KiB), or not three base64url parts with `sid`, `jti` and
+  `nonce` claims.
 - `unknown`: not a token waiting on that call: no such call in this workspace, no token of that
   id still `issued` (never issued, already exchanged or refused), or not the exact bytes the call
   issued (its digest). Nothing is
