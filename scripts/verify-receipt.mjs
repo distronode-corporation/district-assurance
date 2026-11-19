@@ -57,7 +57,7 @@ function check(receipt, keys, retired = { at: null }) {
   if (receipt.alg !== "ES256") return "an algorithm other than ES256";
   if (typeof receipt.kid !== "string" || typeof receipt.signature !== "string") return "not a receipt";
   const jwk = keys.find((k) => k !== null && typeof k === "object" && k.kid === receipt.kid);
-  if (jwk === undefined) return `no key with kid ${JSON.stringify(receipt.kid)} in the key set`;
+  if (jwk === undefined) return `no key with kid ${shown(receipt.kid)} in the key set`;
   if (jwk.kty !== "EC" || jwk.crv !== "P-256" || jwk.d !== undefined) return "the key is not a public P-256 key";
   if (jwk.retiredAt !== undefined) {
     if (!isUtcTime(jwk.retiredAt)) return "the key's retiredAt is not an ISO 8601 UTC time";
@@ -83,6 +83,15 @@ function check(receipt, keys, retired = { at: null }) {
   }
   const signature = Buffer.from(receipt.signature, "base64url");
   return verify("sha256", payload, { key, dsaEncoding: "ieee-p1363" }, signature) ? null : "the signature does not match the body";
+}
+
+/**
+ * A value from the receipt as the terminal may show it: JSON, with the bidi and other invisible
+ * format characters JSON leaves as they are written as escapes too, so no text can reorder or hide
+ * the verdict it is printed in.
+ */
+function shown(value) {
+  return JSON.stringify(value).replace(/[\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
 function parse(text, what) {

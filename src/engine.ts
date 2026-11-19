@@ -215,7 +215,7 @@ export class Engine {
   /** Untrusted text (a business webhook reply, a document) entered the conversation. */
   async markUntrusted(callId: string, source: string): Promise<void> {
     // The taint always lands: a label that is not Unicode text is repaired, never a reason to refuse.
-    source = String(source).toWellFormed();
+    source = untrustedLabel(source);
     await this.#update(callId, (draft) => {
       draft.apply({ type: "untrusted_content", source });
       for (const module of this.registry.list()) {
@@ -653,4 +653,13 @@ export class Engine {
 
 export function createEngine(options: EngineOptions): Engine {
   return new Engine(options);
+}
+
+/** markUntrusted's label as Unicode text; a value that will not turn into a string is labelled "unlabelled". */
+function untrustedLabel(source: unknown): string {
+  try {
+    return String(source).toWellFormed();
+  } catch {
+    return "unlabelled";
+  }
 }

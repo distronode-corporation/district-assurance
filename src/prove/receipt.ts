@@ -74,11 +74,22 @@ export type ReceiptCheck = { valid: true; retiredAt: string | null } | { valid: 
  * receipt under a retired key whose `retiredAt` is not an ISO 8601 UTC time.
  */
 export function checkReceipt(receipt: SignedReceipt, keys: ReadonlyArray<JsonWebKey & { kid?: string; retiredAt?: unknown }>): ReceiptCheck {
+  // Bad input of any shape (a null receipt or body, a key set that is not a list, a getter that
+  // throws) is an invalid receipt, never an exception.
+  try {
+    return checkOnce(receipt, keys);
+  } catch {
+    return { valid: false };
+  }
+}
+
+function checkOnce(receipt: SignedReceipt, keys: ReadonlyArray<JsonWebKey & { kid?: string; retiredAt?: unknown }>): ReceiptCheck {
   // Read once: the body whose issue time is checked against the key's retirement is the body whose
   // signature is verified, and the key's retirement is read once too.
   const { alg, kid, body, signature: sig } = receipt;
   if (alg !== "ES256") return { valid: false };
-  const jwk = keys.find((k) => k.kid === kid);
+  // An entry that is not an object is skipped, as the stand-alone verifier skips it.
+  const jwk = keys.find((k: unknown) => typeof k === "object" && k !== null && (k as { kid?: unknown }).kid === kid);
   if (jwk === undefined) return { valid: false };
   const retired: unknown = jwk.retiredAt;
   let retiredAt: string | null = null;
