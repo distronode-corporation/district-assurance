@@ -252,6 +252,8 @@ const STEP_ACTIONS: Readonly<Record<string, (run: Run, step: FlowStep) => Promis
 export interface Simulation {
   lines: string[];
   status: string;
+  /** 0 when every step ran; 3 when the run stopped at a step the simulator has no caller for. */
+  exitCode: 0 | 3;
 }
 
 /**
@@ -277,10 +279,17 @@ export async function simulate(t: TestEngine, lines: string[], config: FlowConfi
   const run: Run = { t, config, script, callId, pin, line };
   let position = (await t.engine.flowPosition(callId))!;
   // Each turn either moves the flow on or ends it, so the flow's length bounds the turns.
+  let exitCode: 0 | 3 = 0;
   for (let turn = 0; turn < steps.length && position.status === "running"; turn++) {
     const step = position.step!;
     const { type, ...fields } = step;
     line(`step ${position.index + 1}/${steps.length}: ${type} ${canonicalJson(fields)}`);
+    // A step type another module adds has no scripted caller here: the run stops, it never guesses.
+    if (!Object.hasOwn(STEP_ACTIONS, type)) {
+      line(terminalSafe(`step ${type} is not simulated`));
+      exitCode = 3;
+      break;
+    }
     await STEP_ACTIONS[type]!(run, step);
     position = (await t.engine.flowPosition(callId))!;
   }
@@ -295,7 +304,7 @@ export async function simulate(t: TestEngine, lines: string[], config: FlowConfi
     line(`receipt: signature valid against the engine's key set: ${verifyReceipt(receipt, t.engine.receiptKeys())}`);
     lines.push(...JSON.stringify(receipt, null, 2).split("\n"));
   }
-  return { lines, status: position.status };
+  return { lines, status: position.status, exitCode };
 }
 
 /** A fresh engine on the fakes, which prints every event to `lines` as it is appended to the ledger. */
@@ -335,7 +344,10 @@ export function terminalSafe(line: string): string {
   return safe;
 }
 
-/** The command line. Exit codes: 0 the flow ran (whatever its outcome), 1 a refused config, flow or script, 2 bad usage. */
+/**
+ * The command line. Exit codes: 0 the flow ran (whatever its outcome), 1 a refused config, flow or
+ * script, 2 bad usage, 3 the run stopped at a step the simulator has no caller for.
+ */
 export async function main(args: readonly string[], given: Output): Promise<number> {
   // Every line leaves through here, escaped.
   const output: Output = { out: (line) => given.out(terminalSafe(line)), err: (line) => given.err(terminalSafe(line)) };
@@ -376,9 +388,9 @@ export async function main(args: readonly string[], given: Output): Promise<numb
   if (!Object.hasOwn(checked.config.flows, values.flow)) {
     return refuse([`flows: no flow named ${values.flow}; the config's flows are ${JSON.stringify(Object.keys(checked.config.flows))}`]);
   }
-  await simulate(t, lines, checked.config, values.flow, values.script, script);
+  const { exitCode } = await simulate(t, lines, checked.config, values.flow, values.script, script);
   for (const text of lines) output.out(text);
-  return 0;
+  return exitCode;
 }
 
 /**

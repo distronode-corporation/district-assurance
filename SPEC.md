@@ -413,7 +413,8 @@ is `src/cli/simulate.ts`.
   or when `validateConfig` finds a problem; an outside module listed with `enabled: false` is left
   out. A flow the config does not have, or a script that is neither built in nor a valid file, is
   refused the same way. Bad arguments print the usage and exit 2. A flow that ran exits 0, whether
-  it completed or failed.
+  it completed or failed. A step the simulator has no scripted caller for (a type another module
+  adds) prints `step <type> is not simulated`, ends the call there and exits 3.
 - The caller is made up: one subject on file with a 555 number, an answer for every keypad field
   and a PIN of `minDigits` digits. It acts on whatever step the flow is on: at `badge.verify` it
   keys the account number, then each factor the step lists (keypad answers, the PIN, the carrier

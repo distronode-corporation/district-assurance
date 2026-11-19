@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { main, terminalSafe } from "../src/cli/simulate.ts";
+import { BUILT_IN_SCRIPTS, main, simulate, simulationEngine, terminalSafe } from "../src/cli/simulate.ts";
+import type { AssuranceModule } from "../src/core/module.ts";
 import type { FlowConfig } from "../src/core/config.ts";
 import { testConfig } from "./helpers.ts";
 
@@ -106,5 +107,31 @@ describe("hostile #113: the simulator's terminal output", () => {
     for (const n of unsafe) assert.equal(terminalSafe(`a${String.fromCharCode(n)}b`), `a\\u${n.toString(16).padStart(4, "0")}b`, n.toString(16));
     const kept = "Réparation 2 500,00 $ \u{1F527} \u00a0 \u2028 ~";
     assert.equal(terminalSafe(kept), kept);
+  });
+});
+
+describe("hostile #113: a step the simulator has no caller for", () => {
+  it("M7: stops the run, says the step is not simulated, escaped, and exits non-zero", async () => {
+    const waiting: AssuranceModule = {
+      manifest: { name: "fake", version: "1.0.0", summary: "A step that waits.", provides: { factors: [], steps: ["fake.wait"], outcomes: [] }, scopes: { grants: [], needs: {}, classes: {} }, adapters: [] },
+      validateSettings: () => [],
+      requiredAdapters: () => [],
+      validateStep: () => [],
+      initCall: () => ({}),
+      enterStep: () => 0,
+      stepStatus: () => "pending",
+    };
+    const lines: string[] = [];
+    const t = simulationEngine(lines);
+    t.engine.use(waiting);
+    const config = testConfig((c) => {
+      c.modules.fake = {};
+      c.flows = { odd: { steps: [{ type: "fake.wait", note: `x${ESC}[2J` }] } };
+    });
+    const result = await simulate(t, lines, config, "odd", "pass", BUILT_IN_SCRIPTS.pass!);
+    assert.equal(result.exitCode, 3);
+    assert.ok(lines.includes("step fake.wait is not simulated"), lines.join("\n"));
+    assert.equal(lines.some((l) => l.startsWith("  caller:")), false, "no caller acts on it");
+    assert.deepEqual(lines.filter(RAW), [], "every line is escaped");
   });
 });
