@@ -138,6 +138,9 @@ function checkOnce(receipt: SignedReceipt, keys: ReadonlyArray<JsonWebKey & { ki
   // signature is verified, and the key's retirement is read once too.
   const { alg, kid, body, signature: sig } = receipt;
   if (alg !== "ES256") return { valid: false };
+  // Buffer.from also reads an array of the signature's bytes as that signature: only the base64url
+  // string is the receipt format, as the stand-alone verifier holds.
+  if (typeof sig !== "string") return { valid: false };
   // An entry that is not an object is skipped, as the stand-alone verifier skips it.
   const jwk = keys.find((k: unknown) => typeof k === "object" && k !== null && (k as { kid?: unknown }).kid === kid);
   if (jwk === undefined) return { valid: false };
@@ -272,10 +275,13 @@ export function receiptKeyRing(options: ReceiptKeyRingOptions): ReceiptKeyRing {
   };
 }
 
-/** The keys to publish for a signer: a key ring's whole set, or a single signer's one key. Empty without a signer. */
+/**
+ * The keys to publish for a signer: a key ring's whole set, or a single signer's one key, named by
+ * its `keyId` (the `kid` its receipts carry) and refused as a key ring refuses it. Empty without a signer.
+ */
 export function receiptKeySet(signer: ReceiptSigner | undefined): JsonWebKey[] {
   if (signer === undefined) return [];
-  return typeof (signer as Partial<ReceiptKeyRing>).keySet === "function" ? (signer as ReceiptKeyRing).keySet() : [signer.publicJwk()];
+  return typeof (signer as Partial<ReceiptKeyRing>).keySet === "function" ? (signer as ReceiptKeyRing).keySet() : [publishedKey(signer.publicJwk(), signer.keyId)];
 }
 
 function publishedKey(jwk: JsonWebKey, kid: string): JsonWebKey {
