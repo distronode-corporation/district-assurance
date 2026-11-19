@@ -199,6 +199,23 @@ describe("acceptUpload", () => {
     assert.equal((await w.upload(token, JPEG)).ok, true, "exactly the cap is accepted");
   });
 
+  it("refuses a body over the package limit before copying it, and bytes or a type of the wrong kind", async () => {
+    const w = world();
+    const { token } = await w.link();
+    const huge = new Uint8Array(UPLOAD_MAX_BYTES_LIMIT + 1);
+    huge.set(JPEG);
+    const copy = () => {
+      throw new Error("copied");
+    };
+    Object.defineProperty(huge, Symbol.iterator, { value: copy });
+    Object.defineProperty(huge, "slice", { value: copy });
+    assert.deepEqual(await w.upload(token, huge), { ok: false, reason: "too_large" });
+    await assert.rejects(w.upload(token, [0xff, 0xd8, 0xff] as unknown as Uint8Array), rejects("invalid_input"));
+    await assert.rejects(acceptUpload({ token, contentType: undefined as unknown as string, bytes: JPEG }, w.context), rejects("invalid_input"));
+    assert.equal(w.documents.links()[0]!.usedAt, null, "none of these spends the link");
+    assert.equal((await w.upload(token, JPEG)).ok, true);
+  });
+
   it("checks, scans and stores a copy of the bytes, taken before the first await", async () => {
     const w = world();
     const { token } = await w.link();

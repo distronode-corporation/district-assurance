@@ -121,13 +121,20 @@ export async function openUploadLink(token: string, context: UploadContext): Pro
  * Takes one upload on a token. The declared type, the size and the leading bytes are checked
  * first, and a refusal there leaves the link usable. Then the link is claimed, which spends it,
  * and only the one claim that won goes on to the scanner and the store. The bytes are copied
- * before the first await, so a later write to the caller's array cannot change what was checked.
+ * before the first await, so a later write to the caller's array cannot change what was checked;
+ * a body over `UPLOAD_MAX_BYTES_LIMIT` is refused before it is copied, so a huge body is never held
+ * twice. Bytes that are not a `Uint8Array`, or a content type that is not a string, are a host's
+ * bug (`invalid_input`).
  */
 export async function acceptUpload(
   input: { token: string; contentType: string; bytes: Uint8Array },
   context: UploadContext & { ids: IdGenerator; scanner: DocumentScanner },
 ): Promise<UploadResult> {
-  const bytes = Uint8Array.from(input.bytes);
+  if (!(input.bytes instanceof Uint8Array) || typeof input.contentType !== "string") {
+    throw new EngineError("invalid_input", "upload: bytes must be a Uint8Array and contentType a string");
+  }
+  if (input.bytes.length > UPLOAD_MAX_BYTES_LIMIT) return { ok: false, reason: "too_large" };
+  const bytes = Uint8Array.prototype.slice.call(input.bytes);
   const link = await usableLink(input.token, context);
   if (link === null) return { ok: false, reason: "link_not_usable" };
   const contentType = input.contentType.split(";")[0]!.trim().toLowerCase();

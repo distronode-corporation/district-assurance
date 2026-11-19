@@ -77,9 +77,9 @@ Replayed webhooks, reused links, replayed tones. **Controls:** Stripe signatures
 id once; the engine applies each identity session and each payment settlement once (tested).
 Identity links are single-use by the provider. A document upload link is single use by an atomic
 claim in the `DocumentStore`: of two uploads at once, one is stored (tested); it expires after 30
-minutes and is bound to one call and one confirmed record of that call (tested). Left to the host: whether keypad tones arrive as
-out-of-band events or as in-band audio on each carrier bridge, since in-band tones can be replayed
-acoustically and can reach speech-to-text.
+minutes and is bound to one call and one confirmed record of that call (tested). Left to the
+host: whether keypad tones arrive as out-of-band events or as in-band audio on each carrier
+bridge, since in-band tones can be replayed acoustically and can reach speech-to-text.
 
 ### Skipping steps and widening grants
 

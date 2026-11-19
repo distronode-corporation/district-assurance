@@ -418,7 +418,9 @@ accept an upload.
   never stored.
 - `openUploadLink(token)` returns `{locale, allowedTypes, maxBytes, expiresAt}` for a link that
   exists in the workspace, is unused and has not expired (now before `expiresAt`), else null.
-- `acceptUpload({token, contentType, bytes})` checks, in order: the link is usable
+- `acceptUpload({token, contentType, bytes})` throws `invalid_input` when `bytes` is not a
+  `Uint8Array` or `contentType` not a string, and refuses a body over 25 MiB (`too_large`) before
+  copying it. It then checks, in order: the link is usable
   (`link_not_usable`, for an unknown, malformed, used or expired token alike); the declared type,
   without parameters and in any case, is one the link allows (`type_not_allowed`); the file is not
   empty (`empty`) and at most `maxBytes` (`too_large`); the bytes start with the type's signature
