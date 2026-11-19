@@ -34,13 +34,16 @@ All notable changes to this project are documented here. The format follows
   pairs can no longer share a key.
 - Read-backs in English and French (FIL-1): `buildReadBack` and `engine.intakeReadBack` speak each
   field by type (dates in full, yes and no, numbers) with a fixed confirm prompt and never read a
-  sensitive value; `confirmIntake` now requires the read-back's digest and refuses a draft changed since.
+  sensitive value; `confirmIntake` refuses a draft changed since the caller heard it.
 - Conditional fields and validation rules (FIL-4): `showIf` (asked, read back and filed only while
   another field holds a value), `min` and `max` for numbers and dates, and a bounded `pattern` for
   text; `validateConfig` refuses unknown field settings, `showIf` cycles, and fields that name a card or a SIN.
 
 ### Changed
 
+- `confirmIntake` requires `readBack`, the digest of the read-back the caller heard (FIL-1), and
+  the `buildReadBack` stub in `file/later.ts` is replaced by `file/readback.ts`. A host that
+  confirmed without a read-back must call `intakeReadBack` first.
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 
