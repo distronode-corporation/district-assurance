@@ -90,10 +90,13 @@ function adapterInterfaces(runtime: string): string[] {
   return [...block[1]!.matchAll(/^\s*\w+\??: (\w+);/gm)].map((m) => m[1]!);
 }
 
-const read = (path: string): string => readFileSync(new URL(path, import.meta.url), "utf8");
+/** Line endings as the reader expects them: a Windows checkout can hold a file with CRLF. */
+const lf = (text: string): string => text.replace(/\r\n/g, "\n");
+const raw = (path: string): string => readFileSync(new URL(path, import.meta.url), "utf8");
+const read = (path: string): string => lf(raw(path));
 const testSource = (file: string): string | null => {
   const url = new URL(file, import.meta.url);
-  return existsSync(url) ? readFileSync(url, "utf8") : null;
+  return existsSync(url) ? lf(readFileSync(url, "utf8")) : null;
 };
 
 describe("the STRIDE table reader", () => {
@@ -207,6 +210,11 @@ describe("the STRIDE table reader", () => {
         "Core Core 2: names no threat or no control",
       ],
     );
+  });
+
+  it("reads SECURITY-MODEL.md the same from a CRLF copy, as a Windows checkout may hold it", () => {
+    const crlf = raw("../SECURITY-MODEL.md").replace(/\r?\n/g, "\r\n");
+    assert.deepEqual(readTables(strideSection(lf(crlf))), readTables(strideSection(read("../SECURITY-MODEL.md"))));
   });
 
   it("reads the adapter interfaces of EngineAdapters", () => {

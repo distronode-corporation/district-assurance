@@ -86,7 +86,7 @@ function reporters(dir) {
 
 /** The counts node's spec reporter prints at the end ("ℹ tests 9", "ℹ pass 9" and so on). */
 function counts(specFile) {
-  const text = readFileSync(specFile, "utf8");
+  const text = readFileSync(specFile, "utf8").replace(/\r\n/g, "\n");
   const out = {};
   for (const name of ["tests", "suites", "pass", "fail", "cancelled", "skipped", "todo"]) {
     const m = new RegExp(`^\\S+ ${name} (\\d+)$`, "m").exec(text);
@@ -201,7 +201,8 @@ for (const name of DOCS) {
 // 5. INDEX.md: where to start, what was built from what, and the counts.
 const all = counts(join(OUT, "tests", "spec.txt"));
 const contractCounts = counts(join(OUT, "contracts", "spec.txt"));
-const rows = strideRows(readFileSync(join(ROOT, "SECURITY-MODEL.md"), "utf8"));
+// Line endings normalised: a Windows checkout can hold the file with CRLF.
+const rows = strideRows(readFileSync(join(ROOT, "SECURITY-MODEL.md"), "utf8").replace(/\r\n/g, "\n"));
 const open = rows.filter((r) => r.status === "open");
 const covered = rows.filter((r) => r.status === "covered");
 if (rows.length === 0 || covered.length + open.length !== rows.length) fail("a STRIDE row is neither covered nor open");
@@ -219,9 +220,9 @@ every \`src/\` file is at 100% coverage, so its reports are of a passing tree.
 ## Where to start
 
 1. \`docs/SECURITY-MODEL.md\`: the threat model. Its STRIDE tables give one table per module and
-   adapter; each row names its control and the test that proves it, or the ROADMAP.md issue that
-   will build it while it is open. \`test/security-model.test.ts\` checks that every test named
-   exists and every open issue is in ROADMAP.md.
+    adapter; each row names its control and the test that proves it, or the ROADMAP.md issue that
+    will build it while it is open. \`test/security-model.test.ts\` checks that every test named
+    exists and every open issue is in ROADMAP.md.
 2. \`docs/SPEC.md\` and \`docs/ARCHITECTURE.md\`: what the code does and how it is put together.
 3. \`docs/DECISIONS.md\`: why, with alternatives.
 4. The reports below, then the source at the commit above.
