@@ -612,12 +612,14 @@ a relay checks a redeemed grant against `engine.accessKeys()`. Its `controller` 
      `HMAC-SHA256(key, JSON.stringify(["access-code", workspaceId, audience, target, code]))`
      (`accessCodeDigest`) and `body` the grant's body, unsigned. A digest already live for that
      door draws a new code, up to 3 times, then the request is refused (`no_free_code`).
-  5. The code is texted (`purpose: "one_time_code"`, idempotency key
-     `[workspaceId, callId, grantId, "access_code"]`). `delivered`, with `confirmed: false`
-     and the message id as `providerRef`, once sent. A text that throws may still have arrived,
-     so the code is taken back (`store.take`): taken, it was never redeemed, and the grant is
-     `refused` (`text_failed`); already gone (redeemed, or expired) or a store that throws, it is
-     `unknown`.
+  5. A grant that expired while the limiter or the store answered is not texted: its entry is
+     taken back and it is `refused` (`expired`). Otherwise the code is texted (`purpose:
+     "one_time_code"`, idempotency key `[workspaceId, callId, grantId, "access_code"]`), and the
+     minutes in the text count from then. `delivered`, with `confirmed: false` and the message id
+     as `providerRef`, once sent. A text that throws may still have arrived, so the code is taken
+     back (`store.take` with its grant id, so another grant holding the same code by then is left
+     alone): taken, it was never redeemed, and the grant is `refused` (`text_failed`); already
+     gone (redeemed, or expired) or a store that throws, it is `unknown`.
   The ledger holds what Gate writes for any grant (`access.issued`, then `access.delivered`,
   `access.refused` with the reason above, or `access.unknown`), never the code. For a code,
   `delivered` means texted: the door acts later, when the code is redeemed. So unlike a relay
@@ -626,6 +628,7 @@ a relay checks a redeemed grant against `engine.accessKeys()`. Its `controller` 
   not the call's ledger, and `codes.revoke` ends it early.
 - `codes.redeem({workspaceId, audience, target, code})`: `store.get` of the code's digest, the
   body signed again by `signer`, then `store.take` of the digest, so a code is redeemed once;
+  only for the grant that was signed (an entry another grant holds under that digest by then stays);
   `{ok: true, grant}`, or `{ok: false}`, the same for a wrong, used, revoked, expired or malformed
   code (a code that is not a string of at most 32 characters is hashed as an empty one). Signing
   comes before the take, so a signer that throws leaves the code redeemable; a code taken, revoked
@@ -634,8 +637,8 @@ a relay checks a redeemed grant against `engine.accessKeys()`. Its `controller` 
   and `SeenGrants`, as for any grant.
 - `codes.revoke(workspaceId, grantId)` removes a grant's code; one already gone is success.
 - `AccessCodeStore`: `put(entry, now)` (false when the digest is live), `get(workspaceId,
-  digest)` (reads, leaving it), `take(workspaceId, digest)` (removes and returns, atomically:
-  never one entry twice), `revoke(workspaceId, grantId)`. `MemoryAccessCodeStore` is the in-memory reference, dropping expired entries on `put`.
+  digest)` (reads, leaving it), `take(workspaceId, digest, grantId?)` (removes and returns,
+  atomically: never one entry twice; with `grantId`, only that grant's entry), `revoke(workspaceId, grantId)`. `MemoryAccessCodeStore` is the in-memory reference, dropping expired entries on `put`.
 - `limits` is VER-2's `CodeStore` (`take` counts one send atomically, or refuses and counts
   nothing; `MemoryCodeStore` in `district-assurance/testing` is the reference), the same instance
   the engine's texted codes count against, so both kinds of code share one budget per subject.

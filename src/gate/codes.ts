@@ -57,8 +57,12 @@ export interface AccessCodeStore {
   put(entry: AccessCodeEntry, now: Date): Promise<boolean>;
   /** The entry with this digest, or null, leaving it in place. */
   get(workspaceId: string, digest: string): Promise<AccessCodeEntry | null>;
-  /** Removes and returns the entry with this digest, or null. Never returns one entry twice. */
-  take(workspaceId: string, digest: string): Promise<AccessCodeEntry | null>;
+  /**
+   * Removes and returns the entry with this digest, or null, atomically: never one entry twice.
+   * With `grantId`, only an entry for that grant: an entry another grant holds under the same
+   * digest (the same code, drawn again once the first was used) is left in place, and null returned.
+   */
+  take(workspaceId: string, digest: string, grantId?: string): Promise<AccessCodeEntry | null>;
   /** Removes the code for a grant. Success when it is already gone. */
   revoke(workspaceId: string, grantId: string): Promise<void>;
 }
@@ -80,9 +84,10 @@ export class MemoryAccessCodeStore implements AccessCodeStore {
     return entry === undefined ? null : structuredClone(entry);
   }
 
-  async take(workspaceId: string, digest: string): Promise<AccessCodeEntry | null> {
+  async take(workspaceId: string, digest: string, grantId?: string): Promise<AccessCodeEntry | null> {
     const key = JSON.stringify([workspaceId, digest]);
     const entry = this.#entries.get(key) ?? null;
+    if (entry !== null && grantId !== undefined && entry.grantId !== grantId) return null;
     this.#entries.delete(key);
     return entry;
   }
@@ -189,8 +194,9 @@ export class AccessCodes {
     if (!live(seen)) return { ok: false };
     const grant = await signDocument(this.#options.signer, seen.body);
     // Then taken, atomically, once: a code used or revoked meanwhile is refused and its signature dropped.
-    const taken = await store.take(input.workspaceId, digest);
-    if (!live(taken) || taken.grantId !== seen.grantId) return { ok: false };
+    // Only the entry that was signed: one another grant holds under this digest meanwhile stays.
+    const taken = await store.take(input.workspaceId, digest, seen.grantId);
+    if (!live(taken)) return { ok: false };
     return { ok: true, grant };
   }
 
@@ -218,7 +224,14 @@ export class AccessCodes {
       if (await this.#options.store.put(entry, now)) [code, digest] = [candidate, entry.digest];
     }
     if (code === null) return { outcome: "refused", reason: "no_free_code" };
-    const minutes = Math.max(1, Math.ceil((Date.parse(body.expiresAt) - now.getTime()) / 60_000));
+    // The limiter and the store can be slow: a grant that expired meanwhile is never texted, and
+    // the minutes in the text count from now.
+    const sendAt = this.#clock.now().getTime();
+    if (Date.parse(body.expiresAt) <= sendAt) {
+      await this.#options.store.take(body.workspaceId, digest, body.grantId);
+      return { outcome: "refused", reason: "expired" };
+    }
+    const minutes = Math.max(1, Math.ceil((Date.parse(body.expiresAt) - sendAt) / 60_000));
     const text =
       to.locale === "fr"
         ? `Votre code de porte, à usage unique : ${code}. Valable une fois, dans les ${minutes} min.`
@@ -235,7 +248,7 @@ export class AccessCodes {
       // The text may or may not have gone out. Taking the code back proves it was not redeemed, and
       // the door certainly will not open with it: refused. Gone already (redeemed from a text that
       // did arrive, or expired), or a store that fails: thrown, and Gate records the grant as unknown.
-      if ((await this.#options.store.take(body.workspaceId, digest)) !== null) return { outcome: "refused", reason: "text_failed" };
+      if ((await this.#options.store.take(body.workspaceId, digest, body.grantId)) !== null) return { outcome: "refused", reason: "text_failed" };
       throw new EngineError("precondition_failed", "the access code text failed and its code was already gone");
     }
   }

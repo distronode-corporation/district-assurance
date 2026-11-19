@@ -1011,17 +1011,54 @@ describe("gate: one-time access codes", () => {
     };
     assert.deepEqual(await v.codes.redeem({ ...keypadDoor, code: "55556666" }), { ok: false });
 
-    // Replaced by another grant's code under the same digest meanwhile: that grant was never signed, so refused.
+    // Another grant's entry under the same digest by the time it is taken: refused, and that entry is left in place.
+    let swap = true;
     const swapped = new (class extends MemoryAccessCodeStore {
-      override async take(workspaceId: string, digest: string): Promise<AccessCodeEntry | null> {
-        const entry = await super.take(workspaceId, digest);
-        return entry === null ? null : { ...entry, grantId: "acc_other" };
+      override async get(workspaceId: string, digest: string): Promise<AccessCodeEntry | null> {
+        const entry = await super.get(workspaceId, digest);
+        return entry === null || !swap ? entry : { ...entry, grantId: "acc_other" };
       }
     })();
     const w = codesSetup({ store: swapped, newCode: () => "77778888" });
     const fourth = await codeCall(w);
     await w.codes.issue(w.engine, fourth);
     assert.deepEqual(await w.codes.redeem({ ...keypadDoor, code: "77778888" }), { ok: false });
+    swap = false;
+    assert.ok((await w.codes.redeem({ ...keypadDoor, code: "77778888" })).ok, "the entry that was there was not taken");
+  });
+
+  it("records unknown when its code was used and drawn again for another grant before its send failed", async () => {
+    let first = true;
+    let t: CodesSetup | null = null;
+    let second: Promise<unknown> | null = null;
+    const messages: MessageSender = {
+      sendText: async (input) => {
+        if (!first) return t!.texts.sendText(input);
+        first = false;
+        // Grant A's text arrived and its code was used; grant B then drew the same code for the same door.
+        assert.ok((await t!.codes.redeem({ ...keypadDoor, code: "12345678" })).ok);
+        const other = await codeCall(t!);
+        second = t!.codes.issue(t!.engine, other);
+        assert.equal(((await second) as { status: string }).status, "delivered");
+        throw new Error("the answer was lost");
+      },
+    };
+    t = codesSetup({ messages, newCode: () => "12345678", limits: { take: async () => true } });
+    const callId = await codeCall(t);
+    assert.deepEqual(await t.codes.issue(t.engine, callId), { grantId: "acc_1", status: "unknown", confirmed: false }, "A may have opened the door");
+    assert.ok(second !== null);
+    const redeemed = await t.codes.redeem({ ...keypadDoor, code: "12345678" });
+    assert.ok(redeemed.ok, "B's code was left in place");
+    assert.equal(redeemed.grant.body.grantId, "acc_2");
+  });
+
+  it("never texts a code whose grant expired while the limiter or the store was slow", async () => {
+    const t = codesSetup({ limits: { take: async () => (t.clock.advance(600_000), true) } });
+    const callId = await codeCall(t);
+    assert.deepEqual(await t.codes.issue(t.engine, callId), { grantId: "acc_1", status: "refused", confirmed: false });
+    assert.equal(t.texts.sent.length, 0);
+    assert.equal((await codeEvents(t)).at(-1)![1].reason, "expired");
+    assert.equal((t.store as MemoryAccessCodeStore).size, 0, "its entry was taken back");
   });
 
   it("tries a new code when one is live for the same door, and frees a code once its grant expired", async () => {
