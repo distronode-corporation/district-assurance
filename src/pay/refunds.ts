@@ -10,9 +10,11 @@
 // binds its disputes.
 //
 // A refund is reserved in one write (one in flight per payment, the total never above what was
-// paid), sent to the provider with an idempotency key of its own, and committed in another. A
-// failed send leaves it reserved, and asking again resumes it with the same key, so a payment is
-// never refunded twice.
+// paid), its intent and idempotency key saved before the provider is asked, sent, and committed in
+// another write. Each refund of a payment has a sequence number (1 for its first refund, 2 for the
+// next) and its key is made of the payment and that number. A failed send leaves it reserved, and
+// asking again resumes it with the same key; a host that names the sequence number gets the saved
+// result back when its earlier answer was lost after the commit, so a payment is never refunded twice.
 import type { PaymentRefundRequest } from "../core/adapters.ts";
 import { EngineError } from "../core/errors.ts";
 import type { CallDraft, EngineRuntime } from "../core/runtime.ts";
@@ -108,6 +110,13 @@ export interface RefundInput {
   /** In minor units. Default: everything not yet refunded. */
   amountMinor?: number;
   reason: RefundReason;
+  /**
+   * Which refund of this payment this is: 1 for its first, 2 for the next. Asking again with the
+   * same number (an answer the host lost) resumes that refund with its key, or gives its saved
+   * result back, and never refunds again; a different amount is refused. The next number starts a
+   * new refund, and any other is refused. Left out: the next refund, or the one still in flight.
+   */
+  sequence?: number;
 }
 
 export interface RefundResult {
@@ -156,11 +165,12 @@ function findPayment(draft: CallDraft, paymentId: string): Payment | undefined {
 export async function refundPayment(rt: EngineRuntime, input: RefundInput): Promise<RefundResult> {
   // Read once: the amount and reason checked here are the ones refunded and recorded, so a getter
   // (or a host changing the object while the update waits) cannot swap in a negative amount.
-  const { callId, paymentId, reason, amountMinor: asked } = input;
+  const { callId, paymentId, reason, amountMinor: asked, sequence } = input;
   if (!REFUND_REASONS.includes(reason)) throw new EngineError("invalid_input", `reason must be one of ${REFUND_REASONS.join(", ")}`);
   if (asked !== undefined && (!Number.isSafeInteger(asked) || asked <= 0)) {
     throw new EngineError("invalid_input", "amountMinor must be a positive integer");
   }
+  if (sequence !== undefined && (!Number.isSafeInteger(sequence) || sequence < 1)) throw new EngineError("invalid_input", "sequence must be a positive integer");
   const payments = rt.adapter("payments");
   // Optional for the adapter (no flow step needs it): a refund without it is refused here.
   if (payments.refund === undefined) throw new EngineError("precondition_failed", "the payments adapter cannot refund");
@@ -170,15 +180,24 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
     if (payment.mode !== "platform") throw new EngineError("precondition_failed", "a connect payment is the business's: it refunds it on its own account");
     if (payment.status !== "paid") throw new EngineError("precondition_failed", "only a paid payment can be refunded");
     const refunds = (payment.refunds ??= []);
+    // A refund the host names by its number, made already: the same one, never a second. Its saved
+    // result is given back once committed (the host lost the first answer), and resumed while in flight.
+    if (sequence !== undefined && sequence <= refunds.length) {
+      const known = refunds[sequence - 1]!;
+      if (asked !== undefined && asked !== known.amountMinor) throw new EngineError("invalid_input", "that refund was made for another amount");
+      return { refund: known, payment, sequence };
+    }
+    if (sequence !== undefined && sequence !== refunds.length + 1) throw new EngineError("invalid_input", `the next refund of this payment is number ${refunds.length + 1}`);
     // A refund already sent (its answer lost) is resumed with its own key whatever happened since:
     // the provider may have made it, and only the same key learns that. The dispute guard is for
     // new refunds.
     const open = refunds.find((r) => r.status === "requested");
     if (open !== undefined) {
+      if (sequence !== undefined) throw new EngineError("precondition_failed", `refund number ${refunds.indexOf(open) + 1} of this payment is still being sent; resume it first`);
       if (asked !== undefined && asked !== open.amountMinor) {
         throw new EngineError("invalid_input", "a refund of this payment is still being sent; resume it with the same amount");
       }
-      return { refund: open, payment };
+      return { refund: open, payment, sequence: refunds.indexOf(open) + 1 };
     }
     if ((payment.disputes ?? []).some(blocksRefund)) throw new EngineError("precondition_failed", "the payment is disputed: it cannot be refunded while its dispute is open or after it was lost");
     const left = payment.amountMinor - refunded(refunds);
@@ -187,9 +206,10 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
     if (amountMinor > left) throw new EngineError("invalid_input", "the refunds would add up to more than was paid");
     const refund: RefundRecord = { refundId: rt.ids.next("ref"), amountMinor, reason, status: "requested", providerRef: null, requestedAt: rt.now(), settledAt: null };
     refunds.push(refund);
-    return { refund, payment };
+    return { refund, payment, sequence: refunds.length };
   });
   const { refund, payment } = reserved;
+  if (refund.status !== "requested") return { refundId: refund.refundId, status: refund.status, amountMinor: refund.amountMinor, refundedMinor: refunded(payment.refunds!) };
   const answer = await payments.refund({
     linkId: payment.linkId,
     ...(payment.paymentIntentId === undefined ? {} : { paymentIntentId: payment.paymentIntentId }),
@@ -197,8 +217,9 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
     amountMinor: refund.amountMinor,
     currency: payment.currency,
     reason: refund.reason,
-    // One key per refund: a resumed refund replays the first, a new refund is a new one.
-    idempotencyKey: rt.idempotencyKey(callId, paymentId, "refund", refund.refundId),
+    // One key per refund, saved before this call as the payment and the refund's number: a resumed
+    // refund replays the first, a new refund is a new one.
+    idempotencyKey: rt.idempotencyKey(callId, paymentId, "refund", String(reserved.sequence)),
   });
   // The provider's answer goes into the record and the ledger: anything but its three answers is a
   // provider fault, like an answer that was lost, so the refund stays in flight and resumes with its key.
@@ -268,7 +289,14 @@ export async function applyDisputeOutcome(rt: EngineRuntime, outcome: DisputeOut
     }
     const disputes = (payment.disputes ??= []);
     const known = disputes.find((d) => d.disputeId === disputeId);
-    if (known !== undefined && (known.status === "won" || known.status === "lost" || (known.status === status && known.amountMinor === amountMinor) || stale(known, status, occurredAt))) {
+    if (known !== undefined && (known.status === "won" || known.status === "lost" || stale(known, status, occurredAt))) {
+      return { applied: false } as const;
+    }
+    if (known !== undefined && known.status === status && known.amountMinor === amountMinor) {
+      // A newer snapshot that changes nothing still moves the dispute's time on, with no entry: an
+      // older event that arrives after it (an inquiry reopened at t20 after closed at t10 and t30)
+      // must be judged against t30, not t10.
+      if (occurredAt !== undefined && (known.occurredAt === undefined || Date.parse(occurredAt) > Date.parse(known.occurredAt))) known.occurredAt = occurredAt;
       return { applied: false } as const;
     }
     const dispute: DisputeRecord = { disputeId, status, amountMinor, currency, updatedAt: rt.now(), ...(occurredAt === undefined ? {} : { occurredAt }) };

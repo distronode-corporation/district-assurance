@@ -132,15 +132,15 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     if (event === null) return [400, { error: "malformed_event" }];
     // Only an event this endpoint handles is applied and remembered: one that reached the wrong
     // endpoint (an unfiltered listener) is acknowledged and left for its own endpoint.
-    let apply: (() => Promise<boolean>) | null = null;
+    let apply: (() => Promise<{ applied: boolean; unbound?: true }>) | null = null;
     if (route === "identity" && event.kind === "identity") {
       const outcome = event.outcome;
-      apply = async () => (await options.engine.applyIdentityOutcome(outcome)).applied;
+      apply = async () => ({ applied: (await options.engine.applyIdentityOutcome(outcome)).applied });
     }
     // The endpoint fixes the mode: Connect events always name a connected account, account events never do.
     if (event.kind === "payment" && (route === "connect" ? event.outcome.account !== undefined : route === "payments" && event.outcome.account === undefined)) {
       const outcome = event.outcome;
-      apply = async () => (await options.engine.applyPaymentOutcome(outcome)).applied;
+      apply = () => options.engine.applyPaymentOutcome(outcome);
     }
     // Disputes of platform payments come to the platform's own endpoint; a connect payment's are the business's.
     if (route === "payments" && event.kind === "dispute") {
@@ -154,9 +154,12 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     }
     if (apply === null) return [200, { received: true, applied: false, handled: false }];
     if (processed.has(event.eventId)) return [200, { received: true, duplicate: true }];
-    const applied = await apply();
+    const result = await apply();
+    // A payment event for a link no call holds yet (its reference still being bound) is not
+    // acknowledged either, so Stripe delivers it again once it is; never remembered as processed.
+    if (result.unbound === true) return [503, { received: true, applied: false, retry: true }];
     processed.add(event.eventId);
-    return [200, { received: true, applied }];
+    return [200, { received: true, applied: result.applied }];
   }
 
   async function demoRoute(req: IncomingMessage, runs: DemoRuns, path: string, method: string): Promise<Answer> {

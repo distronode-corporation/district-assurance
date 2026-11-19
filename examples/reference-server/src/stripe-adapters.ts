@@ -196,7 +196,7 @@ export class StripeIdentityProvider implements IdentityProvider {
     const { id, url } = session;
     // The URL goes into a text message as is: an https link of printable ASCII and nothing else (no
     // space, line break or control character that would put more than a link into the SMS).
-    if (typeof id !== "string" || !/^vs_[A-Za-z0-9]{1,255}$/.test(id) || typeof url !== "string" || !/^https:\/\/[\x21-\x7e]{1,2040}$/.test(url)) {
+    if (typeof id !== "string" || !/^vs_[A-Za-z0-9]{1,255}$/.test(id) || typeof url !== "string" || !/^https:\/\/[\x21-\x7e]{1,2040}$/.test(url) || !opensAsHttps(url)) {
       throw StripeApiError.refused(200, "malformed_response", null);
     }
     return { sessionId: id, url };
@@ -244,6 +244,11 @@ export interface CheckoutSessionStatus {
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/** Whether a link a payer is texted is an https URL that opens: one with no host (`https://:443`) does not parse. */
+function opensAsHttps(value: string): boolean {
+  return URL.canParse(value) && new URL(value).protocol === "https:";
+}
 const SESSION_ID = /^cs_test_[A-Za-z0-9]{1,200}$/;
 
 function checkedUrl(value: string, what: string): URL {
@@ -301,13 +306,14 @@ export class StripeCheckoutLinks implements PaymentLinks {
       ["expires_at", String(expiresAt)],
       ["client_reference_id", input.paymentId],
       ["metadata[payment_id]", input.paymentId],
-      ["metadata[call_id]", input.callId],
+      // Stripe keeps at most 500 characters of a metadata value: a longer call id goes hashed, as for Identity.
+      ["metadata[call_id]", stripeMetadataCallId(input.callId)],
       ["success_url", this.#successUrl],
     ];
     const session = await this.#call("POST", "/v1/checkout/sessions", { form, idempotencyKey: input.idempotencyKey, account: input.connectedAccountId });
     const id = session.body.id;
     const url = session.body.url;
-    if (session.status !== 200 || typeof id !== "string" || !SESSION_ID.test(id) || typeof url !== "string" || !url.startsWith("https://")) {
+    if (session.status !== 200 || typeof id !== "string" || !SESSION_ID.test(id) || typeof url !== "string" || !opensAsHttps(url)) {
       throw new StripeApiError(session.status, `Stripe did not create the Checkout Session (${describeError(session)})`);
     }
     if (session.body.livemode !== false) throw new StripeApiError(session.status, "Stripe answered a live-mode session to a test-mode key; refusing it");
@@ -317,7 +323,14 @@ export class StripeCheckoutLinks implements PaymentLinks {
   async expireLink(input: { linkId: string; mode: PaymentMode; connectedAccountId?: string; idempotencyKey: string }): Promise<{ state: "expired" | "not_open" }> {
     const id = checkedSessionId(input.linkId);
     const res = await this.#call("POST", `/v1/checkout/sessions/${id}/expire`, { form: [], idempotencyKey: input.idempotencyKey, account: input.connectedAccountId });
-    if (res.status === 200) return { state: "expired" };
+    // Stripe's success answer is the session, expired: a 200 that is not this session, expired, in
+    // test mode, does not establish the close, so the session is read back to learn whether it is.
+    if (res.status === 200 && res.body.id === id && res.body.status === "expired" && res.body.livemode === false) return { state: "expired" };
+    if (res.status === 200) {
+      const now = await this.readLink(id, input.connectedAccountId);
+      if (now.status === "expired") return { state: "expired" };
+      if (now.status !== "open") return { state: "not_open" };
+    }
     if (res.status === 400) {
       // Stripe refuses to expire a session that is not open; read it to tell that from a bad request.
       const now = await this.readLink(id, input.connectedAccountId);
@@ -348,7 +361,8 @@ export class StripeCheckoutLinks implements PaymentLinks {
     path: string,
     options: { form?: Array<[string, string]>; idempotencyKey?: string; account?: string | undefined; signal?: AbortSignal | undefined },
   ): Promise<{ status: number; body: Record<string, unknown> }> {
-    const headers: Record<string, string> = { authorization: `Bearer ${this.#apiKey}` };
+    // The API version is pinned, as for Identity: create, read and expire keep one contract whatever the account's default.
+    const headers: Record<string, string> = { authorization: `Bearer ${this.#apiKey}`, "stripe-version": STRIPE_API_VERSION };
     if (options.idempotencyKey !== undefined) headers["idempotency-key"] = stripeIdempotencyKey(options.idempotencyKey);
     if (options.account !== undefined) headers["stripe-account"] = options.account;
     const timeout = AbortSignal.timeout(this.#timeoutMs);

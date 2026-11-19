@@ -163,20 +163,20 @@ export function e2eScripts(stripe: StripeCheckoutLinks, options: E2eOptions = {}
           if (session !== null && paid(session)) return settle(session);
           if (session?.status === "expired") return { detail: "the session expired unpaid", ok: false };
           if (now() >= until) break;
-          await sleep(pollMs, options.signal);
+          // Never past the end of the wait: a long poll interval still stops on time.
+          await sleep(Math.min(pollMs, until - now()), options.signal);
         }
         // Out of time: close the link at Stripe through the engine (it settles the request as
-        // expired), so the old page cannot take a payment nobody reads. A page Stripe says is no
-        // longer open may have been paid at the last moment: read it once more.
+        // expired), so the old page cannot take a payment nobody reads: at the link's deadline by
+        // expiring it, and before it (the wait ended first) by cancelling it. A page Stripe says is
+        // no longer open may have been paid at the last moment: read it once more.
         const { expired } = await w.engine.expirePaymentLinks(call.callId);
         if (expired.length === 0) {
+          await w.engine.cancelPaymentLink(call.callId, w.links.find((l) => l.linkId === call.linkId)!.paymentId);
           const last = await stripe.readLink(call.linkId);
           if (paid(last)) return settle(last);
         }
-        return {
-          detail: expired.length === 0 ? "not paid in time: start a new run" : "not paid before the link's deadline: the Checkout page is closed, start a new run",
-          ok: false,
-        };
+        return { detail: "not paid in time: the Checkout page is closed, start a new run", ok: false };
       },
     },
     {

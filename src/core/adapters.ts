@@ -329,4 +329,17 @@ export type UnlockResult =
  */
 export interface AccessController {
   unlock(input: { grant: SignedAccessGrant; target: string; idempotencyKey: string }): Promise<UnlockResult>;
+  /**
+   * Optional: withdraws a grant sent earlier that the door has not acted on yet (a code not yet
+   * redeemed, a credential not yet used). The engine asks once, when a call is tainted while one
+   * of its grants may still be acted on (SPEC.md, section 17). A door that already opened cannot
+   * be closed again by this: what was delivered and used stays done. A throw is recorded as failed.
+   */
+  revoke?(input: { grant: AccessGrantBody; target: string; callId: string; idempotencyKey: string }): Promise<void>;
+  /**
+   * Optional: writes what the controller still owes the ledger (access codes: a spent code's
+   * `access.code_spent` entry whose append failed). The engine calls it when a call ends (with its
+   * id) and from `sweepAccess` (the whole workspace), and never lets its failure stop either.
+   */
+  flush?(input: { workspaceId: string; callId?: string }): Promise<void>;
 }

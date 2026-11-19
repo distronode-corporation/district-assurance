@@ -184,8 +184,8 @@ describe("paylink modes: running", () => {
     await t.engine.requestPayment(callId);
     const linkId = "cs_fake_1";
     // A connect payment is bound under its account: another account's event, or one without any, never finds it.
-    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId, paymentStatus: "paid" }), { applied: false }, "a platform-endpoint event");
-    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId, paymentStatus: "paid", account: "acct_other" }), { applied: false });
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId, paymentStatus: "paid" }), { applied: false, unbound: true }, "a platform-endpoint event");
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId, paymentStatus: "paid", account: "acct_other" }), { applied: false, unbound: true });
     assert.equal((await t.engine.state(callId)).phase, "paying");
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId, paymentStatus: "paid", account: ACCT }), { applied: true, callId, status: "paid" });
 
@@ -594,9 +594,8 @@ describe("paylink: the engine's own deadline", () => {
     const a = await t.engine.requestPayment(callId, request);
     release();
     assert.deepEqual(await b, a, "the same delivery, recorded once");
-    // One logical delivery; if both resumes asked the carrier, they used one idempotency key.
-    assert.ok(keys.length >= 1);
-    assert.equal(new Set(keys).size, 1, "every carrier request used one idempotency key, so a carrier that honours it sends one text");
+    // A finished and recorded the delivery before B's create returned: B never asks the carrier (L1 review round 2).
+    assert.equal(keys.length, 1, "one carrier request");
     assert.equal((await t.ledger.list()).filter((e) => e.event === "payment.link_sent").length, 1);
   });
 

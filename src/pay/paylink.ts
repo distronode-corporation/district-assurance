@@ -460,6 +460,9 @@ export async function requestPayment(
     const terms = termsFor(settings, step);
     // The config was checked when saved; a call keeps its steps while the settings can change under it.
     if (terms.mode === "connect" && terms.connectedAccountId === null) errors.push(CONNECT_NEEDS_ACCOUNT);
+    // So can the engine: a call saved by an engine whose adapter took connect payments, or longer
+    // links, is resumed here against this engine's adapter, before the read-back is used up.
+    errors.push(...adapterErrors(rt.adapter("payments").capabilities, terms.mode, terms.linkLifeMinutes));
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     slice.quote = null;
     const paymentId = rt.ids.next("pay");
@@ -523,10 +526,14 @@ export async function requestPayment(
   // The process that will text it holds a short lease, so a concurrent resume never expires the
   // link while it is being sent; once the lease lapses (that sender stopped), it may.
   let claimedAt = "";
+  let recorded: { paymentId: string; status: PaymentStatus; expiresAt: string | null } | null = null;
   const claim = await rt.update(callId, (draft): "sent" | "claimed" | "late" | "settled" => {
     const pending = find(draft, request.paymentId);
     pending.linkId = link.linkId;
-    if (pending.textedAt !== null) return "sent";
+    if (pending.textedAt !== null) {
+      recorded = { paymentId: request.paymentId, status: pending.status, expiresAt: pending.expiresAt };
+      return "sent";
+    }
     // Another process settled the request while this one created the link (it took too long), or
     // the call ended meanwhile (its links are being closed): the link is live at the provider but
     // must never be texted.
@@ -541,49 +548,56 @@ export async function requestPayment(
     }
     return "late";
   });
+  // Another resume texted it and recorded the delivery while this one created the link: nothing is
+  // sent again, and the delivery recorded is the answer.
+  if (claim === "sent") return recorded!;
+  const closeLate = async (): Promise<never> => {
+    const answer = await expireAtProvider(rt, callId, request, link.linkId);
+    await rt.update(callId, (draft) => {
+      if (find(draft, request.paymentId).status !== "open") return;
+      draft.emit("payment.link_expired", "code", { paymentId: request.paymentId, provider: answer.state, reason: "not_sent_in_time" });
+      // Only an expiry the provider confirms settles it; a link no longer open waits for its webhook.
+      if (answer.state === "expired") settle(rt, draft, request.paymentId, "expired");
+    });
+    if (answer.state === "expired") throw new EngineError("precondition_failed", "the payment link could not be texted in time and was expired; request a new payment");
+    // The provider says the link is no longer open (paid, or expired on its side) before its webhook
+    // came: the payment stays open until that outcome arrives, so no new payment can start yet.
+    throw new EngineError("precondition_failed", "the payment link could not be texted in time and the provider says it is no longer open; wait for its outcome");
+  };
+  const leftMs = () => Date.parse(request.providerExpiresAt) - rt.clock.now().getTime();
   try {
     await rt.bindRef(paymentRef(request, link.linkId), callId);
     // Checked again right before the text: binding the reference can take time too.
-    const tooLate = claim === "late" || (claim === "claimed" && Date.parse(request.providerExpiresAt) - rt.clock.now().getTime() < MIN_LINK_LIFE_MINUTES * 60_000);
     if (claim === "settled") {
       await expireAtProvider(rt, callId, request, link.linkId);
       throw new EngineError("precondition_failed", "the payment request was closed while its link was created; the link was expired and never texted");
     }
-    if (tooLate) {
-      const answer = await expireAtProvider(rt, callId, request, link.linkId);
-      await rt.update(callId, (draft) => {
-        if (find(draft, request.paymentId).status !== "open") return;
-        draft.emit("payment.link_expired", "code", { paymentId: request.paymentId, provider: answer.state, reason: "not_sent_in_time" });
-        // Only an expiry the provider confirms settles it; a link no longer open waits for its webhook.
-        if (answer.state === "expired") settle(rt, draft, request.paymentId, "expired");
-      });
-      throw new EngineError("precondition_failed", "the payment link could not be texted in time and was expired; request a new payment");
+    if (claim === "late" || leftMs() < MIN_LINK_LIFE_MINUTES * 60_000) await closeLate();
+    // Only a claimed sender gets here. Binding the reference can stall past the lease, and then a
+    // cancel or the end of the call may have gone ahead (and failed to expire the link at the
+    // provider). So the claim is checked again, and renewed, in a write right before the text: a
+    // request closed, a call ended, or a lease another sender took since is never texted from here.
+    // The lease this sender holds is fixed before the write: a retry of the write (another write
+    // won the compare-and-set) compares against the same one, and the renewal is adopted only once
+    // the write is saved.
+    const held = claimedAt;
+    let renewed = held;
+    const still = await rt.update(callId, (draft): "ok" | "closed" | "taken" => {
+      const pending = find(draft, request.paymentId);
+      if (pending.status !== "open" || draft.record.state.phase === "ended" || pending.closingSince !== undefined) return "closed";
+      if (pending.textedAt !== null || pending.sendingSince !== held) return "taken";
+      renewed = rt.now();
+      pending.sendingSince = renewed;
+      return "ok";
+    });
+    claimedAt = renewed;
+    if (still === "closed") {
+      await expireAtProvider(rt, callId, request, link.linkId);
+      throw new EngineError("precondition_failed", "the payment request was closed while its link was being sent; the link was expired and never texted");
     }
-    if (claim === "claimed") {
-      // Binding the reference can stall past the lease, and then a cancel or the end of the call may
-      // have gone ahead (and failed to expire the link at the provider). So the claim is checked
-      // again, and renewed, in a write right before the text: a request closed, a call ended, or a
-      // lease another sender took since is never texted from here.
-      // The lease this sender holds is fixed before the write: a retry of the write (another write
-      // won the compare-and-set) compares against the same one, and the renewal is adopted only once
-      // the write is saved.
-      const held = claimedAt;
-      let renewed = held;
-      const still = await rt.update(callId, (draft): "ok" | "closed" | "taken" => {
-        const pending = find(draft, request.paymentId);
-        if (pending.status !== "open" || draft.record.state.phase === "ended" || pending.closingSince !== undefined) return "closed";
-        if (pending.textedAt !== null || pending.sendingSince !== held) return "taken";
-        renewed = rt.now();
-        pending.sendingSince = renewed;
-        return "ok";
-      });
-      claimedAt = renewed;
-      if (still === "closed") {
-        await expireAtProvider(rt, callId, request, link.linkId);
-        throw new EngineError("precondition_failed", "the payment request was closed while its link was being sent; the link was expired and never texted");
-      }
-      if (still === "taken") throw new EngineError("precondition_failed", "another process took over texting this payment link");
-    }
+    if (still === "taken") throw new EngineError("precondition_failed", "another process took over texting this payment link");
+    // And the life left, once more: the renewal can take time too.
+    if (leftMs() < MIN_LINK_LIFE_MINUTES * 60_000) await closeLate();
     await rt.adapter("messages").sendText({
       to: reserved.phone,
       body: paymentText(reserved.locale, link.url, request.amountMinor, request.currency),
@@ -688,7 +702,7 @@ function settle(rt: EngineRuntime, draft: CallDraft, paymentId: string, status: 
 export async function applyPaymentOutcome(
   rt: EngineRuntime,
   given: PaymentOutcome & { paymentIntentId?: string },
-): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
+): Promise<{ applied: false; unbound?: true } | { applied: true; callId: string; status: PaymentStatus }> {
   // One snapshot, taken before the first wait: the link looked up, the account checked and the
   // payment settled are the same one, even if the host reuses its object while the lookup runs.
   const outcome = { ...given };
@@ -697,7 +711,9 @@ export async function applyPaymentOutcome(
   // written down as ignored) rather than lost.
   const account = outcome.account ?? null;
   const callId = (account === null ? null : await rt.resolveRef(paymentRef({ connectedAccountId: account }, outcome.linkId))) ?? (await rt.resolveRef(paymentRef({ connectedAccountId: null }, outcome.linkId)));
-  if (callId === null) return { applied: false };
+  // No call holds this link yet: its reference may still be being bound (the provider can answer
+  // before the engine wrote it down). `unbound` tells the host to have the event delivered again.
+  if (callId === null) return { applied: false, unbound: true };
   const { result, paymentIntentId } = await rt.update(callId, (draft) => {
     const payments = draft.slice<PaylinkSlice>(PAYLINK).payments.filter((p) => p.linkId === outcome.linkId);
     const request = payments.find((p) => p.connectedAccountId === account) ?? payments[0]!;

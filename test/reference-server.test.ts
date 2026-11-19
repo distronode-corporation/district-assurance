@@ -99,10 +99,12 @@ describe("reference server", () => {
       // The endpoint fixes the payment mode: a Connect event names an account, an account event does not.
       const platform = event("evt_11", "checkout.session.expired", { id: "cs_x" });
       assert.deepEqual(await send("/webhooks/stripe/connect", platform), { received: true, applied: false, handled: false });
-      assert.deepEqual(await send("/webhooks/stripe/payments", platform), { received: true, applied: false });
+      // No call holds cs_x: not acknowledged, so Stripe delivers it again (its link may still be being bound).
+      assert.deepEqual(await send("/webhooks/stripe/payments", platform), { received: true, applied: false, retry: true });
+      assert.deepEqual(await send("/webhooks/stripe/payments", platform), { received: true, applied: false, retry: true }, "never remembered as processed");
       const connect = event("evt_12", "checkout.session.expired", { id: "cs_y" }, { account: "acct_1" });
       assert.deepEqual(await send("/webhooks/stripe/payments", connect), { received: true, applied: false, handled: false });
-      assert.deepEqual(await send("/webhooks/stripe/connect", connect), { received: true, applied: false });
+      assert.deepEqual(await send("/webhooks/stripe/connect", connect), { received: true, applied: false, retry: true });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

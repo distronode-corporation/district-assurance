@@ -37,6 +37,8 @@ export const ENGINE_EVENTS = [
   "access.unknown",
   "access.failed",
   "access.code_spent",
+  "access.tainted",
+  "access.revoked",
   "stepup.issued",
   "stepup.exchanged",
   "stepup.refused",
