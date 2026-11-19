@@ -36,8 +36,12 @@ describe("hostile #104: what a host passes as the attestation", () => {
     const t = capped({ failed: 1 });
     const { callId } = await t.engine.startCall({ attestation: "failed" });
     await assert.rejects(t.engine.startCall({ callId, attestation: "A" }), rejects("invalid_input"));
-    const receiptCall = await strongCall(t, "failed");
-    assert.equal((await t.engine.finishVerification(receiptCall)).level, 1);
+    // The original call, verified strongly, is still capped as "failed".
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.startPhotoId(callId);
+    await t.engine.applyIdentityOutcome({ sessionId: t.identity.created.at(-1)!.sessionId, status: "verified" });
+    assert.equal((await t.engine.finishVerification(callId)).level, 1);
   });
 });
 
