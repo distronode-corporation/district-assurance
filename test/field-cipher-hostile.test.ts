@@ -314,4 +314,125 @@ describe("FIL-2: a failed filing is never logged for a record that ends up store
     assert.equal((await slow).recordId, filed.recordId);
     assert.deepEqual(await records.getIntakeRecord("ws_test", filed.recordId), filed, "the stored record is the first writer's");
   });
+
+  it("R1 a write the store kept before failing is deleted when a failing cipher later releases the filing", async () => {
+    let fail = false;
+    const cipher = { encrypt: async (plain: string) => { if (fail) throw new Error("kms down"); return `sealed:${plain.length}`; } };
+    const records = seeded(new StoredThenFailed());
+    const t = setup({ config: config(), adapters: { fieldCipher: cipher, records } });
+    const callId = await draftOn(t);
+    records.failNext = 1;
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /answer lost/);
+    assert.notEqual(await records.getIntakeRecord("ws_test", "rec_1"), null, "the store kept it");
+    fail = true;
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("precondition_failed", /nothing was filed/));
+    assert.equal(await records.getIntakeRecord("ws_test", "rec_1"), null, "released, so deleted");
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.deepEqual(receipt.body.records, []);
+  });
+
+  it("R2 one write failing never gives up another write's claim", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let puts = 0;
+    class Mixed extends MemoryRecordStore {
+      override async putIntakeRecord(record: IntakeRecord): Promise<void> {
+        puts++;
+        if (puts === 1) {
+          await held;
+          return super.putIntakeRecord(record);
+        }
+        throw new Error("store down");
+      }
+    }
+    const sessions = new MemorySessionStore();
+    const records = seeded(new Mixed());
+    const a = setup({ config: config(), adapters: { fieldCipher: new FakeFieldCipher(), sessions, records } });
+    const callId = await draftOn(a);
+    const pending = a.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    while (puts === 0) await new Promise((resolve) => setImmediate(resolve));
+    const b = setup({ config: config(), adapters: { fieldCipher: new FakeFieldCipher(), sessions, records, ledger: a.ledger } });
+    await assert.rejects(b.engine.confirmIntake(callId, { confirmedBy: "voice" }), /store down/);
+    const failing = { encrypt: async () => { throw new Error("kms down"); } };
+    const c = setup({ config: config(), adapters: { fieldCipher: failing, sessions, records, ledger: a.ledger } });
+    await assert.rejects(c.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("conflict"), "the first write still holds its claim");
+    release();
+    const filed = await pending;
+    assert.deepEqual(await records.getIntakeRecord("ws_test", filed.recordId), filed);
+  });
+
+  it("R3 a write that outlives its claim stores nothing once the filing was released, and files nothing", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let writing = false;
+    class Slow extends MemoryRecordStore {
+      override async putIntakeRecord(record: IntakeRecord): Promise<void> {
+        writing = true;
+        await held;
+        return super.putIntakeRecord(record);
+      }
+    }
+    const sessions = new MemorySessionStore();
+    const records = seeded(new Slow());
+    const x = setup({ config: config(), adapters: { fieldCipher: new FakeFieldCipher(), sessions, records } });
+    const callId = await draftOn(x);
+    const slow = x.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    while (!writing) await new Promise((resolve) => setImmediate(resolve));
+    const failing = { encrypt: async () => { throw new Error("kms down"); } };
+    const y = setup({ config: config(), adapters: { fieldCipher: failing, sessions, records, ledger: x.ledger } });
+    y.clock.advance(121_000);
+    await assert.rejects(y.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("precondition_failed", /nothing was filed/));
+    release();
+    await assert.rejects(slow, rejects("precondition_failed", /nothing was filed/));
+    assert.equal(await records.getIntakeRecord("ws_test", "rec_1"), null, "the late write stored nothing");
+    assert.equal((await x.ledger.list()).some((e) => e.event === "intake.confirmed"), false);
+  });
+
+  it("R4 a release whose delete failed is carried on by the next confirmation, even with a working cipher", async () => {
+    let fail = true;
+    const cipher = { encrypt: async (plain: string) => { if (fail) throw new Error("kms down"); return `sealed:${plain.length}`; } };
+    let deleteDown = true;
+    class NoDelete extends MemoryRecordStore {
+      override async deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void> {
+        if (deleteDown) throw new Error("delete down");
+        return super.deleteIntakeRecords(workspaceId, recordIds);
+      }
+    }
+    const records = seeded(new NoDelete());
+    const t = setup({ config: config(), adapters: { fieldCipher: cipher, records } });
+    const callId = await draftOn(t);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /delete down/);
+    fail = false;
+    deleteDown = false;
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("precondition_failed", /nothing was filed/));
+    const failed = (await t.ledger.list()).filter((e) => e.event === "record.filing_failed");
+    assert.deepEqual(failed.map((e) => e.detail.reason), ["cipher_error"], "released once, with the reason it began with");
+    assert.equal(await records.getIntakeRecord("ws_test", "rec_1"), null);
+    assert.equal((await t.engine.state(callId)).phase, "open", "the call can end");
+  });
+
+  it("R5 two releases at once: one completes, the other finds it done", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let deletes = 0;
+    class SlowDelete extends MemoryRecordStore {
+      override async deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void> {
+        deletes++;
+        if (deletes === 1) await held;
+        return super.deleteIntakeRecords(workspaceId, recordIds);
+      }
+    }
+    const sessions = new MemorySessionStore();
+    const records = seeded(new SlowDelete());
+    const failing = { encrypt: async () => { throw new Error("kms down"); } };
+    const a = setup({ config: config(), adapters: { fieldCipher: failing, sessions, records } });
+    const callId = await draftOn(a);
+    const first = a.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    while (deletes === 0) await new Promise((resolve) => setImmediate(resolve));
+    const b = setup({ config: config(), adapters: { fieldCipher: failing, sessions, records, ledger: a.ledger } });
+    await assert.rejects(b.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("precondition_failed", /nothing was filed/));
+    release();
+    await assert.rejects(first, rejects("precondition_failed", /nothing was filed/));
+    assert.equal((await a.ledger.list()).filter((e) => e.event === "record.filing_failed").length, 1);
+  });
 });

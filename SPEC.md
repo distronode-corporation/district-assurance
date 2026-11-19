@@ -366,15 +366,18 @@ reason code, never a value), and `confirmIntake` throws `precondition_failed` wi
 the cipher's own error is never passed on. Nothing was stored, since the cipher runs before the
 record store, so `endCall` can go ahead and the host collects the record again if it wants it. If
 another process sealed and filed the same record meanwhile, that record is returned instead. A
-process that sealed the record claims the filing before it writes it (`writingSince`, by the same
-compare-and-set as every write): while the claim is live, a process whose cipher fails releases
-nothing and logs nothing, and `confirmIntake` throws `conflict` ("another process is writing this
-record; confirm again for its outcome"), so a retry returns the winner's record. A writer that finds
-the filing already released writes nothing and throws the same `precondition_failed`, so
-`record.filing_failed` is never logged for a record that is stored. A writer whose write fails gives
-up its claim; a claim older than two minutes (`WRITE_CLAIM_MS`) is taken as a writer that died, so a
-failing cipher can release the filing and never holds the call open for good. Left open: a writer
-that takes longer than that to write can still store a record after another process released it. Until the
+process that sealed the record claims the filing before it writes it (`writers`, each write by its
+own token, by the same compare-and-set as every write): while any claim is live, a process whose
+cipher fails releases nothing and logs nothing, and `confirmIntake` throws `conflict` ("another
+process is writing this record; confirm again for its outcome"), so a retry returns the winner's
+record. A write whose write fails gives up only its own claim; a claim older than two minutes
+(`WRITE_CLAIM_MS`) is taken as a writer that died. A release first marks the filing `releasing`
+(no write claims or files it from then on), then deletes the record by id
+(`RecordStore.deleteIntakeRecords`, which also makes a later write of that id store nothing), then
+drops the draft and logs `record.filing_failed`: so a write the store kept before failing, or one
+that outlived its claim, never leaves a stored record behind a released filing, and a writer that
+finds the filing released files nothing and throws the same `precondition_failed`. A release
+whose delete failed is carried on by the next confirmation, with the reason it began with. Until the
 record is filed, abandoned or the call ends (`endCall` drops an open draft, before `call.ended`
 and the receipt's ledger head, writing no event), the draft in the call record holds sensitive
 values in the clear; afterwards the call record keeps only the encrypted record.

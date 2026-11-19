@@ -1,5 +1,7 @@
 // Dossier (file): intake the caller confirms. The forms live in the module's settings, so a flow
 // step names a form by id and a host's config is checked before any call uses it.
+import { randomUUID } from "node:crypto";
+
 import type { IntakeRecord } from "../core/adapters.ts";
 import { canonicalJson, type JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
@@ -30,11 +32,16 @@ export interface DossierSlice {
     values: Record<string, FieldValue>;
     filing: IntakeRecord | null;
     /**
-     * When a process that sealed the filing claimed it to write it to the RecordStore: a process
-     * whose cipher failed meanwhile releases nothing while the claim is live (WRITE_CLAIM_MS).
-     * Absent when nobody is writing, and on a call stored before the claim.
+     * The writes that claimed the filing to write it to the RecordStore, each by its own token, with
+     * when it claimed: a process whose cipher failed meanwhile releases nothing while any claim is
+     * live (WRITE_CLAIM_MS), and a failed write gives up only its own. Absent when nobody is writing.
      */
-    writingSince?: string;
+    writers?: Record<string, string>;
+    /**
+     * Set when a failing cipher started releasing the filing: no write claims it from then on, and
+     * no write files it. The record is deleted by id (a tombstone) before the release completes.
+     */
+    releasing?: FilingFailure;
   } | null;
   records: Array<{ recordId: string; formId: string; digest: string }>;
   /** The record the last confirmation filed, until another intake starts: a retried confirmation gets it back. */
@@ -285,38 +292,49 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
   // Claim the filing before writing it, by the same compare-and-set as every write: a process whose
   // cipher fails meanwhile then releases nothing, so no failure is logged for a record that ends up
   // stored. A filing already released (that process failed first) is never written.
-  const claim = await rt.update(callId, (draft): "claimed" | "released" | { filed: IntakeRecord } => {
+  const writer = randomUUID();
+  const claim = await rt.update(callId, (draft): "claimed" | "released" | { filed: IntakeRecord } | { releasing: FilingFailure } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     // Filed meanwhile by another process: its record (its ciphertexts) is the answer, and nothing is written again.
     if (s.records.some((r) => r.recordId === record.recordId)) return { filed: s.confirmed?.recordId === record.recordId ? s.confirmed : record };
     if (s.intake?.filing?.recordId !== record.recordId) return "released";
-    s.intake.writingSince = rt.now();
+    // A release that stopped part way (its delete failed): this confirmation carries it on.
+    if (s.intake.releasing !== undefined) return { releasing: s.intake.releasing };
+    s.intake.writers = { ...s.intake.writers, [writer]: rt.now() };
     return "claimed";
   });
-  if (typeof claim === "object") return claim.filed;
-  if (claim === "released") throw new EngineError("precondition_failed", "the fieldCipher could not seal the record in another process; nothing was filed and the draft is gone");
+  if (typeof claim === "object" && "releasing" in claim) await releaseFailedFiling(rt, callId, record, reserved.form, claim.releasing);
+  if (typeof claim === "object" && "filed" in claim) return claim.filed;
+  if (claim !== "claimed") throw new EngineError("precondition_failed", "the fieldCipher could not seal the record in another process; nothing was filed and the draft is gone");
   try {
     await rt.adapter("records").putIntakeRecord(record);
   } catch (error) {
     // The reservation is kept for a retry (the write may have landed); the claim is given up, so a
     // failing cipher is not held off by a writer that is no longer writing. Best effort.
+    // Only this write's own claim: another write may hold it now. A release after this deletes the
+    // record by id first, so a write that did land is never left behind a released filing.
     await rt
       .update(callId, (draft) => {
         const intake = draft.slice<DossierSlice>(DOSSIER).intake;
-        if (intake?.filing?.recordId === record.recordId) delete intake.writingSince;
+        if (intake?.writers !== undefined) delete intake.writers[writer];
       })
       .catch(() => undefined);
     throw error;
   }
-  await rt.update(callId, (draft) => {
+  const filed = await rt.update(callId, (draft) => {
     const s = draft.slice<DossierSlice>(DOSSIER);
-    if (s.records.some((r) => r.recordId === record.recordId)) return;
+    if (s.records.some((r) => r.recordId === record.recordId)) return true;
+    // Released meanwhile (this write's claim went stale): the record was deleted by id, and this
+    // write stored nothing or was deleted, so nothing is filed.
+    if (s.intake?.filing?.recordId !== record.recordId || s.intake.releasing !== undefined) return false;
     draft.apply({ type: "intake_confirmed", recordId: record.recordId });
     s.intake = null;
     s.confirmed = record;
     s.records.push({ recordId: record.recordId, formId: record.formId, digest: record.digest });
     draft.emit("intake.confirmed", "caller", { recordId: record.recordId, formId: record.formId, digest: record.digest, confirmedBy: record.confirmedBy });
+    return true;
   });
+  if (!filed) throw new EngineError("precondition_failed", "the fieldCipher could not seal the record in another process; nothing was filed and the draft is gone");
   return record;
 }
 
@@ -334,19 +352,35 @@ async function releaseFailedFiling(
   form: IntakeForm,
   reason: FilingFailure,
 ): Promise<{ kind: "filed"; record: IntakeRecord } | { kind: "writing" } | { kind: "released" }> {
-  return rt.update(callId, (draft) => {
+  // First mark the filing as releasing, so no write claims or files it from here on.
+  const begun = await rt.update(callId, (draft): { kind: "filed"; record: IntakeRecord } | { kind: "writing" } | { kind: "released" } | { kind: "releasing" } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     // Filed by another process: its record is the answer. Abandoned meanwhile: nothing to release.
     if (s.confirmed?.recordId === record.recordId) return { kind: "filed", record: s.confirmed };
     if (s.intake?.filing?.recordId !== record.recordId) return { kind: "released" };
     // Another process sealed it and is writing it: release nothing and log nothing, it may be stored.
-    const since = s.intake.writingSince;
-    if (since !== undefined && rt.clock.now().getTime() - Date.parse(since) < WRITE_CLAIM_MS) return { kind: "writing" };
+    const now = rt.clock.now().getTime();
+    const live = Object.values(s.intake.writers ?? {}).some((since) => now - Date.parse(since) < WRITE_CLAIM_MS);
+    if (s.intake.releasing === undefined && live) return { kind: "writing" };
+    s.intake.releasing ??= reason;
+    return { kind: "releasing" };
+  });
+  if (begun.kind !== "releasing") return begun;
+  // A write may have landed (a store that failed after storing, a writer whose claim went stale):
+  // the record is deleted by id, and a write still in flight then stores nothing. A failed delete
+  // leaves the filing releasing, and the next confirmation carries the release on from here.
+  await rt.adapter("records").deleteIntakeRecords(rt.workspaceId, [record.recordId]);
+  return rt.update(callId, (draft) => {
+    const s = draft.slice<DossierSlice>(DOSSIER);
+    // No write files a releasing filing; another release of it may have finished first.
+    if (s.intake?.filing?.recordId !== record.recordId) return { kind: "released" as const };
+    // The reason the release began with, which may be another confirmation's.
+    const why = s.intake.releasing!;
     draft.apply({ type: "intake_abandoned" });
     s.intake = null;
     const fields = form.fields.filter((f) => f.sensitive === true).map((f) => f.key);
-    draft.emit("record.filing_failed", "code", { recordId: record.recordId, formId: record.formId, fields, reason });
-    return { kind: "released" };
+    draft.emit("record.filing_failed", "code", { recordId: record.recordId, formId: record.formId, fields, reason: why });
+    return { kind: "released" as const };
   });
 }
 
