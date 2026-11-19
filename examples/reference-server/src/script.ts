@@ -25,7 +25,7 @@ import {
   type SignedAccessGrant,
   type SignedReceipt,
 } from "../../../src/index.ts";
-import { TEST_KNOWLEDGE_KEY, createTestEngine, generateTestSigner, testSubject, type TestEngine } from "../../../src/testing/index.ts";
+import { FixedClock, TEST_KNOWLEDGE_KEY, createTestEngine, generateTestSigner, testSubject, type TestEngine } from "../../../src/testing/index.ts";
 import { createDoorRelay } from "./door-relay.ts";
 import { demoConfig } from "./flows.ts";
 
@@ -94,6 +94,42 @@ export interface DemoWorld {
   links: CreatedLink[];
 }
 
+/**
+ * Wraps a real payments adapter so each link it creates is also kept in `links`. Every other member
+ * (`expireLink`, and the optional ones such as `cancel` and `refund`) is the adapter's own, called
+ * on the adapter itself so its private fields still work, and a member the adapter lacks stays
+ * missing: the engine reads a missing optional method as "this adapter cannot do that".
+ */
+export function recordLinks(real: PaymentLinks, links: CreatedLink[]): PaymentLinks {
+  const createLink: PaymentLinks["createLink"] = async (input) => {
+    const link = await real.createLink(input);
+    links.push({ paymentId: input.paymentId, linkId: link.linkId, url: link.url });
+    return link;
+  };
+  return new Proxy(real, {
+    get(target, name) {
+      if (name === "createLink") return createLink;
+      const value: unknown = Reflect.get(target, name, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+/**
+ * VER-1's wait after a first failed try (its default and floor, which the demo's config keeps). It
+ * holds across calls and engines, so the owner keys the right PIN only after it.
+ */
+export const FIRST_FAILURE_WAIT_MS = 5_000;
+
+/**
+ * Lets VER-1's wait after a failure pass: on the demo's fixed clock by moving the clock, on any
+ * other clock (the live e2e demo's wall clock) by waiting it out for real.
+ */
+export async function waitOutFailureWait(clock: Clock): Promise<void> {
+  if (clock instanceof FixedClock) clock.advance(FIRST_FAILURE_WAIT_MS + 1_000);
+  else await new Promise<void>((resolve) => setTimeout(resolve, FIRST_FAILURE_WAIT_MS + 100));
+}
+
 export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
   const doorsOpened: string[] = [];
   const links: CreatedLink[] = [];
@@ -115,18 +151,7 @@ export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
   // A real adapter (the live demo) is wrapped to record what it answered, so a step finds its own
   // call's link; the fake records its links itself (`t.payments.created`).
   const real = options.payments;
-  const recorded: PaymentLinks | undefined =
-    real === undefined
-      ? undefined
-      : {
-          capabilities: real.capabilities,
-          async createLink(input) {
-            const link = await real.createLink(input);
-            links.push({ paymentId: input.paymentId, linkId: link.linkId, url: link.url });
-            return link;
-          },
-          expireLink: (input) => real.expireLink(input),
-        };
+  const recorded = real === undefined ? undefined : recordLinks(real, links);
   const t = createTestEngine({
     config,
     ...(options.clock === undefined ? {} : { clock: options.clock }),
@@ -252,6 +277,7 @@ const ownerCommand: ScriptStep[] = [
   {
     label: "owner-command: PIN on process A",
     async run(w, call) {
+      await waitOutFailureWait(w.clock);
       const right = await w.engine.submitPin(call.callId, OWNER_PIN);
       return { detail: right.matched ? "matched" : "no match", ok: right.matched };
     },

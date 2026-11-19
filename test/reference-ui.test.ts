@@ -5,13 +5,26 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { request } from "node:http";
 import type { AddressInfo } from "node:net";
-import { after, before, describe, it } from "node:test";
+import { after, before, describe, it, mock } from "node:test";
 
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { DemoRuns, type RunView } from "../examples/reference-server/src/demo-runs.ts";
-import { DEMO_CONNECT_SECRET, DEMO_SECRET, SCRIPTS, createDemoWorld, isDemoFlow, type DemoWorld } from "../examples/reference-server/src/script.ts";
+import {
+  DEMO_CONNECT_SECRET,
+  DEMO_SECRET,
+  FIRST_FAILURE_WAIT_MS,
+  SCRIPTS,
+  createDemoWorld,
+  isDemoFlow,
+  recordLinks,
+  verifyToLevel2,
+  waitOutFailureWait,
+  type CreatedLink,
+  type DemoWorld,
+} from "../examples/reference-server/src/script.ts";
 import { STATIC_FILES, UI_CSP } from "../examples/reference-server/src/static.ts";
-import { EngineError, canonicalJson, signStripePayload, verifyReceipt, type AuditEntry, type SignedReceipt } from "../src/index.ts";
+import { EngineError, canonicalJson, signStripePayload, verifyReceipt, type AuditEntry, type PaymentLinks, type SignedReceipt } from "../src/index.ts";
+import { FixedClock, FakePaymentLinks } from "../src/testing/index.ts";
 
 interface CheckResult {
   ok: boolean;
@@ -506,5 +519,142 @@ describe("reference UI: the page's checks (receipt-check.js, no DOM)", () => {
     assert.equal(await check.sha256Hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     assert.equal(check.shortHash("a".repeat(64)), "aaaaaaaa...aaaaaaaa");
     assert.equal(check.shortHash("abc"), "abc");
+  });
+});
+
+describe("reference UI: the demo world's adapters and clock (review of #50)", () => {
+  /** A real adapter's shape: private state, and the optional `cancel` and `refund` of later PRs. */
+  class RealLinks {
+    readonly capabilities = new FakePaymentLinks().capabilities;
+    readonly #calls: string[] = [];
+    get calls(): readonly string[] {
+      return this.#calls;
+    }
+    async createLink(input: { paymentId: string }): Promise<{ linkId: string; url: string }> {
+      this.#calls.push(`create ${input.paymentId}`);
+      return { linkId: `cs_${input.paymentId}`, url: `https://checkout.example/cs_${input.paymentId}` };
+    }
+    async expireLink(input: { linkId: string }): Promise<{ state: "expired" }> {
+      this.#calls.push(`expire ${input.linkId}`);
+      return { state: "expired" };
+    }
+    async cancel(input: { linkId: string }): Promise<{ state: "cancelled" }> {
+      this.#calls.push(`cancel ${input.linkId}`);
+      return { state: "cancelled" };
+    }
+    async refund(input: { paymentIntentId: string }): Promise<{ state: "refunded" }> {
+      this.#calls.push(`refund ${input.paymentIntentId}`);
+      return { state: "refunded" };
+    }
+  }
+
+  it("passes cancel and refund through to the real adapter, on the adapter itself, and records each link", async () => {
+    const real = new RealLinks();
+    const links: CreatedLink[] = [];
+    const wrapped = recordLinks(real as unknown as PaymentLinks, links) as unknown as RealLinks;
+    assert.equal(wrapped.capabilities, real.capabilities);
+    assert.equal(typeof wrapped.cancel, "function");
+    assert.equal(typeof wrapped.refund, "function");
+    assert.deepEqual(await wrapped.createLink({ paymentId: "pay_1" }), { linkId: "cs_pay_1", url: "https://checkout.example/cs_pay_1" });
+    assert.deepEqual(await wrapped.expireLink({ linkId: "cs_pay_1" }), { state: "expired" });
+    assert.deepEqual(await wrapped.cancel({ linkId: "cs_pay_1" }), { state: "cancelled" });
+    assert.deepEqual(await wrapped.refund({ paymentIntentId: "pi_1" }), { state: "refunded" });
+    assert.deepEqual(real.calls, ["create pay_1", "expire cs_pay_1", "cancel cs_pay_1", "refund pi_1"]);
+    assert.deepEqual(links, [{ paymentId: "pay_1", linkId: "cs_pay_1", url: "https://checkout.example/cs_pay_1" }]);
+  });
+
+  it("leaves an optional method missing when the real adapter lacks it", () => {
+    const plain: PaymentLinks = { capabilities: new FakePaymentLinks().capabilities, createLink: async () => ({ linkId: "l", url: "u" }), expireLink: async () => ({ state: "expired" }) };
+    const wrapped = recordLinks(plain, []) as PaymentLinks & { cancel?: unknown; refund?: unknown };
+    assert.equal("cancel" in wrapped, false);
+    assert.equal(wrapped.cancel, undefined);
+    assert.equal(wrapped.refund, undefined);
+  });
+
+  it("builds the demo world on the wrapped adapter, so a link the real one creates is recorded", async () => {
+    const real = new RealLinks();
+    const world = createDemoWorld({ payments: real as unknown as PaymentLinks });
+    const call = { callId: (await world.engine.startCall({ locale: "fr", flow: "deposit-connect" })).callId, linkId: "", receipt: null };
+    assert.ok((await verifyToLevel2(world, call, "payment.request")).ok);
+    const payment = await world.engine.requestPayment(call.callId);
+    assert.deepEqual(real.calls, [`create ${payment.paymentId}`]);
+    assert.deepEqual(world.links.map((link) => link.paymentId), [payment.paymentId]);
+    await world.close();
+  });
+
+  it("starts the door relay once for callers that ask together (#47's shared startup)", async () => {
+    const world = createDemoWorld();
+    const [a, b] = await Promise.all([world.relayUrl(), world.relayUrl()]);
+    assert.equal(a, b);
+    assert.equal(await world.relayUrl(), a);
+    await world.close();
+  });
+
+  it("counts only a door opened for this run's own grant, never one opened for another grant", async () => {
+    const world = createDemoWorld();
+    const runs = new DemoRuns(world);
+    const first = await runs.start("entry");
+    for (let i = 0; i < 3; i++) await runs.step(first.runId);
+    assert.equal(world.doorsOpened.length, 1);
+    // The same world, but the record of which grants opened a door is lost: a door did open (for the
+    // first run), yet none for this run's grant, so the step must not pass.
+    const blind: DemoWorld = { ...world, openedFor: new Set<string>() };
+    const call = { callId: "", linkId: "", receipt: null };
+    const steps = SCRIPTS.entry;
+    for (const step of steps.slice(0, 2)) assert.ok((await step.run(blind, call)).ok);
+    const door = await steps[2]!.run(blind, call);
+    assert.equal(door.ok, false, door.detail);
+    assert.match(door.detail, /NO door opened for it/);
+    await world.close();
+  });
+
+  it("moves a fixed clock past VER-1's first wait, without a timer", async () => {
+    const clock = new FixedClock();
+    const before = clock.now().getTime();
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      await waitOutFailureWait(clock);
+    } finally {
+      mock.timers.reset();
+    }
+    assert.ok(clock.now().getTime() - before > FIRST_FAILURE_WAIT_MS);
+  });
+
+  it("waits VER-1's first wait out for real on any other clock (the live demo's wall clock)", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      let done = false;
+      const waiting = waitOutFailureWait({ now: () => new Date() }).then(() => (done = true));
+      await Promise.resolve();
+      mock.timers.tick(FIRST_FAILURE_WAIT_MS);
+      await Promise.resolve();
+      assert.equal(done, false, "resolved before the wait passed");
+      mock.timers.tick(100);
+      await waiting;
+      assert.equal(done, true);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("the owner-command step waits for the right PIN on a clock that cannot be moved", async () => {
+    const fixed = new FixedClock();
+    // A clock with the fixed clock's time but no advance(): only real time can pass for it.
+    const world = createDemoWorld({ clock: { now: () => fixed.now() } });
+    const call = { callId: "", linkId: "", receipt: null };
+    const steps = SCRIPTS["owner-command"];
+    for (const step of steps.slice(0, 2)) assert.ok((await step.run(world, call)).ok);
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      let settled = false;
+      const right = steps[2]!.run(world, call).then((outcome) => ((settled = true), outcome));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(settled, false, "keyed the right PIN before VER-1's wait passed");
+      mock.timers.tick(FIRST_FAILURE_WAIT_MS + 100);
+      assert.ok((await right).ok);
+    } finally {
+      mock.timers.reset();
+    }
+    await world.close();
   });
 });
