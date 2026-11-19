@@ -405,8 +405,9 @@ the currency's own decimals.
 order, and every refusal is JSON `{"error": code}`:
 
 - **Rate limit**, first, before any other work: each remote address, as the socket reports it,
-  gets `rateLimit.requests` requests per fixed window of `rateLimit.windowMs` on the server's clock
-  (default 300 a minute). Every request counts, whatever its route or answer. Over the limit:
+  gets `rateLimit.requests` requests per fixed window of `rateLimit.windowMs` (default 300 a
+  minute), counted on `rateLimit.clock`, the system clock by default and never the server's
+  `clock`, which the demo fixes. Every request counts, whatever its route or answer. Over the limit:
   `429 rate_limited` with `Retry-After` in whole seconds to the window's end. `X-Forwarded-For` is
   never read. At most `rateLimit.addresses` addresses are tracked (default 10,000); to make room,
   ended windows are dropped first, then the oldest.

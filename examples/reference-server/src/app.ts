@@ -9,7 +9,7 @@ import { STATUS_CODES, createServer, type IncomingMessage, type Server, type Ser
 import type { Socket } from "node:net";
 import { performance } from "node:perf_hooks";
 
-import { EngineError, parseStripeEvent, verifyStripeSignature, type Clock, type Engine } from "../../../src/index.ts";
+import { EngineError, parseStripeEvent, systemClock, verifyStripeSignature, type Clock, type Engine } from "../../../src/index.ts";
 import type { DemoRuns, RunAnswer } from "./demo-runs.ts";
 import { isDemoFlow } from "./script.ts";
 import { UI_HEADERS, loadStaticFiles, type StaticFile } from "./static.ts";
@@ -29,10 +29,12 @@ export interface ReferenceServerOptions {
    */
   timeoutMs?: number;
   /**
-   * Requests per remote address per window, the window counted on `clock`, for at most
-   * `addresses` addresses at once. Default 300 a minute, 10,000 addresses.
+   * Requests per remote address per window, for at most `addresses` addresses at once. Default
+   * 300 a minute, 10,000 addresses. The window is counted on `clock`, the system clock by default,
+   * never on the server's `clock`: the demo's server runs on a fixed clock, where a window that
+   * filled up would never end.
    */
-  rateLimit?: { requests: number; windowMs: number; addresses?: number };
+  rateLimit?: { requests: number; windowMs: number; addresses?: number; clock?: Clock };
   /**
    * Called once per answered request, after the answer is written, including the refusals of
    * requests node:http could not read. Absent means no logs. If it throws, the entry is dropped.
@@ -109,9 +111,10 @@ class HttpError extends Error {
 }
 
 /**
- * A fixed window per remote address, on the injected clock. The address is the socket's: the
- * server never reads `X-Forwarded-For`, which any client can set, so behind a proxy every caller
- * shares the proxy's address and the proxy has to do its own limiting.
+ * A fixed window per remote address, on its own clock (the system clock unless the host gives
+ * one). The address is the socket's: the server never reads `X-Forwarded-For`, which any client
+ * can set, so behind a proxy every caller shares the proxy's address and the proxy has to do its
+ * own limiting.
  */
 class RateLimit {
   readonly #requests: number;
@@ -163,7 +166,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   const limits: BodyLimits = { ...DEFAULT_BODY_LIMITS, ...options.bodyLimits };
   const timeoutMs = options.timeoutMs ?? 10_000;
   const rate = options.rateLimit ?? { requests: 300, windowMs: 60_000 };
-  const rateLimit = new RateLimit(rate.requests, rate.windowMs, rate.addresses ?? 10_000, options.clock);
+  const rateLimit = new RateLimit(rate.requests, rate.windowMs, rate.addresses ?? 10_000, rate.clock ?? systemClock);
   const files = options.ui === undefined ? new Map<string, StaticFile>() : loadStaticFiles();
 
   async function stripeWebhook(req: IncomingMessage, route: "identity" | "payments"): Promise<[number, Json]> {

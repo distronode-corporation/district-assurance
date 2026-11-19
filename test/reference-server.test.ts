@@ -158,10 +158,10 @@ describe("reference server limits", () => {
     return { base: `http://127.0.0.1:${port}`, port };
   }
 
-  it("limits each address to a number of requests per window, on the server's clock", async (ctx) => {
+  it("limits each address to a number of requests per window, on the rate limit's clock", async (ctx) => {
     const clock = new FixedClock();
     const logs: RequestLog[] = [];
-    const s = await serve(ctx, { clock, rateLimit: { requests: 2, windowMs: 60_000 }, log: (e) => logs.push(e) });
+    const s = await serve(ctx, { clock, rateLimit: { requests: 2, windowMs: 60_000, clock }, log: (e) => logs.push(e) });
     assert.equal((await fetch(`${s.base}/healthz`)).status, 200);
     assert.equal((await fetch(`${s.base}/nope`)).status, 404, "every request counts, matched or not");
     let res = await fetch(`${s.base}/healthz`, { headers: { "x-forwarded-for": "192.0.2.1" } });
@@ -180,10 +180,27 @@ describe("reference server limits", () => {
     ]);
   });
 
+  it("counts windows on the rate limit's own clock, so a server on the demo's fixed clock is never locked out", async (ctx) => {
+    // npm run ui and npm run demo give the server the demo's FixedClock, which never moves.
+    const serverClock = new FixedClock();
+    const rateClock = new FixedClock();
+    const s = await serve(ctx, { clock: serverClock, rateLimit: { requests: 1, windowMs: 60_000, clock: rateClock } });
+    assert.equal((await fetch(`${s.base}/healthz`)).status, 200);
+    assert.equal((await fetch(`${s.base}/healthz`)).status, 429);
+    serverClock.advance(60_000);
+    assert.equal((await fetch(`${s.base}/healthz`)).status, 429, "the server's clock does not end a window");
+    rateClock.advance(60_000);
+    assert.equal((await fetch(`${s.base}/healthz`)).status, 200, "the rate limit's clock does");
+    const d = await serve(ctx, { clock: serverClock, rateLimit: { requests: 1, windowMs: 60_000 } });
+    assert.equal((await fetch(`${d.base}/healthz`)).status, 200);
+    serverClock.advance(120_000);
+    assert.equal((await fetch(`${d.base}/healthz`)).status, 429, "by default the system clock counts the window, not the server's");
+  });
+
   it("tracks a bounded number of addresses, forgetting ended windows first, then the oldest", async (ctx) => {
     const clock = new FixedClock();
     // Listening on every address, so the same server sees IPv4 and IPv6 loopback as two callers.
-    const s = await serve(ctx, { clock, rateLimit: { requests: 1, windowMs: 60_000, addresses: 1 } }, "::");
+    const s = await serve(ctx, { clock, rateLimit: { requests: 1, windowMs: 60_000, addresses: 1, clock } }, "::");
     const v4 = `http://127.0.0.1:${s.port}/healthz`;
     const v6 = `http://[::1]:${s.port}/healthz`;
     assert.equal((await fetch(v4)).status, 200);
