@@ -1,9 +1,10 @@
 // File pieces that are planned and not built. Each throws NotImplementedError naming its issue.
 import { NotImplementedError } from "../core/errors.ts";
+import type { Locale } from "../core/runtime.ts";
 import type { FieldValue, IntakeForm } from "./intake.ts";
 
 /** The read-back line, built by code in English or French, that the caller confirms. */
-export function buildReadBack(_form: IntakeForm, _values: Readonly<Record<string, FieldValue>>, _locale: "en" | "fr"): never {
+export function buildReadBack(_form: IntakeForm, _values: Readonly<Record<string, FieldValue>>, _locale: Locale): never {
   throw new NotImplementedError("buildReadBack", "FIL-1");
 }
 

@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `SUPPORTED_LOCALES` (`["en", "fr"]`, frozen; its members are the `Locale` type) and
+  `isSupportedLocale`: `startCall` checks a locale against it, and the texts the engine sends, the
+  amount formats and the spoken digit words are `Record<Locale, ...>` catalogs (`IDENTITY_TEXT`,
+  `PAYMENT_TEXT`, `AMOUNT_REGION`, `DIGIT_WORDS_BY_LOCALE`) that a test holds to every supported locale.
 - Gate, the fifth built-in module (GAT-1, ADR-25): signed, time-limited access grants (ES256 over
   canonical JSON, like receipts) after verification to `entry.open` (level 2 or more), delivered
   once through an `AccessController`. The engine owns every grant and outcome: it reserves, signs,
