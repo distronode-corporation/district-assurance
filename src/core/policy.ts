@@ -116,9 +116,13 @@ const COUNTRY_CODE = /^[1-9][0-9]{0,5}$/;
  * The country calling codes ITU-T has assigned to countries and geographic areas (ITU-T
  * Recommendation E.164, "List of ITU-T Recommendation E.164 assigned country codes", the complement
  * ITU publishes with its Operational Bulletin). Spare and withdrawn codes are left out, and so are
- * the codes for global services (800, 808, 870, 881 to 883, 888, 979, 991), which no number on file
- * for a person's country carries. The list is prefix-free, as E.164 requires. Re-check it against
- * ITU's current list when ITU assigns or withdraws a code.
+ * the codes for global services (800, 808, 870, 878, 881, 882, 883, 888, 979, and the trial code
+ * 991), which no number on file for a person's country carries: a texted code is never sent to
+ * one. The list is prefix-free, as E.164 requires.
+ *
+ * UNVERIFIED: this list was written from memory and has not been checked against ITU-T's
+ * published list. Check every entry against ITU-T's current list before release, and again when
+ * ITU assigns or withdraws a code.
  */
 export const E164_COUNTRY_CODES: readonly string[] = [
   "1", "7", "20", "27", "30", "31", "32", "33", "34", "36", "39", "40", "41", "43", "44", "45",

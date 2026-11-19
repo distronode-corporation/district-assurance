@@ -122,8 +122,10 @@ of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:
 - `maxKeypadAttemptsPerCall` outside 1 to 5;
 - a `textCodeCountryCodes` that is not a list of distinct E.164 country calling codes (1 to 6
   digits, no `+`), each starting with a country code ITU-T has assigned to a country or geographic
-  area (`E164_COUNTRY_CODES`; `"4"` and `"42"` are refused, `"44"` and `"4420"` accepted; spare,
-  withdrawn and global-service codes such as 800 and 881 are not in it).
+  area (`E164_COUNTRY_CODES`; `"4"` and `"42"` are refused, `"44"` and `"4420"` accepted; spare
+  and withdrawn codes are not in it). The global-service codes 800, 808, 870, 878, 881, 882, 883,
+  888 and 979 (and the trial code 991) are always refused, and so is any longer prefix of one: no
+  texted code goes to a global-service number.
 
 It checks every part in one pass: a malformed part is reported and the others are still checked.
 

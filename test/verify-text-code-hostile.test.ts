@@ -154,4 +154,26 @@ describe("#79 hostile: where a code may go", () => {
     for (const good of [["1"], ["44"], ["33", "1"], ["1204"], ["4420"], ["383"], ["7"]]) assert.deepEqual(errors(good), [], JSON.stringify(good));
     for (const a of E164_COUNTRY_CODES) for (const b of E164_COUNTRY_CODES) if (a !== b) assert.equal(b.startsWith(a), false, `${a} is a prefix of ${b}`);
   });
+
+  it("C7 global-service codes are refused, with longer prefixes, and SPEC and the list's comment name every one", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { validatePolicy, defaultVerificationPolicy, isAssignedCountryPrefix } = await import("../src/core/policy.ts");
+    const globalService = ["800", "808", "870", "878", "881", "882", "883", "888", "979"];
+    const errors = (codes: unknown) => validatePolicy({ ...defaultVerificationPolicy(), textCodeCountryCodes: codes } as never).filter((e) => e.includes("textCodeCountryCodes"));
+    for (const code of globalService) {
+      for (const prefix of [code, `${code}1`, `${code}12`]) {
+        assert.equal(isAssignedCountryPrefix(prefix), false, prefix);
+        assert.notDeepEqual(errors([prefix]), [], prefix);
+        assert.notDeepEqual(errors(["1", prefix]), [], `1 and ${prefix}`);
+      }
+    }
+    const spec = await readFile(new URL("../SPEC.md", import.meta.url), "utf8");
+    const policySource = await readFile(new URL("../src/core/policy.ts", import.meta.url), "utf8");
+    const listComment = policySource.slice(0, policySource.indexOf("export const E164_COUNTRY_CODES"));
+    for (const code of globalService) {
+      assert.match(spec, new RegExp(`\\b${code}\\b`), `SPEC names ${code}`);
+      assert.match(listComment, new RegExp(`\\b${code}\\b`), `the list's comment names ${code}`);
+    }
+    assert.match(listComment, /not been checked against ITU-T/, "the list's comment says it is unverified");
+  });
 });
