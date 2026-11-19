@@ -7,7 +7,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { BUILT_IN_FACTORS } from "../../src/verify/factors.ts";
-import { LINES, TACTICS, TOOLS, leaks, runScript, stringsIn, suiteConfig, type HostAction, type Script, type Turn } from "./host.ts";
+import { LINES, TACTICS, TOOLS, leaks, runScript, stringsIn, suiteConfig, type HostAction, type RunReport, type Script, type Turn } from "./host.ts";
 
 const DIR = new URL("./scripts/", import.meta.url);
 const files = readdirSync(DIR).filter((f) => f.endsWith(".json")).sort();
@@ -85,14 +85,22 @@ function skeleton(s: Script): unknown {
   };
 }
 
+/** Rules a run never exercised, so a script cannot pass by testing nothing. */
+function vacuous(script: Script, report: RunReport): string[] {
+  const problems: string[] = [];
+  if (report.compared === 0) problems.push("the script never compares a wrong entry with an unknown account");
+  if (report.taintChecks === 0) problems.push("the script never checks a taint");
+  if (report.grantsTainted === 0) problems.push("the script never taints a session that holds a grant");
+  // "No text before a match" holds trivially when nothing is texted: a flooding script must text.
+  if (script.tactic === "text-flooding" && report.texts === 0) problems.push("a text-flooding script never sends a text");
+  return problems;
+}
+
 describe("Adversarial scripts", () => {
   for (const [i, script] of scripts.entries()) {
     it(`${script.id}: ${script.summary}`, async () => {
       assert.deepEqual(shapeProblems(files[i]!, script), []);
-      const report = await runScript(script);
-      assert.ok(report.compared > 0, "the script compares at least one wrong entry with an unknown account");
-      assert.ok(report.taintChecks > 0);
-      assert.ok(report.grantsTainted > 0, "the script taints at least one session that holds a grant");
+      assert.deepEqual(vacuous(script, await runScript(script)), []);
     });
   }
 });
@@ -150,6 +158,17 @@ describe("Adversarial suite coverage", () => {
 
   it("speaks the same lines in both languages", () => {
     assert.deepEqual(Object.keys(LINES.fr).sort(), Object.keys(LINES.en).sort());
+  });
+
+  it("fails a script that never exercises a rule, and a flooding script that never texts", () => {
+    const flooding = scripts.find((s) => s.tactic === "text-flooding")!;
+    assert.deepEqual(vacuous(flooding, { compared: 0, taintChecks: 0, grantsTainted: 0, texts: 0 }), [
+      "the script never compares a wrong entry with an unknown account",
+      "the script never checks a taint",
+      "the script never taints a session that holds a grant",
+      "a text-flooding script never sends a text",
+    ]);
+    assert.deepEqual(vacuous(scripts.find((s) => s.tactic === "urgency")!, { compared: 1, taintChecks: 1, grantsTainted: 1, texts: 0 }), []);
   });
 
   it("refuses a malformed script instead of testing nothing", () => {

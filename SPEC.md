@@ -426,9 +426,11 @@ Every script also checks that nothing keyed, said or fetched reaches the ledger,
 spoken line, and that the ledger chain verifies. The check reads every decoded string in the
 ledger and every raw text body, and finds a value as a whole token, so a value embedded in a field
 ("DOB: 19850214") fails it while the same digits inside a hash do not. A value under 4
-characters fails it only as a whole field, since shorter tokens also occur in timestamps. The suite fails when a tactic lacks a script in
-either language, when the French script does not mirror the English one turn for turn, when a
+characters fails it only as a whole field, since shorter tokens also occur in timestamps. The
+suite fails when a tactic lacks a script in either language, when the French script does not
+mirror the English one turn for turn, when a
 built factor (one not marked planned) or a policy scope is not exercised in both languages, or
 when a script never compares a wrong entry with an unknown account or never taints a session that
-holds a grant. A factor that stops being planned (`text_code` with VER-2, `spoken_knowledge` with
+holds a grant, or when a text-flooding script never sends a text (so "no text before a match" is
+never vacuous). A factor that stops being planned (`text_code` with VER-2, `spoken_knowledge` with
 VER-3) fails the suite until it has scripts in both languages.
