@@ -36,7 +36,8 @@ export interface TwilioSignatureInput {
 export function verifyTwilioSignature(input: TwilioSignatureInput): TwilioSignatureCheck {
   // Read once: the URL whose bodySHA256 is taken is the URL whose signature is checked.
   const { url: signedUrl, payload, header } = input;
-  const tokens = input.authTokens.filter((s) => s.length > 0);
+  // Like the Telnyx keys: an entry that is not a non-empty string is skipped, never thrown on.
+  const tokens = input.authTokens.filter((s): s is string => typeof s === "string" && s.length > 0);
   if (tokens.length === 0) return { ok: false, reason: "no_secret" };
   if (header === null || header === undefined || header === "") return { ok: false, reason: "missing_header" };
   const query = signedUrl.indexOf("?");
