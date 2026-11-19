@@ -34,7 +34,9 @@ describe("PIN factor, keyed hash", () => {
     assert.deepEqual(await t.engine.finishVerification(callId), { level: 1, scopes: ["intake.file", "status.read"] });
     const entries = await t.ledger.list();
     assert.deepEqual(entries[1]!.detail, { subject: "host" });
-    assert.deepEqual(entries[2]!.detail, { kind: "pin", passed: true });
+    const { tag, ...detail } = entries[2]!.detail;
+    assert.deepEqual(detail, { kind: "pin", passed: true });
+    assert.match(String(tag), /^[0-9a-f]{64}$/, "every PIN entry carries a keyed tag (VER-12)");
     assert.equal(JSON.stringify(entries).includes(`"${PIN}"`), false, "the PIN is never written");
   });
 
@@ -668,7 +670,14 @@ describe("PIN enrolment and reset (VER-6)", () => {
     await t.engine.resetPin(OWNER);
     assert.equal((await t.engine.submitPin(before.callId, PIN)).matched, false, "the old PIN no longer works on a call already verifying");
     assert.equal((await t.records.getSubject("ws_test", OWNER))!.pinDigest, undefined);
-    assert.deepEqual(resets, [{ workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER }], "VER-1's own counter key");
+    assert.deepEqual(
+      resets,
+      [
+        { workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER },
+        { workspaceId: "ws_test", factor: "duress.hidden.pin", scope: "subject", key: OWNER },
+      ],
+      "VER-1's own counter key, and VER-12's hidden one",
+    );
     const last = (await t.ledger.list()).find((e) => e.event === "pin.reset")!;
     assert.deepEqual([last.event, last.actor, last.callId, last.detail], ["pin.reset", "member", null, { subjectKey: OWNER }]);
     const { callId } = await t.engine.startCall();
@@ -688,7 +697,10 @@ describe("PIN enrolment and reset (VER-6)", () => {
     });
     await t.engine.resetPin(OWNER);
     assert.equal((await t.records.getSubject("ws_test", OWNER))!.pinDigest, pinDigest(TEST_KNOWLEDGE_KEY, OWNER, PIN));
-    assert.deepEqual(resets, [{ workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER }]);
+    assert.deepEqual(resets, [
+      { workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER },
+      { workspaceId: "ws_test", factor: "duress.hidden.pin", scope: "subject", key: OWNER },
+    ]);
     assert.equal((await t.ledger.list()).at(-1)!.event, "pin.reset");
   });
 });

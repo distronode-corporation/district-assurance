@@ -54,7 +54,10 @@ describe("Engine construction", () => {
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: true, locked: false });
     assert.deepEqual(await t.engine.submitPin(callId, PIN), { matched: true, locked: false });
-    assert.deepEqual(asked, ["subject", "field", "pin"], "the subject key, the keypad field and the PIN all went through the function");
+    // The duress digest (VER-12) and the PIN entry's keyed tag go through it too.
+    assert.deepEqual(asked.slice(0, 4), ["subject", "field", "pin", "duress"], "the subject key, the keypad field and the PIN all went through the function");
+    assert.equal(asked.length, 5);
+    assert.ok(asked[4]!.startsWith('["pin.tag",'), "the PIN entry's tag");
     assert.equal((await t.engine.finishVerification(callId)).level, 1);
     assert.equal(JSON.stringify(await t.ledger.list()).includes(DOB), false);
 

@@ -3,7 +3,7 @@
 // says which of them may count. A host adds its own factor (one the caller enters and code judges)
 // with `badgeModule({ factors: [...] })`.
 import type { SubjectRecord } from "../core/adapters.ts";
-import { hexDigestsEqual } from "../core/hash.ts";
+import { hexDigestsEqual, hmacSha256Hex } from "../core/hash.ts";
 import { FACTOR_KINDS, FORBIDDEN_FACTOR_KINDS, type SpokenPolicy, type VerificationPolicy } from "../core/policy.ts";
 import { isIntegerIn } from "../core/shape.ts";
 import type { AdapterName, EngineRuntime, Locale } from "../core/runtime.ts";
@@ -51,6 +51,32 @@ export interface PinSettings {
   maxDigits: number;
   /** 1 to 5. */
   maxAttemptsPerCall: number;
+  /**
+   * The duress PIN (VER-12), off unless set. `refuseScopes`: scopes refused on a duress call on top
+   * of every money, contact and access scope (for example `owner.command`); it may be empty.
+   */
+  duress?: { refuseScopes: string[] };
+}
+
+/**
+ * What a PIN entry was: not a match, the PIN, or the duress PIN. Only the call record and the
+ * ledger's keyed `tag` know which pass it was; to the caller a duress entry is a pass.
+ */
+export type PinOutcome = "fail" | "pass" | "duress";
+
+export const PIN_OUTCOMES: readonly PinOutcome[] = ["fail", "pass", "duress"];
+
+/** The stored digest of a subject's duress PIN: `HMAC(key, "duress:" + subjectKey + ":" + pin)`. */
+export function duressDigest(knowledgeKey: string | Uint8Array, subjectKey: string, pin: string): string {
+  return hmacSha256Hex(knowledgeKey, `duress:${subjectKey}:${pin}`);
+}
+
+/**
+ * The `tag` every `pin` factor entry carries: an HMAC under the knowledge key of the entry's event
+ * id and its outcome. The same shape for every outcome, so only the key holder can tell them apart.
+ */
+export function pinTag<R extends string | Promise<string>>(hmac: (data: string) => R, eventId: string, outcome: PinOutcome): R {
+  return hmac(JSON.stringify(["pin.tag", eventId, outcome]));
 }
 
 export interface BadgeSettings {
@@ -96,24 +122,42 @@ export function checkFactorPlugin(plugin: FactorPlugin, taken: readonly string[]
   return errors;
 }
 
-/** The PIN factor's judge: a keyed hash on file, or the host's verifier. Unknown subjects do the same work. */
-export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: FactorJudgeInput): Promise<boolean> {
+/**
+ * The PIN factor's judge: a keyed hash on file, or the host's verifier. Unknown subjects do the same
+ * work. Every entry is compared with the PIN and the duress PIN digests alike, whether or not a
+ * duress PIN is on file or turned on, so the work and the time never say which it was.
+ */
+export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: FactorJudgeInput): Promise<PinOutcome> {
   const pin = typeof input.entry === "string" ? input.entry : "";
   const wellFormed = isKeypadEntry(pin) && pin.length >= settings.minDigits && pin.length <= settings.maxDigits;
+  let match: boolean;
+  let duress: boolean;
+  let brokenSubject = false;
   if (settings.mode === "verifier") {
     // The verifier is asked every time, with a stand-in for a malformed entry or a non-keypad
     // account, so the answer's timing never says which it was. The stand-in's answer is ignored.
-    const usable = input.subjectKey !== null && wellFormed;
     const subjectKey = input.subjectKey ?? (await input.hmac("subject:"));
-    const { matched } = await rt.adapter("pinVerifier").verify({ workspaceId: input.workspaceId, subjectKey, pin: wellFormed ? pin : "0".repeat(settings.minDigits) });
-    return matched && usable && input.subject !== null;
+    const answer = await rt.adapter("pinVerifier").verify({ workspaceId: input.workspaceId, subjectKey, pin: wellFormed ? pin : "0".repeat(settings.minDigits) });
+    duress = answer.duress === true;
+    match = answer.matched;
+  } else {
+    // Both digests on file are read from the store now, not from the call's copy of the subject, so
+    // a reset (which removes both) since verification began counts. An unknown subject is looked up
+    // the same way.
+    const onFile = await rt.adapter("records").getSubject(input.workspaceId, input.subjectKey ?? (await input.hmac("subject:")));
+    const entry = wellFormed ? pin : "";
+    match = hexDigestsEqual(await input.hmac(`pin:${input.subjectKey ?? ""}:${entry}`), onFile?.pinDigest ?? "");
+    duress = hexDigestsEqual(await input.hmac(`duress:${input.subjectKey ?? ""}:${entry}`), onFile?.duressDigest ?? "");
+    // The two digests are keyed apart, so they are equal only on a subject imported wrongly.
+    brokenSubject = hexDigestsEqual(onFile?.pinDigest ?? "", onFile?.duressDigest ?? "") && onFile?.pinDigest !== undefined;
   }
-  // The digest on file is read from the store now, not from the call's copy of the subject, so a
-  // reset since verification began counts. An unknown subject is looked up the same way.
-  const onFile = await rt.adapter("records").getSubject(input.workspaceId, input.subjectKey ?? (await input.hmac("subject:")));
-  const digest = await input.hmac(`pin:${input.subjectKey ?? ""}:${wellFormed ? pin : ""}`);
-  const match = hexDigestsEqual(digest, onFile?.pinDigest ?? "");
-  return match && wellFormed && input.subject !== null;
+  // A subject on file implies a keypad-shaped account or a host's subject key, never the stand-in.
+  if (!wellFormed || input.subject === null) return "fail";
+  // An entry that is both the PIN and the duress PIN, in either mode, and a subject imported with
+  // the two digests equal, are refused like a wrong PIN, with no alarm: neither a login nor an alarm.
+  if ((match && duress) || brokenSubject) return "fail";
+  if (duress && settings.duress !== undefined) return "duress";
+  return match ? "pass" : "fail";
 }
 
 /** The keypad knowledge factor's judge: every configured field at once, one answer. */

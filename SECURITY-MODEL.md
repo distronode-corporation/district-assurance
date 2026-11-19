@@ -112,8 +112,9 @@ is refused too, even when its take-back write failed, because a retry finishes o
 whose id, stored with the digest, is the retrying call's own; whichever try stored the PIN writes
 `pin.enrolled`, once, even when two tries on one
 call race or the session write after the store's fails on the call's last try (tested). The PIN factor
-reads the digest from the store on every attempt, so after a reset the old PIN fails even on a call
-that began verification before it (tested). In `verifier` mode the engine never enrols. `pin.enrolled` and `pin.reset` carry no
+reads both digests (the PIN's and the duress PIN's) from the store on every attempt, so after a
+reset or a removed duress PIN the old one fails even on a call that began verification before it
+(tested). In `verifier` mode the engine never enrols. `pin.enrolled` and `pin.reset` carry no
 digits (tested). Who may call `resetPin`, and how the business confirms the request first, is the
 host's (left to the host).
 
@@ -155,6 +156,55 @@ nothing from it; one who keys a real account soon after that account's own five 
 the hour is refused, which says only that the account was busy, never its details. Lifting either
 early is the host's (`AttemptCounters.reset` on the `flow.start` counter); a pass never lifts a
 start limit, since it forgets only the failures of its own factor kind (`forgetPass`, tested).
+
+### Coercion (duress PIN)
+
+An owner made to call under pressure, with the person forcing them listening beside them.
+**Controls (VER-12, off unless Badge's `pin.duress` is set):** the business enrols a second,
+duress PIN for the subject with a host call, never a caller one, stored as its own keyed digest
+and refused when it equals the PIN, the account number or any keypad knowledge (tested). Every PIN
+entry is compared with both digests, whether or not a duress PIN is on file, so the work, the time
+and the answer are the same (tested). A duress entry gets the same answer, level, grant, events
+and receipt as the PIN (tested); the duress state is kept only in the call record. On that call
+`authorize` refuses every money, contact and access scope and the scopes the business lists in
+`refuseScopes` (for example `owner.command`), with the same `false` as a scope with no grant
+(tested). Every duress entry owes an alert, written in the same write as the entry, and recorded
+against the call even if verification restarted or the call ended while it was judged (tested).
+The engine sends it to the host's `DuressNotifier` after that write, off the caller's response path
+(so a slow notifier delays nothing the caller hears), even when the ledger append fails (tested),
+and keeps it owed until `notify` resolves: the call's next write, `flushLedger` and the host's sweep
+`deliverDuressAlerts` retry it, at least once by `alertId`, which the call's id and entry number
+make unique across engines (tested); after a crash `sweepAlerts` finds every call that still owes
+one without knowing its id (tested). A notifier that fails changes
+nothing on the call (tested). `putDuressDigest` stores only while the PIN checked against is still on
+file, so a reset and a new PIN meanwhile can never make the duress PIN equal the PIN (tested); a
+reset removes the PIN and the duress PIN in one store step, so it never removes a duress PIN
+enrolled against a newer PIN (tested); and an entry that matches both, on an imported subject or in
+the host's verifier's answer, or any entry on a subject whose two digests are equal, is refused like
+a wrong PIN, neither a login nor an alarm (tested). A duress entry flags its subject until the
+business clears it (`clearDuress`, written to the ledger with an opaque member id and a keyed
+digest of the subject, so neither the ledger nor an export shows who was under duress): every
+later pass on the subject, on any call, is a duress entry, refused the same scopes, and alerted
+once a call (tested). The flag holds after a config turns the duress PIN off, refusing every scope
+(tested); a lost write of the flag is made good when the entry's alert is delivered, never over a
+clearing that came after the entry (tested), though a clearing that lands during that delivery may
+need repeating; a duress PIN entry whose own write fails still flags its subject (tested); a clearing that lands while a pass is judged stays
+cleared (tested). A duress
+entry resets the visible counters as any pass does, but the subject's failures are also counted
+where only a pass not under duress resets them, and their hard lock holds: an attacker who knows
+the duress PIN gets no more guesses at the real PIN than one who does not, and the real PIN, when
+it passes, alerts (tested, 20 wrong guesses between duress entries over 10 calls). Every PIN ledger entry carries a
+`tag` keyed to its event id and outcome, and the event ids of a duress call run as a normal call's
+(an alert's acknowledgement is not counted), so only the holder of the knowledge key can tell a
+duress pass from a normal one (tested); enrolling or removing a duress PIN writes nothing to the ledger.
+A PIN reset removes the duress PIN too.
+
+**Limits.** It does not stop someone who knows both PINs, or who makes the owner say which is
+which. The code is public, so an attacker can learn exactly how a duress call behaves. A refused
+action can itself be noticed by someone watching: the host speaks the same fixed line it uses for
+any scope without a grant, but a payment that never happens is still visible. The notifier is best
+effort; who it alerts, and how fast, is the host's. Anything the host sends after the call (PRV-10)
+must follow the same rule as on a normal call, or it gives the duress away.
 
 ### SIM swap and port-out
 
@@ -526,6 +576,14 @@ the key set URL or refreshes the copy.
 
 ## Left to the host
 
+- Authorizing the member behind `clearDuress` and `resetPin`: the engine takes the member id as
+  given, so only the host's staff tools, after their own sign-in, may call them.
+- Repeating a `clearDuress` that raced an alert's delivery: the counters store has no
+  compare-and-set, so a clearing that lands while an earlier entry's alert is delivered may be
+  undone, leaving the subject flagged (fail closed) until the business clears it again (tested).
+- Accepting that the hidden counter shows in the hard lock: because a duress entry never clears
+  earlier wrong guesses, a caller who counts guesses can see the hard lock come sooner after a
+  duress entry than after a real pass; waits and answers are unchanged (a kept trade-off).
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
   speech-to-text and the model while `sensitive` is set.
 - Keeping the knowledge key, the receipt signing key, the access signing key, the access code key
@@ -562,7 +620,17 @@ the key set URL or refreshes the copy.
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.
 - Calling `resetPin` only from the business's own staff tools, after the business has confirmed
   the request, never from a path a caller or the model can reach; and a `RecordStore.putPinDigest`
-  that stores only the digest it is given, and only if the subject has none, atomically.
+  that stores only the digest it is given, and only if the subject has none, atomically. The same
+  for `enrolDuressPin`, `removeDuressPin` and `putDuressDigest`, which stores only the duress
+  digest it is given, replaces one on file (only the business sets it), and only while the PIN
+  digest on file is the one given, atomically.
+- A `DuressNotifier` that alerts someone the business named, away from the call, and never
+  through anything the caller or the person beside them can see; that never blocks (it queues the
+  alert and returns); that drops repeats by `alertId`; and a sweep calling `sweepAlerts` (with a
+  session store that lists the calls owing alerts) or `deliverDuressAlerts` for recent calls, in
+  case a process stopped with an alert owed; a `RecordStore` whose `putPinDigest(null)` also
+  removes the duress digest in the same step; and, in `verifier` mode, a
+  `PinVerifier` that answers a duress PIN in the same time as any other entry.
 - Who may edit a workspace's FlowConfig, and keeping its revisions.
 - Keeping `refundPayment` on the business's side (a back office, staff tools), never on a tool the
   model can call, and deciding who in the business may ask for a refund.

@@ -9,6 +9,7 @@ import type {
   AuditLedger,
   CallbackDialer,
   CarrierSignals,
+  DuressNotifier,
   IdentityProvider,
   MessageSender,
   Notifier,
@@ -68,6 +69,8 @@ export interface EngineAdapters {
   dialer?: CallbackDialer;
   /** Told of each lock, so the business knows someone is locked out (INT-7). Optional, best effort. */
   notifier?: Notifier;
+  /** Told of a duress PIN entry (VER-12). Needed while Badge's `pin.duress` is set. */
+  duressNotifier?: DuressNotifier;
 }
 
 export type AdapterName = keyof EngineAdapters;
@@ -109,6 +112,16 @@ export interface CallRecord {
     /** On a `verification.locked` entry, the counter that locked, for the lock notice (INT-7). Never in the ledger. */
     counter?: AttemptCounterKey;
   }>;
+  /**
+   * The writes so far that queued ledger entries, numbering their event ids. Absent on a record
+   * saved before it was kept, which continues from its version.
+   */
+  ledgerWrites?: number;
+  /**
+   * Present, and true, while the call owes an alert to a host adapter (a duress alert, VER-12), so a
+   * session store can index the calls a sweep must visit (`SessionStore.listCallsOwingAlerts`).
+   */
+  owesAlerts?: true;
 }
 
 /** A call being changed inside one compare-and-set attempt. Everything here is synchronous and pure. */
@@ -118,8 +131,11 @@ export interface CallDraft {
   slice<T>(module: string): T;
   apply(event: SessionEvent): void;
   assertCan(event: SessionEvent): void;
-  /** Queues a ledger entry, written once the change is saved. */
-  emit(name: EngineEventName, actor: Actor, detail: { [key: string]: JsonValue }): void;
+  /**
+   * Queues a ledger entry, written once the change is saved. With `tag` (a PIN outcome, VER-12) the
+   * entry gets a `tag` field, an HMAC of its event id and that outcome; the outcome is never saved.
+   */
+  emit(name: EngineEventName, actor: Actor, detail: { [key: string]: JsonValue }, tag?: string): void;
   /** The flow step the call is on, or null when no flow is running. */
   step(): FlowStep | null;
 }

@@ -98,7 +98,7 @@ module the config has on.
 
 | Built-in | Steps | Needs | Adapters |
 |---|---|---|---|
-| `badge` | `badge.verify` | | `records`; `counters` with any factor the caller enters (`keypad_knowledge`, `pin`, plug-ins); `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `dialer`, `counters` with `callback`; `pinVerifier` with `pin` in verifier mode |
+| `badge` | `badge.verify` | | `records`; `counters` with any factor the caller enters (`keypad_knowledge`, `pin`, plug-ins); `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `dialer`, `counters` with `callback`; `pinVerifier` with `pin` in verifier mode; `duressNotifier` with `pin.duress` |
 | `dossier` | `dossier.collect` | `intake.file` | `records` |
 | `paylink` | `paylink.request` | `payment.request` | `payments`, `messages`; `amounts` for a step with `amountRef` |
 | `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
@@ -179,6 +179,9 @@ newer than the call's own `revision` when the config changed during the call).
 `authorize(callId, scope)` is true only for a scope the policy lists, on a call that has not
 ended, whose minimum is 0 or whose grant includes it, has not expired, and has a level at or
 above the scope's minimum under the config in force now.
+On a
+duress call (section 6) it is also false for every scope whose class is not `none` and for every
+scope in the duress `refuseScopes`.
 
 Links and callbacks go only to the subject's number on file, and only after a `keypad_knowledge`
 or `pin` factor passed since verification last started from nothing. A plug-in's pass does not
@@ -237,7 +240,9 @@ transcript per field in the policy's `spoken.fields`: `submitFactor(callId, "spo
 
 ## 6. PIN
 
-Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsPerCall (1 to 5)}`.
+Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsPerCall (1 to 5),
+duress?}`. `duress` is `{refuseScopes}`, a list of scopes without duplicates (it may be empty);
+the duress PIN is off unless it is set.
 
 - An entry is well formed when it is ASCII digits with a length from `minDigits` to `maxDigits`.
   A malformed entry is still an attempt, and fails.
@@ -293,7 +298,8 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   caller's request, and needs the `pin` factor on (and a string subject key: `invalid_input` otherwise). In `keyed_hash` mode it removes the digest
   (`putPinDigest` with null), so the subject has no PIN until they enrol again at level 2; in
   `verifier` mode the host's store resets its own PIN. Either way it clears the subject's PIN
-  failure counters when the engine has a `counters` adapter (VER-1), and appends `pin.reset` to the ledger with no call.
+  failure counters when the engine has a `counters` adapter (VER-1), its hidden one (VER-12)
+  included, but not a duress flag, and appends `pin.reset` to the ledger with no call. In `keyed_hash` mode `putPinDigest` with null removes the duress PIN too, in the same atomic step, so a duress PIN the business enrols against a PIN chosen after the reset began is never removed by it.
 
 **Lockouts across calls (VER-1).** Every factor the caller enters (keypad knowledge, the PIN,
 plug-ins) is also counted across calls, in an `AttemptCounters` store every engine of the
@@ -381,6 +387,9 @@ when there is a number.
   (VER-12): only `clearDuress` does, as the flag stays until the business clears it.
 - A counter is never keyed by flow or call, and no setting separates them: failures in one flow
   count in every other flow and call (VER-15, tested).
+- Outside `unlock`, lifting a lock early is the host's: `AttemptCounters.reset` with the keys (`counterKeys`) and,
+  with the duress PIN on, the subject's hidden key for the factor (`hiddenCounterKey(workspaceId,
+  kind, subjectKey)`, section 6), whose hard lock otherwise holds.
 
 **Callback (VER-9).** A built-in factor, not a plug-in: the business calls back the number on
 file, which proves possession of that line whatever number the first call came from. Badge needs
@@ -463,6 +472,99 @@ it), per calling number and per subject.
 - Caller ID can be spoofed, so the per-number limit can lock out the real owner of a number. The
   per-subject limit is the one that holds; the per-number one is a backstop. Lifting either early
   is the host's: `AttemptCounters.reset` with `counterKeys(workspaceId, "flow.start", keys)`.
+
+### Duress PIN (VER-12)
+
+A second PIN that an owner made to call under pressure enters instead of the PIN. Off unless
+`pin.duress` is set; then Badge needs the `duressNotifier` adapter.
+
+- Enrolment: `enrolDuressPin(subjectKey, pin)` is a host call for the business's own tools, never
+  a caller's. It needs the `pin` factor on (`precondition_failed`), `keyed_hash` mode
+  (`precondition_failed`; in `verifier` mode the host's store keeps its own duress PIN), a 64
+  lower-case hex subject key (`invalid_input`), `pin.duress` set (`precondition_failed`) and a
+  subject on file with a PIN (`precondition_failed`). Answers: `malformed` (not digits of a length
+  from `minDigits` to `maxDigits`), `weak` (equal to the PIN on file, the account number or any
+  keypad knowledge, compared as keyed hashes; every digit the same; a run; `weak` does not say
+  which), or `{enrolled: true}` once `RecordStore.putDuressDigest(workspaceId, subjectKey,
+  digest, ifPinDigest)` stored `duressDigest(knowledgeKey, subjectKey, pin)` = `HMAC-SHA256(knowledgeKey,
+  "duress:" + subjectKey + ":" + pin)`, in `SubjectRecord.duressDigest`. The store writes it only
+  while the subject's PIN digest is still the one it was checked against, atomically, and answers
+  whether it did; when not (a reset and a new PIN meanwhile) `enrolDuressPin` throws `conflict` and
+  nothing is stored. A second enrolment replaces it. `removeDuressPin(subjectKey)` removes it (same checks, except `pin.duress` may be
+  off). Neither writes to the ledger. `enrolPin` answers `weak` for a PIN equal to a duress PIN on
+  file.
+- Judging: in `keyed_hash` mode every PIN entry is hashed as both a PIN and a duress PIN and
+  compared with both digests (an empty one when none is on file), whatever the subject, the entry
+  or the setting, so the work and the time are the same. Both digests are read from the store on
+  every entry, never from the call's copy, so a duress PIN removed, or a PIN reset (which removes
+  both), counts even on a call that began verification before it. In `verifier` mode `PinVerifier.verify`
+  may answer `{duress: true}`, and `matched` is then ignored. A duress match counts only on a
+  subject on file, with a well-formed entry, while `pin.duress` is set; otherwise it fails like a
+  wrong PIN. An entry that matches both the PIN and the duress PIN (a subject imported with the two
+  PINs equal), in either mode, and in `keyed_hash` mode any entry on a subject whose two digests
+  are byte for byte equal, fail like a wrong PIN, with no alarm: in `verifier` mode, an answer
+  `{matched: true, duress: true}` fails.
+- A duress entry is a pass everywhere the caller can reach: the same `submitPin` answer, the same
+  factor, level, grant, state, events and receipt as the PIN. The call record's Badge part gets
+  `duress: {refuseScopes}` (the setting as it was then), which nothing clears for the rest of the
+  call, and `authorize` refuses as section 4 says, with the same `false` as a scope with no grant
+  (so `requestPayment` is refused with `scope_denied`). Anything sent after the call (PRV-10)
+  follows the same rule as on a normal call.
+- Flag until cleared: an entry of the duress PIN also flags its subject, durably and hidden, in the
+  `AttemptCounters` store every engine shares (kind `duress.flag`), after the call's write and
+  before the counters' visible reset, even when the entry was stale. A pass that is a duress entry
+  only because the flag was set never writes the flag again, so a `clearDuress` that lands while it
+  is judged stays cleared, and the pass does the same store work as a pass on a subject not flagged.
+  While the flag is set, every later pass on the subject, on any call and by any entered factor, is
+  a duress entry: its scopes refused, and the same to the caller as any pass. The flag is read for
+  every subject, whether or not `pin.duress` is on: a subject flagged before a config turned the
+  duress PIN off stays under duress, and with no `refuseScopes` left to read, its calls refuse every
+  scope of the policy. Alerts are coalesced: every entry of the duress PIN alerts, and a pass that
+  is a duress entry only by the flag alerts once a call (the first), so a flagged subject's call
+  always raises one, and repeated passes on it do not flood the business. Delivering an owed alert
+  sets the flag again first (`duress.flag`), in case the entry's own write of it was lost, unless the
+  subject was cleared after the entry: each alert records the subject's count of clearings
+  (`duress.clears`, one more per `clearDuress`, never reset) as it was read before the flag, and the
+  flag is set again only while that count is unchanged. A failure to set it leaves the alert owed. A duress entry resets the visible
+  counters as a pass does, so it looks like one; every entered factor's failures on the subject are
+  also counted in a hidden counter (kind `duress.hidden.<kind>`) that only a pass not under duress
+  resets (a duress entry takes off only its own failure), and that counter's hard lock (not its
+  waits) refuses like any lock. So a caller who knows the duress PIN gets no more guesses at the
+  real PIN than one who does not. `clearDuress(subjectKey, memberId)` is a host-privileged call,
+  like `resetPin`: the business's own tools, never a caller's request, once it knows the subject is
+  safe. The engine does not authenticate the member: the host must authorize them before it calls.
+  `memberId` is an opaque id, 1 to 64 of letters, digits, `.`, `_`, `-` (no `@` and no space, so
+  no email address or name reaches the ledger; `invalid_input` otherwise). `duress.cleared` is
+  written to the ledger first, naming the subject only by `duressClearedSubject(knowledgeKey,
+  subjectKey)` = `HMAC-SHA256(knowledgeKey, "duress.cleared:" + subjectKey)`, which the business can
+  match and a reader of the ledger or an export cannot; then the count of clearings goes up, and the
+  flag and the hidden counters of every installed factor (on or off) are cleared. A clearing that
+  lands while an earlier entry's alert is being delivered may be undone by that delivery's setting of
+  the flag (the counters store has no compare-and-set): the subject stays flagged, and the business
+  clears it again.
+- Every duress entry owes an alert: in the same write, Badge's part of the call record gets
+  `duressAlerts` `{alertId, subjectKey, at, clears}` and `duress`, and the record `owesAlerts: true` until
+  none is owed; `alertId` is `JSON.stringify(["duress", workspaceId, callId, n])` for the call's `n`th duress
+  entry, unique across engines whatever their id generators, even when verification restarted or the
+  call ended while the entry was judged (the entry is then not a factor, and `submitPin` throws the
+  same error as for any other stale entry). After a write, `flushLedger` included, and even when its
+  ledger append failed, the engine calls `DuressNotifier.notify({alertId, workspaceId, subjectKey,
+  callId, at})` for each alert the call owes, off the response path (after the reply), and takes the
+  alert off the record once `notify` resolves. An alert stays owed until then, and is sent again on
+  the next write, `flushLedger` or `deliverDuressAlerts(callId)` (the host's sweep, which waits and
+  answers how many were acknowledged), or `sweepAlerts()`, which finds the calls without their ids
+  through the optional `SessionStore.listCallsOwingAlerts(workspaceId)` (the calls whose record has
+  `owesAlerts: true`; `precondition_failed` without it) and answers `{sent, failed}`: the calls that
+  owe nothing now, and those that still owe one or could not be read (a listed call the store cannot
+  read, or no longer holds, is reported and the sweep goes on); one engine sends an alert once at a time, again after 30
+  seconds without an answer. So `notify` may see an `alertId` more than once. A notifier that throws,
+  rejects or never answers changes nothing on the call; it must not block.
+- The ledger tag: every `verification.factor` entry with `kind: "pin"` carries `tag` =
+  `HMAC-SHA256(knowledgeKey, JSON.stringify(["pin.tag", eventId, outcome]))`, outcome `fail`,
+  `pass` or `duress`, whether or not the duress PIN is on. `readPinTag(entry)` on the engine (and
+  `readPinTag(hmac, entry)`) returns the outcome, or null for another entry, a wrong key or a
+  changed entry. The ledger otherwise holds the same entries; the receipt's ledger head and the
+  `receipt.issued` digest differ only as the tag's bytes do.
 
 ## 7. FlowConfig
 
@@ -570,7 +672,7 @@ answer on file, a phone number, a link or card data.
 | `flow.abandoned` | `flow`, `step` |
 | `flow.rate_limited` | `flow`, `scope` (`subject` or `number`): never the subject key, the number or its hash |
 | `verification.started` | `subject`: `account`, `host` or `callback` (with `requestedOn`, the call that asked) |
-| `verification.factor` | `kind`, `passed` (and `status` for photo ID) |
+| `verification.factor` | `kind`, `passed` (and `status` for photo ID, `tag` for the PIN, section 6) |
 | `verification.factor_error` | `kind` (the judge threw; no factor recorded, the attempt stays counted) |
 | `verification.carrier_checked` | `checked`, `textCodeTrusted`, `identityMatch` |
 | `verification.locked` | `kind`, `scope` (`subject` or `number`), `hard`, `until`: never the subject key, the number or its hash |
@@ -582,6 +684,7 @@ answer on file, a phone number, a link or card data.
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt`, `policyVersion`, `configRevision` |
 | `pin.enrolled` | none (never the digits, the digest or their length) |
 | `pin.reset` | `subjectKey`; actor `member`, `callId` null |
+| `duress.cleared` | `subject` (a keyed digest, never the subject key), `memberId` (an opaque id); actor `member`, `callId` null |
 | `session.tainted` | `source` |
 | `sensitive.opened` / `sensitive.closed` | `reason` / none |
 | `intake.started` | `formId`, `version` |
@@ -609,10 +712,15 @@ answer on file, a phone number, a link or card data.
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
 A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
-with an `eventId` (the JSON tuple `[workspaceId, callId, version, index]`, unique on a ledger that
-several workspaces share), then appended in order; an entry the ledger would refuse (card data, or detail
-that is not canonical JSON, such as a lone surrogate) is refused before it is saved, so it can never
-block a call's ledger; the outbox is cleared by
+with an `eventId`, then appended in order. How an event id is formed: the JSON tuple
+`[workspaceId, callId, "w", n, index]`, for the `index`th entry (from 0) of the call's `n`th write
+that queued entries. The workspace first makes it unique on a ledger that several workspaces
+share. It is numbered by those writes, not the store's version, so a write that queues none, such
+as a duress alert's acknowledgement, leaves no gap in the ids. The tag `"w"` keeps these ids apart
+from the `[workspaceId, callId, version, index]` ids that builds before VER-12 form: an older and a
+newer build writing one call on one store (a rolling deploy) never give two entries one id, so the
+ledger never drops one as a replay; an entry the ledger would refuse (card data, or detail that is not canonical JSON, such as a lone
+surrogate) is refused before it is saved, so it can never block a call's ledger; the outbox is cleared by
 a further write if nobody wrote since. A failed append leaves them pending, and the next write or
 `flushLedger(callId)` appends them. A ledger appends an `eventId` once (a second append returns the
 first entry), so nothing is lost or doubled. The listener is told after each append, at least once

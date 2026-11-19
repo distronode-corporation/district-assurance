@@ -10,7 +10,7 @@
 // throws NotImplementedError. SPEC.md describes the flow.
 import { createPublicKey, type JsonWebKey } from "node:crypto";
 
-import type { AttemptCounterKey, IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
+import type { AttemptCounterKey, AuditEntry, IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
 import { canonicalJson, hasLoneSurrogate, type JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
@@ -40,7 +40,8 @@ import * as badge from "./verify/badge.ts";
 import * as callback from "./verify/callback.ts";
 import type { CallbackOutcome } from "./verify/callback.ts";
 import { FLOW_START, claimNotice, counterKeys, flowStartLimited, isCallingNumber, lockoutOf, recordFlowStarts, unlockCounter } from "./verify/counters.ts";
-import type { BadgeSettings, FactorEntry, FactorPlugin } from "./verify/factors.ts";
+import { pinTag, type BadgeSettings, type FactorEntry, type FactorPlugin, type PinOutcome } from "./verify/factors.ts";
+import { clearsSoFar, duressFlagKey, flagDuress } from "./verify/duress-flag.ts";
 import { knowledgeHmac, type KnowledgeHmac, type KnowledgeKey } from "./verify/knowledge.ts";
 import * as pin from "./verify/pin.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
@@ -48,7 +49,7 @@ import type { IdentityOutcome } from "./webhooks/stripe.ts";
 export { SUPPORTED_LOCALES, isSupportedLocale } from "./core/runtime.ts";
 export type { EngineAdapters, Locale } from "./core/runtime.ts";
 export type { KeypadResult, OutcomeResult, VerificationResult } from "./verify/badge.ts";
-export type { PinEnrolmentResult } from "./verify/pin.ts";
+export type { DuressEnrolmentResult, PinEnrolmentResult } from "./verify/pin.ts";
 
 
 /** What an `AttemptCounters` store must have, checked when the engine is built. */
@@ -120,6 +121,8 @@ interface QueuedEvent {
   detail: { [key: string]: JsonValue };
   /** On `verification.locked`: the counter that locked, for the lock notice. Never in the ledger. */
   counter?: AttemptCounterKey;
+  /** A PIN outcome to tag the entry with (VER-12). Never saved. */
+  tag?: string | undefined;
 }
 
 /** A member of the business lifting one lock early: the counter a lock notice named, and who did it. */
@@ -150,6 +153,10 @@ export class Engine {
   readonly #onEvent: EventListener | undefined;
   readonly #badge: badge.BadgeModule;
   readonly #rt: EngineRuntime;
+  /** Duress alerts this engine is sending now, by id, with when it started: one send at a time, retried after a while. */
+  readonly #sending = new Map<string, number>();
+  /** Per call, the owed alerts of the duress alert send scheduled and not yet started (`#sendDuressAlertsSoon`). */
+  readonly #sendScheduled = new Map<string, string>();
   readonly #receiptModules: readonly AssuranceModule[];
   #config: FlowConfig;
 
@@ -319,6 +326,7 @@ export class Engine {
       flow: null,
       modules,
       outbox: [],
+      ledgerWrites: 1,
     };
     this.#keepNumber(record, options.numberKey ?? null);
     const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
@@ -332,7 +340,7 @@ export class Engine {
     if (flow !== null) this.#attachFlow(draft, flow.name, { steps: flow.steps }, flow.revision, start);
     then(draft);
     this.#advance(draft);
-    record.outbox = events.map((event, i) => ({ eventId: this.#eventId(callId, 1, i), ...event }));
+    record.outbox = await Promise.all(events.map((event, i) => this.#outboxEntry(callId, 1, i, event)));
     const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
     if (!created) {
       // Another start took the id first (a duplicate delivery racing this one): this start is not counted.
@@ -657,7 +665,15 @@ export class Engine {
     return pin.enrolPin(this.#rt, callId, input);
   }
 
-  /** The business resets a subject's PIN. A host call from the business's own tools, never on a caller's request. */
+  /**
+   * The business lifts a subject's duress flag (VER-12) once it knows the subject is safe: a host
+   * call, never a caller's, written to the ledger with the member (`duress.cleared`).
+   */
+  clearDuress(subjectKey: string, memberId: string): Promise<void> {
+    return badge.clearDuress(this.#rt, this.#badge, subjectKey, memberId);
+  }
+
+  /** The business resets a subject's PIN (and removes any duress PIN). A host call from the business's own tools, never on a caller's request. */
   resetPin(subjectKey: string): Promise<void> {
     return pin.resetPin(this.#rt, subjectKey, this.#adapters.counters);
   }
@@ -696,6 +712,24 @@ export class Engine {
     // unlock unrecorded. Each unlock is its own entry, as a PIN reset is.
     await this.#adapters.ledger.append({ callId: null, actor: "member", event: "verification.unlocked", at: this.#now(), detail });
     await unlockCounter(counters, counter);
+  }
+
+  /**
+   * The business enrols or replaces a subject's duress PIN (VER-12). A host call from its own tools,
+   * never on a caller's request; `keyed_hash` mode with `pin.duress` on, for a subject with a PIN.
+   */
+  enrolDuressPin(subjectKey: string, duressPin: string): Promise<pin.DuressEnrolmentResult> {
+    return pin.enrolDuressPin(this.#rt, subjectKey, duressPin);
+  }
+
+  /** The business removes a subject's duress PIN (VER-12). A host call. */
+  removeDuressPin(subjectKey: string): Promise<void> {
+    return pin.removeDuressPin(this.#rt, subjectKey);
+  }
+
+  /** What a `pin` factor ledger entry's keyed `tag` says (VER-12), or null. Only this key's holder can read it. */
+  readPinTag(entry: Pick<AuditEntry, "eventId" | "event" | "detail">): Promise<PinOutcome | null> {
+    return pin.readPinTagWith(this.#hmac, entry);
   }
 
   // ---- Dossier (file) ----------------------------------------------------------------------
@@ -1000,6 +1034,8 @@ export class Engine {
   #authorized(record: CallRecord, scope: string): boolean {
     const min: AssuranceLevel | undefined = Object.hasOwn(this.#config.policy.scopes, scope) ? this.#config.policy.scopes[scope] : undefined;
     if (min === undefined || record.state.phase === "ended") return false;
+    // A duress call (VER-12) refuses money, contact and access, and the scopes Badge's settings named, as if ungranted.
+    if (badge.duressRefuses(record, scope, scopeClass(scope, this.#config.policy.scopeClasses, this.registry.scopeClasses()))) return false;
     if (min === 0) return true;
     const grant = record.state.grant;
     // The grant's level is checked against today's minimum too, so a stricter config applies to grants already issued.
@@ -1024,10 +1060,21 @@ export class Engine {
       // The step's ledger entries are saved with the step, then appended: a ledger that fails
       // leaves them in the record, and the next write (or flushLedger) appends them, once each.
       const version = stored.version + 1;
-      events.forEach((event, i) => record.outbox.push({ eventId: this.#eventId(callId, version, i), ...event }));
+      // Entries are numbered by the writes that queue them, not by the store's version, so a write
+      // with none (a duress alert's acknowledgement, VER-12) leaves no gap a ledger reader could see.
+      // A record from before the count continues from its version (its ids are tagged, so they
+      // could not meet the older ones anyway; continuing keeps the numbers going up).
+      if (events.length > 0) record.ledgerWrites = (record.ledgerWrites ?? stored.version) + 1;
+      record.outbox.push(...(await Promise.all(events.map((event, i) => this.#outboxEntry(callId, record.ledgerWrites!, i, event)))));
+      markOwedAlerts(record);
       const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
       if (saved.ok) {
-        await this.#flush(callId, version, record);
+        try {
+          await this.#flush(callId, version, record);
+        } finally {
+          // Saved, so owed duress alerts go out even if the ledger is down.
+          this.#sendDuressAlertsSoon(callId, record);
+        }
         return result;
       }
     }
@@ -1044,7 +1091,7 @@ export class Engine {
       assertCan: (event) => {
         if (!canApply(record.state, event)) throw new EngineError("invalid_transition", `${event.type} is not allowed while ${record.state.phase}`);
       },
-      emit: (name, actor, detail) => {
+      emit: (name, actor, detail, tag) => {
         // A copy, checked here, inside the step, so an entry the ledger would refuse is never saved
         // to be appended later, and a caller changing its object afterwards changes nothing.
         const copy = structuredClone(detail);
@@ -1056,7 +1103,7 @@ export class Engine {
         } catch {
           throw new EngineError("invalid_input", "audit detail must be canonical JSON: plain data, no lone surrogate");
         }
-        const event: QueuedEvent = { name, actor, at: this.#now(), detail: copy };
+        const event: QueuedEvent = { name, actor, at: this.#now(), detail: copy, tag };
         if (name === "verification.locked") event.counter = this.#lockedCounter(record, copy);
         events.push(event);
       },
@@ -1146,16 +1193,130 @@ export class Engine {
     }
   }
 
-  /** A ledger event id, unique across workspaces sharing one ledger: a JSON tuple, so no two ids collide. */
-  #eventId(callId: string, version: number, index: number): string {
-    return JSON.stringify([this.workspaceId, callId, version, index]);
+  /**
+   * A queued event as the outbox keeps it, with its event id. A tagged event (a PIN factor, VER-12)
+   * gets its keyed `tag` here, now that its id is known; the outcome itself is never kept.
+   */
+  async #outboxEntry(callId: string, version: number, index: number, queued: QueuedEvent): Promise<CallRecord["outbox"][number]> {
+    const { tag, ...event } = queued;
+    const eventId = this.#eventId(callId, version, index);
+    if (tag !== undefined) event.detail = { ...event.detail, tag: await pinTag(this.#hmac, eventId, tag as PinOutcome) };
+    return { eventId, ...event };
   }
 
-  /** Appends any ledger entries a call still has pending (after a ledger outage). Every write does this too. */
+  /**
+   * A ledger event id, unique across workspaces sharing one ledger: a JSON tuple, so no two ids
+   * collide. `write` counts the call's writes that queued entries (VER-12); the tag "w" gives these
+   * ids a shape of their own, so they never equal the `[workspaceId, callId, version, index]` ids an
+   * older build writes on the same call during a rolling deploy (the ledger would drop one as a replay).
+   */
+  #eventId(callId: string, write: number, index: number): string {
+    return JSON.stringify([this.workspaceId, callId, "w", write, index]);
+  }
+
+  /** Appends any ledger entries a call still has pending (after a ledger outage), and sends any owed duress alert. Every write does this too. */
   async flushLedger(callId: string): Promise<void> {
     const stored = await this.#sessions.get(this.workspaceId, callId);
     if (stored === null) throw new EngineError("unknown_call", "no such call");
-    await this.#flush(callId, stored.version, structuredClone(stored.record) as unknown as CallRecord);
+    const record = structuredClone(stored.record) as unknown as CallRecord;
+    try {
+      await this.#flush(callId, stored.version, record);
+    } finally {
+      this.#sendDuressAlertsSoon(callId, record);
+    }
+  }
+
+  /**
+   * Sends a call's owed duress alerts (VER-12) and waits for them: the host's sweep, for calls whose
+   * alert may still be owed (a notifier that was down, a process that stopped). Answers how many the
+   * notifier acknowledged now. An alert another send of this engine has in hand is left to it.
+   */
+  async deliverDuressAlerts(callId: string): Promise<number> {
+    return this.#sendDuressAlerts(callId);
+  }
+
+  /**
+   * Sends the alerts every call of this workspace still owes (VER-12), for a host after a crash or
+   * on a schedule, without knowing the call ids: the session store lists them
+   * (`listCallsOwingAlerts`). `sent`: calls that owe nothing now; `failed`: calls that still owe one.
+   */
+  async sweepAlerts(): Promise<{ sent: string[]; failed: string[] }> {
+    const list = this.#sessions.listCallsOwingAlerts?.bind(this.#sessions);
+    if (list === undefined) throw new EngineError("precondition_failed", "the session store cannot list the calls that owe alerts (listCallsOwingAlerts)");
+    const result = { sent: [] as string[], failed: [] as string[] };
+    for (const callId of await list(this.workspaceId)) {
+      let owed: boolean;
+      try {
+        await this.#sendDuressAlerts(callId);
+        owed = badge.owedDuressAlerts(await this.#read(callId)).length > 0;
+      } catch {
+        // A call the store cannot read now, or no longer holds, is reported, and the sweep goes on.
+        owed = true;
+      }
+      (owed ? result.failed : result.sent).push(callId);
+    }
+    return result;
+  }
+
+  /** Off the caller's response path: after the reply, so neither the notifier's time nor its failure reaches the caller. */
+  #sendDuressAlertsSoon(callId: string, record: CallRecord): void {
+    if (badge.owedDuressAlerts(record).length === 0) return;
+    // A write that owes the same alerts as a send already scheduled and not yet started (a pass's
+    // counters cleanup right after the entry, VER-1) shares that send, which reads the call's owed
+    // alerts again when it runs; a write that owes a new alert schedules its own.
+    const owed = JSON.stringify(badge.owedDuressAlerts(record).map((alert) => alert.alertId));
+    if (this.#sendScheduled.get(callId) === owed) return;
+    this.#sendScheduled.set(callId, owed);
+    setImmediate(() => {
+      if (this.#sendScheduled.get(callId) === owed) this.#sendScheduled.delete(callId);
+      void this.#sendDuressAlerts(callId).catch(() => undefined);
+    });
+  }
+
+  /**
+   * Each alert the stored call owes now (read again, so an alert already acknowledged is not sent
+   * twice), one send at a time per engine (again after 30 seconds without an answer), taken off the
+   * record once acknowledged.
+   */
+  async #sendDuressAlerts(callId: string): Promise<number> {
+    const notifier = this.#adapters.duressNotifier;
+    let delivered = 0;
+    for (const alert of badge.owedDuressAlerts(await this.#read(callId))) {
+      const now = this.#clock.now().getTime();
+      const since = this.#sending.get(alert.alertId);
+      if (notifier === undefined || (since !== undefined && now - since < 30_000)) continue;
+      this.#sending.set(alert.alertId, now);
+      try {
+        // The flag goes with the alert: set again here, before the notifier, in case the entry's own
+        // write of it was lost (a failed store, a crash), unless the business cleared the subject
+        // after the entry was judged. An engine that judged an entry has counters (Badge requires
+        // them for every entered factor), and one without them fails here, leaving the alert owed.
+        const counters = this.#adapters.counters!;
+        if ((await clearsSoFar(counters, this.workspaceId, alert.subjectKey)) === alert.clears) {
+          await flagDuress(counters, duressFlagKey(this.workspaceId, alert.subjectKey), new Date(alert.at));
+        }
+        await notifier.notify({ alertId: alert.alertId, workspaceId: this.workspaceId, subjectKey: alert.subjectKey, callId, at: alert.at });
+        await this.#acknowledgeDuressAlert(callId, alert.alertId);
+        delivered++;
+      } catch {
+        // Still owed: the next write, flushLedger or deliverDuressAlerts sends it again.
+      } finally {
+        this.#sending.delete(alert.alertId);
+      }
+    }
+    return delivered;
+  }
+
+  /** Takes a delivered alert off the call record, in its own compare-and-set write, with no ledger entry. */
+  async #acknowledgeDuressAlert(callId: string, alertId: string): Promise<void> {
+    for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
+      const stored = (await this.#sessions.get(this.workspaceId, callId))!;
+      const record = structuredClone(stored.record) as unknown as CallRecord;
+      badge.acknowledgeDuressAlert(record, alertId);
+      markOwedAlerts(record);
+      if ((await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue)).ok) return;
+    }
+    throw new EngineError("conflict", `the call changed under every one of ${MAX_WRITE_ATTEMPTS} attempts`);
   }
 }
 
@@ -1224,4 +1385,10 @@ function untrustedLabel(source: unknown): string {
     return "unlabelled";
   }
   return cardNumberRedactor.redact(text).text;
+}
+
+/** Marks a record that owes an alert, so a session store can list it for a sweep, and unmarks one that does not. */
+function markOwedAlerts(record: CallRecord): void {
+  if (badge.owedDuressAlerts(record).length > 0) record.owesAlerts = true;
+  else delete record.owesAlerts;
 }

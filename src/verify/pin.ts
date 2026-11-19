@@ -6,13 +6,18 @@
 // the ledger. Changing a PIN on file is the business's call (`resetPin`, from the host's code), not
 // the caller's: a caller enrols only when no PIN is on file. In `verifier` mode the host's own PIN
 // store enrols and resets, and the engine refuses.
-import type { AttemptCounters, SubjectRecord } from "../core/adapters.ts";
+//
+// The duress PIN (VER-12): a second PIN the business enrols for a subject, which a caller made to
+// call under pressure enters instead. It passes like the PIN everywhere the caller can reach, while
+// `authorize` refuses money, contact and access on that call and the host's `DuressNotifier` is told.
+import type { AttemptCounters, AuditEntry, SubjectRecord } from "../core/adapters.ts";
 import { EngineError } from "../core/errors.ts";
 import { assertFlowNotEnded, currentStep } from "../core/flow.ts";
 import { hexDigestsEqual } from "../core/hash.ts";
 import type { EngineRuntime } from "../core/runtime.ts";
 import { BADGE, type BadgeSlice } from "./badge.ts";
-import type { BadgeSettings, PinSettings } from "./factors.ts";
+import { hiddenCounterKey } from "./duress-flag.ts";
+import { PIN_OUTCOMES, pinTag, type BadgeSettings, type PinOutcome, type PinSettings } from "./factors.ts";
 import { isKeypadEntry } from "./knowledge.ts";
 
 /** The level a caller must reach on this call before choosing a PIN. */
@@ -51,13 +56,39 @@ export async function pinEnrolmentProblem(
   pin: string,
   confirm: string,
 ): Promise<"malformed" | "mismatch" | "weak" | null> {
-  const wellFormed = (entry: string) => isKeypadEntry(entry) && entry.length >= settings.minDigits && entry.length <= settings.maxDigits;
-  if (!wellFormed(pin) || !wellFormed(confirm)) return "malformed";
+  if (!wellFormedPin(settings, pin) || !wellFormedPin(settings, confirm)) return "malformed";
   const digest = await hmac(`pin:${subject.subjectKey}:${pin}`);
   if (!hexDigestsEqual(digest, await hmac(`pin:${subject.subjectKey}:${confirm}`))) return "mismatch";
+  // A duress PIN on file (VER-12) is never also the PIN.
+  const duress = hexDigestsEqual(await hmac(`duress:${subject.subjectKey}:${pin}`), subject.duressDigest ?? "");
+  return (await knowledgeOnFile(hmac, subject, pin)) || duress || isWeakPin(pin) ? "weak" : null;
+}
+
+function wellFormedPin(settings: PinSettings, entry: string): boolean {
+  return isKeypadEntry(entry) && entry.length >= settings.minDigits && entry.length <= settings.maxDigits;
+}
+
+/** Whether a PIN equals the subject's account number or any keypad knowledge on file: keyed hashes, every field, even after a match. */
+async function knowledgeOnFile(hmac: (data: string) => Promise<string>, subject: SubjectRecord, pin: string): Promise<boolean> {
   let onFile = hexDigestsEqual(await hmac(`subject:${pin}`), subject.subjectKey);
   for (const [field, stored] of Object.entries(subject.knowledge)) onFile = hexDigestsEqual(await hmac(`field:${field}:${pin}`), stored) || onFile;
-  return onFile || isWeakPin(pin) ? "weak" : null;
+  return onFile;
+}
+
+/**
+ * Judges a duress PIN the business enrols (VER-12). Refused, as `weak`, when it equals the PIN on
+ * file, the account number or any keypad knowledge, or is one digit or a run, as a PIN is. Only
+ * for a subject with a PIN on file.
+ */
+export async function duressPinProblem(
+  settings: PinSettings,
+  hmac: (data: string) => Promise<string>,
+  subject: SubjectRecord & { pinDigest: string },
+  pin: string,
+): Promise<"malformed" | "weak" | null> {
+  if (!wellFormedPin(settings, pin)) return "malformed";
+  const samePin = hexDigestsEqual(await hmac(`pin:${subject.subjectKey}:${pin}`), subject.pinDigest);
+  return (await knowledgeOnFile(hmac, subject, pin)) || samePin || isWeakPin(pin) ? "weak" : null;
 }
 
 /** Badge's PIN settings. Enrolment and reset are refused while the `pin` factor is off. */
@@ -152,15 +183,86 @@ export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: 
  * The business resets a subject's PIN (a host call from its own staff tools, never a caller's).
  * In `keyed_hash` mode the digest on file is removed, so the subject has no PIN until they enrol
  * again at level 2; in `verifier` mode the host's own store resets the PIN itself. Either way the
- * subject's PIN failure counters (VER-1) are cleared, and `pin.reset` goes to the ledger, with no
- * call.
+ * subject's PIN failure counters (VER-1), the hidden one of VER-12 included, are cleared, and
+ * `pin.reset` goes to the ledger, with no call. A duress flag stays until `clearDuress`.
  */
 export async function resetPin(rt: EngineRuntime, subjectKey: string, counters: AttemptCounters | undefined): Promise<void> {
   const settings = pinSettings(rt);
   // A string only: a regex test turns an array into its text, which a record store finds while the
   // counters, keyed by the value, are left as they were.
   if (typeof subjectKey !== "string" || !SUBJECT_KEY.test(subjectKey)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
+  // The duress PIN goes too, in the store's same atomic step: it must differ from the PIN, the next
+  // PIN is not chosen yet, and a duress PIN the business enrols against that next PIN must survive.
   if (settings.mode === "keyed_hash") await rt.adapter("records").putPinDigest(rt.workspaceId, subjectKey, null);
   await counters?.reset({ workspaceId: rt.workspaceId, factor: "pin", scope: "subject", key: subjectKey });
+  // The PIN's hidden failures too (VER-12): the business's reset lifts every PIN lock on the
+  // subject, the one a duress PIN entry could not clear included. The duress flag stays.
+  await counters?.reset(hiddenCounterKey(rt.workspaceId, "pin", subjectKey));
   await rt.adapter("ledger").append({ callId: null, actor: "member", event: "pin.reset", at: rt.now(), detail: { subjectKey } });
+}
+
+/** Why a duress PIN was not stored, or that it was. `weak` does not say which rule it broke. */
+export type DuressEnrolmentResult = { enrolled: true } | { enrolled: false; reason: "malformed" | "weak" };
+
+/** Badge's PIN settings for duress PIN work: `keyed_hash` mode (the host's verifier keeps its own). */
+function duressPinSettings(rt: EngineRuntime, subjectKey: string): PinSettings {
+  const settings = pinSettings(rt);
+  if (settings.mode === "verifier") throw new EngineError("precondition_failed", "in verifier mode the host's own PIN store keeps the duress PIN");
+  if (!SUBJECT_KEY.test(subjectKey)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
+  return settings;
+}
+
+/**
+ * The business enrols, or replaces, a subject's duress PIN (VER-12): a host call from its own
+ * tools, never a caller's. Needs `pin.duress` on in `keyed_hash` mode and a subject with a PIN on
+ * file. Stored as its own keyed digest through `RecordStore.putDuressDigest`. Nothing goes to the
+ * ledger, so the ledger never shows who has one.
+ */
+export async function enrolDuressPin(rt: EngineRuntime, subjectKey: string, pin: string): Promise<DuressEnrolmentResult> {
+  const settings = duressPinSettings(rt, subjectKey);
+  if (settings.duress === undefined) throw new EngineError("precondition_failed", "the duress PIN is turned off");
+  const records = rt.adapter("records");
+  const subject = await records.getSubject(rt.workspaceId, subjectKey);
+  const pinDigest = subject?.pinDigest;
+  if (subject === null || pinDigest === undefined) throw new EngineError("precondition_failed", "a duress PIN needs a subject with a PIN on file");
+  const problem = await duressPinProblem(settings, (d) => rt.hmac(d), { ...subject, pinDigest }, pin);
+  if (problem !== null) return { enrolled: false, reason: problem };
+  // Stored only if the PIN checked against is still the one on file: a reset and a new PIN since the
+  // read could otherwise leave the duress PIN equal to the PIN, raising the alarm on every login.
+  if (!(await records.putDuressDigest(rt.workspaceId, subjectKey, await rt.hmac(`duress:${subjectKey}:${pin}`), pinDigest))) {
+    throw new EngineError("conflict", "the PIN changed while the duress PIN was being stored; try again");
+  }
+  return { enrolled: true };
+}
+
+/** The business removes a subject's duress PIN (a host call). Allowed while `pin.duress` is off, to clean up. */
+export async function removeDuressPin(rt: EngineRuntime, subjectKey: string): Promise<void> {
+  duressPinSettings(rt, subjectKey);
+  await rt.adapter("records").putDuressDigest(rt.workspaceId, subjectKey, null);
+}
+
+/**
+ * What a `pin` factor ledger entry's `tag` says (VER-12), for the holder of the knowledge key: the
+ * outcome whose tag matches, or null when it is not a PIN entry or no outcome matches (a wrong key,
+ * or a changed entry).
+ */
+export function readPinTag(hmac: (data: string) => string, entry: Pick<AuditEntry, "eventId" | "event" | "detail">): PinOutcome | null {
+  const tagged = taggedEntry(entry);
+  return tagged === null ? null : (PIN_OUTCOMES.find((outcome) => hexDigestsEqual(pinTag(hmac, tagged.eventId, outcome), tagged.tag)) ?? null);
+}
+
+/** The event id and tag of a `pin` factor entry, or null for any other entry (shared by both readers). */
+function taggedEntry(entry: Pick<AuditEntry, "eventId" | "event" | "detail">): { eventId: string; tag: string } | null {
+  const { eventId, event, detail } = entry;
+  if (event !== "verification.factor" || detail.kind !== "pin" || eventId === undefined || typeof detail.tag !== "string") return null;
+  return { eventId, tag: detail.tag };
+}
+
+/** `readPinTag` through the knowledge key's asynchronous HMAC (a key store's, for example). */
+export async function readPinTagWith(hmac: (data: string) => Promise<string>, entry: Pick<AuditEntry, "eventId" | "event" | "detail">): Promise<PinOutcome | null> {
+  const tagged = taggedEntry(entry);
+  if (tagged === null) return null;
+  // Every outcome's tag is computed, so the time taken never says which one matched.
+  const tags = await Promise.all(PIN_OUTCOMES.map((outcome) => pinTag(hmac, tagged.eventId, outcome)));
+  return PIN_OUTCOMES.find((_, i) => hexDigestsEqual(tags[i]!, tagged.tag)) ?? null;
 }

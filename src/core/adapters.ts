@@ -188,6 +188,8 @@ export interface SubjectRecord {
   knowledge: Record<string, string>;
   /** The HMAC of the subject's PIN (`pinDigest`), for the PIN factor in `keyed_hash` mode. */
   pinDigest?: string;
+  /** The HMAC of the subject's duress PIN (`duressDigest`), set only by the business (VER-12). */
+  duressDigest?: string;
   /**
    * Which enrolment stored `pinDigest` (VER-6): written with it by `putPinDigest`, so a call
    * finishing an enrolment whose last write failed can tell its own from another's. Opaque.
@@ -226,7 +228,33 @@ export interface AmountSource {
  * subject exists, and should take the same time either way.
  */
 export interface PinVerifier {
-  verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean }>;
+  /**
+   * `duress: true` when the entry is the subject's duress PIN (VER-12): the call then looks like a
+   * pass to the caller, and `matched` is ignored. It counts only while Badge's `pin.duress` is set.
+   */
+  verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean; duress?: boolean }>;
+}
+
+/** One duress alert (VER-12): `alertId` is the same on every retry of it, for a host to drop repeats. */
+export interface DuressAlert {
+  alertId: string;
+  workspaceId: string;
+  subjectKey: string;
+  callId: string;
+  /** When the duress PIN was entered, ISO 8601. */
+  at: string;
+}
+
+/**
+ * Told when a caller enters a duress PIN (VER-12), for every duress entry. The alert is owed in the
+ * call record, in the same write that recorded the entry, and sent after that write, off the
+ * caller's response path; it stays owed until `notify` resolves, and is retried on the call's next
+ * write, on `flushLedger` and on `deliverDuressAlerts` (the host's sweep). So it is delivered at
+ * least once: drop repeats by `alertId`. Never given the PIN. The host alerts whoever the business
+ * named, away from the call. `notify` must not block: hand the alert to a queue and return.
+ */
+export interface DuressNotifier {
+  notify(input: DuressAlert): Promise<void>;
 }
 
 /**
@@ -318,6 +346,12 @@ export interface SessionStore {
   /** Points a provider reference (an identity session, a payment link) at a call. The first binding wins. */
   bindRef(workspaceId: string, ref: string, callId: string): Promise<boolean>;
   resolveRef(workspaceId: string, ref: string): Promise<string | null>;
+  /**
+   * The ids of the workspace's calls whose stored record has `owesAlerts: true`, for
+   * `Engine.sweepAlerts` after a crash (VER-12). Optional: without it the host sweeps by call id
+   * (`deliverDuressAlerts`). A durable store indexes that one field.
+   */
+  listCallsOwingAlerts?(workspaceId: string): Promise<string[]>;
 }
 
 export interface IntakeRecord {
@@ -341,12 +375,22 @@ export interface RecordStore {
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
   /**
    * Stores a subject's PIN digest (`pinDigest`) with the id of the enrolment that chose it
-   * (`pinEnrolmentId`), or removes both with null (a reset by the business). Never given the PIN
+   * (`pinEnrolmentId`), or removes both with null (a reset by the business), and the duress PIN
+   * (`duressDigest`, VER-12) in the same atomic step, so no duress PIN enrolled against a newer PIN
+   * is ever removed by an older reset. Never given the PIN
    * itself. A digest is stored only if the subject has none, as one atomic step (of two enrolments at
    * once, one wins and the other replaces nothing); the answer says whether it was stored. Null always
    * removes and answers true. A subject the store does not have is left alone, and the answer is false.
    */
   putPinDigest(workspaceId: string, subjectKey: string, digest: string | null, enrolmentId?: string): Promise<boolean>;
+  /**
+   * Stores a subject's duress PIN digest (`duressDigest`), replacing any (the business changes it),
+   * only if the subject's PIN digest is still `ifPinDigest`, in one atomic step, so a PIN reset and
+   * a new PIN in between can never leave the duress PIN equal to the PIN; the answer says whether it
+   * stored. Null removes it (whatever `ifPinDigest`) and answers true. Never given the PIN itself. A
+   * subject the store does not have is left alone, and the answer is false.
+   */
+  putDuressDigest(workspaceId: string, subjectKey: string, digest: string | null, ifPinDigest?: string): Promise<boolean>;
 }
 
 export interface AuditInput {
