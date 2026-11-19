@@ -49,6 +49,8 @@ export async function runDemo(print = true): Promise<DemoResult> {
       const outcome = await step.run(world, call);
       allOk &&= outcome.ok;
       say(step.label, outcome.detail);
+      // A later step may need this one's result (a receipt, a link, a grant): stop here.
+      if (!outcome.ok) throw new Error(`the demo's check failed at "${step.label}": ${outcome.detail}`);
     }
     return call;
   };

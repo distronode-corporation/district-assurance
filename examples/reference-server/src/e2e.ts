@@ -23,8 +23,8 @@ import { randomIds, systemClock, type FlowConfig } from "../../../src/index.ts";
 import { createReferenceServer } from "./app.ts";
 import { DemoRuns } from "./demo-runs.ts";
 import { demoConfig } from "./flows.ts";
-import { SCRIPTS, createDemoWorld, endWithReceipt, openDoor, requestLink, startDoorRelay, verifyToLevel2, type ScriptStep, type Scripts } from "./script.ts";
-import { StripeCheckoutLinks, assertTestModeSecretKey } from "./stripe-adapters.ts";
+import { SCRIPTS, createDemoWorld, endWithReceipt, openDoor, requestLink, startDoorRelay, verifyToLevel2, type ScriptStep, type Scripts, type StepOutcome } from "./script.ts";
+import { StripeApiError, StripeCheckoutLinks, assertTestModeSecretKey, type CheckoutSessionStatus } from "./stripe-adapters.ts";
 
 /** A session id shortened for the screen and the log: its `cs_test_` prefix and a few characters. */
 export function shortSessionId(id: string): string {
@@ -38,18 +38,36 @@ export function e2eConfig(): FlowConfig {
   return config;
 }
 
+/** Waits `ms`, or less when `signal` aborts. */
+function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+  });
+}
+
 export interface E2eOptions {
-  /** How long the payment step waits for the test payment. Default 10 minutes. */
+  /**
+   * The longest the payment step waits for the test payment. It never waits past the engine's
+   * deadline for the link (the text plus the flow's link life, 15 minutes), which is the default.
+   */
   waitMs?: number;
   /** How often it reads the session back. Default 3 seconds. */
   pollMs?: number;
   /** Hears each step's line, for the terminal. */
   log?: (label: string, detail: string) => void;
+  /** Stops a payment step that is waiting, when the demo shuts down. */
+  signal?: AbortSignal;
 }
 
 /** The live demo's scripts: owner-command as in the fake demo, and `visit` on real Stripe test mode. */
 export function e2eScripts(stripe: StripeCheckoutLinks, options: E2eOptions = {}): Scripts {
-  const waitMs = options.waitMs ?? 10 * 60_000;
+  const waitMs = options.waitMs ?? Number.POSITIVE_INFINITY;
   const pollMs = options.pollMs ?? 3000;
   const visit: ScriptStep[] = [
     ...verifyToLevel2("visit"),
@@ -68,17 +86,42 @@ export function e2eScripts(stripe: StripeCheckoutLinks, options: E2eOptions = {}
     {
       label: "pay: test payment read back from Stripe",
       async run(w, call) {
-        const deadline = Date.now() + waitMs;
+        const paid = (session: CheckoutSessionStatus) => session.status === "complete" && session.paymentStatus === "paid";
+        const settle = async (session: CheckoutSessionStatus): Promise<StepOutcome> => {
+          const applied = await w.engine.applyPaymentOutcome({ kind: "completed", linkId: call.linkId, paymentStatus: "paid" });
+          return { detail: `session ${session.status}, payment ${session.paymentStatus}, livemode ${session.livemode}; settled: ${applied.applied}`, ok: applied.applied };
+        };
+        // Until the engine's own deadline for the link (the text plus the flow's link life).
+        const now = () => w.clock.now().getTime();
+        const engineDeadline = Date.parse(call.paymentExpiresAt ?? "") || now();
+        const until = Math.min(engineDeadline + 1000, now() + waitMs);
         for (;;) {
-          const session = await stripe.readLink(call.linkId);
-          if (session.status === "complete" && session.paymentStatus === "paid") {
-            const applied = await w.engine.applyPaymentOutcome({ kind: "completed", linkId: call.linkId, paymentStatus: "paid" });
-            return { detail: `session ${session.status}, payment ${session.paymentStatus}, livemode ${session.livemode}; settled: ${applied.applied}`, ok: applied.applied };
+          if (options.signal?.aborted === true) return { detail: "stopped: the demo is shutting down", ok: false };
+          let session: CheckoutSessionStatus | null = null;
+          try {
+            session = await stripe.readLink(call.linkId);
+          } catch (error) {
+            // A lost read, or Stripe busy or failing on its side: ask again. A refusal or an answer
+            // this adapter cannot trust ends the step.
+            if (error instanceof StripeApiError && !error.retryable) throw error;
           }
-          if (session.status === "expired") return { detail: "the session expired unpaid", ok: false };
-          if (Date.now() >= deadline) return { detail: `not paid within ${Math.round(waitMs / 60_000)} minutes: start a new run`, ok: false };
-          await new Promise((resolve) => setTimeout(resolve, pollMs));
+          if (session !== null && paid(session)) return settle(session);
+          if (session?.status === "expired") return { detail: "the session expired unpaid", ok: false };
+          if (now() >= until) break;
+          await sleep(pollMs, options.signal);
         }
+        // Out of time: close the link at Stripe through the engine (it settles the request as
+        // expired), so the old page cannot take a payment nobody reads. A page Stripe says is no
+        // longer open may have been paid at the last moment: read it once more.
+        const { expired } = await w.engine.expirePaymentLinks(call.callId);
+        if (expired.length === 0) {
+          const last = await stripe.readLink(call.linkId);
+          if (paid(last)) return settle(last);
+        }
+        return {
+          detail: expired.length === 0 ? "not paid in time: start a new run" : "not paid before the link's deadline: the Checkout page is closed, start a new run",
+          ok: false,
+        };
       },
     },
     { ...openDoor, label: "gate: door opened" },
@@ -116,29 +159,36 @@ export interface E2eDemo {
   close(): Promise<void>;
 }
 
-/** Starts the door relay and the reference server with the UI on 127.0.0.1. Refuses a key that is not `sk_test_`. */
-export async function startE2eDemo(apiKey: string, port: number, options: E2eOptions & { apiBase?: string } = {}): Promise<E2eDemo> {
+/**
+ * Starts the door relay and the reference server with the UI on 127.0.0.1. Refuses a key that is
+ * not `sk_test_`, and port 0 (Checkout's return URL names the port).
+ */
+export async function startE2eDemo(apiKey: string, port: number, options: Omit<E2eOptions, "signal"> & { apiBase?: string } = {}): Promise<E2eDemo> {
   assertTestModeSecretKey(apiKey);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new RangeError("port must be an integer from 1 to 65535");
   const log = options.log ?? (() => undefined);
   const base = `http://127.0.0.1:${port}`;
   const stripe = new StripeCheckoutLinks(apiKey, { successUrl: `${base}/`, ...(options.apiBase === undefined ? {} : { apiBase: options.apiBase }) });
   const world = createDemoWorld({ payments: stripe, clock: systemClock, ids: randomIds, config: e2eConfig() });
+  const stop = new AbortController();
   const relay = await startDoorRelay(world, 0, (target) => log("door relay", `door opened: ${target} (grant checked: ES256 signature, workspace, audience, window, not seen before)`));
-  const server = createReferenceServer({
-    engine: world.engine,
-    clock: systemClock,
-    // No webhook in this demo: payment completion is read back from Stripe.
-    stripeSecrets: { identity: [], payments: [], connect: [] },
-    ui: new DemoRuns(world, 20, e2eScripts(stripe, options)),
-  });
+  const closeRelay = () => new Promise<void>((resolve) => relay.close(() => resolve()));
+  let server: Server;
   try {
+    server = createReferenceServer({
+      engine: world.engine,
+      clock: systemClock,
+      // No webhook in this demo: payment completion is read back from Stripe.
+      stripeSecrets: { identity: [], payments: [], connect: [] },
+      ui: new DemoRuns(world, 20, e2eScripts(stripe, { ...options, signal: stop.signal })),
+    });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(port, "127.0.0.1", resolve);
     });
   } catch (error) {
-    // The port is taken: stop the relay too, so nothing is left listening.
-    await new Promise<void>((resolve) => relay.close(() => resolve()));
+    // The UI did not load or the port is taken: stop the relay too, so nothing is left listening.
+    await closeRelay();
     throw error;
   }
   world.base = base;
@@ -147,8 +197,10 @@ export async function startE2eDemo(apiKey: string, port: number, options: E2eOpt
     relay,
     base,
     close: async () => {
+      // A payment step that is waiting answers at once, so the server can close.
+      stop.abort();
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      await new Promise<void>((resolve) => relay.close(() => resolve()));
+      await closeRelay();
     },
   };
 }

@@ -72,6 +72,8 @@ export interface DemoWorld {
   other: Engine;
   gate: GateModule;
   clock: Clock;
+  /** The FlowConfig both engines run. */
+  config: FlowConfig;
   /** The reference server's base URL, set once it listens. */
   base: string;
   /** The example door relay's unlock URL, set once it listens (`startDoorRelay`). */
@@ -82,6 +84,8 @@ export interface DemoWorld {
   sentGrants: SignedAccessGrant[];
   /** Every door the relay opened, oldest first. */
   doorOpened: string[];
+  /** The door each grant opened, by grant id. */
+  openedBy: Map<string, string>;
   /** Signs a Stripe event with the demo secret (the Connect one on `/connect`) and posts it to the server. */
   stripe(path: string, type: string, object: Record<string, unknown>, account?: string): Promise<Record<string, unknown>>;
 }
@@ -144,11 +148,13 @@ export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
     other,
     gate,
     clock,
+    config,
     base: "",
     relayUrl: "",
     links,
     sentGrants,
     doorOpened: [],
+    openedBy: new Map(),
     async stripe(path, type, object, account) {
       const payload = JSON.stringify({ id: `evt_demo_${++n}`, type, livemode: false, data: { object }, ...(account === undefined ? {} : { account }) });
       const secret = path.endsWith("/connect") ? DEMO_CONNECT_SECRET : DEMO_SECRET;
@@ -170,12 +176,16 @@ export async function startDoorRelay(world: DemoWorld, port = 0, onOpen: (target
     workspaceId: DEMO_WORKSPACE,
     keys: world.gate.keys(),
     clock: world.clock,
-    open: async (target) => {
+    open: async (target, grant) => {
       world.doorOpened.push(target);
+      world.openedBy.set(grant.grantId, target);
       onOpen(target);
     },
   });
-  await new Promise<void>((resolve) => relay.listen(port, "127.0.0.1", resolve));
+  await new Promise<void>((resolve, reject) => {
+    relay.once("error", reject);
+    relay.listen(port, "127.0.0.1", resolve);
+  });
   world.relayUrl = `http://127.0.0.1:${(relay.address() as AddressInfo).port}/unlock`;
   return relay;
 }
@@ -186,6 +196,10 @@ export interface ScriptRun {
   /** This call's payment link, once requested: runs share the adapters, so never "the latest link". */
   linkId: string;
   receipt: SignedReceipt | null;
+  /** The engine's deadline for this call's link, once texted. */
+  paymentExpiresAt?: string | null;
+  /** This call's access grant, once Gate sent one: runs share the relay, so never "the latest grant". */
+  grantId?: string;
 }
 
 /** What a step did, in one line, and whether the demo's check on it held. */
@@ -304,6 +318,7 @@ export async function requestLink(w: DemoWorld, call: ScriptRun): Promise<{ paym
   const payment = await w.engine.requestPayment(call.callId);
   const link = w.links.find((l) => l.paymentId === payment.paymentId)!;
   call.linkId = link.linkId;
+  call.paymentExpiresAt = payment.expiresAt;
   return { paymentId: payment.paymentId, expiresAt: payment.expiresAt, link };
 }
 
@@ -311,11 +326,11 @@ export async function requestLink(w: DemoWorld, call: ScriptRun): Promise<{ paym
 export const openDoor: ScriptStep = {
   label: "gate: access grant delivered",
   async run(w, call) {
-    const before = w.doorOpened.length;
     const access = await w.gate.grantAccess(w.engine, call.callId);
-    const opened = w.doorOpened.slice(before);
+    call.grantId = access.grantId;
+    const opened = w.openedBy.get(access.grantId);
     return {
-      detail: `${access.grantId}, ${access.status}, door moved: ${access.confirmed}${opened.length === 0 ? "" : `, opened ${opened.join(", ")}`}`,
+      detail: `${access.grantId}, ${access.status}, door moved: ${access.confirmed}${opened === undefined ? "" : `, opened ${opened}`}`,
       ok: access.status === "delivered" && access.confirmed,
     };
   },
@@ -412,22 +427,27 @@ const depositConnect: ScriptStep[] = [
   endWithReceipt("deposit-connect"),
 ];
 
+/** The grant Gate sent for this call. */
+function sentGrant(w: DemoWorld, call: ScriptRun): SignedAccessGrant {
+  return w.sentGrants.find((grant) => grant.body.grantId === call.grantId)!;
+}
+
 /** Level 2 for `entry.open`, a signed grant the door relay checks; the same grant again and a changed copy are refused. */
 const entry: ScriptStep[] = [
   ...verifyToLevel2("entry"),
   openDoor,
   {
     label: "gate: same grant sent again",
-    async run(w) {
-      const again = await fetch(w.relayUrl, { method: "POST", body: JSON.stringify(w.sentGrants.at(-1)) });
+    async run(w, call) {
+      const again = await fetch(w.relayUrl, { method: "POST", body: JSON.stringify(sentGrant(w, call)) });
       return { detail: `${again.status} ${((await again.json()) as { error: string }).error}`, ok: again.status === 409 };
     },
   },
   {
     label: "gate: a changed grant",
-    async run(w) {
+    async run(w, call) {
       const opened = w.doorOpened.length;
-      const forged = structuredClone(w.sentGrants.at(-1)!);
+      const forged = structuredClone(sentGrant(w, call));
       forged.body.target = "door-2";
       const changed = await fetch(w.relayUrl, { method: "POST", body: JSON.stringify(forged) });
       return {

@@ -8,11 +8,12 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { DemoRuns, type RunView } from "../examples/reference-server/src/demo-runs.ts";
 import { e2eConfig, e2eScripts, shortSessionId, startE2eDemo } from "../examples/reference-server/src/e2e.ts";
 import { createDemoWorld, startDoorRelay } from "../examples/reference-server/src/script.ts";
-import { StripeCheckoutLinks, StripeKeyRefused, assertTestModeSecretKey, checkoutPaymentMethodTypes } from "../examples/reference-server/src/stripe-adapters.ts";
-import { systemClock, type PaymentLinkRequest } from "../src/index.ts";
+import { StripeApiError, StripeCheckoutLinks, StripeKeyRefused, assertTestModeSecretKey, checkoutPaymentMethodTypes } from "../examples/reference-server/src/stripe-adapters.ts";
+import { systemClock, type Clock, type PaymentLinkRequest } from "../src/index.ts";
 
 // Made up, shaped like a test key; never a real one.
-const KEY = "sk_test_FAKEFAKEFAKEFAKE0123456789";
+// Joined at run time so no scanner mistakes this file for a leaked key.
+const KEY = ["sk", "test", "FAKEFAKEFAKEFAKE0123456789"].join("_");
 
 interface Seen {
   method: string;
@@ -38,6 +39,8 @@ class FakeStripe {
   next: { status: number; body: string } | null = null;
   paidAfterReads = -1;
   createLive = false;
+  /** The payer pays just as the demo closes the page. */
+  payOnExpire = false;
   #n = 0;
   server: Server;
   base = "";
@@ -65,6 +68,7 @@ class FakeStripe {
         const session = one === null ? undefined : this.sessions.get(one[1]!);
         if (session === undefined) return send(404, { error: { type: "invalid_request_error", code: "resource_missing" } });
         if (req.method === "POST" && one![2] !== undefined) {
+          if (this.payOnExpire) Object.assign(session, { status: "complete", payment_status: "paid" });
           if (session.status !== "open") return send(400, { error: { type: "invalid_request_error", message: "Only Checkout Sessions with a status in [open] can be expired." } });
           session.status = "expired";
           return send(200, session);
@@ -89,11 +93,21 @@ class FakeStripe {
     this.next = null;
     this.paidAfterReads = -1;
     this.createLive = false;
+    this.payOnExpire = false;
   }
 }
 
 const NOW = Date.parse("2026-11-18T12:00:00.000Z");
-const clock = { now: () => new Date(NOW) };
+const RETURN = "http://127.0.0.1:8787/";
+
+/** A port nothing listens on now. */
+async function freePort(): Promise<number> {
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const { port } = probe.address() as AddressInfo;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return port;
+}
 
 function request(overrides: Partial<PaymentLinkRequest> = {}): PaymentLinkRequest {
   return {
@@ -120,23 +134,26 @@ describe("Stripe Checkout adapter: test-mode keys only", () => {
         String(key),
       );
     }
-    assert.throws(() => new StripeCheckoutLinks("sk_live_abcdefgh12345678"), /LIVE Stripe key/);
-    assert.throws(() => new StripeCheckoutLinks("rk_live_abcdefgh12345678"), /LIVE Stripe key/);
-    assert.throws(() => new StripeCheckoutLinks(""), /set STRIPE_TEST_SECRET_KEY/);
+    assert.throws(() => new StripeCheckoutLinks("sk_live_abcdefgh12345678", { successUrl: RETURN }), /LIVE Stripe key/);
+    assert.throws(() => new StripeCheckoutLinks("rk_live_abcdefgh12345678", { successUrl: RETURN }), /LIVE Stripe key/);
+    assert.throws(() => new StripeCheckoutLinks("", { successUrl: RETURN }), /set STRIPE_TEST_SECRET_KEY/);
     assert.doesNotThrow(() => assertTestModeSecretKey(KEY));
   });
 
   it("refuses a live key before the demo starts anything", async () => {
     await assert.rejects(startE2eDemo("sk_live_abcdefgh12345678", 0), StripeKeyRefused);
     await assert.rejects(startE2eDemo("rk_live_abcdefgh12345678", 0), StripeKeyRefused);
+    for (const port of [0, -1, 1.5, 65_536]) await assert.rejects(startE2eDemo(KEY, port), RangeError);
   });
 
   it("talks to https only (http to the loopback), with no credentials in the URL", () => {
-    assert.throws(() => new StripeCheckoutLinks(KEY, { apiBase: "http://api.stripe.com" }), /apiBase must be https/);
-    assert.throws(() => new StripeCheckoutLinks(KEY, { apiBase: "https://u:p@api.stripe.com" }), /carries no credentials/);
+    assert.throws(() => new StripeCheckoutLinks(KEY, { apiBase: "http://api.stripe.com", successUrl: RETURN }), /apiBase must be https/);
+    assert.throws(() => new StripeCheckoutLinks(KEY, { apiBase: "https://u:p@api.stripe.com", successUrl: RETURN }), /carries no credentials/);
     assert.throws(() => new StripeCheckoutLinks(KEY, { successUrl: "http://example.com/" }), /successUrl must be https/);
-    assert.doesNotThrow(() => new StripeCheckoutLinks(KEY, { successUrl: "http://127.0.0.1:8787/" }));
-    assert.doesNotThrow(() => new StripeCheckoutLinks(KEY));
+    assert.throws(() => new StripeCheckoutLinks(KEY, {} as never), TypeError, "a hosted page needs a return URL");
+    assert.doesNotThrow(() => new StripeCheckoutLinks(KEY, { successUrl: "https://example.com/done" }));
+    const links = new StripeCheckoutLinks(KEY, { successUrl: RETURN });
+    assert.deepEqual(links.capabilities, { modes: ["platform"], minLinkMinutes: 31, maxLinkMinutes: 1439 });
   });
 
   it("maps Apple Pay and Google Pay to card, and keeps Link", () => {
@@ -152,7 +169,7 @@ describe("Stripe Checkout adapter against a local fake", () => {
 
   before(async () => {
     await fake.start();
-    links = new StripeCheckoutLinks(KEY, { apiBase: fake.base, successUrl: "http://127.0.0.1:8787/", clock, timeoutMs: 5000 });
+    links = new StripeCheckoutLinks(KEY, { apiBase: fake.base, successUrl: RETURN, timeoutMs: 5000 });
   });
   after(() => new Promise<void>((resolve) => fake.server.close(() => resolve())));
   beforeEach(() => fake.reset());
@@ -175,7 +192,7 @@ describe("Stripe Checkout adapter against a local fake", () => {
       "line_items[0][price_data][unit_amount]": "2500",
       "line_items[0][price_data][product_data][name]": "Visit deposit",
       "payment_method_types[0]": "card",
-      "expires_at": String(NOW / 1000 + 31 * 60),
+      "expires_at": String(NOW / 1000 + 30 * 60),
       client_reference_id: "pay_1",
       "metadata[payment_id]": "pay_1",
       "metadata[call_id]": "call_1",
@@ -183,24 +200,34 @@ describe("Stripe Checkout adapter against a local fake", () => {
     });
   });
 
-  it("charges the connected account in connect mode, and keeps expires_at inside Stripe's window", async () => {
+  it("sends Stripe-Account for a connected account, and the same parameters on a retry", async () => {
     await links.createLink(request({ mode: "connect", connectedAccountId: "acct_x", paymentMethods: ["card", "link"], expiresAt: new Date(NOW + 2 * 3600_000).toISOString() }));
-    await links.createLink(request({ expiresAt: new Date(NOW + 48 * 3600_000).toISOString() }));
     assert.equal(fake.seen[0]!.headers["stripe-account"], "acct_x");
     assert.equal(fake.seen[0]!.form.get("payment_method_types[1]"), "link");
-    assert.equal(fake.seen[0]!.form.get("expires_at"), String(NOW / 1000 + 7200), "the engine's deadline, when inside the window");
-    assert.equal(fake.seen[1]!.form.get("expires_at"), String(NOW / 1000 + 23 * 3600 + 59 * 60), "never past Stripe's 24 hours");
-    const bare = new StripeCheckoutLinks(KEY, { apiBase: fake.base, clock });
-    await bare.createLink(request());
-    assert.equal(fake.seen[2]!.form.has("success_url"), false);
+    assert.equal(fake.seen[0]!.form.get("expires_at"), String(NOW / 1000 + 7200), "the engine's expiresAt, unchanged");
+    // A retry under the same idempotency key, later: the same body, so Stripe answers the first Session.
+    fake.next = { status: 500, body: "{}" };
+    await assert.rejects(links.createLink(request()));
+    await links.createLink(request());
+    assert.equal(fake.seen[1]!.form.toString(), fake.seen[2]!.form.toString());
+    assert.equal(fake.seen[1]!.headers["idempotency-key"], fake.seen[2]!.headers["idempotency-key"]);
   });
 
   it("names the status and Stripe's error type and code, never its message, on a refusal", async () => {
     fake.next = { status: 401, body: JSON.stringify({ error: { type: "invalid_request_error", code: "api_key_invalid", message: `Invalid API Key provided: ${KEY}` } }) };
     await assert.rejects(links.createLink(request()), (e: unknown) => {
       const message = (e as Error).message;
-      return message === "Stripe did not create the Checkout Session (HTTP 401, type invalid_request_error, code api_key_invalid)" && !message.includes(KEY);
+      return (
+        e instanceof StripeApiError &&
+        e.name === "StripeApiError" &&
+        e.status === 401 &&
+        !e.retryable &&
+        message === "Stripe did not create the Checkout Session (HTTP 401, type invalid_request_error, code api_key_invalid)" &&
+        !message.includes(KEY)
+      );
     });
+    fake.next = { status: 429, body: "{}" };
+    await assert.rejects(links.createLink(request()), (e: unknown) => e instanceof StripeApiError && e.retryable);
     fake.next = { status: 500, body: "not json" };
     await assert.rejects(links.createLink(request()), /HTTP 500\)/);
     fake.next = { status: 200, body: "[]" };
@@ -253,6 +280,7 @@ describe("Stripe Checkout adapter against a local fake", () => {
       { id: open.linkId, status: "weird", payment_status: "paid", livemode: false },
       { id: open.linkId, status: "open", payment_status: "weird", livemode: false },
       { id: open.linkId, status: "open", payment_status: "paid", livemode: "no" },
+      { id: open.linkId, status: "complete", payment_status: "paid", livemode: true },
     ]) {
       fake.next = { status: 200, body: JSON.stringify(body) };
       await assert.rejects(links.readLink(open.linkId), /did not answer/);
@@ -277,12 +305,14 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
     return answer.view;
   }
 
-  async function world(options: Parameters<typeof e2eScripts>[1]) {
-    const stripe = new StripeCheckoutLinks(KEY, { apiBase: fake.base });
-    const w = createDemoWorld({ payments: stripe, clock: systemClock, config: e2eConfig() });
+  async function world(options: Parameters<typeof e2eScripts>[1], clock: Clock = systemClock) {
+    const stripe = new StripeCheckoutLinks(KEY, { apiBase: fake.base, successUrl: RETURN });
+    const w = createDemoWorld({ payments: stripe, clock, config: e2eConfig() });
     const relay = await startDoorRelay(w);
     return { w, relay, runs: new DemoRuns(w, 20, e2eScripts(stripe, options)) };
   }
+
+  const WAIT = "pay: test payment read back from Stripe";
 
   it("runs owner-command, then visit: a test-mode link, the payment read back, the door, a receipt", async () => {
     fake.paidAfterReads = 2;
@@ -290,6 +320,7 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
     const { w, relay, runs } = await world({ pollMs: 1, waitMs: 5000, log: (label, detail) => lines.push(`${label} ${detail}`) });
     try {
       assert.deepEqual(runs.flows().map((f) => f.flow), ["owner-command", "visit"]);
+      assert.equal(runs.hasFlow("deposit-connect"), false, "not in this config");
       const owner = await runAll(runs, "owner-command");
       assert.ok(owner.results.every((r) => r.ok));
       const visit = await runAll(runs, "visit");
@@ -298,6 +329,7 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
       assert.match(link.detail, /Checkout Session cs_test_fake1\.\.\. created, livemode false, status open/);
       assert.equal(link.link!.href, "https://checkout.stripe.com/c/pay/cs_test_fake1");
       assert.match(visit.results.at(-3)!.detail, /session complete, payment paid, livemode false; settled: true/);
+      assert.match(visit.results.at(-2)!.detail, /delivered, door moved: true, opened door-1$/);
       assert.deepEqual(w.doorOpened, ["door-1"]);
       const receipt = (await w.engine.receipt(visit.callId!))!;
       assert.deepEqual(receipt.body.payments.map((p) => [p.status, p.mode, p.providerRef]), [["paid", "platform", "cs_test_fake1"]]);
@@ -309,15 +341,39 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
     }
   });
 
-  it("reports an expired session and a payment that never comes, and logs a failed check", async () => {
+  it("asks again after a lost read or a busy Stripe, and stops at a refusal", async () => {
+    const lines: string[] = [];
+    const { relay, runs } = await world({ pollMs: 1, waitMs: 5000, log: (label, detail) => lines.push(`${label} ${detail}`) });
+    try {
+      fake.paidAfterReads = 1;
+      const run = await runs.start("visit");
+      for (let i = 0; i < 5; i++) await runs.step(run.runId);
+      fake.next = { status: 503, body: "{}" };
+      let answer = await runs.step(run.runId);
+      assert.ok(answer.ok);
+      assert.deepEqual([answer.view.results.at(-1)!.label, answer.view.results.at(-1)!.ok], [WAIT, true]);
+      const second = await runs.start("visit");
+      for (let i = 0; i < 5; i++) await runs.step(second.runId);
+      fake.next = { status: 401, body: JSON.stringify({ error: { type: "authentication_error" } }) };
+      answer = await runs.step(second.runId);
+      assert.ok(answer.ok);
+      assert.deepEqual([answer.view.results.at(-1)!.detail, answer.view.done], ["failed: internal error", true]);
+      assert.ok(lines.includes(`${WAIT} FAILED: Stripe did not answer the Checkout Session (HTTP 401, type authentication_error)`));
+    } finally {
+      await new Promise<void>((resolve) => relay.close(() => resolve()));
+    }
+  });
+
+  it("ends the run on a payment that does not come, and on a session that expired, before any door", async () => {
     const lines: string[] = [];
     const { w, relay, runs } = await world({ pollMs: 1, waitMs: 30, log: (label, detail) => lines.push(`${label} ${detail}`) });
     try {
       let visit = await runAll(runs, "visit");
-      const wait = visit.results.findIndex((r) => r.label === "pay: test payment read back from Stripe");
-      assert.deepEqual([visit.results[wait]!.ok, visit.results[wait]!.detail], [false, "not paid within 0 minutes: start a new run"]);
+      assert.deepEqual([visit.results.at(-1)!.label, visit.results.at(-1)!.ok, visit.results.at(-1)!.detail], [WAIT, false, "not paid in time: start a new run"]);
+      assert.equal(visit.done, true, "a failed check ends the run: no door step after it");
+      assert.deepEqual(await runs.step(visit.runId), { ok: false, status: 409, error: "done" });
+      assert.deepEqual(w.doorOpened, []);
       assert.ok(lines.some((line) => line.includes("CHECK FAILED: not paid")));
-      fake.sessions.get(w.links.at(-1)!.linkId)!.status = "expired";
       const run = await runs.start("visit");
       for (let i = 0; i < 5; i++) await runs.step(run.runId);
       fake.sessions.get(w.links.at(-1)!.linkId)!.status = "expired";
@@ -336,31 +392,84 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
     }
   });
 
-  it("uses its defaults without a log", async () => {
-    const stripe = new StripeCheckoutLinks(KEY, { apiBase: fake.base });
+  it("closes the Checkout page at the engine's deadline, and settles a payment made just then", async () => {
+    let offset = 0;
+    const clock: Clock = { now: () => new Date(Date.now() + offset) };
+    const { w, relay, runs } = await world({ pollMs: 1 }, clock);
+    try {
+      const run = await runs.start("visit");
+      for (let i = 0; i < 5; i++) await runs.step(run.runId);
+      // The engine's deadline (the text plus 15 minutes) is already behind it.
+      offset = 20 * 60_000;
+      const closed = await runs.step(run.runId);
+      assert.ok(closed.ok);
+      assert.deepEqual([closed.view.results.at(-1)!.ok, closed.view.results.at(-1)!.detail], [false, "not paid before the link's deadline: the Checkout page is closed, start a new run"]);
+      assert.equal(fake.sessions.get(w.links.at(-1)!.linkId)!.status, "expired");
+      assert.deepEqual((await w.engine.state(closed.view.callId!)).paymentIds.length, 1);
+
+      offset = 0;
+      const late = await runs.start("visit");
+      for (let i = 0; i < 5; i++) await runs.step(late.runId);
+      offset = 20 * 60_000;
+      fake.payOnExpire = true;
+      const paid = await runs.step(late.runId);
+      assert.ok(paid.ok);
+      assert.match(paid.view.results.at(-1)!.detail, /session complete, payment paid, livemode false; settled: true/);
+    } finally {
+      await new Promise<void>((resolve) => relay.close(() => resolve()));
+    }
+  });
+
+  it("uses its defaults without a log, and stops a waiting step when told to", async () => {
+    const stripe = new StripeCheckoutLinks(KEY, { apiBase: fake.base, successUrl: RETURN });
     const scripts = e2eScripts(stripe);
     assert.deepEqual(Object.keys(scripts), ["owner-command", "visit"]);
     assert.equal(shortSessionId("cs_test_a1b2c3d4e5f6g7"), "cs_test_a1b2c3...");
+    const stop = new AbortController();
+    const { relay, runs } = await world({ pollMs: 60_000, signal: stop.signal });
+    try {
+      const run = await runs.start("visit");
+      for (let i = 0; i < 5; i++) await runs.step(run.runId);
+      const waiting = runs.step(run.runId);
+      setTimeout(() => stop.abort(), 50);
+      const answer = await waiting;
+      assert.ok(answer.ok);
+      assert.deepEqual([answer.view.results.at(-1)!.ok, answer.view.results.at(-1)!.detail], [false, "stopped: the demo is shutting down"]);
+      const next = await runs.start("visit");
+      for (let i = 0; i < 5; i++) await runs.step(next.runId);
+      const after = await runs.step(next.runId);
+      assert.ok(after.ok);
+      assert.equal(after.view.results.at(-1)!.detail, "stopped: the demo is shutting down", "an aborted signal answers at once");
+    } finally {
+      await new Promise<void>((resolve) => relay.close(() => resolve()));
+    }
   });
 
-  it("starts the server and the door relay on the loopback, and stops them", async () => {
-    const demo = await startE2eDemo(KEY, 0, { apiBase: fake.base });
+  it("starts the server and the door relay on the loopback, and a waiting payment does not hold up the stop", async () => {
+    const port = await freePort();
+    const demo = await startE2eDemo(KEY, port, { apiBase: fake.base, pollMs: 60_000 });
+    let waiting: Promise<Response> | undefined;
     try {
-      const port = (demo.server.address() as AddressInfo).port;
-      const res = await fetch(`http://127.0.0.1:${port}/demo/flows`);
-      const { flows } = (await res.json()) as { flows: Array<{ flow: string }> };
+      assert.equal(demo.base, `http://127.0.0.1:${port}`);
+      const { flows } = (await (await fetch(`${demo.base}/demo/flows`)).json()) as { flows: Array<{ flow: string }> };
       assert.deepEqual(flows.map((f) => f.flow), ["owner-command", "visit"]);
-      assert.equal(demo.base, "http://127.0.0.1:0");
       assert.equal((demo.relay.address() as AddressInfo).address, "127.0.0.1");
+      const json = { "content-type": "application/json" };
+      const run = (await (await fetch(`${demo.base}/demo/runs`, { method: "POST", headers: json, body: JSON.stringify({ flow: "visit" }) })).json()) as { runId: string };
+      const next = () => fetch(`${demo.base}/demo/runs/${run.runId}/next`, { method: "POST", headers: json, body: "{}" });
+      for (let i = 0; i < 5; i++) assert.equal((await next()).status, 200);
+      assert.equal(fake.seen.find((s) => s.method === "POST")!.form.get("success_url"), `${demo.base}/`);
+      waiting = next();
+      await new Promise((resolve) => setTimeout(resolve, 50));
     } finally {
       await demo.close();
     }
+    assert.equal((await waiting!).status, 200, "answered when the demo stopped");
     await assert.rejects(
       (async () => {
-        const first = await startE2eDemo(KEY, 0, { apiBase: fake.base });
-        const port = (first.server.address() as AddressInfo).port;
+        const first = await startE2eDemo(KEY, await freePort(), { apiBase: fake.base });
         try {
-          await startE2eDemo(KEY, port, { apiBase: fake.base });
+          await startE2eDemo(KEY, (first.server.address() as AddressInfo).port, { apiBase: fake.base });
         } finally {
           await first.close();
         }

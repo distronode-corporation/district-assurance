@@ -4,7 +4,6 @@
 import { randomUUID } from "node:crypto";
 
 import { EngineError, verifyChain, type AuditEntry, type FlowPosition, type SessionState } from "../../../src/index.ts";
-import { demoConfig } from "./flows.ts";
 import { SCRIPTS, type DemoWorld, type ScriptRun, type Scripts } from "./script.ts";
 
 export interface StepResult {
@@ -65,11 +64,13 @@ export class DemoRuns {
 
   /** Whether `flow` is one of these runs' scripts. */
   hasFlow(flow: string): boolean {
-    return Object.hasOwn(this.#scripts, flow);
+    return Object.hasOwn(this.#scripts, flow) && Object.hasOwn(this.#world.config.flows, flow);
   }
 
   flows(): FlowView[] {
-    return Object.keys(this.#scripts).map((flow) => this.#describe(flow));
+    return Object.keys(this.#scripts)
+      .filter((flow) => this.hasFlow(flow))
+      .map((flow) => this.#describe(flow));
   }
 
   async start(flow: string): Promise<RunView> {
@@ -108,6 +109,8 @@ export class DemoRuns {
     try {
       const outcome = await step.run(this.#world, run.call);
       run.results.push({ index, label: step.label, ...outcome });
+      // A failed check ends the run: the next step may depend on it (no door before a payment).
+      if (!outcome.ok) run.failed = true;
     } catch (error) {
       run.failed = true;
       const detail = error instanceof EngineError ? `refused: ${error.code}` : "failed: internal error";
@@ -143,6 +146,6 @@ export class DemoRuns {
   }
 
   #describe(flow: string): FlowView {
-    return { flow, summary: demoConfig().flows[flow]!.summary ?? "", steps: this.#scripts[flow]!.map((step) => step.label) };
+    return { flow, summary: this.#world.config.flows[flow]!.summary ?? "", steps: this.#scripts[flow]!.map((step) => step.label) };
   }
 }

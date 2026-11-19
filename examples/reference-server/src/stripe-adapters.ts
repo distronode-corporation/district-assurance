@@ -9,8 +9,6 @@
 // StripeIdentityProvider (VER-5) is not built yet and throws NotImplementedError.
 import {
   NotImplementedError,
-  systemClock,
-  type Clock,
   type IdentityProvider,
   type InstantPaymentMethod,
   type PaymentLinkCapabilities,
@@ -55,11 +53,32 @@ export function assertTestModeSecretKey(key: unknown): asserts key is string {
 export interface StripeCheckoutOptions {
   /** Default `https://api.stripe.com`. https only; http only to the loopback (a test's fake). */
   apiBase?: string;
-  /** Where Checkout sends the payer once paid. https, or http to the loopback (the demo page). */
-  successUrl?: string;
-  clock?: Clock;
+  /**
+   * Where Checkout sends the payer once paid (Stripe requires it for a hosted page). https, or
+   * http to the loopback (the demo page).
+   */
+  successUrl: string;
   /** Per request, default 15000 ms. */
   timeoutMs?: number;
+}
+
+/**
+ * Stripe answered, and the answer was a refusal or not one this adapter can trust. `status` is
+ * the HTTP status (200 for an answer of the wrong shape). The message names the status and
+ * Stripe's error type and code, never Stripe's own message, which can quote part of a key.
+ */
+export class StripeApiError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "StripeApiError";
+    this.status = status;
+  }
+
+  /** Worth asking again: Stripe was busy or failed on its side. */
+  get retryable(): boolean {
+    return this.status === 429 || this.status >= 500;
+  }
 }
 
 /** A Checkout Session as read back from Stripe, read only. */
@@ -67,14 +86,12 @@ export interface CheckoutSessionStatus {
   linkId: string;
   status: "open" | "complete" | "expired";
   paymentStatus: "paid" | "unpaid" | "no_payment_required";
-  livemode: boolean;
+  /** Always false: a live-mode answer is refused. */
+  livemode: false;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const SESSION_ID = /^cs_test_[A-Za-z0-9]{1,200}$/;
-// Stripe's shortest Checkout life is 30 minutes and its longest 24 hours; a minute of margin each way.
-const MIN_LIFE_S = 31 * 60;
-const MAX_LIFE_S = 23 * 3600 + 59 * 60;
 
 function checkedUrl(value: string, what: string): URL {
   const url = new URL(value);
@@ -93,36 +110,35 @@ export function checkoutPaymentMethodTypes(methods: readonly InstantPaymentMetho
 /**
  * Stripe Checkout: a Session in payment mode with the engine's instant payment methods, on the
  * platform's own account (`platform`), or with the `Stripe-Account` header when a request names a
- * connected account. The engine asks for a life inside the declared capabilities; the adapter
- * still keeps `expires_at` inside Stripe's window (with a minute of margin each way), and
- * `expireLink` calls `/v1/checkout/sessions/{id}/expire` when the engine's own deadline comes.
+ * connected account. `expires_at` is the engine's own `expiresAt`, unchanged, so a retry under the
+ * same idempotency key sends the same parameters; the engine keeps it inside the declared
+ * capabilities. `expireLink` calls `/v1/checkout/sessions/{id}/expire` when the engine's own
+ * deadline comes.
  */
 export class StripeCheckoutLinks implements PaymentLinks {
   /**
    * Platform mode only, the one this minimal adapter has proven against Stripe test mode (the
    * `Stripe-Account` header for connect mode is sent, but not yet proven live). Checkout's
-   * `expires_at` runs from 30 minutes to 24 hours after creation.
+   * `expires_at` runs from 30 minutes to 24 hours after creation; the declared window keeps a
+   * minute of margin at each end, since the engine counts from the request and Stripe from its
+   * arrival.
    */
-  readonly capabilities: PaymentLinkCapabilities = { modes: ["platform"], minLinkMinutes: 30, maxLinkMinutes: 1440 };
+  readonly capabilities: PaymentLinkCapabilities = { modes: ["platform"], minLinkMinutes: 31, maxLinkMinutes: 1439 };
   readonly #apiKey: string;
   readonly #base: URL;
-  readonly #successUrl: string | undefined;
-  readonly #clock: Clock;
+  readonly #successUrl: string;
   readonly #timeoutMs: number;
 
-  constructor(apiKey: string, options: StripeCheckoutOptions = {}) {
+  constructor(apiKey: string, options: StripeCheckoutOptions) {
     assertTestModeSecretKey(apiKey);
     this.#apiKey = apiKey;
     this.#base = checkedUrl(options.apiBase ?? "https://api.stripe.com", "apiBase");
-    this.#successUrl = options.successUrl === undefined ? undefined : checkedUrl(options.successUrl, "successUrl").href;
-    this.#clock = options.clock ?? systemClock;
+    this.#successUrl = checkedUrl(options.successUrl, "successUrl").href;
     this.#timeoutMs = options.timeoutMs ?? 15_000;
   }
 
   async createLink(input: PaymentLinkRequest): Promise<{ linkId: string; url: string }> {
-    const now = Math.floor(this.#clock.now().getTime() / 1000);
-    const wanted = Math.floor(Date.parse(input.expiresAt) / 1000);
-    const expiresAt = Math.min(Math.max(wanted, now + MIN_LIFE_S), now + MAX_LIFE_S);
+    const expiresAt = Math.floor(Date.parse(input.expiresAt) / 1000);
     const form: Array<[string, string]> = [
       ["mode", "payment"],
       ["line_items[0][quantity]", "1"],
@@ -134,15 +150,15 @@ export class StripeCheckoutLinks implements PaymentLinks {
       ["client_reference_id", input.paymentId],
       ["metadata[payment_id]", input.paymentId],
       ["metadata[call_id]", input.callId],
-      ...(this.#successUrl === undefined ? [] : [["success_url", this.#successUrl] as [string, string]]),
+      ["success_url", this.#successUrl],
     ];
     const session = await this.#call("POST", "/v1/checkout/sessions", { form, idempotencyKey: input.idempotencyKey, account: input.connectedAccountId });
     const id = session.body.id;
     const url = session.body.url;
     if (session.status !== 200 || typeof id !== "string" || !SESSION_ID.test(id) || typeof url !== "string" || !url.startsWith("https://")) {
-      throw new Error(`Stripe did not create the Checkout Session (${describeError(session)})`);
+      throw new StripeApiError(session.status, `Stripe did not create the Checkout Session (${describeError(session)})`);
     }
-    if (session.body.livemode !== false) throw new Error("Stripe answered a live-mode session to a test-mode key; refusing it");
+    if (session.body.livemode !== false) throw new StripeApiError(session.status, "Stripe answered a live-mode session to a test-mode key; refusing it");
     return { linkId: id, url };
   }
 
@@ -155,7 +171,7 @@ export class StripeCheckoutLinks implements PaymentLinks {
       const now = await this.readLink(id, input.connectedAccountId);
       if (now.status !== "open") return { state: "not_open" };
     }
-    throw new Error(`Stripe did not expire the Checkout Session (${describeError(res)})`);
+    throw new StripeApiError(res.status, `Stripe did not expire the Checkout Session (${describeError(res)})`);
   }
 
   /** Reads a Checkout Session's status from Stripe. Read only: it changes nothing. */
@@ -168,9 +184,9 @@ export class StripeCheckoutLinks implements PaymentLinks {
       res.body.id !== id ||
       !(status === "open" || status === "complete" || status === "expired") ||
       !(paymentStatus === "paid" || paymentStatus === "unpaid" || paymentStatus === "no_payment_required") ||
-      typeof livemode !== "boolean"
+      livemode !== false
     ) {
-      throw new Error(`Stripe did not answer the Checkout Session (${describeError(res)})`);
+      throw new StripeApiError(res.status, `Stripe did not answer the Checkout Session (${describeError(res)})`);
     }
     return { linkId: id, status, paymentStatus, livemode };
   }
