@@ -140,8 +140,8 @@ refused at every entry point. A planned factor cannot be turned on.
 `_`, starting with a letter) to `{spokenKnowledgeAbove, levelOneAbove}`, numbers from 0 to 1 with
 `levelOneAbove` not below `spokenKnowledgeAbove`; vendors' scores are not comparable, so each has
 its own. `reportSyntheticVoice(callId, {score, vendor})` takes a score from 0 to 1 at any point in
-a call that has not ended, in a flow or not; an input that is not an object, a vendor with no
-thresholds, or a score that is not a number from 0 to 1, is refused (`invalid_input`). A call
+a call that has not ended, in a flow or not; an input that is not an object, a vendor that is not
+a string naming a vendor with thresholds, or a score that is not a number from 0 to 1, is refused (`invalid_input`). A call
 stored before VER-14 has no band, and reads as `clear`. Its band is `level_1` above `levelOneAbove`,
 `spoken_off` above `spokenKnowledgeAbove`, else `clear`. The call keeps its highest band, so a
 later, lower score lifts nothing, and a taint or a new verification does not reset it. Under

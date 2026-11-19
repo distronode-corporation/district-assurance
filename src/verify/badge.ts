@@ -528,7 +528,9 @@ export async function reportSyntheticVoice(rt: EngineRuntime, callId: string, in
   if (!isObject(input)) throw new EngineError("invalid_input", "a synthetic voice report is { score and vendor }");
   const { score, vendor } = input;
   const vendors = rt.settings<BadgeVoiceSettings>(BADGE).syntheticVoice ?? {};
-  const thresholds = Object.hasOwn(vendors, vendor) ? vendors[vendor] : undefined;
+  // A string only: Object.hasOwn coerces its key, so ["acme"] would find acme's thresholds and
+  // put an array (or any object naming a vendor) into the ledger entry.
+  const thresholds = typeof vendor === "string" && Object.hasOwn(vendors, vendor) ? vendors[vendor] : undefined;
   if (thresholds === undefined) throw new EngineError("invalid_input", "this vendor has no synthetic voice thresholds in the badge settings");
   if (!isScore(score)) throw new EngineError("invalid_input", "score must be a number from 0 to 1");
   const band: SyntheticVoiceBand = score > thresholds.levelOneAbove ? "level_1" : score > thresholds.spokenKnowledgeAbove ? "spoken_off" : "clear";
