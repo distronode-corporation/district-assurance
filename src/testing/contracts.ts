@@ -530,6 +530,8 @@ export function recordStoreContract(factory: (subjects: SeededSubject[]) => Reco
     { workspaceId: "north/branch", subject: contractSubject("3", { phoneOnFile: "+15555550199" }) },
     ...SURROGATE_KEYS.map((key, i) => ({ workspaceId: "w", subject: contractSubject(key, { phoneOnFile: `+1555555011${i}` }) })),
     ...SURROGATE_KEYS.map((key, i) => ({ workspaceId: key, subject: contractSubject("4", { phoneOnFile: `+1555555012${i}` }) })),
+    // Another workspace's subject with the same key as the second one: a deletion must not reach it.
+    { workspaceId: "w2", subject: contractSubject("2".repeat(64), { phoneOnFile: "+15555550101" }) },
   ];
   const cases: Array<[string, (store: RecordStore) => Promise<void>]> = [
     [
@@ -613,6 +615,33 @@ export function recordStoreContract(factory: (subjects: SeededSubject[]) => Reco
         ]);
         assert.deepEqual(await store.getIntakeRecord("w", "rec_same"), contractRecord("w", "rec_same"));
         for (let i = 0; i < 10; i++) assert.deepEqual(await store.getIntakeRecord("w", `rec_${i}`), contractRecord("w", `rec_${i}`));
+      },
+    ],
+    [
+      "deletes a subject's PIN and duress digests, keeps the rest, and deleting a missing one is harmless",
+      async (store) => {
+        const key = "2".repeat(64);
+        const pin = "e".repeat(64);
+        const duress = "f".repeat(64);
+        for (const w of ["w", "w2"]) {
+          assert.equal(await store.putPinDigest(w, key, pin), true, `${w}: the PIN digest is stored`);
+          assert.equal(await store.putDuressDigest(w, key, duress, pin), true, `${w}: the duress digest is stored`);
+        }
+        assert.deepEqual(await store.getSubject("w", key), { ...subjects[1]!.subject, pinDigest: pin, duressDigest: duress });
+        await store.deletePinDigest("w", key);
+        const gone = await store.getSubject("w", key);
+        assert.deepEqual(gone, subjects[1]!.subject, "the phone on file and the knowledge are kept");
+        assert.equal("pinDigest" in gone!, false);
+        assert.equal("duressDigest" in gone!, false);
+        // Deleting again, and deleting for a subject the store does not have, change nothing and create nothing.
+        await store.deletePinDigest("w", key);
+        await store.deletePinDigest("w", "f".repeat(64));
+        await store.deletePinDigest("w3", key);
+        assert.deepEqual(await store.getSubject("w", key), subjects[1]!.subject);
+        assert.equal(await store.getSubject("w", "f".repeat(64)), null);
+        assert.equal(await store.getSubject("w3", key), null);
+        // The same key in another workspace keeps both digests.
+        assert.deepEqual(await store.getSubject("w2", key), { ...subjects.at(-1)!.subject, pinDigest: pin, duressDigest: duress });
       },
     ],
   ];

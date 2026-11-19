@@ -128,7 +128,7 @@ describe("the RecordStore contract", () => {
       async getIntakeRecord(workspaceId: string, recordId: string) {
         return structuredClone(this.#records.get(`${workspaceId}/${recordId}`) ?? null);
       }
-      // FIL-2 (#78), VER-6 (#74), VER-12 (#124) and PRV-7 (#105) writes; the PRV-5 contract does not exercise them yet.
+      // FIL-2 (#78), VER-6 (#74), VER-12 (#124) and PRV-7 (#105) writes: a store that drops them fails the digest case too.
       async deleteIntakeRecords() {}
       async listIntakeRecords() {
         return [];
@@ -147,6 +147,7 @@ describe("the RecordStore contract", () => {
     }
     assert.deepEqual(await failing(recordStoreContract((subjects) => new Joined(subjects))), [
       "keeps workspaces apart, and never lets two workspace and id pairs share a key",
+      "deletes a subject's PIN and duress digests, keeps the rest, and deleting a missing one is harmless",
     ]);
   });
 
@@ -177,6 +178,23 @@ describe("the RecordStore contract", () => {
       }
     }
     assert.deepEqual(await failing(recordStoreContract((subjects) => seed(new Leaky(), subjects))), ["stores an intake record and returns copies"]);
+  });
+
+  it("catches a store whose digest deletion reaches the same key in another workspace, or drops the rest of the subject", async () => {
+    const name = "deletes a subject's PIN and duress digests, keeps the rest, and deleting a missing one is harmless";
+    class Spilling extends MemoryRecordStore {
+      override async deletePinDigest(_workspaceId: string, subjectKey: string) {
+        for (const w of ["w", "w2"]) await super.deletePinDigest(w, subjectKey);
+      }
+    }
+    class Dropping extends MemoryRecordStore {
+      override async deletePinDigest(workspaceId: string, subjectKey: string) {
+        const subject = await this.getSubject(workspaceId, subjectKey);
+        if (subject !== null) this.putSubject(workspaceId, { subjectKey, phoneOnFile: "", knowledge: {} });
+      }
+    }
+    assert.deepEqual(await failing(recordStoreContract((subjects) => seed(new Spilling(), subjects))), [name]);
+    assert.deepEqual(await failing(recordStoreContract((subjects) => seed(new Dropping(), subjects))), [name]);
   });
 });
 
