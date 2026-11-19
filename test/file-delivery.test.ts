@@ -5,7 +5,7 @@ import { strict as assert } from "node:assert";
 import type { AddressInfo } from "node:net";
 import { describe, it } from "node:test";
 
-import { createReferenceServer } from "../examples/reference-server/src/app.ts";
+import { createReferenceServer, type ReferenceServerOptions } from "../examples/reference-server/src/app.ts";
 import type { RecordDelivery } from "../src/core/adapters.ts";
 import * as root from "../src/index.ts";
 import {
@@ -239,7 +239,7 @@ describe("the reference server's sample receiver", () => {
     },
   };
 
-  async function serve(t: TestEngine, records?: { secrets: readonly string[]; onRecord?: (d: RecordDeliveryBody) => void | Promise<void> }) {
+  async function serve(t: TestEngine, records?: ReferenceServerOptions["records"]) {
     const server = createReferenceServer({ engine: t.engine, clock: t.clock, stripeSecrets: { identity: [], payments: [] }, ...(records === undefined ? {} : { records }) });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/webhooks/records`;
@@ -323,7 +323,7 @@ describe("the reference server's sample receiver", () => {
     }
   });
 
-  it("applies a delivery once when a duplicate arrives while the first is still running", async () => {
+  it("applies a delivery once when a duplicate arrives while the first is still running", { timeout: 10_000 }, async () => {
     const t = setup();
     const recordId = await confirmedRecord(t);
     const applied: string[] = [];
@@ -331,6 +331,7 @@ describe("the reference server's sample receiver", () => {
     const gate = new Promise<void>((resolve) => (release = resolve));
     let started!: () => void;
     const running = new Promise<void>((resolve) => (started = resolve));
+    const duplicates: string[] = [];
     const { url, close } = await serve(t, {
       secrets: [SECRET],
       onRecord: async (d) => {
@@ -338,16 +339,25 @@ describe("the reference server's sample receiver", () => {
         await gate;
         applied.push(d.record.recordId);
       },
+      // The first delivery is held in its handler until the duplicate reaches the pending wait:
+      // only then is it released, so the duplicate can only have taken the pending path.
+      onDuplicate: (_key, state) => {
+        duplicates.push(state);
+        if (state === "pending") release();
+      },
     });
     try {
       const to = { ...destination, url };
       const first = deliverRecord({ ...inputs(t, recordId, fetchDelivery), destination: to });
       await running;
       const second = deliverRecord({ ...inputs(t, recordId, fetchDelivery), destination: to });
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      release();
       const [a, b] = await Promise.all([first, second]);
       assert.deepEqual([a.status, b.status], [200, 200]);
+      assert.deepEqual(applied, [recordId]);
+      assert.deepEqual(duplicates, ["pending"], "the duplicate waited on the delivery in flight");
+      // After it succeeded, a third delivery is a plain duplicate.
+      await deliverRecord({ ...inputs(t, recordId, fetchDelivery), destination: to });
+      assert.deepEqual(duplicates, ["pending", "received"]);
       assert.deepEqual(applied, [recordId]);
     } finally {
       await close();

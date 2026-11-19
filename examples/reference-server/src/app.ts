@@ -29,7 +29,15 @@ export interface ReferenceServerOptions {
    * awaits `onRecord` and records the key only once it succeeds; when it throws or rejects, the
    * answer is 500 and the sender's retry applies the record again.
    */
-  records?: { secrets: readonly string[]; onRecord?: (delivery: RecordDeliveryBody) => void | Promise<void> };
+  records?: {
+    secrets: readonly string[];
+    onRecord?: (delivery: RecordDeliveryBody) => void | Promise<void>;
+    /**
+     * Told of each duplicate, before it is answered: `pending` while the first delivery's
+     * `onRecord` still runs (the duplicate waits for it), `received` once it has succeeded.
+     */
+    onDuplicate?: (idempotencyKey: string, state: "pending" | "received") => void;
+  };
   /** Default 64 KiB. */
   maxBodyBytes?: number;
   /** The demo's runs: serves the browser UI and the `/demo/*` routes. Off when absent. */
@@ -113,9 +121,13 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     const delivery = parseRecordDelivery(payload);
     if (delivery === null) return [400, { error: "malformed_delivery" }];
     const key = delivery.idempotencyKey;
-    if (receivedRecords.has(key)) return [200, { received: true, duplicate: true }];
+    if (receivedRecords.has(key)) {
+      options.records?.onDuplicate?.(key, "received");
+      return [200, { received: true, duplicate: true }];
+    }
     const pending = pendingRecords.get(key);
     if (pending !== undefined) {
+      options.records?.onDuplicate?.(key, "pending");
       await pending;
       return [200, { received: true, duplicate: true }];
     }
