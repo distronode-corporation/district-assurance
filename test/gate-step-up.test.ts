@@ -183,11 +183,12 @@ describe("step-up: tokens", () => {
     assert.ok(!cryptoVerify("sha256", Buffer.from(`${header}.${payload}x`), { key, dsaEncoding: "ieee-p1363" }, Buffer.from(signature, "base64url")));
 
     // The call ended before the web sign-in got there: the token is still exchanged, once.
-    await t.engine.endCall(callId);
+    assert.equal(await t.engine.endCall(callId), null, "this flow has no receipt step");
     assert.deepEqual(await t.engine.exchangeStepUpToken(issued.token, portal), { ok: true, claims });
     assert.deepEqual(await t.engine.exchangeStepUpToken(issued.token, portal), { ok: false, reason: "unknown" }, "used once");
     const order = (await t.ledger.list()).map((e) => e.event);
-    assert.ok(order.indexOf("stepup.exchanged") > order.indexOf("receipt.issued"), "an exchange after the end follows the receipt");
+    assert.ok(order.includes("call.ended") && order.includes("stepup.exchanged"), "both entries are there");
+    assert.ok(order.indexOf("stepup.exchanged") > order.indexOf("call.ended"), "the exchange came after the call ended");
 
     const digest = sha256Hex(issued.token);
     assert.deepEqual(await stepUpEvents(t), [
@@ -326,6 +327,16 @@ describe("step-up: tokens", () => {
     assert.equal((await t.engine.exchangeStepUpToken(token, portal)).ok, true, "the real token was never used up");
   });
 
+  it("answers a token that is not these exact bytes from a read, writing nothing", async () => {
+    const t = stepUpSetup();
+    const callId = await webVerified(t);
+    const { token } = await t.engine.issueStepUpToken(callId, { nonce: NONCE });
+    t.sessions.stopWhen = () => true;
+    assert.deepEqual(await t.engine.exchangeStepUpToken(`${token.slice(0, -2)}${token.endsWith("AA") ? "BB" : "AA"}`, portal), { ok: false, reason: "unknown" }, "no write, so no store error");
+    t.sessions.stopWhen = null;
+    assert.equal((await t.engine.exchangeStepUpToken(token, portal)).ok, true);
+  });
+
   it("throws a failed write as it is", async () => {
     const t = stepUpSetup();
     const callId = await webVerified(t);
@@ -408,7 +419,7 @@ describe("step-up: tokens", () => {
     const entries = await t.ledger.list();
     const events = entries.map((e) => e.event);
     assert.deepEqual(entries.filter((e) => e.event === "stepup.failed").map((e) => e.detail), [{ tokenId: "stu_1", reason: "call_ended" }]);
-    assert.ok(events.indexOf("stepup.failed") < events.indexOf("call.ended"), "settled in the write that ended the call");
+    assert.ok(events.includes("stepup.failed") && events.indexOf("stepup.failed") < events.indexOf("call.ended"), "settled in the write that ended the call");
     assert.equal(events.at(-1), "receipt.issued", "nothing follows the receipt");
     // A signer that fails after the call ended: the token stays as the end settled it.
     const other = await webVerified(t, null);
@@ -538,7 +549,7 @@ describe("step-up: the end of the call", () => {
     assert.deepEqual(await t.engine.exchangeStepUpToken(token, portal), { ok: false, reason: "not_authorized" }, "and stays refused");
     const entries = await t.ledger.list();
     const events = entries.map((e) => e.event);
-    assert.ok(events.indexOf("stepup.refused") < events.indexOf("call.ended"), "refused in the write that ended the call");
+    assert.ok(events.includes("stepup.refused") && events.indexOf("stepup.refused") < events.indexOf("call.ended"), "refused in the write that ended the call");
     assert.ok(!events.includes("stepup.exchanged"));
     assert.equal(events.at(-1), "receipt.issued", "nothing follows the receipt");
     assert.deepEqual((await stepUpTokens(t, callId)).map((r) => [r.status, r.refusedAtEnd]), [["refused", "not_authorized"]]);
@@ -611,6 +622,11 @@ describe("step-up: the end of the call", () => {
       assert.ok(!("d" in key) && !JSON.stringify(key).includes("SECRET"));
     }
     assert.deepEqual(t.engine.stepUpKeys().keys.map((k) => (k as { kid?: string }).kid), ["s-1"]);
+    // A signer whose public JWK carries no kid still publishes the kid its tokens' header names.
+    const bare = generateTestSigner("s-2");
+    const { kid: _dropped, ...noKid } = bare.publicJwk() as { kid?: string };
+    const u = setup({ adapters: { stepUpSigner: { ...bare, publicJwk: () => noKid } } });
+    assert.deepEqual(u.engine.stepUpKeys().keys.map((k) => (k as { kid?: string }).kid), ["s-2"]);
   });
 });
 

@@ -185,8 +185,8 @@ Hanging up never revives a token: the write that ends the call refuses every iss
 call is tainted, has a new verification running or no longer holds the token's grant (verified
 again, as that subject or another), since the ended call holds no grant to judge it by later
 (tested). Only a token for the grant the call still holds as it ends stays exchangeable, until it
-expires (at most 5 minutes; whether it should is a pending decision), its exchange written after
-the receipt, outside its ledger head; the receipt lists the call's tokens as the end left them
+expires (at most 5 minutes; whether it should is a pending decision), its exchange written before
+or after `receipt.issued` and never changing the receipt; the receipt lists the call's tokens as the end left them
 (tested). A refused exchange is final, so anyone holding a token can use it up with a wrong nonce
 and deny that one sign-in (it starts again with a new nonce); a guessed nonce never gets a second
 try (tested). Published key sets carry only public key members, whatever a signer returns

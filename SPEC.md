@@ -365,9 +365,10 @@ false. `endCall` returns it, or null. `verification` comes from Badge, `records`
 `payments` from Paylink and `consents` from Trace; a module that is off contributes an empty
 part. `ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
 the ended call issues the receipt later with the same head, without ending the call again.
-`stepUp` is step-up's part (section 18): each token the call was issued, `{tokenId, expiresAt,
-status}` as the end of the call left it. It is present only on a call that was issued one, so the
-format stays at `v: 1`. `verifyReceipt(receipt, keys)` picks the key by `kid`
+`stepUp` is step-up's part (section 18): each token record the call has, `{tokenId, expiresAt,
+status}` as the end of the call left it, `failed` ones included (a reservation whose signing failed
+is listed too, so the part's presence is no proof that a token became valid). It is present only
+on a call with at least one record, so the format stays at `v: 1`. `verifyReceipt(receipt, keys)` picks the key by `kid`
 and returns false for any change, a wrong algorithm, a malformed signature or an unknown key.
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
 `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
@@ -652,8 +653,11 @@ for that subject or another, or the grant dropped) is refused (`stepup.refused`,
 `tainted` or `not_authorized`), and any later exchange of it answers that reason and writes
 nothing. Only a token issued for the grant the call still holds as it ends stays exchangeable
 after the end, until it expires (at most 5 minutes); its `stepup.exchanged` or `stepup.refused`
-entry then follows the receipt, outside its ledger head. Whether tokens stay exchangeable after
-the end at all is a pending decision. The receipt lists the call's tokens as the end left them
+entry may then land before or after `receipt.issued` (the receipt can still be signing), and never
+changes the receipt. Whether tokens stay exchangeable after the end at all is a pending decision.
+An exchange whose write is saved but whose ledger append then fails throws, and the token is used
+up: a retry answers `unknown`, and the sign-in starts again with a new nonce (it fails closed; the
+entry is appended by the call's next write or `flushLedger`). The receipt lists the call's tokens as the end left them
 (`stepUp`, section 12), so a reader can tie such a later entry to it.
 
 ```json

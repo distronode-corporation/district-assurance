@@ -442,7 +442,9 @@ export class Engine {
 
   /** The JWKS document for the step-up issuer's `/.well-known/jwks.json` (no keys without a step-up signer). */
   stepUpKeys(): { keys: JsonWebKey[] } {
-    return { keys: this.#adapters.stepUpSigner === undefined ? [] : [publicMembers(this.#adapters.stepUpSigner.publicJwk())] };
+    const signer = this.#adapters.stepUpSigner;
+    // The published `kid` is the one the tokens' header carries, whatever the signer's JWK says.
+    return { keys: signer === undefined ? [] : [{ ...publicMembers(signer.publicJwk()), kid: signer.keyId } as JsonWebKey] };
   }
 
   // ---- Trace (prove) -----------------------------------------------------------------------

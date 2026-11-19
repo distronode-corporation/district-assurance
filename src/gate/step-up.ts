@@ -359,12 +359,19 @@ export async function exchangeStepUpToken(rt: EngineRuntime, token: unknown, exp
   const claims = readClaims(token);
   if (claims === null) return { ok: false, reason: "malformed" };
   const digest = sha256Hex(token as string);
+  /** The token's record when the call holds these exact bytes; anything else is not a token of this engine's. */
+  const issuedBytes = (record: CallRecord) => {
+    const slice = record.modules[STEP_UP] as unknown as StepUpSlice | undefined;
+    const found = slice?.tokens.find((t) => t.tokenId === claims.jti);
+    return found === undefined || found.digest === null || !hexDigestsEqual(found.digest, digest) ? null : found;
+  };
   try {
+    // A token that is not these exact bytes is answered from a read: it writes nothing, so it can
+    // neither use up the real token nor fail on a store error.
+    if (issuedBytes(await rt.read(claims.sid)) === null) return { ok: false, reason: "unknown" };
     return await rt.update(claims.sid, (draft): StepUpExchange => {
-      const slice = draft.record.modules[STEP_UP] as unknown as StepUpSlice | undefined;
-      const record = slice?.tokens.find((t) => t.tokenId === claims.jti);
-      // Only the exact bytes this call issued: anything else is refused without using the token up.
-      if (record === undefined || record.digest === null || !hexDigestsEqual(record.digest, digest)) return { ok: false, reason: "unknown" };
+      // A token's digest is written once, when it becomes valid, so the read above holds here too.
+      const record = issuedBytes(draft.record)!;
       // Refused by the end of its call: it says why, and nothing more is written.
       if (record.refusedAtEnd !== undefined) return { ok: false, reason: record.refusedAtEnd };
       // Not waiting any more (already exchanged or refused).

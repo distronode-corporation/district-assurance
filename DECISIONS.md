@@ -344,6 +344,6 @@ adapter (a key of its own, apart from the receipt and access signers). The write
 call fails a token still being signed and refuses every issued token its call no longer vouches
 for (tainted, a new verification running, or another grant). Whether a token issued for the grant
 the call still holds at its end stays exchangeable until it expires (at most 5 minutes), with its
-exchange entry then following `receipt.issued`, is a pending decision; the code does so for now,
+exchange entry then written before or after `receipt.issued`, is a pending decision; the code does so for now,
 and the receipt lists the call's tokens.
 
