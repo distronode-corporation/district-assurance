@@ -51,6 +51,9 @@ export type HostAction =
   | { do: "owner"; account: string }
   | { do: "keypad"; entries: Record<string, string> }
   | { do: "pin"; pin: string }
+  | { do: "spoken"; answer: Record<string, string> }
+  | { do: "text_code"; entries: Array<"right" | "wrong"> }
+  | { do: "callback"; answered: boolean }
   | { do: "carrier" }
   | { do: "identity"; status: "verified" | "canceled" }
   | { do: "finish" }
@@ -92,6 +95,7 @@ export type LineKey =
   | "verified"
   | "not_verified"
   | "link_sent"
+  | "calling_back"
   | "done"
   | "refused"
   | "interrupt"
@@ -109,6 +113,7 @@ export const LINES: Readonly<Record<Locale, Readonly<Record<LineKey, string>>>> 
     verified: "Thank you, you are verified.",
     not_verified: "I could not verify you on this call.",
     link_sent: "I have texted a link to the number we have on file.",
+    calling_back: "If we can, we will call you back at the number we have on file. Goodbye for now.",
     done: "Done.",
     refused: "I cannot do that on this call.",
     interrupt: "Please do not read card numbers aloud. I can text you a secure payment link instead.",
@@ -124,6 +129,7 @@ export const LINES: Readonly<Record<Locale, Readonly<Record<LineKey, string>>>> 
     verified: "Merci, votre identité est vérifiée.",
     not_verified: "Je n'ai pas pu vérifier votre identité pendant cet appel.",
     link_sent: "Je vous ai envoyé un lien par texto au numéro inscrit à votre dossier.",
+    calling_back: "Si nous le pouvons, nous vous rappellerons au numéro inscrit à votre dossier. À bientôt.",
     done: "C'est fait.",
     refused: "Je ne peux pas faire cela pendant cet appel.",
     interrupt: "Veuillez ne pas lire de numéro de carte à voix haute. Je peux plutôt vous envoyer un lien de paiement sécurisé par texto.",
@@ -138,7 +144,7 @@ const TEXT_OPENINGS: Readonly<Record<Locale, string>> = { en: "Your ", fr: "Votr
 
 /** People on file. Made up; 555 numbers. */
 export const SUBJECTS = {
-  "12345678": { phoneOnFile: "+15555550100", knowledge: { dob: "19850214", unit: "0412" }, pin: "4826" },
+  "12345678": { phoneOnFile: "+15555550100", knowledge: { dob: "19850214", unit: "0412", postal: "K1A0B1" }, pin: "4826" },
   "23456789": { phoneOnFile: "+15555550102", knowledge: { dob: "19520630", unit: "0907" } },
 } as const satisfies Record<string, { phoneOnFile: string; knowledge: Record<string, string>; pin?: string }>;
 
@@ -148,19 +154,25 @@ export const UNKNOWN_ACCOUNT = "99999999";
 /** The amount the host's price list sets for a deposit outside a flow. Code chooses it, never the model. */
 const PRICE_LIST_DEPOSIT = { amountMinor: 15000, currency: "cad", description: "Repair deposit", amountSource: "price_list" } as const;
 
-/** Keypad knowledge is two fields; a PIN alone reaches level 1, for owner commands only in its flow. */
+/**
+ * Keypad knowledge is two fields; a PIN or a spoken postal code alone reaches level 1, for owner
+ * commands only in its flow. A texted code or a callback adds to a keypad match for level 2.
+ */
 export function suiteConfig(): FlowConfig {
   const config = defaultConfig();
   config.revision = "adversarial-1";
   const policy = defaultVerificationPolicy();
   policy.keypadFields = ["dob", "unit"];
-  policy.levels[0] = { level: 1, anyOf: [["keypad_knowledge"], ["pin"]] };
+  policy.levels[0] = { level: 1, anyOf: [["keypad_knowledge"], ["pin"], ["spoken_knowledge"]] };
+  policy.levels[1]!.anyOf.push(["keypad_knowledge", "callback"]);
+  policy.spoken = { fields: { postal: "ca_postal_code" }, maxAttemptsPerCall: 3 };
+  policy.textCodeCountryCodes = ["1"];
   policy.scopes["owner.command"] = 1;
   policy.scopeClasses = { "owner.command": "none" };
   config.policy = policy;
   config.modules.badge = {
     settings: {
-      factors: ["keypad_knowledge", "pin", "carrier_identity_match", "photo_id"],
+      factors: ["keypad_knowledge", "pin", "carrier_identity_match", "photo_id", "text_code", "callback", "spoken_knowledge"],
       pin: { mode: "keyed_hash", minDigits: 4, maxDigits: 8, maxAttemptsPerCall: 3 },
     },
   };
@@ -221,6 +233,8 @@ export async function runScript(script: Script): Promise<RunReport> {
   const report: RunReport = { compared: 0, taintChecks: 0, grantsTainted: 0, texts: 0 };
   const spoken: string[] = [];
   const keyed: string[] = [];
+  /** Texted codes: they reach a text by design, and must reach nothing else. */
+  const codes: string[] = [];
   let call = await open(script.flow);
 
   async function open(flow: string | undefined): Promise<Call> {
@@ -275,7 +289,7 @@ export async function runScript(script: Script): Promise<RunReport> {
   }
 
   /** Sends a keypad or PIN entry to the call and to the mirror, and compares a failed answer with the mirror's. */
-  async function entry(submit: (callId: string) => Promise<{ matched: boolean; locked: boolean }>, values: string[]): Promise<Outcome> {
+  async function entry(submit: (callId: string) => Promise<{ matched: boolean; locked: boolean }>, values: string[], opens = true): Promise<Outcome> {
     keyed.push(...values);
     // A failure starts a wait across calls (VER-1, #71): each entry comes after it, as a caller's would.
     t.clock.advance(900_000);
@@ -287,7 +301,8 @@ export async function runScript(script: Script): Promise<RunReport> {
     const mirror = await submit(call.mirrorId);
     const result = outcome.result as { matched: boolean };
     if (result.matched) {
-      call.matchedPhone = SUBJECTS[call.account as keyof typeof SUBJECTS].phoneOnFile;
+      // Only a keypad or PIN match lets a text or a callback go out; a spoken answer never does.
+      if (opens) call.matchedPhone = SUBJECTS[call.account as keyof typeof SUBJECTS].phoneOnFile;
     } else {
       // An unknown account and a wrong answer: the same answer, the same line, the same ledger detail.
       assert.deepEqual(mirror, outcome.result, `${script.id}: the answer must not tell a wrong entry from an unknown account`);
@@ -296,6 +311,62 @@ export async function runScript(script: Script): Promise<RunReport> {
       report.compared++;
     }
     return outcome;
+  }
+
+  /**
+   * Asks for a code to the number on file, then keys each entry: the code the last text carried, or
+   * one digit off it. A code goes out only after a keypad or PIN match, so there is no mirror to
+   * compare with; the entries come at once, as a caller reading the text would key them.
+   */
+  async function textCode(entries: Array<"right" | "wrong">): Promise<Outcome> {
+    const sentBefore = t.messages.sent.length;
+    const sent = await attempt(async () => ({ line: null, result: await engine.sendTextCode(call.callId) }));
+    if (sent.error !== undefined) return sent;
+    // The text goes out after the reply.
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+    const text = t.messages.sent.slice(sentBefore).at(-1);
+    const code = text === undefined ? "000000" : /\d{6}/.exec(text.body)![0];
+    codes.push(code);
+    let outcome: Outcome = sent;
+    for (const which of entries) {
+      const keyedCode = which === "right" ? code : `${(Number(code[0]) + 1) % 10}${code.slice(1)}`;
+      outcome = await attempt(async () => {
+        const result = await engine.checkTextCode(call.callId, keyedCode);
+        return { line: result.matched ? "matched" : result.locked ? "locked" : "no_match", result: { ...result } };
+      });
+    }
+    return outcome;
+  }
+
+  /**
+   * Asks for a callback and ends the call. The mirror asks too, and both hear the same line; only a
+   * call that matched by keypad or PIN rings, and only the number on file. When one rings, the
+   * script carries on in the callback call, with the dialer's outcome: answered and confirmed, or not.
+   */
+  async function callBack(answered: boolean): Promise<Outcome> {
+    const dialsBefore = t.dialer.dialed.length;
+    const matched = call.matchedPhone;
+    const outcome = await attempt(async () => {
+      await engine.requestCallback(call.callId);
+      return { line: "calling_back" };
+    });
+    if (outcome.error !== undefined) return outcome;
+    assert.equal(await engine.requestCallback(call.mirrorId), undefined);
+    const dials = t.dialer.dialed.slice(dialsBefore);
+    if (dials.length === 0) return { line: "calling_back", result: { dialed: false } };
+    // One ring, for the call and never for the mirror: after a match, to the number on file.
+    assert.equal(dials.length, 1, `${script.id}: the mirror's callback rang`);
+    const dial = dials[0]!;
+    assert.notEqual(matched, null, `${script.id}: a callback before a keypad or PIN match`);
+    assert.equal(dial.to, matched, `${script.id}: a callback not to the number on file`);
+    if (script.callingNumber !== matched) assert.notEqual(dial.to, script.callingNumber, `${script.id}: a callback to the calling number`);
+    await closeCall();
+    // The callback call has its subject chosen, not matched: its own mirror keys the unknown account.
+    const { callId: mirrorId } = await engine.startCall({ locale: script.locale });
+    await engine.beginVerification(mirrorId, { accountNumber: UNKNOWN_ACCOUNT });
+    call = { callId: dial.callId, mirrorId, flow: call.flow, account: call.account, matchedPhone: null, taintedSinceGrant: false };
+    const applied = await engine.applyCallbackOutcome({ ref: dial.ref, answered, confirmed: answered });
+    return { line: "calling_back", result: { dialed: true, applied: applied.applied } };
   }
 
   async function begin(account: string, chosenByHost: boolean): Promise<Outcome> {
@@ -328,6 +399,12 @@ export async function runScript(script: Script): Promise<RunReport> {
         return entry((id) => engine.submitKeypad(id, action.entries), Object.values(action.entries));
       case "pin":
         return entry((id) => engine.submitPin(id, action.pin), [action.pin]);
+      case "spoken":
+        return entry((id) => engine.submitFactor(id, "spoken_knowledge", { ...action.answer }), Object.values(action.answer), false);
+      case "text_code":
+        return textCode(action.entries);
+      case "callback":
+        return callBack(action.answered);
       case "carrier":
         return attempt(async () => ({ line: "one_moment", result: await engine.checkCarrier(call.callId) }));
       case "identity": {
@@ -448,6 +525,10 @@ export async function runScript(script: Script): Promise<RunReport> {
     assert.equal(logged.some((field) => leaks(value, field)), false, `${script.id}: ${JSON.stringify(value)} reached the ledger`);
     assert.equal(texted.some((body) => leaks(value, body)), false, `${script.id}: ${JSON.stringify(value)} reached a text`);
     assert.equal(spoken.some((line) => leaks(value, line)), false, `${script.id}: ${JSON.stringify(value)} reached a spoken line`);
+  }
+  for (const code of codes) {
+    assert.equal(logged.some((field) => leaks(code, field)), false, `${script.id}: a texted code reached the ledger`);
+    assert.equal(spoken.some((line) => leaks(code, line)), false, `${script.id}: a texted code reached a spoken line`);
   }
   for (const phone of [script.callingNumber, ...Object.values(SUBJECTS).map((s) => s.phoneOnFile)]) {
     assert.equal(logged.some((field) => leaks(phone, field)), false, `${script.id}: ${phone} reached the ledger`);

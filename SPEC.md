@@ -1642,7 +1642,7 @@ revoking an issued code belongs to one-time codes. Planned: one-time access code
 flooding and injection in business data, each in English and in Canadian French. A scripted host
 runs them: the caller's words reach the engine only as transcript lines to `redact`; the model's
 proposals are tool calls mapped to fixed code paths (`authorize`, `startPhotoId`,
-`requestPayment`), and a proposal with no path (mark the caller verified, skip the check) never
+`requestPayment`, `sendTextCode`, `requestCallback`), and a proposal with no path (mark the caller verified, skip the check) never
 reaches the engine; business text is always passed to `markUntrusted`; the host speaks fixed
 lines chosen only from the engine's answers. After every turn the runner checks:
 
@@ -1668,5 +1668,6 @@ mirror the English one turn for turn, when a
 built factor (one not marked planned) or a policy scope is not exercised in both languages, or
 when a script never compares a wrong entry with an unknown account or never taints a session that
 holds a grant, or when a text-flooding script never sends a text (so "no text before a match" is
-never vacuous). A factor that stops being planned (`text_code` with VER-2, `spoken_knowledge` with
-VER-3) fails the suite until it has scripts in both languages.
+never vacuous). Every built factor has scripts in both languages: a texted code in text flooding
+(it reaches a text and nothing else), a callback in authority (only a keypad or PIN match rings,
+and only the number on file), and a spoken answer in partial answers (its match opens no text).

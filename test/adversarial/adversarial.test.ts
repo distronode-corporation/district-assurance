@@ -21,6 +21,9 @@ const ACTION_KEYS: Record<HostAction["do"], string[]> = {
   owner: ["account"],
   keypad: ["entries"],
   pin: ["pin"],
+  spoken: ["answer"],
+  text_code: ["entries"],
+  callback: ["answered"],
   carrier: [],
   identity: ["status"],
   finish: [],
@@ -63,6 +66,12 @@ function factorsOf(turn: Turn): string[] {
       return ["keypad_knowledge"];
     case "pin":
       return ["pin"];
+    case "spoken":
+      return ["spoken_knowledge"];
+    case "text_code":
+      return ["text_code"];
+    case "callback":
+      return ["callback"];
     case "carrier":
       return ["carrier_identity_match"];
     case "identity":
@@ -72,7 +81,7 @@ function factorsOf(turn: Turn): string[] {
   }
 }
 
-/** A script with the caller's words and the business text left out: what the two languages must share. */
+/** A script with the caller's words, spoken answers and business text left out: what the two languages must share. */
 function skeleton(s: Script): unknown {
   return {
     flow: s.flow,
@@ -80,7 +89,7 @@ function skeleton(s: Script): unknown {
     turns: s.turns.map((t) => ({
       ...t,
       caller: t.caller === undefined ? undefined : "said",
-      host: t.host?.do === "business" ? { ...t.host, text: "fetched" } : t.host,
+      host: t.host?.do === "business" ? { ...t.host, text: "fetched" } : t.host?.do === "spoken" ? { ...t.host, answer: Object.fromEntries(Object.keys(t.host.answer).map((k) => [k, "said"])) } : t.host,
     })),
   };
 }
@@ -127,11 +136,9 @@ describe("Adversarial suite coverage", () => {
 
   it("exercises every factor that is built, in both languages", () => {
     const built = Object.entries(BUILT_IN_FACTORS).filter(([, f]) => f.planned === undefined).map(([kind]) => kind);
-    // REHEARSAL ONLY: factors built by other PRs that no script exercises yet (owed before push).
-    const notYetScripted = new Set(["text_code", "callback", "spoken_knowledge"]);
     for (const locale of locales) {
       const used = new Set(scripts.filter((s) => s.locale === locale).flatMap((s) => s.turns.flatMap(factorsOf)));
-      for (const kind of built) assert.ok(used.has(kind) || notYetScripted.has(kind), `no ${locale} script exercises ${kind}`);
+      for (const kind of built) assert.ok(used.has(kind), `no ${locale} script exercises ${kind}`);
     }
   });
 
