@@ -135,6 +135,38 @@ describe("file: intake forms", () => {
 });
 
 describe("file: field rules and conditional fields", () => {
+  it("refuses a card, a PAN, a SIN or an SSN named in one word or as a camelCase, snake or kebab part, and keeps words that only contain the letters", () => {
+    const named = (key: string, en: string, fr = "Référence") => validateForm({ formId: "f", version: "1", fields: [{ key, label: { en, fr }, type: "text", required: false }] }).length;
+    for (const [key, en, fr] of [
+      ["creditcard", "Number"],
+      ["cardno", "Number"],
+      ["card_num", "Number"],
+      ["debitcards", "Number"],
+      ["sinnumber", "Number"],
+      ["nas_no", "Number"],
+      ["ref", "Creditcard number"],
+      ["ref", "Cardholder name"],
+      ["ref", "Reference", "Numérocarte"],
+      ["pan", "Number"],
+      ["ssn", "Number"],
+      ["cc_number", "Number"],
+      ["ref", "Your P.A.N."],
+      ["ref", "panNumber"],
+      ["ref", "ssnValue"],
+      ["ref", "card-holder-name"],
+      ["ref", "SSNumber"],
+      ["pannumber", "Number"],
+      ["ccno", "Number"],
+      ["ref", "Social Security"],
+      ["ref", "Reference", "Votre NAS"],
+    ] as const) {
+      assert.equal(named(key, en, fr), 1, `${key} / ${en} / ${fr ?? ""}`);
+    }
+    for (const [key, en] of [["cardiology", "Department"], ["discard_reason", "Why it was discarded"], ["ref", "Cartel"], ["business", "Business name"], ["casino", "Using"], ["account", "Account"], ["accept_terms", "Accept"], ["pancake", "Pancakes"], ["company", "Company name"], ["panel", "Panel"], ["nasal", "Nasal spray"], ["ref", "companyName"], ["ref", "accountNumber"], ["occupation", "Occupation"], ["ssd_size", "Disk"]] as const) {
+      assert.equal(named(key, en), 0, `${key} / ${en}`);
+    }
+  });
+
   const f = (key: string, type: IntakeField["type"], extra: Partial<IntakeField> = {}): IntakeField => ({ key, label: { en: key, fr: key }, type, required: false, ...extra });
 
   it("holds numbers and dates to min and max, inclusive", () => {

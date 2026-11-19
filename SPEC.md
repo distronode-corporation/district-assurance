@@ -372,9 +372,14 @@ Field rules (FIL-4), each checked by `validateConfig`, which reports every bad o
 
 - A field has only `key`, `label`, `type`, `required`, `sensitive`, `maxLength`, `showIf`, `min`,
   `max` and `pattern`.
-- No field's key or label (any language; case, accents and dots ignored) names a card or a
-  Social Insurance Number: the words `card`, `carte`, `tarjeta`, `cardholder`, `cvv`, `cvc`, `sin`,
-  `nas`, `social insurance`, `assurance sociale` or `seguro social`.
+- No field's key or label (any language; case, accents and dots ignored) names a card, its
+  number or a national identity number: the words `card`, `carte`, `tarjeta`, `cardholder`, `cvv`,
+  `cvc`, `pan`, `cc`, `sin`, `nas`, `ssn`, `social insurance`, `assurance sociale`, `social
+  security` or `seguro social`, each a whole part of the name split at spaces,
+  `_`, `-` and camelCase humps (`panNumber`), never a piece of a longer word (`account`, `pancake`,
+  `nasal` pass), or one of them run into one word with a number or kind (`creditcard`, `cardno`,
+  `numerocarte`, `sinnumber`, `ssnumber`, `pannumber`, `ccno`). The
+  card-number check on values still applies whatever a field is called.
 - `min` and `max` only on number fields (finite numbers) and date fields (`YYYY-MM-DD` dates),
   inclusive, with `min` at most `max`.
 - `pattern` only on text fields: a regular expression of 1 to 200 characters, valid in Unicode
@@ -485,13 +490,16 @@ callback) and an optional `clock`; anything else is refused with `EngineError("i
 |---|---|---|
 | `0` to `9`, under `maxDigits` buffered | `buffering` | appended; the idle timeout restarts |
 | `0` to `9`, `maxDigits` already buffered | `overflow` | the entry is discarded |
+| anything but `#` or `*`, after `overflow` or `rejected` in the same entry | `discarding` | ignored; the idle timeout restarts |
 | `#`, digits buffered | `submitted` | the buffer is emptied, then `onDigits(digits)` runs once; its return value is `result` |
 | `#`, nothing buffered | `empty` | none |
 | `*` | `cleared` | the entry is discarded |
 | anything else (`A` to `D`, several characters, not a string) | `rejected` | the entry is discarded |
 
 Before each tone, an entry whose last tone is `idleTimeoutMs` old or older is discarded, and the
-result says `timedOut: true`; the tone is then taken as the first of a new entry. `expire()` does
+result says `timedOut: true`; the tone is then taken as the first of a new entry. A discarded entry
+(after `overflow` or `rejected`) lasts until `#` (`empty`), `*`, `clear()` or the idle timeout ends
+it, so no tail of it is ever submitted: with `maxDigits` 4, `123456#` submits nothing. `expire()` does
 the same from the host's own timer and says whether it discarded anything; `clear()` discards the
 entry at once. A discarded entry never reaches the callback. `toString`, `toJSON` and
 `util.inspect` show no digit and not how many are buffered.
