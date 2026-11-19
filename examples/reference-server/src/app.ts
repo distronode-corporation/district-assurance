@@ -5,7 +5,8 @@
 // its own body limit, every request has deadlines, each remote address has a rate limit, and each
 // answered request can be logged as one structured entry that never holds a body or a header.
 // Still not hardened for production; ROADMAP.md, "Reference server", lists what else that takes.
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { STATUS_CODES, createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 import { performance } from "node:perf_hooks";
 
 import { EngineError, parseStripeEvent, verifyStripeSignature, type Clock, type Engine } from "../../../src/index.ts";
@@ -22,9 +23,9 @@ export interface ReferenceServerOptions {
   bodyLimits?: Partial<BodyLimits>;
   /**
    * Milliseconds to receive a whole request, headers and body, and, counted from the end of the
-   * headers, to answer it. Headers that take too long get a 408 from node:http and the connection
-   * is closed; a request not answered in time gets a 503 (a body still arriving gets whichever
-   * comes first). Default 10 seconds.
+   * headers, to answer it. A request not all received in time gets `408 request_timeout` and the
+   * connection is closed; a request not answered in time gets `503 timeout` (a body still arriving
+   * gets whichever comes first). Default 10 seconds.
    */
   timeoutMs?: number;
   /**
@@ -32,7 +33,10 @@ export interface ReferenceServerOptions {
    * `addresses` addresses at once. Default 300 a minute, 10,000 addresses.
    */
   rateLimit?: { requests: number; windowMs: number; addresses?: number };
-  /** Called once per answered request, after the answer is written. Absent means no logs. */
+  /**
+   * Called once per answered request, after the answer is written, including the refusals of
+   * requests node:http could not read. Absent means no logs. If it throws, the entry is dropped.
+   */
   log?: (entry: RequestLog) => void;
   /** The demo's runs: serves the browser UI and the `/demo/*` routes. Off when absent. */
   ui?: DemoRuns;
@@ -57,6 +61,7 @@ export interface RequestLog {
   time: string;
   /** The remote address the rate limit counts, as the socket reports it. */
   address: string;
+  /** `unknown` when the request was refused before its headers were read. */
   method: string;
   /** `/receipts/:callId`, `/demo/runs/:runId/next` and so on; `unmatched` when no route matched. */
   route: string;
@@ -268,22 +273,51 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     return [404, { error: "not_found" }];
   }
 
+  /** The request each socket is answering, so a client error on it is answered and logged once. */
+  const inFlight = new WeakMap<Socket, Exchange>();
+
+  /** Logs one answered request. A `log` that throws loses its entry, never the server. */
+  function record(exchange: Exchange, address: string, status: number, error: string | undefined): void {
+    try {
+      options.log?.({
+        time: options.clock.now().toISOString(),
+        address,
+        method: exchange.method,
+        route: exchange.seen.route,
+        status,
+        ...(error === undefined ? {} : { error }),
+        ms: Math.round(performance.now() - exchange.started),
+      });
+    } catch {
+      // The answer is already written, and a failing log sink has nowhere to report to.
+    }
+  }
+
   // node:http enforces the receive deadline itself, checking open connections at this interval.
   const timeouts = { requestTimeout: timeoutMs, headersTimeout: timeoutMs, connectionsCheckingInterval: Math.min(timeoutMs, 1000) };
-  return createServer(timeouts, (req: IncomingMessage, res: ServerResponse) => {
-    const started = performance.now();
-    const seen: Seen = { route: "unmatched" };
+  const server = createServer(timeouts, (req: IncomingMessage, res: ServerResponse) => {
+    const exchange: Exchange = { started: performance.now(), method: req.method ?? "GET", seen: { route: "unmatched" }, done: false };
+    const socket = req.socket;
+    inFlight.set(socket, exchange);
+    // Kept while its body is unread, so node:http timing that body out after the answer is not
+    // answered and logged a second time; forgotten once the socket can carry the next request.
+    res.on("close", () => {
+      if (req.complete && inFlight.get(socket) === exchange) inFlight.delete(socket);
+    });
     let timer: NodeJS.Timeout | undefined;
     const deadline = new Promise<Answer>((resolve) => {
       timer = setTimeout(() => resolve([503, { error: "timeout" }]), timeoutMs);
     });
-    const routed = route(req, seen).catch((error: unknown): Answer => {
+    const routed = route(req, exchange.seen).catch((error: unknown): Answer => {
       if (!(error instanceof HttpError)) return [500, { error: "internal" }];
       for (const [name, value] of Object.entries(error.headers)) res.setHeader(name, value);
       return [error.status, { error: error.message }];
     });
     void Promise.race([routed, deadline]).then((answer) => {
       clearTimeout(timer);
+      // Already answered and logged in `clientError`, when node:http gave up on the request.
+      if (exchange.done) return;
+      exchange.done = true;
       let status = 200;
       let error: string | undefined;
       if (Array.isArray(answer)) {
@@ -295,18 +329,46 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
         res.writeHead(status, { ...UI_HEADERS, "content-type": answer.contentType });
         res.end(answer.body);
       }
-      options.log?.({
-        time: options.clock.now().toISOString(),
-        address: addressOf(req),
-        method: req.method ?? "GET",
-        route: seen.route,
-        status,
-        ...(error === undefined ? {} : { error }),
-        ms: Math.round(performance.now() - started),
-      });
+      record(exchange, addressOf(req), status, error);
     });
   });
+
+  // node:http's own refusals (headers or body too slow, headers too large, a malformed request)
+  // reach this instead of the listener. Answered as node:http would, but in JSON, and logged.
+  server.on("clientError", (err: NodeJS.ErrnoException, socket: Socket) => {
+    const exchange = inFlight.get(socket);
+    inFlight.delete(socket);
+    // A reset socket takes no answer, and one whose answer is already written cannot take another.
+    if (err.code !== "ECONNRESET" && socket.writable && exchange?.done !== true) {
+      const [status, code] = CLIENT_ERRORS[err.code ?? ""] ?? [400, "bad_request"];
+      const body = JSON.stringify({ error: code });
+      const headers = { ...JSON_HEADERS, "content-length": String(Buffer.byteLength(body)), connection: "close" };
+      const head = Object.entries(headers).map(([name, value]) => `${name}: ${value}\r\n`);
+      socket.write(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\n${head.join("")}\r\n${body}`);
+      const answered = exchange ?? { started: performance.now(), method: "unknown", seen: { route: "unmatched" }, done: false };
+      answered.done = true;
+      record(answered, socket.remoteAddress ?? "unknown", status, code);
+    }
+    socket.destroy(err);
+  });
+  return server;
 }
+
+/** One request, from the listener to its answer. */
+interface Exchange {
+  started: number;
+  method: string;
+  seen: Seen;
+  /** Answered, by the listener or by `clientError`. */
+  done: boolean;
+}
+
+/** node:http's client error codes and the answer each gets; any other is `400 bad_request`. */
+const CLIENT_ERRORS: Readonly<Record<string, readonly [number, string]>> = {
+  ERR_HTTP_REQUEST_TIMEOUT: [408, "request_timeout"],
+  HPE_HEADER_OVERFLOW: [431, "headers_too_large"],
+  HPE_CHUNK_EXTENSIONS_OVERFLOW: [413, "body_too_large"],
+};
 
 function addressOf(req: IncomingMessage): string {
   return req.socket.remoteAddress ?? "unknown";

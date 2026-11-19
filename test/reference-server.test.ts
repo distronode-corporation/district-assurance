@@ -204,17 +204,84 @@ describe("reference server limits", () => {
     assert.deepEqual(logs.map((e) => [e.route, e.status, e.error]), [["/receipts/:callId", 503, "timeout"]]);
   });
 
-  it("disconnects a client that sends its headers too slowly with a 408", async (ctx) => {
-    const s = await serve(ctx, { timeoutMs: 100 });
-    const answer = await new Promise<string>((resolve, reject) => {
-      // The headers never end, so no handler runs: node:http alone times the request out.
-      const socket = connect(s.port, "127.0.0.1", () => socket.write("POST /webhooks/stripe/identity HTTP/1.1\r\nhost: 127.0.0.1\r\n"));
-      let text = "";
-      socket.on("data", (chunk: Buffer) => (text += chunk.toString("utf8")));
-      socket.on("close", () => resolve(text));
-      socket.on("error", reject);
+  it("disconnects a client that sends its headers too slowly with a 408, in JSON, and logs it", async (ctx) => {
+    const logs: RequestLog[] = [];
+    const s = await serve(ctx, { timeoutMs: 100, log: (e) => logs.push(e) });
+    // The headers never end, so no handler runs: node:http times the request out.
+    const answer = await rawSocket(s.port, "POST /webhooks/stripe/identity HTTP/1.1\r\nhost: 127.0.0.1\r\n");
+    assert.match(answer, /^HTTP\/1\.1 408 Request Timeout\r\n/);
+    assert.match(answer, /\r\ncontent-type: application\/json; charset=utf-8\r\n/);
+    assert.match(answer, /\r\nconnection: close\r\n/);
+    assert.equal(answer.slice(answer.indexOf("\r\n\r\n") + 4), JSON.stringify({ error: "request_timeout" }));
+    assert.deepEqual(
+      logs.map((e) => [e.address, e.method, e.route, e.status, e.error]),
+      [["127.0.0.1", "unknown", "unmatched", 408, "request_timeout"]],
+    );
+  });
+
+  it("answers and logs once when a body arrives too slowly", async (ctx) => {
+    const logs: RequestLog[] = [];
+    const s = await serve(ctx, { timeoutMs: 100, log: (e) => logs.push(e) });
+    // The headers end but the body never does: whichever deadline comes first answers, once.
+    const answer = await rawSocket(s.port, "POST /webhooks/stripe/identity HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 10\r\n\r\nab");
+    const status = Number(/^HTTP\/1\.1 (\d{3}) /.exec(answer)![1]);
+    assert.ok(status === 408 || status === 503, answer);
+    assert.equal(answer.match(/HTTP\/1\.1 /g)!.length, 1, "one answer");
+    // node:http checks its deadline every 100 ms here, so give a late check time to run.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.deepEqual(
+      logs.map((e) => [e.method, e.route, e.status]),
+      [["POST", "/webhooks/stripe/identity", status]],
+    );
+  });
+
+  it("refuses requests node:http cannot read in JSON, and logs them", async (ctx) => {
+    const logs: RequestLog[] = [];
+    const s = await serve(ctx, { log: (e) => logs.push(e) });
+    const bodyOf = (answer: string) => JSON.parse(answer.slice(answer.indexOf("\r\n\r\n") + 4)) as unknown;
+    let answer = await rawSocket(s.port, "NOT HTTP AT ALL\r\n\r\n");
+    assert.match(answer, /^HTTP\/1\.1 400 Bad Request\r\n/);
+    assert.deepEqual(bodyOf(answer), { error: "bad_request" });
+    answer = await rawSocket(s.port, `GET /healthz HTTP/1.1\r\nhost: 127.0.0.1\r\nx-big: ${"x".repeat(20_000)}\r\n\r\n`);
+    assert.match(answer, /^HTTP\/1\.1 431 /);
+    assert.deepEqual(bodyOf(answer), { error: "headers_too_large" });
+    answer = await rawSocket(s.port, `POST /webhooks/stripe/identity HTTP/1.1\r\nhost: 127.0.0.1\r\ntransfer-encoding: chunked\r\n\r\n1;${"x".repeat(20_000)}\r\n`);
+    assert.match(answer, /^HTTP\/1\.1 413 /);
+    assert.deepEqual(bodyOf(answer), { error: "body_too_large" });
+    assert.deepEqual(
+      logs.map((e) => [e.method, e.route, e.status, e.error]),
+      [
+        ["unknown", "unmatched", 400, "bad_request"],
+        ["unknown", "unmatched", 431, "headers_too_large"],
+        ["POST", "/webhooks/stripe/identity", 413, "body_too_large"],
+      ],
+    );
+  });
+
+  it("closes a reset connection without answering or logging", () => {
+    const logs: RequestLog[] = [];
+    const t = createTestEngine();
+    const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [], payments: [] }, clock: t.clock, log: (e) => logs.push(e) });
+    const written: string[] = [];
+    let destroyed = false;
+    const socket = { writable: true, remoteAddress: "127.0.0.1", write: (s: string) => written.push(s), destroy: () => (destroyed = true) };
+    server.emit("clientError", Object.assign(new Error("reset"), { code: "ECONNRESET" }), socket);
+    assert.deepEqual([written, logs, destroyed], [[], [], true]);
+  });
+
+  it("keeps serving when the log sink throws", async (ctx) => {
+    let calls = 0;
+    const s = await serve(ctx, {
+      timeoutMs: 100,
+      log: () => {
+        calls += 1;
+        throw new Error("sink down");
+      },
     });
-    assert.match(answer, /^HTTP\/1\.1 408 /);
+    assert.deepEqual(await (await fetch(`${s.base}/healthz`)).json(), { ok: true });
+    assert.match(await rawSocket(s.port, "GET /healthz HTTP/1.1\r\n"), /^HTTP\/1\.1 408 /);
+    assert.deepEqual(await (await fetch(`${s.base}/healthz`)).json(), { ok: true });
+    assert.equal(calls, 3);
   });
 
   it("gives the demo's runs a small body limit of their own", async (ctx) => {
@@ -227,6 +294,17 @@ describe("reference server limits", () => {
     assert.equal(res.status, 201);
   });
 });
+
+/** Writes `text` on a new connection and resolves with everything the server sent before closing. */
+function rawSocket(port: number, text: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1", () => socket.write(text));
+    let answer = "";
+    socket.on("data", (chunk: Buffer) => (answer += chunk.toString("utf8")));
+    socket.on("close", () => resolve(answer));
+    socket.on("error", reject);
+  });
+}
 
 /** A raw HTTP/1.1 request whose body is written chunk by chunk, with the headers exactly as given. */
 function raw(base: string, method: string, path: string, headers: Record<string, string>, chunks: string[]): Promise<{ status: number; body: string }> {

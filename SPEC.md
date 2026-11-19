@@ -414,12 +414,18 @@ order, and every refusal is JSON `{"error": code}`:
   (`bodyLimits` overrides each). A declared `Content-Length` over the limit is refused before a byte
   is read; a streamed body is cut off once it passes the limit. Either way: `413 body_too_large`.
   The other routes never read a body.
-- **Timeouts**, `timeoutMs` (default 10 seconds): node:http answers `408` and closes the connection
-  when a request's headers and body are not all received in time; a request not answered within
-  `timeoutMs` of its headers gets `503 timeout`.
-- **Logs**: with `log`, one entry per answered request, after the answer is written:
-  `{time, address, method, route, status, error?, ms}`. `time` is from the server's clock;
+- **Timeouts**, `timeoutMs` (default 10 seconds): a request whose headers and body are not all
+  received in time gets `408 request_timeout` and the connection is closed; a request not answered
+  within `timeoutMs` of its headers gets `503 timeout`.
+- **Requests node:http cannot read** are refused by the server's `clientError` handler, also in
+  JSON and with `Connection: close`: too slow `408 request_timeout`, headers too large
+  `431 headers_too_large`, chunk extensions too large `413 body_too_large`, anything else
+  malformed `400 bad_request`. A reset connection, or one whose answer is already written, gets
+  nothing more and is closed.
+- **Logs**: with `log`, one entry per answered request, after the answer is written, including the
+  refusals above: `{time, address, method, route, status, error?, ms}`. `time` is from the
+  server's clock; `method` is `unknown` when the request was refused before its headers were read;
   `route` is the matched pattern (`/receipts/:callId`, `/demo/runs/:runId/next`) or `unmatched`,
   never the path as sent; `error` is the answer's error code. An entry holds no header, query
-  string or body. `logJsonLines` writes each entry as one line of JSON on standard output, and
+  string or body. A `log` that throws loses that entry; the server and the answer are unaffected. `logJsonLines` writes each entry as one line of JSON on standard output, and
   `npm run serve` uses it.
