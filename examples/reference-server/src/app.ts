@@ -251,7 +251,7 @@ function pageLocale(url: URL, acceptLanguage: string | undefined): Locale {
   return /^\s*fr(?:-|;|,|\s|$)/i.test(acceptLanguage ?? "") ? "fr" : "en";
 }
 
-const PAGE_TEXT = {
+export const PAGE_TEXT = {
   en: {
     title: "Call receipt",
     valid: (kid: string) => `Signature valid: signed with key ${kid}, and not one byte has changed since.`,
