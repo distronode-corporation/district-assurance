@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import type { PaymentLinks } from "../src/core/adapters.ts";
+import type { JsonValue } from "../src/core/canonical.ts";
 import { ConfigError } from "../src/core/config.ts";
 import { NotImplementedError } from "../src/core/errors.ts";
 import type { EngineEvent } from "../src/core/events.ts";
@@ -721,6 +722,38 @@ describe("Engine pay", () => {
     release();
     assert.ok(rejects("precondition_failed", /another process took over/)(await first));
     assert.equal(t.messages.sent.filter((m) => m.purpose === "payment_link").length, 1, "texted once");
+  });
+
+  it("keeps its lease when an unrelated write wins the renewal's compare-and-set", async () => {
+    // Right after the binding, one unrelated write lands first: the renewal retries from a fresh read.
+    class RacingStore extends MemorySessionStore {
+      raceNext = false;
+      armed = false;
+      onBind: () => void = () => undefined;
+      override async bindRef(workspaceId: string, ref: string, callId: string): Promise<boolean> {
+        if (this.armed && ref.startsWith("payment:")) {
+          this.raceNext = true;
+          this.onBind();
+        }
+        return super.bindRef(workspaceId, ref, callId);
+      }
+      override async compareAndSet(w: string, c: string, v: number, r: JsonValue) {
+        if (this.raceNext) {
+          this.raceNext = false;
+          const current = (await this.get(w, c))!;
+          await super.compareAndSet(w, c, current.version, current.record);
+        }
+        return super.compareAndSet(w, c, v, r);
+      }
+    }
+    const sessions = new RacingStore();
+    const t = setup({ adapters: { sessions } });
+    const callId = await verifiedCall(t);
+    sessions.armed = true;
+    // Time moves between the claim and the renewal, so the renewed lease differs from the held one.
+    sessions.onBind = () => t.clock.advance(1_000);
+    assert.equal((await t.engine.requestPayment(callId, request)).status, "open", "texted after the retried renewal");
+    assert.equal(t.messages.sent.filter((m) => m.purpose === "payment_link").length, 1);
   });
 
   it("appends entries a failed append left pending before it takes the receipt's ledger head", async () => {

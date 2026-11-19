@@ -390,14 +390,20 @@ export async function requestPayment(
     // have gone ahead (and failed to expire the link at the provider). So the claim is checked
     // again, and renewed, in a write right before the text: a request closed, a call ended, or a
     // lease another sender took since is never texted from here.
+    // The lease this sender holds is fixed before the write: a retry of the write (another write
+    // won the compare-and-set) compares against the same one, and the renewal is adopted only once
+    // the write is saved.
+    const held = claimedAt;
+    let renewed = held;
     const still = await rt.update(callId, (draft): "ok" | "closed" | "taken" => {
       const pending = find(draft, request.paymentId);
       if (pending.status !== "open" || draft.record.state.phase === "ended") return "closed";
-      if (pending.textedAt !== null || pending.sendingSince !== claimedAt) return "taken";
-      claimedAt = rt.now();
-      pending.sendingSince = claimedAt;
+      if (pending.textedAt !== null || pending.sendingSince !== held) return "taken";
+      renewed = rt.now();
+      pending.sendingSince = renewed;
       return "ok";
     });
+    claimedAt = renewed;
     if (still === "closed") {
       await expireAtProvider(rt, callId, request, link.linkId);
       throw new EngineError("precondition_failed", "the payment request was closed while its link was being sent; the link was expired and never texted");
