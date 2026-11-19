@@ -8,7 +8,6 @@ import { buildReadBack, createUploadLink, deliverRecord } from "../src/file/late
 import { chargeSavedCard, startKeypadCardCapture } from "../src/pay/later.ts";
 import { revokeConsent } from "../src/prove/consent.ts";
 import { exportLedger } from "../src/prove/later.ts";
-import { vendorAccessController } from "../src/gate/later.ts";
 import { createTestEngine } from "../src/testing/index.ts";
 import { checkTextCode, enrolPin, normaliseSpokenAnswer, recordSubjectFailure, sendTextCode } from "../src/verify/later.ts";
 import { verifyTelnyxSignature, verifyTwilioSignature } from "../src/webhooks/carrier.ts";
@@ -31,7 +30,6 @@ const STUBS: Array<[string, () => unknown]> = [
   ["PRV-4", () => exportLedger({ fromSeq: 1 })],
   ["SRV-1", () => verifyTwilioSignature(hook)],
   ["SRV-1", () => verifyTelnyxSignature(hook)],
-  ["GAT-6", () => vendorAccessController({ vendor: "kisi", apiKey: "k" })],
   ["MOD-3", () => createTestEngine().engine.useFactor({ kind: "x_factor", summary: "x", maxAttemptsPerCall: 1, adapters: [], judge: async () => false })],
 ];
 

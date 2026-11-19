@@ -904,3 +904,33 @@ the single use nor the refusal after taint: those are the exchange's, so the exc
 required. There is no OpenID Provider in the engine (ADR-24).
 revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS
 (GAT-4), direct vendor adapters (GAT-6).
+**Direct vendor adapters** (`vendorAccessController({vendor, apiKey, baseUrl?, allowLoopbackForTests?, timeoutMs?, fetch?,
+clock?})`, `vendor` being `kisi` or `verkada`), named in the engine's `access` adapter like any
+controller: the controller's door ref is the vendor's own id, a Kisi lock
+id (digits) or a Verkada door id (a UUID). `unlock` first checks that the grant's `target` is the
+target it was asked to open and has that form; otherwise it answers `refused` with
+`target_mismatch` or `bad_target` and sends nothing. It also sends nothing, answering `refused`
+with `grant_expiring`, for a grant with less than `timeoutMs` left by `clock` (the system clock by
+default), the client's own bound on the whole unlock, since the expiry is strict and the call
+may end then. This bounds when the request is sent, not the network: neither vendor's request
+carries a deadline, so one delayed in transit could still arrive after the grant expired. Each
+request's path is set on a copy of `baseUrl`, so its host is always `baseUrl`'s. Kisi: one `POST <baseUrl>/locks/<lock
+id>/unlock` with `Authorization: KISI-LOGIN <apiKey>` and the body `{}`. Verkada: `POST
+<baseUrl>/token` with `x-api-key: <apiKey>`; a token call that does not answer 200 with a
+`token` string answers `refused` with `token_unavailable` and the unlock is not sent; then one
+`POST <baseUrl>/access/v1/door/admin_unlock` with `x-verkada-auth: <token>` and `{"door_id":
+"<door id>"}`. The token is never kept. Neither vendor checks the grant, takes an idempotency key
+or reports in its answer that the door moved, so neither is sent and a 2xx is `delivered` with
+`confirmed: false` and the grant id as `providerRef`. A 4xx is `refused` with `http_<status>`
+(the vendor's text is never passed on); anything else throws (`unknown`). Never retried, no
+redirects, one timeout for the whole unlock (100 to 30,000 ms, default 5,000). `baseUrl` defaults
+to `https://api.kisi.io` or `https://api.verkada.com` (`https://api.eu.verkada.com` and
+`https://api.au.verkada.com` for those regions), and its host must be one of the vendor's
+(`VENDOR_HOSTS`: `api.kisi.io`; `api.verkada.com`, `api.eu.verkada.com`, `api.au.verkada.com`), over
+HTTPS on the default port, with no credentials, query or fragment: the key goes nowhere else. The
+loopback address, over HTTP or HTTPS, only with `allowLoopbackForTests: true`, for tests and never
+for production. `apiKey` is 1 to 500 printable characters with no spaces.
+
+A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);
+revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS
+(GAT-4), a Seam adapter (GAT-5).

@@ -177,6 +177,23 @@ the host: a relay that keeps seen
 grant ids across restarts (or refuses every grant for 15 minutes plus the verifier's clock skew
 after one), a relay clock kept in sync with the engine's (a grant's expiry is strict, so a relay
 running behind accepts it that much longer), and the door's own safety
+holds each grant's digest and outcome, never the grant.
+**Direct vendor adapters** (Kisi, Verkada) are weaker on one point: the vendor cannot check the
+signed grant, so the vendor's API key opens the door on its own, and whoever holds it can open
+every door it reaches. The adapter sends nothing for a target its grant does not name or that is
+not the vendor's id format, nor for a grant with less than its timeout left (so the client never
+sends, or waits on, an unlock past the grant's expiry; a request delayed in the network could
+still arrive later, since neither vendor's request carries a deadline), keeps every request on
+the configured host (a base path starting with `//` cannot redirect the key, tested), keeps the API
+key out of errors, sends the unlock once (never retried, no redirects; a lost answer is
+`unknown`), and passes on only the HTTP status of a refusal, never the vendor's text (tested
+against a local fake server). Verkada's short-lived token is fetched for each unlock and never
+kept; a failed token call refuses, since no unlock was sent (tested). Left to the host: a relay
+that keeps seen grant ids across restarts (or refuses every grant for 15 minutes plus the
+verifier's clock skew after one), a relay clock kept in sync with the engine's (a grant's expiry
+is strict, so a relay running behind accepts it that much longer), keeping a vendor API key in its
+key store, scoped to as few doors as the vendor allows (a Kisi user or a Verkada key with door
+access to those doors only), and the door's own safety
 (an unlock pulse, not a latch).
 
 ### One-time access codes: stolen, guessed or reused

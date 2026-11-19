@@ -36,6 +36,7 @@ All notable changes to this project are documented here. The format follows
 - The signed-webhook relay adapter (GAT-2), `webhookRelay`, and an example door relay. An unlock
   is never retried; a lost answer is `unknown`.
 - The Seam adapter (GAT-5), `seamAccessController`: checks the device can unlock remotely, unlocks once with no retry, `confirmed` only when Seam reports success, a lost answer `unknown`.
+- Direct vendor adapters (GAT-6), `vendorAccessController` for Kisi and Verkada, through each vendor's documented unlock call; never retried, a lost answer is `unknown`.
 - `FakeAccessController` in `district-assurance/testing`.
 - One-time access codes (GAT-3): `accessCodes(...)`, an `AccessController` that texts an 8-digit
   code for an access grant to the number on file instead of working a door; codes kept only as
