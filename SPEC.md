@@ -422,13 +422,16 @@ callback) and an optional `clock`; anything else is refused with `EngineError("i
 |---|---|---|
 | `0` to `9`, under `maxDigits` buffered | `buffering` | appended; the idle timeout restarts |
 | `0` to `9`, `maxDigits` already buffered | `overflow` | the entry is discarded |
+| anything but `#` or `*`, after `overflow` or `rejected` in the same entry | `discarding` | ignored; the idle timeout restarts |
 | `#`, digits buffered | `submitted` | the buffer is emptied, then `onDigits(digits)` runs once; its return value is `result` |
 | `#`, nothing buffered | `empty` | none |
 | `*` | `cleared` | the entry is discarded |
 | anything else (`A` to `D`, several characters, not a string) | `rejected` | the entry is discarded |
 
 Before each tone, an entry whose last tone is `idleTimeoutMs` old or older is discarded, and the
-result says `timedOut: true`; the tone is then taken as the first of a new entry. `expire()` does
+result says `timedOut: true`; the tone is then taken as the first of a new entry. A discarded entry
+(after `overflow` or `rejected`) lasts until `#` (`empty`), `*`, `clear()` or the idle timeout ends
+it, so no tail of it is ever submitted: with `maxDigits` 4, `123456#` submits nothing. `expire()` does
 the same from the host's own timer and says whether it discarded anything; `clear()` discards the
 entry at once. A discarded entry never reaches the callback. `toString`, `toJSON` and
 `util.inspect` show no digit and not how many are buffered.
