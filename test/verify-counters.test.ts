@@ -93,19 +93,22 @@ describe("lockState: the waits and the hard lock, on a fixed clock", () => {
   });
 
   it("follows stricter settings", () => {
-    const strict: Lockout = { backoffSeconds: [10, 30, 120, 600, 1800, 3600], lockAfterFailures: 3, windowHours: 48 };
+    const strict: Lockout = { backoffSeconds: [10, 30, 120, 600, 1800, 3600], lockAfterFailures: 3, windowHours: 48, flowStartsPerHour: { subject: 1, number: 1 } };
     assert.deepEqual(lockState(strict, failures(2), new Date(T0)), { hard: false, until: iso(T0 + 30_000) });
     assert.deepEqual(lockState(strict, failures(3), new Date(T0)), { hard: true, until: iso(T0 + 48 * HOUR) });
   });
 
   it("fills in the defaults, and never shares them", () => {
     const lockout = lockoutOf(undefined);
-    assert.deepEqual(lockout, { backoffSeconds: [5, 15, 60, 300, 900], lockAfterFailures: 10, windowHours: 24 });
+    assert.deepEqual(lockout, { backoffSeconds: [5, 15, 60, 300, 900], lockAfterFailures: 10, windowHours: 24, flowStartsPerHour: { subject: 5, number: 10 } });
     lockout.backoffSeconds.push(1);
+    lockout.flowStartsPerHour.subject = 1;
     assert.deepEqual(DEFAULT_LOCKOUT.backoffSeconds, [5, 15, 60, 300, 900]);
+    assert.deepEqual(DEFAULT_LOCKOUT.flowStartsPerHour, { subject: 5, number: 10 });
     assert.deepEqual(lockoutOf({ lockAfterFailures: 4 }).lockAfterFailures, 4);
+    assert.deepEqual(lockoutOf({ flowStartsPerHour: { number: 3 } }).flowStartsPerHour, { subject: 5, number: 3 });
     // As a host's config can carry them, e.g. `lockAfterFailures: env.MAX` with the variable unset.
-    const unset = { backoffSeconds: undefined, lockAfterFailures: undefined, windowHours: undefined } as unknown as Parameters<typeof lockoutOf>[0];
+    const unset = { backoffSeconds: undefined, lockAfterFailures: undefined, windowHours: undefined, flowStartsPerHour: { subject: undefined, number: undefined } } as unknown as Parameters<typeof lockoutOf>[0];
     assert.deepEqual(lockoutOf(unset), lockoutOf(undefined), "a setting given as undefined keeps its default");
     const given = [10, 30, 120, 600, 1800];
     const copied = lockoutOf({ backoffSeconds: given });

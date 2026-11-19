@@ -70,10 +70,11 @@ export interface PinVerifier {
 /**
  * Which failures a counter holds: one factor kind, in one workspace, for one subject (its subject
  * key) or one calling number (`numberKeyFor`, a keyed hash: the store never sees the number).
+ * Never a flow or a call: failures in one flow count in every other (VER-15).
  */
 export interface AttemptCounterKey {
   workspaceId: string;
-  /** The factor kind, for example `pin`. */
+  /** The factor kind, for example `pin`, or `flow.start` for the starts of flows that need a money, contact or access scope (VER-15). */
   factor: string;
   scope: "subject" | "number";
   /** The subject key, or the keyed hash of the calling number. 64 lower-case hex characters. */
@@ -81,7 +82,8 @@ export interface AttemptCounterKey {
 }
 
 /**
- * Failed attempts across calls, for lockouts that outlive a call (VER-1). Every engine of a
+ * Failed attempts across calls, for lockouts that outlive a call (VER-1), and the starts of flows
+ * that need a money, contact or access scope, for their hourly limit (VER-15). Every engine of a
  * workspace, in every process, must share one store. Times are ISO 8601. `attemptCountersContract`
  * in `district-assurance/testing` is the suite a durable store must pass; `MemoryAttemptCounters`
  * is the reference.

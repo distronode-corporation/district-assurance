@@ -30,6 +30,8 @@ export type EngineErrorCode =
   | "precondition_failed"
   /** The module is installed but turned off in the workspace's config, or not installed. */
   | "module_disabled"
+  /** Too many flows that need a money, contact or access scope started this hour; the same answer whichever limit was hit (VER-15). */
+  | "rate_limited"
   /** Another process changed the call at the same time, every retry included (SessionStore). */
   | "conflict";
 

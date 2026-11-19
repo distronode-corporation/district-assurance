@@ -53,6 +53,11 @@ export interface FlowCursor {
   index: number;
   mark: JsonValue;
   status: FlowStatus;
+  /**
+   * The flow-start counters (`scope:key`) this flow was counted on, so a restart is not counted
+   * twice; null for a flow whose starts are not limited (no money, contact or access scope).
+   */
+  counted: string[] | null;
 }
 
 /** One call, as the SessionStore holds it. JSON only. */

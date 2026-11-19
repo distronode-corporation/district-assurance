@@ -9,6 +9,7 @@ export const ENGINE_EVENTS = [
   "flow.completed",
   "flow.failed",
   "flow.abandoned",
+  "flow.rate_limited",
   "verification.started",
   "verification.factor",
   "verification.carrier_checked",
