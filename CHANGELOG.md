@@ -61,6 +61,10 @@ All notable changes to this project are documented here. The format follows
 - ADR-21 to ADR-25.
 - Grants, `verification.finished`, `grant.issued` and receipts name the `policyVersion` and
   `configRevision` that judged the caller (VER-8); optional on receipts, which stay at `v: 1`.
+- `npm run demo:e2e`: the demo UI with a real Stripe Checkout Session in test mode, through a
+  minimal PAY-1 adapter (`StripeCheckoutLinks`: platform mode, built-in fetch, `sk_test_` keys
+  only, live and restricted keys refused). The payment is read back from Stripe; Gate's grant goes
+  to the example door relay; the call ends with a receipt the page verifies.
 
 - The modular core. A module registry and module interface (what a module provides, the scopes it
   grants or needs, the adapters it requires, its settings validator); Badge, Dossier, Paylink and

@@ -1,4 +1,4 @@
-// The demo's FlowConfig: one workspace with four flows. Gate needs the engine's `access` adapters
+// The demo's FlowConfig: one workspace with five flows. Gate needs the engine's `access` adapters
 // (its targets name the "lobby" controller) and an `accessSigner`.
 //
 // - `owner-command`: the line's owner keys their PIN; Badge checks it against a keyed hash and
@@ -12,6 +12,8 @@
 //   (`connect` mode, a made-up connected account), with a 10-minute link and cards and wallets only.
 // - `entry`: verification to level 2 for `entry.open` (an access scope, never below level 2), then
 //   a signed, 30-second access grant for the front door.
+// - `visit`: the live demo's call (`npm run demo:e2e`): level 2, a deposit by a real Stripe
+//   test-mode Checkout link on the platform's account, the front door once it is paid, a receipt.
 import { defaultVerificationPolicy, type FlowConfig } from "../../../src/index.ts";
 
 export function demoConfig(): FlowConfig {
@@ -99,6 +101,15 @@ export function demoConfig(): FlowConfig {
         steps: [
           { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["entry.open"] },
           { type: "gate.grant", target: "front-door", lifetimeSeconds: 30 },
+        ],
+      },
+      visit: {
+        summary: "Verify to level 2, take a deposit by a Stripe test-mode link, open the front door once paid, sign a receipt.",
+        steps: [
+          { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["payment.request", "entry.open"] },
+          { type: "paylink.request", amountMinor: 2500, currency: "cad", description: "Visit deposit (Stripe test mode)", amountSource: "price_list", mode: "platform" },
+          { type: "gate.grant", target: "front-door", lifetimeSeconds: 30 },
+          { type: "trace.receipt" },
         ],
       },
     },

@@ -17,11 +17,15 @@ import {
   subjectKeyFor,
   webhookRelay,
   type AccessController,
+  type Clock,
   type Engine,
+  type FlowConfig,
+  type IdGenerator,
+  type PaymentLinks,
   type SignedAccessGrant,
   type SignedReceipt,
 } from "../../../src/index.ts";
-import { TEST_KNOWLEDGE_KEY, createTestEngine, generateTestSigner, testSubject, type TestEngine } from "../../../src/testing/index.ts";
+import { FixedClock, TEST_KNOWLEDGE_KEY, createTestEngine, generateTestSigner, testSubject, type TestEngine } from "../../../src/testing/index.ts";
 import { createDoorRelay } from "./door-relay.ts";
 import { demoConfig } from "./flows.ts";
 
@@ -33,6 +37,31 @@ export const DEMO_CONNECT_SECRET = "whsec_demo_connect_not_a_secret";
 export const DEMO_ACCOUNT = "acct_demo_business";
 const OWNER_ACCOUNT = "10000001";
 const OWNER_PIN = "4826";
+
+/** A payment link as the payments adapter answered it. */
+export interface CreatedLink {
+  paymentId: string;
+  linkId: string;
+  url: string;
+}
+
+/** What `npm run demo:e2e` changes in the world; the fake demo and the UI pass nothing. */
+export interface DemoWorldOptions {
+  /** The payments adapter. Default: the test engine's fake. */
+  payments?: PaymentLinks;
+  /** Default: the test engine's fixed clock. The live demo passes the wall clock (Stripe and the relay read it). */
+  clock?: Clock;
+  /**
+   * Default: the test engine's sequential ids. The live demo passes random ids: the engine's
+   * idempotency keys are built from them, and Stripe keeps a key for 24 hours, so ids that restart
+   * at `call_1` with every run would collide with an earlier run's requests.
+   */
+  ids?: IdGenerator;
+  /** Default: `demoConfig()`. */
+  config?: FlowConfig;
+  /** Hears each door the example relay opens. */
+  onDoorOpened?: (target: string) => void;
+}
 
 /** One engine with the demo's records, a second engine on the same stores, and a signed-webhook poster. */
 export interface DemoWorld {
@@ -57,10 +86,54 @@ export interface DemoWorld {
   relayUrl(): Promise<string>;
   /** Stops the door relay, if it was started. */
   close(): Promise<void>;
+  /** The clock both engines and the door relay read. */
+  clock: Clock;
+  /** The FlowConfig both engines run. */
+  config: FlowConfig;
+  /** Every link a real payments adapter created, oldest first (the fake keeps its own list). */
+  links: CreatedLink[];
 }
 
-export function createDemoWorld(): DemoWorld {
+/**
+ * Wraps a real payments adapter so each link it creates is also kept in `links`. Every other member
+ * (`expireLink`, and the optional ones such as `cancel` and `refund`) is the adapter's own, called
+ * on the adapter itself so its private fields still work, and a member the adapter lacks stays
+ * missing: the engine reads a missing optional method as "this adapter cannot do that".
+ */
+export function recordLinks(real: PaymentLinks, links: CreatedLink[]): PaymentLinks {
+  const createLink: PaymentLinks["createLink"] = async (input) => {
+    const link = await real.createLink(input);
+    links.push({ paymentId: input.paymentId, linkId: link.linkId, url: link.url });
+    return link;
+  };
+  return new Proxy(real, {
+    get(target, name) {
+      if (name === "createLink") return createLink;
+      const value: unknown = Reflect.get(target, name, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+/**
+ * VER-1's wait after a first failed try (its default and floor, which the demo's config keeps). It
+ * holds across calls and engines, so the owner keys the right PIN only after it.
+ */
+export const FIRST_FAILURE_WAIT_MS = 5_000;
+
+/**
+ * Lets VER-1's wait after a failure pass: on the demo's fixed clock by moving the clock, on any
+ * other clock (the live e2e demo's wall clock) by waiting it out for real.
+ */
+export async function waitOutFailureWait(clock: Clock): Promise<void> {
+  if (clock instanceof FixedClock) clock.advance(FIRST_FAILURE_WAIT_MS + 1_000);
+  else await new Promise<void>((resolve) => setTimeout(resolve, FIRST_FAILURE_WAIT_MS + 100));
+}
+
+export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
   const doorsOpened: string[] = [];
+  const links: CreatedLink[] = [];
+  const config = options.config ?? demoConfig();
   const openedFor = new Set<string>();
   const sentGrants = new Map<string, SignedAccessGrant>();
   let relay: Server | null = null;
@@ -76,7 +149,18 @@ export function createDemoWorld(): DemoWorld {
       return webhookRelay({ url: await world.relayUrl() }).unlock(input);
     },
   };
-  const t = createTestEngine({ config: demoConfig(), adapters: { access: { lobby }, accessSigner } });
+  // A real adapter (the live demo) is wrapped to record what it answered, so a step finds its own
+  // call's link; the fake records its links itself (`t.payments.created`).
+  const real = options.payments;
+  const recorded = real === undefined ? undefined : recordLinks(real, links);
+  const t = createTestEngine({
+    config,
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.ids === undefined ? {} : { ids: options.ids }),
+    adapters: { access: { lobby }, accessSigner, ...(recorded === undefined ? {} : { payments: recorded }) },
+  });
+  const payments = recorded ?? t.payments;
+  const clock = options.clock ?? t.clock;
   t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: OWNER_ACCOUNT, phoneOnFile: "+15555550101", knowledge: {}, pin: OWNER_PIN }));
   t.records.putSubject(
     "ws_test",
@@ -86,10 +170,10 @@ export function createDemoWorld(): DemoWorld {
   const other = createEngine({
     workspaceId: "ws_test",
     knowledgeKey: TEST_KNOWLEDGE_KEY,
-    config: demoConfig(),
-    clock: t.clock,
-    ids: t.ids,
-    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments: t.payments, signer: generateTestSigner(), access: { lobby }, accessSigner },
+    config,
+    clock,
+    ids: options.ids ?? t.ids,
+    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments, signer: generateTestSigner(), access: { lobby }, accessSigner },
   });
   let n = 0;
   const world: DemoWorld = {
@@ -101,6 +185,9 @@ export function createDemoWorld(): DemoWorld {
     doorsOpened,
     openedFor,
     sentGrants,
+    clock,
+    config,
+    links,
     relayUrl() {
       // A closed world starts nothing: a start after close() would listen with no one to stop it.
       if (closed) return Promise.reject(new Error("the demo world is closed"));
@@ -110,10 +197,11 @@ export function createDemoWorld(): DemoWorld {
           workspaceId: "ws_test",
           audience: "lobby",
           keys: t.engine.accessKeys(),
-          clock: t.clock,
+          clock,
           open: async (target, grant) => {
             doorsOpened.push(target);
             openedFor.add(grant.grantId);
+            options.onDoorOpened?.(target);
           },
         });
         const started = relay;
@@ -138,7 +226,7 @@ export function createDemoWorld(): DemoWorld {
     async stripe(path, type, object, account) {
       const payload = JSON.stringify({ id: `evt_demo_${++n}`, type, livemode: false, data: { object }, ...(account === undefined ? {} : { account }) });
       const secret = path.endsWith("/connect") ? DEMO_CONNECT_SECRET : DEMO_SECRET;
-      const header = signStripePayload(payload, secret, Math.floor(t.clock.now().getTime() / 1000));
+      const header = signStripePayload(payload, secret, Math.floor(clock.now().getTime() / 1000));
       const res = await fetch(`${world.base}${path}`, { method: "POST", headers: { "stripe-signature": header }, body: payload });
       return (await res.json()) as Record<string, unknown>;
     },
@@ -154,12 +242,16 @@ export interface ScriptRun {
   receipt: SignedReceipt | null;
   /** This call's access grant, once Gate sent one (entry). */
   grantId?: string;
+  /** The engine's deadline for this call's link, once texted (the live demo's payment wait). */
+  paymentExpiresAt?: string | null;
 }
 
 /** What a step did, in one line, and whether the demo's check on it held. */
 export interface StepOutcome {
   detail: string;
   ok: boolean;
+  /** A link the page shows with the step (the live demo's Checkout page). https only. */
+  link?: { href: string; text: string };
 }
 
 export interface ScriptStep {
@@ -167,9 +259,12 @@ export interface ScriptStep {
   run(world: DemoWorld, call: ScriptRun): Promise<StepOutcome>;
 }
 
+/** The scripts a set of runs can replay, by flow name. */
+export type Scripts = Readonly<Record<string, readonly ScriptStep[]>>;
+
 export type DemoFlow = "owner-command" | "deposit" | "deposit-connect" | "entry";
 
-const pass = (detail: string): StepOutcome => ({ detail, ok: true });
+export const pass = (detail: string): StepOutcome => ({ detail, ok: true });
 
 /** The owner's PIN only, on two engines that share one session store. One wrong PIN, then the right one. */
 const ownerCommand: ScriptStep[] = [
@@ -192,6 +287,7 @@ const ownerCommand: ScriptStep[] = [
   {
     label: "owner-command: PIN on process A",
     async run(w, call) {
+      await waitOutFailureWait(w.clock);
       const right = await w.engine.submitPin(call.callId, OWNER_PIN);
       return { detail: right.matched ? "matched" : "no match", ok: right.matched };
     },
@@ -316,7 +412,7 @@ const deposit: ScriptStep[] = [
 ];
 
 /** Keypad and carrier to level 2, the scopes the flow's verify step names. */
-async function verifyToLevel2(w: DemoWorld, call: ScriptRun, scope: string): Promise<StepOutcome> {
+export async function verifyToLevel2(w: DemoWorld, call: ScriptRun, scope: string): Promise<StepOutcome> {
   await w.engine.beginVerification(call.callId, { accountNumber: "12345678" });
   await w.engine.submitKeypad(call.callId, { dob: "19850214" });
   await w.engine.checkCarrier(call.callId);

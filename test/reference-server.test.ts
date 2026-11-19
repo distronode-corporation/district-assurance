@@ -6,7 +6,7 @@ import { after, before, describe, it } from "node:test";
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { runDemo } from "../examples/reference-server/src/demo.ts";
 import { createDoorRelay } from "../examples/reference-server/src/door-relay.ts";
-import { StripeCheckoutLinks, StripeIdentityProvider } from "../examples/reference-server/src/stripe-adapters.ts";
+import { StripeIdentityProvider } from "../examples/reference-server/src/stripe-adapters.ts";
 import { NotImplementedError, canonicalJson, signDocument, signStripePayload, type Engine } from "../src/index.ts";
 import { createTestEngine, generateTestSigner, type TestEngine } from "../src/testing/index.ts";
 
@@ -142,7 +142,7 @@ describe("reference server", () => {
 describe("example door relay", () => {
   it("refuses an oversized body without keeping it, and a body that is not JSON", async () => {
     const opened: string[] = [];
-    const relay = createDoorRelay({ workspaceId: "w", audience: "lobby", keys: [], clock: { now: () => new Date(0) }, open: async (target) => void opened.push(target) });
+    const relay = createDoorRelay({ audience: "lobby", workspaceId: "w", keys: [], clock: { now: () => new Date(0) }, open: async (target) => void opened.push(target) });
     await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve));
     const url = `http://127.0.0.1:${(relay.address() as AddressInfo).port}`;
     try {
@@ -172,8 +172,8 @@ describe("example door relay", () => {
     const body = { v: 1, kind: "access", grantId: "acc_1", workspaceId: "w", audience: "lobby", target: "door-1", action: "unlock", scope: "entry.open", level: 2, issuedAt: "1970-01-01T00:00:00.000Z", expiresAt: "1970-01-01T00:01:00.000Z" } as const;
     const grant = await signDocument(signer, body);
     const relay = createDoorRelay({
-      workspaceId: "w",
       audience: "lobby",
+      workspaceId: "w",
       keys: [signer.publicJwk()],
       clock: { now: () => new Date(0) },
       open: () => {
@@ -208,26 +208,7 @@ describe("demo and Stripe adapters", () => {
     assert.equal(result.receipt.body.consents[0]!.purpose, "repair_texts");
   });
 
-  it("has Stripe adapters that are planned, not built", async () => {
+  it("has a Stripe Identity adapter that is planned, not built (the Checkout one is in stripe-adapters.test.ts)", async () => {
     await assert.rejects(new StripeIdentityProvider("rk_test").createDocumentCheck({ callId: "c", idempotencyKey: "k" }), (e: unknown) => e instanceof NotImplementedError && e.issue === "VER-5");
-    await assert.rejects(
-      new StripeCheckoutLinks("rk_test").createLink({
-        callId: "c",
-        paymentId: "p",
-        amountMinor: 1,
-        currency: "cad",
-        description: "d",
-        mode: "connect",
-        connectedAccountId: "acct_x",
-        paymentMethods: ["card"],
-        expiresAt: "2026-01-01T00:15:00.000Z",
-        idempotencyKey: "k",
-      }),
-      (e: unknown) => e instanceof NotImplementedError && e.issue === "PAY-1",
-    );
-    await assert.rejects(
-      new StripeCheckoutLinks("rk_test").expireLink({ linkId: "cs_x", mode: "platform", idempotencyKey: "k" }),
-      (e: unknown) => e instanceof NotImplementedError && e.issue === "PAY-1",
-    );
   });
 });

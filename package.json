@@ -52,7 +52,8 @@
     "test:coverage": "c8 node --test --throw-deprecation --test-reporter=spec \"test/**/*.test.ts\"",
     "demo": "node examples/reference-server/src/demo.ts",
     "serve": "node examples/reference-server/src/main.ts",
-    "ui": "node examples/reference-server/src/ui.ts"
+    "ui": "node examples/reference-server/src/ui.ts",
+    "demo:e2e": "node examples/reference-server/src/e2e.ts"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

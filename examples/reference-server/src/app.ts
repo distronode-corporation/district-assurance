@@ -9,7 +9,6 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import { EngineError, parseStripeEvent, verifyStripeSignature, type Clock, type Engine } from "../../../src/index.ts";
 import type { DemoRuns, RunAnswer } from "./demo-runs.ts";
-import { isDemoFlow } from "./script.ts";
 import { UI_HEADERS, loadStaticFiles, type StaticFile } from "./static.ts";
 
 export interface ReferenceServerOptions {
@@ -132,7 +131,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       } catch {
         throw new HttpError(400, "malformed_json");
       }
-      if (!isDemoFlow(flow)) throw new HttpError(400, "unknown_flow");
+      if (typeof flow !== "string" || !runs.hasFlow(flow)) throw new HttpError(400, "unknown_flow");
       return [201, (await runs.start(flow)) as unknown as Json];
     }
     return [404, { error: "not_found" }];

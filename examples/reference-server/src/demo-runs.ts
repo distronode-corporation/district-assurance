@@ -4,18 +4,18 @@
 import { randomUUID } from "node:crypto";
 
 import { EngineError, verifyChain, type AuditEntry, type FlowPosition, type SessionState } from "../../../src/index.ts";
-import { demoConfig } from "./flows.ts";
-import { SCRIPTS, type DemoFlow, type DemoWorld, type ScriptRun } from "./script.ts";
+import { SCRIPTS, type DemoWorld, type ScriptRun, type Scripts } from "./script.ts";
 
 export interface StepResult {
   index: number;
   label: string;
   detail: string;
   ok: boolean;
+  link?: { href: string; text: string };
 }
 
 export interface FlowView {
-  flow: DemoFlow;
+  flow: string;
   summary: string;
   steps: string[];
 }
@@ -40,7 +40,7 @@ export type RunAnswer = { ok: true; view: RunView } | { ok: false; status: 404 |
 
 interface Run {
   runId: string;
-  flow: DemoFlow;
+  flow: string;
   call: ScriptRun;
   results: StepResult[];
   busy: boolean;
@@ -52,19 +52,28 @@ interface Run {
 export class DemoRuns {
   readonly #world: DemoWorld;
   readonly #max: number;
+  readonly #scripts: Scripts;
   readonly #runs = new Map<string, Run>();
 
-  /** Keeps the newest `maxRuns` runs (default 20); an older run's id answers 404. */
-  constructor(world: DemoWorld, maxRuns = 20) {
+  /** Keeps the newest `maxRuns` runs (default 20); an older run's id answers 404. `scripts` defaults to the demo's four flows. */
+  constructor(world: DemoWorld, maxRuns = 20, scripts: Scripts = SCRIPTS) {
     this.#world = world;
     this.#max = maxRuns;
+    this.#scripts = scripts;
+  }
+
+  /** Whether `flow` is one of these runs' scripts. */
+  hasFlow(flow: string): boolean {
+    return Object.hasOwn(this.#scripts, flow) && Object.hasOwn(this.#world.config.flows, flow);
   }
 
   flows(): FlowView[] {
-    return (Object.keys(SCRIPTS) as DemoFlow[]).map((flow) => describe(flow));
+    return Object.keys(this.#scripts)
+      .filter((flow) => this.hasFlow(flow))
+      .map((flow) => this.#describe(flow));
   }
 
-  async start(flow: DemoFlow): Promise<RunView> {
+  async start(flow: string): Promise<RunView> {
     const run: Run = { runId: `run_${randomUUID()}`, flow, call: { callId: "", linkId: "", receipt: null }, results: [], busy: false, failed: false, turn: Promise.resolve() };
     this.#runs.set(run.runId, run);
     for (const old of this.#runs.keys()) {
@@ -84,7 +93,7 @@ export class DemoRuns {
     const run = this.#runs.get(runId);
     if (run === undefined) return { ok: false, status: 404, error: "not_found" };
     if (run.busy) return { ok: false, status: 409, error: "busy" };
-    const steps = SCRIPTS[run.flow];
+    const steps = this.#scripts[run.flow]!;
     const index = run.results.length;
     if (run.failed || index >= steps.length) return { ok: false, status: 409, error: "done" };
     run.busy = true;
@@ -96,10 +105,12 @@ export class DemoRuns {
   }
 
   async #runStep(run: Run, index: number): Promise<RunView> {
-    const step = SCRIPTS[run.flow][index]!;
+    const step = this.#scripts[run.flow]![index]!;
     try {
       const outcome = await step.run(this.#world, run.call);
       run.results.push({ index, label: step.label, ...outcome });
+      // A failed check ends the run: the next step may depend on it (no door before a payment).
+      if (!outcome.ok) run.failed = true;
     } catch (error) {
       run.failed = true;
       const detail = error instanceof EngineError ? `refused: ${error.code}` : "failed: internal error";
@@ -122,9 +133,9 @@ export class DemoRuns {
     const chain = verifyChain(all);
     return {
       runId: run.runId,
-      ...describe(run.flow),
+      ...this.#describe(run.flow),
       next: run.results.length,
-      done: run.failed || run.results.length === SCRIPTS[run.flow].length,
+      done: run.failed || run.results.length === this.#scripts[run.flow]!.length,
       results: structuredClone(run.results),
       callId,
       state: callId === null ? null : await engine.state(callId),
@@ -133,8 +144,8 @@ export class DemoRuns {
       chain: { ok: chain.ok, entries: all.length },
     };
   }
-}
 
-function describe(flow: DemoFlow): FlowView {
-  return { flow, summary: demoConfig().flows[flow]!.summary ?? "", steps: SCRIPTS[flow].map((step) => step.label) };
+  #describe(flow: string): FlowView {
+    return { flow, summary: this.#world.config.flows[flow]!.summary ?? "", steps: this.#scripts[flow]!.map((step) => step.label) };
+  }
 }
