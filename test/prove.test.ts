@@ -351,7 +351,7 @@ describe("memory consent store", () => {
     const store = new MemoryConsentStore();
     const consent = (consentId: string, purpose: string): ConsentRecord => ({
       consentId,
-      callId: "call_1",
+      callId: "call_1", subjectKey: null,
       purpose,
       wordingVersion: "1",
       wordingDigest: "0".repeat(64),

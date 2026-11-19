@@ -7,7 +7,7 @@ import { verifyReceipt, type SignedReceipt } from "../src/prove/receipt.ts";
 import { verifySubjectExport, type SignedSubjectExport } from "../src/prove/subject.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, type TestEngine } from "../src/testing/index.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
-import { ACCOUNT, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
+import { ACCOUNT, heard, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
 const SUBJECT = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const request = { workspaceId: "ws_test", subjectKey: SUBJECT };
@@ -16,7 +16,7 @@ async function filedCall(t: TestEngine, issue = "leak under the sink"): Promise<
   const callId = await verifiedCall(t);
   await t.engine.startIntake(callId, "repair");
   await t.engine.setIntakeField(callId, "issue", issue);
-  const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+  const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
   await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
   const receipt = (await t.engine.endCall(callId))!;
   return { callId, record, receipt };
@@ -115,7 +115,7 @@ describe("#105 hostile: store faults during an erase", () => {
       await held;
       return put(r);
     };
-    const confirming = t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    const confirming = t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     await inPut;
     const before = (await t.ledger.list()).length;
     // The new record is not listed yet, so only the first call's copy is forgotten; the erase goes

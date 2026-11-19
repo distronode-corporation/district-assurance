@@ -301,7 +301,10 @@ export class MemoryRecordStore implements RecordStore {
   }
 
   async deletePinDigest(workspaceId: string, subjectKey: string): Promise<void> {
-    delete this.#subjects.get(scoped(workspaceId, subjectKey))?.pinDigest;
+    const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
+    // The duress PIN is a PIN too: left alone, it would still pass for the subject (VER-12).
+    delete subject?.pinDigest;
+    delete subject?.duressDigest;
   }
 }
 

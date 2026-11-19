@@ -15,7 +15,7 @@ function world() {
   const records = new MemoryRecordStore();
   const documents = new MemoryDocumentStore();
   const scanner: DocumentScanner = { scan: async () => ({ clean: true }) };
-  const record: IntakeRecord = { recordId: "rec_1", workspaceId: WS, callId: "call_1", formId: "repair", formVersion: "1", values: { issue: "Leak" }, digest: "0".repeat(64), confirmedBy: "voice", confirmedAt: "2026-01-01T00:00:00.000Z" };
+  const record: IntakeRecord = { recordId: "rec_1", workspaceId: WS, callId: "call_1", subjectKey: null, formId: "repair", formVersion: "1", values: { issue: "Leak" }, digest: "0".repeat(64), confirmedBy: "voice", confirmedAt: "2026-01-01T00:00:00.000Z" };
   void records.putIntakeRecord(record);
   const context = { workspaceId: WS, documents, clock, records, scanner, ids: new SequentialIds() };
   return { documents, context };

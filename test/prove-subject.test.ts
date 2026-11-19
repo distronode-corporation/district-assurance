@@ -11,7 +11,7 @@ import { SUBJECT_EXPORT_DOMAIN, subjectExportPayload, verifySubjectExport, type 
 import { TEST_KNOWLEDGE_KEY, createTestEngine, recordStoreErasureContract, type TestEngine } from "../src/testing/index.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { MemoryRecordStore, testSubject } from "../src/testing/fakes.ts";
-import { ACCOUNT, DOB, PIN, rejects, setup, testConfig, verifiedCall, wording } from "./helpers.ts";
+import { ACCOUNT, DOB, heard, PIN, rejects, setup, testConfig, verifiedCall, wording } from "./helpers.ts";
 
 const SUBJECT = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const request = { workspaceId: "ws_test", subjectKey: SUBJECT };
@@ -21,7 +21,7 @@ async function filedCall(t: TestEngine, issue = "leak under the sink"): Promise<
   const callId = await verifiedCall(t);
   await t.engine.startIntake(callId, "repair");
   await t.engine.setIntakeField(callId, "issue", issue);
-  const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+  const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
   await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
   const receipt = (await t.engine.endCall(callId))!;
   return { callId, record, receipt };
@@ -50,7 +50,7 @@ describe("intake records carry the matched subject", () => {
     const { callId } = await t.engine.startCall();
     await t.engine.startIntake(callId, "repair");
     await t.engine.setIntakeField(callId, "issue", "leak");
-    const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack: await heard(t, callId) });
     assert.equal(record.subjectKey, null);
     assert.deepEqual(await t.records.listIntakeRecords("ws_test", SUBJECT), []);
     const exported = await t.engine.exportSubject(request);
@@ -129,7 +129,7 @@ describe("exportSubject", () => {
     await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
     await t.engine.startIntake(callId, "repair");
     await t.engine.setIntakeField(callId, "issue", "leak");
-    await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     // The same call, no flow: another subject is verified and consents.
     await t.engine.beginVerification(callId, { accountNumber: other });
     await t.engine.submitKeypad(callId, { dob: DOB });
@@ -307,9 +307,9 @@ describe("eraseSubject", () => {
       if (writes === 1) await held;
       await put(record);
     };
-    const slow = t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    const slow = t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     while (writes === 0) await new Promise((resolve) => setImmediate(resolve));
-    const fast = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    const fast = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     assert.equal(writes, 2);
     assert.deepEqual((await t.engine.eraseSubject(request)).recordIds, [fast.recordId]);
     release();
@@ -336,7 +336,7 @@ describe("eraseSubject", () => {
     const callId = await verifiedCall(t);
     await t.engine.startIntake(callId, "repair");
     await t.engine.setIntakeField(callId, "issue", "leak");
-    await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     await t.engine.startIntake(callId, "repair");
     await t.engine.setIntakeField(callId, "issue", "drip");
     assert.equal((await t.engine.eraseSubject(request)).erased, true);
@@ -348,12 +348,12 @@ describe("eraseSubject", () => {
       await put(record);
       throw new Error("timeout");
     };
-    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /timeout/);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), /timeout/);
     const entries = (await t.ledger.list()).length;
     await assert.rejects(t.engine.eraseSubject(request), rejects("precondition_failed", /being filed/));
     assert.equal((await t.ledger.list()).length, entries, "nothing appended");
     t.records.putIntakeRecord = put;
-    await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     assert.deepEqual((await t.engine.eraseSubject(request)).recordIds, ["rec_2"]);
   });
 
@@ -412,7 +412,7 @@ describe("eraseSubject and a filing reserved before it", () => {
       await held;
       return put(record, seen);
     };
-    const confirming = t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    const confirming = t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     while (!writing) await new Promise((resolve) => setImmediate(resolve));
     const erased = await t.engine.eraseSubject(request);
     assert.deepEqual([erased.erased, erased.recordIds, erased.pinDigest], [true, [], true]);
@@ -439,6 +439,8 @@ describe("eraseSubject and a filing reserved before it", () => {
     const callId = await verifiedCall(t);
     await t.engine.startIntake(callId, "repair");
     await t.engine.setIntakeField(callId, "issue", "leak");
+    // Heard before the store is wrapped: the wrapper's first read is confirmIntake's own.
+    const readBack = await heard(t, callId);
     const read = t.sessions.get.bind(t.sessions);
     let first = true;
     t.sessions.get = async (w, id) => {
@@ -450,9 +452,9 @@ describe("eraseSubject and a filing reserved before it", () => {
       copy.record.modules.badge.knowledgeMatched = false;
       return copy as never;
     };
-    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("conflict", /subject changed/));
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack }), rejects("conflict", /subject changed/));
     t.sessions.get = read;
-    assert.equal((await t.engine.confirmIntake(callId, { confirmedBy: "voice" })).subjectKey, SUBJECT);
+    assert.equal((await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) })).subjectKey, SUBJECT);
   });
 
   it("drops nothing a second confirmation already dropped", async () => {
@@ -469,9 +471,9 @@ describe("eraseSubject and a filing reserved before it", () => {
       await held;
       return put(record, seen);
     };
-    const one = t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    const one = t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     while (writes === 0) await new Promise((resolve) => setImmediate(resolve));
-    const two = t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    const two = t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     while (writes === 1) await new Promise((resolve) => setImmediate(resolve));
     await t.engine.eraseSubject(request);
     release();

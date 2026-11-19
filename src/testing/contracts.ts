@@ -507,6 +507,7 @@ const contractRecord = (workspaceId: string, recordId: string): IntakeRecord => 
   recordId,
   workspaceId,
   callId: "call_1",
+  subjectKey: null,
   formId: "maintenance",
   formVersion: "1",
   values: { issue: "leaking tap", rooms: 2, urgent: true },

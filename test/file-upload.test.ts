@@ -26,7 +26,7 @@ const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0])
 const PDF = new TextEncoder().encode("%PDF-1.7\n%fake\n");
 
 function intakeRecord(recordId: string, callId: string): IntakeRecord {
-  return { recordId, workspaceId: WS, callId, formId: "repair", formVersion: "1", values: { issue: "Leak" }, digest: "0".repeat(64), confirmedBy: "voice", confirmedAt: "2026-01-01T00:00:00.000Z" };
+  return { recordId, workspaceId: WS, callId, subjectKey: null, formId: "repair", formVersion: "1", values: { issue: "Leak" }, digest: "0".repeat(64), confirmedBy: "voice", confirmedAt: "2026-01-01T00:00:00.000Z" };
 }
 
 class FakeScanner implements DocumentScanner {

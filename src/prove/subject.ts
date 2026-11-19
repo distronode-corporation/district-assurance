@@ -252,8 +252,9 @@ export async function exportSubject(rt: EngineRuntime, input: SubjectRequest & {
  * The event id of a subject's `n`th erasure (from 0) or of its completion. Keyed, so it names no
  * subject to anyone without the knowledge key.
  */
-function erasureEventId(rt: EngineRuntime, subjectKey: string, n: number, event: "subject.erased" | "subject.erasure_completed"): string {
-  return JSON.stringify([rt.workspaceId, null, event, rt.hmac(`${event}:${subjectKey}:${n}`)]);
+async function erasureEventId(rt: EngineRuntime, subjectKey: string, n: number, event: "subject.erased" | "subject.erasure_completed"): Promise<string> {
+  // The knowledge HMAC is asynchronous (#72): awaited, or the id would hold a Promise.
+  return JSON.stringify([rt.workspaceId, null, event, await rt.hmac(`${event}:${subjectKey}:${n}`)]);
 }
 
 /** Carries out the plan an erasure entry holds, then appends its completion. Every step is idempotent. */
@@ -263,7 +264,7 @@ async function carryOut(rt: EngineRuntime, records: RecordStore, subjectKey: str
   await records.deleteIntakeRecords(rt.workspaceId, recordIds);
   if (pinDigest) await records.deletePinDigest(rt.workspaceId, subjectKey);
   await rt.adapter("ledger").append({
-    eventId: erasureEventId(rt, subjectKey, n, "subject.erasure_completed"),
+    eventId: await erasureEventId(rt, subjectKey, n, "subject.erasure_completed"),
     callId: null,
     actor: "member",
     event: "subject.erasure_completed",
@@ -295,23 +296,25 @@ export async function eraseSubject(
   const ledger = rt.adapter("ledger");
   const appended = new Map((await ledger.list()).map((e) => [e.eventId, e]));
   let n = 0;
-  while (appended.has(erasureEventId(rt, subjectKey, n, "subject.erased"))) n++;
+  while (appended.has(await erasureEventId(rt, subjectKey, n, "subject.erased"))) n++;
   // The last erasure, unfinished: carry out its plan before looking for anything filed since.
   let finished: ErasureResult | null = null;
-  if (n > 0 && !appended.has(erasureEventId(rt, subjectKey, n - 1, "subject.erasure_completed"))) {
-    finished = await carryOut(rt, records, subjectKey, n - 1, appended.get(erasureEventId(rt, subjectKey, n - 1, "subject.erased"))!);
+  if (n > 0 && !appended.has(await erasureEventId(rt, subjectKey, n - 1, "subject.erasure_completed"))) {
+    finished = await carryOut(rt, records, subjectKey, n - 1, appended.get(await erasureEventId(rt, subjectKey, n - 1, "subject.erased"))!);
   }
   // Counted before the listing: a filing reserved before now and written after it stores nothing,
   // whether or not this listing sees it, so no record the plan misses can bring values back.
   await records.markSubjectErased(rt.workspaceId, subjectKey);
   const found = await records.listIntakeRecords(rt.workspaceId, subjectKey);
-  const pinDigest = (await records.getSubject(rt.workspaceId, subjectKey))?.pinDigest !== undefined;
+  const onFile = await records.getSubject(rt.workspaceId, subjectKey);
+  // A duress PIN digest alone is a PIN digest to erase too (VER-12).
+  const pinDigest = onFile?.pinDigest !== undefined || onFile?.duressDigest !== undefined;
   const recordIds = found.map((r) => r.recordId);
   if (recordIds.length === 0 && !pinDigest) return finished ?? { erased: false, recordIds, pinDigest, entry: null };
   for (const callId of callsOf(found)) await unlessGone(forget(callId, recordIds));
   // Two erasures at once append the same id: the first plan appended is the one both carry out.
   const entry = await ledger.append({
-    eventId: erasureEventId(rt, subjectKey, n, "subject.erased"),
+    eventId: await erasureEventId(rt, subjectKey, n, "subject.erased"),
     callId: null,
     actor: "member",
     event: "subject.erased",

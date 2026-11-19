@@ -471,7 +471,7 @@ describe("reference server: document uploads", () => {
         return { clean: this.clean };
       },
     };
-    await t.records.putIntakeRecord({ recordId: "rec_1", workspaceId: t.engine.workspaceId, callId: "call_1", formId: "f", formVersion: "1", values: {}, digest: "0".repeat(64), confirmedBy: "voice", confirmedAt: "2026-01-01T00:00:00.000Z" });
+    await t.records.putIntakeRecord({ recordId: "rec_1", workspaceId: t.engine.workspaceId, callId: "call_1", subjectKey: null, formId: "f", formVersion: "1", values: {}, digest: "0".repeat(64), confirmedBy: "voice", confirmedAt: "2026-01-01T00:00:00.000Z" });
     const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [], payments: [] }, clock: t.clock, uploads: { documents, scanner, ids: t.ids } });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

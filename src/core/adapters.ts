@@ -424,7 +424,10 @@ export interface RecordStore {
   markSubjectErased(workspaceId: string, subjectKey: string): Promise<void>;
   /** How many times a subject was marked erased: 0 for one never erased. */
   subjectErasures(workspaceId: string, subjectKey: string): Promise<number>;
-  /** Removes the subject's `pinDigest` and keeps the rest of the subject record, which is the host's. Idempotent. */
+  /**
+   * Removes the subject's `pinDigest` and `duressDigest` (a duress PIN left alone would still pass,
+   * VER-12) and keeps the rest of the subject record, which is the host's. Idempotent.
+   */
   deletePinDigest(workspaceId: string, subjectKey: string): Promise<void>;
 }
 

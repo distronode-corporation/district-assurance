@@ -23,7 +23,7 @@ function flipping<T extends object>(base: T, key: string, first: unknown, then: 
 }
 
 function record(recordId: string, callId: string): IntakeRecord {
-  return { recordId, workspaceId: WS, callId, formId: "repair", formVersion: "1", values: { issue: "Leak" }, digest: "0".repeat(64), confirmedBy: "voice", confirmedAt: "2026-01-01T00:00:00.000Z" };
+  return { recordId, workspaceId: WS, callId, subjectKey: null, formId: "repair", formVersion: "1", values: { issue: "Leak" }, digest: "0".repeat(64), confirmedBy: "voice", confirmedAt: "2026-01-01T00:00:00.000Z" };
 }
 
 function world() {

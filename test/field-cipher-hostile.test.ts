@@ -197,11 +197,15 @@ describe("FIL-2: a failed filing is never logged for a record that ends up store
     const held = new Promise<void>((r) => (release = r));
     let entered!: () => void;
     const inPut = new Promise<void>((r) => (entered = r));
+    // B's view of the shared store: the same store's methods (bound, for its private fields), its write held.
     const bRecords = Object.create(records) as MemoryRecordStore;
-    bRecords.putIntakeRecord = async (r: IntakeRecord) => {
+    bRecords.getIntakeRecord = records.getIntakeRecord.bind(records);
+    bRecords.subjectErasures = records.subjectErasures.bind(records);
+    bRecords.deleteIntakeRecords = records.deleteIntakeRecords.bind(records);
+    bRecords.putIntakeRecord = async (r: IntakeRecord, erasuresSeen?: number) => {
       entered();
       await held;
-      return records.putIntakeRecord(r);
+      return records.putIntakeRecord(r, erasuresSeen);
     };
     const b = setup({ config: config(), adapters: { fieldCipher: new FakeFieldCipher(), sessions, records: bRecords, ledger: a.ledger } });
     return { a, b, callId, records, fail: () => fail(), release, inPut };

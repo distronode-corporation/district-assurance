@@ -163,6 +163,31 @@ describe("Duress PIN: what the caller sees", () => {
   });
 });
 
+describe("Duress PIN: a subject's erasure (#105 with #124)", () => {
+  it("removes the duress digest with the PIN digest, so neither PIN passes after the erase", async () => {
+    const t = await duressSetup();
+    const subjectKey = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
+    assert.notEqual((await t.records.getSubject("ws_test", subjectKey))!.duressDigest, undefined);
+    assert.equal((await t.engine.eraseSubject({ workspaceId: "ws_test", subjectKey })).pinDigest, true);
+    const onFile = (await t.records.getSubject("ws_test", subjectKey))!;
+    assert.deepEqual([onFile.pinDigest, onFile.duressDigest], [undefined, undefined]);
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    assert.equal((await t.engine.submitPin(callId, DURESS)).matched, false, "the duress PIN no longer passes");
+    assert.equal(t.notifier.told.length, 0);
+  });
+
+  it("erases a duress digest left alone after the PIN digest went", async () => {
+    const t = await duressSetup();
+    const subjectKey = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
+    const subject = (await t.records.getSubject("ws_test", subjectKey))!;
+    delete subject.pinDigest;
+    t.records.putSubject("ws_test", subject);
+    assert.equal((await t.engine.eraseSubject({ workspaceId: "ws_test", subjectKey })).pinDigest, true);
+    assert.equal((await t.records.getSubject("ws_test", subjectKey))!.duressDigest, undefined);
+  });
+});
+
 describe("Duress PIN: the notifier", () => {
   it("is told of every duress entry, after the write and off the response path, with an alert id, the workspace, the subject, the call and the time, never the PIN", async () => {
     const t = await duressSetup();

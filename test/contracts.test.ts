@@ -128,8 +128,16 @@ describe("the RecordStore contract", () => {
       async getIntakeRecord(workspaceId: string, recordId: string) {
         return structuredClone(this.#records.get(`${workspaceId}/${recordId}`) ?? null);
       }
-      // FIL-2 (#78), VER-6 (#74) and VER-12 (#124) writes; the PRV-5 contract does not exercise them yet.
+      // FIL-2 (#78), VER-6 (#74), VER-12 (#124) and PRV-7 (#105) writes; the PRV-5 contract does not exercise them yet.
       async deleteIntakeRecords() {}
+      async listIntakeRecords() {
+        return [];
+      }
+      async markSubjectErased() {}
+      async subjectErasures() {
+        return 0;
+      }
+      async deletePinDigest() {}
       async putPinDigest() {
         return false;
       }
