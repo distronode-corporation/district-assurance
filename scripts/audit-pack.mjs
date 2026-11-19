@@ -6,7 +6,8 @@
 //   node scripts/audit-pack.mjs [--out <dir>] [--sbom <file>]
 //
 // --out   Where to write the pack. Default: .tmp/audit-pack (git ignores .tmp/). It is emptied
-//         first, so it must be new, empty or an earlier pack; anything else is refused.
+//         first, so it must be new, empty or an earlier pack (one holding the .audit-pack marker
+//         this script writes first, and nothing else of its own); anything else is refused.
 // --sbom  The release SBOM to include (SRV-6). Without it, the pack holds a CycloneDX SBOM that
 //         `npm sbom` derives from package-lock.json, and INDEX.md says it is a stand-in.
 //
@@ -20,6 +21,8 @@ import { createRequire } from "node:module";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+
+import { MARKER, outProblem } from "./audit-pack-out.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -127,13 +130,15 @@ const { values } = parseArgs({
 });
 const OUT = resolve(ROOT, values.out);
 const FOLDERS = ["tests", "coverage", "contracts", "sbom", "docs"];
-// The folder is emptied, so it must be new, empty or an earlier pack (finished or not), holding
-// nothing but the pack's own entries: never the repository or a folder of it, by mistake.
-if (existsSync(OUT) && !readdirSync(OUT).every((name) => [...FOLDERS, "INDEX.md", "SHA256SUMS"].includes(name))) {
-  fail(`--out ${values.out} holds files that are not an earlier pack; choose a new folder`);
-}
+// The folder is emptied, so it must be new, empty or an earlier pack (finished or not, told by its
+// marker), never the repository, a folder of it, or a folder of someone's own, by mistake.
+const outRefused = outProblem(OUT);
+if (outRefused !== null) fail(`--out ${values.out} ${outRefused}`);
 
 rmSync(OUT, { recursive: true, force: true });
+mkdirSync(OUT, { recursive: true });
+// The marker first, so a pack that stops part way can be emptied by the next run.
+writeFileSync(join(OUT, MARKER), "district-assurance audit pack: this folder is emptied by the next scripts/audit-pack.mjs run\n");
 for (const dir of FOLDERS) mkdirSync(join(OUT, dir), { recursive: true });
 
 // 1. Every test, under c8: the test reports, and the coverage reports held to .c8rc.json's 100%.
@@ -230,6 +235,7 @@ every \`src/\` file is at 100% coverage, so its reports are of a passing tree.
 | \`contracts/\` | the test files that run a contract suite, on their own (${contractFiles.map((f) => `\`${f}\``).join(", ")}): \`spec.txt\` and \`junit.xml\` |
 | \`sbom/\` | the SBOM, \`package.json\` and \`package-lock.json\` |
 | \`docs/\` | ${DOCS.map((d) => `\`${d}\``).join(", ")} |
+| \`${MARKER}\` | marks the folder as a pack, which the next run may empty |
 | \`SHA256SUMS\` | the SHA-256 of every other file in the pack (\`sha256sum -c SHA256SUMS\`) |
 
 ${sbomNote}
