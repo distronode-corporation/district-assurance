@@ -167,7 +167,8 @@ How the answers are read:
   `swapped_period` is the window Twilio looked at, not the age of a change, so it is never read as
   one when the change fell inside it. Anything else is no answer.
 - **Identity match:** `match` when `summary_score` is at least `identityMinScore` (1 to 100, 80
-  by default; anything else throws when the adapter is built), else `no_match`. The identity
+  by default; anything else throws when the adapter is built), else `no_match`; a
+  `summary_score` outside 0 to 100 is no answer. The identity
   comes from the host's `identityFor(phoneNumber)`; without it only SIM Swap is asked. Twilio
   takes the identity in the query string.
 - **Porting:** `N` is none known; `Y` gives the hours from the last moment the port date ends
@@ -177,7 +178,7 @@ How the answers are read:
 
 Every failure answers `checked: false` with nothing known, and never throws into the call: a
 number that is not E.164, an answer for a country outside the allow-list, a timeout (`timeoutMs`,
-3000 by default, over the whole exchange), a network or HTTP error, a field error (a feature the
+3000 by default, over the whole exchange, the host's `identityFor` included), a network or HTTP error, a field error (a feature the
 account is not approved for, or a country it does not cover), or an answer that cannot be read. A
 Twilio report is `checked` only when every field asked for answered. The optional `onUnavailable`
 listener hears why (`vendor`, `reason`, the HTTP `status` and the vendor's error `code`), never
