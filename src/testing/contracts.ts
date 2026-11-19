@@ -290,7 +290,7 @@ export function moduleContract(module: AssuranceModule, options: ModuleContractO
             }
             // validateConfig asks for a step's level and grants even when the step has problems.
             const level = mustNotThrow(`stepLevel ${what}`, () => module.stepLevel?.(frozen(bad)) ?? null);
-            assert.ok(level === null || Number.isInteger(level), `stepLevel ${what} must return a level or null`);
+            assert.ok(level === null || [0, 1, 2, 3].includes(level), `stepLevel ${what} must return a level from 0 to 3, or null`);
             const grants = mustNotThrow(`stepGrants ${what}`, () => module.stepGrants?.(frozen(bad)) ?? null);
             if (grants !== null) assertSentences(grants, `stepGrants ${what}`);
           }

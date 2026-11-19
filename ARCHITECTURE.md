@@ -94,7 +94,8 @@ with a `callback.book` step that needs the `callback.book` scope. The rules:
    move nothing). Not `alwaysOn`: only Trace holds the ledger.
 2. **Validators.** `validateSettings` and `validateStep` get what came from storage or an
    operator's editor. Check every type and answer with sentences; never throw. `stepLevel` and
-   `stepGrants` (only for a module that verifies) are asked even about a step with problems.
+   `stepGrants` (only for a module that verifies) are asked even about a step with problems;
+   `stepLevel` answers a level from 0 to 3, or null.
 3. **The call record.** `initCall` returns the module's part of a new call as plain JSON, and
    copies in what the call must keep if the config changes mid-call (Callback keeps its window
    ids). `enterStep` returns a JSON mark, usually a count, so `stepStatus` counts only what

@@ -186,7 +186,7 @@ describe("the module contract catches", () => {
       /^validateStep, stepLevel.*validateStep with callback.book.window spoiled.*must not change the adapters it is given/,
     ],
     ["stepLevel that throws on garbage", broken({ stepLevel: (step) => (step.window === undefined ? null : (step.window as string).length) }), /stepLevel with callback.book.window spoiled, as .*window: null.*, threw/],
-    ["stepLevel that is not a level", broken({ stepLevel: () => 0.5 }), /stepLevel with .* must return a level or null/],
+    ["stepLevel that is not a level", broken({ stepLevel: () => 0.5 }), /stepLevel with .* must return a level from 0 to 3, or null/],
     ["stepGrants that is not a list", broken({ stepGrants: () => "status.read" as unknown as string[] }), /stepGrants with .* must return a list of strings/],
     ["an initCall that throws", broken({ initCall: () => { throw new Error("boom"); } }), /^initCall and enterStep.*initCall threw: boom/],
     ["an initCall that is not JSON", broken({ initCall: () => ({ at: new Date(0) }) as unknown as JsonValue }), /initCall must return JSON/],
