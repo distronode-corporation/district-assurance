@@ -39,7 +39,7 @@ import {
   type PinOutcome,
   type PinSettings,
 } from "./factors.ts";
-import { counterKeys, currentLock, isCallingNumber, lockoutOf, lockoutSettingsErrors, forgetPass, recordFailures, type Lock } from "./counters.ts";
+import { counterKeys, currentLock, isCallingNumber, lockoutOf, lockoutSettingsErrors, forgetPass, recordFailures, removeOwnOnNumbers, type Lock } from "./counters.ts";
 import { clearsSoFar, duressClearedData, duressFlagKey, flagDuress, hiddenCounterKey, hiddenHardLock, hiddenWindowStart, isUnderDuress, recordClear } from "./duress-flag.ts";
 import { isKeypadEntry } from "./knowledge.ts";
 import type { TextCodeState } from "./text-code.ts";
@@ -162,6 +162,12 @@ export interface CallbackState {
   at: string | null;
   /** On a passed callback call: its failure is still to be forgotten. A replayed outcome retries that. */
   forgetPending: boolean;
+  /**
+   * Set on the call before the pass's own failure comes off the calling number, which runs at most
+   * once (a replay could take off another failure of the same millisecond). Absent until then, and
+   * on calls saved before it.
+   */
+  forgetClaimed?: true;
   /** On the callback call: the number the dial goes to, kept in the write that claims the dial, and the one the carrier check asks about. */
   to?: string;
   /** On the callback call: how often the number on file changed between tries of the dial. Each number gets its own idempotency key. */
@@ -732,11 +738,16 @@ async function settleForget(rt: EngineRuntime, callId: string, at: string): Prom
   if (owed.forgetOwed?.at !== at) return;
   const counters = rt.adapter("counters");
   const { keys, hidden } = owed.forgetOwed;
-  await forgetPass(counters, keys.filter((k) => k.scope === "subject"), new Date(at));
+  await forgetPass(counters, keys, new Date(at));
   if (owed.forgetOwed.claimed !== true) {
     // Not claimed (or claimed by another run first): this run leaves the rest to the run that holds it, or the next.
-    if (!(await claimForget(rt, callId, at))) return;
-    for (const key of keys) if (key.scope === "number") await counters.removeFailure(key, at);
+    const take = (s: BadgeSlice): boolean => {
+      if (s.forgetOwed?.at !== at || s.forgetOwed.claimed === true) return false;
+      s.forgetOwed.claimed = true;
+      return true;
+    };
+    if (!(await claimOnCall(rt, callId, take, (s) => s.forgetOwed?.at === at && s.forgetOwed.claimed === true))) return;
+    await removeOwnOnNumbers(counters, keys, new Date(at));
     // The hidden counter forgets only on a pass that is not under duress; a duress entry takes off its
     // own failure, as a pass does, and keeps the rest. One write either way, so the round trips never
     // tell a duress pass from another.
@@ -752,24 +763,18 @@ async function settleForget(rt: EngineRuntime, callId: string, at: string): Prom
 }
 
 /**
- * Claims the removals of the cleanup owed at `at` on the call: true when this run's write saved the
- * claim. A write that saved and then failed (the ledger, appended after the save) still claimed it;
- * one that did not save, or a claim another run made first, did not.
+ * Claims a step of a cleanup on the call, so it runs at most once: true when this run's write saved
+ * the claim. `take` sets the claim on the slice and says whether it took it (false: not owed, or
+ * claimed already); `held` says whether the call holds it. A write that saved and then failed (the
+ * ledger, appended after the save) still claimed it, which the call says; one that did not save did not.
  */
-async function claimForget(rt: EngineRuntime, callId: string, at: string): Promise<boolean> {
+export async function claimOnCall(rt: EngineRuntime, callId: string, take: (s: BadgeSlice) => boolean, held: (s: BadgeSlice) => boolean): Promise<boolean> {
   let mine = false;
   try {
-    return await rt.update(callId, (draft) => {
-      const s = draft.slice<BadgeSlice>(BADGE);
-      mine = s.forgetOwed?.at === at && s.forgetOwed.claimed !== true;
-      if (mine) s.forgetOwed!.claimed = true;
-      return mine;
-    });
+    return await rt.update(callId, (draft) => (mine = take(draft.slice<BadgeSlice>(BADGE))));
   } catch {
-    // Not saved before the write failed, or saved and then the ledger failed: the call says which.
     if (!mine) return false;
-    const now = (await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice;
-    return now.forgetOwed?.at === at && now.forgetOwed.claimed === true;
+    return held((await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice);
   }
 }
 

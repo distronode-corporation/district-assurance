@@ -209,16 +209,22 @@ export function recordedAt(failures: readonly string[], at: string): string[] | 
 }
 
 /**
- * After a pass whose failure was recorded at `at`: forgets the subject's failures up to the pass
- * (`forgetUpTo`), and takes only this attempt's own failure off the number's, in one atomic step of
- * the store. The number's other failures may be against other accounts, so they stay until they
- * leave the window, and so does any failure another call records while the pass is being forgotten.
+ * After a pass whose failure was recorded at `at`, the part safe to run again: forgets the
+ * subject's failures up to the pass (`forgetUpTo`). The number's are left to `removeOwnOnNumbers`.
  */
 export async function forgetPass(counters: AttemptCounters, keys: readonly AttemptCounterKey[], at: Date): Promise<void> {
-  for (const key of keys) {
-    if (key.scope === "subject") await forgetUpTo(counters, key, at);
-    else await counters.removeFailure(key, at.toISOString());
-  }
+  for (const key of keys) if (key.scope === "subject") await forgetUpTo(counters, key, at);
+}
+
+/**
+ * After a pass whose failure was recorded at `at`: takes only this attempt's own failure off each
+ * number's counter, in one atomic step of the store. The number's other failures may be against
+ * other accounts, so they stay until they leave the window, and so does any failure another call
+ * records meanwhile. Not safe to run twice (it takes off one failure at `at`, whichever it is), so
+ * the caller claims it on the call first and runs it at most once.
+ */
+export async function removeOwnOnNumbers(counters: AttemptCounters, keys: readonly AttemptCounterKey[], at: Date): Promise<void> {
+  for (const key of keys) if (key.scope === "number") await counters.removeFailure(key, at.toISOString());
 }
 
 /**

@@ -101,3 +101,28 @@ describe("T13: a claim that is not this run's runs no removal", () => {
     assert.equal((await t.counters.get(numberKey, LONG_AGO)).length, 1, "this run removed nothing");
   });
 });
+
+describe("T13: another run took the cleanup while this one was about to claim it", () => {
+  for (const other of ["claimed it", "finished it"] as const) {
+    it(`another run ${other}: this one removes nothing`, async () => {
+      const t = setup();
+      const { callId } = await t.engine.startCall();
+      await t.engine.beginVerification(callId, { accountNumber: ACCOUNT, callingNumber: LINE });
+      const removeFailure = t.counters.removeFailure.bind(t.counters);
+      let once = true;
+      // Right after the subject's part, before this run's claim reads the call.
+      t.counters.removeFailure = async (key, at) => {
+        await removeFailure(key, at);
+        if (key.scope !== "subject" || !once) return;
+        once = false;
+        const stored = (await t.sessions.get("ws_test", callId))!;
+        const next = structuredClone(stored.record) as unknown as { modules: { badge: { forgetOwed?: { claimed?: true } } } };
+        if (other === "claimed it") next.modules.badge.forgetOwed!.claimed = true;
+        else delete next.modules.badge.forgetOwed;
+        await t.sessions.compareAndSet("ws_test", callId, stored.version, next as unknown as JsonValue);
+      };
+      await t.engine.submitKeypad(callId, { dob: DOB });
+      assert.equal((await t.counters.get(numberKey, LONG_AGO)).length, 1, "this run removed nothing");
+    });
+  }
+});

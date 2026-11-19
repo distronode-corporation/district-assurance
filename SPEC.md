@@ -526,9 +526,11 @@ the `dialer` (`CallbackDialer`) and `counters` adapters when it is on.
   in `AttemptCounters` under the key `callback.placed`, recorded before the dial, so of two
   requests racing for the last one only one is placed). Otherwise it is placed, and a failure is
   recorded on the `callback` counters before the line is dialed; a pass forgets the subject's
-  failures and this callback's own on the number (section 6). A pass whose counters could not be
-  updated keeps that work pending, and a repeated outcome retries it without recording `callback`
-  again.
+  failures up to it and this callback's own on the number (section 6). A pass whose counters could
+  not be updated keeps that work pending, and a repeated outcome retries it without recording
+  `callback` again: the subject's part every time, and the removal off the number at most once,
+  claimed on the callback call first as for any pass (section 6), so a retry never takes off
+  another failure of the same millisecond.
 - The reservation keeps the subject, the verification and the time it is counted at. If
   verification restarts (another subject included) before the request is decided, it is refused,
   and nothing reserved for one subject is ever placed for another. A request that failed before
