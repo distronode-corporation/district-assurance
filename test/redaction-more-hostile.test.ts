@@ -24,7 +24,7 @@ const all = composeRedactors(cardNumberRedactor, healthCardRedactor, sinRedactor
 describe("hostile #91: separators", () => {
   const separators: Record<string, string> = {
     "en dash": "–",
-    "em dash": "—",
+    "em dash": "\u2014",
     "minus sign": "−",
     "zero-width space": "​",
     "soft hyphen": "­",
