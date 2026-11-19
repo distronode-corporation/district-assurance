@@ -246,7 +246,11 @@ unique).
 
 ## 8. Flow execution
 
-`startCall({flow})` or `startFlow(callId, name)`, on an open call that has not run a flow, copies
+`startCall` refuses (`invalid_input`, nothing saved) a `callId` that is not 1 to 200 characters the
+ledger can carry (no lone surrogate), a `locale` other than `en` or `fr`, and a `flow` that is not a
+name; the engine refuses a `workspaceId` with a lone surrogate. These enter the ledger directly, so
+no host value can block a call's ledger. `startCall({flow})` or `startFlow(callId, name)`, on an
+open call that has not run a flow, copies
 the flow's steps into the call record, so a later config change never moves a call. The first step
 is entered: its module's `enterStep` returns a mark. After every change to the call, the engine
 asks the current step's module for `stepStatus(step, {state, slice, mark})`:
@@ -387,7 +391,9 @@ Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording 
 Forms live in Dossier's settings: a `formId` (lower case, digits, `-`, `_`), a `version` and
 fields with snake_case unique keys, a known type and an English and a French label.
 `validateConfig` refuses fields marked `sensitive` until field encryption exists (FIL-2).
-`startIntake(callId, formId)` names the form, and the draft keeps the form as it was then, so a
+`setIntakeField` refuses (`invalid_input`) a value with a lone surrogate, which speech-to-text or a
+model can produce and a record's digest cannot hash. `startIntake(callId, formId)` names the form,
+and the draft keeps the form as it was then, so a
 config change mid-intake never changes what is filed; a call also keeps the forms (and Trace the
 wordings) in force when it started. A draft being filed refuses changes. A filing that failed
 after its reservation (the store refused it, or the last write was lost) stays reserved and
@@ -588,9 +594,12 @@ the skew, because the engine ends a call only once every grant at a door has ans
 and `lifetime` (longer than 900 seconds, or ending before it starts). This assumes the engine's and
 the relay's clocks agree (NTP): a relay whose clock runs behind by some seconds accepts a grant for
 that much longer. `new SeenGrants()`: `accept(body, now)` is true once per grant id, and keeps the
-id until the grant expires, when the verifier refuses it anyway. It never forgets one again: once
-ids were forgotten at some time, a grant that had expired by then is refused even if the relay's
-clock later moves back inside its validity. `engine.accessKeys()` is the public key set.
+id until the grant expires, when the verifier refuses it anyway. It keeps a forget point: ids are
+forgotten only once their grant expired at or before it, and any grant expiring at or before it is
+refused, so a grant accepted once is never accepted again, under any sequence of clock jumps and
+rollbacks. The forget point follows the relay's clock but never passes the latest expiry it has
+accepted, so a clock that jumped forward refuses no fresh grant beyond one grant lifetime (at most
+15 minutes) of grants it has really seen. `engine.accessKeys()` is the public key set.
 Every key set the engine publishes (`receiptKeys()`, `accessKeys()`, `stepUpKeys()`) holds only
 the public members of each key (`kty`, `crv`, `x`, `y`, `kid`, `alg`, `use`), whatever its
 signer's `publicJwk` returns, so a signer that hands back its private `d` never has it published.

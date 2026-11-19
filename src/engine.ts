@@ -11,7 +11,7 @@
 import { createPublicKey, type JsonWebKey } from "node:crypto";
 
 import type { IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
-import { canonicalJson, type JsonValue } from "./core/canonical.ts";
+import { canonicalJson, hasLoneSurrogate, type JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
 import { EngineError, NotImplementedError } from "./core/errors.ts";
@@ -114,7 +114,9 @@ export class Engine {
     const errors: string[] = [];
     const keyLength = typeof options.knowledgeKey === "string" ? Buffer.byteLength(options.knowledgeKey) : options.knowledgeKey.byteLength;
     if (keyLength < 16) errors.push("knowledgeKey must be at least 16 bytes");
-    if (options.workspaceId === "") errors.push("workspaceId is empty");
+    if (typeof options.workspaceId !== "string" || options.workspaceId === "" || hasLoneSurrogate(options.workspaceId)) {
+      errors.push("workspaceId must be a non-empty string the ledger can carry (no lone surrogate)");
+    }
     if ((options.adapters as Partial<EngineAdapters>).ledger === undefined) errors.push("the ledger adapter is required: the ledger is always on");
     errors.push(...distinctSigners(options.adapters));
     for (const module of options.modules ?? []) {
@@ -201,6 +203,13 @@ export class Engine {
 
   /** Opens a call. With `flow`, the call runs that flow from its first step. */
   async startCall(input: { callId?: string; locale?: Locale; flow?: string } = {}): Promise<SessionState> {
+    // Everything the host gives here enters the ledger as it is, not through emit's checks: checked
+    // now, before anything is saved, so no call's ledger can be blocked by a value it cannot hash.
+    if (input.callId !== undefined && (typeof input.callId !== "string" || input.callId === "" || input.callId.length > 200 || hasLoneSurrogate(input.callId))) {
+      throw new EngineError("invalid_input", "callId must be 1 to 200 characters the ledger can carry (no lone surrogate)");
+    }
+    if (input.locale !== undefined && input.locale !== "en" && input.locale !== "fr") throw new EngineError("invalid_input", "locale must be en or fr");
+    if (input.flow !== undefined && typeof input.flow !== "string") throw new EngineError("invalid_input", "flow must name a flow");
     const callId = input.callId ?? this.#ids.next("call");
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
