@@ -11,7 +11,7 @@ The design: a small core (the session state machine on a shared session store, t
 its levels, redaction, the module registry and the audit ledger) and modules around it: Badge
 (verify), Dossier (file), Paylink (pay), Trace (prove), Gate (entry), and any outside module
 a host adds. Every module can be turned on, turned off, added and removed per workspace config,
-and flows are config, not code. DECISIONS.md, ADR-13 to ADR-24, says why.
+and flows are config, not code. DECISIONS.md, ADR-13 to ADR-25, says why.
 
 ## How work is proven
 
@@ -196,7 +196,7 @@ The second pull request of the modular core built the first part (GAT-1, PAY-7, 
 
 | Piece | Where | Proof |
 |---|---|---|
-| Gate module (GAT-1) | `src/gate/gate.ts`, `src/gate/access.ts` | refused without `entry.open`, a grant verified with the public key only, a changed byte refused, never past the verification grant, every grant and outcome in the ledger (`test/gate.test.ts`) |
+| Gate module (GAT-1) | `src/gate/gate.ts`, `src/gate/access.ts`, `src/engine.ts` | the engine owns every grant and outcome (ADR-25); refused without `entry.open`, a grant verified with the public key only, a changed byte refused, never past the verification grant, every grant and outcome in the ledger (`test/gate.test.ts`) |
 | Unlocks never retried | `src/gate/gate.ts` | a lost answer is `unknown`, sent once, a fresh request is a new grant, one in flight per call, a limit per call (`test/gate.test.ts`) |
 | Signed-webhook relay (GAT-2) | `src/gate/relay.ts`, `examples/reference-server/src/door-relay.ts` | against a loopback HTTP server: 2xx, 4xx, 5xx, redirects, timeouts (`test/gate-relay.test.ts`); replay and tamper refused by the example relay (`npm run demo`) |
 | Payment modes (PAY-7) | `src/pay/paylink.ts`, `src/core/adapters.ts` | `connect` and `platform` per step, the account on the request, outcomes from another account ignored (`test/paylink-modes.test.ts`) |

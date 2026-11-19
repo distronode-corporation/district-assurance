@@ -173,23 +173,39 @@ describe("paylink modes: running", () => {
     assert.equal(t.payments.created.length, 0);
   });
 
-  it("ignores an outcome from another account than the payment's, and writes that down", async () => {
+  it("never lets an outcome from another account settle a payment, and writes down one that reaches it", async () => {
     const t = setup({ config: withFlow({ ...pay, mode: "connect" }) });
     const callId = await onPayStep(t);
     await t.engine.requestPayment(callId);
     const linkId = "cs_fake_1";
+    // A connect payment is bound under its account: another account's event, or one without any, never finds it.
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId, paymentStatus: "paid" }), { applied: false }, "a platform-endpoint event");
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId, paymentStatus: "paid", account: "acct_other" }), { applied: false });
-    const ignored = (await t.ledger.list()).filter((e) => e.event === "payment.outcome_ignored");
-    assert.deepEqual(ignored.map((e) => e.detail), [{ paymentId: "pay_1", reason: "account" }, { paymentId: "pay_1", reason: "account" }]);
     assert.equal((await t.engine.state(callId)).phase, "paying");
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId, paymentStatus: "paid", account: ACCT }), { applied: true, callId, status: "paid" });
 
+    // A connected account's event for a platform payment reaches it, and is ignored and written down.
     const p = setup();
     const platformCall = await verifiedCall(p);
     await p.engine.requestPayment(platformCall, request);
     assert.deepEqual(await p.engine.applyPaymentOutcome({ kind: "expired", linkId: "cs_fake_1", account: ACCT }), { applied: false }, "a connected account's event for a platform payment");
+    const ignored = (await p.ledger.list()).filter((e) => e.event === "payment.outcome_ignored");
+    assert.deepEqual(ignored.map((e) => e.detail), [{ paymentId: "pay_1", reason: "account" }]);
     assert.equal(outcomeAccountMatches({ mode: "platform", connectedAccountId: null }, { kind: "expired", linkId: "x" }), true);
+  });
+
+  it("keeps two connected accounts' payments apart even when their providers give the same link id", async () => {
+    const payments = new FakePaymentLinks();
+    payments.createLink = async () => ({ linkId: "cs_same", url: "https://pay.example.test/c/cs_same" });
+    const t = setup({ adapters: { payments }, config: withFlow({ ...pay, mode: "connect" }, { mode: "platform", connectedAccountId: "acct_a" }) });
+    const first = await onPayStep(t);
+    await t.engine.requestPayment(first);
+    t.engine.configure(withFlow({ ...pay, mode: "connect" }, { mode: "platform", connectedAccountId: "acct_b" }));
+    const second = await onPayStep(t);
+    await t.engine.requestPayment(second);
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_same", paymentStatus: "paid", account: "acct_b" }), { applied: true, callId: second, status: "paid" });
+    assert.equal((await t.engine.state(first)).phase, "paying", "account a's payment is untouched");
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_same", paymentStatus: "paid", account: "acct_a" }), { applied: true, callId: first, status: "paid" });
   });
 
   it("reads the connected account from a Stripe Connect event", () => {
@@ -341,11 +357,17 @@ describe("paylink: the engine's own deadline", () => {
     v.clock.advance(12 * 60_000);
     v.messages.sendText = send3;
     const expire = vPayments.expireLink.bind(vPayments);
+    const answers: string[] = [];
     vPayments.expireLink = async (input) => {
+      // The provider expired the link on its own first: its webhook is in, and it is closed there too.
       await v.engine.applyPaymentOutcome({ kind: "expired", linkId: input.linkId });
-      return expire(input);
+      vPayments.settle(input.linkId);
+      const answer = await expire(input);
+      answers.push(answer.state);
+      return answer;
     };
     await assert.rejects(v.engine.requestPayment(c3, request), rejects("precondition_failed"));
+    assert.deepEqual(answers, ["not_open"], "the provider said it was no longer open");
     assert.equal((await v.ledger.list()).filter((e) => e.event === "payment.link_expired").length, 0, "already settled by the provider");
   });
 
@@ -491,7 +513,11 @@ describe("paylink: the engine's own deadline", () => {
       throw new Error("carrier down");
     };
     await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
-    t.messages.sendText = send;
+    const keys: string[] = [];
+    t.messages.sendText = (input) => {
+      keys.push(input.idempotencyKey);
+      return send(input);
+    };
     const create = t.payments.createLink.bind(t.payments);
     let release: () => void = () => undefined;
     const held = new Promise<void>((resolve) => (release = resolve));
@@ -506,7 +532,8 @@ describe("paylink: the engine's own deadline", () => {
     const a = await t.engine.requestPayment(callId, request);
     release();
     assert.deepEqual(await b, a, "the same delivery, recorded once");
-    assert.equal(t.messages.sent.filter((m) => m.purpose === "payment_link").length, 2, "the text is idempotent by key; sent twice to the fake, once to a real carrier");
+    assert.equal(keys.length, 2, "both resumes asked the carrier");
+    assert.equal(keys[0], keys[1], "with one idempotency key, so a carrier that honours it sends one text");
     assert.equal((await t.ledger.list()).filter((e) => e.event === "payment.link_sent").length, 1);
   });
 
@@ -643,6 +670,18 @@ describe("paylink: the engine's own deadline", () => {
     assert.equal(t.payments.expired.length, 0);
     assert.equal((await t.ledger.list()).filter((e) => e.event === "payment.link_expired").length, 0, "B expired nothing");
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" }), { applied: true, callId, status: "paid" });
+  });
+
+  it("refuses a payments adapter that declares no capabilities when the engine is built and when a config is saved", async () => {
+    // A plain JavaScript adapter: no types to make it declare anything.
+    const bare = { createLink: async () => ({ linkId: "cs_1", url: "https://pay.example.test/c/cs_1" }), expireLink: async () => ({ state: "expired" as const }) };
+    const refused = /modules\.paylink: the payments adapter declares no capabilities \(\{ modes, minLinkMinutes, maxLinkMinutes \}\)/;
+    assert.throws(() => setup({ adapters: { payments: bare as never } }), refused);
+    // Built with paylink off, then a config turning it on: refused at save, never a TypeError mid-call.
+    const off = setup({ adapters: { payments: bare as never }, config: testConfig((c) => delete (c.modules as Record<string, unknown>).paylink) });
+    assert.throws(() => off.engine.configure(testConfig()), refused);
+    // A registry that only knows adapter names cannot tell, and does not refuse.
+    assert.deepEqual(validateConfig(testConfig(), new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "pinVerifier"], modules: builtInModules() })), []);
   });
 
   it("refuses on a call that started with paylink off", async () => {

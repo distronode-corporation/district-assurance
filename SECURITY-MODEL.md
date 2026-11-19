@@ -22,7 +22,7 @@ claim.
 |---|---|
 | The host's code paths that call the engine | Everything the caller says |
 | The adapters the host plugs in | Everything the model says or proposes |
-| The knowledge key, the receipt signing key, Gate's and step-up's signing keys | Caller ID and any number given on the call |
+| The knowledge key, the receipt signing key, the access signing key and the step-up signing key | Caller ID and any number given on the call |
 | The clock and id source | Webhook bodies until their signature verifies |
 | The outside modules the host installs | Text from business endpoints, CRMs and documents |
 | The door controllers and relays the host configures | A door relay's answer, beyond "took it", "refused" or "lost" |
@@ -127,43 +127,62 @@ the host's code with an `amountSource`, and destinations come from the subject r
 ### Unlocks: forged, replayed, or sent twice
 
 Someone forges an access grant, replays one, or a retry opens a door for a caller who is no longer
-there. **Controls:** Gate refuses without a verification grant covering `entry.open` (level 2 or
-more), checked by the engine itself on the flow step and by Gate, and once more right before the door
-is asked, so a call tainted or a grant expired while it was signed sends nothing (tested). An access grant is
-signed with ES256 under Gate's own key and carries its audience (the controller), its target, its
+there, or code inside the engine writes an outcome the door never gave. **Controls:** the engine
+owns every access grant (ADR-25): it reserves it, signs it, computes its digest, calls the
+controller once and records the controller's actual answer, all in its own writes. Gate is a
+built-in module, so no module code can reach a grant (`updateModule` refuses it) and there is no
+outcome API to write one: a forged delivery, a re-pointed or lowered grant, a second settlement or
+a digest the engine did not compute has no path in (tested, for every attack of the PR 2 reviews).
+A grant needs a verification grant covering `entry.open` (level 2 or more), checked on every
+request, in a flow and outside one, and once more right before the door is asked, so a call tainted
+or a grant expired while it was signed sends nothing (tested). An access grant is signed with
+ES256 under the access signer's own key and carries its audience (the controller), its target, its
 level and a short validity, never past the verification grant (tested); a relay holds only the
 public key, so taking a relay over does not let anyone mint grants, and one changed byte fails
 (tested). A grant is bound to its workspace: a verifier must name the workspace it serves, so
 workspaces that share a key and a controller name never open each other's doors (tested). The
-example relay refuses a grant id it has seen (`SeenGrants`, tested in the demo). An outcome write
-settles only a grant Gate reserved under its scope check, so no write marks a door delivered
-without a grant, and none reaches the ledger after a call ended with nothing in flight (tested).
+example relay refuses a grant id it has seen (`SeenGrants`, tested in the demo). A call never ends
+while a signed grant may still be acted on (at its door, or sent with its answer lost): the end
+waits for the answer, or for the grant's expiry, so no access outcome follows the receipt and no grant reaches a door after it
+while it can still open one (tested). Left as a limit, stated plainly: a door controller that does
+not check a grant's expiry could act on a request delayed past it, after the call ended; the relay
+contract requires the check, and the record would then say `unknown`, never `delivered`. The access
+signer must be its own key (refused when it is the receipt signer's), and a host's module can never
+take Gate's name, even after Gate was removed (tested). Outside modules' `updateModule` is held by the engine to their manifest's
+scopes on every call, outside a flow too (tested).
 **An unlock is never retried:** one grant in flight per call, sent once, no redirects followed;
 a lost answer (a timeout, a dropped connection, a 5xx) is recorded as `unknown`, and opening again
 is a fresh request with a new grant, up to `maxGrantsPerCall` (tested). The answer is recorded
-even if the caller's grant expired or the call ended while the door answered (tested). The ledger
+even if the caller's grant expired while the door answered (tested); one that arrives after the
+call ended is not (the grant was settled `unknown` at the end). The ledger
 holds each grant's digest and outcome, never the grant. Left to the host: a relay that keeps seen
-grant ids across restarts (or refuses every grant for 15 minutes plus twice the verifier's clock
-skew after one), and the door's own safety
+grant ids across restarts (or refuses every grant for 15 minutes plus the verifier's clock skew
+after one), a relay clock kept in sync with the engine's (a grant's expiry is strict, so a relay
+running behind accepts it that much longer), and the door's own safety
 (an unlock pulse, not a latch).
 
 ### Web sign-in step-up: stolen, replayed or misdirected tokens
 
 Someone replays a step-up token, uses one meant for another person or site, or keeps using one
 after the call turned untrusted. **Controls:** a token is issued only with a verification grant
-covering `entry.sign_in` (level 2 or more), checked by the engine on the flow step and by the
-module, and once more after signing, so a call tainted, verified again or expired while it was
-signed gets nothing (tested). It is an ES256 JWT under the module's own key, lives 2 to 5
-minutes and never past the verification grant (tested). It is bound to the site's audience, to
+covering `entry.sign_in` (level 2 or more), checked by the engine on every request and once more
+after signing, so a call tainted, verified again, ended or expired while it was signed gets
+nothing (tested). Step-up is built in (ADR-25): the engine issues every token and records its
+exchange, and no module code can write a token or its outcome (tested). It is an ES256 JWT under
+its own key (`stepUpSigner`), which the engine refuses to share with the receipt or access signer,
+by key id or key material (tested); it lives 2 to 5 minutes and never past the verification grant
+(tested). It is bound to the site's audience, to
 the subject the verification grant was issued for (never one the host or the model names, and
 none while a new verification runs), to the grant itself and to the nonce the site showed
 (tested). The web sign-in exchanges it through the engine, which accepts only the exact bytes the
-call issued, once: the exchange closes the token's reservation, so a second one is refused, on
-any process (tested). An exchange after the call was tainted, after the call was verified again,
+call issued, once: the exchange settles the token in the engine's own write, so a second one is
+refused, on any process (tested). An exchange after the call was tainted, after the call was verified again,
 after expiry, or for another site, subject or nonce is refused and uses the token up; a forged or
 altered token is refused without using up the real one (tested). The ledger holds the token's
 digest and outcome, never the token, the nonce or the subject handle, and the call record keeps
-no nonce (tested). `sub` is a handle per site, so two sites cannot link one person (tested).
+no nonce (tested). `sub` is a handle per site, so two sites cannot link one person (tested). A
+token issued before the call ended stays exchangeable until it expires (at most 5 minutes), and
+its exchange is written after the receipt, outside the receipt's ledger head (tested).
 Left to the host: exchanging every token through the engine (checking the JWS against the JWKS
 alone gives neither the single use nor the refusal after taint), handing the token only to the
 browser session that showed the nonce, a nonce of at least 6 digits that lives no longer than
@@ -227,8 +246,8 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
   speech-to-text and the model while `sensitive` is set.
-- Keeping the knowledge key, the receipt signing key, Gate's and step-up's signing keys in a key
-  store, each apart from the others.
+- Keeping the knowledge key, the receipt signing key, the access signing key and the step-up
+  signing key in a key store, each apart from the others.
 - Exchanging each step-up token through the engine (`exchangeStepUpToken`), and only for the
   browser session that showed its nonce.
 - Calling `expirePaymentLinks` at each link's `expiresAt` (a timer or a sweep); until it does, a

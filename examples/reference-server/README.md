@@ -88,7 +88,11 @@ How the page is kept small and safe:
 3. Trigger a test event (`stripe trigger checkout.session.completed`). The server checks the
    signature and answers `{"received": true, "applied": false}`: the signature is good, and the
    session is unknown to this engine because the Stripe adapters are not built yet. A wrong secret
-   answers `400` with the reason.
+   answers `400` with the reason. Then prove the Connect side the same way, with a test connected
+   account: `stripe trigger checkout.session.completed --stripe-account acct_...`, and check that
+   `/webhooks/stripe/connect` (not `/payments`) answered it. Filter each listener to its own event
+   types (`--events checkout.session.completed,...`), so an event never reaches an endpoint that
+   does not handle it.
 
 Use test-mode keys only. Never commit a secret; the server reads them from the environment.
 

@@ -93,26 +93,24 @@ module the config has on.
 | `dossier` | `dossier.collect` | `intake.file` | `records` |
 | `paylink` | `paylink.request` | `payment.request` | `payments`, `messages` |
 | `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
+| `gate` | `gate.grant` | `entry.open` | `access` (door controllers by name), `accessSigner` |
 
-Gate (section 17) ships in the package but is installed like an outside module, with
-`engine.use(gateModule({ signer, controllers }))`: its step is `gate.grant`, it needs `entry.open`
-(class access, floor 2), and it holds its own signer and door controllers, so it needs no engine
-adapter. Web sign-in step-up (section 18) ships the same way, as its own module `step-up`
-(`engine.use(stepUpModule({ signer, issuer }))`): its step is `step-up.issue`, and it needs
-`entry.sign_in` (class access, floor 2).
+Gate (section 17) is off in `defaultConfig()`: it needs doors in its settings and the two access
+adapters. Web sign-in step-up (section 18, module `step-up`, step `step-up.issue`, scope
+`entry.sign_in`, class access, floor 2) is built in the same way and off by default too: it needs
+its sites and issuer in its settings and the `stepUpSigner` adapter. Built-in modules' parts of a
+call are written only by the engine's own code: no outside code reaches them (`updateModule` and
+`moduleState` refuse a built-in module).
 
 An outside module changes its part of a call with `updateModule(callId, name, fn)`: one
-compare-and-set write, refused once the flow has ended, refused while the flow is on another
-module's step, and held by the engine to the scope the current step needs. `fn` gets a copy of the
-module's part and a view: the session state, the current step (a copy, or null), the engine's
-clock (`now`), `newId(prefix)`, `authorized(scope)`, `subjectKey` (the subject the call's
-verification grant was issued for; null without a grant or while a verification runs),
-`emit(event, detail)` (a `module.event` ledger entry) and `reserve(ref)`, which opens a reservation in the call record for work whose
-outcome comes later. `recordModuleOutcome(callId, name, ref, fn)` is the write for that outcome (a
-provider's answer): refused unless `ref` is an open reservation of that module on that call, so it
-settles authorized work and never starts any; not held to the scope; allowed after the flow or the
-call ended while the reservation is open; `call.release()` closes it. `moduleReservations(callId,
-name)` lists the open ones.
+compare-and-set write, refused once the flow has ended and while the flow is on another module's
+step. The engine holds every call to the module's scopes, so a module that never asks still fails
+closed: in a flow, the scope the current step needs; outside a flow, every scope the module's
+manifest names (`scope_denied`). `fn` gets a copy of the module's part and a view: the session
+state, the current step (a copy, or null), the engine's clock (`now`), `newId(prefix)`,
+`authorized(scope)` and `emit(event, detail)` (a `module.event` ledger entry). There is no way for
+an outside module to write an outcome for work the engine holds: outcomes the engine must vouch
+for (an access grant's) are the engine's own (ADR-25).
 
 ## 4. Factors, levels and scopes
 
@@ -241,7 +239,7 @@ until FIL-2); Paylink `{maxAmountMinor?, mode?, connectedAccountId?, linkLifeMin
 `connectedAccountId`, 1 to 255 letters, digits, `-` or `_`; a `connectedAccountId` needs an
 explicit `mode`, so a business account never quietly defaults to the platform's; the other two are the defaults for steps
 that name none and for payments outside a flow, 15 minutes and card, Apple Pay, Google Pay and
-Link); Gate `{targets, maxGrantsPerCall?}` (section 17); step-up `{sites, maxTokensPerCall?}`
+Link); Gate `{targets, maxGrantsPerCall?}` (section 17); step-up `{issuer, sites, maxTokensPerCall?}`
 (section 18); Trace `{receipts?, wordings?}`
 (`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr}}`, purposes
 unique).
@@ -311,7 +309,11 @@ answer on file, a phone number, a link or card data.
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
-| `module.event` | `module`, `event`, `detail` (written by an outside module; Gate's are in section 17) |
+| `access.issued` | `grantId`, `target`, `controller`, `scope`, `level`, `verificationGrantId`, `expiresAt` (section 17) |
+| `access.delivered` / `access.refused` / `access.unknown` / `access.failed` | `grantId`, `digest` and `kid` once signed, `confirmed` or `reason` (written by the engine only) |
+| `stepup.issued` | `tokenId`, `site`, `scope`, `level`, `verificationGrantId`, `expiresAt` (section 18) |
+| `stepup.exchanged` / `stepup.refused` / `stepup.failed` | `tokenId`, `digest` (and `kid` when signed), `reason` when refused or failed (written by the engine only) |
+| `module.event` | `module`, `event`, `detail` (written by an outside module) |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
 A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
@@ -439,8 +441,11 @@ texted never expires this way; it stays open to resume.
 **Adapter capabilities.** `PaymentLinks.capabilities` declares `{modes, minLinkMinutes,
 maxLinkMinutes}`. When the config is saved, a step's mode (and Paylink's default mode) must be one
 the adapter takes, and the link life no longer than its maximum; malformed capabilities are a
-problem too. A registry built without capabilities (only adapter names) skips these checks; an
-engine always has them.
+problem too, and so is an engine's payments adapter that declares no capabilities at all (a plain
+JavaScript adapter). Adapters are given when the engine is built, so these checks run when the
+engine is built (`createEngine`) and when a config is saved (`configure`), not at `engine.use`,
+which installs modules; a refused adapter never fails mid-call. A registry built without capabilities (only adapter names) skips these checks; an engine
+always has them.
 
 **Methods.** `paymentMethods` lists only methods that settle during the call: `card` (credit, and
 Visa and Mastercard debit), `apple_pay`, `google_pay`, `link`; the default is all four. Anything
@@ -485,41 +490,66 @@ the currency's own decimals.
 ## 17. Gate and access grants
 
 Gate's settings: `targets`, at least one, each `{id, controller, ref}`: `id` lower-case letters,
-digits and `-` (unique), `controller` a name the Gate was built with (`gateModule({ controllers })`,
-names lower-case letters, digits and `-`), `ref` the controller's own name for the door, 1 to 200
-characters; `maxGrantsPerCall` 1 to 5, default 3. A call keeps the targets in force when it
-started; a flow attached later is refused when a step names a target the call did not keep.
+digits and `-` (unique), `controller` the name of one of the engine's `access` adapters that has an
+`unlock` function, own or from its class (checked when the engine is built and when a config is
+saved), `ref` the controller's own name for the
+door, 1 to 200 characters; `maxGrantsPerCall` 1 to 5, default 3. A call keeps the targets in force
+when it started; a flow attached later is refused when a step names a target the call did not keep.
 
-`gate.grantAccess(engine, callId, input?)`: in a flow the `gate.grant` step names the target and
-the lifetime (pass no input); outside one the host's code passes `{target, lifetimeSeconds?}`.
+The engine owns every access grant (ADR-25): it reserves it, signs it, computes its digest, calls
+the controller and records the controller's answer, in its own writes. Module code never writes a
+grant or its outcome. `engine.grantAccess(callId, input?)`: in a flow the `gate.grant` step names
+the target and the lifetime (pass no input); outside one the host's code passes `{target,
+lifetimeSeconds?}` (anything else is `invalid_input`; other fields are ignored, never applied).
+`engine.accessGrants(callId)` lists a call's grants as recorded; `engine.accessKeys()` is the
+access signer's public key set. The access signer must be its own key: an engine whose
+`accessSigner` has the receipt signer's key id or public key is refused when it is built, so a
+receipt never verifies as an access grant. A host's module can never take a built-in module's name
+(`engine.use` and `modules` refuse it, even after the built-in module was removed).
 
-1. **Reserve** (`updateModule`, held to `entry.open`; Gate also checks `authorized("entry.open")`),
-   opening a reservation named by the grant id; every later write for this grant settles only it.
-   Refused: `scope_denied` without a verification grant covering `entry.open` (none, expired,
-   tainted, or below today's minimum); `invalid_input` for a missing or unknown target or a bad
-   lifetime; `precondition_failed` while another grant of the call is in flight or once
-   `maxGrantsPerCall` grants were issued. First, in a write of its own (so it holds even when the
-   request is then refused), a reservation whose grant expired without an answer recorded is
-   settled as `unknown`; at the grant limit that fails the step. The grant's expiry is the earlier of now plus its
+1. **Settle stale grants**, in a write of their own (so it holds even when the request is then
+   refused): a grant still reserved past its expiry (its process stopped before recording the
+   answer) becomes `unknown` (`access.unknown`, reason `no_answer_recorded`, with its digest and key
+   id when it was signed). At the grant limit, that fails the step.
+2. **Reserve**: refused with `precondition_failed` off the flow's current step, `scope_denied`
+   without a verification grant covering `entry.open` (checked on every request, in a flow or
+   not: none, expired, tainted, or below today's minimum), `invalid_input` for a missing or unknown
+   target or a bad lifetime, and `precondition_failed` while another grant of the call is in flight
+   or once `maxGrantsPerCall` grants were issued, and `precondition_failed` when the engine has no
+   access controller by the target's name (own adapter entries with an `unlock` function only). The
+   grant's expiry is the earlier of now plus its
    lifetime and the verification grant's expiry. Ledger: `access.issued`.
-2. **Sign**: ES256 over the canonical JSON of the body below, with Gate's signer. A signing
-   failure settles the grant `failed` (nothing sent) and throws.
-   Then, in a write of its own, the grant is checked once more: if the call is no longer
-   authorized for `entry.open` (tainted, its grant expired) or the access grant expired while it
-   was signed, it is settled `failed` (`access.failed`, with `digest`, `kid` and the reason
-   `not_authorized` or `expired`),
-   nothing is sent, and `scope_denied` is thrown.
-3. **Send once** to the target's controller: `unlock({grant, target, idempotencyKey})`, the key
+3. **Sign**: ES256 over the canonical JSON of the body below, with the `accessSigner`. The engine
+   computes the digest (SHA-256 of those bytes) itself. A signing failure settles the grant
+   `failed` (`access.failed`, reason `not_signed`; nothing sent) and throws.
+4. **Check again**, in a write: if the grant was settled meanwhile (the call ended), the call is no
+   longer authorized for `entry.open`, or the grant expired while it was signed, nothing is sent
+   and `scope_denied` is thrown (the last two settle it `failed`, reason `not_authorized` or
+   `expired`). The digest and key id are written to the grant.
+5. **Send once** to the target's controller (if it was removed from the adapters meanwhile, the
+   grant is settled `failed`, reason `not_sent`, and `precondition_failed` is thrown: nothing was
+   sent, so it is never recorded as `unknown`): `unlock({grant, target, idempotencyKey})`, the key
    being `[workspaceId, callId, grantId, "unlock"]`. Never retried.
-4. **Record** (`recordModuleOutcome`): `delivered` (with `confirmed` when the controller reported
-   the door moved), `refused` (the controller certainly did not act; its reason as a short code),
-   or `unknown` when the controller's call threw or timed out. A failure to write the answer is
-   thrown as it is, never turned into `unknown`; the reservation settles once its grant expires. Ledger: `access.delivered`, `access.refused`,
-   `access.unknown` or `access.failed`, each with `grantId` and the grant's `digest`
-   (also kept on the reservation before the send, so a stale reservation settled as `unknown`
-   still names it)
-   (SHA-256 of its signed bytes) and `kid`, never the grant or its signature. A fresh request
-   after `unknown` is a new grant.
+6. **Record the answer**, in the engine's write: `delivered` (with `confirmed` when the controller
+   reported the door moved), `refused` (the controller certainly did not act; its reason as a short
+   code), or `unknown` (reason `answer_lost`) when the call threw or timed out. A grant settled
+   meanwhile stays as it is. `grantAccess` returns what the call holds. A failure to write the
+   answer is thrown as it is; the grant then settles as stale (step 1). Every outcome entry carries
+   `grantId`, `digest` and `kid`, never the grant or its signature. A fresh request after `unknown`
+   is a new grant.
+
+**Ending a call** is refused (`precondition_failed`) while a signed grant may still be acted on: at
+its door (step 4 passed, its answer not yet recorded) or sent with its answer lost (`unknown`, the
+controller may still be working on it), and not yet expired. A definitive answer (`delivered`,
+`refused`) lets the call end at once. The end waits for an answer still due, bounded by the
+controller's timeout, or for the grant's expiry if the answer was lost or its process stopped. A grant reserved but not yet
+signed is settled `unknown` (reason `call_ended`) in the same write that ends the call, and is then
+never sent (step 4 finds it settled); one that expired is settled `unknown` (reason
+`no_answer_recorded`). All of it happens before the receipt's ledger head is taken, so no access
+outcome ever follows `receipt.issued`, and no grant reaches a door after the receipt while it can
+still open it: once it expires, a relay refuses it (`verifyAccessGrant`). A controller that does not
+check a grant's expiry could still act on a request delayed past it; the relay contract requires the
+check.
 
 ```json
 {
@@ -534,13 +564,19 @@ the lifetime (pass no input); outside one the host's code passes `{target, lifet
 ```
 
 `verifyAccessGrant(grant, keys, {workspaceId, audience, now, clockSkewSeconds?})` returns `{ok:
-true, body}` or `{ok: false, reason}`: `malformed` (not this shape), `signature` (unknown `kid`,
+true, body}` or `{ok: false, reason}`: `invalid_options` (a `clockSkewSeconds` that is not a
+finite, non-negative number, or a `now` that is not a valid date: refused, so neither time check
+ever turns off), `malformed` (not
+this shape), `signature` (unknown `kid`,
 another algorithm, any change), `workspace` (issued by another workspace, or no `workspaceId`
 given: it is required, so workspaces sharing a key and a controller name never open each other's
-doors), `audience`, `not_yet_valid` and `expired` (with 30 seconds of skew by default), and
-`lifetime` (longer than 900 seconds, or ending before it starts). `new SeenGrants({ clockSkewSeconds })` (default
-30, at least the verifier's): `accept(body, now)` is true once per grant id, and keeps the id until
-the verifier would refuse the grant as expired. `gate.keys()` is the public key set.
+doors), `audience`, `not_yet_valid` (with `clockSkewSeconds` of allowance, default 30, for a
+grant issued a little ahead of the relay's clock), `expired` (strict: from `expiresAt` on, whatever
+the skew, because the engine ends a call only once every grant at a door has answered or expired),
+and `lifetime` (longer than 900 seconds, or ending before it starts). This assumes the engine's and
+the relay's clocks agree (NTP): a relay whose clock runs behind by some seconds accepts a grant for
+that much longer. `new SeenGrants()`: `accept(body, now)` is true once per grant id, and keeps the
+id until the grant expires, when the verifier refuses it anyway. `engine.accessKeys()` is the public key set.
 
 **The relay contract, version 1** (`webhookRelay({url, timeoutMs?})`): `POST <url>` with
 `content-type: application/json`, `idempotency-key: <the key above>` and the signed grant as
@@ -549,7 +585,7 @@ URL; redirects are not followed; the timeout is 100 to 30,000 ms (default 5,000)
 answers 2xx after it worked the door, optionally `{"state": "confirmed", "ref": "<its id>"}`; 4xx
 when it did not act, optionally `{"error": "<code>"}` (`replay`, `signature`, ...). Anything else,
 including no answer, is `unknown`. A relay checks the grant with `verifyAccessGrant` against
-`gate.keys()`, its own workspace and its own audience, and refuses a grant id it has seen.
+`engine.accessKeys()`, its own workspace and its own audience, and refuses a grant id it has seen.
 
 A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);
 revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), a
@@ -559,42 +595,51 @@ Seam adapter (GAT-5), direct vendor adapters (GAT-6). Web sign-in step-up is sec
 
 Digital entry (GAT-4, ADR-24): a person signing in on the host's site is shown a nonce, calls,
 is verified, and keys the nonce; the call gets a step-up token, which the host's web sign-in
-exchanges once to raise that sign-in's authentication level. The module is `step-up`, installed
-with `engine.use(stepUpModule({ signer, issuer }))`: `signer` is its own ES256 key (its own `kid`,
-not the receipt or Gate key), `issuer` the https URL (no query, fragment or credentials) that is
-the tokens' `iss` and serves `keys()`, a JWKS document `{keys: [...]}`, at
+exchanges once to raise that sign-in's authentication level. `step-up` is a built-in module, like
+Gate (ADR-25): the engine issues every token and records its one exchange itself, and no module
+code can write a token or its outcome (`updateModule` and `moduleState` refuse it). Its signer is
+the engine adapter `stepUpSigner`, its own ES256 key (its own `kid` and key material, not the
+receipt signer's or the access signer's: the engine refuses a shared key when it is built).
+`engine.stepUpKeys()` is the JWKS document `{keys: [...]}` to serve at the issuer's
 `/.well-known/jwks.json`.
 
-Settings: `sites`, at least one, each `{id, audience}`: `id` lower-case letters, digits and `-`
-(unique), `audience` the site's client id or origin, 1 to 200 characters without spaces, which
-is the tokens' `aud`; `maxTokensPerCall` 1 to 5, default 3. A call keeps the sites in force when
-it started.
+Settings: `issuer`, the https URL (no query, fragment or credentials) that is the tokens' `iss`;
+`sites`, at least one, each `{id, audience}`: `id` lower-case letters, digits and `-` (unique),
+`audience` the site's client id or origin, 1 to 200 characters without spaces, which is the
+tokens' `aud`; `maxTokensPerCall` 1 to 5, default 3. A call keeps the issuer and the sites in
+force when it started. `engine.stepUpTokens(callId)` lists a call's tokens as the engine keeps
+them (never a token or a nonce).
 
-`issueStepUpToken(engine, callId, {nonce, site?, lifetimeSeconds?})`: `nonce` is what the caller
+`engine.issueStepUpToken(callId, {nonce, site?, lifetimeSeconds?})`: `nonce` is what the caller
 keyed, 6 to 12 ASCII digits, passed by the host's code from the keypad. In a flow the
 `step-up.issue` step names the site and the lifetime (pass only the nonce); outside one the
 host's code passes them.
 
-1. **Reserve** (`updateModule`, held to `entry.sign_in`; the module also checks
-   `authorized("entry.sign_in")`), opening a reservation named by the token id (`jti`). Refused:
+1. **Reserve**, in one engine write held to `entry.sign_in`, a token named by its id (`jti`). Refused:
    `scope_denied` without a verification grant covering `entry.sign_in` (none, expired, tainted,
    below today's minimum); `precondition_failed` while a verification runs (its subject may not be
    the grant's), while another token of the call is being signed, or once `maxTokensPerCall`
    tokens were issued; `invalid_input` for a bad nonce (the message never repeats it), a missing
    or unknown site, a bad lifetime, or a site or lifetime passed in a flow. The token lives
    `lifetimeSeconds` (2 to 5 minutes), never past the verification grant, in whole seconds.
-   Ledger: `step_up.issued` (`tokenId`, `site`, `scope`, `level`, `verificationGrantId`,
+   Ledger: `stepup.issued` (`tokenId`, `site`, `scope`, `level`, `verificationGrantId`,
    `expiresAt`).
 2. **Sign** a compact JWS: header `{alg: "ES256", typ: "JWT", kid}`, payload below, the signature
    the 64-byte r||s over `base64url(header) "." base64url(payload)` (RFC 7515), each part's JSON in
-   canonical form. A signing failure settles the token `failed` (`step_up.failed`, reason
+   canonical form. A signing failure settles the token `failed` (`stepup.failed`, reason
    `signing`) and throws.
-3. **Make it valid** (`recordModuleOutcome`): checked once more; if the call is no longer
-   authorized or a verification started, or the token expired while it was signed, it is settled
-   `failed` (`step_up.failed` with `digest`, `kid` and the reason `not_authorized` or `expired`),
-   and `scope_denied` is thrown. Otherwise it is `issued`, with the SHA-256 of the compact token
-   and the `kid` kept on the call, and `{token, tokenId, expiresAt}` is returned. The reservation
-   stays open for the exchange.
+3. **Make it valid**, in another engine write: checked once more; if the call is no longer
+   authorized, a verification started, the call's grant or its subject is no longer the token's,
+   the call ended, or the token expired while it was signed, it is settled `failed`
+   (`stepup.failed` with `digest`, `kid` and the reason `not_authorized` or `expired`), and
+   `scope_denied` is thrown. Otherwise it is `issued`, with the SHA-256 of the compact token and
+   the `kid` kept on the call, and `{token, tokenId, expiresAt}` is returned.
+
+Ending the call fails a token still being signed (`stepup.failed`, reason `call_ended`), in the
+write that ends it, so none is handed out after the end. A token already `issued` stays
+exchangeable after the call ended, until it expires (at most 5 minutes), so a sign-in that
+finishes just after the caller hangs up still works; its `stepup.exchanged` or
+`stepup.refused` entry then follows the receipt, outside its ledger head.
 
 ```json
 {
@@ -610,21 +655,22 @@ host's code passes them.
 for: a handle per site, so two sites cannot link one person. `acr` is `stepUpAcr(level)`;
 `auth_time` is when the verification grant was issued; `grant` names it.
 
-`exchangeStepUpToken(engine, token, {audience, subjectKey, nonce})` is the host's web sign-in
-exchanging a token, once, on any process (`recordModuleOutcome` on the token's reservation, so it
-also works after the call ended). It returns `{ok: true, claims}` or `{ok: false, reason}` and
-never throws for a bad token; a write that fails is thrown as it is.
+`engine.exchangeStepUpToken(token, {audience, subjectKey, nonce})` is the host's web sign-in
+exchanging a token, once, on any process of the workspace, in one engine write (so it also works
+after the call ended). It returns `{ok: true, claims}` or `{ok: false, reason}` and never throws
+for a bad token; a write that fails is thrown as it is.
 
 - `malformed`: not three base64url parts with `sid`, `jti` and `nonce` claims.
-- `unknown`: not a token waiting on that call: no such call, no open reservation (never issued,
-  already exchanged or refused), or not the exact bytes the call issued (its digest). Nothing is
+- `unknown`: not a token waiting on that call: no such call in this workspace, no token of that
+  id still `issued` (never issued, already exchanged or refused), or not the exact bytes the call
+  issued (its digest). Nothing is
   written, so a forged token never uses up the real one.
-- Each of these uses the token up (`refused`, `step_up.refused` with `digest` and `reason`):
+- Each of these uses the token up (`refused`, `stepup.refused` with `digest` and `reason`):
   `tainted` (the call was tainted since, at any time before the exchange); `not_authorized` (the
   call has not ended and its verification grant is no longer the token's: verified again, or
   dropped); `expired`; `mismatch` (another `audience`, a subject whose `stepUpSubject` is not the
   token's `sub`, or another nonce, compared in constant time).
-- Otherwise `exchanged` (`step_up.exchanged`, with `digest` and `kid`), and the claims.
+- Otherwise `exchanged` (`stepup.exchanged`, with `digest` and `kid`), and the claims.
 
 The ledger never holds the token, its signature, the nonce or `sub`. The call record holds no
 nonce.

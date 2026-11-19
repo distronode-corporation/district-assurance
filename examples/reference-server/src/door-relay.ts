@@ -13,7 +13,7 @@ export interface DoorRelayOptions {
   workspaceId: string;
   /** This relay's id: the controller name grants must be addressed to. */
   audience: string;
-  /** Gate's public key set (`gate.keys()`). */
+  /** The engine's access key set (`engine.accessKeys()`). */
   keys: readonly JsonWebKey[];
   clock: Clock;
   /** Works the door. Resolves once it moved. */

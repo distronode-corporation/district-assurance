@@ -3,25 +3,28 @@ import type { FlowConfig } from "./core/config.ts";
 import type { AssuranceModule } from "./core/module.ts";
 import { defaultVerificationPolicy } from "./core/policy.ts";
 import { dossierModule } from "./file/dossier.ts";
+import { gateModule } from "./gate/gate.ts";
+import { stepUpModule } from "./gate/step-up.ts";
 import { paylinkModule } from "./pay/paylink.ts";
 import { traceModule } from "./prove/trace.ts";
 import { badgeModule, type BadgeModule } from "./verify/badge.ts";
 
 /**
- * The names of the built-in modules, which the engine wires itself. Gate (entry) ships in the
- * package too, but a host installs it with `engine.use(gateModule(...))`, with its own signer and
- * door controllers, and it runs on the outside module path (`Engine.updateModule`).
+ * The names of the built-in modules, which the engine wires and runs itself: no outside code can
+ * reach their part of a call. Gate and step-up are two (ADR-25): their controllers and signers are engine adapters.
  */
-export const BUILT_IN_MODULES = ["badge", "dossier", "paylink", "trace"] as const;
+export const BUILT_IN_MODULES = ["badge", "dossier", "paylink", "trace", "gate", "step-up"] as const;
 
-/** Badge (with the given factor plug-ins, if any), Dossier, Paylink and Trace. */
+/** Badge (with the given factor plug-ins, if any), Dossier, Paylink, Trace, Gate and step-up. */
 export function builtInModules(badge: BadgeModule = badgeModule()): AssuranceModule[] {
-  return [badge, dossierModule, paylinkModule, traceModule];
+  return [badge, dossierModule, paylinkModule, traceModule, gateModule, stepUpModule];
 }
 
 /**
- * Every built-in module on, the default policy, keypad knowledge, carrier signals and photo ID as
- * factors, receipts on, and no forms, wordings or flows. A host starts from its own config instead.
+ * Badge, Dossier, Paylink and Trace on (Gate off: it needs doors, and the access adapters; step-up
+ * off: it needs its sites, its issuer and its signer), the
+ * default policy, keypad knowledge, carrier signals and photo ID as factors, receipts on, and no
+ * forms, wordings or flows. A host starts from its own config instead.
  */
 export function defaultConfig(): FlowConfig {
   return {
