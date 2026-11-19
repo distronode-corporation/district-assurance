@@ -47,8 +47,9 @@ export const MAX_WRITE_ATTEMPTS = 5;
 export interface EngineOptions {
   workspaceId: string;
   /**
-   * The per-workspace HMAC key for knowledge factors and PINs: at least 16 bytes, or an opaque
-   * HMAC-SHA256 function that runs in the host's key store, so the key never enters this process.
+   * The per-workspace HMAC key for knowledge factors and PINs: at least 16 bytes, or an opaque,
+   * asynchronous HMAC-SHA256 function that calls the host's key management service, so the key
+   * never enters this process.
    */
   knowledgeKey: KnowledgeKey;
   adapters: EngineAdapters;

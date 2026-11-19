@@ -142,7 +142,7 @@ describe("factor plug-ins", () => {
     assert.deepEqual(await t.engine.submitFactor(callId, "voice_passphrase", "open sesame"), { matched: false, locked: true });
     assert.equal(seen.length, 1);
     assert.equal(seen[0]!.subjectKey, OWNER);
-    assert.match(seen[0]!.hmac("x"), /^[0-9a-f]{64}$/);
+    assert.match(await seen[0]!.hmac("x"), /^[0-9a-f]{64}$/);
     assert.equal(Object.values(seen[0]!).includes(TEST_KNOWLEDGE_KEY), false);
     assert.equal((await t.engine.finishVerification(callId)).level, 1);
     const again = await t.engine.startCall();
@@ -153,6 +153,48 @@ describe("factor plug-ins", () => {
 });
 
 describe("results that arrive late (CodeRabbit threads on PR 3)", () => {
+  it("writes no factor error after the call ended or the verification restarted while a judge was throwing", async () => {
+    let during: () => Promise<void> = async () => undefined;
+    const t = setup({
+      badge: badgeModule({
+        factors: [
+          {
+            kind: "flaky_check",
+            summary: "a judge whose store fails after the call moved on",
+            maxAttemptsPerCall: 2,
+            adapters: [],
+            judge: async () => {
+              await during();
+              throw new Error("store unavailable");
+            },
+          },
+        ],
+      }),
+      config: testConfig((c) => {
+        c.policy.levels[0] = { level: 1, anyOf: [["keypad_knowledge"], ["flaky_check"]] };
+        (c.modules.badge!.settings as { factors: string[] }).factors.push("flaky_check");
+      }),
+    });
+    const ended = await t.engine.startCall();
+    await t.engine.beginVerification(ended.callId, { accountNumber: ACCOUNT });
+    during = async () => {
+      await t.engine.endCall(ended.callId);
+    };
+    await assert.rejects(t.engine.submitFactor(ended.callId, "flaky_check", "x"), /store unavailable/);
+    const afterEnd = (await t.ledger.list()).filter((e) => e.callId === ended.callId).map((e) => e.event);
+    assert.deepEqual(afterEnd.slice(afterEnd.indexOf("call.ended")), ["call.ended", "receipt.issued"], "no factor error after call.ended");
+
+    const restarted = await t.engine.startCall();
+    await t.engine.beginVerification(restarted.callId, { accountNumber: ACCOUNT });
+    during = async () => {
+      await t.engine.finishVerification(restarted.callId);
+      await t.engine.beginVerification(restarted.callId, { accountNumber: "99999999" });
+    };
+    await assert.rejects(t.engine.submitFactor(restarted.callId, "flaky_check", "x"), /store unavailable/);
+    const afterRestart = (await t.ledger.list()).filter((e) => e.callId === restarted.callId).map((e) => e.event);
+    assert.equal(afterRestart.at(-1), "verification.started", "an earlier verification's error is not written into the new one");
+  });
+
   it("never applies a factor judged for a verification that restarted for another subject", async () => {
     const t = setup({
       badge: badgeModule({

@@ -47,7 +47,8 @@ text never confirms an account. Planned: per-subject and per-number counters acr
 **Controls:** a per-call limit on judged attempts for every factor the caller enters (keypad
 knowledge, the PIN at 1 to 5, plug-ins at 1 to 5), after which the line stops judging, even the
 right answer (tested). Each attempt is counted in its own write before it is judged, so a crash, a
-failing PIN verifier or a second process never gives a free try (tested, two engines on one
+failing PIN verifier or knowledge key store, an entry crafted to make a judge throw, or a second
+process never gives a free try (tested, two engines on one
 store). PINs are at least 4 digits, and keypad attempts are capped at 5 per call like the PIN's.
 **Hard gate:** durable lockout across calls (VER-1) must be merged before any host runs the
 owner-command flow, or any PIN factor, on a live line. Without it, a 4-digit PIN with 3 attempts
@@ -152,10 +153,11 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 
 ### Theft of the keys
 
-**Controls:** neither key has to be in the engine's process. The knowledge key can be an opaque
-HMAC function that runs in the host's key store; the engine, the built-in factors and plug-ins all
-hash through that one function, and an answer that is not a 64-character lower-case hex digest is
-refused (tested). The receipt key stays behind `ReceiptSigner`; a signer that returns anything but
+**Controls:** neither key has to be in the engine's process. The knowledge key can be an opaque,
+asynchronous HMAC function that calls the host's key management service; the engine, the built-in
+factors and plug-ins all hash through that one function, an answer that is not a 64-character
+lower-case hex digest is refused without being quoted, and a key store that rejects fails closed:
+no factor, the attempt counted, nothing it was asked written to the ledger (tested). The receipt key stays behind `ReceiptSigner`; a signer that returns anything but
 a 64-byte P1363 signature is refused, and `derToP1363` converts a key store's DER answer, checked
 against `node:crypto` (tested). An HMAC function does not stop a process that can call it from
 computing digests, so who may call the key store remains the host's control. A receipt key that

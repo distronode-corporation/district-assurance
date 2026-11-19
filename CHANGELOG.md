@@ -25,9 +25,11 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
-- Key store contracts (INT-4): the knowledge key can be an opaque HMAC function that the engine and
-  every factor hash through, `signReceipt` refuses a signature that is not 64-byte P1363, and
-  `derToP1363` converts a key store's DER signature.
+- Key store contracts (INT-4): the knowledge key can be an opaque, asynchronous HMAC function (a
+  key management service) that the engine and every factor hash through, `signReceipt` refuses a
+  signature that is not 64-byte P1363, and `derToP1363` converts a key store's DER signature. A
+  factor judge that throws or rejects (a key store outage) records no factor and writes
+  `verification.factor_error`; the attempt stays counted.
 - Receipt key sets and rotation (PRV-1): `receiptKeyRing` holds several signers with one active and
   publishes retired public keys, `engine.receiptKeys()` and the reference server's key set route
   serve the whole history, so a receipt signed before a rotation still verifies.
@@ -39,7 +41,6 @@ All notable changes to this project are documented here. The format follows
 - `canonicalJson` refuses a string or property name holding a lone surrogate (RFC 8785, section
   3.2.2.2), as do the stand-alone verifier and the demo page; an intake text value holding one is
   refused as `not_text`.
-
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 
@@ -49,6 +50,9 @@ All notable changes to this project are documented here. The format follows
 - The policy, forms, consent wordings, grant lifetime and payment limit moved into FlowConfig;
   `startIntake` takes a form id and `recordConsent` a purpose.
 - `state`, `authorize`, `setIntakeField` and `receipt` are asynchronous (the session store).
+- A factor plug-in's `hmac(data)` is asynchronous (a `Promise` of the hex digest), so the knowledge
+  key can live in a key management service. `subjectKeyFor`, `knowledgeDigest`, `pinDigest` and
+  `judgeKeypadFactors` return a `Promise` when given an HMAC function; `judgeKeypadWith` always does.
 - `returning_pin` is now `pin`; `returningCallerPin` is `enrolPin` (VER-6).
 - Once a call's flow has ended, no step work runs on that call. A consent answered "no" fails its
   step unless the step says `require: "answer"`. Outside modules' steps are held to their scopes
