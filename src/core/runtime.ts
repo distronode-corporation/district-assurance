@@ -3,6 +3,7 @@
 // to the package; outside modules use `Engine.updateModule` and `Engine.moduleState` instead.
 import type {
   AccessController,
+  AmountSource,
   AuditLedger,
   CarrierSignals,
   IdentityProvider,
@@ -49,6 +50,8 @@ export interface EngineAdapters {
   payments?: PaymentLinks;
   signer?: ReceiptSigner;
   pinVerifier?: PinVerifier;
+  /** Needed by a `paylink.request` step that names an `amountRef` (PAY-2). */
+  amounts?: AmountSource;
   /** Gate's door controllers, by name. Targets in Gate's settings name one of these. */
   access?: Readonly<Record<string, AccessController>>;
   /** Signs Gate's access grants. Its own key (its own `kid`), not the receipt key. */

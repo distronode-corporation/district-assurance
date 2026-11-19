@@ -7,6 +7,7 @@ import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import type { JsonValue } from "../src/core/canonical.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { MAX_WRITE_ATTEMPTS, createEngine } from "../src/engine.ts";
+import { buildAmountReadBack } from "../src/pay/amount.ts";
 import { TEST_KNOWLEDGE_KEY, generateTestSigner, sessionStoreContract } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, rejects, setup, testConfig } from "./helpers.ts";
 
@@ -213,10 +214,14 @@ describe("ledger entries saved with the step (review item 6)", () => {
     t.carrier.set("+15555550100", { identityMatch: "match" });
     await t.engine.checkCarrier(callId);
     const request = { amountMinor: 100, currency: "cad", description: "x", amountSource: "price_list" as const };
-    // The ledger goes down: verification's entries stay pending, and the payment's reservation
-    // is saved before its flush of those entries fails, with no link created yet.
-    ledger.failures = 2;
+    // The ledger goes down: verification's entries stay pending, and so do the read-back's and the
+    // caller's yes, each saved before its flush fails; the payment's reservation is saved before
+    // its flush of all of those fails, with no link created yet.
+    ledger.failures = 4;
     await assert.rejects(t.engine.finishVerification(callId), /ledger down/);
+    await assert.rejects(t.engine.readBackPayment(callId, request), /ledger down/);
+    const { digest } = buildAmountReadBack("en", { amountMinor: 100, currency: "cad", description: "x" });
+    await assert.rejects(t.engine.confirmPaymentAmount(callId, { digest, confirmedBy: "keypad" }), /ledger down/);
     await assert.rejects(t.engine.requestPayment(callId, request), /ledger down/);
     assert.equal((await t.engine.state(callId)).phase, "paying", "reserved, no link yet");
     assert.equal(t.payments.created.length, 0);
@@ -227,6 +232,11 @@ describe("ledger entries saved with the step (review item 6)", () => {
     const receipt = await t.engine.endCall(callId);
     assert.equal(receipt!.body.payments[0]!.status, "paid");
     assert.equal((await ledger.list()).filter((e) => e.event === "call.ended").length, 1);
+    assert.deepEqual(
+      (await ledger.list()).filter((e) => e.event.startsWith("payment.")).map((e) => e.event),
+      ["payment.amount_read_back", "payment.amount_confirmed", "payment.link_sent", "payment.settled"],
+      "every pending entry was appended once, in order",
+    );
     assert.equal(verifyChain(await ledger.list()).ok, true);
   });
 

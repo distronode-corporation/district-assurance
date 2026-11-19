@@ -25,6 +25,7 @@ import {
 import { STATIC_FILES, UI_CSP } from "../examples/reference-server/src/static.ts";
 import { EngineError, canonicalJson, signStripePayload, verifyReceipt, type AuditEntry, type PaymentLinks, type SignedReceipt } from "../src/index.ts";
 import { FixedClock, FakePaymentLinks } from "../src/testing/index.ts";
+import { confirmAmount } from "./helpers.ts";
 
 interface CheckResult {
   ok: boolean;
@@ -241,7 +242,7 @@ describe("reference UI: demo routes", () => {
 
   it("lists the demo's four flows with their steps", async () => {
     const { flows } = (await (await fetch(`${s.base}/demo/flows`)).json()) as { flows: Array<{ flow: string; summary: string; steps: string[] }> };
-    assert.deepEqual(flows.map((f) => [f.flow, f.steps.length]), [["owner-command", 6], ["deposit", 11], ["deposit-connect", 6], ["entry", 6]]);
+    assert.deepEqual(flows.map((f) => [f.flow, f.steps.length]), [["owner-command", 6], ["deposit", 12], ["deposit-connect", 6], ["entry", 6]]);
     assert.match(flows[1]!.summary, /deposit/);
     assert.equal((await fetch(`${s.base}/demo/flows`, { method: "POST", headers: json, body: "{}" })).status, 405);
   });
@@ -384,7 +385,7 @@ describe("reference UI: DemoRuns", () => {
       const runs = new DemoRuns(s.world);
       const a = await runs.start("deposit");
       const b = await runs.start("deposit");
-      const payAt = SCRIPTS.deposit.findIndex((step) => step.label.startsWith("pay:"));
+      const payAt = SCRIPTS.deposit.findIndex((step) => step.label.startsWith("pay: link"));
       for (let i = 0; i <= payAt; i++) {
         await runs.step(a.runId);
         await runs.step(b.runId);
@@ -576,6 +577,7 @@ describe("reference UI: the demo world's adapters and clock (review of #50)", ()
     const world = createDemoWorld({ payments: real as unknown as PaymentLinks });
     const call = { callId: (await world.engine.startCall({ locale: "fr", flow: "deposit-connect" })).callId, linkId: "", receipt: null };
     assert.ok((await verifyToLevel2(world, call, "payment.request")).ok);
+    await confirmAmount(world.engine, call.callId);
     const payment = await world.engine.requestPayment(call.callId);
     assert.deepEqual(real.calls, [`create ${payment.paymentId}`]);
     assert.deepEqual(world.links.map((link) => link.paymentId), [payment.paymentId]);

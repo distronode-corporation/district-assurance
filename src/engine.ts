@@ -29,6 +29,7 @@ import * as gate from "./gate/gate.ts";
 import * as stepUp from "./gate/step-up.ts";
 import type { NormaliseResult } from "./file/intake.ts";
 import { BUILT_IN_MODULES, builtInModules, defaultConfig } from "./modules.ts";
+import type { AmountReadBack } from "./pay/amount.ts";
 import * as paylink from "./pay/paylink.ts";
 import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
 import * as refunds from "./pay/refunds.ts";
@@ -413,6 +414,16 @@ export class Engine {
   }
 
   // ---- Paylink (pay) -----------------------------------------------------------------------
+
+  /** Builds the amount read-back the host speaks before a link: the step's (or host's) amount, or the one the AmountSource resolves (PAY-2). */
+  readBackPayment(callId: string, input?: paylink.PaymentInput): Promise<AmountReadBack> {
+    return paylink.readBackPayment(this.#rt, callId, input);
+  }
+
+  /** The caller confirmed the amount read back; `digest` is the read-back's. */
+  confirmPaymentAmount(callId: string, input: { digest: string; confirmedBy: "voice" | "keypad" }): Promise<void> {
+    return paylink.confirmPaymentAmount(this.#rt, callId, input);
+  }
 
   /** Texts a payment link. `expiresAt` is the engine's deadline for it: call `expirePaymentLinks` then. */
   requestPayment(callId: string, input?: paylink.PaymentInput): Promise<{ paymentId: string; status: PaymentStatus; expiresAt: string | null }> {

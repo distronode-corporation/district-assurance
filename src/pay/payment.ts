@@ -3,7 +3,8 @@
 // comes from code (a record, the business's endpoint, a price list), never from the model.
 import type { InstantPaymentMethod, PaymentMode } from "../core/adapters.ts";
 
-export type AmountSource = "intake_record" | "business_endpoint" | "price_list";
+/** Where an amount comes from. The `AmountSource` adapter (PAY-2) resolves a reference from one of them. */
+export type AmountSourceKind = "intake_record" | "business_endpoint" | "price_list";
 
 export type PaymentStatus = "open" | "paid" | "failed" | "expired";
 
@@ -13,7 +14,7 @@ export interface PaymentRequest {
   amountMinor: number;
   currency: string;
   description: string;
-  amountSource: AmountSource;
+  amountSource: AmountSourceKind;
   /** The provider's id for the hosted page (for example a Checkout Session id). */
   linkId: string;
   status: PaymentStatus;
@@ -21,6 +22,8 @@ export interface PaymentRequest {
   settledAt: string | null;
   /** When the link was texted; null while it is still being created or sent (and can be resumed). */
   textedAt: string | null;
+  /** What the request was made for (PAY-2), so a resume can name the same amountRef. Absent on older calls. */
+  requestKey?: string;
   /** Whose account takes the money. */
   mode: PaymentMode;
   /** The business's account at the provider, in `connect` mode; null in `platform` mode. */

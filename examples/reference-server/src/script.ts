@@ -372,6 +372,15 @@ const deposit: ScriptStep[] = [
     },
   },
   {
+    label: "pay: amount read back",
+    async run(w, call) {
+      // Every link waits for the caller to hear its amount and say yes (PAY-2); code builds the line.
+      const back = await w.engine.readBackPayment(call.callId);
+      await w.engine.confirmPaymentAmount(call.callId, { digest: back.digest, confirmedBy: "keypad" });
+      return pass(`"${back.text}" caller: yes`);
+    },
+  },
+  {
     label: "pay: link texted, amount from flow",
     async run(w, call) {
       const payment = await w.engine.requestPayment(call.callId);
@@ -433,6 +442,9 @@ const depositConnect: ScriptStep[] = [
   {
     label: "pay: connect mode",
     async run(w, call) {
+      // The amount is read back and confirmed first, as for every link (PAY-2).
+      const back = await w.engine.readBackPayment(call.callId);
+      await w.engine.confirmPaymentAmount(call.callId, { digest: back.digest, confirmedBy: "voice" });
       const payment = await w.engine.requestPayment(call.callId);
       const asked = w.t.payments.created.find((link) => link.paymentId === payment.paymentId)!;
       call.linkId = asked.linkId;

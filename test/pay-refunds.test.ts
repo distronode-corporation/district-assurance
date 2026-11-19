@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import type { EngineEvent } from "../src/core/events.ts";
 import type { DisputeOutcome } from "../src/pay/refunds.ts";
 import { FakePaymentLinks, type TestEngine } from "../src/testing/index.ts";
-import { rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
+import { confirmAmount, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
 const ACCT = "acct_business_1";
 const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
@@ -16,6 +16,7 @@ const verify = { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "
 /** A verified call with a platform payment of 150.00 CAD, paid; Stripe named payment intent `pi_1`. */
 async function paidCall(t: TestEngine): Promise<string> {
   const callId = await verifiedCall(t);
+  await confirmAmount(t.engine, callId, request);
   await t.engine.requestPayment(callId, request);
   assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid", paymentIntentId: "pi_1" }), { applied: true, callId, status: "paid" });
   return callId;
@@ -37,6 +38,7 @@ describe("refunds: a late platform payment", () => {
   it("keeps the payment intent of a payment paid after the engine closed its link, so its disputes and refunds still land", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     const { paymentId } = await t.engine.requestPayment(callId, request);
     // The call ends: the engine expires the link; a caller already on the page pays anyway.
     t.clock.advance(15 * 60_000);
@@ -92,6 +94,7 @@ describe("refunds: platform payments", () => {
   it("refunds by the hosted page when the outcome named no payment intent", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     await t.engine.requestPayment(callId, request);
     await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" });
     await t.engine.refundPayment({ callId, paymentId: "pay_1", amountMinor: 100, reason: "duplicate" });
@@ -165,6 +168,7 @@ describe("refunds: platform payments", () => {
   it("refuses what is not a paid platform payment, and anything malformed", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     await t.engine.requestPayment(callId, request);
     const base = { callId, paymentId: "pay_1", reason: "requested_by_customer" as const };
     await assert.rejects(t.engine.refundPayment(base), rejects("precondition_failed", /only a paid payment/));
@@ -233,6 +237,7 @@ describe("refunds: disputes", () => {
   it("keeps a payment intent named by a later paid outcome, and resumes a lost refund though a dispute opened since", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     await t.engine.requestPayment(callId, request);
     // Paid first by an outcome that names no payment intent; the next one names it.
     assert.equal((await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" })).applied, true);
@@ -266,6 +271,7 @@ describe("refunds: disputes", () => {
   it("binds the payment intent again when the paid event comes again, and only a paid platform payment's", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     await t.engine.requestPayment(callId, request);
     const bind = t.sessions.bindRef.bind(t.sessions);
     let fail = true;
@@ -283,12 +289,14 @@ describe("refunds: disputes", () => {
     // A failed payment's intent is not kept, nor a connect payment's: its disputes are the business's.
     const f = setup();
     const fCall = await verifiedCall(f);
+    await confirmAmount(f.engine, fCall, request);
     await f.engine.requestPayment(fCall, request);
     await f.engine.applyPaymentOutcome({ kind: "async_failed", linkId: "cs_fake_1", paymentIntentId: "pi_1" });
     assert.deepEqual(await f.engine.applyDisputeOutcome(dispute()), { applied: false, unbound: true });
 
     const connect = setup({ config: testConfig((cfg) => (cfg.modules.paylink = { settings: { mode: "connect", connectedAccountId: ACCT } })) });
     const connectCall = await verifiedCall(connect);
+    await confirmAmount(connect.engine, connectCall, request);
     await connect.engine.requestPayment(connectCall, request);
     assert.deepEqual(
       await connect.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid", paymentIntentId: "pi_1", account: ACCT }),
@@ -311,6 +319,7 @@ describe("refunds: config", () => {
     const t = setup({ adapters: { payments: noRefund() } });
     assert.equal(t.engine.config.modules.paylink !== undefined, true, "the default platform mode is valid without refund");
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     await t.engine.requestPayment(callId, request);
     assert.equal((await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid", paymentIntentId: "pi_1" })).applied, true, "the payment is taken");
     await assert.rejects(t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "requested_by_customer" }), rejects("precondition_failed", /cannot refund/));

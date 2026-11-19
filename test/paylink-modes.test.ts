@@ -13,7 +13,7 @@ import { parseStripeEvent } from "../src/webhooks/stripe.ts";
 import { canonicalJson, type JsonValue } from "../src/core/canonical.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { FakePaymentLinks } from "../src/testing/fakes.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
+import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
 const ACCT = "acct_business_1";
 const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
@@ -114,6 +114,7 @@ describe("paylink modes: running", () => {
     const t = setup({ config: withFlow(pay, {}) });
     const callId = await onPayStep(t);
     t.clock.advance(60_000);
+    await confirmAmount(t.engine, callId);
     const result = await t.engine.requestPayment(callId);
     assert.deepEqual(result, { paymentId: "pay_1", status: "open", expiresAt: "2026-01-01T00:16:00.000Z" });
     assert.deepEqual(t.payments.created, [
@@ -132,6 +133,7 @@ describe("paylink modes: running", () => {
       keys.push(input.idempotencyKey);
       return create(input);
     };
+    await confirmAmount(t.engine, callId);
     const { expiresAt } = await t.engine.requestPayment(callId);
     assert.equal(expiresAt, "2026-01-01T00:05:00.000Z");
     assert.deepEqual(t.payments.created[0], {
@@ -157,6 +159,7 @@ describe("paylink modes: running", () => {
       config: testConfig((c) => (c.modules.paylink = { settings: { mode: "connect", connectedAccountId: ACCT, linkLifeMinutes: 30, paymentMethods: ["card", "apple_pay"] } })),
     });
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     assert.equal((await t.engine.requestPayment(callId, request)).expiresAt, "2026-01-01T00:30:00.000Z");
     assert.equal(t.payments.created[0]!.mode, "connect");
     assert.equal(t.payments.created[0]!.connectedAccountId, ACCT);
@@ -169,6 +172,7 @@ describe("paylink modes: running", () => {
     const t = setup({ config: withFlow({ ...pay, mode: "connect" }) });
     const callId = await onPayStep(t);
     t.engine.configure(testConfig((c) => (c.modules.paylink = { settings: {} })));
+    await confirmAmount(t.engine, callId);
     await assert.rejects(t.engine.requestPayment(callId), rejects("invalid_input", /connect mode needs connectedAccountId/));
     assert.equal(t.payments.created.length, 0);
   });
@@ -176,6 +180,7 @@ describe("paylink modes: running", () => {
   it("never lets an outcome from another account settle a payment, and writes down one that reaches it", async () => {
     const t = setup({ config: withFlow({ ...pay, mode: "connect" }) });
     const callId = await onPayStep(t);
+    await confirmAmount(t.engine, callId);
     await t.engine.requestPayment(callId);
     const linkId = "cs_fake_1";
     // A connect payment is bound under its account: another account's event, or one without any, never finds it.
@@ -187,6 +192,7 @@ describe("paylink modes: running", () => {
     // A connected account's event for a platform payment reaches it, and is ignored and written down.
     const p = setup();
     const platformCall = await verifiedCall(p);
+    await confirmAmount(p.engine, platformCall, request);
     await p.engine.requestPayment(platformCall, request);
     assert.deepEqual(await p.engine.applyPaymentOutcome({ kind: "expired", linkId: "cs_fake_1", account: ACCT }), { applied: false }, "a connected account's event for a platform payment");
     const ignored = (await p.ledger.list()).filter((e) => e.event === "payment.outcome_ignored");
@@ -199,9 +205,11 @@ describe("paylink modes: running", () => {
     payments.createLink = async () => ({ linkId: "cs_same", url: "https://pay.example.test/c/cs_same" });
     const t = setup({ adapters: { payments }, config: withFlow({ ...pay, mode: "connect" }, { mode: "platform", connectedAccountId: "acct_a" }) });
     const first = await onPayStep(t);
+    await confirmAmount(t.engine, first);
     await t.engine.requestPayment(first);
     t.engine.configure(withFlow({ ...pay, mode: "connect" }, { mode: "platform", connectedAccountId: "acct_b" }));
     const second = await onPayStep(t);
+    await confirmAmount(t.engine, second);
     await t.engine.requestPayment(second);
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_same", paymentStatus: "paid", account: "acct_b" }), { applied: true, callId: second, status: "paid" });
     assert.equal((await t.engine.state(first)).phase, "paying", "account a's payment is untouched");
@@ -228,6 +236,7 @@ describe("paylink: the engine's own deadline", () => {
   it("never ledgers an expire answer the provider cannot give: the payment stays open, and a good answer later settles it (from #114's hostile pass)", async () => {
     const t = setup({ config: withFlow({ ...pay, mode: "connect", linkLifeMinutes: 10 }) });
     const callId = await onPayStep(t);
+    await confirmAmount(t.engine, callId);
     await t.engine.requestPayment(callId);
     t.clock.advance(10 * 60_000);
     const real = t.payments.expireLink.bind(t.payments);
@@ -254,6 +263,7 @@ describe("paylink: the engine's own deadline", () => {
   it("expires a texted link at its deadline, at the provider first, and fails the flow", async () => {
     const t = setup({ config: withFlow({ ...pay, mode: "connect", linkLifeMinutes: 10 }) });
     const callId = await onPayStep(t);
+    await confirmAmount(t.engine, callId);
     const { expiresAt } = await t.engine.requestPayment(callId);
     t.clock.advance(9 * 60_000);
     assert.deepEqual(await t.engine.expirePaymentLinks(callId), { expired: [] }, "not yet");
@@ -274,6 +284,7 @@ describe("paylink: the engine's own deadline", () => {
   it("leaves a link the provider no longer has open for its webhook, which may say paid", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     await t.engine.requestPayment(callId, request);
     t.payments.settle("cs_fake_1");
     t.clock.advance(15 * 60_000);
@@ -290,6 +301,7 @@ describe("paylink: the engine's own deadline", () => {
     t.messages.sendText = async () => {
       throw new Error("carrier down");
     };
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
     t.clock.advance(14 * 60_000);
     assert.deepEqual(await t.engine.expirePaymentLinks(callId), { expired: [] }, "never texted: still resumable");
@@ -311,6 +323,7 @@ describe("paylink: the engine's own deadline", () => {
     t.messages.sendText = async () => {
       throw new Error("carrier down");
     };
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
     t.clock.advance(61 * 60_000);
     assert.deepEqual(await t.engine.expirePaymentLinks(callId), { expired: [] });
@@ -325,6 +338,7 @@ describe("paylink: the engine's own deadline", () => {
     t.messages.sendText = async () => {
       throw new Error("carrier down");
     };
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
     assert.equal(t.payments.created[0]!.expiresAt, "2026-01-01T00:35:00.000Z", "the provider's 30 minutes plus a 5 minute margin, over twice the life");
     t.clock.advance(14 * 60_000);
@@ -337,6 +351,7 @@ describe("paylink: the engine's own deadline", () => {
     late.messages.sendText = async () => {
       throw new Error("carrier down");
     };
+    await confirmAmount(late.engine, lateCall, request);
     await assert.rejects(late.engine.requestPayment(lateCall, request), /carrier down/);
     late.clock.advance(7 * 60_000);
     late.messages.sendText = lateSend;
@@ -353,6 +368,7 @@ describe("paylink: the engine's own deadline", () => {
     t.messages.sendText = async () => {
       throw new Error("carrier down");
     };
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
     assert.equal(payments.created[0]!.expiresAt, "2026-01-01T00:10:00.000Z");
     t.clock.advance(12 * 60_000);
@@ -375,6 +391,7 @@ describe("paylink: the engine's own deadline", () => {
     u.messages.sendText = async () => {
       throw new Error("carrier down");
     };
+    await confirmAmount(u.engine, c2, request);
     await assert.rejects(u.engine.requestPayment(c2, request), /carrier down/);
     u.clock.advance(6 * 60_000);
     u.messages.sendText = send2;
@@ -388,6 +405,7 @@ describe("paylink: the engine's own deadline", () => {
     v.messages.sendText = async () => {
       throw new Error("carrier down");
     };
+    await confirmAmount(v.engine, c3, request);
     await assert.rejects(v.engine.requestPayment(c3, request), /carrier down/);
     v.clock.advance(12 * 60_000);
     v.messages.sendText = send3;
@@ -409,12 +427,14 @@ describe("paylink: the engine's own deadline", () => {
   it("asks the provider for at least its minimum and at most its maximum link life (review R8)", async () => {
     const t = setup({ config: testConfig((c) => (c.modules.paylink = { settings: { linkLifeMinutes: 5 } })) });
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     const { expiresAt } = await t.engine.requestPayment(callId, request);
     assert.equal(t.payments.created[0]!.expiresAt, "2026-01-01T00:35:00.000Z", "Stripe Checkout's 30 minutes plus a margin, not 10");
     assert.equal(expiresAt, "2026-01-01T00:05:00.000Z", "the engine still closes it at 5");
     const shortPayments = new FakePaymentLinks({ minLinkMinutes: 0, maxLinkMinutes: 20 });
     const short = setup({ adapters: { payments: shortPayments } });
     const c2 = await verifiedCall(short);
+    await confirmAmount(short.engine, c2, request);
     await short.engine.requestPayment(c2, request);
     assert.equal(shortPayments.created[0]!.expiresAt, "2026-01-01T00:20:00.000Z", "twice 15 minutes, held to the adapter's 20");
   });
@@ -460,6 +480,7 @@ describe("paylink: the engine's own deadline", () => {
     t.payments.createLink = async () => {
       throw new Error("provider timed out");
     };
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /provider timed out/);
     t.payments.createLink = create;
     // Asked for 00:35; at 00:05:01 less than the provider's 30 minutes is left.
@@ -469,6 +490,7 @@ describe("paylink: the engine's own deadline", () => {
     const expired = (await t.ledger.list()).find((e) => e.event === "payment.link_expired")!;
     assert.deepEqual(expired.detail, { paymentId: "pay_1", provider: "not_created", reason: "not_created_in_time" });
     assert.equal((await t.engine.state(callId)).phase, "open", "settled: a new request may follow");
+    await confirmAmount(t.engine, callId, request);
     assert.equal((await t.engine.requestPayment(callId, request)).status, "open");
   });
 
@@ -480,6 +502,7 @@ describe("paylink: the engine's own deadline", () => {
     t.messages.sendText = async () => {
       throw new Error("carrier down");
     };
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
     payments.settle("cs_fake_1");
     t.clock.advance(12 * 60_000);
@@ -498,6 +521,7 @@ describe("paylink: the engine's own deadline", () => {
     t.messages.sendText = async () => {
       throw new Error("carrier down");
     };
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
     // Resume A claims the text at 00:04:30 (5.5 of 10 minutes left). B comes 40 seconds later, with
     // under 5 minutes left: without the lease it would expire the link A is sending.
@@ -518,6 +542,7 @@ describe("paylink: the engine's own deadline", () => {
     u.messages.sendText = async () => {
       throw new Error("carrier down");
     };
+    await confirmAmount(u.engine, c2, request);
     await assert.rejects(u.engine.requestPayment(c2, request), /carrier down/);
     u.clock.advance(4 * 60_000);
     await assert.rejects(u.engine.requestPayment(c2, request), /carrier down/, "claimed at 00:04, then stopped");
@@ -532,6 +557,7 @@ describe("paylink: the engine's own deadline", () => {
     t.payments.createLink = async () => {
       throw new Error("provider timed out");
     };
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /provider timed out/);
     t.payments.createLink = create;
     t.clock.advance(5 * 60_000 + 1000);
@@ -547,6 +573,7 @@ describe("paylink: the engine's own deadline", () => {
     t.messages.sendText = async () => {
       throw new Error("carrier down");
     };
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
     const keys: string[] = [];
     t.messages.sendText = (input) => {
@@ -580,6 +607,7 @@ describe("paylink: the engine's own deadline", () => {
     t.payments.createLink = async () => {
       throw new Error("provider timed out");
     };
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /provider timed out/);
     // Resume A starts its create at 00:03 and the provider answers late; resume B, at 00:04:01,
     // finds the request too old to create (34 minutes needed, 30:59 left) and expires it.
@@ -611,6 +639,7 @@ describe("paylink: the engine's own deadline", () => {
   it("records a paid outcome that arrives after the engine's own deadline expired the link, flagged late", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     await t.engine.requestPayment(callId, request);
     t.clock.advance(15 * 60_000);
     assert.deepEqual(await t.engine.expirePaymentLinks(callId), { expired: ["pay_1"] });
@@ -626,6 +655,7 @@ describe("paylink: the engine's own deadline", () => {
     };
     // Asked for 00:35 at 00:00. A resume at 00:03:50 still has 31:10 left and tries; the provider
     // refuses (its own latency took it under 30). The next resume, at 00:04:10, expires the request.
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /less than 30 minutes/);
     t.clock.advance(230_000);
     await assert.rejects(t.engine.requestPayment(callId, request), /less than 30 minutes/);
@@ -642,6 +672,7 @@ describe("paylink: the engine's own deadline", () => {
     t.messages.sendText = async () => {
       throw new Error("carrier down");
     };
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
     t.clock.advance(270_000);
     t.messages.sendText = async (input) => {
@@ -676,6 +707,7 @@ describe("paylink: the engine's own deadline", () => {
     t.payments.createLink = async () => {
       throw new Error("provider timed out");
     };
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /provider timed out/);
     // A, at 00:03:50, still has time to create (31:10 left) and its create is slow.
     t.clock.advance(230_000);

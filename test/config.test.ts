@@ -382,6 +382,22 @@ describe("validateConfig: flows", () => {
     assert.deepEqual(one({ ...pay, mode: "cash" }), ["(paylink.request): mode must be connect or platform"]);
     assert.deepEqual(one({ ...pay, mode: "connect" }), ["(paylink.request): connect mode needs connectedAccountId in the paylink settings"]);
     assert.deepEqual(one({ ...pay, amountMinor: 1_000_001 }), ["(paylink.request): amountMinor is above the limit"]);
+    // PAY-2: a reference the AmountSource resolves, instead of a fixed amount, never both.
+    const byRef = { type: "paylink.request", amountRef: "deposit.standard", description: "x", amountSource: "price_list" };
+    const withAmounts = registry([...ALL_ADAPTERS, "amounts"]);
+    const verify = { type: "badge.verify", level: 3, factors: ["keypad_knowledge", "photo_id"] };
+    assert.deepEqual(flows({ f: { steps: [verify, byRef] } }, withAmounts), []);
+    assert.deepEqual(one(byRef), ["(paylink.request): an amountRef needs the amounts adapter, which the engine does not have"]);
+    assert.deepEqual(
+      flows({ f: { steps: [verify, { ...byRef, amountMinor: 100, currency: "cad" }, { ...byRef, amountRef: "no spaces" }, { ...byRef, amountRef: 7 }, { ...byRef, amountRef: "x".repeat(65) }] } }, withAmounts),
+      [
+        "flows.f.steps[1] (paylink.request): name amountMinor and currency, or amountRef, not both",
+        "flows.f.steps[2] (paylink.request): amountRef must be 1 to 64 letters, digits, '.', ':', '-' or '_'",
+        "flows.f.steps[3] (paylink.request): amountRef must be 1 to 64 letters, digits, '.', ':', '-' or '_'",
+        "flows.f.steps[4] (paylink.request): amountRef must be 1 to 64 letters, digits, '.', ':', '-' or '_'",
+      ],
+    );
+    assert.deepEqual(flows({ f: { steps: [verify, { ...byRef, currency: "cad" }] } }, withAmounts), ["flows.f.steps[1] (paylink.request): name amountMinor and currency, or amountRef, not both"]);
     assert.deepEqual(one({ type: "trace.consent", x: 1 }), ["(trace.consent): x is not a field of this step", "(trace.consent): purpose must name a wording"]);
     assert.deepEqual(one({ type: "trace.consent", purpose: "nope" }), ["(trace.consent): no wording for nope in the trace settings"]);
     assert.deepEqual(one({ type: "trace.receipt", x: 1 }), ["(trace.receipt): x is not a field of this step"]);

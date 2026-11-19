@@ -164,6 +164,30 @@ export interface SubjectRecord {
   pinDigest?: string;
 }
 
+/** What the engine asks an `AmountSource` for: the reference a step or the host's code named, and whose call it is. */
+export interface AmountLookup {
+  workspaceId: string;
+  callId: string;
+  /** Where the amount comes from: `intake_record`, `business_endpoint` or `price_list`. */
+  source: string;
+  /** The reference the `paylink.request` step (or the host's code) names, for example a price list entry. */
+  reference: string;
+  /** The subject Badge matched on this call (a keyed hash, never an account number). */
+  subjectKey: string;
+  /** The records filed on this call so far, oldest first. */
+  recordIds: readonly string[];
+}
+
+/**
+ * Resolves a payment amount from a reference: a record, the business's endpoint or a price list
+ * (PAY-2). Code asks it, never the model; the engine checks the answer like any other amount and
+ * reads it back to the caller before a link is sent.
+ */
+export interface AmountSource {
+  /** The amount in minor units and its currency, or null when the reference names none. */
+  resolve(input: AmountLookup): Promise<{ amountMinor: number; currency: string } | null>;
+}
+
 /**
  * The host's own PIN store, for the PIN factor in `verifier` mode: a host that already keeps PINs
  * (for example as scrypt hashes) checks the entry itself. The engine hands over the digits once,

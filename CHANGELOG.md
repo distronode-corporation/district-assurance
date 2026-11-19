@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Amounts from code, read back first (PAY-2): an `AmountSource` adapter (`amounts`, reference
+  `PriceListAmounts`) resolves a `paylink.request` step's `amountRef`; `readBackPayment` builds the
+  amount read-back in the call's locale (`AMOUNT_READBACK_TEXT`) and `confirmPaymentAmount` records
+  the caller's yes before the link is texted.
 - `SUPPORTED_LOCALES` (`["en", "fr"]`, frozen; its members are the `Locale` type) and
   `isSupportedLocale`: `startCall` checks a locale against it, and the texts the engine sends, the
   amount formats and the spoken digit words are `Record<Locale, ...>` catalogs (`IDENTITY_TEXT`,
@@ -99,6 +103,12 @@ All notable changes to this project are documented here. The format follows
   pass.
 - The reference server remembers webhook event ids for 4 days (Stripe retries for 3) and at most
   10,000 of them, least recently seen first out, instead of in a set that grew without end.
+- Breaking: the `AmountSource` string type (`intake_record`, `business_endpoint`, `price_list`) is
+  renamed `AmountSourceKind`, and `AmountSource` is now the adapter interface (PAY-2).
+- Breaking: `requestPayment` sends no link without a read-back the caller confirmed, for a fixed
+  amount too. A host that calls it directly calls `readBackPayment`, speaks the text, and calls
+  `confirmPaymentAmount` on the caller's yes first (PAY-2). The demo's deposit, connect-mode and
+  live e2e flows read their amounts back first.
 
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.

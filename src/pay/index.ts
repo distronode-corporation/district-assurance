@@ -1,5 +1,15 @@
+export * from "./amount.ts";
 export * from "./later.ts";
-export { PAYLINK, formatAmount, paylinkModule, type PaylinkRequestStep, type PaylinkSettings, type PaylinkSlice, type PaymentInput } from "./paylink.ts";
+export {
+  PAYLINK,
+  paylinkModule,
+  type FixedPaymentInput,
+  type PaylinkRequestStep,
+  type PaylinkSettings,
+  type PaylinkSlice,
+  type PaymentInput,
+  type ReferencedPaymentInput,
+} from "./paylink.ts";
 export * from "./payment.ts";
 export {
   DISPUTE_STATUSES,

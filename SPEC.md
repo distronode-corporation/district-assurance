@@ -100,7 +100,7 @@ module the config has on.
 |---|---|---|---|
 | `badge` | `badge.verify` | | `records`; `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `pinVerifier` with `pin` in verifier mode |
 | `dossier` | `dossier.collect` | `intake.file` | `records` |
-| `paylink` | `paylink.request` | `payment.request` | `payments`, `messages` |
+| `paylink` | `paylink.request` | `payment.request` | `payments`, `messages`; `amounts` for a step with `amountRef` |
 | `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
 | `gate` | `gate.grant` | `entry.open` | `access` (door controllers by name), `accessSigner` |
 
@@ -243,7 +243,7 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 |---|---|
 | `badge.verify` | `level` 1 to 3; `factors`, at least one, each on in Badge's settings, together reaching `level` under the policy; optional `scopes`, each in the policy at or below `level` |
 | `dossier.collect` | `form`, a form id in Dossier's settings |
-| `paylink.request` | `amountMinor`, `currency`, `description`, `amountSource` (section 14); optional `mode` (`connect` or `platform`; connect needs Paylink's `connectedAccountId`), `linkLifeMinutes` (5 to 60), `paymentMethods` (instant methods only) |
+| `paylink.request` | `amountMinor` and `currency`, or instead `amountRef` (1 to 64 of letters, digits, `.`, `:`, `-`, `_`; needs the `amounts` adapter), never both; `description`, `amountSource` (section 14); optional `mode` (`connect` or `platform`; connect needs Paylink's `connectedAccountId`), `linkLifeMinutes` (5 to 60), `paymentMethods` (instant methods only) |
 | `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
 | `trace.receipt` | none; needs the `signer` adapter |
 | `gate.grant` | `target`, a target id in Gate's settings; optional `lifetimeSeconds` (10 to 900, default 60) |
@@ -322,6 +322,8 @@ answer on file, a phone number, a link or card data.
 | `intake.confirmed` | `recordId`, `formId`, `digest`, `confirmedBy` |
 | `intake.abandoned` | none |
 | `redaction.applied` | `kinds` (counts per kind) |
+| `payment.amount_read_back` | `amountMinor`, `currency`, `amountSource`, `digest` (never the `amountRef`) |
+| `payment.amount_confirmed` | `digest`, `confirmedBy` |
 | `payment.link_sent` | `paymentId`, `linkId`, `amountMinor`, `currency`, `amountSource`, `mode`, `expiresAt` |
 | `payment.link_expired` | `paymentId`, `provider` (`expired`, `not_open`, or `not_created` when no link was created), and `reason`: none when the engine's deadline came, else `not_sent_in_time`, `not_created_in_time`, `cancelled` or `call_ended` |
 | `payment.outcome_ignored` | `paymentId`, `reason` (`account`): an outcome from another account |
@@ -435,7 +437,7 @@ is refused when a step needs a form or a wording the call did not keep.
 
 ## 14. Payments
 
-`requestPayment` needs `payment.request`, a positive integer amount in minor units up to
+`requestPayment` needs `payment.request`, a confirmed amount read-back (below), a positive integer amount in minor units up to
 Paylink's `maxAmountMinor` (at most 1,000,000), a lower-case ISO 4217 currency, a 1 to 200
 character description and an `amountSource` (`intake_record`, `business_endpoint` or
 `price_list`). In a flow they come from the `paylink.request` step and the host passes none;
@@ -593,6 +595,37 @@ Refunds and disputes work after the flow and the call ended. They never change a
 disputes are host calls and webhooks, never flow steps, so no config needs it and a platform
 payment flow is valid without it; `refundPayment` on an engine whose adapter has none is
 refused (`precondition_failed`), and disputes are still recorded.
+
+**Amounts from code, read back first (PAY-2).** Instead of `amountMinor` and `currency`, a step
+(or, outside a flow, the host's code) can name an `amountRef`, which the host's `AmountSource`
+adapter (`amounts`) resolves: `resolve({workspaceId, callId, source, reference, subjectKey,
+recordIds})` returns `{amountMinor, currency}` or null. `source` is the step's `amountSource`;
+`subjectKey` is the subject Badge matched; `recordIds` are the records filed on the call.
+`PriceListAmounts` is the reference adapter (a fixed table, `price_list` only).
+
+- `readBackPayment(callId, input?)` needs `payment.request`, a matched subject and an open call,
+  takes its request like `requestPayment`, resolves an `amountRef` (null is `precondition_failed`;
+  an answer that is not a valid amount under the limit is `invalid_input`), and returns `{text,
+  digest, amountMinor, currency, description}`. `text` comes from `AMOUNT_READBACK_TEXT` in the
+  call's locale: "The amount to pay is AMOUNT, for DESCRIPTION. Is that correct?" / "Le montant à
+  payer est de AMOUNT, pour DESCRIPTION. Est-ce exact ?"; `digest` is `SHA-256(canonicalJson({amountMinor, currency,
+  description, locale, text}))`. The call keeps the read-back (one at a time; a new one replaces
+  it) until a link uses it. Untrusted content drops it. The read-back is for the subject matched
+  when the amount was looked up: if another subject is matched by the time it is stored, it is
+  refused (`precondition_failed`).
+- `confirmPaymentAmount(callId, {digest, confirmedBy})` records that the caller said yes.
+  `confirmedBy` is `voice` or `keypad` and `digest` a string, else `invalid_input`, before
+  anything is written. A digest that is not the last read-back's is refused
+  (`precondition_failed`); confirming twice is harmless.
+- `requestPayment`: every link needs a read-back on the call that the caller confirmed, whether
+  the amount is fixed (in the step or the host's code) or comes from an `amountRef`; without one
+  it is `precondition_failed` and nothing is created or texted. The request must be the one read
+  back (or none, outside a flow), and the link is for the amount the caller heard, checked again
+  against the limit in force. A read-back for another subject than the one matched now is
+  refused. A call with a link already out is refused as before (`invalid_transition`). A request
+  still being sent resumes with no input, the same amount, or the same `amountRef` request it was
+  made for, without a new read-back. The mode, link life and payment methods still come from the
+  step and the settings when the link is reserved.
 
 ## 15. Stripe webhooks
 

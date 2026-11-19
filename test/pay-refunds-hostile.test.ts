@@ -3,13 +3,14 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import type { TestEngine } from "../src/testing/index.ts";
-import { PHONE_ON_FILE, rejects, setup, verifiedCall } from "./helpers.ts";
+import { confirmAmount, PHONE_ON_FILE, rejects, setup, verifiedCall } from "./helpers.ts";
 
 const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
 const base = { disputeId: "dp_1", chargeId: "ch_1", paymentIntentId: "pi_1", status: "needs_response" as const, amountMinor: 15000, currency: "cad" };
 
 async function paidCall(t: TestEngine): Promise<{ callId: string; paymentId: string }> {
   const callId = await verifiedCall(t);
+  await confirmAmount(t.engine, callId, request);
   const { paymentId } = await t.engine.requestPayment(callId, request);
   await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid", paymentIntentId: "pi_1" });
   return { callId, paymentId };

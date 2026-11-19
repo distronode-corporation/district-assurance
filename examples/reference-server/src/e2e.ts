@@ -118,6 +118,9 @@ export function e2eScripts(stripe: StripeCheckoutLinks, options: E2eOptions = {}
     {
       label: "pay: Checkout link created (Stripe test mode)",
       async run(w, call) {
+        // The amount is read back and confirmed first, as for every link (PAY-2).
+        const back = await w.engine.readBackPayment(call.callId);
+        await w.engine.confirmPaymentAmount(call.callId, { digest: back.digest, confirmedBy: "keypad" });
         const payment = await w.engine.requestPayment(call.callId);
         const link = w.links.find((l) => l.paymentId === payment.paymentId)!;
         call.linkId = link.linkId;

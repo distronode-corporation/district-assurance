@@ -9,6 +9,10 @@
 // is the merchant). One adapter shape serves both: the request carries the mode and, in connect
 // mode, the connected account.
 //
+// Before every link, code reads the amount back to the caller (`readBackPayment`) and the caller
+// confirms it (`confirmPaymentAmount`), whether the amount is fixed or resolved by the host's
+// `AmountSource` adapter from the step's `amountRef` (PAY-2); no link is sent without that.
+//
 // The link is reserved in one write (the call enters `paying`, so a second request is refused
 // everywhere), created and texted, then committed. Once texted it lives `linkLifeMinutes` (15 by
 // default): the engine expires it itself at that deadline (`expirePaymentLinks`), because a
@@ -16,15 +20,17 @@
 // to resume; once a link exists, only the provider's outcome, the engine's deadline, a cancel or
 // the end of the call settles it. Money that moves after the engine closed a link is still
 // recorded as paid, and flagged in the ledger.
-import type { InstantPaymentMethod, PaymentLinkCapabilities, PaymentLinkClose, PaymentMode } from "../core/adapters.ts";
+import type { AmountSource, InstantPaymentMethod, PaymentLinkCapabilities, PaymentLinkClose, PaymentMode, SubjectRecord } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
+import { hexDigestsEqual } from "../core/hash.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
 import type { CallDraft, CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
 import type { SessionState } from "../core/session.ts";
 import { isIntegerIn, isObject, unknownKeys } from "../core/shape.ts";
 import { matchedSubject } from "../verify/badge.ts";
+import { AMOUNT_REF, buildAmountReadBack, formatAmount, type AmountQuote, type AmountReadBack } from "./amount.ts";
 import {
   DEFAULT_LINK_LIFE_MINUTES,
   INSTANT_PAYMENT_METHODS,
@@ -36,7 +42,7 @@ import {
   paymentMethodErrors,
   settlementFor,
   validateAmount,
-  type AmountSource,
+  type AmountSourceKind,
   type PaymentOutcome,
   type PaymentRequest,
   type PaymentStatus,
@@ -45,7 +51,10 @@ import type { PaymentAfterwards } from "./refunds.ts";
 
 export const PAYLINK = "paylink";
 
-const AMOUNT_SOURCES: readonly AmountSource[] = ["intake_record", "business_endpoint", "price_list"];
+export { AMOUNT_REGION, formatAmount } from "./amount.ts";
+
+const AMOUNT_SOURCES: readonly AmountSourceKind[] = ["intake_record", "business_endpoint", "price_list"];
+const CONFIRMED_BY: readonly string[] = ["voice", "keypad"];
 
 /** A provider's account id: what a host's adapter passes on (for Stripe, `acct_...`). */
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,255}$/;
@@ -63,27 +72,42 @@ export interface PaylinkSettings {
   paymentMethods?: InstantPaymentMethod[];
 }
 
+/** A step with a fixed amount (`amountMinor` and `currency`) or one the AmountSource resolves (`amountRef`), never both. */
 export interface PaylinkRequestStep extends FlowStep {
   type: "paylink.request";
-  amountMinor: number;
-  currency: string;
+  amountMinor?: number;
+  currency?: string;
+  /** Instead of `amountMinor` and `currency`: a reference the `amounts` adapter resolves (PAY-2). */
+  amountRef?: string;
   description: string;
-  amountSource: AmountSource;
+  amountSource: AmountSourceKind;
   mode?: PaymentMode;
   linkLifeMinutes?: number;
   paymentMethods?: InstantPaymentMethod[];
 }
 
-export interface PaymentInput {
+/** A fixed amount, from the host's code. */
+export interface FixedPaymentInput {
   amountMinor: number;
   currency: string;
   description: string;
-  amountSource: AmountSource;
+  amountSource: AmountSourceKind;
 }
+
+/** An amount the `amounts` adapter resolves from a reference; read back and confirmed before the link. */
+export interface ReferencedPaymentInput {
+  amountRef: string;
+  description: string;
+  amountSource: AmountSourceKind;
+}
+
+export type PaymentInput = FixedPaymentInput | ReferencedPaymentInput;
 
 export interface PaylinkSlice {
   /** Each request, and once a platform payment is paid, its payment intent, refunds and disputes (`refunds.ts`). */
   payments: Array<PaymentRequest & PaymentAfterwards>;
+  /** The amount last read back on this call and not yet used by a link (PAY-2). Absent on a call saved before PAY-2. */
+  quote?: AmountQuote | null;
 }
 
 /** How a payment is taken: from the step, then the settings, then the defaults. */
@@ -95,15 +119,20 @@ interface PaymentTerms {
 }
 
 function requestErrors(input: Record<string, unknown>, maxMinor: number | undefined): string[] {
-  const amount = input.amountMinor;
-  const currency = input.currency;
-  const errors =
-    typeof amount === "number" && typeof currency === "string"
-      ? validateAmount(amount, currency, maxMinor)
-      : ["amountMinor and currency are required"];
+  const errors: string[] = [];
+  if (input.amountRef !== undefined) {
+    if (input.amountMinor !== undefined || input.currency !== undefined) errors.push("name amountMinor and currency, or amountRef, not both");
+    if (typeof input.amountRef !== "string" || !AMOUNT_REF.test(input.amountRef)) errors.push("amountRef must be 1 to 64 letters, digits, '.', ':', '-' or '_'");
+  } else {
+    const amount = input.amountMinor;
+    const currency = input.currency;
+    errors.push(...(typeof amount === "number" && typeof currency === "string" ? validateAmount(amount, currency, maxMinor) : ["amountMinor and currency are required"]));
+  }
   const description = input.description;
   if (typeof description !== "string" || description.trim() === "" || description.trim().length > 200) errors.push("description must be 1 to 200 characters");
-  if (!AMOUNT_SOURCES.includes(input.amountSource as AmountSource)) errors.push(`amountSource must be one of ${AMOUNT_SOURCES.join(", ")}`);
+  // A lone surrogate is not text: it cannot be read back or hashed into the read-back's digest.
+  else if (!description.isWellFormed()) errors.push("description must be well-formed text, with no lone surrogate");
+  if (!AMOUNT_SOURCES.includes(input.amountSource as AmountSourceKind)) errors.push(`amountSource must be one of ${AMOUNT_SOURCES.join(", ")}`);
   return errors;
 }
 
@@ -132,6 +161,7 @@ function termsFor(settings: PaylinkSettings, step: PaylinkRequestStep | null): P
 const SEND_LEASE_MS = 60_000;
 
 const CONNECT_NEEDS_ACCOUNT = "connect mode needs connectedAccountId in the paylink settings";
+const NEEDS_AMOUNTS = "an amountRef needs the amounts adapter, which the engine does not have";
 
 function isCapabilities(value: unknown): value is PaymentLinkCapabilities {
   if (!isObject(value)) return false;
@@ -211,11 +241,12 @@ export const paylinkModule: AssuranceModule = {
   },
 
   validateStep(step: FlowStep, ctx: StepContext): string[] {
-    const errors = unknownKeys(step, ["type", "amountMinor", "currency", "description", "amountSource", "mode", "linkLifeMinutes", "paymentMethods"]).map(
+    const errors = unknownKeys(step, ["type", "amountMinor", "currency", "amountRef", "description", "amountSource", "mode", "linkLifeMinutes", "paymentMethods"]).map(
       (k) => `${k} is not a field of this step`,
     );
     const settings = ctx.settings as PaylinkSettings | undefined | null;
     errors.push(...requestErrors(step, settings?.maxAmountMinor));
+    if (step.amountRef !== undefined && !ctx.adapters.has("amounts")) errors.push(NEEDS_AMOUNTS);
     errors.push(...termErrors(step));
     // Settings that did not validate are reported on their own; the cross-check needs good ones.
     if (settings !== null && (step.mode ?? settings?.mode) === "connect" && settings?.connectedAccountId === undefined) errors.push(CONNECT_NEEDS_ACCOUNT);
@@ -228,7 +259,12 @@ export const paylinkModule: AssuranceModule = {
   },
 
   initCall(): JsonValue {
-    return { payments: [] };
+    return { payments: [], quote: null };
+  },
+
+  onUntrusted(s: JsonValue): JsonValue {
+    // A confirmation heard before untrusted text entered the call no longer counts: read it back again.
+    return { ...(s as unknown as PaylinkSlice), quote: null } as unknown as JsonValue;
   },
 
   enterStep(_step: FlowStep, s: JsonValue): JsonValue {
@@ -259,9 +295,133 @@ export const paylinkModule: AssuranceModule = {
 
 // ---- runtime -------------------------------------------------------------------------------
 
+/** The checks every payment entry point makes: the flow's step, the scope, and the subject Badge matched. */
+function requestContext(rt: EngineRuntime, record: CallRecord, input: PaymentInput | undefined): { step: PaylinkRequestStep | null; subject: SubjectRecord } {
+  const step = stepOfType<PaylinkRequestStep>(record, "paylink.request");
+  if (!rt.authorized(record, "payment.request")) throw new EngineError("scope_denied", "the grant does not cover payment.request");
+  if (step !== null && input !== undefined) throw new EngineError("invalid_input", "the flow step sets the amount; pass no input");
+  return { step, subject: matchedSubject(record) };
+}
+
+const OUTSIDE_A_FLOW = "outside a flow, the amount (or amountRef), description and amountSource are required";
+
+/** What an amount was read back for, so a read-back serves only the request it was made for. */
+function specKey(spec: PaymentInput): string {
+  const s = spec as Partial<FixedPaymentInput & ReferencedPaymentInput>;
+  return JSON.stringify([s.amountMinor ?? null, s.currency ?? null, s.amountRef ?? null, s.description, s.amountSource]);
+}
+
+/** The amount request in force on an open call, checked: the flow step's, or outside a flow the host's. */
+function readBackSpec(rt: EngineRuntime, record: CallRecord, input: PaymentInput | undefined, maxMinor: number | undefined): { spec: PaymentInput; subject: SubjectRecord } {
+  const { step, subject } = requestContext(rt, record, input);
+  if (record.state.phase !== "open") throw new EngineError("invalid_transition", `an amount is read back on an open call, not while ${record.state.phase}`);
+  // validateConfig let a step through with a fixed amount or an amountRef, never neither.
+  const spec = (step as PaymentInput | null) ?? input;
+  if (spec === undefined) throw new EngineError("invalid_input", OUTSIDE_A_FLOW);
+  const errors = requestErrors({ ...spec }, maxMinor);
+  if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+  return { spec, subject };
+}
+
+/**
+ * Builds the amount read-back the host speaks before a link is sent. The amount is the step's (or
+ * the host's) fixed amount, or the one the `amounts` adapter resolves from its reference; it is
+ * checked like any amount. The read-back replaces any earlier one on the call and waits for
+ * `confirmPaymentAmount`. Its ledger entry carries the amount and the digest, never the reference.
+ */
+export async function readBackPayment(rt: EngineRuntime, callId: string, given?: PaymentInput): Promise<AmountReadBack> {
+  const settings = rt.settings<PaylinkSettings | undefined>(PAYLINK) ?? {};
+  // Read once, before the lookup: the request checked, looked up and quoted is one snapshot, so a
+  // host changing its object (an amountRef) while the amount is looked up changes nothing.
+  const input = given === undefined ? undefined : ({ ...given } as PaymentInput);
+  const before = await rt.read(callId);
+  const { spec, subject } = readBackSpec(rt, before, input, settings.maxAmountMinor);
+  const named = spec as Partial<FixedPaymentInput & ReferencedPaymentInput>;
+  let amount = { amountMinor: named.amountMinor!, currency: named.currency! };
+  if (named.amountRef !== undefined) {
+    const source = rt.adapter("amounts") as AmountSource | undefined;
+    if (source === undefined) throw new EngineError("precondition_failed", NEEDS_AMOUNTS);
+    const found = await source.resolve({
+      workspaceId: rt.workspaceId,
+      callId,
+      source: spec.amountSource,
+      reference: named.amountRef,
+      subjectKey: subject.subjectKey,
+      recordIds: [...before.state.recordIds],
+    });
+    // undefined too: an async resolve that falls through answers it instead of null.
+    if (found === null || found === undefined) throw new EngineError("precondition_failed", "the amount source has no amount for this reference");
+    amount = { amountMinor: found.amountMinor, currency: found.currency };
+    const errors = requestErrors({ ...amount, description: spec.description, amountSource: spec.amountSource }, settings.maxAmountMinor);
+    if (errors.length > 0) throw new EngineError("invalid_input", `the amount source answered with a bad amount: ${errors.join("; ")}`);
+  }
+  const readBack = buildAmountReadBack(before.locale, { ...amount, description: spec.description.trim() });
+  return rt.update(callId, (draft) => {
+    // Checked again: the call can have moved on while the amount was looked up.
+    const now = readBackSpec(rt, draft.record, input, settings.maxAmountMinor);
+    if (now.subject.subjectKey !== subject.subjectKey) {
+      throw new EngineError("precondition_failed", "the matched subject changed while the amount was looked up; read it back again");
+    }
+    draft.slice<PaylinkSlice>(PAYLINK).quote = {
+      spec: specKey(spec),
+      subjectKey: subject.subjectKey,
+      amountMinor: readBack.amountMinor,
+      currency: readBack.currency,
+      description: readBack.description,
+      amountSource: spec.amountSource,
+      digest: readBack.digest,
+      readAt: rt.now(),
+      confirmedAt: null,
+    };
+    draft.emit("payment.amount_read_back", "code", { amountMinor: readBack.amountMinor, currency: readBack.currency, amountSource: spec.amountSource, digest: readBack.digest });
+    return readBack;
+  });
+}
+
+/**
+ * The caller said yes to the amount read back. `digest` is the read-back's digest as the host got
+ * it; a different one (a newer read-back, or none) is refused, so a confirmation is only ever for
+ * the amount the caller heard. Confirming twice is harmless. `confirmedBy` goes into the ledger,
+ * so it is one of two fixed words, never the host's text.
+ */
+export async function confirmPaymentAmount(rt: EngineRuntime, callId: string, input: { digest: string; confirmedBy: "voice" | "keypad" }): Promise<void> {
+  rt.settings(PAYLINK);
+  if (!isObject(input)) throw new EngineError("invalid_input", "digest must be the read-back's digest");
+  // Read once: the checked values are the ones compared and ledgered, so a getter or a host
+  // changing the object while the update waits cannot swap them.
+  const digest: unknown = input.digest;
+  const confirmedBy = input.confirmedBy as unknown as string;
+  if (typeof digest !== "string") throw new EngineError("invalid_input", "digest must be the read-back's digest");
+  if (!CONFIRMED_BY.includes(confirmedBy)) throw new EngineError("invalid_input", "confirmedBy must be voice or keypad");
+  await rt.update(callId, (draft) => {
+    requestContext(rt, draft.record, undefined);
+    // A call saved before PAY-2 has no quote field: the same as no read-back.
+    const quote = draft.slice<PaylinkSlice>(PAYLINK).quote ?? null;
+    if (quote === null) throw new EngineError("precondition_failed", "no amount was read back on this call");
+    if (!hexDigestsEqual(digest, quote.digest)) throw new EngineError("precondition_failed", "this is not the amount last read back; read it back again");
+    if (quote.confirmedAt !== null) return;
+    quote.confirmedAt = rt.now();
+    draft.emit("payment.amount_confirmed", "caller", { digest: quote.digest, confirmedBy });
+  });
+}
+
+/**
+ * The read-back a new link is for. Every link needs one, confirmed by the caller and made for this
+ * request and this subject, fixed amount or not: the caller hears every amount before it is sent.
+ */
+function confirmedQuote(quote: AmountQuote | null, spec: PaymentInput | undefined, subject: SubjectRecord): AmountQuote {
+  if (quote === null) throw new EngineError("precondition_failed", "the amount is read back and confirmed before the link is sent");
+  if (quote.subjectKey !== subject.subjectKey) throw new EngineError("precondition_failed", "the amount was read back for another subject; read it back again");
+  if (spec !== undefined && specKey(spec) !== quote.spec) throw new EngineError("precondition_failed", "this request is not the amount read back; read it back again");
+  if (quote.confirmedAt === null) throw new EngineError("precondition_failed", "the caller has not confirmed the amount read back");
+  return quote;
+}
+
 /**
  * Texts a hosted payment link to the number on file. In a flow, the step sets the amount and
  * `input` must be left out; outside one, the host's code passes it (`amountSource` says where from).
+ * Every link needs a read-back on the call (`readBackPayment`) that the caller confirmed
+ * (`confirmPaymentAmount`), for this request, and the link is for exactly that amount.
  *
  * The request is reserved first. If creating or texting the link fails, the request stays open
  * (a provider can create a link and still fail to answer), and calling `requestPayment` again
@@ -276,25 +436,30 @@ export async function requestPayment(
 ): Promise<{ paymentId: string; status: PaymentStatus; expiresAt: string | null }> {
   const settings = rt.settings<PaylinkSettings | undefined>(PAYLINK) ?? {};
   const reserved = await rt.update(callId, (draft) => {
-    const step = stepOfType<PaylinkRequestStep>(draft.record, "paylink.request");
-    if (!rt.authorized(draft.record, "payment.request")) throw new EngineError("scope_denied", "the grant does not cover payment.request");
-    if (step !== null && input !== undefined) throw new EngineError("invalid_input", "the flow step sets the amount; pass no input");
-    const subject = matchedSubject(draft.record);
+    const { step, subject } = requestContext(rt, draft.record, input);
     const where = { phone: subject.phoneOnFile, locale: draft.record.locale };
-    const last = draft.slice<PaylinkSlice>(PAYLINK).payments.at(-1);
+    const slice = draft.slice<PaylinkSlice>(PAYLINK);
+    const last = slice.payments.at(-1);
     if (draft.record.state.phase === "paying" && last !== undefined && last.status === "open" && last.textedAt === null) {
-      if (input !== undefined && (input.amountMinor !== last.amountMinor || input.currency !== last.currency)) {
-        throw new EngineError("invalid_input", "a payment link is still being sent on this call; resume it with the same amount");
-      }
+      const named = input as Partial<FixedPaymentInput & ReferencedPaymentInput> | undefined;
+      // A resume names nothing, the same amount, or the same amountRef request it was made for.
+      const same =
+        named === undefined ||
+        (named.amountRef !== undefined ? last.requestKey === specKey(named as PaymentInput) : named.amountMinor === last.amountMinor && named.currency === last.currency);
+      if (!same) throw new EngineError("invalid_input", "a payment link is still being sent on this call; resume it with the same amount or amountRef, or none");
       return { request: last, ...where };
     }
-    const chosen: PaymentInput | undefined = step ?? input;
-    if (chosen === undefined) throw new EngineError("invalid_input", "outside a flow, the amount, currency, description and amountSource are required");
+    // A link already out (or a call not open) is refused as a transition, before the read-back.
+    draft.assertCan({ type: "payment_requested", paymentId: "next" });
+    // A call saved before PAY-2 has no quote field: the same as no read-back.
+    const quote = confirmedQuote(slice.quote ?? null, (step as PaymentInput | null) ?? input, subject);
+    const chosen: FixedPaymentInput = { amountMinor: quote.amountMinor, currency: quote.currency, description: quote.description, amountSource: quote.amountSource };
     const errors = requestErrors({ ...chosen }, settings.maxAmountMinor);
     const terms = termsFor(settings, step);
     // The config was checked when saved; a call keeps its steps while the settings can change under it.
     if (terms.mode === "connect" && terms.connectedAccountId === null) errors.push(CONNECT_NEEDS_ACCOUNT);
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+    slice.quote = null;
     const paymentId = rt.ids.next("pay");
     const requestedAt = rt.now();
     draft.apply({ type: "payment_requested", paymentId });
@@ -310,6 +475,8 @@ export async function requestPayment(
       requestedAt,
       settledAt: null,
       textedAt: null,
+      // The request the read-back was made for (confirmedQuote held any request named to it).
+      requestKey: quote.spec,
       ...terms,
       expiresAt: null,
       providerExpiresAt: providerExpiry(requestedAt, terms.linkLifeMinutes, rt.adapter("payments").capabilities),
@@ -580,14 +747,12 @@ export async function expirePaymentLinks(rt: EngineRuntime, callId: string): Pro
   return { expired };
 }
 
-/** Where each supported locale's amounts are formatted. */
-export const AMOUNT_REGION: Record<Locale, string> = { en: "en-CA", fr: "fr-CA" };
-
 /** The payment link text, in every supported locale (SPEC.md section 16). */
 export const PAYMENT_TEXT: Record<Locale, (amount: string, url: string) => string> = {
   en: (amount, url) => `Your secure payment link for ${amount}: ${url}`,
   fr: (amount, url) => `Votre lien de paiement sécurisé pour ${amount} : ${url}`,
 };
+
 /**
  * Closes one open payment for good: settles it `expired`, at the provider first when a link exists.
  * Unlike the deadline, a `not_open` answer settles it too, because the engine stops waiting for
@@ -667,12 +832,6 @@ export function openPayments(record: CallRecord): PaymentRequest[] {
   return (slice?.payments ?? []).filter((p) => p.status === "open");
 }
 
-/** Formats an amount in minor units with the currency's own number of decimals. */
-export function formatAmount(locale: Locale, amountMinor: number, currency: string): string {
-  const format = new Intl.NumberFormat(AMOUNT_REGION[locale], { style: "currency", currency: currency.toUpperCase() });
-  const digits = format.resolvedOptions().maximumFractionDigits as number;
-  return format.format(amountMinor / 10 ** digits);
-}
 
 function paymentText(locale: Locale, url: string, amountMinor: number, currency: string): string {
   return PAYMENT_TEXT[locale](formatAmount(locale, amountMinor, currency), url);

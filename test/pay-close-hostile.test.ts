@@ -3,7 +3,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import type { PaymentLinks } from "../src/core/adapters.ts";
-import { rejects, setup, verifiedCall } from "./helpers.ts";
+import { confirmAmount, rejects, setup, verifiedCall } from "./helpers.ts";
 
 const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
 
@@ -17,6 +17,7 @@ describe("hostile #114: closing links", () => {
   it("a cancel and an endCall closing one link at once write one link_expired, and the receipt shows it expired", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     const { paymentId } = await t.engine.requestPayment(callId, request);
     const expire = t.payments.expireLink.bind(t.payments);
     const held = deferred();
@@ -41,6 +42,7 @@ describe("hostile #114: closing links", () => {
     for (const state of ["paid", "", "+15555550100", undefined, null, 1]) {
       const t = setup();
       const callId = await verifiedCall(t);
+      await confirmAmount(t.engine, callId, request);
       const { paymentId } = await t.engine.requestPayment(callId, request);
       const expire = t.payments.expireLink.bind(t.payments);
       t.payments.expireLink = async () => ({ state }) as never;
@@ -54,6 +56,7 @@ describe("hostile #114: closing links", () => {
     for (const answer of [{ state: "paid" }, {}, null, "expired", 1]) {
       const c = setup();
       const id = await verifiedCall(c);
+      await confirmAmount(c.engine, id, request);
       const { paymentId } = await c.engine.requestPayment(id, request);
       (c.payments as PaymentLinks).cancel = async () => answer as never;
       await assert.rejects(c.engine.cancelPaymentLink(id, paymentId), rejects("precondition_failed", /neither expired nor not_open/), JSON.stringify(answer));
@@ -62,6 +65,7 @@ describe("hostile #114: closing links", () => {
     }
     const t = setup();
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     await t.engine.requestPayment(callId, request);
     t.payments.expireLink = async () => null as never;
     await assert.rejects(t.engine.endCall(callId), rejects("precondition_failed"), "an answer that is not even an object");
@@ -70,6 +74,7 @@ describe("hostile #114: closing links", () => {
   it("refuses unknown and prototype-key payment ids, and ids from another workspace's call", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     await t.engine.requestPayment(callId, request);
     for (const id of ["__proto__", "constructor", "toString", "", "pay_1 ", "\ud800"]) {
       await assert.rejects(t.engine.cancelPaymentLink(callId, id), rejects("invalid_input", /no payment with that id/), id);
@@ -90,6 +95,7 @@ describe("hostile #114: closing links", () => {
       await held.promise;
       return send(input);
     };
+    await confirmAmount(t.engine, callId, request);
     const pending = t.engine.requestPayment(callId, request);
     await reached.promise;
     await assert.rejects(t.engine.endCall(callId), rejects("precondition_failed", /being texted/));
@@ -105,6 +111,7 @@ describe("hostile #114: closing links", () => {
   it("a payment paid after its cancel is recorded paid and flagged late; cancelling again changes nothing", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
+    await confirmAmount(t.engine, callId, request);
     const { paymentId } = await t.engine.requestPayment(callId, request);
     await t.engine.cancelPaymentLink(callId, paymentId);
     const entries = (await t.ledger.list()).length;

@@ -4,7 +4,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import type { TestEngine } from "../src/testing/index.ts";
-import { rejects, setup, verifiedCall } from "./helpers.ts";
+import { confirmAmount, rejects, setup, verifiedCall } from "./helpers.ts";
 
 const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
 
@@ -21,6 +21,7 @@ function flipping<T extends object>(base: T, key: string, first: unknown, then: 
 
 async function paidCall(t: TestEngine): Promise<{ callId: string; paymentId: string }> {
   const callId = await verifiedCall(t);
+  await confirmAmount(t.engine, callId, request);
   const { paymentId } = await t.engine.requestPayment(callId, request);
   await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid", paymentIntentId: "pi_1" });
   return { callId, paymentId };
