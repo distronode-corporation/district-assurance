@@ -594,7 +594,9 @@ forgotten only once their grant expired at or before it, and any grant expiring 
 refused, so a grant accepted once is never accepted again, under any sequence of clock jumps and
 rollbacks. The forget point follows the relay's clock but never passes the latest expiry it has
 accepted, so a clock that jumped forward refuses no fresh grant beyond one grant lifetime (at most
-15 minutes) of grants it has really seen. `engine.accessKeys()` is the public key set.
+15 minutes) of grants it has really seen. It knows a grant by its id alone, so grant ids must be
+unique per workspace: the default generator is random (96 bits); a host's own `ids` that repeats
+across calls or processes makes a relay refuse a fresh grant as a replay. `engine.accessKeys()` is the public key set.
 It, and `engine.receiptKeys()`, publish only a key's public members (`kty`, `crv`, `x`, `y`, `kid`,
 `alg`, `use`), whatever a signer's `publicJwk` returns, so a signer that hands back its private `d`
 never has it published.
