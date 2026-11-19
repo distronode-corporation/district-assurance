@@ -410,7 +410,7 @@ describe("lone surrogates and other values the ledger cannot hash (PRV-2 review)
     t.engine.configure(flowConfig((c) => (c.modules.loyalty = {})));
     const { callId } = await t.engine.startCall();
     // An outside module's detail that canonical JSON refuses is refused in the step, not saved.
-    for (const bad of ["\uD800", { at: new Date(0) }] as unknown as JsonValue[]) {
+    for (const bad of [{ note: "\uD800" }, { at: new Date(0) }] as unknown as { [key: string]: JsonValue }[]) {
       await assert.rejects(t.engine.updateModule(callId, "loyalty", (slice, call) => (call.emit("noted", bad), slice)), rejects("invalid_input", /canonical JSON/));
     }
     // The taint always lands, whatever its label holds: a lone surrogate is replaced, not refused.
