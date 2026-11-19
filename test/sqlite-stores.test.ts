@@ -68,6 +68,16 @@ describe("SqliteRecordStore passes the RecordStore contract", () => {
   }
 });
 
+describe("SqliteRecordStore on a file passes the RecordStore contract", () => {
+  for (const c of recordStoreContract((subjects) => {
+    const { records } = openStores(newFile());
+    for (const { workspaceId, subject } of subjects) records.putSubject(workspaceId, subject);
+    return records;
+  })) {
+    it(c.name, c.run);
+  }
+});
+
 describe("SQLite stores", () => {
   it("keep the ledger, subjects and records across a restart, and the chain goes on", async () => {
     const path = newFile();
