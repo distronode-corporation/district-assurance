@@ -641,16 +641,14 @@ export class Engine {
     if (this.#onEvent === undefined) return;
     const report = (error: unknown): void => {
       try {
-        const handled: unknown = this.#onListenerError?.(error, event);
         // An async hook that rejects is ignored too, never left as an unhandled rejection.
-        if (handled instanceof Promise) handled.catch(() => undefined);
+        settled(this.#onListenerError?.(error, event), () => undefined);
       } catch {
         // Ignored by design: the ledger is the record, and a failing hook has nowhere left to report.
       }
     };
     try {
-      const told: unknown = this.#onEvent(event);
-      if (told instanceof Promise) told.catch(report);
+      settled(this.#onEvent(event), report);
     } catch (error) {
       report(error);
     }
@@ -689,6 +687,18 @@ export class Engine {
       }
     }
     return report;
+  }
+}
+
+/**
+ * Sends a listener's or a hook's rejection to `onReject` when it returned a thenable: any value
+ * whose `then` is a function, so a promise from another realm or a library's own thenable is
+ * caught like a native one. `Promise.resolve` calls that `then`, and a `then` that throws rejects.
+ * A `then` getter that throws, throws here, for the caller's own catch.
+ */
+function settled(value: unknown, onReject: (error: unknown) => void): void {
+  if ((typeof value === "object" || typeof value === "function") && value !== null && typeof (value as { then?: unknown }).then === "function") {
+    Promise.resolve(value as PromiseLike<unknown>).catch(onReject);
   }
 }
 

@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
+import { runInNewContext } from "node:vm";
 
 import type { AuditInput, SessionStore, WriteHint } from "../src/core/adapters.ts";
 import type { JsonValue } from "../src/core/canonical.ts";
@@ -793,6 +794,41 @@ describe("Engine event delivery (INT-5)", () => {
       assert.equal(calls, 1);
       assert.deepEqual(unhandled, []);
       assert.equal((await t.ledger.list()).length, 1);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("treats a promise from another realm like a native one, from the listener and from the hook", async () => {
+    // A promise made in another realm (node:vm here; a worker or a bundled library elsewhere) is
+    // not an instance of this realm's Promise, but it rejects just the same.
+    const foreign = (message: string): unknown => runInNewContext(`Promise.reject(new Error(${JSON.stringify(message)}))`);
+    const probe = foreign("probe") as PromiseLike<unknown>;
+    assert.equal(probe instanceof Promise, false);
+    probe.then(undefined, () => undefined);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const errors: string[] = [];
+      const t = setup({ onEvent: () => foreign("listener rejection") as void, onListenerError: (e) => void errors.push((e as Error).message) });
+      await t.engine.startCall();
+      const h = setup({
+        onEvent: () => {
+          throw new Error("listener bug");
+        },
+        onListenerError: () => foreign("hook rejection") as void,
+      });
+      await h.engine.startCall();
+      // A then that throws when read is a listener failure too, never the engine's.
+      const throwingThen = new Proxy({}, { get: (_target, key) => (key === "then" ? assert.fail("then read") : undefined) });
+      const g = setup({ onEvent: () => throwingThen as unknown as void, onListenerError: (e) => void errors.push((e as Error).message) });
+      await g.engine.startCall();
+      await tick();
+      await tick();
+      assert.deepEqual(errors, ["listener rejection", "then read"]);
+      assert.deepEqual(unhandled, [], "the hook's rejection was caught and ignored");
+      assert.equal((await h.ledger.list()).length, 1);
     } finally {
       process.off("unhandledRejection", onUnhandled);
     }

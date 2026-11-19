@@ -311,7 +311,9 @@ same event comes again, with the same `eventId`, when a flush replays it (after 
 from another process), and one is missed when the process stops between the append and the call.
 The engine calls the listener inline and never awaits it; a listener with slow work returns a
 promise. A throw or a rejection is passed to `onListenerError(error, event)`, and a failure of
-that hook is ignored: nothing the listener does stops the call, the write or the ledger.
+that hook is ignored: nothing the listener does stops the call, the write or the ledger. Any
+returned value whose `then` is a function counts as a promise (one from another realm, or a
+library's own thenable), and a `then` that throws when read is a listener failure too.
 
 ## 10. Audit ledger
 
