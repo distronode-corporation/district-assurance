@@ -229,9 +229,11 @@ export class BadgeModule implements AssuranceModule {
   }
 
   onUntrusted(s: JsonValue): JsonValue {
-    // A photo ID link sent before the taint no longer counts. One link per call still holds.
+    // A photo ID link sent before the taint no longer counts. One link per call still holds. The
+    // keypad or PIN match before the taint no longer unlocks anything sent out (a text, a carrier
+    // check, a payment link) until a fresh verification matches again.
     const badge = s as unknown as BadgeSlice;
-    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink) } as unknown as JsonValue;
+    return { ...badge, knowledgeMatched: false, identitySessions: [], identityLink: voided(badge.identityLink) } as unknown as JsonValue;
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {

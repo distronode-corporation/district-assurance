@@ -31,6 +31,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- A taint now voids the keypad or PIN match made before it: `startPhotoId`, `checkCarrier` and a
+  payment link refuse until a fresh verification matches (found by the adversarial suite).
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

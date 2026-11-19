@@ -139,8 +139,9 @@ policy lists, on a call that has not ended, whose minimum is 0 or whose grant in
 expired, and has a level at or above the scope's minimum under the config in force now.
 
 Links go only to the subject's number on file, and only after a `keypad_knowledge` or `pin`
-factor passed since verification last started from nothing. A plug-in's pass does not unlock
-texts.
+factor passed since verification last started from nothing and since the session was last
+tainted: `markUntrusted` voids the match, so no text, carrier check or payment link goes out on it
+until a fresh verification matches again. A plug-in's pass does not unlock texts.
 
 ## 5. Keypad knowledge
 

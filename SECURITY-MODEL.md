@@ -121,8 +121,11 @@ must pass `sessionStoreContract`.
 
 A webhook reply, a CRM note or a document says "ignore the rules". **Controls:** `markUntrusted`
 taints the session, drops the grant and sets the level to 0; the next verification starts from no
-factors, and a photo ID link sent before the taint no longer counts (tested). Fetched text never chooses a tool, a recipient or an amount: amounts come from
-the host's code with an `amountSource`, and destinations come from the subject record.
+factors, a photo ID link sent before the taint no longer counts, and the keypad or PIN match made
+before the taint no longer unlocks a text, a carrier check or a payment link until a fresh
+verification matches (tested). Fetched text never chooses a tool, a recipient or an amount:
+amounts come from the host's code with an `amountSource`, and destinations come from the subject
+record.
 
 ### Card data and PCI DSS scope
 

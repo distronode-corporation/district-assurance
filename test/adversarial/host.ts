@@ -335,6 +335,8 @@ export async function runScript(script: Script): Promise<RunReport> {
         keyed.push(action.text);
         await taint(action.source);
         call.taintedSinceGrant = true;
+        // A taint voids the match: nothing goes out again until a fresh verification matches.
+        call.matchedPhone = null;
         return { line: null };
       case "end":
         return attempt(async () => {
