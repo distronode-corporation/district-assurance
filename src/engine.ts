@@ -1454,6 +1454,9 @@ export class Engine {
       if (notifier === undefined || (since !== undefined && now - since < 30_000)) continue;
       this.#sending.set(alert.alertId, now);
       try {
+        // Read again once claimed: another send may have delivered and acknowledged it while this
+        // one waited on an earlier alert. A read that fails leaves it owed.
+        if (!badge.owedDuressAlerts(await this.#read(callId)).some((owed) => owed.alertId === alert.alertId)) continue;
         // The flag goes with the alert: set again here, before the notifier, in case the entry's own
         // write of it was lost (a failed store, a crash), unless the business cleared the subject
         // after the entry was judged. An engine that judged an entry has counters (Badge requires
