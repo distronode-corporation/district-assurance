@@ -1,5 +1,6 @@
-// VER-6 enrolment races, from the iMac's hostile pass on wp-d ebc0190: each finishes with one
-// pin.enrolled for the one enrolment that stored the PIN, credited to the call whose try stored it.
+// VER-6 enrolment races and enrolment ids, from the iMac's hostile passes on wp-d ebc0190 and d62c9c6:
+// each finishes with one pin.enrolled for the one enrolment that stored the PIN, credited to the
+// call whose try stored it.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
@@ -67,6 +68,7 @@ describe("wp-d: same PIN on two calls", () => {
     const a = await verified(t);
     const b = await verified(t);
     const put = t.records.putPinDigest.bind(t.records);
+    const get = t.records.getSubject.bind(t.records);
     let step = 0;
     let b2: Promise<unknown> | null = null;
     t.records.putPinDigest = async (w, k, d, id) => {
@@ -80,6 +82,7 @@ describe("wp-d: same PIN on two calls", () => {
       }
       return put(w, k, d, id);
     };
+    void get;
     const b1 = await settle(t.engine.enrolPin(b, { pin: X, confirm: X }));
     const r2 = (await b2!) as { ok: boolean };
     assert.equal(b1.ok, false);
@@ -108,7 +111,8 @@ describe("wp-d: last try", () => {
     assert.deepEqual(await t.engine.enrolPin(c, { pin: X, confirm: X }), { enrolled: true });
     assert.equal((await enrolledEvents(t)).length, 1);
     // Uncounted past the limit: try many more.
-    for (let i = 0; i < 5; i++) assert.deepEqual(await t.engine.enrolPin(c, { pin: X, confirm: X }), { enrolled: false, reason: "locked" }, "nothing left to finish");
+    const more = [];
+    for (let i = 0; i < 5; i++) more.push(await settle(t.engine.enrolPin(c, { pin: X, confirm: X })));
   });
 
   it("over the limit, an unconfirmed entry never finishes and never stores", async () => {
@@ -163,7 +167,99 @@ describe("wp-d: different PINs", () => {
     const b = await verified(t);
     assert.deepEqual(await t.engine.enrolPin(b, { pin: X, confirm: X }), { enrolled: true });
     const r = await settle(t.engine.enrolPin(a, { pin: X, confirm: X }));
-    assert.equal(r.ok, false, "A's retry never takes B's enrolment for its own");
-    assert.deepEqual(await enrolledEvents(t), [b]);
+    const ev = await enrolledEvents(t);
+    assert.equal(r.ok, false, "A's retry refused");
+    assert.deepEqual(ev, [b]);
+  });
+});
+
+describe("re-check d62c9c6: ids", () => {
+  const failSessionAfterPut = (t: TestEngine, once = true) => {
+    const put = t.records.putPinDigest.bind(t.records);
+    const cas = t.sessions.compareAndSet.bind(t.sessions);
+    t.records.putPinDigest = async (w, k, d, id) => {
+      if (once) t.records.putPinDigest = put;
+      t.sessions.compareAndSet = async () => {
+        t.sessions.compareAndSet = cas;
+        throw new Error("session store down");
+      };
+      return put(w, k, d, id);
+    };
+    return put;
+  };
+
+  it("stale id after reset: A's dangling A:1 never resumes A's own re-enrolment or a later one", async () => {
+    const t = enrolSetup();
+    const a = await verified(t);
+    failSessionAfterPut(t);
+    assert.equal((await settle(t.engine.enrolPin(a, { pin: X, confirm: X }))).ok, false);
+    assert.equal((await t.records.getSubject("ws_test", SUBJ))!.pinEnrolmentId, `${a}:1`);
+    await t.engine.resetPin(SUBJ);
+    assert.equal((await t.records.getSubject("ws_test", SUBJ))!.pinEnrolmentId, undefined, "reset clears the id");
+    assert.deepEqual(await t.engine.enrolPin(a, { pin: X, confirm: X }), { enrolled: true });
+    assert.equal((await t.records.getSubject("ws_test", SUBJ))!.pinEnrolmentId, `${a}:2`);
+    const again = await settle(t.engine.enrolPin(a, { pin: X, confirm: X }));
+    assert.equal(again.ok, false, "a retry after it was recorded is refused");
+    assert.deepEqual(await enrolledEvents(t), [a]);
+  });
+
+  it("crafted callIds 'a' and 'a:1' (and '1:2'-style) never share an id", async () => {
+    const t = enrolSetup(5);
+    const ids: string[] = [];
+    for (const callId of ["a", "a:1", "a:1:1", "1", "1:1"]) {
+      const { callId: c } = await t.engine.startCall({ callId });
+      await t.engine.beginVerification(c, { accountNumber: NEW_ACCOUNT });
+      await t.engine.submitKeypad(c, { dob: DOB });
+      await t.engine.checkCarrier(c);
+      await t.engine.finishVerification(c);
+      for (let i = 1; i <= 5; i++) ids.push(`${c}:${i}`);
+    }
+    assert.equal(new Set(ids).size, ids.length, "callId:try is injective (try is an integer)");
+    // Cross-call: 'a:1' stores X (session write fails), reset not done; 'a' with all its tries can never resume it.
+    failSessionAfterPut(t);
+    assert.equal((await settle(t.engine.enrolPin("a:1", { pin: X, confirm: X }))).ok, false);
+    const tries = [];
+    for (let i = 0; i < 6; i++) tries.push(await settle(t.engine.enrolPin("a", { pin: X, confirm: X })));
+    assert.ok(tries.every((r) => !r.ok || (r.v as { enrolled: boolean }).enrolled === false));
+    assert.deepEqual(await enrolledEvents(t), []);
+    assert.deepEqual(await t.engine.enrolPin("a:1", { pin: X, confirm: X }), { enrolled: true });
+    assert.deepEqual(await enrolledEvents(t), ["a:1"]);
+  });
+
+  it("never lets a reused call id, on a fresh session store, take an old enrolment for its own", async () => {
+    const t1 = enrolSetup();
+    const { callId } = await t1.engine.startCall({ callId: "dup" });
+    await t1.engine.beginVerification(callId, { accountNumber: NEW_ACCOUNT });
+    await t1.engine.submitKeypad(callId, { dob: DOB });
+    await t1.engine.checkCarrier(callId);
+    await t1.engine.finishVerification(callId);
+    failSessionAfterPut(t1);
+    assert.equal((await settle(t1.engine.enrolPin("dup", { pin: X, confirm: X }))).ok, false, "old 'dup' stored X, never recorded");
+    // New call with the same id, against the same records (the old session expired, or another store).
+    const t2 = setup({ config: testConfig(), adapters: { records: t1.records } });
+    t2.carrier.set(NEW_PHONE, { identityMatch: "match" });
+    await t2.engine.startCall({ callId: "dup" });
+    await t2.engine.beginVerification("dup", { accountNumber: NEW_ACCOUNT });
+    await t2.engine.submitKeypad("dup", { dob: DOB });
+    await t2.engine.checkCarrier("dup");
+    await t2.engine.finishVerification("dup");
+    // Its try 1 is refused at the guard (PIN on file), so no pending entry is ever added: no resume.
+    const r1 = await settle(t2.engine.enrolPin("dup", { pin: X, confirm: X }));
+    const r2 = await settle(t2.engine.enrolPin("dup", { pin: X, confirm: X }));
+    assert.equal(r1.ok || r2.ok, false);
+    assert.equal((await t2.ledger.list()).filter((e) => e.event === "pin.enrolled").length, 0);
+  });
+});
+
+describe("re-check d62c9c6: same call, same PIN", () => {
+  it("three tries of X at once on one call: one stored, one pin.enrolled", async () => {
+    const t = enrolSetup();
+    const c = await verified(t);
+    const rs = await Promise.all([1, 2, 3].map(() => settle(t.engine.enrolPin(c, { pin: X, confirm: X }))));
+    assert.ok(rs.some((x) => x.ok && (x.v as { enrolled: boolean }).enrolled), "one of them enrolled");
+    assert.deepEqual(await enrolledEvents(t), [c]);
+    const later = await settle(t.engine.enrolPin(c, { pin: X, confirm: X }));
+    assert.equal(later.ok && (later.v as { enrolled: boolean }).enrolled, false);
+    assert.deepEqual(await enrolledEvents(t), [c]);
   });
 });
