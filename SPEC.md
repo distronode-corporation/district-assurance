@@ -491,8 +491,12 @@ The engine owns every access grant (ADR-25): it reserves it, signs it, computes 
 the controller and records the controller's answer, in its own writes. Module code never writes a
 grant or its outcome. `engine.grantAccess(callId, input?)`: in a flow the `gate.grant` step names
 the target and the lifetime (pass no input); outside one the host's code passes `{target,
-lifetimeSeconds?}`. `engine.accessGrants(callId)` lists a call's grants as recorded;
-`engine.accessKeys()` is the access signer's public key set.
+lifetimeSeconds?}` (anything else is `invalid_input`; other fields are ignored, never applied).
+`engine.accessGrants(callId)` lists a call's grants as recorded; `engine.accessKeys()` is the
+access signer's public key set. The access signer must be its own key: an engine whose
+`accessSigner` has the receipt signer's key id or public key is refused when it is built, so a
+receipt never verifies as an access grant. A host's module can never take a built-in module's name
+(`engine.use` and `modules` refuse it, even after the built-in module was removed).
 
 1. **Settle stale grants**, in a write of their own (so it holds even when the request is then
    refused): a grant still reserved past its expiry (its process stopped before recording the
@@ -502,7 +506,9 @@ lifetimeSeconds?}`. `engine.accessGrants(callId)` lists a call's grants as recor
    without a verification grant covering `entry.open` (checked on every request, in a flow or
    not: none, expired, tainted, or below today's minimum), `invalid_input` for a missing or unknown
    target or a bad lifetime, and `precondition_failed` while another grant of the call is in flight
-   or once `maxGrantsPerCall` grants were issued. The grant's expiry is the earlier of now plus its
+   or once `maxGrantsPerCall` grants were issued, and `precondition_failed` when the engine has no
+   access controller by the target's name (own adapter entries with an `unlock` function only). The
+   grant's expiry is the earlier of now plus its
    lifetime and the verification grant's expiry. Ledger: `access.issued`.
 3. **Sign**: ES256 over the canonical JSON of the body below, with the `accessSigner`. The engine
    computes the digest (SHA-256 of those bytes) itself. A signing failure settles the grant
@@ -511,7 +517,9 @@ lifetimeSeconds?}`. `engine.accessGrants(callId)` lists a call's grants as recor
    longer authorized for `entry.open`, or the grant expired while it was signed, nothing is sent
    and `scope_denied` is thrown (the last two settle it `failed`, reason `not_authorized` or
    `expired`). The digest and key id are written to the grant.
-5. **Send once** to the target's controller: `unlock({grant, target, idempotencyKey})`, the key
+5. **Send once** to the target's controller (if it was removed from the adapters meanwhile, the
+   grant is settled `failed`, reason `not_sent`, and `precondition_failed` is thrown: nothing was
+   sent, so it is never recorded as `unknown`): `unlock({grant, target, idempotencyKey})`, the key
    being `[workspaceId, callId, grantId, "unlock"]`. Never retried.
 6. **Record the answer**, in the engine's write: `delivered` (with `confirmed` when the controller
    reported the door moved), `refused` (the controller certainly did not act; its reason as a short
@@ -521,9 +529,16 @@ lifetimeSeconds?}`. `engine.accessGrants(callId)` lists a call's grants as recor
    `grantId`, `digest` and `kid`, never the grant or its signature. A fresh request after `unknown`
    is a new grant.
 
-**Ending a call** settles every grant still in flight as `unknown` (reason `call_ended`) in the
-same write that ends the call, before the receipt's ledger head is taken. A door answer that
-arrives afterwards changes nothing, so no access outcome ever follows `receipt.issued`.
+**Ending a call** is refused (`precondition_failed`) while a signed grant is at its door (step 4
+passed, its answer not yet recorded, not yet expired): the end waits for the answer, bounded by the
+controller's timeout, or for the grant's expiry if its process stopped. A grant reserved but not yet
+signed is settled `unknown` (reason `call_ended`) in the same write that ends the call, and is then
+never sent (step 4 finds it settled); one that expired is settled `unknown` (reason
+`no_answer_recorded`). All of it happens before the receipt's ledger head is taken, so no access
+outcome ever follows `receipt.issued`, and no grant reaches a door after the receipt while it can
+still open it: once it expires, a relay refuses it (`verifyAccessGrant`). A controller that does not
+check a grant's expiry could still act on a request delayed past it; the relay contract requires the
+check.
 
 ```json
 {

@@ -317,9 +317,13 @@ refuse every built-in module, and the outside-module outcome API of earlier draf
 (`recordModuleOutcome`, reservations, `outcomeRecord`, `checkOutcome`) is removed. An outside
 module's `updateModule` is held by the engine to its manifest's scopes on every call: in a flow,
 the current step's; outside a flow, all of them. Ending a call settles a grant still in flight as
-`unknown` in the same write, before the receipt's ledger head is taken, so no access outcome ever
-follows `receipt.issued` (re-issuing a receipt is not supported, so nothing is ever appended
-under one).
+`unknown` if it was not yet signed, and is refused while a signed grant is at its door (until its
+answer is recorded or it expires, after which a relay refuses it), so no access outcome ever
+follows `receipt.issued` and no door acts on a grant after it (re-issuing a receipt is not
+supported, so nothing is ever appended under one). Holding the end, rather than a lock across
+the unlock, keeps the engine free of locks: the wait is bounded by the controller's timeout, or by
+the grant's lifetime (at most 15 minutes) if its process stopped. Built-in module names are the
+engine's for good, and the access signer must be a key of its own.
 **Why.** Four rounds of hostile review on PR 2 each found a new way for a module's own code to
 write an outcome the controller never gave: a forged grant beside a pending one, a reserved grant
 re-pointed or lowered, the same reservation settled again, a digest the engine never signed, a

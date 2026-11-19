@@ -140,10 +140,14 @@ level and a short validity, never past the verification grant (tested); a relay 
 public key, so taking a relay over does not let anyone mint grants, and one changed byte fails
 (tested). A grant is bound to its workspace: a verifier must name the workspace it serves, so
 workspaces that share a key and a controller name never open each other's doors (tested). The
-example relay refuses a grant id it has seen (`SeenGrants`, tested in the demo). Ending a call
-settles a grant still at its door as `unknown` in the same write, before the receipt's ledger head
-is taken, so a door answer that arrives later changes nothing and no access outcome ever follows
-the receipt (tested). Outside modules' `updateModule` is held by the engine to their manifest's
+example relay refuses a grant id it has seen (`SeenGrants`, tested in the demo). A call never ends
+while a signed grant is at its door: the end waits for the answer, or for the grant's expiry if its
+process stopped, so no access outcome follows the receipt and no grant reaches a door after it
+while it can still open one (tested). Left as a limit, stated plainly: a door controller that does
+not check a grant's expiry could act on a request delayed past it, after the call ended; the relay
+contract requires the check, and the record would then say `unknown`, never `delivered`. The access
+signer must be its own key (refused when it is the receipt signer's), and a host's module can never
+take Gate's name, even after Gate was removed (tested). Outside modules' `updateModule` is held by the engine to their manifest's
 scopes on every call, outside a flow too (tested).
 **An unlock is never retried:** one grant in flight per call, sent once, no redirects followed;
 a lost answer (a timeout, a dropped connection, a 5xx) is recorded as `unknown`, and opening again

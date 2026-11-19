@@ -113,9 +113,9 @@ parts are never reachable this way.
 7. Trace: `recordConsent(purpose)` fingerprints the configured wording and stores the answer.
    Gate: `grantAccess` needs `entry.open`; the engine reserves one grant, signs it, sends it once to
    the door's controller and records the controller's answer (delivered, refused or unknown).
-8. `endCall` closes the session (abandoning a flow still running, and settling an access grant
-   still at its door as unknown) and, when the call gets a receipt, takes the ledger head and signs
-   it.
+8. `endCall` closes the session (abandoning a flow still running, and settling an access grant not
+   yet signed as unknown; it waits while a signed grant is at its door) and, when the call gets a
+   receipt, takes the ledger head and signs it.
 
 Every step appends to the `AuditLedger`, and the optional `onEvent` listener sees the same event.
 While a flow runs, any work that is not the current step's is refused.

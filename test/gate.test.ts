@@ -484,26 +484,66 @@ describe("gate: the engine owns every outcome (ADR-25)", () => {
     assert.deepEqual((await accessEvents(t)).filter(([e]) => e !== "access.issued").map(([, d]) => (d as { digest: string }).digest), [digest]);
   });
 
-  it("settles a grant in flight as unknown when the call ends, before the receipt's head, so nothing follows the receipt (review round 4, R4)", async () => {
+  it("never ends a call while a signed grant is at its door, so no door acts on a grant after the receipt (review rounds 4 and 5, R4 and E2)", async () => {
     const t = gateSetup();
     const door = holdDoor(t);
     const callId = await verified(t, null);
     const pending = t.engine.grantAccess(callId, { target: "front-door" });
     await door.atDoor;
-    // The receipt signer is slow too: the door answers while the receipt is being signed.
-    const sign = t.engine.receiptKeys().length;
-    assert.equal(sign, 1);
-    const ending = t.engine.endCall(callId);
-    await new Promise((resolve) => setImmediate(resolve));
+    await assert.rejects(t.engine.endCall(callId), rejects("precondition_failed", /at its door/), "refused while the door decides");
+    assert.equal((await t.engine.state(callId)).phase, "open");
     door.answer({ outcome: "delivered", providerRef: "p", confirmed: true });
-    assert.deepEqual(await pending, { grantId: "acc_1", status: "unknown", confirmed: false }, "settled by the end");
-    const receipt = (await ending)!;
-    const after = (await t.ledger.list()).filter((e) => e.seq > receipt.body.ledger.seq).map((e) => e.event);
-    assert.deepEqual(after, ["receipt.issued"], "no access outcome after the receipt's ledger head");
-    assert.deepEqual((await accessEvents(t)).map(([e, d]) => [e, (d as { reason?: string }).reason ?? null]), [
-      ["access.issued", null],
-      ["access.unknown", "call_ended"],
+    assert.deepEqual(await pending, { grantId: "acc_1", status: "delivered", confirmed: true });
+    const receipt = (await t.engine.endCall(callId))!;
+    const ledger = await t.ledger.list();
+    const delivered = ledger.find((e) => e.event === "access.delivered")!;
+    assert.ok(delivered.seq <= receipt.body.ledger.seq, "the outcome is under the receipt's head");
+    assert.deepEqual(ledger.filter((e) => e.seq > receipt.body.ledger.seq).map((e) => e.event), ["receipt.issued"], "nothing after it but the receipt");
+  });
+
+  it("refuses an end that lands between the check before sending and the send itself (review round 5, E2)", async () => {
+    // A store that runs a hook right after the write that checks the grant and records its digest.
+    class Hooked extends StoppingStore {
+      after: (() => Promise<void>) | null = null;
+      override async compareAndSet(w: string, c: string, v: number, r: JsonValue) {
+        const out = await super.compareAndSet(w, c, v, r);
+        const g = (r as unknown as { modules: { gate?: { grants: Array<{ digest: string | null; status: string }> } } }).modules.gate?.grants.at(-1);
+        const run = this.after;
+        if (out.ok && run !== null && g?.digest !== null && g?.digest !== undefined && g.status === "reserved") {
+          this.after = null;
+          await run();
+        }
+        return out;
+      }
+    }
+    const sessions = new Hooked();
+    const door = new FakeAccessController();
+    const t = setup({ config: gateConfig(), adapters: { sessions, access: { lobby: door }, accessSigner: generateTestSigner("gate-key-1") } });
+    t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+    const callId = await verified(t as unknown as GateTest, null);
+    let ended: unknown = null;
+    sessions.after = async () => {
+      ended = await t.engine.endCall(callId).then(() => "ended", (e: unknown) => (e as { code?: string }).code);
+    };
+    assert.equal((await t.engine.grantAccess(callId, { target: "front-door" })).status, "delivered");
+    assert.equal(ended, "precondition_failed", "the end was refused: the grant was on its way to the door");
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.ok((await t.ledger.list()).find((e) => e.event === "access.delivered")!.seq <= receipt.body.ledger.seq);
+  });
+
+  it("ends a call whose grant's process stopped at the door once that grant expired, recording it unknown", async () => {
+    const t = gateSetup();
+    const callId = await verified(t, null);
+    t.sessions.stopWhen = () => t.door.received.length === 1;
+    await assert.rejects(t.engine.grantAccess(callId, { target: "front-door" }), /the process stopped/);
+    await assert.rejects(t.engine.endCall(callId), rejects("precondition_failed", /at its door/));
+    t.clock.advance(60_000);
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.deepEqual((await accessEvents(t)).at(-1), [
+      "access.unknown",
+      { grantId: "acc_1", digest: accessGrantDigest(t.door.received[0]!.grant.body), kid: "gate-key-1", reason: "no_answer_recorded" },
     ]);
+    assert.ok(receipt.body.ledger.seq >= (await t.ledger.list()).find((e) => e.event === "access.unknown")!.seq);
   });
 
   it("never carries a delivery for a refused grant under the receipt's head (review round 4, R5)", async () => {
@@ -516,15 +556,58 @@ describe("gate: the engine owns every outcome (ADR-25)", () => {
     assert.equal(JSON.stringify(receipt.body).includes("delivered"), false);
   });
 
-  it("settles a grant in flight as unknown when a flow call without a receipt ends, and its late answer changes nothing", async () => {
+  it("never lets a host module take a built-in module's name, even after it was removed (review round 5, F5)", () => {
     const t = gateSetup();
-    const door = holdDoor(t);
-    const callId = await verified(t);
-    const pending = t.engine.grantAccess(callId);
-    await door.atDoor;
-    assert.equal(await t.engine.endCall(callId), null, "the entry flow has no receipt step");
-    door.answer({ outcome: "delivered", providerRef: "p", confirmed: true });
-    assert.deepEqual(await pending, { grantId: "acc_1", status: "unknown", confirmed: false });
+    t.engine.configure(testConfig((c) => (c.policy.scopes["entry.open"] = 2)));
+    t.engine.remove("gate");
+    assert.throws(() => t.engine.use({ ...gateModule, stepStatus: () => "complete" }), (e: unknown) => /gate is the name of a built-in module/.test(String((e as Error).message)));
+    assert.throws(() => setup({ modules: [{ ...gateModule }] }), /gate is the name of a built-in module/);
+  });
+
+  it("refuses an input that is not { target } with invalid_input, never a TypeError (review round 5, I3)", async () => {
+    const t = gateSetup();
+    const callId = await verified(t, null);
+    for (const bad of [null, 7, "front-door", [], {}, { target: 1 }]) {
+      await assert.rejects(t.engine.grantAccess(callId, bad as never), rejects("invalid_input"), JSON.stringify(bad));
+    }
+    for (const target of ["nope", "__proto__", "constructor", "toString", "", "FRONT-DOOR"]) {
+      await assert.rejects(t.engine.grantAccess(callId, { target }), rejects("invalid_input"), target);
+    }
+    assert.equal(t.door.received.length, 0);
+    assert.deepEqual(await t.engine.accessGrants(callId), []);
+  });
+
+  it("never records unknown for a grant it could not send: a controller gone before or while it was signed (review round 5, I5)", async () => {
+    const access: Record<string, AccessController> = { lobby: new FakeAccessController() };
+    const accessSigner = generateTestSigner("gate-key-1");
+    const t = setup({ config: gateConfig(), adapters: { access, accessSigner } });
+    t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+    const callId = await verified(t as unknown as GateTest, null);
+    const lobby = access.lobby!;
+    delete access.lobby;
+    await assert.rejects(t.engine.grantAccess(callId, { target: "front-door" }), rejects("precondition_failed", /no access controller named lobby/));
+    assert.deepEqual(await t.engine.accessGrants(callId), [], "nothing reserved");
+    access.lobby = { unlock: "not a function" } as never;
+    await assert.rejects(t.engine.grantAccess(callId, { target: "front-door" }), rejects("precondition_failed"), "not a controller");
+    access.lobby = lobby;
+    const sign = accessSigner.sign.bind(accessSigner);
+    accessSigner.sign = async (payload) => {
+      delete access.lobby;
+      return sign(payload);
+    };
+    await assert.rejects(t.engine.grantAccess(callId, { target: "front-door" }), rejects("precondition_failed", /not sent/));
+    const [g] = await t.engine.accessGrants(callId);
+    assert.equal(g!.status, "failed", "failed, not unknown: nothing was sent");
+    assert.deepEqual((await t.ledger.list()).filter((e) => e.event === "access.failed").map((e) => e.detail.reason), ["not_sent"]);
+  });
+
+  it("refuses an access signer that is the receipt signer's key (its key id or its public key)", () => {
+    const shared = generateTestSigner("shared-1");
+    assert.throws(() => setup({ adapters: { signer: shared, accessSigner: shared } }), /accessSigner must have its own key id/);
+    assert.throws(() => setup({ adapters: { signer: shared, accessSigner: { ...shared, keyId: "other-id" } } }), /accessSigner must be its own key/);
+    assert.doesNotThrow(() => setup({ adapters: { signer: shared, accessSigner: generateTestSigner("access-1") } }));
+    const noReceipts = testConfig((c) => (c.modules.trace = { settings: { receipts: false, wordings: [] } }));
+    assert.doesNotThrow(() => setup({ config: noReceipts, adapters: { signer: undefined, accessSigner: shared } }), "no receipts: nothing to clash with");
   });
 
   it("uses an access controller only by the name a target gives", async () => {

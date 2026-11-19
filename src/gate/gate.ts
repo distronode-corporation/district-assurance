@@ -14,7 +14,7 @@
 // once, and its answer committed. A lost answer is "unknown", and opening again needs a fresh
 // request: a new grant, within the per-call limit. Ending the call settles a grant still in flight
 // as unknown, before the receipt's ledger head is taken, so no outcome ever follows the receipt.
-import type { AccessGrantBody, SignedAccessGrant, UnlockResult } from "../core/adapters.ts";
+import type { AccessController, AccessGrantBody, SignedAccessGrant, UnlockResult } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
@@ -194,9 +194,17 @@ export function settleInFlight(rt: EngineRuntime, draft: CallDraft, reason: "no_
   if (slice === undefined) return;
   const now = Date.parse(rt.now());
   for (const g of slice.grants) {
-    if (g.status === "reserved" && (reason === "call_ended" || Date.parse(g.expiresAt) <= now)) {
+    if (g.status !== "reserved") continue;
+    const expired = Date.parse(g.expiresAt) <= now;
+    if (reason === "call_ended" && !expired && g.digest !== null) {
+      // Signed and checked: it is at its door, or on its way. The call ends once the answer is
+      // recorded or the grant expires (after which a relay refuses it), never while it can still
+      // open a door: so no door acts on a grant after the receipt.
+      throw new EngineError("precondition_failed", "an access grant is at its door; end the call once it answers or expires");
+    }
+    if (reason === "call_ended" || expired) {
       g.status = "unknown";
-      draft.emit("access.unknown", "system", { grantId: g.grantId, ...(g.digest === null ? {} : { digest: g.digest, kid: g.kid! }), reason });
+      draft.emit("access.unknown", "system", { grantId: g.grantId, ...(g.digest === null ? {} : { digest: g.digest, kid: g.kid! }), reason: expired ? "no_answer_recorded" : reason });
     }
   }
 }
@@ -244,23 +252,27 @@ export async function grantAccess(rt: EngineRuntime, callId: string, input?: { t
   }
   // The engine computes the digest from the frozen grant it signed; it is never taken from elsewhere.
   const digest = accessGrantDigest(body);
-  // Signing can take a while (a KMS): checked again, in a write, right before the door is asked.
-  const lapsed = await rt.update(callId, (draft) => {
+  // Signing can take a while (a KMS): checked again, in a write, right before the door is asked,
+  // and the controller looked up in it: a grant that cannot be sent is failed, never unknown.
+  const checked = await rt.update(callId, (draft): { controller: AccessController } | EngineError => {
     const g = find(draft, record.grantId);
-    if (g.status !== "reserved") return "it was settled meanwhile";
-    const why = !rt.authorized(draft.record, ENTRY_SCOPE) ? "the call is no longer authorized" : Date.parse(g.expiresAt) <= Date.parse(rt.now()) ? "it expired" : null;
+    if (g.status !== "reserved") return new EngineError("scope_denied", "the access grant was not sent: it was settled meanwhile");
+    const controller = controllerOf(rt, g.controller);
+    const why = !rt.authorized(draft.record, ENTRY_SCOPE) ? "not_authorized" : Date.parse(g.expiresAt) <= Date.parse(rt.now()) ? "expired" : controller === null ? "not_sent" : null;
     g.digest = digest;
     g.kid = grant.kid;
-    if (why !== null) {
-      g.status = "failed";
-      draft.emit("access.failed", "code", { grantId: g.grantId, digest, kid: grant.kid, reason: why === "it expired" ? "expired" : "not_authorized" });
-    }
-    return why;
+    if (why === null) return { controller: controller! };
+    g.status = "failed";
+    draft.emit("access.failed", "code", { grantId: g.grantId, digest, kid: grant.kid, reason: why });
+    return why === "not_sent"
+      ? new EngineError("precondition_failed", `the access grant was not sent: the engine has no access controller named ${g.controller}`)
+      : new EngineError("scope_denied", `the access grant was not sent: ${why === "expired" ? "it expired" : "the call is no longer authorized"}`);
   });
-  if (lapsed !== null) throw new EngineError("scope_denied", `the access grant was not sent: ${lapsed}`);
+  if (checked instanceof EngineError) throw checked;
+  const { controller } = checked;
   let answer: UnlockResult | null;
   try {
-    answer = await rt.adapter("access")[record.controller]!.unlock({ grant, target: record.ref, idempotencyKey: rt.idempotencyKey(callId, record.grantId, "unlock") });
+    answer = await controller.unlock({ grant, target: record.ref, idempotencyKey: rt.idempotencyKey(callId, record.grantId, "unlock") });
   } catch {
     // The answer was lost (a timeout, a dropped connection, a controller error). The door may or
     // may not have moved: record that, and never send this grant again.
@@ -291,11 +303,13 @@ function reserve(rt: EngineRuntime, draft: CallDraft, input: { target: string; l
   // The scope is checked on every request, in a flow and outside one.
   if (!rt.authorized(draft.record, ENTRY_SCOPE)) throw new EngineError("scope_denied", `the grant does not cover ${ENTRY_SCOPE}`);
   if (step !== null && input !== undefined) throw new EngineError("invalid_input", "the flow step names the target; pass no input");
+  if (input !== undefined && (!isObject(input) || typeof input.target !== "string")) throw new EngineError("invalid_input", "the input is { target, lifetimeSeconds? }");
   const wanted = step ?? input;
   if (wanted === undefined) throw new EngineError("invalid_input", "outside a flow, the target is required");
   const slice = gateSlice(draft);
   const target = slice.targets.find((t) => t.id === wanted.target);
   if (target === undefined) throw new EngineError("invalid_input", `no target ${wanted.target} on this call`);
+  if (controllerOf(rt, target.controller) === null) throw new EngineError("precondition_failed", `the engine has no access controller named ${target.controller}`);
   const lifetime = wanted.lifetimeSeconds ?? DEFAULT_ACCESS_SECONDS;
   if (!isIntegerIn(lifetime, MIN_ACCESS_SECONDS, MAX_ACCESS_GRANT_SECONDS)) {
     throw new EngineError("invalid_input", `lifetimeSeconds must be an integer from ${MIN_ACCESS_SECONDS} to ${MAX_ACCESS_GRANT_SECONDS}`);
@@ -330,6 +344,13 @@ function reserve(rt: EngineRuntime, draft: CallDraft, input: { target: string; l
     expiresAt: record.expiresAt,
   });
   return structuredClone(record);
+}
+
+/** The access controller by name: own properties only, and only an object with an unlock function. */
+function controllerOf(rt: EngineRuntime, name: string): AccessController | null {
+  const all = rt.adapter("access");
+  const found = Object.hasOwn(all, name) ? all[name] : undefined;
+  return typeof found?.unlock === "function" ? found : null;
 }
 
 function find(draft: CallDraft, grantId: string): AccessRecord {

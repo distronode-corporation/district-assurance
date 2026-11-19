@@ -115,6 +115,10 @@ export class Engine {
     if (keyLength < 16) errors.push("knowledgeKey must be at least 16 bytes");
     if (options.workspaceId === "") errors.push("workspaceId is empty");
     if ((options.adapters as Partial<EngineAdapters>).ledger === undefined) errors.push("the ledger adapter is required: the ledger is always on");
+    errors.push(...distinctSigners(options.adapters));
+    for (const module of options.modules ?? []) {
+      if ((BUILT_IN_MODULES as readonly string[]).includes(module.manifest.name)) errors.push(`${module.manifest.name} is the name of a built-in module`);
+    }
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     this.workspaceId = options.workspaceId;
     this.#key = options.knowledgeKey;
@@ -159,6 +163,11 @@ export class Engine {
 
   /** Installs an outside module. It stays off until a config turns it on. */
   use(module: AssuranceModule): this {
+    // A built-in module's name stays the engine's, even after the module was removed: a host's
+    // module can never stand in for Gate's grants or Paylink's payments.
+    if ((BUILT_IN_MODULES as readonly string[]).includes(module.manifest.name)) {
+      throw new EngineError("invalid_input", `${module.manifest.name} is the name of a built-in module`);
+    }
     this.registry.use(module);
     return this;
   }
@@ -685,6 +694,19 @@ export class Engine {
     if (stored === null) throw new EngineError("unknown_call", "no such call");
     await this.#flush(callId, stored.version, structuredClone(stored.record) as unknown as CallRecord);
   }
+}
+
+/**
+ * The access signer must be its own key, never the receipt signer's: a receipt must never verify as
+ * an access grant, nor the reverse. Refused by key id and by public key.
+ */
+function distinctSigners(adapters: EngineAdapters): string[] {
+  const { signer, accessSigner } = adapters;
+  if (signer === undefined || accessSigner === undefined) return [];
+  const a = signer.publicJwk();
+  const b = accessSigner.publicJwk();
+  if (signer.keyId === accessSigner.keyId) return ["accessSigner must have its own key id, not the receipt signer's"];
+  return a.x === b.x && a.y === b.y ? ["accessSigner must be its own key, not the receipt signer's"] : [];
 }
 
 export function createEngine(options: EngineOptions): Engine {
