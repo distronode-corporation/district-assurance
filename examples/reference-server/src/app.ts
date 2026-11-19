@@ -161,12 +161,30 @@ interface Seen {
   route: string;
 }
 
+/**
+ * A limit, checked when the server is created: anything but a whole number from 1 would switch it
+ * off (0 or NaN compare false, a 0 window starts afresh on every request) or refuse everything.
+ */
+function wholeFrom1(name: string, value: number, max = Number.MAX_SAFE_INTEGER): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > max) throw new RangeError(`${name} must be a whole number from 1 to ${max}`);
+  return value;
+}
+
+/** The longest setTimeout can wait; past it, the 503 deadline would fire at once. */
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
 export function createReferenceServer(options: ReferenceServerOptions): Server {
   const processed = new Set<string>();
   const limits: BodyLimits = { ...DEFAULT_BODY_LIMITS, ...options.bodyLimits };
-  const timeoutMs = options.timeoutMs ?? 10_000;
+  for (const name of ["stripeIdentity", "stripePayments", "demo"] as const) wholeFrom1(`bodyLimits.${name}`, limits[name]);
+  const timeoutMs = wholeFrom1("timeoutMs", options.timeoutMs ?? 10_000, MAX_TIMEOUT_MS);
   const rate = options.rateLimit ?? { requests: 300, windowMs: 60_000 };
-  const rateLimit = new RateLimit(rate.requests, rate.windowMs, rate.addresses ?? 10_000, rate.clock ?? systemClock);
+  const rateLimit = new RateLimit(
+    wholeFrom1("rateLimit.requests", rate.requests),
+    wholeFrom1("rateLimit.windowMs", rate.windowMs),
+    wholeFrom1("rateLimit.addresses", rate.addresses ?? 10_000),
+    rate.clock ?? systemClock,
+  );
   const files = options.ui === undefined ? new Map<string, StaticFile>() : loadStaticFiles();
 
   async function stripeWebhook(req: IncomingMessage, route: "identity" | "payments"): Promise<[number, Json]> {

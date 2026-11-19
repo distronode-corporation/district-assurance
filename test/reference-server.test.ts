@@ -197,6 +197,27 @@ describe("reference server limits", () => {
     assert.equal((await fetch(`${d.base}/healthz`)).status, 429, "by default the system clock counts the window, not the server's");
   });
 
+  it("refuses a limit that would switch itself off, or refuse everything, when the server is created", () => {
+    const t = createTestEngine();
+    const base = { engine: t.engine, stripeSecrets: { identity: [], payments: [] }, clock: t.clock };
+    const bad: Array<[string, Partial<ReferenceServerOptions>]> = [
+      ["windowMs 0 is a new window every request", { rateLimit: { requests: 2, windowMs: 0 } }],
+      ["windowMs NaN never ends a window", { rateLimit: { requests: 2, windowMs: Number.NaN } }],
+      ["requests NaN is never over", { rateLimit: { requests: Number.NaN, windowMs: 60_000 } }],
+      ["requests 0 refuses everything", { rateLimit: { requests: 0, windowMs: 60_000 } }],
+      ["requests 1.5", { rateLimit: { requests: 1.5, windowMs: 60_000 } }],
+      ["addresses 0", { rateLimit: { requests: 1, windowMs: 60_000, addresses: 0 } }],
+      ["timeoutMs 0 turns node:http's receive deadline off", { timeoutMs: 0 }],
+      ["timeoutMs past what setTimeout can wait", { timeoutMs: 2 ** 31 }],
+      ["a NaN body limit is never passed", { bodyLimits: { stripePayments: Number.NaN } }],
+      ["a negative body limit", { bodyLimits: { demo: -1 } }],
+    ];
+    for (const [label, options] of bad) {
+      assert.throws(() => createReferenceServer({ ...base, ...options }), /must be a whole number from 1/, label);
+    }
+    assert.ok(createReferenceServer({ ...base, timeoutMs: 2 ** 31 - 1, rateLimit: { requests: 1, windowMs: 1, addresses: 1 }, bodyLimits: { demo: 1 } }));
+  });
+
   it("tracks a bounded number of addresses, forgetting ended windows first, then the oldest", async (ctx) => {
     const clock = new FixedClock();
     // Listening on every address, so the same server sees IPv4 and IPv6 loopback as two callers.

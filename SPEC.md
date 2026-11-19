@@ -401,8 +401,10 @@ the currency's own decimals.
 
 ## 17. Reference server limits and logs
 
-`examples/reference-server/src/app.ts`, not part of the package. Each request is handled in this
-order, and every refusal is JSON `{"error": code}`:
+`examples/reference-server/src/app.ts`, not part of the package. Every limit below, the timeout and
+each body limit is a whole number from 1 (the timeout at most 2,147,483,647 ms, what `setTimeout`
+can wait); anything else throws when the server is created, since 0 or NaN would switch a limit
+off. Each request is handled in this order, and every refusal is JSON `{"error": code}`:
 
 - **Rate limit**, first, before any other work: each remote address, as the socket reports it,
   gets `rateLimit.requests` requests per fixed window of `rateLimit.windowMs` (default 300 a
