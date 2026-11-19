@@ -211,7 +211,8 @@ export async function readBackPayment(rt: EngineRuntime, callId: string, input?:
       subjectKey: subject.subjectKey,
       recordIds: [...before.state.recordIds],
     });
-    if (found === null) throw new EngineError("precondition_failed", "the amount source has no amount for this reference");
+    // undefined too: an async resolve that falls through answers it instead of null.
+    if (found === null || found === undefined) throw new EngineError("precondition_failed", "the amount source has no amount for this reference");
     amount = { amountMinor: found.amountMinor, currency: found.currency };
     const errors = requestErrors({ ...amount, description: spec.description, amountSource: spec.amountSource }, settings.maxAmountMinor);
     if (errors.length > 0) throw new EngineError("invalid_input", `the amount source answered with a bad amount: ${errors.join("; ")}`);

@@ -715,6 +715,15 @@ describe("Engine pay: amounts from code, read back first (PAY-2)", () => {
     assert.equal(JSON.stringify(await t.ledger.list()).includes("deposit.standard"), false, "the reference stays out of the ledger");
   });
 
+  it("reads an AmountSource that answers nothing at all as no amount, not as a crash", async () => {
+    // An async resolve that falls through returns undefined, not the null the interface asks for.
+    for (const nothing of [undefined, null]) {
+      const t = setup({ adapters: { amounts: { resolve: async () => nothing as unknown as null } } });
+      const callId = await verifiedCall(t);
+      await assert.rejects(t.engine.readBackPayment(callId, byRef), rejects("precondition_failed", /no amount for this reference/), String(nothing));
+    }
+  });
+
   it("refuses an amountRef nobody can resolve, a bad answer, and a link without a read-back", async () => {
     const plain = setup();
     const call = await verifiedCall(plain);
