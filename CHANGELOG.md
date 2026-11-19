@@ -27,7 +27,10 @@ All notable changes to this project are documented here. The format follows
   `npm run demo` and the UI.
 - Consent revocation (PRV-3): `Engine.revokeConsent` by voice, text or dashboard through a new
   `ConsentStore` adapter (`consents`; `MemoryConsentStore` in the fakes), a `consent.revoked`
-  ledger event written once per consent, and `isStopRequest` for STOP, ARRÊT, ARRÊTE and ARRÊTER.
+  ledger event written once per consent and never before its `consent.recorded`, and
+  `isStopRequest` for STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT, ARRÊT, ARRÊTE and ARRÊTER. A
+  consent still being stored when its call ends settles as not recorded (no consent):
+  `consent.unrecorded` in the ledger, `answer: "not_recorded"` on the receipt.
 
 ### Changed
 

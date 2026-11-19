@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { ConfigError } from "../src/core/config.ts";
 import { NotImplementedError } from "../src/core/errors.ts";
 import type { EngineEvent } from "../src/core/events.ts";
+import { MemorySessionStore } from "../src/core/session-store.ts";
 import { defaultVerificationPolicy } from "../src/core/policy.ts";
 import { createEngine } from "../src/engine.ts";
 import { defaultConfig } from "../src/modules.ts";
@@ -673,9 +674,9 @@ describe("Engine consent revocation", () => {
 
   const flowWithConsent = () => testConfig((c) => (c.flows = { f: { steps: [{ type: "trace.consent", purpose: "texts" }, { type: "trace.receipt" }] } }));
 
-  it("maps STOP and its French forms to revocation, and nothing else", () => {
-    for (const text of ["STOP", "stop", " Stop. ", "STOP!", "ARRÊT", "arret", "Arrête", "ARRETER", "arrêter !"]) assert.equal(isStopRequest(text), true, text);
-    for (const text of ["", "yes", "oui", "don't stop", "stop texting me please", "stopper", "arrêt maintenant", "ST0P"]) assert.equal(isStopRequest(text), false, text);
+  it("maps the standard opt-out words and their French forms to revocation, and nothing else", () => {
+    for (const text of ["STOP", "stop", " Stop. ", "STOP!", "STOPALL", "Unsubscribe", "cancel", "END", "quit!", "ARRÊT", "arret", "Arrête", "ARRETER", "arrêter !"]) assert.equal(isStopRequest(text), true, text);
+    for (const text of ["", "yes", "oui", "don't stop", "stop texting me please", "stopper", "arrêt maintenant", "ST0P", "stop all", "cancel my order", "the end", "unsub"]) assert.equal(isStopRequest(text), false, text);
     // From a host's webhook, anything at all: not text is never a stop, and never throws.
     for (const value of [null, undefined, 42, ["STOP"], { text: "STOP" }]) assert.equal(isStopRequest(value as unknown as string), false, String(value));
     assert.equal(isStopRequest("STOP\uD800"), false, "a lone surrogate is not part of a stop word");
@@ -748,14 +749,89 @@ describe("Engine consent revocation", () => {
     consents.failNext = 1;
     await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), /consent store down/);
     assert.equal((await t.engine.flowPosition(callId))!.index, 0, "not recorded yet");
-    await assert.rejects(t.engine.endCall(callId), rejects("precondition_failed", /consent is being stored/));
     await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "no" }), rejects("precondition_failed", /being stored/));
     const consent = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
     assert.equal(consent.consentId, "cns_1");
     assert.equal((await t.engine.flowPosition(callId))!.status, "completed");
     assert.equal((await t.ledger.list()).filter((e) => e.event === "consent.recorded").length, 1);
     assert.notEqual(await consents.getConsent("ws_test", "cns_1"), null);
-    assert.equal((await t.engine.endCall(callId))!.body.consents.length, 1);
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.deepEqual(receipt.body.consents.map((c) => c.answer), ["yes"], "the normal path: recorded, nothing unrecorded");
+    assert.equal((await t.ledger.list()).some((e) => e.event === "consent.unrecorded"), false);
+  });
+
+  it("ends a call whose consent store is down: the consent settles as not recorded, which is no consent", async () => {
+    const consents = gatedStore();
+    const t = setup({ adapters: { consents }, config: flowWithConsent() });
+    const { callId } = await t.engine.startCall({ flow: "f" });
+    consents.failNext = 1;
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), /consent store down/);
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.deepEqual(receipt.body.consents, [{ purpose: "texts", wordingVersion: "1", wordingDigest: receipt.body.consents[0]!.wordingDigest, answer: "not_recorded" }]);
+    assert.equal(verifyReceipt(receipt, t.engine.receiptKeys()), true);
+    const entries = (await t.ledger.list()).filter((e) => e.callId === callId);
+    const events = entries.map((e) => e.event);
+    assert.deepEqual(events.slice(events.indexOf("consent.unrecorded")), ["consent.unrecorded", "flow.abandoned", "call.ended", "receipt.issued"]);
+    assert.deepEqual(entries.find((e) => e.event === "consent.unrecorded")!.detail, { purpose: "texts" });
+    assert.equal(events.includes("consent.recorded"), false);
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), rejects("invalid_transition", /ended/), "a retry after the end is refused");
+  });
+
+  it("records nothing, and refuses its revocation, when the store answers after the call ended", async () => {
+    const consents = gatedStore();
+    const t = setup({ adapters: { consents } });
+    const { callId } = await t.engine.startCall();
+    consents.hold = true;
+    const late = t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await new Promise((resolve) => setImmediate(resolve));
+    await t.engine.endCall(callId);
+    consents.release();
+    await assert.rejects(late, rejects("precondition_failed", /call ended before the consent was stored/));
+    const stored = await consents.getConsent("ws_test", "cns_1");
+    assert.notEqual(stored, null, "the store has it, but the call never recorded it");
+    await assert.rejects(t.engine.revokeConsent({ consentId: "cns_1", via: "text" }), rejects("precondition_failed", /not recorded on its call/));
+    const events = (await t.ledger.list()).map((e) => e.event);
+    assert.equal(events.includes("consent.recorded") || events.includes("consent.revoked"), false);
+  });
+
+  it("never writes consent.revoked before its consent.recorded, even with the recorded entry still pending", async () => {
+    const ledger = new MemoryAuditLedger();
+    let failRecorded = true;
+    const flaky = Object.assign(Object.create(ledger) as MemoryAuditLedger, {
+      append: async (input: Parameters<MemoryAuditLedger["append"]>[0]) => {
+        if (input.event === "consent.recorded" && failRecorded) {
+          failRecorded = false;
+          throw new Error("ledger down");
+        }
+        return ledger.append(input);
+      },
+    });
+    const t = setup({ adapters: { consents: new MemoryConsentStore(), ledger: flaky } });
+    const { callId } = await t.engine.startCall();
+    // The consent is recorded on the call, but its ledger entry is still in the call's outbox.
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), /ledger down/);
+    await t.engine.revokeConsent({ consentId: "cns_1", via: "text" });
+    const events = (await ledger.list()).map((e) => e.event);
+    assert.deepEqual(events.filter((e) => e.startsWith("consent.")), ["consent.recorded", "consent.revoked"]);
+    assert.equal(verifyChain(await ledger.list()).ok, true);
+  });
+
+  it("revokes from the store alone once the host removed the call record, and passes a session store failure through", async () => {
+    const consents = new MemoryConsentStore();
+    const t = setup({ adapters: { consents } });
+    const { callId } = await t.engine.startCall();
+    const yes = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    // Another engine of the workspace whose session store no longer has the call.
+    const later = createTestEngine({ config: testConfig(), adapters: { consents, ledger: t.ledger } });
+    assert.equal((await later.engine.revokeConsent({ consentId: yes.consentId, via: "web" })).via, "web");
+    const fresh = new MemoryConsentStore();
+    await fresh.putConsent("ws_test", yes);
+    const sessions = new MemorySessionStore();
+    sessions.get = async () => {
+      throw new Error("session store down");
+    };
+    const broken = createTestEngine({ config: testConfig(), adapters: { consents: fresh, ledger: t.ledger, sessions } });
+    await assert.rejects(broken.engine.revokeConsent({ consentId: yes.consentId, via: "text" }), /session store down/);
   });
 
   it("records one consent when two processes resume it at once", async () => {

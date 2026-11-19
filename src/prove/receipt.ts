@@ -20,7 +20,7 @@ export interface ReceiptBody {
   verification: { level: AssuranceLevel; methods: FactorKind[] };
   records: Array<{ recordId: string; formId: string; digest: string }>;
   payments: Array<{ paymentId: string; status: string; amountMinor: number; currency: string; providerRef: string }>;
-  consents: Array<{ purpose: string; wordingVersion: string; wordingDigest: string; answer: "yes" | "no" }>;
+  consents: Array<{ purpose: string; wordingVersion: string; wordingDigest: string; answer: "yes" | "no" | "not_recorded" }>;
   ledger: { seq: number; hash: string };
 }
 

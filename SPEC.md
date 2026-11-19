@@ -278,6 +278,7 @@ answer on file, a phone number, a link or card data.
 | `payment.settled` | `paymentId`, `status` |
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
 | `consent.revoked` | `consentId`, `purpose`, `wordingVersion`, `via` (`call`, `text` or `web`) |
+| `consent.unrecorded` | `purpose` (a consent still being stored when the call ended: no consent) |
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
@@ -330,8 +331,9 @@ numbers, sparse array holes, and objects whose prototype is not `Object.prototyp
 A call gets a receipt when its flow has a `trace.receipt` step (wherever it is, and whether
 or not the flow finished), or, for a call that ran no flow, when Trace's `receipts` setting is not
 false. `endCall` returns it, or null. `verification` comes from Badge, `records` from Dossier,
-`payments` from Paylink and `consents` from Trace; a module that is off contributes an empty
-part. `ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
+`payments` from Paylink and `consents` from Trace (`answer` is `yes`, `no`, or `not_recorded` for
+a consent still being stored when the call ended, section 17); a module that is off contributes an
+empty part. `ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
 the ended call issues the receipt later with the same head, without ending the call again. `verifyReceipt(receipt, keys)` picks the key by `kid`
 and returns false for any change, a wrong algorithm, a malformed signature or an unknown key.
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
@@ -416,22 +418,30 @@ A consent is revoked by voice, text or dashboard with `revokeConsent({consentId,
 
 With the adapter, `recordConsent` reserves the consent on the call, writes it to the store and
 then records it (`consent.recorded`, and the flow step judged). If the store write fails the
-consent stays reserved: the call cannot end, a consent with another purpose or answer is refused
+consent stays reserved: a consent with another purpose or answer is refused
 (`precondition_failed`), and the next `recordConsent` with the same purpose and answer resumes it
-with the same record. Without the adapter, consents live on the call record only and
+with the same record. A store outage never keeps the call from ending: at `endCall` a consent
+still reserved settles as not recorded, which is no consent (fail closed). The ledger gets
+`consent.unrecorded` with the purpose only, before `call.ended`, and the receipt lists it with
+`answer: "not_recorded"`. A `recordConsent` still writing it when the call ended records nothing
+and throws `precondition_failed`; one after the end is refused (`invalid_transition`). Without the adapter, consents live on the call record only and
 `revokeConsent` is refused (`precondition_failed`).
 
 `revokeConsent` refuses an empty id or an unknown `via` (`invalid_input`), a consent the store does
-not have for this workspace (`invalid_input`) and a consent answered "no" (`precondition_failed`).
-Otherwise it stores the revocation, appends `consent.revoked` (actor `member` for `web`, else
+not have for this workspace (`invalid_input`), a consent answered "no", and a consent that is not
+recorded on its call, still being stored or settled as not recorded (`precondition_failed`). So
+that `consent.revoked` never precedes `consent.recorded`, it appends the call's pending ledger
+entries first; when the host has removed the call record, the store alone decides. Otherwise it
+stores the revocation, appends `consent.revoked` (actor `member` for `web`, else
 `caller`) at the revocation's time, tells the listener, and returns the revocation. A second
 revocation, or a retry after the ledger failed, returns the first one and completes its entry
 without writing a second. Revoking does not change the call record or a receipt already signed:
 the receipt proves what was answered then, and the ledger proves the revocation.
 
 `isStopRequest(text)` is true when a text or a spoken answer, apart from spaces and a closing `.`
-or `!`, is STOP or one of its French forms ARRÊT, ARRÊTE, ARRÊTER, in any case, with or without
-accents. A word inside a longer message ("don't stop") is not a match, and a value that is not a
-string is false. The host decides which
-consents a match revokes (for example every consent texted to that number) and calls
-`revokeConsent` for each.
+or `!`, is one of the standard carrier opt-out words STOP, STOPALL, UNSUBSCRIBE, CANCEL, END and
+QUIT, or the French ARRÊT, ARRÊTE, ARRÊTER, in any case, with or without accents. A word inside a
+longer message ("don't stop", "cancel my order") is not a match, and a value that is not a string
+is false. A host may treat more words as a stop on its own. The host decides which consents a
+match revokes (for example every consent texted to that number) and calls `revokeConsent` for
+each.

@@ -102,6 +102,8 @@ export interface EngineRuntime {
    * the call), then tells the listener. Idempotent by `eventId`, like every append.
    */
   append(entry: AuditInput & { eventId: string; callId: string }): Promise<void>;
+  /** Appends a call's pending ledger entries, in order. */
+  flushLedger(callId: string): Promise<void>;
   /** Whether the call's grant covers a scope now. */
   authorized(record: CallRecord, scope: string): boolean;
   bindRef(ref: string, callId: string): Promise<void>;

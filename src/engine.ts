@@ -394,6 +394,7 @@ export class Engine {
         const reason = slice === undefined ? null : (module.blocksEnd?.(slice) ?? null);
         if (reason !== null) throw new EngineError("precondition_failed", `the call cannot end yet: ${reason}`);
       }
+      trace.settleUnrecorded(draft);
       draft.apply({ type: "call_ended", at: this.#now() });
       const flow = draft.record.flow;
       if (flow !== null && flow.status === "running") {
@@ -482,6 +483,7 @@ export class Engine {
       update: (callId, fn) => this.#update(callId, fn),
       read: (callId) => this.#read(callId),
       append: (entry) => this.#append(entry),
+      flushLedger: (callId) => this.flushLedger(callId),
       authorized: (record, scope) => this.#authorized(record, scope),
       bindRef: async (ref, callId) => {
         await this.#sessions.bindRef(this.workspaceId, ref, callId);
