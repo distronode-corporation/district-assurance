@@ -203,11 +203,14 @@ export const traceModule: AssuranceModule = {
  * then recorded, so every consent on the record can be revoked later. A store write that failed
  * stays reserved: the next `recordConsent` with the same purpose and answer resumes it with the
  * same record. A call that ends first settles it as not recorded (`settleUnrecorded`): no consent.
+ * `subjectOf` names the subject the call matched (or null), which the consent is recorded under:
+ * the engine passes it, so Trace never reads Badge's part of the call itself.
  */
 export async function recordConsent(
   rt: EngineRuntime,
   callId: string,
   input: { purpose: string; answer: "yes" | "no"; channel?: ConsentChannel },
+  subjectOf: (record: CallRecord) => string | null,
 ): Promise<ConsentRecord> {
   // Read once: the purpose a wording was found for is the one checked against the step and stored.
   const { purpose, answer, channel } = input;
@@ -234,6 +237,7 @@ export async function recordConsent(
     const record: ConsentRecord = {
       consentId: rt.ids.next("cns"),
       callId,
+      subjectKey: subjectOf(draft.record),
       purpose: wording.purpose,
       wordingVersion: wording.version,
       wordingDigest: wordingDigest(wording),

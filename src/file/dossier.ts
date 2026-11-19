@@ -8,7 +8,7 @@ import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import { hexDigestsEqual } from "../core/hash.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
-import type { EngineRuntime, FieldCipher, Locale } from "../core/runtime.ts";
+import type { CallRecord, EngineRuntime, FieldCipher, Locale } from "../core/runtime.ts";
 import type { SessionState } from "../core/session.ts";
 import { isDenseArray, isObject, unknownKeys } from "../core/shape.ts";
 import { formSpeaks, intakeDigest, isShown, missingRequired, normaliseFieldValue, shownValues, validateForm, type FieldValue, type IntakeForm, type NormaliseResult } from "./intake.ts";
@@ -47,6 +47,8 @@ export interface DossierSlice {
      * no write files it. The record is deleted by id (a tombstone) before the release completes.
      */
     releasing?: FilingFailure;
+    /** The subject's erasure count read before `filing` was reserved (RecordStore.subjectErasures). Absent on calls saved before PRV-7. */
+    erasuresSeen?: number;
   } | null;
   records: Array<{ recordId: string; formId: string; digest: string }>;
   /** The record the last confirmation filed, until another intake starts: a retried confirmation gets it back. */
@@ -265,9 +267,15 @@ async function sealed(rt: EngineRuntime, record: IntakeRecord, form: IntakeForm)
  * draft that would no longer read back the same is refused. A filing that failed anywhere after
  * the reservation (the cipher, the store, a lost write) resumes with the same record on the next
  * call; the draft stays closed to changes until it is filed. Only the encrypted record leaves the
- * engine.
+ * engine. `subjectOf` names the subject the call matched (or null), which the record is filed
+ * under: the engine passes it, so Dossier never reads Badge's part of the call itself.
  */
-export async function confirmIntake(rt: EngineRuntime, callId: string, input: { confirmedBy: "voice" | "keypad"; readBack: string }): Promise<IntakeRecord> {
+export async function confirmIntake(
+  rt: EngineRuntime,
+  callId: string,
+  input: { confirmedBy: "voice" | "keypad"; readBack: string },
+  subjectOf: (record: CallRecord) => string | null,
+): Promise<IntakeRecord> {
   rt.settings(DOSSIER);
   // Read once: the read-back digest compared and the channel filed are the values the host passed
   // at the call, not what a getter or a change to the object answers while the update waits.
@@ -276,7 +284,12 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
   if (confirmedBy !== "voice" && confirmedBy !== "keypad") throw new EngineError("invalid_input", "confirmedBy must be voice or keypad");
   // The record id and the sensitive values' keyed digests, taken before the reserving write: the
   // knowledge HMAC is asynchronous (#72). A draft changed since is refused below.
-  const before = (await rt.read(callId)).modules[DOSSIER] as unknown as DossierSlice | undefined;
+  const call = await rt.read(callId);
+  const before = call.modules[DOSSIER] as unknown as DossierSlice | undefined;
+  const records = rt.adapter("records");
+  // Read before reserving: an erasure counted after this read keeps the record out of the store.
+  const readKey = subjectOf(call);
+  const seen = readKey === null ? 0 : await records.subjectErasures(rt.workspaceId, readKey);
   const open = before?.intake ?? null;
   let prepared: { recordId: string; shown: string; covered: Record<string, FieldValue> } | null = null;
   if (open !== null && open.filing === null) {
@@ -284,12 +297,12 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
     const shown = shownValues(open.form, open.values);
     prepared = { recordId, shown: canonicalJson(shown), covered: await digestValues(rt, recordId, open.form, shown) };
   }
-  const reserved = await rt.update(callId, (draft): { record: IntakeRecord; form: IntakeForm | null } => {
+  const reserved = await rt.update(callId, (draft): { record: IntakeRecord; form: IntakeForm | null; erasuresSeen: number | undefined } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     const intake = s.intake;
     // Filed already (a retry after the last write's ledger entry failed): this write appends that
     // entry, and the same record comes back.
-    if (intake === null && s.confirmed !== null) return { record: s.confirmed, form: null };
+    if (intake === null && s.confirmed !== null) return { record: s.confirmed, form: null, erasuresSeen: undefined };
     if (intake === null) throw new EngineError("invalid_transition", "no intake is open on this call");
     // A Spanish caller confirms on the keypad: Spanish spoken answers are refused until a reviewed
     // vocabulary exists, and the Spanish read-back asks for the 1.
@@ -300,7 +313,7 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
     if (typeof readBack !== "string" || !hexDigestsEqual(readBack, heard)) {
       throw new EngineError("precondition_failed", "the draft changed since the caller heard its read-back; read it back again");
     }
-    if (intake.filing !== null) return { record: intake.filing, form: intake.form };
+    if (intake.filing !== null) return { record: intake.filing, form: intake.form, erasuresSeen: intake.erasuresSeen };
     if (!rt.authorized(draft.record, "intake.file")) throw new EngineError("scope_denied", "the grant does not cover intake.file");
     const missing = missingRequired(intake.form, intake.values);
     if (missing.length > 0) throw new EngineError("invalid_input", `required fields missing: ${missing.join(", ")}`);
@@ -312,6 +325,7 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
       recordId,
       workspaceId: rt.workspaceId,
       callId,
+      subjectKey: subjectOf(draft.record),
       formId: intake.form.formId,
       formVersion: intake.form.version,
       values,
@@ -319,8 +333,11 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
       confirmedBy,
       confirmedAt: rt.now(),
     };
+    // The count read above is for the subject matched then; a subject changed since is read again.
+    if (built.subjectKey !== readKey) throw new EngineError("conflict", "the call's subject changed while the record was confirmed; confirm it again");
     intake.filing = built;
-    return { record: built, form: intake.form };
+    intake.erasuresSeen = seen;
+    return { record: built, form: intake.form, erasuresSeen: seen };
   });
   if (reserved.form === null) return reserved.record;
   // Encrypted on every attempt: a cipher may answer differently each time, and the digest does not
@@ -359,7 +376,9 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
   if (typeof claim === "object" && "filed" in claim) return claim.filed;
   if (claim !== "claimed") throw new EngineError("precondition_failed", "the fieldCipher could not seal the record in another process; nothing was filed and the draft is gone");
   try {
-    await rt.adapter("records").putIntakeRecord(record);
+    // A write that lands after the record was erased stores nothing (RecordStore.deleteIntakeRecords),
+    // nor one whose subject was erased since the count was read (RecordStore.markSubjectErased).
+    await records.putIntakeRecord(record, reserved.erasuresSeen);
   } catch (error) {
     // The reservation is kept for a retry (the write may have landed); the claim is given up, so a
     // failing cipher is not held off by a writer that is no longer writing. Best effort.
@@ -373,20 +392,30 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
       .catch(() => undefined);
     throw error;
   }
-  const filed = await rt.update(callId, (draft) => {
+  const stored = (await records.getIntakeRecord(record.workspaceId, record.recordId)) !== null;
+  const filed = await rt.update(callId, (draft): "filed" | "released" | "erased" => {
     const s = draft.slice<DossierSlice>(DOSSIER);
-    if (s.records.some((r) => r.recordId === record.recordId)) return true;
+    if (s.records.some((r) => r.recordId === record.recordId)) return "filed";
     // Released meanwhile (this write's claim went stale): the record was deleted by id, and this
     // write stored nothing or was deleted, so nothing is filed.
-    if (s.intake?.filing?.recordId !== record.recordId || s.intake.releasing !== undefined) return false;
+    if (s.intake?.filing?.recordId !== record.recordId || s.intake.releasing !== undefined) return "released";
+    // The store kept nothing (the subject was erased): the call files nothing either, and drops
+    // the draft that holds the values.
+    if (!stored) {
+      draft.apply({ type: "intake_abandoned" });
+      s.intake = null;
+      draft.emit("intake.abandoned", "code", {});
+      return "erased";
+    }
     draft.apply({ type: "intake_confirmed", recordId: record.recordId });
     s.intake = null;
     s.confirmed = record;
     s.records.push({ recordId: record.recordId, formId: record.formId, digest: record.digest });
     draft.emit("intake.confirmed", "caller", { recordId: record.recordId, formId: record.formId, digest: record.digest, confirmedBy: record.confirmedBy });
-    return true;
+    return "filed";
   });
-  if (!filed) throw new EngineError("precondition_failed", "the fieldCipher could not seal the record in another process; nothing was filed and the draft is gone");
+  if (filed === "released") throw new EngineError("precondition_failed", "the fieldCipher could not seal the record in another process; nothing was filed and the draft is gone");
+  if (filed === "erased") throw new EngineError("precondition_failed", "the subject was erased while this record was filed; nothing was filed");
   return record;
 }
 
@@ -445,5 +474,24 @@ export async function abandonIntake(rt: EngineRuntime, callId: string): Promise<
     s.intake = null;
     s.confirmed = null;
     draft.emit("intake.abandoned", "code", {});
+  });
+}
+
+/**
+ * Drops a call's own copy of records being erased: the last confirmed record, which the call keeps
+ * so a retried confirmation gets it back. The digests in `records` stay, as on the receipt.
+ * Refused while one of them is being filed, since finishing the filing would store it again. A
+ * second confirmation of the same record whose write is still in flight once the filing finished
+ * finds no filing here: the RecordStore stores nothing for a deleted record id, so that write
+ * cannot bring the values back. Runs
+ * whether or not Dossier is on now: the call filed the record when it was.
+ */
+export async function forgetRecords(rt: EngineRuntime, callId: string, recordIds: readonly string[]): Promise<void> {
+  await rt.update(callId, (draft) => {
+    const s = draft.slice<DossierSlice>(DOSSIER);
+    if (s.intake?.filing != null && recordIds.includes(s.intake.filing.recordId)) {
+      throw new EngineError("precondition_failed", "a record of this subject is being filed on a call; confirm it first");
+    }
+    if (s.confirmed !== null && recordIds.includes(s.confirmed.recordId)) s.confirmed = null;
   });
 }

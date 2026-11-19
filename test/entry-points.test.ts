@@ -77,6 +77,7 @@ describe("entry points", () => {
       "auditLedgerContract",
       "recordStoreContract",
       "MemoryConsentStore",
+      "recordStoreErasureContract",
     ]) {
       assert.ok(name in testing, name);
     }

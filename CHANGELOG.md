@@ -189,6 +189,15 @@ All notable changes to this project are documented here. The format follows
   `acceptUpload` checks type, size and leading bytes, spends the link and asks the host's
   `DocumentScanner`; a `DocumentStore` adapter with `MemoryDocumentStore`; the reference server
   serves an upload page in English and French at `/u/:token`.
+- Access and deletion requests for one subject (PRV-7): intake records carry the matched
+  `subjectKey`, `RecordStore` gains `listIntakeRecords`, `deleteIntakeRecords`,
+  `deletePinDigest`, `markSubjectErased` and `subjectErasures` (with `recordStoreErasureContract` in
+  `district-assurance/testing`), and `putIntakeRecord` an optional `erasuresSeen`, `Engine.exportSubject` returns a signed export (its own domain, never a
+  receipt; `verifySubjectExport`), and `Engine.eraseSubject` deletes the records and the PIN digest
+  and appends `subject.erased`, leaving the ledger and receipts whole (ADR-21). A consent carries
+  the matched `subjectKey` and an export lists only that subject's consents; a deleted record id
+  is never stored again; each erasure gets its own entry, closed by `subject.erasure_completed`,
+  and a retry after a partial delete finishes the same one.
 
 ### Changed
 

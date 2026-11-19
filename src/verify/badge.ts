@@ -493,7 +493,11 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
   const number = input.callingNumber;
   if (number !== undefined && !isCallingNumber(number)) throw new EngineError("invalid_input", "callingNumber must be E.164; leave it out when the number is withheld");
   const numberKey = number === undefined ? null : await rt.hmac(`number:${number}`);
-  const subject = subjectKey === null ? null : await rt.adapter("records").getSubject(rt.workspaceId, subjectKey);
+  const onFile = subjectKey === null ? null : await rt.adapter("records").getSubject(rt.workspaceId, subjectKey);
+  // The call keeps no copy of the PIN digest: the PIN is judged against the store on every attempt,
+  // so a digest erased or reset since verification began never counts, and no call record holds it.
+  const subject = onFile === null ? null : structuredClone(onFile);
+  if (subject !== null) delete subject.pinDigest;
   await rt.update(callId, (draft) => {
     stepOfType(draft.record, "badge.verify");
     const s = draft.slice<BadgeSlice>(BADGE);

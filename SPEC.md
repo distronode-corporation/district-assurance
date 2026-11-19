@@ -367,6 +367,11 @@ the duress PIN is off unless it is set.
   read from the `RecordStore` at every attempt (not from the call's copy of the subject), so a
   reset or an enrolment since verification began counts. The entry is hashed the same way and compared in constant time; an unknown subject, a subject without
   a digest and a malformed entry do the same work and give the same answer.
+  `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`, in `SubjectRecord.pinDigest`. The
+  entry is hashed the same way and compared in constant time; an unknown subject, a subject without
+  a digest and a malformed entry do the same work and give the same answer. The digest is read from
+  the `RecordStore` on every attempt, and the call record's copy of the subject never holds it, so
+  a digest erased (section 17) or changed since verification began counts at once.
 - `verifier` mode: the host's `PinVerifier.verify({workspaceId, subjectKey, pin})` decides; the
   PIN is passed once and kept nowhere. It is asked for every attempt: for a malformed entry or an
   account a keypad cannot produce, with a stand-in (`minDigits` zeros, an HMAC subject key) whose
@@ -849,6 +854,8 @@ answer on file, a phone number, a link or card data.
 | `contact.notice_owed` | none: saved in the same write as the contact change that owes it |
 | `contact.notice_sent` | none |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
+| `subject.erased` | `recordIds`, `pinDigest` (whether one is deleted): the erasure's plan; `callId` null, actor `member` (section 17) |
+| `subject.erasure_completed` | `erasureSeq` (the `subject.erased` entry it completes); `callId` null, actor `member` (section 17) |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
 A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
@@ -1171,7 +1178,9 @@ config change mid-intake never changes what is filed; a call also keeps the form
 wordings) in force when it started. A draft being filed refuses changes. A filing that failed
 after its reservation (the store refused it, or the last write was lost) stays reserved and
 resumes with the same record on the next `confirmIntake`, so `RecordStore.putIntakeRecord` must be
-idempotent by `recordId`; two confirmations at once file one record. A confirmation retried after its record was
+idempotent by `recordId`; two confirmations at once file one record. A record carries the
+`subjectKey` Badge matched on the call when it was filed (a keypad or PIN match), or null when
+none had. A confirmation retried after its record was
 filed (its ledger entry failed) returns the same record. `endCall` is refused while a record is
 being filed. Provider idempotency keys are JSON tuples of the workspace, the call and the
 operation, so workspaces sharing an adapter never share a key. A flow attached to a running call
@@ -2155,3 +2164,85 @@ with no bank word before it is not found. Health card numbers of other provinces
 yet. Number words ("forty two", "quarante-deux") and "double" forms are planned (PAY-5). The test
 corpus is shared JSON in `test/corpus/`, one file per kind: each case gives a text, its language
 and the exact substrings a redactor must find, in order.
+## 17. Subject requests: access and deletion
+
+Two `Engine` methods the business calls from its own code, for one person's access or deletion
+request. They take no call id and are no flow step, so nothing on a call reaches them. Both take
+`{workspaceId, subjectKey}`: the engine's own workspace and a 64 lower-case hex subject key (a
+string: an array or other object holding the key is refused), each read once, else `invalid_input`
+(also for a request that is not an object); both need the `records` adapter, else `precondition_failed`. What the law requires
+in a given case is the business's to decide.
+
+The `RecordStore` lists a subject's intake records (`listIntakeRecords(workspaceId, subjectKey)`),
+deletes records by id (`deleteIntakeRecords(workspaceId, recordIds)`) and removes a subject's PIN
+digest, keeping the rest of the subject record (`deletePinDigest(workspaceId, subjectKey)`); the
+deletes are idempotent. A record filed under no subject is never listed. The store remembers each
+deleted record id (the id alone) and a later `putIntakeRecord` of it stores nothing, so a
+confirmation whose write was still in flight when the subject was erased cannot bring the values
+back. It also counts each subject's erasures (`markSubjectErased`, `subjectErasures`; the subject key
+alone): `confirmIntake` reads the count before it reserves a record and passes it to
+`putIntakeRecord(record, erasuresSeen)`, which stores nothing once the subject was erased more
+times than that, so a filing reserved before an erasure the listing missed stays out too. The
+confirmation then reads the record back: when the store kept nothing, the call files nothing
+either, drops the draft and its values (`intake.abandoned`), and the confirmation fails with
+`precondition_failed`. A call whose subject changed between that read and the reservation is
+refused with `conflict`, to be confirmed again.
+
+`exportSubject({workspaceId, subjectKey, kept?})` needs the `signer` adapter and returns:
+
+```json
+{
+  "body": {
+    "v": 1, "type": "subject_export", "exportId": "...", "workspaceId": "...", "subjectKey": "...", "issuedAt": "...",
+    "intakeRecords": [{ "recordId": "...", "subjectKey": "...", "values": {}, "...": "..." }],
+    "pinDigestOnFile": true,
+    "consents": [{ "consentId": "...", "callId": "...", "subjectKey": "<64 hex>", "purpose": "...", "answer": "yes", "...": "..." }],
+    "calls": ["..."],
+    "ledgerEntries": [{ "seq": 12, "hash": "...", "event": "intake.confirmed", "callId": "..." }],
+    "receipts": [{ "receiptId": "...", "callId": "..." }],
+    "heldByHost": [{ "what": "subject record", "reason": "..." }],
+    "kept": [{ "what": "ledger entries", "reason": "..." }],
+    "limits": ["..."]
+  },
+  "alg": "ES256", "kid": "...", "signature": "<base64url of the 64-byte r||s signature>"
+}
+```
+
+- `intakeRecords` are the subject's, values included; `pinDigestOnFile` says whether a digest is
+  on file, never the digest.
+- `calls` are the calls those records name. `consents` and `receipts` are the ones those call
+  records hold (a call record that is gone is skipped). A consent carries the `subjectKey` Badge
+  matched on the call when it was recorded (or null), and only those recorded under this subject
+  are listed: a call can match another subject later, and their consents are not this subject's. Consents join from PRV-3's `ConsentStore`
+  once it exists.
+- `ledgerEntries` are this workspace's entries (by the workspace in their `eventId`) whose
+  `detail.recordId`, `detail.consentId` or `detail.receiptId` names one of the above: ids only.
+- `heldByHost` lists the subject record, which is the host's data, and a PIN in the host's own
+  PIN store (`verifier` mode), which the engine never reads or deletes. `kept` lists, with the reason,
+  what an erase keeps: ledger entries and receipts (append-only and signed; they hold ids and
+  digests, kept as integrity records for the retention period; an unkeyed SHA-256 of a short value
+  can be confirmed by guessing), call records and consents, then each `{what, reason}` the business
+  passes in `kept` (non-empty text, else `invalid_input`). `limits` says what the export cannot
+  find, including a record filed on a call with no matched subject.
+- The signature is ES256 over `"district-assurance/subject-export/v1\n" + canonicalJson(body)`.
+  The signed bytes name the document type, so an export never verifies as a receipt (signed over
+  `canonicalJson(body)`, which starts with `{`) and a receipt never as an export.
+  `verifySubjectExport(exported, keys)` checks it as `verifyReceipt` checks a receipt.
+
+`eraseSubject({workspaceId, subjectKey})` reads the ledger once. Each erasure of a subject is
+numbered from 0, and its event ids are keyed (HMAC under the knowledge key) on the subject and that
+number. If the subject's last erasure has a `subject.erased` entry but no
+`subject.erasure_completed`, a delete failed part way: the erase carries out that entry's plan (the
+same record ids, the PIN digest if the plan says so) and appends the completion, under the same
+entry, whatever was already deleted. It then lists the subject's records and whether a PIN digest
+is on file, after counting the erasure (`markSubjectErased`, first, so a filing reserved before it
+is guarded whether or not the listing sees it). With neither, it does nothing more and returns `{erased: false}` (or the finished
+erasure). Otherwise it drops each named call record's copy of the last confirmed record (refused
+with `precondition_failed` while one of the subject's records is still being filed on a call; a
+call record that is gone is skipped), appends `subject.erased` under the next number, deletes the
+records and the PIN digest, then appends `subject.erasure_completed`. A later erasure (for example
+of a PIN digest the host put back) gets an entry of its own; two erasures at once append one plan,
+and both carry it out. It never changes
+or removes a ledger entry or a receipt, so `verifyChain` and every receipt still verify. The
+listener is not told (the entry names no call). Attempt counts live per call in the call record;
+counters per subject across calls are VER-1's, and the erase resets them once they exist.

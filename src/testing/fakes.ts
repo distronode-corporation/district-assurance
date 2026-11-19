@@ -230,6 +230,8 @@ export class MemoryRecordStore implements RecordStore {
   readonly #records = new Map<string, IntakeRecord>();
   /** Ids of deleted records: a late write of one stores nothing. */
   readonly #deleted = new Set<string>();
+  /** Erasures counted per subject: a write reserved before the latest stores nothing. */
+  readonly #erasures = new Map<string, number>();
 
   putSubject(workspaceId: string, subject: SubjectRecord): void {
     this.#subjects.set(scoped(workspaceId, subject.subjectKey), structuredClone(subject));
@@ -240,15 +242,20 @@ export class MemoryRecordStore implements RecordStore {
     return subject === undefined ? null : structuredClone(subject);
   }
 
-  async putIntakeRecord(record: IntakeRecord): Promise<void> {
+  async putIntakeRecord(record: IntakeRecord, erasuresSeen?: number): Promise<void> {
     const key = scoped(record.workspaceId, record.recordId);
     if (this.#deleted.has(key)) return;
+    if (erasuresSeen !== undefined && record.subjectKey !== null && (await this.subjectErasures(record.workspaceId, record.subjectKey)) > erasuresSeen) return;
     this.#records.set(key, structuredClone(record));
   }
 
   async getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null> {
     const record = this.#records.get(scoped(workspaceId, recordId));
     return record === undefined ? null : structuredClone(record);
+  }
+
+  async listIntakeRecords(workspaceId: string, subjectKey: string): Promise<IntakeRecord[]> {
+    return [...this.#records.values()].filter((r) => r.workspaceId === workspaceId && r.subjectKey === subjectKey).map((r) => structuredClone(r));
   }
 
   async deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void> {
@@ -282,6 +289,19 @@ export class MemoryRecordStore implements RecordStore {
     else if (subject.pinDigest !== ifPinDigest) return false;
     else subject.duressDigest = digest;
     return true;
+  }
+
+  async markSubjectErased(workspaceId: string, subjectKey: string): Promise<void> {
+    const key = scoped(workspaceId, subjectKey);
+    this.#erasures.set(key, (this.#erasures.get(key) ?? 0) + 1);
+  }
+
+  async subjectErasures(workspaceId: string, subjectKey: string): Promise<number> {
+    return this.#erasures.get(scoped(workspaceId, subjectKey)) ?? 0;
+  }
+
+  async deletePinDigest(workspaceId: string, subjectKey: string): Promise<void> {
+    delete this.#subjects.get(scoped(workspaceId, subjectKey))?.pinDigest;
   }
 }
 
@@ -337,17 +357,17 @@ export class FakePinVerifier implements PinVerifier {
   readonly #duress = new Map<string, string>();
 
   set(workspaceId: string, subjectKey: string, pin: string): void {
-    this.#pins.set(`${workspaceId}/${subjectKey}`, pin);
+    this.#pins.set(scoped(workspaceId, subjectKey), pin);
   }
 
   /** The subject's duress PIN (VER-12). */
   setDuress(workspaceId: string, subjectKey: string, pin: string): void {
-    this.#duress.set(`${workspaceId}/${subjectKey}`, pin);
+    this.#duress.set(scoped(workspaceId, subjectKey), pin);
   }
 
   async verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean; duress?: boolean }> {
     this.asked.push(input.subjectKey);
-    const key = `${input.workspaceId}/${input.subjectKey}`;
+    const key = scoped(input.workspaceId, input.subjectKey);
     return { matched: this.#pins.get(key) === input.pin, duress: this.#duress.get(key) === input.pin };
   }
 }

@@ -62,6 +62,8 @@ export const ENGINE_EVENTS = [
   "contact.notice_owed",
   "contact.notice_sent",
   "module.event",
+  "subject.erased",
+  "subject.erasure_completed",
 ] as const;
 
 export type EngineEventName = (typeof ENGINE_EVENTS)[number];

@@ -365,6 +365,12 @@ export interface IntakeRecord {
   recordId: string;
   workspaceId: string;
   callId: string;
+  /**
+   * The subject Badge matched on the call (a keypad or PIN match) when the record was filed, or
+   * null when none had. A record filed under null cannot be found for a subject's access or
+   * deletion request.
+   */
+  subjectKey: string | null;
   formId: string;
   formVersion: string;
   values: Record<string, string | number | boolean>;
@@ -379,11 +385,15 @@ export interface RecordStore {
   getSubject(workspaceId: string, subjectKey: string): Promise<SubjectRecord | null>;
   /**
    * Idempotent by `recordId`: the engine retries a write whose outcome it could not see, with the
-   * same record. Stores nothing for a `recordId` that `deleteIntakeRecords` deleted: a write still
-   * in flight when its filing was released must not bring the values back.
+   * same record. Stores nothing for a `recordId` that `deleteIntakeRecords` deleted, nor, given
+   * `erasuresSeen` (what `subjectErasures` answered before the record was reserved), when its
+   * subject has been marked erased more times than that since: a confirmation still in flight when
+   * its subject was erased must not bring the values back, whether or not the erasure saw it.
    */
-  putIntakeRecord(record: IntakeRecord): Promise<void>;
+  putIntakeRecord(record: IntakeRecord, erasuresSeen?: number): Promise<void>;
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
+  /** The intake records filed under a subject key. Records filed under null are never listed. */
+  listIntakeRecords(workspaceId: string, subjectKey: string): Promise<IntakeRecord[]>;
   /**
    * Stores a subject's PIN digest (`pinDigest`) with the id of the enrolment that chose it
    * (`pinEnrolmentId`), or removes both with null (a reset by the business), and the duress PIN
@@ -407,6 +417,15 @@ export interface RecordStore {
    * `putIntakeRecord` of it stores nothing. Idempotent: an id already gone is skipped.
    */
   deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void>;
+  /**
+   * Counts one erasure of a subject, atomically (the subject key alone is kept, no value). Every
+   * `eraseSubject` marks it before it looks for the subject's records.
+   */
+  markSubjectErased(workspaceId: string, subjectKey: string): Promise<void>;
+  /** How many times a subject was marked erased: 0 for one never erased. */
+  subjectErasures(workspaceId: string, subjectKey: string): Promise<number>;
+  /** Removes the subject's `pinDigest` and keeps the rest of the subject record, which is the host's. Idempotent. */
+  deletePinDigest(workspaceId: string, subjectKey: string): Promise<void>;
 }
 
 /** How a consent was given or revoked: on the call, by text, or on the host's dashboard. */
@@ -416,6 +435,11 @@ export type ConsentChannel = "call" | "text" | "web";
 export interface ConsentRecord {
   consentId: string;
   callId: string;
+  /**
+   * The subject Badge matched on the call (a keypad or PIN match) when the consent was recorded, or
+   * null when none had. A subject's export lists only the consents recorded under its key (PRV-7).
+   */
+  subjectKey: string | null;
   purpose: string;
   wordingVersion: string;
   wordingDigest: string;
