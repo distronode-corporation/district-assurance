@@ -11,7 +11,7 @@ import { hmacSha256Hex } from "../src/core/hash.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { readPinTag } from "../src/verify/pin.ts";
 import { FakeDuressNotifier, TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig, waitOut } from "./helpers.ts";
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const DURESS = "7391";
@@ -141,6 +141,8 @@ describe("Duress PIN: what the caller sees", () => {
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     assert.equal((await t.engine.submitPin(callId, "0000")).matched, false, "a wrong PIN still fails");
+    // Past the wait VER-1 puts after a failure.
+    waitOut(t);
     assert.equal((await t.engine.submitPin(callId, DURESS)).matched, true);
     await t.engine.finishVerification(callId);
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
@@ -265,13 +267,17 @@ describe("Duress PIN: the notifier", () => {
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     const get = t.sessions.get.bind(t.sessions);
-    let reads = 0;
+    let down = false;
     t.sessions.get = async (workspaceId, id) => {
-      // The judge's two writes read the session twice; the send after the reply is the third read.
-      if (++reads === 3) throw new Error("session store down");
+      // Down for the send after the reply, which is the next read.
+      if (down) {
+        down = false;
+        throw new Error("session store down");
+      }
       return get(workspaceId, id);
     };
     await t.engine.submitPin(callId, DURESS);
+    down = true;
     await settle();
     assert.equal(t.notifier.told.length, 0);
     assert.equal(await t.engine.deliverDuressAlerts(callId), 1);
@@ -321,7 +327,11 @@ describe("Duress PIN: the ledger tag", () => {
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     await t.engine.submitKeypad(callId, { dob: DOB });
-    for (const pin of ["0000", PIN, DURESS]) await t.engine.submitPin(callId, pin);
+    for (const pin of ["0000", PIN, DURESS]) {
+      await t.engine.submitPin(callId, pin);
+      // Past the wait VER-1 puts after a failure.
+      waitOut(t);
+    }
     const entries = (await t.ledger.list()).filter((e) => e.event === "verification.factor");
     assert.deepEqual(
       entries.map((e) => t.engine.readPinTag(e)),
@@ -488,8 +498,8 @@ describe("Duress PIN: settings", () => {
       "pin.duress.refuseScopes must list scopes (it may be empty)",
     ]);
     assert.deepEqual(module.validateSettings(settings({ refuseScopes: ["a", "a"] })), ["pin.duress.refuseScopes has duplicates"]);
-    assert.deepEqual(module.requiredAdapters(settings({ refuseScopes: [] })), ["records", "duressNotifier"]);
-    assert.deepEqual(module.requiredAdapters({ factors: ["keypad_knowledge"], pin: settings({ refuseScopes: [] }).pin }), ["records"]);
+    assert.deepEqual(module.requiredAdapters(settings({ refuseScopes: [] })), ["records", "counters", "duressNotifier"]);
+    assert.deepEqual(module.requiredAdapters({ factors: ["keypad_knowledge"], pin: settings({ refuseScopes: [] }).pin }), ["records", "counters"]);
     assert.throws(
       () => createTestEngine({ config: duressConfig() }),
       (e: unknown) => e instanceof ConfigError && e.problems.includes("modules.badge: needs the duressNotifier adapter, which the engine does not have"),

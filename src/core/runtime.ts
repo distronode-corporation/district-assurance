@@ -38,7 +38,7 @@ export interface EngineAdapters {
   payments?: PaymentLinks;
   signer?: ReceiptSigner;
   pinVerifier?: PinVerifier;
-  /** Failure counters across calls (VER-1). A PIN reset clears the subject's PIN counters. */
+  /** Failures across calls, shared by every engine of the workspace. Badge needs it when a factor the caller enters is on; a PIN reset clears the subject's PIN counters. */
   counters?: AttemptCounters;
   /** Told of a duress PIN entry (VER-12). Needed while Badge's `pin.duress` is set. */
   duressNotifier?: DuressNotifier;

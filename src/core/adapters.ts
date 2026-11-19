@@ -100,6 +100,44 @@ export interface DuressNotifier {
   notify(input: DuressAlert): Promise<void>;
 }
 
+/**
+ * Which failures a counter holds: one factor kind, in one workspace, for one subject (its subject
+ * key) or one calling number (`numberKeyFor`, a keyed hash: the store never sees the number).
+ */
+export interface AttemptCounterKey {
+  workspaceId: string;
+  /** The factor kind, for example `pin`. */
+  factor: string;
+  scope: "subject" | "number";
+  /** The subject key, or the keyed hash of the calling number. 64 lower-case hex characters. */
+  key: string;
+}
+
+/**
+ * Failed attempts across calls, for lockouts that outlive a call (VER-1). Every engine of a
+ * workspace, in every process, must share one store. Times are ISO 8601. `attemptCountersContract`
+ * in `district-assurance/testing` is the suite a durable store must pass; `MemoryAttemptCounters`
+ * is the reference.
+ */
+export interface AttemptCounters {
+  /** The failures recorded for the key at or after `since`, in the order they were recorded. */
+  get(key: AttemptCounterKey, since: string): Promise<string[]>;
+  /**
+   * Records one failure at `at`, and returns the failures at or after `since` in the order they
+   * were recorded, this one last, in one atomic step: of two concurrent failures, the second sees
+   * the first. The store may forget failures before `since`.
+   */
+  recordFailure(key: AttemptCounterKey, at: string, since: string): Promise<string[]>;
+  /**
+   * Forgets one failure recorded at `at` and keeps every other, in one atomic step, so a failure
+   * another attempt records meanwhile is never lost; nothing when there is none. After a pass, it
+   * takes the passing attempt's own failure off the calling number.
+   */
+  removeFailure(key: AttemptCounterKey, at: string): Promise<void>;
+  /** Forgets every failure for the key: after a pass, or when the business lifts a lock. */
+  reset(key: AttemptCounterKey): Promise<void>;
+}
+
 /** A stored call session and its version. The version goes up by one on every write. */
 export interface StoredSession {
   version: number;
@@ -170,28 +208,6 @@ export interface RecordStore {
    * subject the store does not have is left alone, and the answer is false.
    */
   putDuressDigest(workspaceId: string, subjectKey: string, digest: string | null, ifPinDigest?: string): Promise<boolean>;
-}
-
-/**
- * Which failures a counter holds: one factor kind, in one workspace, for one subject (its subject
- * key) or one calling number (`numberKeyFor`, a keyed hash: the store never sees the number).
- */
-export interface AttemptCounterKey {
-  workspaceId: string;
-  /** The factor kind, for example `pin`. */
-  factor: string;
-  scope: "subject" | "number";
-  /** The subject key, or the keyed hash of the calling number. 64 lower-case hex characters. */
-  key: string;
-}
-
-/**
- * Failure counters across calls (VER-1). Stand-in: only `reset`, which a PIN reset needs, with
- * VER-1's own key and signature, so VER-1's full interface replaces it unchanged.
- */
-export interface AttemptCounters {
-  /** Forgets every failure for the key: after a pass, or when the business lifts a lock. */
-  reset(key: AttemptCounterKey): Promise<void>;
 }
 
 export interface AuditInput {

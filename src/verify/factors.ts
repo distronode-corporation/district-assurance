@@ -7,6 +7,7 @@ import { hexDigestsEqual, hmacSha256Hex } from "../core/hash.ts";
 import { FACTOR_KINDS, FORBIDDEN_FACTOR_KINDS, type VerificationPolicy } from "../core/policy.ts";
 import { isIntegerIn } from "../core/shape.ts";
 import type { AdapterName, EngineRuntime } from "../core/runtime.ts";
+import type { LockoutSettings } from "./counters.ts";
 import { isKeypadEntry, judgeKeypadWith } from "./knowledge.ts";
 
 /** What the caller entered: one string (a PIN), or one value per field (keypad knowledge). */
@@ -82,6 +83,8 @@ export interface BadgeSettings {
   grantTtlSeconds?: number;
   /** Required when `pin` is on. */
   pin?: PinSettings;
+  /** Waits and locks across calls for the factors the caller enters (counters.ts). Default: the floors. */
+  lockout?: LockoutSettings;
 }
 
 /** How each built-in factor reaches the engine. Planned factors cannot be turned on yet. */

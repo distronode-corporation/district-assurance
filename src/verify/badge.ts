@@ -20,7 +20,7 @@ import {
   type FactorKind,
   type ScopeClass,
 } from "../core/policy.ts";
-import type { CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
+import type { CallDraft, CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
 import { canApply, type SessionState } from "../core/session.ts";
 import { isIntegerIn, isObject, isStringArray, unknownKeys } from "../core/shape.ts";
 import type { IdentityOutcome } from "../webhooks/stripe.ts";
@@ -36,6 +36,7 @@ import {
   type PinOutcome,
   type PinSettings,
 } from "./factors.ts";
+import { counterKeys, currentLock, isCallingNumber, lockoutOf, lockoutSettingsErrors, forgetPass, recordFailures, type Lock } from "./counters.ts";
 import { isKeypadEntry } from "./knowledge.ts";
 
 export const BADGE = "badge";
@@ -52,6 +53,8 @@ export interface BadgeVerifyStep extends FlowStep {
 export interface BadgeSlice {
   subjectKey: string | null;
   subject: SubjectRecord | null;
+  /** The keyed hash of the calling number the host gave, for the counters across calls; null without one. */
+  numberKey: string | null;
   /** Judged attempts per factor kind on this call. */
   attempts: Record<string, number>;
   /** Tries at choosing a PIN on this call (`enrolPin`), counted before each is judged. Absent until the first. */
@@ -107,7 +110,14 @@ export interface VerificationResult {
 
 export type OutcomeResult = { applied: false } | { applied: true; callId: string };
 
-const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin"];
+/**
+ * Who verification is for, and optionally the number the call came from (E.164, from the carrier,
+ * never from the model). The number is never a factor: it only keys a counter across calls, so a
+ * caller trying one account after another from one line is locked out too.
+ */
+export type BeginVerificationInput = ({ accountNumber: string } | { subjectKey: string }) & { callingNumber?: string };
+
+const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin", "lockout"];
 const PIN_KEYS = ["mode", "minDigits", "maxDigits", "maxAttemptsPerCall", "duress"];
 
 /** The subject whose number links may go to: only once a keypad or PIN factor matched. */
@@ -168,6 +178,7 @@ export class BadgeModule implements AssuranceModule {
     if (settings.grantTtlSeconds !== undefined && !isIntegerIn(settings.grantTtlSeconds, 1, 3600)) {
       errors.push("grantTtlSeconds must be an integer from 1 to 3600");
     }
+    errors.push(...lockoutSettingsErrors(settings.lockout));
     return errors;
   }
 
@@ -175,7 +186,10 @@ export class BadgeModule implements AssuranceModule {
     const s = settings as BadgeSettings;
     const adapters = new Set<string>(this.manifest.adapters);
     for (const kind of s.factors) {
-      for (const a of BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS]?.adapters ?? this.#plugins.get(kind)!.adapters) adapters.add(a);
+      const builtIn = BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS];
+      for (const a of builtIn?.adapters ?? this.#plugins.get(kind)!.adapters) adapters.add(a);
+      // A factor the caller enters (a plug-in always is) is counted across calls.
+      if (builtIn?.entered !== false) adapters.add("counters");
     }
     if (s.pin?.mode === "verifier" && s.factors.includes("pin")) adapters.add("pinVerifier");
     if (s.pin?.duress !== undefined && s.factors.includes("pin")) adapters.add("duressNotifier");
@@ -228,6 +242,7 @@ export class BadgeModule implements AssuranceModule {
     const initial: BadgeSlice = {
       subjectKey: null,
       subject: null,
+      numberKey: null,
       attempts: {},
       knowledgeMatched: false,
       carrier: null,
@@ -330,9 +345,11 @@ function maxAttempts(rt: EngineRuntime, module: BadgeModule, kind: string): numb
 /**
  * Starts (or restarts) verification. The subject is either the account number the caller keyed
  * (hashed under the knowledge key) or a subject key the host's code chose, for example the owner
- * of the line. Choosing the subject is not a factor: only factors raise the level.
+ * of the line. Choosing the subject is not a factor: only factors raise the level. With a calling
+ * number, failures are also counted against that number across calls; a later restart that
+ * leaves it out keeps it.
  */
-export async function beginVerification(rt: EngineRuntime, callId: string, input: { accountNumber: string } | { subjectKey: string }): Promise<void> {
+export async function beginVerification(rt: EngineRuntime, callId: string, input: BeginVerificationInput): Promise<void> {
   rt.settings(BADGE);
   let subjectKey: string | null;
   if ("subjectKey" in input) {
@@ -341,6 +358,9 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
   } else {
     subjectKey = isKeypadEntry(input.accountNumber) ? rt.hmac(`subject:${input.accountNumber}`) : null;
   }
+  const number = input.callingNumber;
+  if (number !== undefined && !isCallingNumber(number)) throw new EngineError("invalid_input", "callingNumber must be E.164; leave it out when the number is withheld");
+  const numberKey = number === undefined ? null : rt.hmac(`number:${number}`);
   const subject = subjectKey === null ? null : await rt.adapter("records").getSubject(rt.workspaceId, subjectKey);
   await rt.update(callId, (draft) => {
     stepOfType(draft.record, "badge.verify");
@@ -359,22 +379,50 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
     }
     s.subjectKey = subjectKey;
     s.subject = subject;
+    if (numberKey !== null) s.numberKey = numberKey;
     draft.emit("verification.started", "code", { subject: "subjectKey" in input ? "host" : "account" });
   });
 }
 
+/** Refuses an attempt the call cannot take now: a factor that is off or off-step, a phase that is not verifying, a restarted verification. */
+function assertAttempt(rt: EngineRuntime, draft: CallDraft, kind: string, epoch: number): BadgeSlice {
+  allowFactor(rt, draft.record, kind);
+  draft.assertCan({ type: "factor_recorded", factor: { kind, passed: false, at: rt.now() } });
+  const s = draft.slice<BadgeSlice>(BADGE);
+  assertSameVerification(s, epoch);
+  return s;
+}
+
+/** Answers `locked` without judging, and says so in the ledger: which counter and the factor, never a value. */
+async function refuseLocked(rt: EngineRuntime, callId: string, kind: string, epoch: number, lock: Lock): Promise<KeypadResult> {
+  await rt.update(callId, (draft) => {
+    assertAttempt(rt, draft, kind, epoch);
+    draft.emit("verification.locked", "code", { kind, scope: lock.scope, hard: lock.hard, until: lock.until });
+  });
+  return { matched: false, locked: true };
+}
+
 /**
- * Judges one entered factor: keypad knowledge, the PIN, or a plug-in. The attempt is counted
- * first; after the factor's limit the line stops judging, even the right answer.
+ * Judges one entered factor: keypad knowledge, the PIN, or a plug-in. The counters across calls
+ * are read first, and a locked subject or number is refused without judging or counting. Then the
+ * attempt is counted on the call and as a failure across calls, both before it is judged; an
+ * accepted pass forgets the subject's failures and its own on the number. After the factor's limit the line stops judging, even the right answer.
  */
 export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callId: string, kind: string, entry: FactorEntry): Promise<KeypadResult> {
   const builtIn = BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS];
   const plugin = module.plugin(kind);
   if (builtIn?.entered !== true && plugin === undefined) throw new EngineError("invalid_input", `${kind} is not a factor the caller enters`);
+  const before = await rt.read(callId);
+  allowFactor(rt, before, kind);
+  const current = before.modules[BADGE] as unknown as BadgeSlice | undefined;
+  if (current === undefined) throw new EngineError("module_disabled", `${BADGE} was off when this call started`);
+  const counters = rt.adapter("counters");
+  const lockout = lockoutOf(rt.settings<BadgeSettings>(BADGE).lockout);
+  const keys = counterKeys(rt.workspaceId, kind, current);
+  const lock = await currentLock(counters, lockout, keys, rt.clock.now());
+  if (lock !== null) return refuseLocked(rt, callId, kind, current.epoch, lock);
   const reserved = await rt.update(callId, (draft) => {
-    allowFactor(rt, draft.record, kind);
-    draft.assertCan({ type: "factor_recorded", factor: { kind, passed: false, at: rt.now() } });
-    const s = draft.slice<BadgeSlice>(BADGE);
+    const s = assertAttempt(rt, draft, kind, current.epoch);
     const max = maxAttempts(rt, module, kind);
     const used = s.attempts[kind] ?? 0;
     if (used >= max) return null;
@@ -382,18 +430,31 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch };
   });
   if (reserved === null) return { matched: false, locked: true };
+  const at = rt.clock.now();
+  const recorded = await recordFailures(counters, lockout, keys, at);
+  // Another attempt, on this call or another, locked the subject or number since they were read.
+  // This entry is not judged, so it gives back the call's attempt it reserved, like one refused up front.
+  if (recorded.raced !== null) {
+    await rt.update(callId, (draft) => {
+      const s = draft.slice<BadgeSlice>(BADGE);
+      s.attempts[kind] = Math.max(0, s.attempts[kind]! - 1);
+    });
+    return refuseLocked(rt, callId, kind, reserved.epoch, recorded.raced);
+  }
   const input = { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey, subject: reserved.subject, entry, hmac: (d: string) => rt.hmac(d) };
   const settings = rt.settings<BadgeSettings>(BADGE);
   let outcome: PinOutcome;
   if (kind === "pin") outcome = await judgePin(rt, settings.pin as PinSettings, input);
   else outcome = (kind === "keypad_knowledge" ? await judgeKeypad(rt.policy, input) : (await plugin!.judge(input)) === true) ? "pass" : "fail";
   // A duress entry is a pass everywhere the caller can reach: the factor, the level, the grant, the
-  // events and the receipt. Only the call record's `duress` and the PIN entry's keyed tag differ.
+  // events, the receipt and the counters across calls. Only the call record's `duress` and the PIN
+  // entry's keyed tag differ.
   const passed = outcome !== "fail";
+  const hard = passed ? null : recorded.hard;
   const stale = await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
-    const at = rt.now();
-    const factor = { kind, passed, at };
+    const now = rt.now();
+    const factor = { kind, passed, at: now };
     // A duress entry is recorded against the call, not the verification: it stands, and its alert is
     // owed, even if verification restarted or the call moved on while it was judged. The engine sends
     // the alert after this write (and retries it until the notifier answers).
@@ -402,7 +463,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
       // Unique without the id generator: the call and the number of this duress entry on it, which
       // the compare-and-set write makes one per entry across every engine.
       s.duressEntries = (s.duressEntries ?? 0) + 1;
-      s.duressAlerts = [...(s.duressAlerts ?? []), { alertId: JSON.stringify(["duress", callId, s.duressEntries]), subjectKey: reserved.subjectKey!, at }];
+      s.duressAlerts = [...(s.duressAlerts ?? []), { alertId: JSON.stringify(["duress", callId, s.duressEntries]), subjectKey: reserved.subjectKey!, at: now }];
     }
     // Otherwise the result is applied only to the verification it was judged for, as for any factor;
     // a stale one is refused with the same error either way, after the write.
@@ -411,10 +472,15 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     draft.apply({ type: "factor_recorded", factor });
     if (passed && KNOWLEDGE_FACTORS.includes(kind)) s.knowledgeMatched = true;
     draft.emit("verification.factor", "code", { kind, passed }, kind === "pin" ? outcome : undefined);
+    if (hard !== null) draft.emit("verification.locked", "code", { kind, scope: hard.scope, hard: true, until: hard.until });
     return null;
   });
+  // A stale entry's failure stays counted across calls, as for any entry that was not accepted.
   if (stale !== null) throw stale;
-  return { matched: passed, locked: !passed && reserved.last };
+  // Only once the result is accepted. The number keeps its failures but this attempt's own: they
+  // may be against other accounts, so a pass on this one must not clear them.
+  if (passed) await forgetPass(counters, keys, at);
+  return { matched: passed, locked: !passed && (reserved.last || hard !== null) };
 }
 
 /** Asks the carrier about the number on file, never the calling number. Only after a keypad or PIN match. */
