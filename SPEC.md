@@ -577,11 +577,11 @@ reason, idempotencyKey})`, and committed in another write with the provider's an
 payment has a sequence number, 1 for its first and one more for each after (a failed one keeps
 its number), and its key is `[workspaceId, callId, paymentId, "refund", sequence]`. `sequence`
 is required: a missing one, or anything but an integer of 1 or more, is `invalid_input` before any
-write, so a host that retries can never refund twice. The same number again (the host lost the
-engine's answer) resumes that refund with its key while it is in flight, or gives its saved result
+write. A host that retries after a lost answer must reuse that refund's number: the same number again resumes that refund with its key while it is in flight, or gives its saved result
 back once it was committed, and never refunds again (another amount for it is `invalid_input`);
-the next number starts a new refund, any other number is `invalid_input`, and a new number while
-another refund is in flight is `precondition_failed`. A refund still
+the next number starts a new refund (sent with a new key and limited to the amount not yet
+refunded, so a retry under the next number refunds again), any other number is `invalid_input`,
+and a new number while another refund is in flight is `precondition_failed`. A refund still
 in flight is resumed with its own key before the dispute check, which is for new refunds: a refund
 the provider made whose answer was lost is learned even if a dispute opened since. An adapter
 answers a refund the provider refused as `failed` and throws only when the answer was lost: a

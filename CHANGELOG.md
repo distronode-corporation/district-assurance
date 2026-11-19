@@ -177,7 +177,8 @@ All notable changes to this project are documented here. The format follows
   - `refundPayment` requires a `sequence` (the refund's number for the payment, an integer of 1 or
     more; anything else is `invalid_input` before any write): the refund's key is the payment and
     that number, saved before the provider is asked, so a retry after a lost answer resumes the same
-    key or gets the saved result back, and refunds once. Breaking for hosts, before v1.
+    key or gets the saved result back, and refunds once, when the retry reuses the same number.
+    Breaking for hosts, before v1.
   - A newer dispute snapshot that changes nothing still moves its time on; a Stripe event whose
     `created` is past what a `Date` holds is malformed, not a throw.
   - `requestPayment` checks a saved step's mode and link life against this engine's adapter,
