@@ -387,27 +387,31 @@ export class Engine {
    */
   async unlock(input: UnlockInput): Promise<void> {
     if (typeof input !== "object" || input === null) throw new EngineError("invalid_input", "unlock takes the counter a lock notice named and the member");
+    // Each field read once, and only the plain copy passed on: a getter read again could change a
+    // value after it was checked (the card-number check, the ledger, the digest, the counter cleared).
+    const { workspaceId, factor, scope, key, memberId }: { [K in keyof UnlockInput]: unknown } = input;
     const errors: string[] = [];
-    if (input.workspaceId !== this.workspaceId) errors.push("workspaceId is not this engine's workspace");
-    if (!this.#badge.manifest.provides.factors.includes(input.factor)) errors.push("factor is not an installed factor kind");
-    if (input.scope !== "subject" && input.scope !== "number") errors.push("scope must be subject or number");
+    if (workspaceId !== this.workspaceId) errors.push("workspaceId is not this engine's workspace");
+    if (typeof factor !== "string" || !this.#badge.manifest.provides.factors.includes(factor)) errors.push("factor is not an installed factor kind");
+    if (scope !== "subject" && scope !== "number") errors.push("scope must be subject or number");
     // Strings only: a regex test turns an array or an object into a string, which would pass here,
     // be recorded, and then clear no counter.
-    if (typeof input.key !== "string" || !COUNTER_KEY.test(input.key)) errors.push("key must be 64 lower-case hex characters");
-    if (typeof input.memberId !== "string" || !MEMBER_ID.test(input.memberId)) errors.push("memberId must be an opaque id: 1 to 64 of letters, digits, '.', '_', '-'");
+    if (typeof key !== "string" || !COUNTER_KEY.test(key)) errors.push("key must be 64 lower-case hex characters");
+    if (typeof memberId !== "string" || !MEMBER_ID.test(memberId)) errors.push("memberId must be an opaque id: 1 to 64 of letters, digits, '.', '_', '-'");
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+    const counter: AttemptCounterKey = { workspaceId: this.workspaceId, factor: factor as string, scope: scope as AttemptCounterKey["scope"], key: key as string };
     const counters = this.#adapters.counters;
     if (counters === undefined) throw new EngineError("precondition_failed", "the engine has no counters adapter, so nothing is locked");
     // Checked before the digest goes in: the digest is the engine's own hex, never card data.
-    if (detailCarriesCardNumber({ memberId: input.memberId })) throw new EngineError("invalid_input", "audit detail must never carry a card number");
+    if (detailCarriesCardNumber({ memberId: memberId as string })) throw new EngineError("invalid_input", "audit detail must never carry a card number");
     // The counter by a keyed digest only the business can match (unlockedCounter with its knowledge
     // key), never the key itself, as duress.cleared names its subject.
-    const detail = { kind: input.factor, scope: input.scope, counter: unlockedCounter(this.#key, input), memberId: input.memberId };
+    const detail = { kind: counter.factor, scope: counter.scope, counter: unlockedCounter(this.#key, counter), memberId: memberId as string };
     // No event id: one from the id generator repeats when a host's generator does (a restart, a
     // second process), and the ledger would take the repeat for an append already done, leaving this
     // unlock unrecorded. Each unlock is its own entry, as a PIN reset is.
     await this.#adapters.ledger.append({ callId: null, actor: "member", event: "verification.unlocked", at: this.#now(), detail });
-    await unlockCounter(counters, { workspaceId: this.workspaceId, factor: input.factor, scope: input.scope, key: input.key });
+    await unlockCounter(counters, counter);
   }
 
   // ---- Dossier (file) ----------------------------------------------------------------------

@@ -138,3 +138,28 @@ describe("#118 hostile: notices", () => {
     assert.equal(one.notifier.notices.length, 1);
   });
 });
+
+describe("#118 double reads", () => {
+  it("R10 unlock reads each field once: a getter cannot pass the checks and then record or clear another counter or member", async () => {
+    const t = alerted();
+    await t.engine.submitPin(await call(t), "0000");
+    const reads: Record<string, number> = {};
+    const input = { ...OK } as Record<string, unknown>;
+    const swaps: Record<string, unknown> = { key: "f".repeat(64), memberId: "4242424242424242", factor: "keypad_knowledge", scope: "number", workspaceId: "ws_other" };
+    for (const [field, then] of Object.entries(swaps)) {
+      const first = (OK as Record<string, unknown>)[field];
+      Object.defineProperty(input, field, {
+        enumerable: true,
+        get() {
+          reads[field] = (reads[field] ?? 0) + 1;
+          return reads[field] === 1 ? first : then;
+        },
+      });
+    }
+    await t.engine.unlock(input as typeof OK);
+    assert.deepEqual(reads, { workspaceId: 1, factor: 1, scope: 1, key: 1, memberId: 1 });
+    const last = (await t.ledger.list()).at(-1)!;
+    assert.deepEqual([last.detail.kind, last.detail.scope, last.detail.memberId], ["pin", "subject", "member_42"]);
+    assert.deepEqual(await t.counters.get({ workspaceId: "ws_test", factor: "pin", scope: "subject", key: SUBJECT }, LONG_AGO), [], "the counter checked is the one cleared");
+  });
+});
