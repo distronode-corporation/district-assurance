@@ -581,3 +581,11 @@ describe("Duress PIN: races and broken subjects (iMac hostile pass, #124)", () =
     assert.equal(t.notifier.told.length, 0);
   });
 });
+
+describe("Duress PIN: the synchronous tag reader (#124 with #72)", () => {
+  it("reads nothing from an entry that is not a tagged PIN factor, or whose tag no outcome makes", () => {
+    const hmac = () => "0".repeat(64);
+    assert.equal(readPinTag(hmac, { event: "call.started", detail: {} }), null);
+    assert.equal(readPinTag(hmac, { eventId: "e", event: "verification.factor", detail: { kind: "pin", tag: "1".repeat(64) } }), null, "no outcome matches");
+  });
+});

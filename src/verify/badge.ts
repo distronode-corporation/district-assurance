@@ -253,9 +253,8 @@ export class BadgeModule implements AssuranceModule {
     } else {
       if (new Set(settings.factors).size !== settings.factors.length) errors.push("factors has duplicates");
       for (const kind of settings.factors) {
+        // No built-in factor is planned any more (VER-2 and VER-3 are built), so none is refused as unbuilt.
         if (!known.includes(kind)) errors.push(`factor ${kind} is not installed`);
-        const planned = BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS]?.planned;
-        if (planned !== undefined) errors.push(`factor ${kind} is not built yet (${planned})`);
       }
       if (settings.factors.includes("pin")) errors.push(...pinSettingsErrors(settings.pin));
     }
