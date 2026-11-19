@@ -37,8 +37,8 @@ function signerWithoutKid(keyId: string): ReceiptSigner {
     algorithm: inner.algorithm,
     sign: (payload) => inner.sign(payload),
     publicJwk: () => {
-      const { kid: _kid, ...rest } = inner.publicJwk() as JsonWebKey & { kid?: string };
-      return { ...rest, kid: "not-the-key-id" } as JsonWebKey;
+      const { kid: _kid, ...rest } = inner.publicJwk() as ReturnType<ReceiptSigner["publicJwk"]> & { kid?: string };
+      return { ...rest, kid: "not-the-key-id" } as ReturnType<ReceiptSigner["publicJwk"]>;
     },
   };
 }
