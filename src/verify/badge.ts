@@ -54,8 +54,11 @@ export interface BadgeSlice {
   attempts: Record<string, number>;
   /** Tries at choosing a PIN on this call (`enrolPin`), counted before each is judged. Absent until the first. */
   pinEnrolments?: number;
-  /** A PIN digest this call is storing and has not yet recorded as enrolled (`pin.enrolled`). Never the digits. */
-  pinPending?: { subjectKey: string; digest: string };
+  /**
+   * The PIN digests this call's tries are storing and have not yet recorded as enrolled
+   * (`pin.enrolled`), one entry per try. Never the digits. At most `maxAttemptsPerCall` entries.
+   */
+  pinPending?: Array<{ subjectKey: string; digest: string }>;
   /** A keypad or PIN factor matched since verification last started from nothing. */
   knowledgeMatched: boolean;
   carrier: CarrierSignalReport | null;

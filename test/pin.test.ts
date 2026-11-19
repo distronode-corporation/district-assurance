@@ -417,6 +417,91 @@ describe("PIN enrolment and reset (VER-6)", () => {
     await assert.rejects(t.engine.enrolPin(callId, { pin: CHOSEN, confirm: CHOSEN }), rejects("precondition_failed", /only the business/), "already finished");
   });
 
+  it("refuses a retry of the losing enrolment of the same PIN, so pin.enrolled is written once (CodeRabbit, PR 74)", async () => {
+    const t = enrolSetup();
+    const loser = await verified(t);
+    const winner = await verified(t);
+    const put = t.records.putPinDigest.bind(t.records);
+    let raced = false;
+    t.records.putPinDigest = async (workspaceId, subjectKey, digest) => {
+      if (!raced) {
+        raced = true;
+        assert.deepEqual(await t.engine.enrolPin(winner, { pin: CHOSEN, confirm: CHOSEN }), { enrolled: true });
+      }
+      return put(workspaceId, subjectKey, digest);
+    };
+    await assert.rejects(t.engine.enrolPin(loser, { pin: CHOSEN, confirm: CHOSEN }), rejects("precondition_failed", /only the business/));
+    await assert.rejects(t.engine.enrolPin(loser, { pin: CHOSEN, confirm: CHOSEN }), rejects("precondition_failed", /only the business/), "the retry");
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "pin.enrolled").length, 1);
+  });
+
+  it("finishes an enrolment stored on the call's last try, and nothing else past the limit (CodeRabbit, PR 74)", async () => {
+    const t = enrolSetup();
+    const callId = await verified(t);
+    for (let i = 0; i < 4; i++) assert.deepEqual(await t.engine.enrolPin(callId, { pin: "1111", confirm: "1111" }), { enrolled: false, reason: "weak" });
+    const put = t.records.putPinDigest.bind(t.records);
+    const cas = t.sessions.compareAndSet.bind(t.sessions);
+    t.records.putPinDigest = async (workspaceId, subjectKey, digest) => {
+      t.records.putPinDigest = put;
+      t.sessions.compareAndSet = async () => {
+        t.sessions.compareAndSet = cas;
+        throw new Error("session store down");
+      };
+      return put(workspaceId, subjectKey, digest);
+    };
+    await assert.rejects(t.engine.enrolPin(callId, { pin: CHOSEN, confirm: CHOSEN }), /session store down/, "the fifth and last try");
+    assert.deepEqual(await t.engine.enrolPin(callId, { pin: "6094", confirm: "6094" }), { enrolled: false, reason: "locked" }, "another PIN past the limit");
+    assert.deepEqual(await t.engine.enrolPin(callId, { pin: CHOSEN, confirm: CHOSEN }), { enrolled: true });
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "pin.enrolled").length, 1);
+    assert.deepEqual(await t.engine.enrolPin(callId, { pin: CHOSEN, confirm: CHOSEN }), { enrolled: false, reason: "locked" }, "nothing left to finish");
+  });
+
+  it("locks past the limit when the last try's store write failed, whatever PIN comes next", async () => {
+    const t = enrolSetup();
+    const callId = await verified(t);
+    for (let i = 0; i < 4; i++) await t.engine.enrolPin(callId, { pin: "1111", confirm: "1111" });
+    const put = t.records.putPinDigest.bind(t.records);
+    t.records.putPinDigest = async () => {
+      t.records.putPinDigest = put;
+      throw new Error("record store down");
+    };
+    await assert.rejects(t.engine.enrolPin(callId, { pin: CHOSEN, confirm: CHOSEN }), /record store down/);
+    for (const pin of [CHOSEN, "6094"]) assert.deepEqual(await t.engine.enrolPin(callId, { pin, confirm: pin }), { enrolled: false, reason: "locked" }, pin);
+    assert.equal((await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest, undefined);
+  });
+
+  for (const [second, label] of [["6094", "another PIN"], [CHOSEN, "the same PIN"]] as const) {
+    it(`writes pin.enrolled for the PIN stored when two tries on one call race, the second with ${label} (CodeRabbit, PR 74)`, async () => {
+      const t = enrolSetup();
+      const callId = await verified(t);
+      const put = t.records.putPinDigest.bind(t.records);
+      let calls = 0;
+      let other: Promise<unknown> = Promise.resolve();
+      let reached = (): void => undefined;
+      let release = (): void => undefined;
+      const atStore = new Promise<void>((resolve) => (reached = resolve));
+      t.records.putPinDigest = async (workspaceId, subjectKey, digest) => {
+        calls++;
+        if (calls === 1) {
+          // The second try records its pending digest and waits at the store while the first one stores.
+          other = t.engine.enrolPin(callId, { pin: second, confirm: second });
+          await atStore;
+        } else {
+          reached();
+          await new Promise<void>((resolve) => (release = resolve));
+        }
+        return put(workspaceId, subjectKey, digest);
+      };
+      assert.deepEqual(await t.engine.enrolPin(callId, { pin: CHOSEN, confirm: CHOSEN }), { enrolled: true });
+      release();
+      await assert.rejects(other, rejects("precondition_failed", /only the business/));
+      assert.equal((await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest, pinDigest(TEST_KNOWLEDGE_KEY, NEW_SUBJECT, CHOSEN));
+      assert.equal((await t.ledger.list()).filter((e) => e.event === "pin.enrolled").length, 1, "the stored PIN is in the ledger, once");
+      const stored = (await t.sessions.get("ws_test", callId))!.record as { modules: { badge: { pinPending?: unknown[] } } };
+      assert.deepEqual(stored.modules.badge.pinPending, [], "nothing left pending");
+    });
+  }
+
   it("is reset by the business only: the digest goes, the PIN counters are cleared, and the old PIN stops working", async () => {
     const resets: unknown[] = [];
     const t = enrolSetup({ adapters: { counters: { reset: async (input) => void resets.push(input) } } });
@@ -427,7 +512,7 @@ describe("PIN enrolment and reset (VER-6)", () => {
     await t.engine.resetPin(OWNER);
     assert.equal((await t.engine.submitPin(before.callId, PIN)).matched, false, "the old PIN no longer works on a call already verifying");
     assert.equal((await t.records.getSubject("ws_test", OWNER))!.pinDigest, undefined);
-    assert.deepEqual(resets, [{ workspaceId: "ws_test", kind: "pin", key: { subject: OWNER } }]);
+    assert.deepEqual(resets, [{ workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER }], "VER-1's own counter key");
     const last = (await t.ledger.list()).find((e) => e.event === "pin.reset")!;
     assert.deepEqual([last.event, last.actor, last.callId, last.detail], ["pin.reset", "member", null, { subjectKey: OWNER }]);
     const { callId } = await t.engine.startCall();
@@ -447,7 +532,7 @@ describe("PIN enrolment and reset (VER-6)", () => {
     });
     await t.engine.resetPin(OWNER);
     assert.equal((await t.records.getSubject("ws_test", OWNER))!.pinDigest, pinDigest(TEST_KNOWLEDGE_KEY, OWNER, PIN));
-    assert.equal(resets.length, 1);
+    assert.deepEqual(resets, [{ workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER }]);
     assert.equal((await t.ledger.list()).at(-1)!.event, "pin.reset");
   });
 });
