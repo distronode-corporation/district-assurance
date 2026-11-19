@@ -32,6 +32,11 @@ All notable changes to this project are documented here. The format follows
 - `auditLedgerContract` and `recordStoreContract` in `district-assurance/testing` (PRV-5), which
   the memory adapters pass; `MemoryRecordStore` now keys by JSON tuples, so two workspace and id
   pairs can no longer share a key.
+- Property and fuzz tests (SRV-7, `test/property`, `test/fuzz`) for the ledger, the keypad collector,
+  `validateConfig`, `canonicalJson`, the Stripe checks, the carrier stubs and the reference server,
+  on `fast-check` (a development dependency only), in CI and nightly (`fuzz.yml`); they found, and
+  this fixes, `parseStripeEvent` reading event types like `constructor` from `Object.prototype` and
+  `verifyChain` throwing on a stored entry changed to hold `1e999` instead of reporting the break.
 
 ### Changed
 
