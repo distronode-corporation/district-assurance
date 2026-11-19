@@ -83,6 +83,35 @@ fn)`, one compare-and-set write, and reads it with `engine.moduleState`. `fn` se
 state, can ask whether a scope is authorized, and can write `module.event` ledger entries. A
 running flow moves on when the module's `stepStatus` says its step is complete.
 
+### Writing an outside module
+
+`examples/modules/callback.ts` is a complete one: Callback books a time to call the caller back,
+with a `callback.book` step that needs the `callback.book` scope. The rules:
+
+1. **Manifest.** A name of your own (not a built-in's, not `core`, `engine`, `flow`, `module`);
+   steps named `<name>.<snake_case>`; in `scopes.needs`, the scope each step needs, and in
+   `scopes.classes` the class of any scope whose name does not imply one (`none` for scopes that
+   move nothing). Not `alwaysOn`: only Trace holds the ledger.
+2. **Validators.** `validateSettings` and `validateStep` get what came from storage or an
+   operator's editor. Check every type and answer with sentences; never throw. `stepLevel` and
+   `stepGrants` (only for a module that verifies) are asked even about a step with problems.
+3. **The call record.** `initCall` returns the module's part of a new call as plain JSON, and
+   copies in what the call must keep if the config changes mid-call (Callback keeps its window
+   ids). `enterStep` returns a JSON mark, usually a count, so `stepStatus` counts only what
+   happened during the step.
+4. **Purity.** `initCall`, `enterStep`, `stepStatus` and the optional hooks change nothing they
+   are given and keep nothing between calls. The engine calls `stepStatus` after every change to
+   the call, from any process.
+5. **Run time.** The host's code changes the part with `engine.updateModule`, through pure helpers
+   the module exports (Callback's `bookCallback`). Ledger detail from `call.emit` carries what
+   happened, never a value the caller gave, a phone number or a link.
+6. **Check it.** Run `moduleContract(module, { settings, steps })` from
+   `district-assurance/testing` under your test runner, with sample settings and a sample of each
+   step. It checks the manifest against the built-in modules, feeds the validators garbage, and
+   checks that `initCall` and `enterStep` return JSON, that `stepStatus` is pure, and that the
+   optional hooks return what they promise. `test/contracts.test.ts` runs it on Callback and on
+   the built-in modules.
+
 ## One call, step by step
 
 1. `startCall({ flow })` creates the call record in the SessionStore at version 1 and, with a flow,

@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- `moduleContract(module)` in `district-assurance/testing`, the suite an outside module should pass
+  (MOD-1), an example outside module (`examples/modules/callback.ts`) and a guide to writing one
+  in ARCHITECTURE.md.
 
 ### Changed
 

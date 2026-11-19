@@ -156,7 +156,9 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.
 - Who may edit a workspace's FlowConfig, and keeping its revisions.
 - Outside modules: their code runs inside the engine's writes and is part of the host's security
-  model.
+  model. `moduleContract` checks the shape of one (validators that never throw on a malformed
+  config, a pure `stepStatus`, JSON call state); it cannot check what the module's code does with
+  the scopes it is given, or what it writes to the ledger.
 - The person path: a caller who fails or cannot use a keypad reaches someone who can help.
 - Disclosure that an automated assistant answers and that the call is transcribed.
 - Deciding who may switch these modules on (business verification), so the line cannot be used to

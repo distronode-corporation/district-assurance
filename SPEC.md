@@ -87,6 +87,18 @@ installed, a step not prefixed with the module's name, a scope need for a step i
 provide, or a second `alwaysOn` module. `remove` refuses Trace. `Engine.remove` also refuses a
 module the config has on.
 
+`moduleContract(module, {settings?, steps?, policy?, installed?})` in `district-assurance/testing`
+is the suite an outside module should pass (MOD-1), given sample settings and a sample of each step
+it provides. It checks that the manifest passes `checkManifest` against `installed` (default: the
+built-in modules) and is JSON; that the sample settings and steps validate and `requiredAdapters`
+includes the manifest's adapters; that `validateSettings`, `validateStep`, `stepLevel` and
+`stepGrants` never throw on garbage (every JSON type, `__proto__` and method-named keys, a long
+string, deep nesting, a sparse array, a missing value, at every path of the samples) and answer
+with the right types; that `initCall` and `enterStep` return canonical JSON, the same each time;
+that `stepStatus` answers the same for the same view, in any order; and that none of these, nor
+`cannotRunStep`, `blocksEnd`, `onUntrusted` or `receiptPart`, changes a (frozen) input.
+`examples/modules/callback.ts` is an example outside module that passes it.
+
 | Built-in | Steps | Needs | Adapters |
 |---|---|---|---|
 | `badge` | `badge.verify` | | `records`; `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `pinVerifier` with `pin` in verifier mode |
