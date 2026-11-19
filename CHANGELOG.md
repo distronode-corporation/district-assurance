@@ -184,6 +184,11 @@ All notable changes to this project are documented here. The format follows
   backoff under one idempotency key per record and destination, with a `delivery.attempted` ledger
   entry per attempt and no payload in it; `FakeRecordDelivery` in `district-assurance/testing`;
   a sample receiver on the reference server at `POST /webhooks/records`.
+- Documents by text (FIL-5): `createUploadLink` makes a single-use, 30-minute link bound to a call
+  and a confirmed record, with allowed types and a size cap, storing only its token's hash;
+  `acceptUpload` checks type, size and leading bytes, spends the link and asks the host's
+  `DocumentScanner`; a `DocumentStore` adapter with `MemoryDocumentStore`; the reference server
+  serves an upload page in English and French at `/u/:token`.
 
 ### Changed
 

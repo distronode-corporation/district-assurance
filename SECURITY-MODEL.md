@@ -340,6 +340,12 @@ that is not `https:`, except `http:` on a loopback host for a local fake, so the
 network in cleartext (tested). Left to the host: whether keypad tones arrive as
 out-of-band events or as in-band audio on each carrier bridge, since in-band tones can be replayed
 acoustically and can reach speech-to-text.
+id once; the engine applies each identity session and each payment settlement once (tested).
+Identity links are single-use by the provider. A document upload link is single use by an atomic
+claim in the `DocumentStore`: of two uploads at once, one is stored (tested); it expires after 30
+minutes and is bound to one call and one confirmed record of that call (tested). Left to the
+host: whether keypad tones arrive as out-of-band events or as in-band audio on each carrier
+bridge, since in-band tones can be replayed acoustically and can reach speech-to-text.
 
 ### Skipping steps and widening grants
 
@@ -641,6 +647,17 @@ through a PCI-certified carrier service on a call path where tones never reach t
 (PAY-6), after an assessor's scoping. Nothing here is a PCI DSS attestation; a host's scope
 depends on its whole call path.
 
+### Hostile documents
+
+A caller, or whoever holds an upload link, sends malware, a script dressed as a photo, or a file
+large enough to hurt. **Controls:** an upload link takes only the types it was made for (JPEG, PNG,
+PDF), a declared type is checked against the file's leading bytes, and the size is capped per link
+(10 MiB by default, 25 MiB at most) before anything is stored (tested). Every document goes to the
+host's `DocumentScanner` before it is stored, and one it does not pass is refused and spends the
+link (tested). The reference server's upload page has no script, a CSP that allows nothing but a
+form posted back to itself, and no referrer, so the token in its address never leaves in a header.
+Left to the host: a real scanner, and serving stored documents only as downloads, never inline.
+
 ### Tampering with the record
 
 **Controls:** the ledger is hash-chained, and any changed, removed or reordered entry is detected
@@ -739,6 +756,10 @@ the key set URL or refreshes the copy.
 - **Seam in the door path.** The adapter is built (GAT-5), but putting a paid third party between
   the engine and a door in production still waits on its pricing and its handling of Canadian data
   being checked, and on one unlock proven by hand in Seam's sandbox.
+fields are refused by `validateConfig` until field encryption exists (FIL-2). PINs on file are
+HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode). Upload link
+tokens are 256 random bits and only their SHA-256 is stored, so a copy of the `DocumentStore`
+yields no working link (tested).
 
 ## Left to the host
 
@@ -817,6 +838,8 @@ the key set URL or refreshes the copy.
   adapter with a timeout that does not follow redirects, calling `deliverRecord` again (from a
   durable queue) for a record that was not delivered, and a receiver that checks the signature and
   applies each idempotency key once.
+- Until the engine sends upload links itself: texting an upload link only to the number on file,
+  never logging its token, and a `DocumentStore` whose `claimUploadLink` is atomic.
 - Outside modules: their code runs inside the engine's writes and is part of the host's security
   model. So do factor judges, the host's plug-ins and those an outside module supplies: the
   engine counts and limits their attempts, but whether a judge answers the same way for an unknown

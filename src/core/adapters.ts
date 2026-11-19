@@ -457,6 +457,76 @@ export interface RecordDelivery {
   post(input: { url: string; headers: Record<string, string>; body: string }): Promise<{ status: number }>;
 }
 
+/** The document types an upload link can take: a photo or a PDF. */
+export type DocumentType = "image/jpeg" | "image/png" | "application/pdf";
+
+/**
+ * A single-use upload link, as stored. The capability token itself is never stored: only its
+ * SHA-256, which is also the key the link is found by.
+ */
+export interface UploadLinkRecord {
+  workspaceId: string;
+  /** SHA-256 hex of the token. */
+  tokenHash: string;
+  callId: string;
+  /** The confirmed intake record the document is attached to. */
+  recordId: string;
+  /** The language of the upload page. */
+  locale: "en" | "fr";
+  allowedTypes: DocumentType[];
+  maxBytes: number;
+  /** ISO 8601. */
+  createdAt: string;
+  /** ISO 8601, 30 minutes after `createdAt`. */
+  expiresAt: string;
+  /** ISO 8601 once an upload claimed the link, null before. */
+  usedAt: string | null;
+}
+
+/** A document received through an upload link, as stored next to its bytes. */
+export interface DocumentRecord {
+  documentId: string;
+  workspaceId: string;
+  callId: string;
+  recordId: string;
+  contentType: DocumentType;
+  /** Bytes. */
+  size: number;
+  /** SHA-256 hex of the bytes. */
+  digest: string;
+  /** ISO 8601. */
+  receivedAt: string;
+}
+
+/**
+ * Where upload links and the documents they bring in live. `claimUploadLink` is the one place a
+ * link is spent, so it must be atomic: of two claims at once, one wins. Expired links are removed
+ * by `purgeExpiredUploadLinks`, which the engine calls whenever it reads one and a host may call
+ * from its own sweep (`sweepUploadLinks`).
+ */
+export interface DocumentStore {
+  /** Stores a new link. False, and nothing written, when a link with that token hash exists. */
+  putUploadLink(link: UploadLinkRecord): Promise<boolean>;
+  getUploadLink(workspaceId: string, tokenHash: string): Promise<UploadLinkRecord | null>;
+  /**
+   * Sets `usedAt` only if the link exists, is unused and has not expired at `usedAt` (`usedAt`
+   * before `expiresAt`), in one atomic step. True for the one claim that did.
+   */
+  claimUploadLink(workspaceId: string, tokenHash: string, usedAt: string): Promise<boolean>;
+  /** Removes the workspace's links whose `expiresAt` is at or before `now` (ISO 8601). Returns how many. */
+  purgeExpiredUploadLinks(workspaceId: string, now: string): Promise<number>;
+  putDocument(document: DocumentRecord, bytes: Uint8Array): Promise<void>;
+}
+
+/**
+ * The host's scanning hook (an antivirus, a content filter), asked about every document after its
+ * type, size and leading bytes passed and before it is stored. Anything but `clean: true` refuses it.
+ */
+export interface DocumentScanner {
+  /** A scanner that throws refuses the document as `scan_failed`; the error never reaches the caller. */
+  scan(input: { workspaceId: string; documentId: string; contentType: DocumentType; bytes: Uint8Array }): Promise<{ clean: boolean }>;
+}
+
 export interface AuditInput {
   /** The engine's id for this entry. A ledger appends an id once: a second append returns the first entry. */
   eventId?: string;
