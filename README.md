@@ -132,7 +132,7 @@ state machine, the config, the events and the formats.
 |---|---|
 | `POST /webhooks/stripe/identity` | Stripe Identity outcomes, signature checked first |
 | `POST /webhooks/stripe/payments` | Stripe Checkout outcomes, signature checked first, each event applied once |
-| `POST /webhooks/twilio`, `/telnyx` | `501` until carrier signature checks are built |
+| `POST /webhooks/twilio`, `/telnyx` | carrier webhooks, signature checked, then acknowledged (nothing is applied yet) |
 | `GET /receipts/:callId` | a call's signed receipt (demo only: real receipt links need capability tokens) |
 | `GET /.well-known/receipt-keys.json` | the public key set for receipts |
 | `GET /healthz` | liveness |

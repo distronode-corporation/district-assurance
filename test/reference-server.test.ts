@@ -1,5 +1,6 @@
 // The reference server, over a real socket on 127.0.0.1, and the scripted demo.
 import { strict as assert } from "node:assert";
+import { createHmac, createPublicKey, generateKeyPairSync, sign } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 
@@ -10,6 +11,10 @@ import { NotImplementedError, signStripePayload, type Engine } from "../src/inde
 import { createTestEngine, type TestEngine } from "../src/testing/index.ts";
 
 const SECRET = "whsec_test_not_a_secret";
+const TWILIO_TOKEN = "twilio_token_not_a_secret";
+const TWILIO_ORIGIN = "https://voice.example.test";
+const TELNYX_PRIVATE = generateKeyPairSync("ed25519").privateKey;
+const TELNYX_KEY = Buffer.from(createPublicKey(TELNYX_PRIVATE).export({ format: "jwk" }).x!, "base64url").toString("base64");
 
 describe("reference server", () => {
   let t: TestEngine;
@@ -18,7 +23,13 @@ describe("reference server", () => {
 
   before(async () => {
     t = createTestEngine();
-    const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [SECRET], payments: [] }, clock: t.clock, maxBodyBytes: 1024 });
+    const server = createReferenceServer({
+      engine: t.engine,
+      stripeSecrets: { identity: [SECRET], payments: [] },
+      carriers: { twilio: { authTokens: [TWILIO_TOKEN], publicOrigin: TWILIO_ORIGIN }, telnyx: { publicKeys: [TELNYX_KEY] } },
+      clock: t.clock,
+      maxBodyBytes: 1024,
+    });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     close = () => new Promise((resolve) => server.close(() => resolve()));
@@ -65,9 +76,32 @@ describe("reference server", () => {
     assert.deepEqual([res.status, await res.json()], [413, { error: "body_too_large" }]);
   });
 
-  it("answers 501 on the carrier webhooks that are not built", async () => {
-    const res = await post("/webhooks/twilio", "");
-    assert.deepEqual([res.status, await res.json()], [501, { error: "not_implemented", issue: "SRV-1", carrier: "twilio" }]);
+  it("checks Twilio signatures against the public URL, query included", async () => {
+    const body = "CallSid=CA1234567890ABCDE&Digits=1234";
+    const url = `${TWILIO_ORIGIN}/webhooks/twilio?foo=1`;
+    const signature = createHmac("sha1", TWILIO_TOKEN).update(`${url}CallSidCA1234567890ABCDEDigits1234`).digest("base64");
+    const form = { "content-type": "application/x-www-form-urlencoded" };
+    let res = await post("/webhooks/twilio?foo=1", body, { ...form, "x-twilio-signature": signature });
+    assert.deepEqual([res.status, await res.json()], [200, { received: true }]);
+    res = await post("/webhooks/twilio?foo=2", body, { ...form, "x-twilio-signature": signature });
+    assert.deepEqual([res.status, await res.json()], [400, { error: "signature", reason: "no_matching_signature" }]);
+    res = await post("/webhooks/twilio?foo=1", body, form);
+    assert.deepEqual([res.status, await res.json()], [400, { error: "signature", reason: "missing_header" }]);
+    assert.equal((await fetch(`${base}/webhooks/twilio`)).status, 405);
+  });
+
+  it("checks Telnyx signatures and their timestamp", async () => {
+    const body = '{"data":{"event_type":"call.initiated"}}';
+    const stamp = `${Math.floor(t.clock.now().getTime() / 1000)}`;
+    const signature = sign(null, Buffer.from(`${stamp}|${body}`), TELNYX_PRIVATE).toString("base64");
+    let res = await post("/webhooks/telnyx", body, { "telnyx-signature-ed25519": signature, "telnyx-timestamp": stamp });
+    assert.deepEqual([res.status, await res.json()], [200, { received: true }]);
+    res = await post("/webhooks/telnyx", `${body} `, { "telnyx-signature-ed25519": signature, "telnyx-timestamp": stamp });
+    assert.deepEqual([res.status, await res.json()], [400, { error: "signature", reason: "no_matching_signature" }]);
+    res = await post("/webhooks/telnyx", body, { "telnyx-signature-ed25519": signature, "telnyx-timestamp": `${Number(stamp) - 301}` });
+    assert.deepEqual([res.status, await res.json()], [400, { error: "signature", reason: "timestamp_out_of_tolerance" }]);
+    res = await post("/webhooks/telnyx", body);
+    assert.deepEqual([res.status, await res.json()], [400, { error: "signature", reason: "missing_header" }]);
   });
 
   it("serves a receipt once the call ended, 404 before and for unknown calls", async () => {
@@ -84,8 +118,13 @@ describe("reference server", () => {
     const broken = { receipt: () => { throw new Error("boom"); } } as unknown as Engine;
     const server = createReferenceServer({ engine: broken, stripeSecrets: { identity: [], payments: [] }, clock: t.clock });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/receipts/c1`);
+    const other = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const res = await fetch(`${other}/receipts/c1`);
     assert.deepEqual([res.status, await res.json()], [500, { error: "internal" }]);
+    for (const carrier of ["twilio", "telnyx"]) {
+      const refused = await fetch(`${other}/webhooks/${carrier}`, { method: "POST", body: "" });
+      assert.deepEqual([refused.status, await refused.json()], [400, { error: "signature", reason: "no_secret" }], `${carrier} without keys refuses everything`);
+    }
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 });

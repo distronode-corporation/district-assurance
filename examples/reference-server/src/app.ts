@@ -1,11 +1,19 @@
 // The reference server: a small node:http server around one Engine. It receives the Stripe
-// webhooks that finish a photo ID check and a payment, serves receipts and the receipt key set,
-// and answers 501 on the carrier webhooks that are not built yet. With `ui`, it also serves the
+// webhooks that finish a photo ID check and a payment, serves receipts and the receipt key set, and
+// checks the signatures of the carrier webhooks (Twilio, Telnyx). With `ui`, it also serves the
 // demo's browser UI and the routes that run the scripted demo one step at a time. Not hardened
 // for production; ROADMAP.md, "Reference server", lists what that takes.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
-import { EngineError, parseStripeEvent, verifyStripeSignature, type Clock, type Engine } from "../../../src/index.ts";
+import {
+  EngineError,
+  parseStripeEvent,
+  verifyStripeSignature,
+  verifyTelnyxSignature,
+  verifyTwilioSignature,
+  type Clock,
+  type Engine,
+} from "../../../src/index.ts";
 import type { DemoRuns, RunAnswer } from "./demo-runs.ts";
 import { isDemoFlow } from "./script.ts";
 import { UI_HEADERS, loadStaticFiles, type StaticFile } from "./static.ts";
@@ -14,6 +22,16 @@ export interface ReferenceServerOptions {
   engine: Engine;
   /** Signing secrets per Stripe endpoint. Empty means the endpoint refuses everything. */
   stripeSecrets: { identity: readonly string[]; payments: readonly string[] };
+  /** Carrier webhook keys. A carrier left out, or given no key, refuses everything. */
+  carriers?: {
+    /**
+     * The account's auth tokens, and the public origin Twilio calls (`https://voice.example.test`):
+     * Twilio signs the full URL, which a server behind a proxy cannot see.
+     */
+    twilio?: { authTokens: readonly string[]; publicOrigin: string };
+    /** The account's Ed25519 public keys, base64, as the Telnyx portal shows them. */
+    telnyx?: { publicKeys: readonly string[] };
+  };
   clock: Clock;
   /** Default 64 KiB. */
   maxBodyBytes?: number;
@@ -73,6 +91,36 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     if (route === "payments" && event.kind === "payment") applied = (await options.engine.applyPaymentOutcome(event.outcome)).applied;
     processed.add(event.eventId);
     return [200, { received: true, applied }];
+  }
+
+  /**
+   * A carrier webhook: the signature is checked, and nothing else yet. The engine takes no carrier
+   * event today (call handling is the host's), so a verified request is acknowledged and dropped.
+   */
+  async function carrierWebhook(req: IncomingMessage, carrier: "twilio" | "telnyx"): Promise<[number, Json]> {
+    const payload = await readBody(req, maxBody);
+    const header = (name: string) => {
+      const value = req.headers[name];
+      return typeof value === "string" ? value : undefined;
+    };
+    const twilio = options.carriers?.twilio;
+    const check =
+      carrier === "twilio"
+        ? verifyTwilioSignature({
+            url: `${twilio?.publicOrigin ?? ""}${req.url!}`,
+            payload,
+            header: header("x-twilio-signature"),
+            authTokens: twilio?.authTokens ?? [],
+          })
+        : verifyTelnyxSignature({
+            payload,
+            signatureHeader: header("telnyx-signature-ed25519"),
+            timestampHeader: header("telnyx-timestamp"),
+            publicKeys: options.carriers?.telnyx?.publicKeys ?? [],
+            now: options.clock.now(),
+          });
+    if (!check.ok) return [400, { error: "signature", reason: check.reason }];
+    return [200, { received: true }];
   }
 
   async function demoRoute(req: IncomingMessage, runs: DemoRuns, path: string, method: string): Promise<Answer> {
@@ -135,7 +183,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     const carrier = /^\/webhooks\/(twilio|telnyx)$/.exec(path);
     if (carrier !== null) {
       expect("POST");
-      return [501, { error: "not_implemented", issue: "SRV-1", carrier: carrier[1] }];
+      return carrierWebhook(req, carrier[1] as "twilio" | "telnyx");
     }
     const receipt = /^\/receipts\/([A-Za-z0-9_-]{1,64})$/.exec(path);
     if (receipt !== null) {

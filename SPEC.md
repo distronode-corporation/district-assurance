@@ -398,3 +398,29 @@ subject's number on file. Identity link: "Your one-time identity check link: URL
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
 the currency's own decimals.
+
+## 17. Carrier webhooks
+
+`verifyTwilioSignature` follows Twilio's published scheme: the `X-Twilio-Signature` header is
+`base64(HMAC-SHA1(auth token, URL + parameters))`, where URL is the full URL Twilio requested,
+query included, and parameters are the form parameters of the raw body, sorted by name (then by
+value for a repeated name, in code-unit order) and written as name then value with no separator.
+When the URL has a `bodySHA256` query parameter, the URL alone is signed and the hex SHA-256 of
+the raw body must equal it (`body_hash_mismatch` otherwise). The URL is tried as given and with the
+scheme's default port (443 or 80) added or removed; another port is never changed. The check
+passes if any configured auth token matches. Refusals: `no_secret`, `missing_header`,
+`no_matching_signature`, `body_hash_mismatch`. The scheme has no timestamp.
+
+`verifyTelnyxSignature` follows Telnyx's published scheme: the `telnyx-signature-ed25519` header is
+the base64 Ed25519 signature of `telnyx-timestamp + "|" + raw body`. Public keys are the base64 of
+32 raw bytes; any other value is skipped. The check passes if the signature verifies under any
+configured key and the timestamp is within 300 seconds of now (configurable), either way. It
+returns the same `SignatureCheck` as Stripe's: `no_secret`, `missing_header` (either header),
+`malformed_header` (a signature that is not 64 bytes of base64, a timestamp that is not 1 to 12
+digits), `timestamp_out_of_tolerance`, `no_matching_signature`.
+
+The reference server answers `POST /webhooks/twilio` and `/webhooks/telnyx` with 400
+`{error: "signature", reason}` when the check fails, 200 `{received: true}` when it passes, and
+does nothing else with the body: the engine takes no carrier event yet. Twilio's URL is the
+configured public origin followed by the request target. A carrier with no key configured refuses
+everything.
