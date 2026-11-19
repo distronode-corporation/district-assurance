@@ -144,6 +144,23 @@ of birth is reversed by trying every date; the caller's entries are never stored
 fields are refused by `validateConfig` until field encryption exists (FIL-2). PINs on file are
 HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode).
 
+### Supply chain and releases
+
+A compromised dependency, action or build, or a release nobody meant to make. **Controls:** the
+package has no runtime dependency. Every workflow action is pinned by full commit SHA, every workflow's
+top-level token is read-only or empty with each job granted only the scopes it uses, and no
+package-manager cache is restored. npm audit and
+osv-scanner check the lockfile on every pull request, weekly, and on each release tag
+(`supply-chain.yml`). Nothing publishes on its own: `"private": true` makes `npm publish` refuse
+until a release is decided (ADR-12), a release needs a person to push a version tag or start the
+workflow, and the publish job waits for the `npm-publish` environment's reviewers. It runs only
+in this repository, after CI and the supply-chain checks pass on the tag. The tarball must be
+byte-identical across two builds and a third on a fresh runner, holds only `dist/` and the listed
+documents, and passes an install-and-import smoke test before it is published (`release.yml`).
+There is no npm token: trusted publishing uses the publish job's short-lived OIDC token, the only
+job granted `id-token: write`, and npm provenance ties the tarball to the commit and workflow
+that built it.
+
 ## Left to the host
 
 - Buffering keypad digits outside the model, never logging them, and cutting audio to

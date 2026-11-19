@@ -1,7 +1,7 @@
 name: Supply chain
 
 # The dependency trees of this repository, checked on every pull request and push to main,
-# and weekly through audit.yml (which calls this file):
+# weekly through audit.yml, and on every release tag through release.yml (both call this file):
 #   dependency-review  (pull requests only) what a pull request adds to a dependency tree.
 #   npm-audit          the lockfile against GitHub's advisory database, through npm.
 #   osv-scanner        the lockfile against the OSV database.
