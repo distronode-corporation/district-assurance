@@ -247,7 +247,8 @@ export const paylinkModule: AssuranceModule = {
         status: p.status,
         amountMinor: p.amountMinor,
         currency: p.currency,
-        mode: p.mode,
+        // A payment recorded before modes existed was taken on the host's own account: platform.
+        mode: p.mode ?? "platform",
         providerRef: p.linkId,
       })),
     };

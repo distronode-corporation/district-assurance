@@ -146,8 +146,17 @@ describe("example door relay", () => {
     await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve));
     const url = `http://127.0.0.1:${(relay.address() as AddressInfo).port}`;
     try {
-      const big = await fetch(`${url}/unlock`, { method: "POST", body: "x".repeat(64 * 1024) });
-      assert.deepEqual([big.status, await big.json()], [413, { error: "body_too_large" }]);
+      // The cutoff can land before the headers or while the body is read: either is "cut off".
+      const big = await (async () => {
+        try {
+          const r = await fetch(`${url}/unlock`, { method: "POST", body: "x".repeat(64 * 1024) });
+          return [r.status, await r.json()];
+        } catch {
+          return "cut off";
+        }
+      })();
+      // Answered at once and the upload cut off: the client sees the 413, or the connection close.
+      assert.ok(big === "cut off" || JSON.stringify(big) === JSON.stringify([413, { error: "body_too_large" }]), JSON.stringify(big));
       const junk = await fetch(`${url}/unlock`, { method: "POST", body: "{" });
       assert.deepEqual([junk.status, await junk.json()], [400, { error: "malformed" }]);
       assert.equal((await fetch(`${url}/other`)).status, 404);
