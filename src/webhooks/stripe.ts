@@ -31,18 +31,20 @@ const MAX_TOLERANCE_SECONDS = 86_400;
  */
 export function verifyStripeSignature(input: StripeSignatureInput): SignatureCheck {
   // Only a missing tolerance takes the default: null, a string or NaN is a host bug, refused.
-  const tolerance: unknown = input.toleranceSeconds === undefined ? 300 : input.toleranceSeconds;
+  // Each field is read once, so a getter cannot pass a check and answer something else after it.
+  const { header, payload, now, toleranceSeconds } = input;
+  const tolerance: unknown = toleranceSeconds === undefined ? 300 : toleranceSeconds;
   if (!Number.isSafeInteger(tolerance) || (tolerance as number) < 0 || (tolerance as number) > MAX_TOLERANCE_SECONDS) {
     throw new EngineError("invalid_input", "toleranceSeconds must be an integer from 0 to 86400");
   }
-  const nowMs = input.now instanceof Date ? input.now.getTime() : Number.NaN;
+  const nowMs = now instanceof Date ? now.getTime() : Number.NaN;
   if (!Number.isFinite(nowMs)) throw new EngineError("invalid_input", "now must be a valid Date");
   const secrets = input.secrets.filter((s) => s.length > 0);
   if (secrets.length === 0) return { ok: false, reason: "no_secret" };
-  if (input.header === null || input.header === undefined || input.header === "") return { ok: false, reason: "missing_header" };
+  if (header === null || header === undefined || header === "") return { ok: false, reason: "missing_header" };
   let timestamp: number | null = null;
   const signatures: string[] = [];
-  for (const part of input.header.split(",")) {
+  for (const part of header.split(",")) {
     const eq = part.indexOf("=");
     if (eq < 0) continue;
     const key = part.slice(0, eq).trim();
@@ -54,7 +56,7 @@ export function verifyStripeSignature(input: StripeSignatureInput): SignatureChe
   if (Math.abs(Math.floor(nowMs / 1000) - timestamp) > (tolerance as number)) {
     return { ok: false, reason: "timestamp_out_of_tolerance" };
   }
-  const signed = `${timestamp}.${input.payload}`;
+  const signed = `${timestamp}.${payload}`;
   for (const secret of secrets) {
     const expected = hmacSha256Hex(secret, signed);
     if (signatures.some((sig) => hexDigestsEqual(expected, sig))) return { ok: true, timestamp };

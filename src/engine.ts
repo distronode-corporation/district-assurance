@@ -171,7 +171,9 @@ export class Engine {
 
   /** Opens a call. With `flow`, the call runs that flow from its first step. */
   async startCall(input: { callId?: string; locale?: Locale; flow?: string } = {}): Promise<SessionState> {
-    const callId = input.callId ?? this.#ids.next("call");
+    // Read once: a getter cannot attach one flow's steps under another flow's name.
+    const { callId: givenId, locale, flow } = input;
+    const callId = givenId ?? this.#ids.next("call");
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
       const name = module.manifest.name;
@@ -180,7 +182,7 @@ export class Engine {
     const record: CallRecord = {
       v: 1,
       state: newSession(callId, this.workspaceId, this.#now()),
-      locale: input.locale ?? "en",
+      locale: locale ?? "en",
       revision: this.#config.revision,
       flow: null,
       modules,
@@ -189,9 +191,9 @@ export class Engine {
     // A call started with a flow is created with it attached, so no other process can start a
     // different flow on the same id in between.
     const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
-    if (input.flow !== undefined) {
+    if (flow !== undefined) {
       const draft = this.#draft(record, events);
-      this.#attachFlow(draft, input.flow, this.#flowDefinition(input.flow), this.#config.revision);
+      this.#attachFlow(draft, flow, this.#flowDefinition(flow), this.#config.revision);
       this.#advance(draft);
     }
     record.outbox = events.map((event, i) => ({ eventId: this.#eventId(callId, 1, i), ...event }));

@@ -282,12 +282,15 @@ function maxAttempts(rt: EngineRuntime, module: BadgeModule, kind: string): numb
  */
 export async function beginVerification(rt: EngineRuntime, callId: string, input: { accountNumber: string } | { subjectKey: string }): Promise<void> {
   rt.settings(BADGE);
+  // Read once: the key or account number checked is the one used, and the ledger names its source.
+  const byHost = "subjectKey" in input;
+  const given: unknown = byHost ? input.subjectKey : (input as { accountNumber: string }).accountNumber;
   let subjectKey: string | null;
-  if ("subjectKey" in input) {
-    if (!/^[0-9a-f]{64}$/.test(input.subjectKey)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
-    subjectKey = input.subjectKey;
+  if (byHost) {
+    if (typeof given !== "string" || !/^[0-9a-f]{64}$/.test(given)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
+    subjectKey = given;
   } else {
-    subjectKey = isKeypadEntry(input.accountNumber) ? rt.hmac(`subject:${input.accountNumber}`) : null;
+    subjectKey = typeof given === "string" && isKeypadEntry(given) ? rt.hmac(`subject:${given}`) : null;
   }
   const subject = subjectKey === null ? null : await rt.adapter("records").getSubject(rt.workspaceId, subjectKey);
   await rt.update(callId, (draft) => {
@@ -307,7 +310,7 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
     }
     s.subjectKey = subjectKey;
     s.subject = subject;
-    draft.emit("verification.started", "code", { subject: "subjectKey" in input ? "host" : "account" });
+    draft.emit("verification.started", "code", { subject: byHost ? "host" : "account" });
   });
 }
 
@@ -419,20 +422,22 @@ export async function startPhotoId(rt: EngineRuntime, callId: string): Promise<{
 
 /** The identity provider's verified webhook outcome. Unknown, late or tainted sessions are ignored. */
 export async function applyIdentityOutcome(rt: EngineRuntime, outcome: IdentityOutcome): Promise<OutcomeResult> {
-  const callId = await rt.resolveRef(`identity:${outcome.sessionId}`);
+  // Read once: the session looked up is the one consumed, and the status that passed is the one ledgered.
+  const { sessionId, status } = outcome;
+  const callId = await rt.resolveRef(`identity:${sessionId}`);
   if (callId === null) return { applied: false };
   return rt.update(callId, (draft): OutcomeResult => {
     const s = draft.slice<BadgeSlice>(BADGE);
-    const factor = { kind: "photo_id", passed: outcome.status === "verified", at: rt.now() };
+    const factor = { kind: "photo_id", passed: status === "verified", at: rt.now() };
     const step = draft.step();
     // No flow at all, or a running flow on a step that uses photo ID. A flow that ended takes nothing more.
     const stepAllows = step === null ? draft.record.flow === null : step.type === "badge.verify" && (step.factors as string[]).includes("photo_id");
-    if (!s.identitySessions.includes(outcome.sessionId) || !canApply(draft.record.state, { type: "factor_recorded", factor }) || !stepAllows) {
+    if (!s.identitySessions.includes(sessionId) || !canApply(draft.record.state, { type: "factor_recorded", factor }) || !stepAllows) {
       return { applied: false };
     }
-    s.identitySessions = s.identitySessions.filter((id) => id !== outcome.sessionId);
+    s.identitySessions = s.identitySessions.filter((id) => id !== sessionId);
     draft.apply({ type: "factor_recorded", factor });
-    draft.emit("verification.factor", "system", { kind: factor.kind, passed: factor.passed, status: outcome.status });
+    draft.emit("verification.factor", "system", { kind: factor.kind, passed: factor.passed, status });
     return { applied: true, callId };
   });
 }

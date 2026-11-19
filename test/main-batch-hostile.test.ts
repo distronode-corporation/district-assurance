@@ -98,8 +98,9 @@ describe("hostile: verifyStripeSignature", () => {
         return reads === 1 ? 300 : Number.POSITIVE_INFINITY;
       },
     };
-    // Read twice, but the second answer is the one checked: a widened tolerance is refused, never used.
-    assert.throws(() => verifyStripeSignature(input), rejects("invalid_input", /toleranceSeconds/));
+    // Read once: the 300 seconds checked is the tolerance used, so the year-old signature stays refused.
+    assert.deepEqual(verifyStripeSignature(input), { ok: false, reason: "timestamp_out_of_tolerance" });
+    assert.equal(reads, 1);
   });
 
   it("refuses a Date whose getTime lies, and a clock from a Date subclass at the edges", () => {
