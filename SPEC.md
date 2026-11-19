@@ -242,7 +242,7 @@ unique).
 ## 8. Flow execution
 
 `startCall` refuses (`invalid_input`, nothing saved) a `callId` that is not 1 to 200 characters the
-ledger can carry (no lone surrogate), a `locale` other than `en` or `fr`, and a `flow` that is not a
+ledger can carry (no lone surrogate), a `locale` not in `SUPPORTED_LOCALES` (`en`, `fr`), and a `flow` that is not a
 name; the engine refuses a `workspaceId` with a lone surrogate. These enter the ledger directly, so
 no host value can block a call's ledger. `startCall({flow})` or `startFlow(callId, name)`, on an
 open call that has not run a flow, copies
@@ -483,7 +483,13 @@ are reported as ignored, and a body that is not a well-formed event is `null`, i
 
 ## 16. Texts
 
-Code builds every text, in the call's locale (English or French). The destination is always the
+Code builds every text, in the call's locale, one of `SUPPORTED_LOCALES` (exported, a frozen
+`["en", "fr"]` whose members are the `Locale` type; `isSupportedLocale` checks a host's value).
+Each catalog of code-built words is a `Record<Locale, ...>`: `IDENTITY_TEXT`, `PAYMENT_TEXT`,
+`AMOUNT_REGION` (where amounts are formatted) and `DIGIT_WORDS_BY_LOCALE` (the spoken digits the
+card-number detector reads, every locale's always on). A test fails when a catalog lacks a
+supported locale, when a `Record<Locale, ...>` in `src/` is not one it checks, or when code picks
+words by comparing a locale instead, so a new locale grows every catalog. The destination is always the
 subject's number on file. Identity link: "Your one-time identity check link: URL" / "Votre lien
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in

@@ -503,14 +503,22 @@ export async function expirePaymentLinks(rt: EngineRuntime, callId: string): Pro
   return { expired };
 }
 
+/** Where each supported locale's amounts are formatted. */
+export const AMOUNT_REGION: Record<Locale, string> = { en: "en-CA", fr: "fr-CA" };
+
+/** The payment link text, in every supported locale (SPEC.md section 16). */
+export const PAYMENT_TEXT: Record<Locale, (amount: string, url: string) => string> = {
+  en: (amount, url) => `Your secure payment link for ${amount}: ${url}`,
+  fr: (amount, url) => `Votre lien de paiement sécurisé pour ${amount} : ${url}`,
+};
+
 /** Formats an amount in minor units with the currency's own number of decimals. */
 export function formatAmount(locale: Locale, amountMinor: number, currency: string): string {
-  const format = new Intl.NumberFormat(locale === "fr" ? "fr-CA" : "en-CA", { style: "currency", currency: currency.toUpperCase() });
+  const format = new Intl.NumberFormat(AMOUNT_REGION[locale], { style: "currency", currency: currency.toUpperCase() });
   const digits = format.resolvedOptions().maximumFractionDigits as number;
   return format.format(amountMinor / 10 ** digits);
 }
 
 function paymentText(locale: Locale, url: string, amountMinor: number, currency: string): string {
-  const amount = formatAmount(locale, amountMinor, currency);
-  return locale === "fr" ? `Votre lien de paiement sécurisé pour ${amount} : ${url}` : `Your secure payment link for ${amount}: ${url}`;
+  return PAYMENT_TEXT[locale](formatAmount(locale, amountMinor, currency), url);
 }

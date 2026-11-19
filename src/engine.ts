@@ -21,7 +21,7 @@ import { hmacSha256Hex } from "./core/hash.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
 import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
-import type { AdapterName, CallDraft, CallRecord, EngineAdapters, EngineRuntime, FlowStatus, Locale } from "./core/runtime.ts";
+import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
 import * as dossier from "./file/dossier.ts";
@@ -38,6 +38,7 @@ import * as badge from "./verify/badge.ts";
 import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
+export { SUPPORTED_LOCALES, isSupportedLocale } from "./core/runtime.ts";
 export type { EngineAdapters, Locale } from "./core/runtime.ts";
 export type { KeypadResult, OutcomeResult, VerificationResult } from "./verify/badge.ts";
 
@@ -207,7 +208,7 @@ export class Engine {
     if (input.callId !== undefined && (typeof input.callId !== "string" || input.callId === "" || input.callId.length > 200 || hasLoneSurrogate(input.callId))) {
       throw new EngineError("invalid_input", "callId must be 1 to 200 characters the ledger can carry (no lone surrogate)");
     }
-    if (input.locale !== undefined && input.locale !== "en" && input.locale !== "fr") throw new EngineError("invalid_input", "locale must be en or fr");
+    if (input.locale !== undefined && !isSupportedLocale(input.locale)) throw new EngineError("invalid_input", `locale must be one of ${SUPPORTED_LOCALES.join(", ")}`);
     if (input.flow !== undefined && typeof input.flow !== "string") throw new EngineError("invalid_input", "flow must name a flow");
     const callId = input.callId ?? this.#ids.next("call");
     const modules: Record<string, JsonValue> = {};

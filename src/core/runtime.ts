@@ -20,7 +20,19 @@ import type { FlowStep } from "./module.ts";
 import type { VerificationPolicy } from "./policy.ts";
 import type { SessionEvent, SessionState } from "./session.ts";
 
-export type Locale = "en" | "fr";
+/**
+ * The languages a call can run in. Every catalog of text the engine builds (the texts it sends,
+ * the amounts it formats, the spoken digits it redacts) is a `Record<Locale, ...>` with one entry
+ * for each, and a test checks it: adding a locale here makes every catalog grow with it.
+ */
+export const SUPPORTED_LOCALES = Object.freeze(["en", "fr"] as const);
+
+export type Locale = (typeof SUPPORTED_LOCALES)[number];
+
+/** Whether a host's value is a supported locale. */
+export function isSupportedLocale(value: unknown): value is Locale {
+  return (SUPPORTED_LOCALES as readonly unknown[]).includes(value);
+}
 
 /**
  * Everything the engine can be given. Only `ledger` is always required (the ledger is always on);
