@@ -78,11 +78,13 @@ export function isDocumentType(value: unknown): value is DocumentType {
  * the store does not have or that another call confirmed.
  */
 export async function createUploadLink(input: UploadLinkInput, context: UploadContext & { records: RecordStore }): Promise<UploadLink> {
+  // Read once: the record checked against the call is the one the link is bound to.
+  const { callId, recordId } = input;
   const locale = input.locale ?? "en";
   const allowedTypes = [...(input.allowedTypes ?? DOCUMENT_TYPES)];
   const maxBytes = input.maxBytes ?? DEFAULT_UPLOAD_MAX_BYTES;
   const problems: string[] = [];
-  if (input.callId === "" || input.recordId === "") problems.push("callId and recordId are required");
+  if (callId === "" || recordId === "") problems.push("callId and recordId are required");
   if (locale !== "en" && locale !== "fr") problems.push("locale is en or fr");
   if (allowedTypes.length === 0 || !allowedTypes.every(isDocumentType) || new Set(allowedTypes).size !== allowedTypes.length) {
     problems.push(`allowedTypes is a non-empty list of distinct types from ${DOCUMENT_TYPES.join(", ")}`);
@@ -90,8 +92,8 @@ export async function createUploadLink(input: UploadLinkInput, context: UploadCo
   if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > UPLOAD_MAX_BYTES_LIMIT) problems.push(`maxBytes is an integer from 1 to ${UPLOAD_MAX_BYTES_LIMIT}`);
   if (problems.length > 0) throw new EngineError("invalid_input", `upload link: ${problems.join("; ")}`);
 
-  const record = await context.records.getIntakeRecord(context.workspaceId, input.recordId);
-  if (record === null || record.callId !== input.callId) throw new EngineError("precondition_failed", "upload link: the record is not a confirmed record of this call");
+  const record = await context.records.getIntakeRecord(context.workspaceId, recordId);
+  if (record === null || record.callId !== callId) throw new EngineError("precondition_failed", "upload link: the record is not a confirmed record of this call");
 
   const token = `upl_${randomBytes(32).toString("base64url")}`;
   const now = context.clock.now();
@@ -99,8 +101,8 @@ export async function createUploadLink(input: UploadLinkInput, context: UploadCo
   const stored = await context.documents.putUploadLink({
     workspaceId: context.workspaceId,
     tokenHash: sha256Hex(token),
-    callId: input.callId,
-    recordId: input.recordId,
+    callId,
+    recordId,
     locale,
     allowedTypes,
     maxBytes,
@@ -131,14 +133,16 @@ export async function acceptUpload(
   input: { token: string; contentType: string; bytes: Uint8Array },
   context: UploadContext & { ids: IdGenerator; scanner: DocumentScanner },
 ): Promise<UploadResult> {
-  if (!(input.bytes instanceof Uint8Array) || typeof input.contentType !== "string") {
+  // Read once: the bytes and type checked are the ones copied, scanned and stored.
+  const { token, contentType: declared, bytes: given } = input;
+  if (!(given instanceof Uint8Array) || typeof declared !== "string") {
     throw new EngineError("invalid_input", "upload: bytes must be a Uint8Array and contentType a string");
   }
-  if (input.bytes.length > UPLOAD_MAX_BYTES_LIMIT) return { ok: false, reason: "too_large" };
-  const bytes = Uint8Array.prototype.slice.call(input.bytes);
-  const link = await usableLink(input.token, context);
+  if (given.length > UPLOAD_MAX_BYTES_LIMIT) return { ok: false, reason: "too_large" };
+  const bytes = Uint8Array.prototype.slice.call(given);
+  const link = await usableLink(token, context);
   if (link === null) return { ok: false, reason: "link_not_usable" };
-  const contentType = input.contentType.split(";")[0]!.trim().toLowerCase();
+  const contentType = declared.split(";")[0]!.trim().toLowerCase();
   if (!isDocumentType(contentType) || !link.allowedTypes.includes(contentType)) return { ok: false, reason: "type_not_allowed" };
   if (bytes.length === 0) return { ok: false, reason: "empty" };
   if (bytes.length > link.maxBytes) return { ok: false, reason: "too_large" };
