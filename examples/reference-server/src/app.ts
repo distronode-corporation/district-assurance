@@ -72,11 +72,21 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     if (!check.ok) return [400, { error: "signature", reason: check.reason }];
     const event = parseStripeEvent(payload);
     if (event === null) return [400, { error: "malformed_event" }];
+    // Only an event this endpoint handles is applied and remembered: one that reached the wrong
+    // endpoint (an unfiltered listener) is acknowledged and left for its own endpoint.
+    let apply: (() => Promise<boolean>) | null = null;
+    if (route === "identity" && event.kind === "identity") {
+      const outcome = event.outcome;
+      apply = async () => (await options.engine.applyIdentityOutcome(outcome)).applied;
+    }
+    // The endpoint fixes the mode: Connect events always name a connected account, account events never do.
+    if (event.kind === "payment" && (route === "connect" ? event.outcome.account !== undefined : route === "payments" && event.outcome.account === undefined)) {
+      const outcome = event.outcome;
+      apply = async () => (await options.engine.applyPaymentOutcome(outcome)).applied;
+    }
+    if (apply === null) return [200, { received: true, applied: false, handled: false }];
     if (processed.has(event.eventId)) return [200, { received: true, duplicate: true }];
-    let applied = false;
-    if (route === "identity" && event.kind === "identity") applied = (await options.engine.applyIdentityOutcome(event.outcome)).applied;
-    // The engine ignores an outcome whose connected account is not the payment's.
-    if (route !== "identity" && event.kind === "payment") applied = (await options.engine.applyPaymentOutcome(event.outcome)).applied;
+    const applied = await apply();
     processed.add(event.eventId);
     return [200, { received: true, applied }];
   }

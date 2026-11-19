@@ -228,29 +228,19 @@ calls) is a hard gate: no host runs it on a live line before VER-1 is merged.
 money and no customer data, run across the host's processes. Its scopes stay below the floors, so
 an owner command can never move money or change contact details at level 1.
 
-## ADR-21. Gate runs on the outside module path, and signs grants like receipts
+## ADR-21. Access grants are signed like receipts
 
-**Decided.** Gate ships in the package but is not wired by the engine: a host installs it with
-`engine.use(gateModule({ signer, controllers }))`, because it needs its own signing key and its
-own door controllers. Its work goes through `Engine.updateModule`, so the engine itself holds the
-`gate.grant` step to `entry.open`, an access scope whose floor is level 2; Gate asks
-`authorized` too, which covers calls outside a flow. A controller's answer is written with the
-new `Engine.recordModuleOutcome`, which is not held to the scope and still writes after the flow
-or the call ended, because the work was authorized when it started. An access grant is a small
-body (grant id, workspace, audience, target, action, scope, level, issued and expiry times)
-signed with ES256 over its canonical JSON (`signDocument`, the receipt code generalised), under its
-own `kid`. It never outlives the call's verification grant and lives 10 to 900 seconds, 60 by
-default. The ledger gets `access.issued` and the outcome with the grant's digest, never the
-grant. Outside modules also see the current step, the engine's clock and an id source.
-**Why.** Gate was the first real user of the outside module path (review item 3 of the modular
-core): if Gate can be built on it, so can a host's module, and the scope check lives in one place.
-Recording outcomes on a separate path keeps that check strict while never losing a door's
-answer. One signing format for receipts and grants means one verifier in every language.
-**Amended (hostile review of PR 2):** an outcome write needs a reservation that `updateModule`
-opened (`call.reserve(ref)`), names it, and closes it (`call.release()`), so it can settle
-authorized work but never mark a door delivered on its own or write to the ledger after a call
-ended with nothing in flight. A verifier must name the workspace it serves: grants are bound to
-their workspace as well as their audience.
+**Decided.** An access grant is a small body (grant id, workspace, audience, target, action, scope,
+level, issued and expiry times) signed with ES256 over its canonical JSON (`signDocument`, the
+receipt code generalised), under the access signer's own `kid`. It never outlives the call's
+verification grant and lives 10 to 900 seconds, 60 by default. The ledger gets `access.issued` and
+the outcome with the grant's digest, never the grant. A verifier must name the workspace it serves:
+grants are bound to their workspace as well as their audience. Outside modules see the current
+step, the engine's clock and an id source.
+**Why.** One signing format for receipts and grants means one verifier in every language.
+**Superseded in part by ADR-25:** Gate first ran on the outside module path, with its answers
+written through `recordModuleOutcome` and judged by the module's own `checkOutcome`. Four rounds of
+hostile review broke that design, and Gate is now built in (ADR-25).
 **Revisit** when Gate needs a receipt part (access on the call's receipt).
 
 ## ADR-22. The signed-webhook relay first; an unlock is never retried
@@ -284,7 +274,13 @@ request to the one `PaymentLinks` adapter carries the mode, the account in conne
 payment methods and the engine's deadline; the idempotency key includes the mode. A link lives
 `linkLifeMinutes` (5 to 60, default 15) from when it was texted, and the engine expires it itself
 at that deadline (`expirePaymentLinks`, through the new `PaymentLinks.expireLink`), because
-Stripe Checkout's shortest `expires_at` is 30 minutes. A link may offer only methods that settle
+Stripe Checkout's shortest `expires_at` is 30 minutes. Two times are kept apart: the provider
+expiry (`providerExpiresAt`, set when the request is reserved, from twice the link life within the
+adapter's declared range, plus a margin over its minimum) is what `createLink` receives as
+`expiresAt`; the engine's deadline (the text plus the link life, never past the provider expiry) is
+what `requestPayment` returns and `expirePaymentLinks` enforces. The engine has no timer: the host
+must call `expirePaymentLinks` at `expiresAt` (a timer or a sweep), or the link stays payable until
+the provider expiry, and a payment in that window is still recorded. A link may offer only methods that settle
 during the call: card (credit, and Visa and Mastercard debit), Apple Pay, Google Pay and Link, the
 default; the validator refuses anything else, pre-authorized debit and Interac by name. A
 provider outcome whose connected account is not the payment's is ignored and written to the
@@ -309,4 +305,41 @@ Receipts and access grants keep canonical JSON. No OpenID Provider (CIBA) for no
 same way); running a full OpenID Provider is too heavy for a small business. node:crypto signs
 ES256 in the JWS format already, so this needs no runtime dependency (ADR-3). **Revisit** for
 enterprise hosts that want CIBA.
+
+## ADR-25. The engine owns access outcomes; Gate is built in
+
+**Decided.** Gate is a built-in module, like Paylink. Its door controllers (`access`, by name) and
+its grant signer (`accessSigner`) are engine adapters, and the config turns it on. The engine
+itself reserves each grant, signs it, computes its digest from the frozen grant it signed, calls the
+controller once, and records the controller's actual answer (`delivered`, `refused` or `unknown`)
+with its ledger entry, all in its own writes. The module only proposes the intent: the targets
+(door, controller) in its settings, and the step's lifetime; level, workspace and expiry come from
+the call. No module code can write a grant or its outcome: `updateModule` and `moduleState`
+refuse every built-in module, and the outside-module outcome API of earlier drafts
+(`recordModuleOutcome`, reservations, `outcomeRecord`, `checkOutcome`) is removed. An outside
+module's `updateModule` is held by the engine to its manifest's scopes on every call: in a flow,
+the current step's; outside a flow, all of them. Ending a call settles a grant still in flight as
+`unknown` if it was not yet signed, and is refused while a signed grant is at its door (until its
+answer is recorded or it expires, after which a relay refuses it), so no access outcome ever
+follows `receipt.issued` and no door acts on a grant after it (re-issuing a receipt is not
+supported, so nothing is ever appended under one). Holding the end, rather than a lock across
+the unlock, keeps the engine free of locks: the wait is bounded by the controller's timeout, or by
+the grant's lifetime (at most 15 minutes) if its process stopped. Built-in module names are the
+engine's for good, and the access signer must be a key of its own.
+**Why.** Four rounds of hostile review on PR 2 each found a new way for a module's own code to
+write an outcome the controller never gave: a forged grant beside a pending one, a reserved grant
+re-pointed or lowered, the same reservation settled again, a digest the engine never signed, a
+write through `updateModule` that skipped the outcome checks entirely, and a late answer landing
+after the receipt. Each patch closed one path while the root cause stayed: the module could write
+outcome state, and the engine trusted the module's judgement of it, while the controller's real
+answer lived only in the module's memory. Moving the outcome into the engine removes that trust
+instead of policing it: there is no write path left to attack. A late door answer recorded as
+`unknown` when the call ends is honest (the engine does not know), and keeps the receipt final.
+**Revisit** if a host needs its own access module with engine-held outcomes: that would be a
+generic "held work" contract in the core (the engine calls an adapter the module names and records
+its answer), designed once, not per module.
+**Amended (GAT-3):** a one-time access code's grant is `delivered` when the code is texted, and
+the door acts on it later, when the code is redeemed, which may follow `receipt.issued` (until the
+grant expires, at most 15 minutes). The ledger still gets no access entry after the receipt: the
+redemption is the door's to log, and the host revokes a code it no longer wants.
 

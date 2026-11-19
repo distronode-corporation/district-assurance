@@ -1,16 +1,17 @@
-// Gate (GAT-1): signed, time-limited access grants after verification, delivered once through an
-// AccessController, and every grant and outcome in the ledger.
+// Gate (GAT-1, ADR-25): signed, time-limited access grants after verification, delivered once
+// through an AccessController the engine holds, with the engine itself recording every outcome.
+// Every hostile-review case of PR 2 that applies to the engine-owned design is kept here.
 import { strict as assert } from "node:assert";
 import { generateKeyPairSync } from "node:crypto";
 import { describe, it } from "node:test";
 
-import type { FlowConfig } from "../src/core/config.ts";
-import { validateConfig } from "../src/core/config.ts";
-import { ModuleRegistry } from "../src/core/module.ts";
-import { sha256Hex } from "../src/core/hash.ts";
-import { canonicalJson } from "../src/core/canonical.ts";
+import type { AccessController, UnlockResult } from "../src/core/adapters.ts";
+import type { JsonValue } from "../src/core/canonical.ts";
+import { validateConfig, type FlowConfig } from "../src/core/config.ts";
+import { ModuleRegistry, type AssuranceModule } from "../src/core/module.ts";
+import { MemorySessionStore } from "../src/core/session-store.ts";
 import { SeenGrants, accessGrantDigest, verifyAccessGrant, type AccessGrantBody, type SignedAccessGrant } from "../src/gate/access.ts";
-import { GateModule, gateModule, type GateHost, type GateSlice } from "../src/gate/gate.ts";
+import { gateModule } from "../src/gate/gate.ts";
 import { builtInModules } from "../src/modules.ts";
 import { keyPairSigner } from "../src/prove/receipt.ts";
 import { FakeAccessController, FakeMessageSender, FixedClock, generateTestSigner } from "../src/testing/index.ts";
@@ -25,6 +26,7 @@ import {
   type AccessCodeStore,
   type TextSendLimits,
 } from "../src/gate/codes.ts";
+import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig } from "./helpers.ts";
 
 const verify = { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["entry.open"] };
@@ -42,15 +44,30 @@ function gateConfig(patch: (c: FlowConfig) => void = () => undefined): FlowConfi
   });
 }
 
-function gateSetup(mode: FakeAccessController["mode"] = "confirm", patch?: (c: FlowConfig) => void) {
-  const door = new FakeAccessController(mode);
-  const gate = gateModule({ signer: generateTestSigner("gate-key-1"), controllers: { lobby: door } });
-  const t = setup({ modules: [gate], config: gateConfig(patch) });
-  t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
-  return { ...t, gate, door };
+/** A session store that can be told to refuse one write: a process that stops after the door answered. */
+class StoppingStore extends MemorySessionStore {
+  stopWhen: (() => boolean) | null = null;
+  override async compareAndSet(w: string, c: string, v: number, r: JsonValue) {
+    if (this.stopWhen?.() === true) {
+      this.stopWhen = null;
+      throw new Error("the process stopped");
+    }
+    return super.compareAndSet(w, c, v, r);
+  }
 }
 
-async function verified(t: ReturnType<typeof gateSetup>, flow: string | null = "entry"): Promise<string> {
+function gateSetup(options: { mode?: FakeAccessController["mode"]; patch?: (c: FlowConfig) => void; signer?: ReturnType<typeof generateTestSigner> } = {}) {
+  const door = new FakeAccessController(options.mode ?? "confirm");
+  const sessions = new StoppingStore();
+  const accessSigner = options.signer ?? generateTestSigner("gate-key-1");
+  const t = setup({ config: gateConfig(options.patch), adapters: { sessions, access: { lobby: door }, accessSigner } });
+  t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+  return { ...t, door, sessions, accessSigner };
+}
+
+type GateTest = ReturnType<typeof gateSetup>;
+
+async function verified(t: GateTest, flow: string | null = "entry"): Promise<string> {
   const { callId } = await t.engine.startCall(flow === null ? {} : { flow });
   await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
   await t.engine.submitKeypad(callId, { dob: DOB });
@@ -59,47 +76,86 @@ async function verified(t: ReturnType<typeof gateSetup>, flow: string | null = "
   return callId;
 }
 
-const slice = async (t: ReturnType<typeof gateSetup>, callId: string) => (await t.engine.moduleState(callId, "gate")) as unknown as GateSlice;
-const gateEvents = async (t: ReturnType<typeof gateSetup>) =>
-  (await t.ledger.list()).filter((e) => e.event === "module.event" && e.detail.module === "gate").map((e) => [e.detail.event, e.detail.detail] as const);
+const accessEvents = async (t: GateTest) => (await t.ledger.list()).filter((e) => e.event.startsWith("access.")).map((e) => [e.event, e.detail] as const);
+
+/** A door that holds its answer until told: the grant stays in flight meanwhile. */
+function holdDoor(t: GateTest) {
+  let answer: (r: UnlockResult) => void = () => undefined;
+  let reached: () => void = () => undefined;
+  const atDoor = new Promise<void>((resolve) => (reached = resolve));
+  t.door.unlock = (input) => {
+    t.door.received.push(structuredClone(input));
+    reached();
+    return new Promise<UnlockResult>((resolve) => (answer = resolve));
+  };
+  return { atDoor, answer: (r: UnlockResult) => answer(r) };
+}
+
+/** A signer that holds its signature until told. */
+function holdSigner(t: GateTest) {
+  const sign = t.accessSigner.sign.bind(t.accessSigner);
+  let go: () => void = () => undefined;
+  let started: () => void = () => undefined;
+  const signing = new Promise<void>((resolve) => (started = resolve));
+  t.accessSigner.sign = async (payload) => {
+    started();
+    await new Promise<void>((resolve) => (go = resolve));
+    return sign(payload);
+  };
+  return { signing, go: () => go() };
+}
+
+const registry = (adapters = ["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "pinVerifier", "access", "accessSigner"], capabilities: Record<string, unknown> = {}) =>
+  new ModuleRegistry({ adapters, capabilities, modules: builtInModules() });
 
 describe("gate: config", () => {
-  const registry = (gate: GateModule) => new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer"], modules: [...builtInModules(), gate] });
-  const gate = gateModule({ signer: generateTestSigner(), controllers: { lobby: new FakeAccessController(), "side-2": new FakeAccessController() } });
-
-  it("refuses bad controllers at construction", () => {
-    assert.throws(() => gateModule({ signer: generateTestSigner(), controllers: {} }), /at least one controller/);
-    assert.throws(() => gateModule({ signer: generateTestSigner(), controllers: { Lobby: new FakeAccessController() } }), /lower-case letters, digits and hyphens: Lobby/);
-  });
-
   it("checks every gate setting", () => {
-    assert.deepEqual(gate.validateSettings({ targets, maxGrantsPerCall: 5 }), []);
-    assert.deepEqual(gate.validateSettings(undefined), ["must be an object with the targets"]);
-    assert.deepEqual(gate.validateSettings({ targets: [], maxGrantsPerCall: 6, x: 1 }), [
+    assert.deepEqual(gateModule.validateSettings({ targets, maxGrantsPerCall: 5 }), []);
+    assert.deepEqual(gateModule.validateSettings(undefined), ["must be an object with the targets"]);
+    assert.deepEqual(gateModule.validateSettings({ targets: [], maxGrantsPerCall: 6, x: 1 }), [
       "x is not a gate setting",
       "maxGrantsPerCall must be an integer from 1 to 5",
       "targets must list at least one target",
     ]);
-    assert.deepEqual(gate.validateSettings({ targets: "front-door" }), ["targets must list at least one target"]);
     const sparse: unknown[] = [];
     sparse[1] = targets[0];
-    assert.deepEqual(gate.validateSettings({ targets: sparse }), ["targets must list at least one target"], "a hole is not a target");
-    assert.deepEqual(gate.validateSettings({ targets: [7, { id: "Front", controller: "attic", ref: " ", y: 1 }, { id: "a", controller: "lobby", ref: "x".repeat(201) }, { id: "a", controller: 1, ref: 1 }] }), [
+    assert.deepEqual(gateModule.validateSettings({ targets: sparse }), ["targets must list at least one target"], "a hole is not a target");
+    assert.deepEqual(gateModule.validateSettings({ targets: [7, { id: "Front", controller: "", ref: " ", y: 1 }, { id: "a", controller: "lobby", ref: "x".repeat(201) }, { id: "a", controller: 1, ref: 1 }] }), [
       "targets[0] must be { id, controller, ref }",
       "targets[1].y is not a target field",
       "targets[1].id must be lower-case letters, digits and hyphens, at most 64",
-      "targets[1].controller must name a controller this gate was given (lobby, side-2)",
+      "targets[1].controller must name a controller",
       "targets[1].ref must be 1 to 200 characters",
       "targets[2].ref must be 1 to 200 characters",
-      "targets[3].controller must name a controller this gate was given (lobby, side-2)",
+      "targets[3].controller must name a controller",
       "targets[3].ref must be 1 to 200 characters",
       "two targets have the same id",
     ]);
   });
 
+  it("needs the access adapters, and holds targets to the controllers the engine has", () => {
+    assert.deepEqual(validateConfig(gateConfig(), registry()), [], "a registry that knows only adapter names skips the controller check");
+    assert.deepEqual(validateConfig(gateConfig(), registry(["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "pinVerifier"])), [
+      "modules.gate: needs the access adapter, which the engine does not have",
+      "modules.gate: needs the accessSigner adapter, which the engine does not have",
+    ]);
+    assert.deepEqual(validateConfig(gateConfig(), registry(undefined, { access: { controllers: ["side"] } })), [
+      "modules.gate: target front-door names the controller lobby, which the access adapter does not have (it has: side)",
+      "modules.gate: target garage names the controller lobby, which the access adapter does not have (it has: side)",
+    ]);
+    assert.throws(() => setup({ config: gateConfig(), adapters: { access: {} } }), /the access adapter does not have \(it has: none\)/);
+    // Only a controller with an unlock function counts, own or from its class.
+    assert.throws(() => setup({ config: gateConfig(), adapters: { access: { lobby: { unlock: "not a function" } as never } } }), /names the controller lobby, which the access adapter does not have/);
+    class Door {
+      async unlock(): Promise<UnlockResult> {
+        return { outcome: "delivered", providerRef: "p", confirmed: true };
+      }
+    }
+    assert.doesNotThrow(() => setup({ config: gateConfig(), adapters: { access: { lobby: new Door() } } }), "a class-based adapter");
+  });
+
   it("checks gate.grant steps, and holds them to entry.open at level 2", () => {
-    const problems = (c: FlowConfig) => validateConfig(c, registry(gate));
-    assert.deepEqual(problems(gateConfig()), []);
+    const problems = (c: FlowConfig) => validateConfig(c, registry());
     const step = (s: Record<string, unknown>) => problems(gateConfig((c) => (c.flows = { entry: { steps: [verify as never, s as never] } })));
     assert.deepEqual(step({ type: "gate.grant", target: "front-door", lifetimeSeconds: 900 }), []);
     assert.deepEqual(step({ type: "gate.grant", target: "attic", lifetimeSeconds: 9, x: 1 }), [
@@ -111,11 +167,7 @@ describe("gate: config", () => {
       "flows.entry.steps[1] (gate.grant): lifetimeSeconds must be an integer from 10 to 900",
       "flows.entry.steps[1] (gate.grant): target must name a target in the gate settings",
     ]);
-    // Settings that did not validate: the step is not cross-checked against them.
-    assert.deepEqual(
-      problems(gateConfig((c) => (c.modules.gate = { settings: { targets: [] } }))),
-      ["modules.gate.settings: targets must list at least one target"],
-    );
+    assert.deepEqual(problems(gateConfig((c) => (c.modules.gate = { settings: { targets: [] } }))), ["modules.gate.settings: targets must list at least one target"]);
     assert.deepEqual(problems(gateConfig((c) => (c.policy.scopes["entry.open"] = 1))), ["policy: scope entry.open is access, and below its floor of level 2"]);
     assert.deepEqual(
       problems(gateConfig((c) => (c.flows = { entry: { steps: [{ ...verify, scopes: ["payment.request"] } as never, { type: "gate.grant", target: "front-door" }] } }))),
@@ -129,10 +181,10 @@ describe("gate: config", () => {
 });
 
 describe("gate: grants", () => {
-  it("runs an entry flow: a signed grant to the door, verified with the public key only", async () => {
+  it("runs an entry flow: a signed grant to the door, verified with the access key only", async () => {
     const t = gateSetup();
     const callId = await verified(t);
-    assert.deepEqual(await t.gate.grantAccess(t.engine, callId), { grantId: "acc_1", status: "delivered", confirmed: true });
+    assert.deepEqual(await t.engine.grantAccess(callId), { grantId: "acc_1", status: "delivered", confirmed: true });
     assert.equal((await t.engine.flowPosition(callId))!.status, "completed");
     const [sent] = t.door.received;
     assert.equal(sent!.target, "door-1");
@@ -152,131 +204,115 @@ describe("gate: grants", () => {
       expiresAt: "2026-01-01T00:01:00.000Z",
     });
     assert.equal(grant.kid, "gate-key-1");
-    const keys = t.gate.keys();
+    const keys = t.engine.accessKeys();
     assert.deepEqual(verifyAccessGrant(grant, keys, { workspaceId: "ws_test", audience: "lobby", now: t.clock.now() }), { ok: true, body: grant.body });
     const changed = structuredClone(grant);
     changed.body.target = "door-2";
     assert.deepEqual(verifyAccessGrant(changed, keys, { workspaceId: "ws_test", audience: "lobby", now: t.clock.now() }), { ok: false, reason: "signature" });
     assert.deepEqual(verifyAccessGrant(grant, t.engine.receiptKeys(), { workspaceId: "ws_test", audience: "lobby", now: t.clock.now() }), { ok: false, reason: "signature" }, "not the receipt key");
-
     const digest = accessGrantDigest(grant.body);
-    assert.equal(digest, sha256Hex(canonicalJson(grant.body)));
-    const events = await gateEvents(t);
-    assert.deepEqual(events, [
+    assert.deepEqual(await accessEvents(t), [
       ["access.issued", { grantId: "acc_1", target: "front-door", controller: "lobby", scope: "entry.open", level: 2, verificationGrantId: "grant_1", expiresAt: "2026-01-01T00:01:00.000Z" }],
-      ["access.delivered", { grantId: "acc_1", digest, confirmed: true, kid: "gate-key-1" }],
+      ["access.delivered", { grantId: "acc_1", digest, kid: "gate-key-1", confirmed: true }],
     ]);
     assert.ok(!JSON.stringify(await t.ledger.list()).includes(grant.signature), "the grant itself is never in the ledger");
-    assert.deepEqual((await slice(t, callId)).grants[0], {
-      grantId: "acc_1",
-      target: "front-door",
-      controller: "lobby",
-      ref: "door-1",
-      level: 2,
-      issuedAt: "2026-01-01T00:00:00.000Z",
-      expiresAt: "2026-01-01T00:01:00.000Z",
-      status: "delivered",
-      confirmed: true,
-      providerRef: "door_fake_1",
-      digest,
-      kid: "gate-key-1",
-    });
+    assert.deepEqual(await t.engine.accessGrants(callId), [
+      {
+        grantId: "acc_1",
+        target: "front-door",
+        controller: "lobby",
+        ref: "door-1",
+        level: 2,
+        issuedAt: "2026-01-01T00:00:00.000Z",
+        expiresAt: "2026-01-01T00:01:00.000Z",
+        status: "delivered",
+        confirmed: true,
+        providerRef: "door_fake_1",
+        digest,
+        kid: "gate-key-1",
+      },
+    ]);
   });
 
-  it("refuses without a verification grant covering entry.open", async () => {
+  it("refuses without a verification grant covering entry.open, in a flow and outside one", async () => {
     const t = gateSetup();
     const { callId } = await t.engine.startCall({ flow: "entry" });
-    await assert.rejects(t.gate.grantAccess(t.engine, callId), rejects("precondition_failed", /on step badge.verify/), "not Gate's step yet");
+    await assert.rejects(t.engine.grantAccess(callId), rejects("precondition_failed", /on step badge.verify/), "not Gate's step yet");
     const open = await t.engine.startCall();
-    await assert.rejects(t.gate.grantAccess(t.engine, open.callId, { target: "front-door" }), rejects("scope_denied", /entry.open/));
-    // Verified, then tainted: the grant is gone.
-    const callId2 = await verified(t, null);
-    await t.engine.markUntrusted(callId2, "crm_note");
-    await assert.rejects(t.gate.grantAccess(t.engine, callId2, { target: "front-door" }), rejects("scope_denied"));
-    // Verified, then the verification grant expired.
-    const callId3 = await verified(t, null);
+    await assert.rejects(t.engine.grantAccess(open.callId, { target: "front-door" }), rejects("scope_denied", /entry.open/), "no flow, no verification");
+    const tainted = await verified(t, null);
+    await t.engine.markUntrusted(tainted, "crm_note");
+    await assert.rejects(t.engine.grantAccess(tainted, { target: "front-door" }), rejects("scope_denied"));
+    const expired = await verified(t, null);
     t.clock.advance(900_000);
-    await assert.rejects(t.gate.grantAccess(t.engine, callId3, { target: "front-door" }), rejects("scope_denied"));
+    await assert.rejects(t.engine.grantAccess(expired, { target: "front-door" }), rejects("scope_denied"));
     assert.equal(t.door.received.length, 0, "no door was ever asked");
-  });
-
-  it("holds the step to entry.open in the engine even if the module never asked", async () => {
-    const t = gateSetup();
-    const { callId } = await t.engine.startCall({ flow: "entry" });
-    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
-    await t.engine.submitKeypad(callId, { dob: DOB });
-    await t.engine.finishVerification(callId);
-    assert.equal((await t.engine.flowPosition(callId))!.status, "failed", "level 1 is below the step's level");
-    const c2 = await verified(t);
-    t.clock.advance(900_000);
-    await assert.rejects(t.engine.updateModule(c2, "gate", (s) => s), rejects("scope_denied", /entry.open/));
+    assert.deepEqual(await accessEvents(t), [], "and nothing reached the ledger");
   });
 
   it("takes the target from the step in a flow and from the host outside one", async () => {
     const t = gateSetup();
     const inFlow = await verified(t);
-    await assert.rejects(t.gate.grantAccess(t.engine, inFlow, { target: "garage" }), rejects("invalid_input", /pass no input/));
+    await assert.rejects(t.engine.grantAccess(inFlow, { target: "garage" }), rejects("invalid_input", /pass no input/));
     const outside = await verified(t, null);
-    await assert.rejects(t.gate.grantAccess(t.engine, outside), rejects("invalid_input", /target is required/));
-    await assert.rejects(t.gate.grantAccess(t.engine, outside, { target: "attic" }), rejects("invalid_input", /no target attic/));
-    await assert.rejects(t.gate.grantAccess(t.engine, outside, { target: "garage", lifetimeSeconds: 5 }), rejects("invalid_input", /lifetimeSeconds/));
-    assert.equal((await t.gate.grantAccess(t.engine, outside, { target: "garage", lifetimeSeconds: 120 })).status, "delivered");
+    await assert.rejects(t.engine.grantAccess(outside), rejects("invalid_input", /target is required/));
+    await assert.rejects(t.engine.grantAccess(outside, { target: "attic" }), rejects("invalid_input", /no target attic/));
+    await assert.rejects(t.engine.grantAccess(outside, { target: "garage", lifetimeSeconds: 5 }), rejects("invalid_input", /lifetimeSeconds/));
+    assert.equal((await t.engine.grantAccess(outside, { target: "garage", lifetimeSeconds: 120 })).status, "delivered");
     assert.equal(t.door.received[0]!.target, "door-2");
     assert.equal(t.door.received[0]!.grant.body.expiresAt, "2026-01-01T00:02:00.000Z");
   });
 
   it("never outlives the verification grant", async () => {
-    const t = gateSetup("deliver", (c) => (c.flows.entry!.steps[1] = { type: "gate.grant", target: "front-door", lifetimeSeconds: 900 }));
+    const t = gateSetup({ mode: "deliver", patch: (c) => (c.flows.entry!.steps[1] = { type: "gate.grant", target: "front-door", lifetimeSeconds: 900 }) });
     const callId = await verified(t);
     t.clock.advance(600_000);
-    assert.deepEqual(await t.gate.grantAccess(t.engine, callId), { grantId: "acc_1", status: "delivered", confirmed: false });
+    assert.deepEqual(await t.engine.grantAccess(callId), { grantId: "acc_1", status: "delivered", confirmed: false });
     assert.equal(t.door.received[0]!.grant.body.expiresAt, "2026-01-01T00:15:00.000Z", "the verification grant's own expiry");
   });
 
   it("records a lost answer as unknown, never retries it, and needs a fresh request", async () => {
-    const t = gateSetup("lose", (c) => (c.modules.gate!.settings = { targets: structuredClone(targets), maxGrantsPerCall: 2 }));
+    const t = gateSetup({ mode: "lose", patch: (c) => (c.modules.gate!.settings = { targets: structuredClone(targets), maxGrantsPerCall: 2 }) });
     const callId = await verified(t);
-    assert.deepEqual(await t.gate.grantAccess(t.engine, callId), { grantId: "acc_1", status: "unknown", confirmed: false });
+    assert.deepEqual(await t.engine.grantAccess(callId), { grantId: "acc_1", status: "unknown", confirmed: false });
     assert.equal(t.door.received.length, 1, "sent once");
     assert.equal((await t.engine.flowPosition(callId))!.status, "running", "the step waits for a fresh request");
     t.door.mode = "refuse";
-    assert.deepEqual(await t.gate.grantAccess(t.engine, callId), { grantId: "acc_2", status: "refused", confirmed: false });
+    assert.deepEqual(await t.engine.grantAccess(callId), { grantId: "acc_2", status: "refused", confirmed: false });
     assert.deepEqual(t.door.received.map((r) => r.grant.body.grantId), ["acc_1", "acc_2"], "a fresh grant, never the lost one again");
     assert.equal((await t.engine.flowPosition(callId))!.status, "failed", "every grant used, the door never opened");
-    const events = (await gateEvents(t)).map(([e, d]) => [e, (d as { reason?: string }).reason ?? null]);
-    assert.deepEqual(events, [["access.issued", null], ["access.unknown", null], ["access.issued", null], ["access.refused", "door_offline"]]);
-
+    assert.deepEqual((await accessEvents(t)).map(([e, d]) => [e, (d as { reason?: string }).reason ?? null]), [
+      ["access.issued", null],
+      ["access.unknown", "answer_lost"],
+      ["access.issued", null],
+      ["access.refused", "door_offline"],
+    ]);
     const outside = await verified(t, null);
-    await t.gate.grantAccess(t.engine, outside, { target: "front-door" });
-    await t.gate.grantAccess(t.engine, outside, { target: "front-door" });
-    await assert.rejects(t.gate.grantAccess(t.engine, outside, { target: "front-door" }), rejects("precondition_failed", /every access grant/));
+    await t.engine.grantAccess(outside, { target: "front-door" });
+    await t.engine.grantAccess(outside, { target: "front-door" });
+    await assert.rejects(t.engine.grantAccess(outside, { target: "front-door" }), rejects("precondition_failed", /every access grant/));
   });
 
   it("writes a controller's refusal reason as a short code only", async () => {
     const t = gateSetup();
     const callId = await verified(t, null);
     t.door.unlock = async () => ({ outcome: "refused", reason: "Door said: <script>" });
-    await t.gate.grantAccess(t.engine, callId, { target: "front-door" });
-    assert.equal(((await gateEvents(t)).at(-1)![1] as { reason: string }).reason, "refused");
+    await t.engine.grantAccess(callId, { target: "front-door" });
+    assert.equal(((await accessEvents(t)).at(-1)![1] as { reason: string }).reason, "refused");
   });
 
   it("fails a grant whose signing failed, sends nothing, and allows a new one", async () => {
-    const door = new FakeAccessController();
-    const signer = generateTestSigner("gate-key-1");
+    const t = gateSetup();
+    const sign = t.accessSigner.sign.bind(t.accessSigner);
     let broken = true;
-    const gate = gateModule({
-      signer: { ...signer, sign: (payload) => (broken ? Promise.reject(new Error("kms down")) : signer.sign(payload)) },
-      controllers: { lobby: door },
-    });
-    const t = { ...setup({ modules: [gate], config: gateConfig() }), gate, door };
-    t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+    t.accessSigner.sign = (payload) => (broken ? Promise.reject(new Error("kms down")) : sign(payload));
     const callId = await verified(t);
-    await assert.rejects(t.gate.grantAccess(t.engine, callId), /kms down/);
-    assert.equal((await slice(t, callId)).grants[0]!.status, "failed");
-    assert.equal(door.received.length, 0);
+    await assert.rejects(t.engine.grantAccess(callId), /kms down/);
+    assert.equal((await t.engine.accessGrants(callId))[0]!.status, "failed");
+    assert.equal(t.door.received.length, 0);
     broken = false;
-    assert.equal((await t.gate.grantAccess(t.engine, callId)).status, "delivered");
-    assert.deepEqual((await gateEvents(t)).map(([e]) => e), ["access.issued", "access.failed", "access.issued", "access.delivered"]);
+    assert.equal((await t.engine.grantAccess(callId)).status, "delivered");
+    assert.deepEqual((await accessEvents(t)).map(([e]) => e), ["access.issued", "access.failed", "access.issued", "access.delivered"]);
   });
 
   it("allows one grant in flight per call", async () => {
@@ -285,153 +321,109 @@ describe("gate: grants", () => {
     const unlock = t.door.unlock.bind(t.door);
     let nested: Promise<unknown> | null = null;
     t.door.unlock = async (input) => {
-      nested = t.gate.grantAccess(t.engine, callId, { target: "garage" });
+      nested = t.engine.grantAccess(callId, { target: "garage" });
       await assert.rejects(nested, rejects("precondition_failed", /being delivered/));
       return unlock(input);
     };
-    assert.equal((await t.gate.grantAccess(t.engine, callId, { target: "front-door" })).status, "delivered");
+    assert.equal((await t.engine.grantAccess(callId, { target: "front-door" })).status, "delivered");
     assert.ok(nested !== null);
   });
 
-  it("settles a reservation whose answer was never recorded as unknown, once its grant expired", async () => {
-    const t = gateSetup();
-    const callId = await verified(t, null);
-    const lost: GateHost = {
-      workspaceId: t.engine.workspaceId,
-      updateModule: (c, n, fn) => t.engine.updateModule(c, n, fn),
-      moduleState: (c, n) => t.engine.moduleState(c, n),
-      // The check before sending is written; the answer after it is not.
-      recordModuleOutcome: (c, n, r, fn) => (t.door.received.length === 0 ? t.engine.recordModuleOutcome(c, n, r, fn) : Promise.reject(new Error("the process stopped"))),
-    };
-    // The door answered "delivered", then writing it failed: that error is thrown as it is, never turned into "unknown".
-    await assert.rejects(t.gate.grantAccess(lost, callId, { target: "front-door" }), /the process stopped/);
-    assert.equal(t.door.received.length, 1);
-    assert.equal((await slice(t, callId)).grants[0]!.status, "reserved");
-    await assert.rejects(t.gate.grantAccess(t.engine, callId, { target: "front-door" }), rejects("precondition_failed", /being delivered/));
-    t.clock.advance(60_000);
-    assert.equal((await t.gate.grantAccess(t.engine, callId, { target: "front-door" })).status, "delivered");
-    assert.deepEqual((await slice(t, callId)).grants.map((g) => g.status), ["unknown", "delivered"]);
-    const stale = (await gateEvents(t))[1]![1] as Record<string, unknown>;
-    assert.deepEqual(Object.keys(stale).sort(), ["digest", "grantId", "kid", "reason"], "the grant that never got its answer is still named");
-    assert.deepEqual((await gateEvents(t)).map(([e, d]) => [e, (d as { reason?: string }).reason ?? null]), [
-      ["access.issued", null],
-      ["access.unknown", "no_answer_recorded"],
-      ["access.issued", null],
-      ["access.delivered", null],
-    ]);
+  it("sends nothing when the call was tainted, the grant expired or the call ended while it was signed", async () => {
+    for (const [what, during, reason] of [
+      ["tainted", (t: GateTest, callId: string) => t.engine.markUntrusted(callId, "crm_note"), /no longer authorized/],
+      ["expired", async (t: GateTest) => t.clock.advance(60_000), /it expired/],
+      ["ended", async (t: GateTest, callId: string) => void (await t.engine.endCall(callId)), /settled meanwhile/],
+    ] as const) {
+      const t = gateSetup();
+      const hold = holdSigner(t);
+      const callId = await verified(t, null);
+      const pending = t.engine.grantAccess(callId, { target: "front-door" });
+      await hold.signing;
+      await during(t, callId);
+      hold.go();
+      await assert.rejects(pending, rejects("scope_denied", reason), what);
+      assert.equal(t.door.received.length, 0, `${what}: no door was asked`);
+    }
   });
 
-  it("fails the step at the grant limit once a stale reservation settles, and keeps that settlement", async () => {
-    const t = gateSetup("confirm", (c) => (c.modules.gate!.settings = { targets: structuredClone(targets), maxGrantsPerCall: 1 }));
-    const callId = await verified(t);
-    const lost: GateHost = {
-      workspaceId: t.engine.workspaceId,
-      updateModule: (c, n, fn) => t.engine.updateModule(c, n, fn),
-      moduleState: (c, n) => t.engine.moduleState(c, n),
-      // The check before sending is written; the answer after it is not.
-      recordModuleOutcome: (c, n, r, fn) => (t.door.received.length === 0 ? t.engine.recordModuleOutcome(c, n, r, fn) : Promise.reject(new Error("the process stopped"))),
+  it("records nothing for a grant whose signing failed after the call ended", async () => {
+    const t = gateSetup();
+    let started: () => void = () => undefined;
+    const signing = new Promise<void>((resolve) => (started = resolve));
+    let fail: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (fail = resolve));
+    t.accessSigner.sign = async () => {
+      started();
+      await held;
+      throw new Error("kms down");
     };
-    await assert.rejects(t.gate.grantAccess(lost, callId), /the process stopped/);
+    const callId = await verified(t);
+    const pending = t.engine.grantAccess(callId);
+    await signing;
+    await t.engine.endCall(callId);
+    fail();
+    await assert.rejects(pending, /kms down/);
+    assert.deepEqual((await accessEvents(t)).map(([e, d]) => [e, (d as { reason?: string }).reason ?? null]), [
+      ["access.issued", null],
+      ["access.unknown", "call_ended"],
+    ], "settled by the end; the failed signing changes nothing");
+  });
+
+  it("settles a stale grant as unknown in its own write, naming its digest, once its answer was never recorded", async () => {
+    const t = gateSetup();
+    const callId = await verified(t, null);
+    // The door answers; the process stops before writing it.
+    t.sessions.stopWhen = () => t.door.received.length === 1;
+    await assert.rejects(t.engine.grantAccess(callId, { target: "front-door" }), /the process stopped/);
+    assert.equal(t.door.received.length, 1);
+    assert.equal((await t.engine.accessGrants(callId))[0]!.status, "reserved");
+    await assert.rejects(t.engine.grantAccess(callId, { target: "front-door" }), rejects("precondition_failed", /being delivered/));
+    t.clock.advance(60_000);
+    assert.equal((await t.engine.grantAccess(callId, { target: "front-door" })).status, "delivered");
+    assert.deepEqual((await t.engine.accessGrants(callId)).map((g) => g.status), ["unknown", "delivered"]);
+    const stale = (await accessEvents(t))[1]!;
+    assert.deepEqual(stale, ["access.unknown", { grantId: "acc_1", digest: accessGrantDigest(t.door.received[0]!.grant.body), kid: "gate-key-1", reason: "no_answer_recorded" }]);
+  });
+
+  it("names no digest for a stale grant that stopped before it was signed", async () => {
+    const t = gateSetup();
+    const callId = await verified(t, null);
+    let writes = 0;
+    t.sessions.stopWhen = () => ++writes === 2;
+    await assert.rejects(t.engine.grantAccess(callId, { target: "front-door" }), /the process stopped/);
+    t.clock.advance(60_000);
+    await t.engine.grantAccess(callId, { target: "front-door" });
+    assert.deepEqual((await accessEvents(t))[1], ["access.unknown", { grantId: "acc_1", reason: "no_answer_recorded" }]);
+  });
+
+  it("fails the step at the grant limit once a stale grant settles, and keeps that settlement", async () => {
+    const t = gateSetup({ patch: (c) => (c.modules.gate!.settings = { targets: structuredClone(targets), maxGrantsPerCall: 1 }) });
+    const callId = await verified(t);
+    t.sessions.stopWhen = () => t.door.received.length === 1;
+    await assert.rejects(t.engine.grantAccess(callId), /the process stopped/);
     t.clock.advance(60_000);
     // Settling the stale grant uses the call's last one, so the step fails and the request is refused.
-    await assert.rejects(t.gate.grantAccess(t.engine, callId), rejects("precondition_failed", /flow entry has failed/));
-    assert.equal((await slice(t, callId)).grants[0]!.status, "unknown", "settled in its own write, though the request was refused");
+    await assert.rejects(t.engine.grantAccess(callId), rejects("precondition_failed", /flow entry has failed/));
+    assert.equal((await t.engine.accessGrants(callId))[0]!.status, "unknown", "settled in its own write, though the request was refused");
     assert.equal(t.door.received.length, 1, "no second grant was sent");
-    assert.equal((await t.engine.flowPosition(callId))!.status, "failed");
   });
 
-  it("settles a reservation that stopped before it was signed as unknown, naming no grant it never had", async () => {
+  it("settles a stale grant once when several requests find it at the same time (review round 4, R1)", async () => {
     const t = gateSetup();
+    const door = holdDoor(t);
     const callId = await verified(t, null);
-    const stopped: GateHost = {
-      workspaceId: t.engine.workspaceId,
-      updateModule: (c, n, fn) => t.engine.updateModule(c, n, fn),
-      moduleState: (c, n) => t.engine.moduleState(c, n),
-      recordModuleOutcome: () => Promise.reject(new Error("the process stopped")),
-    };
-    await assert.rejects(t.gate.grantAccess(stopped, callId, { target: "front-door" }), /the process stopped/);
-    assert.equal(t.door.received.length, 0, "stopped before the send");
-    t.clock.advance(60_000);
-    assert.equal((await t.gate.grantAccess(t.engine, callId, { target: "front-door" })).status, "delivered");
-    const stale = (await gateEvents(t))[1]!;
-    assert.deepEqual(stale, ["access.unknown", { grantId: "acc_1", reason: "no_answer_recorded" }]);
-  });
-
-  it("records the answer even if the grant expired or the call ended while the door answered", async () => {
-    const t = gateSetup();
-    const callId = await verified(t);
-    const unlock = t.door.unlock.bind(t.door);
-    t.door.unlock = async (input) => {
-      t.clock.advance(900_000);
-      return unlock(input);
-    };
-    assert.equal((await t.gate.grantAccess(t.engine, callId)).status, "delivered");
-    assert.equal((await t.engine.flowPosition(callId))!.status, "completed");
-
-    const c2 = await verified(t, null);
-    t.door.unlock = async (input) => {
-      await t.engine.endCall(c2);
-      return unlock(input);
-    };
-    assert.equal((await t.gate.grantAccess(t.engine, c2, { target: "front-door" })).status, "delivered");
-    assert.equal((await slice(t, c2)).grants[0]!.status, "delivered");
-  });
-
-  it("sends nothing when the call was tainted or the grant expired while it was being signed", async () => {
-    const door = new FakeAccessController();
-    const signer = generateTestSigner("gate-key-1");
-    let during: () => Promise<void> = async () => undefined;
-    const gate = gateModule({
-      signer: { ...signer, sign: async (payload) => (await during(), signer.sign(payload)) },
-      controllers: { lobby: door },
-    });
-    const t = { ...setup({ modules: [gate], config: gateConfig() }), gate, door };
-    t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
-    const tainted = await verified(t, null);
-    during = () => t.engine.markUntrusted(tainted, "crm_note");
-    await assert.rejects(t.gate.grantAccess(t.engine, tainted, { target: "front-door" }), rejects("scope_denied", /no longer authorized/));
-    const slow = await verified(t, null);
-    during = async () => t.clock.advance(60_000);
-    await assert.rejects(t.gate.grantAccess(t.engine, slow, { target: "front-door" }), rejects("scope_denied", /it expired/));
-    assert.equal(door.received.length, 0, "no door was asked");
-    assert.deepEqual((await slice(t, tainted)).grants.map((g) => g.status), ["failed"]);
-    const reasons = (await gateEvents(t)).filter(([e]) => e === "access.failed").map(([, d]) => (d as { reason: string }).reason);
-    assert.deepEqual(reasons, ["not_authorized", "expired"]);
-    assert.equal(((await gateEvents(t)).find(([e]) => e === "access.failed")![1] as { kid: string }).kid, "gate-key-1");
-    // Settled by another process while signing (it saw the grant expire): left as that process left it.
-    const raced = await verified(t, null);
-    during = async () => {
-      t.clock.advance(60_000);
-      const [open] = await t.engine.moduleReservations(raced, "gate");
-      await t.engine.recordModuleOutcome(raced, "gate", open!, (s, call) => {
-        const sl = s as unknown as GateSlice;
-        sl.grants[0]!.status = "unknown";
-        call.release();
-        return s;
-      });
-    };
-    await assert.rejects(t.gate.grantAccess(t.engine, raced, { target: "front-door" }), rejects("scope_denied", /settled meanwhile/));
-    assert.deepEqual((await slice(t, raced)).grants.map((g) => g.status), ["unknown"]);
-    assert.equal(door.received.length, 0);
-  });
-
-  it("keeps an outcome settled meanwhile as it is", async () => {
-    const t = gateSetup();
-    const callId = await verified(t, null);
-    const unlock = t.door.unlock.bind(t.door);
-    let first = true;
-    t.door.unlock = async (input) => {
-      if (first) {
-        first = false;
-        t.clock.advance(61_000);
-        // Another process sees the first grant expired with no answer, settles it, and opens again.
-        await t.gate.grantAccess(t.engine, callId, { target: "garage" });
-      }
-      return unlock(input);
-    };
-    const firstResult = await t.gate.grantAccess(t.engine, callId, { target: "front-door" });
-    assert.deepEqual((await slice(t, callId)).grants.map((g) => g.status), ["unknown", "delivered"]);
-    assert.deepEqual(firstResult, { grantId: "acc_1", status: "unknown", confirmed: false }, "what the call holds, not what the door said");
+    const first = t.engine.grantAccess(callId, { target: "front-door" });
+    await door.atDoor;
+    // Later requests get their answers at once; the first one's stays held.
+    t.door.unlock = async () => ({ outcome: "delivered", providerRef: "garage-1", confirmed: true });
+    t.clock.advance(120_000);
+    await Promise.allSettled([1, 2, 3].map(() => t.engine.grantAccess(callId, { target: "garage" })));
+    assert.equal((await accessEvents(t)).filter(([e]) => e === "access.unknown").length, 1, "settled once");
+    // The late real answer to the first grant changes nothing (review round 4, R3).
+    door.answer({ outcome: "delivered", providerRef: "p", confirmed: true });
+    assert.deepEqual(await first, { grantId: "acc_1", status: "unknown", confirmed: false });
+    assert.equal((await t.engine.accessGrants(callId))[0]!.status, "unknown");
   });
 
   it("keeps the targets a call started with when the config changes", async () => {
@@ -446,121 +438,242 @@ describe("gate: grants", () => {
     await assert.rejects(t.engine.startFlow(callId, "attic"), rejects("precondition_failed", /no target attic/));
   });
 
-  it("never lets an outcome write create a grant: a forged delivery after the grant expired is refused (review R2, R2b)", async () => {
+  it("refuses when Gate is off, and has no grants or keys to show then", async () => {
+    const t = setup({ adapters: { accessSigner: undefined } });
+    const { callId } = await t.engine.startCall();
+    await assert.rejects(t.engine.grantAccess(callId, { target: "front-door" }), rejects("module_disabled"));
+    assert.deepEqual(await t.engine.accessGrants(callId), []);
+    assert.deepEqual(t.engine.accessKeys(), []);
+  });
+});
+
+describe("gate: the engine owns every outcome (ADR-25)", () => {
+  it("never lets module code reach Gate's grants: updateModule and moduleState refuse it (review round 4, U1 to U3)", async () => {
     const t = gateSetup();
+    const door = holdDoor(t);
     const callId = await verified(t);
-    t.clock.advance(900_000);
-    await assert.rejects(t.gate.grantAccess(t.engine, callId), rejects("scope_denied"));
-    const forge = (reservation: string) =>
-      t.engine.recordModuleOutcome(callId, "gate", reservation, (s, call) => {
-        const slice = s as unknown as GateSlice;
-        slice.grants.push({ ...structuredClone(slice.grants[0] ?? ({} as never)), grantId: call.newId("acc"), status: "delivered" } as never);
-        call.emit("access.delivered", { grantId: "forged", confirmed: true });
-        return slice as never;
-      });
-    await assert.rejects(forge("acc_1"), rejects("precondition_failed", /no open reservation acc_1/));
-    await assert.rejects(forge(""), rejects("precondition_failed"));
-    assert.equal((await t.engine.flowPosition(callId))!.status, "running", "the flow did not complete");
-    assert.deepEqual((await slice(t, callId)).grants, []);
-    assert.equal(t.door.received.length, 0);
-    assert.deepEqual(await gateEvents(t), [], "nothing was written to the ledger");
-  });
-
-  it("writes nothing after the call ended unless a grant is still in flight (review R3)", async () => {
-    const t = gateSetup();
-    const callId = await verified(t, null);
-    await t.engine.endCall(callId);
-    const before = (await t.ledger.list()).length;
-    await assert.rejects(
-      t.engine.recordModuleOutcome(callId, "gate", "acc_1", (s, call) => {
-        call.emit("access.delivered", { grantId: "after-end", confirmed: true });
-        return s;
-      }),
-      rejects("precondition_failed"),
-    );
-    assert.equal((await t.ledger.list()).length, before, "nothing appended after the receipt");
-    // A grant in flight when the call ends still records its answer: that is the reservation's purpose.
-    const c2 = await verified(t, null);
-    const unlock = t.door.unlock.bind(t.door);
-    t.door.unlock = async (input) => {
-      await t.engine.endCall(c2);
-      return unlock(input);
+    const pending = t.engine.grantAccess(callId);
+    await door.atDoor;
+    const forge = (s: JsonValue) => {
+      const g = (s as unknown as { grants: Array<Record<string, unknown>> }).grants.at(-1)!;
+      Object.assign(g, { status: "delivered", confirmed: true, providerRef: "forged", ref: "door-999" });
+      return s;
     };
-    assert.equal((await t.gate.grantAccess(t.engine, c2, { target: "front-door" })).status, "delivered");
-    assert.deepEqual(await t.engine.moduleReservations(c2, "gate"), [], "and its reservation is closed");
+    await assert.rejects(t.engine.updateModule(callId, "gate", forge), rejects("precondition_failed", /gate is built in/), "U1: in flight");
+    await assert.rejects(t.engine.moduleState(callId, "gate"), rejects("precondition_failed", /gate is built in/));
+    door.answer({ outcome: "refused", reason: "door_offline" });
+    assert.deepEqual(await pending, { grantId: "acc_1", status: "refused", confirmed: false }, "the door's real answer");
+    await assert.rejects(t.engine.updateModule(callId, "gate", forge), rejects("precondition_failed", /built in/), "U3: settled");
+    assert.deepEqual((await t.engine.accessGrants(callId)).map((g) => [g.status, g.ref]), [["refused", "door-1"]]);
+    // U2: no flow and no verification at all.
+    const bare = await t.engine.startCall();
+    await assert.rejects(t.engine.updateModule(bare.callId, "gate", forge), rejects("precondition_failed", /built in/));
+    assert.deepEqual((await accessEvents(t)).filter(([e]) => e === "access.delivered"), [], "no forged delivery anywhere");
+    assert.equal("recordModuleOutcome" in t.engine, false, "and there is no outcome API to reach them by");
   });
 
-  it("never sends a grant another process settled while this one's write was being retried", async () => {
-    const t = gateSetup();
-    const callId = await verified(t, null);
-    const real = t.engine;
-    let raced = false;
-    // A host whose pre-send write loses its first compare-and-set to another process, which
-    // settles this grant meanwhile: the retry is refused, and the discarded attempt said "send".
-    const racing: GateHost = {
-      workspaceId: real.workspaceId,
-      updateModule: (c, n, fn) => real.updateModule(c, n, fn),
-      moduleState: (c, n) => real.moduleState(c, n),
-      recordModuleOutcome: async (c, n, r, fn) => {
-        if (!raced) {
-          raced = true;
-          fn(await real.moduleState(c, n), { authorized: () => true, now: t.clock.now().toISOString(), emit: () => undefined, release: () => undefined } as never);
-          await real.recordModuleOutcome(c, n, r, (s, call) => {
-            (s as unknown as GateSlice).grants.find((g) => g.grantId === r)!.status = "unknown";
-            call.release();
-            return s;
-          });
-        }
-        return real.recordModuleOutcome(c, n, r, fn);
-      },
-    };
-    await assert.rejects(t.gate.grantAccess(racing, callId, { target: "front-door" }), rejects("scope_denied", /settled meanwhile/));
-    assert.equal(t.door.received.length, 0, "the door was never asked");
-  });
-
-  it("keeps reservations for a module named constructor (own properties only)", async () => {
+  it("holds an outside module's updateModule outside a flow to every scope its manifest needs (review round 4, U2)", async () => {
     const t = setup();
-    const constructorModule = {
-      manifest: { name: "constructor", version: "1", summary: "x", provides: { factors: [], steps: [], outcomes: [] }, scopes: { grants: [], needs: {} }, adapters: [] },
+    const scoped: AssuranceModule = {
+      manifest: { name: "tier", version: "1", summary: "x", provides: { factors: [], steps: ["tier.lookup"], outcomes: [] }, scopes: { grants: [], needs: { "tier.lookup": "status.read" } }, adapters: [] },
       validateSettings: () => [],
       requiredAdapters: () => [],
       validateStep: () => [],
-      initCall: () => ({}),
+      initCall: () => ({ n: 0 }),
       enterStep: () => null,
-      stepStatus: () => "pending" as const,
+      stepStatus: () => "pending",
     };
-    // Not a reserved name (only core, engine, flow and module are), and an inherited property of every object.
-    t.engine.use(constructorModule);
-    t.engine.configure(testConfig((c) => ((c.modules as Record<string, unknown>)["constructor"] = {})));
+    t.engine.use(scoped);
+    t.engine.configure(testConfig((c) => (c.modules.tier = {})));
     const { callId } = await t.engine.startCall();
-    assert.deepEqual(await t.engine.moduleReservations(callId, "constructor"), []);
-    await assert.rejects(t.engine.recordModuleOutcome(callId, "constructor", "r1", (s) => s), rejects("precondition_failed"));
-    await t.engine.updateModule(callId, "constructor", (s, call) => (call.reserve("r1"), s));
-    assert.deepEqual(await t.engine.moduleReservations(callId, "constructor"), ["r1"]);
-    await t.engine.recordModuleOutcome(callId, "constructor", "r1", (s, call) => (call.release(), s));
-    assert.deepEqual(await t.engine.moduleReservations(callId, "constructor"), []);
+    await assert.rejects(t.engine.updateModule(callId, "tier", () => ({ n: 1 })), rejects("scope_denied", /status.read/), "no flow, not verified");
+    assert.deepEqual(await t.engine.moduleState(callId, "tier"), { n: 0 });
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    assert.deepEqual(await t.engine.updateModule(callId, "tier", () => ({ n: 1 })), { n: 1 }, "verified for status.read: allowed");
+    assert.deepEqual(await t.engine.updateModule(callId, "tier", (_s, call) => ({ id: call.newId("tier"), at: call.now })), { id: "tier_1", at: "2026-01-01T00:00:00.000Z" }, "the engine's ids and clock");
   });
 
-  it("opens reservations only in updateModule and closes them only in recordModuleOutcome", async () => {
+  it("computes each grant's digest itself, from the grant it signed (review round 4, D1)", async () => {
+    const t = gateSetup({ mode: "lose" });
+    const callId = await verified(t, null);
+    await t.engine.grantAccess(callId, { target: "front-door" });
+    const digest = accessGrantDigest(t.door.received[0]!.grant.body);
+    assert.equal((await t.engine.accessGrants(callId))[0]!.digest, digest);
+    assert.deepEqual((await accessEvents(t)).filter(([e]) => e !== "access.issued").map(([, d]) => (d as { digest: string }).digest), [digest]);
+  });
+
+  it("never ends a call while a signed grant is at its door, so no door acts on a grant after the receipt (review rounds 4 and 5, R4 and E2)", async () => {
+    const t = gateSetup();
+    const door = holdDoor(t);
+    const callId = await verified(t, null);
+    const pending = t.engine.grantAccess(callId, { target: "front-door" });
+    await door.atDoor;
+    await assert.rejects(t.engine.endCall(callId), rejects("precondition_failed", /at its door/), "refused while the door decides");
+    assert.equal((await t.engine.state(callId)).phase, "open");
+    door.answer({ outcome: "delivered", providerRef: "p", confirmed: true });
+    assert.deepEqual(await pending, { grantId: "acc_1", status: "delivered", confirmed: true });
+    const receipt = (await t.engine.endCall(callId))!;
+    const ledger = await t.ledger.list();
+    const delivered = ledger.find((e) => e.event === "access.delivered")!;
+    assert.ok(delivered.seq <= receipt.body.ledger.seq, "the outcome is under the receipt's head");
+    assert.deepEqual(ledger.filter((e) => e.seq > receipt.body.ledger.seq).map((e) => e.event), ["receipt.issued"], "nothing after it but the receipt");
+  });
+
+  it("refuses an end that lands between the check before sending and the send itself (review round 5, E2)", async () => {
+    // A store that runs a hook right after the write that checks the grant and records its digest.
+    class Hooked extends StoppingStore {
+      after: (() => Promise<void>) | null = null;
+      override async compareAndSet(w: string, c: string, v: number, r: JsonValue) {
+        const out = await super.compareAndSet(w, c, v, r);
+        const g = (r as unknown as { modules: { gate?: { grants: Array<{ digest: string | null; status: string }> } } }).modules.gate?.grants.at(-1);
+        const run = this.after;
+        if (out.ok && run !== null && g?.digest !== null && g?.digest !== undefined && g.status === "reserved") {
+          this.after = null;
+          await run();
+        }
+        return out;
+      }
+    }
+    const sessions = new Hooked();
+    const door = new FakeAccessController();
+    const t = setup({ config: gateConfig(), adapters: { sessions, access: { lobby: door }, accessSigner: generateTestSigner("gate-key-1") } });
+    t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+    const callId = await verified(t as unknown as GateTest, null);
+    let ended: unknown = null;
+    sessions.after = async () => {
+      ended = await t.engine.endCall(callId).then(() => "ended", (e: unknown) => (e as { code?: string }).code);
+    };
+    assert.equal((await t.engine.grantAccess(callId, { target: "front-door" })).status, "delivered");
+    assert.equal(ended, "precondition_failed", "the end was refused: the grant was on its way to the door");
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.ok((await t.ledger.list()).find((e) => e.event === "access.delivered")!.seq <= receipt.body.ledger.seq);
+  });
+
+  it("never ends a call while a grant whose answer was lost may still be acted on, until it expires", async () => {
+    const t = gateSetup({ mode: "lose" });
+    const callId = await verified(t, null);
+    assert.equal((await t.engine.grantAccess(callId, { target: "front-door" })).status, "unknown");
+    // The controller timed out, but may still be working on the request: the call waits for the expiry.
+    await assert.rejects(t.engine.endCall(callId), rejects("precondition_failed", /may still be acted on/));
+    t.clock.advance(60_000);
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.deepEqual(verifyAccessGrant(t.door.received[0]!.grant, t.engine.accessKeys(), { workspaceId: "ws_test", audience: "lobby", now: new Date(Date.parse(receipt.body.issuedAt) + 1) }), { ok: false, reason: "expired" });
+    // A definitive answer lets the call end at once.
+    const r = gateSetup({ mode: "refuse" });
+    const c2 = await verified(r, null);
+    await r.engine.grantAccess(c2, { target: "front-door" });
+    assert.notEqual(await r.engine.endCall(c2), null);
+  });
+
+  it("ends a call whose grant's process stopped at the door once that grant expired, recording it unknown", async () => {
     const t = gateSetup();
     const callId = await verified(t, null);
-    await assert.rejects(t.engine.updateModule(callId, "gate", (s, call) => (call.release(), s)), rejects("precondition_failed", /only recordModuleOutcome/));
-    await assert.rejects(t.engine.updateModule(callId, "gate", (s, call) => (call.reserve(""), s)), rejects("invalid_input"));
-    await t.engine.updateModule(callId, "gate", (s, call) => (call.reserve("r1"), call.reserve("r1"), call.reserve("r2"), s));
-    assert.deepEqual(await t.engine.moduleReservations(callId, "gate"), ["r1", "r2"]);
-    await assert.rejects(t.engine.recordModuleOutcome(callId, "gate", "r1", (s, call) => (call.reserve("r3"), s)), rejects("precondition_failed", /only updateModule/));
-    await t.engine.recordModuleOutcome(callId, "gate", "r1", (s, call) => (call.release(), s));
-    assert.deepEqual(await t.engine.moduleReservations(callId, "gate"), ["r2"]);
-    await t.engine.recordModuleOutcome(callId, "gate", "r2", (s, call) => (call.release(), s));
-    assert.deepEqual(await t.engine.moduleReservations(callId, "gate"), []);
-    await assert.rejects(t.engine.recordModuleOutcome(callId, "gate", "r2", (s) => s), rejects("precondition_failed"), "closed: refused");
+    t.sessions.stopWhen = () => t.door.received.length === 1;
+    await assert.rejects(t.engine.grantAccess(callId, { target: "front-door" }), /the process stopped/);
+    await assert.rejects(t.engine.endCall(callId), rejects("precondition_failed", /at its door/));
+    t.clock.advance(60_000);
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.deepEqual((await accessEvents(t)).at(-1), [
+      "access.unknown",
+      { grantId: "acc_1", digest: accessGrantDigest(t.door.received[0]!.grant.body), kid: "gate-key-1", reason: "no_answer_recorded" },
+    ]);
+    assert.ok(receipt.body.ledger.seq >= (await t.ledger.list()).find((e) => e.event === "access.unknown")!.seq);
+    // The grant the door got is dead for any relay from the moment the receipt was issued (review round 6, E2).
+    const at = new Date(Date.parse(receipt.body.issuedAt) + 1);
+    assert.deepEqual(verifyAccessGrant(t.door.received[0]!.grant, t.engine.accessKeys(), { workspaceId: "ws_test", audience: "lobby", now: at }), { ok: false, reason: "expired" });
+    assert.deepEqual(verifyAccessGrant(t.door.received[0]!.grant, t.engine.accessKeys(), { workspaceId: "ws_test", audience: "lobby", now: at, clockSkewSeconds: 900 }), { ok: false, reason: "expired" }, "whatever skew the relay allows");
   });
 
-  it("records outcomes only for installed outside modules", async () => {
+  it("never carries a delivery for a refused grant under the receipt's head (review round 4, R5)", async () => {
+    const t = gateSetup({ mode: "refuse" });
+    const callId = await verified(t, null);
+    await t.engine.grantAccess(callId, { target: "front-door" });
+    const receipt = (await t.engine.endCall(callId))!;
+    const under = (await t.ledger.list()).filter((e) => e.seq <= receipt.body.ledger.seq);
+    assert.equal(under.filter((e) => e.event === "access.delivered").length, 0);
+    assert.equal(JSON.stringify(receipt.body).includes("delivered"), false);
+  });
+
+  it("never lets a host module take a built-in module's name, even after it was removed (review round 5, F5)", () => {
     const t = gateSetup();
-    const { callId } = await t.engine.startCall();
-    await assert.rejects(t.engine.recordModuleOutcome(callId, "paylink", "x", (s) => s), rejects("precondition_failed", /built in/));
-    await assert.rejects(t.engine.recordModuleOutcome(callId, "nope", "x", (s) => s), rejects("module_disabled"));
+    t.engine.configure(testConfig((c) => (c.policy.scopes["entry.open"] = 2)));
+    t.engine.remove("gate");
+    assert.throws(() => t.engine.use({ ...gateModule, stepStatus: () => "complete" }), (e: unknown) => /gate is the name of a built-in module/.test(String((e as Error).message)));
+    assert.throws(() => setup({ modules: [{ ...gateModule }] }), /gate is the name of a built-in module/);
+  });
+
+  it("refuses an input that is not { target } with invalid_input, never a TypeError (review round 5, I3)", async () => {
+    const t = gateSetup();
+    const callId = await verified(t, null);
+    for (const bad of [null, 7, "front-door", [], {}, { target: 1 }]) {
+      await assert.rejects(t.engine.grantAccess(callId, bad as never), rejects("invalid_input"), JSON.stringify(bad));
+    }
+    for (const target of ["nope", "__proto__", "constructor", "toString", "", "FRONT-DOOR"]) {
+      await assert.rejects(t.engine.grantAccess(callId, { target }), rejects("invalid_input"), target);
+    }
+    assert.equal(t.door.received.length, 0);
+    assert.deepEqual(await t.engine.accessGrants(callId), []);
+  });
+
+  it("never records unknown for a grant it could not send: a controller gone before or while it was signed (review round 5, I5)", async () => {
+    const access: Record<string, AccessController> = { lobby: new FakeAccessController() };
+    const accessSigner = generateTestSigner("gate-key-1");
+    const t = setup({ config: gateConfig(), adapters: { access, accessSigner } });
+    t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+    const callId = await verified(t as unknown as GateTest, null);
+    const lobby = access.lobby!;
+    delete access.lobby;
+    await assert.rejects(t.engine.grantAccess(callId, { target: "front-door" }), rejects("precondition_failed", /no access controller named lobby/));
+    assert.deepEqual(await t.engine.accessGrants(callId), [], "nothing reserved");
+    access.lobby = { unlock: "not a function" } as never;
+    await assert.rejects(t.engine.grantAccess(callId, { target: "front-door" }), rejects("precondition_failed"), "not a controller");
+    access.lobby = lobby;
+    const sign = accessSigner.sign.bind(accessSigner);
+    accessSigner.sign = async (payload) => {
+      delete access.lobby;
+      return sign(payload);
+    };
+    await assert.rejects(t.engine.grantAccess(callId, { target: "front-door" }), rejects("precondition_failed", /not sent/));
+    const [g] = await t.engine.accessGrants(callId);
+    assert.equal(g!.status, "failed", "failed, not unknown: nothing was sent");
+    assert.deepEqual((await t.ledger.list()).filter((e) => e.event === "access.failed").map((e) => e.detail.reason), ["not_sent"]);
+  });
+
+  it("refuses an access signer that is the receipt signer's key (its key id or its public key)", () => {
+    const shared = generateTestSigner("shared-1");
+    assert.throws(() => setup({ adapters: { signer: shared, accessSigner: shared } }), /accessSigner must have its own key id/);
+    assert.throws(() => setup({ adapters: { signer: shared, accessSigner: { ...shared, keyId: "other-id" } } }), /accessSigner must be its own key/);
+    // The same key written differently: '=' padding, or the standard base64 alphabet (review round 6).
+    const jwk = shared.publicJwk();
+    const toStd = (v: string) => Buffer.from(v, "base64url").toString("base64");
+    for (const [label, x, y] of [
+      ["padded", `${jwk.x}=`, `${jwk.y}=`],
+      ["standard base64", toStd(jwk.x!), toStd(jwk.y!)],
+    ] as const) {
+      const disguised = { ...shared, keyId: `disguised-${label}`, publicJwk: () => ({ ...jwk, x, y }) };
+      assert.throws(() => setup({ adapters: { signer: shared, accessSigner: disguised } }), /accessSigner must be its own key/, label);
+    }
+    const broken = { ...generateTestSigner("broken-1"), publicJwk: () => ({ kty: "EC", crv: "P-256", x: "not-a-key", y: "nope" }) };
+    assert.doesNotThrow(() => setup({ adapters: { signer: shared, accessSigner: broken } }), "a key that does not import is not this check's to judge");
+    assert.doesNotThrow(() => setup({ adapters: { signer: shared, accessSigner: generateTestSigner("access-1") } }));
+    const noReceipts = testConfig((c) => (c.modules.trace = { settings: { receipts: false, wordings: [] } }));
+    assert.doesNotThrow(() => setup({ config: noReceipts, adapters: { signer: undefined, accessSigner: shared } }), "no receipts: nothing to clash with");
+  });
+
+  it("uses an access controller only by the name a target gives", async () => {
+    const side: AccessController = { unlock: async () => ({ outcome: "delivered", providerRef: "side-1", confirmed: true }) };
+    const lobby = new FakeAccessController();
+    const t = setup({
+      config: gateConfig((c) => (c.modules.gate = { settings: { targets: [{ id: "front-door", controller: "lobby", ref: "door-1" }, { id: "side-door", controller: "side", ref: "s-1" }] } })),
+      adapters: { access: { lobby, side } },
+    });
+    t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+    const callId = await verified(t as unknown as GateTest, null);
+    assert.equal((await t.engine.grantAccess(callId, { target: "side-door" })).status, "delivered");
+    assert.equal(lobby.received.length, 0);
+    assert.equal((await t.engine.accessGrants(callId))[0]!.providerRef, "side-1");
   });
 });
 
@@ -588,14 +701,32 @@ describe("access grants: the verifier and replay", () => {
   };
   const check = (grant: unknown, at = now, extra: { clockSkewSeconds?: number } = {}) => verifyAccessGrant(grant, keys, { workspaceId: "w", audience: "lobby", now: at, ...extra });
 
-  it("accepts a good grant inside its window, allowing clock skew", async () => {
+  it("accepts a good grant inside its window, with clock skew on its start only and a strict expiry", async () => {
     const grant = await sign();
     assert.equal(check(grant).ok, true);
     assert.equal(check(grant, new Date("2025-12-31T23:59:31.000Z")).ok, true, "30 seconds early");
     assert.deepEqual(check(grant, new Date("2025-12-31T23:59:29.000Z")), { ok: false, reason: "not_yet_valid" });
-    assert.equal(check(grant, new Date("2026-01-01T00:01:29.000Z")).ok, true);
-    assert.deepEqual(check(grant, new Date("2026-01-01T00:01:30.000Z")), { ok: false, reason: "expired" });
-    assert.deepEqual(check(grant, new Date("2026-01-01T00:01:01.000Z"), { clockSkewSeconds: 0 }), { ok: false, reason: "expired" });
+    assert.equal(check(grant, new Date("2026-01-01T00:00:59.999Z")).ok, true);
+    assert.deepEqual(check(grant, new Date("2026-01-01T00:01:00.000Z")), { ok: false, reason: "expired" }, "never extended past the expiry");
+    assert.deepEqual(check(grant, new Date("2026-01-01T00:01:00.000Z"), { clockSkewSeconds: 120 }), { ok: false, reason: "expired" }, "whatever the skew");
+    assert.deepEqual(check(grant, new Date("2025-12-31T23:59:59.000Z"), { clockSkewSeconds: 0 }), { ok: false, reason: "not_yet_valid" });
+  });
+
+  it("refuses a clock skew that is not a finite, non-negative number, so the not-before check never turns off", async () => {
+    const early = await sign({ issuedAt: "2026-01-01T00:10:00.000Z", expiresAt: "2026-01-01T00:11:00.000Z" });
+    for (const bad of [Number.NaN, Infinity, -Infinity, -1, -0.001, "30", null]) {
+      assert.deepEqual(check(early, now, { clockSkewSeconds: bad as never }), { ok: false, reason: "invalid_options" }, String(bad));
+    }
+    assert.deepEqual(check(early, now, { clockSkewSeconds: 0 }), { ok: false, reason: "not_yet_valid" }, "zero is a valid skew");
+    assert.deepEqual(check(early, now), { ok: false, reason: "not_yet_valid" }, "and the default holds the check");
+  });
+
+  it("refuses an unusable clock reading, so an expired grant never passes", async () => {
+    const expired = await sign({ issuedAt: "2025-01-01T00:00:00.000Z", expiresAt: "2025-01-01T00:01:00.000Z" });
+    for (const bad of [new Date(Number.NaN), undefined, "2026-01-01", 0]) {
+      assert.deepEqual(verifyAccessGrant(expired, keys, { workspaceId: "w", audience: "lobby", now: bad as never }), { ok: false, reason: "invalid_options" }, String(bad));
+    }
+    assert.deepEqual(check(expired), { ok: false, reason: "expired" });
   });
 
   it("refuses a grant another workspace issued, even on a shared key and controller name (review R1)", async () => {
@@ -628,23 +759,20 @@ describe("access grants: the verifier and replay", () => {
     assert.equal(seen.accept(first.body, now), false);
     const later = new Date("2026-01-01T00:02:01.000Z");
     assert.equal(seen.accept({ ...body, grantId: "acc_2", expiresAt: "2026-01-01T00:03:00.000Z" }, later), true, "and forgets the expired one");
-    assert.equal(seen.accept(first.body, later), true, "forgotten after expiry plus skew, when the verifier refuses it anyway");
+    assert.equal(seen.accept(first.body, later), true, "forgotten after its expiry, when the verifier refuses it anyway");
   });
 
-  it("keeps a grant id as long as a verifier with a wider skew still accepts the grant", async () => {
-    const seen = new SeenGrants({ clockSkewSeconds: 120 });
+  it("keeps a grant id for exactly as long as the verifier accepts the grant", async () => {
+    const seen = new SeenGrants();
     const grant = await sign();
     assert.equal(seen.accept(grant.body, now), true);
-    const late = new Date("2026-01-01T00:02:59.000Z");
-    assert.equal(check(grant, late, { clockSkewSeconds: 120 }).ok, true, "still valid to this verifier");
-    assert.equal(seen.accept(grant.body, late), false, "so still refused as a replay");
-    const gone = new Date("2026-01-01T00:03:00.000Z");
-    assert.equal(check(grant, gone, { clockSkewSeconds: 120 }).ok, false);
+    const last = new Date("2026-01-01T00:00:59.999Z");
+    assert.equal(check(grant, last).ok, true, "still valid");
+    assert.equal(seen.accept(grant.body, last), false, "so still refused as a replay");
+    const gone = new Date("2026-01-01T00:01:00.000Z");
+    assert.equal(check(grant, gone).ok, false, "and from its expiry the verifier refuses it");
   });
 
-  it("is the GateModule class gateModule builds", () => {
-    assert.ok(gateModule({ signer, controllers: { lobby: new FakeAccessController() } }) instanceof GateModule);
-  });
 });
 
 // One-time access codes (GAT-3): a code texted to the number on file, redeemed once at a keypad.
@@ -657,10 +785,10 @@ function codesSetup(options: { limits?: TextSendLimits; newCode?: () => string; 
   const clock = new FixedClock();
   const texts = new FakeMessageSender();
   const store = options.store ?? new MemoryAccessCodeStore();
-  const signer = generateTestSigner("gate-key-1");
+  const accessSigner = generateTestSigner("gate-key-1");
   const codes = accessCodes({
     key: CODE_KEY,
-    signer,
+    signer: accessSigner,
     store,
     messages: options.messages ?? texts,
     limits: options.limits ?? new MemoryTextSendLimits(),
@@ -668,17 +796,16 @@ function codesSetup(options: { limits?: TextSendLimits; newCode?: () => string; 
     ...(options.newCode === undefined ? {} : { newCode: options.newCode }),
   });
   const door = new FakeAccessController();
-  const gate = gateModule({ signer, controllers: { lobby: door, keypad: codes.controller } });
   const t = setup({
-    modules: [gate],
     clock,
+    adapters: { access: { lobby: door, keypad: codes.controller }, accessSigner },
     config: gateConfig((c) => {
       c.modules.gate = { settings: { targets: [...structuredClone(targets), keypadTarget] } };
       c.flows["code-entry"] = { steps: [verify as never, { type: "gate.grant", target: "side-door", lifetimeSeconds: 600 }] };
     }),
   });
   t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
-  return { ...t, clock, gate, door, codes, texts, store };
+  return { ...t, clock, door, codes, texts, store, accessSigner };
 }
 
 type CodesSetup = ReturnType<typeof codesSetup>;
@@ -693,14 +820,14 @@ async function codeCall(t: CodesSetup, locale: "en" | "fr" = "en"): Promise<stri
 }
 
 const textedCode = (t: CodesSetup, i = -1) => TEXT.exec(t.texts.sent.at(i)!.body)![1]!;
-const codeEvents = async (t: CodesSetup) => (await gateEvents(t as never)).map(([event, detail]) => [event, detail as Record<string, unknown>] as const);
-const codeSlice = (t: CodesSetup, callId: string) => slice(t as never, callId);
+const codeEvents = async (t: CodesSetup) => (await accessEvents(t as never)).map(([event, detail]) => [event, detail as Record<string, unknown>] as const);
+const codeGrants = (t: CodesSetup, callId: string) => t.engine.accessGrants(callId);
 
 describe("gate: one-time access codes", () => {
   it("texts a code to the number on file and redeems it once, for the grant it stands for", async () => {
     const t = codesSetup();
     const callId = await codeCall(t);
-    assert.deepEqual(await t.codes.issue(t.gate, t.engine, callId), { grantId: "acc_1", status: "delivered", confirmed: false });
+    assert.deepEqual(await t.codes.issue(t.engine, callId), { grantId: "acc_1", status: "delivered", confirmed: false });
     assert.equal((await t.engine.flowPosition(callId))!.status, "completed");
     assert.equal(t.door.received.length, 0, "no door was asked");
     const [text] = t.texts.sent;
@@ -710,7 +837,7 @@ describe("gate: one-time access codes", () => {
     const code = textedCode(t);
     // The code is in the text and nowhere else.
     assert.ok(!JSON.stringify(await t.ledger.list()).includes(code));
-    const digest = (await codeSlice(t, callId)).grants[0]!.digest!;
+    const digest = (await codeGrants(t, callId))[0]!.digest!;
     assert.deepEqual(await codeEvents(t), [
       ["access.issued", { grantId: "acc_1", target: "side-door", controller: "keypad", scope: "entry.open", level: 2, verificationGrantId: "grant_1", expiresAt: "2026-01-01T00:10:00.000Z" }],
       ["access.delivered", { grantId: "acc_1", digest, confirmed: false, kid: "gate-key-1" }],
@@ -720,7 +847,7 @@ describe("gate: one-time access codes", () => {
     t.clock.advance(9 * 60_000);
     const redeemed = await t.codes.redeem({ ...keypadDoor, code });
     assert.ok(redeemed.ok);
-    const check = verifyAccessGrant(redeemed.grant, t.gate.keys(), { workspaceId: "ws_test", audience: "keypad", now: t.clock.now() });
+    const check = verifyAccessGrant(redeemed.grant, t.engine.accessKeys(), { workspaceId: "ws_test", audience: "keypad", now: t.clock.now() });
     assert.ok(check.ok);
     assert.equal(check.body.grantId, "acc_1");
     assert.equal(check.body.target, "keypad-1");
@@ -738,7 +865,7 @@ describe("gate: one-time access codes", () => {
     })();
     const t = codesSetup({ store });
     const callId = await codeCall(t);
-    await t.codes.issue(t.gate, t.engine, callId);
+    await t.codes.issue(t.engine, callId);
     const code = textedCode(t);
     const [entry] = put;
     assert.deepEqual(Object.keys(entry!).sort(), ["body", "callId", "digest", "grantId", "workspaceId"]);
@@ -750,7 +877,7 @@ describe("gate: one-time access codes", () => {
   it("binds a code to its workspace, its controller, its door and its grant's lifetime, in French too", async () => {
     const t = codesSetup();
     const callId = await codeCall(t, "fr");
-    await t.codes.issue(t.gate, t.engine, callId);
+    await t.codes.issue(t.engine, callId);
     const match = /^Votre code de porte, à usage unique : (\d{8})\. Valable une fois, dans les 10 min\.$/.exec(t.texts.sent[0]!.body);
     const code = match![1]!;
     for (const door of [{ ...keypadDoor, workspaceId: "ws_other" }, { ...keypadDoor, audience: "lobby" }, { ...keypadDoor, target: "door-1" }]) {
@@ -765,15 +892,15 @@ describe("gate: one-time access codes", () => {
     const t = codesSetup();
     const callId = await codeCall(t);
     t.clock.advance(14 * 60_000 + 30_000);
-    await t.codes.issue(t.gate, t.engine, callId);
+    await t.codes.issue(t.engine, callId);
     assert.equal(TEXT.exec(t.texts.sent[0]!.body)![2], "1");
-    assert.equal((await codeSlice(t, callId)).grants[0]!.expiresAt, "2026-01-01T00:15:00.000Z");
+    assert.equal((await codeGrants(t, callId))[0]!.expiresAt, "2026-01-01T00:15:00.000Z");
   });
 
   it("revokes a code before its end, and revoking one already gone is success", async () => {
     const t = codesSetup();
     const callId = await codeCall(t);
-    await t.codes.issue(t.gate, t.engine, callId);
+    await t.codes.issue(t.engine, callId);
     const code = textedCode(t);
     await t.codes.revoke("ws_test", "acc_1");
     await t.codes.revoke("ws_test", "acc_1");
@@ -788,12 +915,12 @@ describe("gate: one-time access codes", () => {
     const { subjectKey } = await t.engine.numberOnFile(callId);
     // A texted code (VER-2) to the same subject a moment ago, through the same limiter.
     assert.equal(await limits.acquire({ workspaceId: "ws_test", subjectKey, purpose: "one_time_code", at: t.clock.now() }), true);
-    assert.deepEqual(await t.codes.issue(t.gate, t.engine, callId), { grantId: "acc_1", status: "refused", confirmed: false });
+    assert.deepEqual(await t.codes.issue(t.engine, callId), { grantId: "acc_1", status: "refused", confirmed: false });
     assert.equal(t.texts.sent.length, 0);
-    const digest = (await codeSlice(t, callId)).grants[0]!.digest!;
+    const digest = (await codeGrants(t, callId))[0]!.digest!;
     assert.deepEqual((await codeEvents(t)).at(-1), ["access.refused", { grantId: "acc_1", digest, reason: "send_limit", kid: "gate-key-1" }]);
     t.clock.advance(60_000);
-    assert.equal((await t.codes.issue(t.gate, t.engine, callId)).status, "delivered");
+    assert.equal((await t.codes.issue(t.engine, callId)).status, "delivered");
   });
 
   it("limits each subject to 5 texts in 24 hours, 60 seconds apart", async () => {
@@ -819,7 +946,7 @@ describe("gate: one-time access codes", () => {
     };
     const t = codesSetup({ messages: failing, newCode: () => "24681357" });
     const callId = await codeCall(t);
-    assert.deepEqual(await t.codes.issue(t.gate, t.engine, callId), { grantId: "acc_1", status: "refused", confirmed: false });
+    assert.deepEqual(await t.codes.issue(t.engine, callId), { grantId: "acc_1", status: "refused", confirmed: false });
     assert.equal((await codeEvents(t)).at(-1)![1].reason, "text_failed");
     assert.deepEqual(await t.codes.redeem({ ...keypadDoor, code: "24681357" }), { ok: false });
 
@@ -830,47 +957,72 @@ describe("gate: one-time access codes", () => {
     })();
     const u = codesSetup({ messages: failing, store: stuck });
     const other = await codeCall(u);
-    assert.deepEqual(await u.codes.issue(u.gate, u.engine, other), { grantId: "acc_1", status: "unknown", confirmed: false });
+    assert.deepEqual(await u.codes.issue(u.engine, other), { grantId: "acc_1", status: "unknown", confirmed: false });
   });
 
   it("tries a new code when one is live for the same door, and frees a code once its grant expired", async () => {
     const t = codesSetup({ newCode: () => "12345678" });
     const first = await codeCall(t);
-    assert.equal((await t.codes.issue(t.gate, t.engine, first)).status, "delivered");
+    assert.equal((await t.codes.issue(t.engine, first)).status, "delivered");
     const second = await codeCall(t);
     t.clock.advance(60_000);
-    assert.deepEqual(await t.codes.issue(t.gate, t.engine, second), { grantId: "acc_2", status: "refused", confirmed: false });
+    assert.deepEqual(await t.codes.issue(t.engine, second), { grantId: "acc_2", status: "refused", confirmed: false });
     assert.equal((await codeEvents(t)).at(-1)![1].reason, "no_free_code");
     assert.equal(t.texts.sent.length, 1);
     t.clock.advance(10 * 60_000);
     const third = await codeCall(t);
-    assert.equal((await t.codes.issue(t.gate, t.engine, third)).status, "delivered");
+    assert.equal((await t.codes.issue(t.engine, third)).status, "delivered");
     assert.equal((t.store as MemoryAccessCodeStore).size, 1, "the expired code was dropped");
   });
 
   it("texts only for its own issue calls, each for its own call", async () => {
     const t = codesSetup({ limits: new MemoryTextSendLimits({ minGapSeconds: 0 }) });
     const callId = await codeCall(t);
-    assert.deepEqual(await t.gate.grantAccess(t.engine, callId), { grantId: "acc_1", status: "refused", confirmed: false });
+    assert.deepEqual(await t.engine.grantAccess(callId), { grantId: "acc_1", status: "refused", confirmed: false });
     assert.equal((await codeEvents(t)).at(-1)![1].reason, "not_requested");
     assert.equal(t.texts.sent.length, 0);
     const a = await codeCall(t);
     const b = await codeCall(t);
-    const results = await Promise.all([t.codes.issue(t.gate, t.engine, a), t.codes.issue(t.gate, t.engine, b)]);
+    const results = await Promise.all([t.codes.issue(t.engine, a), t.codes.issue(t.engine, b)]);
     assert.deepEqual(results.map((r) => r.status), ["delivered", "delivered"]);
     const keys = t.texts.sent.map((s) => s.messageId);
     assert.equal(new Set(keys).size, 2);
-    assert.deepEqual((await codeSlice(t, a)).grants.map((g) => g.status), ["delivered"]);
-    assert.deepEqual((await codeSlice(t, b)).grants.map((g) => g.status), ["delivered"]);
+    assert.deepEqual((await codeGrants(t, a)).map((g) => g.status), ["delivered"]);
+    assert.deepEqual((await codeGrants(t, b)).map((g) => g.status), ["delivered"]);
+  });
+
+  it("texts each code to its own call's number when two workspaces hand out the same grant id at once", async () => {
+    const t = codesSetup();
+    const OTHER_PHONE = "+15555550199";
+    const u = createTestEngine({
+      workspaceId: "ws_other",
+      clock: t.clock,
+      adapters: { access: { keypad: t.codes.controller }, accessSigner: t.accessSigner },
+      config: gateConfig((c) => {
+        c.modules.gate = { settings: { targets: [keypadTarget] } };
+        c.flows = {};
+        c.flows["code-entry"] = { steps: [verify as never, { type: "gate.grant", target: "side-door", lifetimeSeconds: 600 }] };
+      }),
+    });
+    u.records.putSubject("ws_other", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: OTHER_PHONE, knowledge: { dob: DOB } }));
+    u.carrier.set(OTHER_PHONE, { identityMatch: "match" });
+    const mine = await codeCall(t);
+    const theirs = await codeCall(u as never);
+    // Both engines' first grant is acc_1, and both are in flight together; the other workspace's issue started first.
+    const [other, own] = await Promise.all([t.codes.issue(u.engine, theirs), t.codes.issue(t.engine, mine)]);
+    assert.deepEqual([other.grantId, own.grantId, other.status, own.status], ["acc_1", "acc_1", "delivered", "delivered"]);
+    assert.deepEqual(t.texts.sent.map((m) => m.to).sort(), [OTHER_PHONE, PHONE_ON_FILE].sort());
+    const toOther = t.texts.sent.find((m) => m.to === OTHER_PHONE)!;
+    assert.ok((await t.codes.redeem({ ...keypadDoor, workspaceId: "ws_other", code: TEXT.exec(toOther.body)![1]! })).ok, "the other workspace's code is its own");
   });
 
   it("refuses before a keypad match, without entry.open, and with a short key", async () => {
     const t = codesSetup();
     const { callId } = await t.engine.startCall({ flow: "code-entry" });
     await assert.rejects(t.engine.numberOnFile(callId), rejects("precondition_failed"));
-    await assert.rejects(t.codes.issue(t.gate, t.engine, callId), rejects("precondition_failed"));
+    await assert.rejects(t.codes.issue(t.engine, callId), rejects("precondition_failed"));
     const open = await t.engine.startCall({});
-    await assert.rejects(t.codes.issue(t.gate, t.engine, open.callId, { target: "side-door" }), rejects("scope_denied"));
+    await assert.rejects(t.codes.issue(t.engine, open.callId, { target: "side-door" }), rejects("scope_denied"));
     assert.equal(t.texts.sent.length, 0);
     const parts = { signer: generateTestSigner(), store: new MemoryAccessCodeStore(), messages: t.texts, limits: new MemoryTextSendLimits() };
     assert.throws(() => accessCodes({ key: "short", ...parts }), /at least 16 bytes/);

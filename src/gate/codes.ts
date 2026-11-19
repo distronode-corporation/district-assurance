@@ -3,11 +3,13 @@
 // the door later hands the code to the host, which redeems it here, once, for that same grant.
 //
 // A code rides on Gate's own grant path: `accessCodes(...).controller` is an `AccessController`,
-// named in `gateModule({ controllers })` like any other, and `issue` runs `gate.grantAccess` for
-// it. So a code gets everything a grant gets: the reservation, the `entry.open` checks before and
-// right before sending, one in flight per call, `maxGrantsPerCall`, the ledger entries with the
-// grant's digest, and a lifetime that never passes the verification grant. "Delivered" means the
-// code was texted.
+// named in the engine's `access` adapter like any other, and `issue` runs `engine.grantAccess` for
+// it. So a code gets everything a grant gets: the engine's reservation, the `entry.open` checks
+// before and right before sending, one in flight per call, `maxGrantsPerCall`, the engine's own
+// ledger entries with the grant's digest, and a lifetime that never passes the verification grant.
+// The engine records the controller's answer itself (ADR-25): nothing here writes an outcome.
+// "Delivered" means the code was texted: the door acts later, when the code is redeemed, which may
+// be after the call ended and its receipt was issued, until the grant expires (SPEC.md, section 17).
 //
 // The engine keeps only a keyed hash of each code (HMAC under the codes' own key, bound to the
 // workspace, the controller and the door) with the grant's body, never the code and never a
@@ -26,8 +28,8 @@ import { EngineError } from "../core/errors.ts";
 import { hmacSha256Hex } from "../core/hash.ts";
 import type { Engine } from "../engine.ts";
 import { signDocument } from "../prove/receipt.ts";
-import type { AccessController, AccessGrantBody, SignedAccessGrant, UnlockResult } from "./access.ts";
-import { GATE, type AccessResult, type GateHost, type GateModule, type GateSlice } from "./gate.ts";
+import { accessGrantDigest, type AccessController, type AccessGrantBody, type SignedAccessGrant, type UnlockResult } from "./access.ts";
+import type { AccessResult } from "./gate.ts";
 
 /** Digits in a code: a guess at the door is one in 100 million per live code. */
 export const ACCESS_CODE_DIGITS = 8;
@@ -124,7 +126,7 @@ export class MemoryTextSendLimits implements TextSendLimits {
 export interface AccessCodeOptions {
   /** The HMAC key for codes, at least 16 bytes. Its own key, not the knowledge key. */
   key: string | Uint8Array;
-  /** Signs a redeemed grant for the door's relay: Gate's own signer. */
+  /** Signs a redeemed grant for the door's relay: the engine's `accessSigner`, so relays check it with `engine.accessKeys()`. */
   signer: ReceiptSigner;
   store: AccessCodeStore;
   /** Texts the code. The destination is always the number on file, from the engine. */
@@ -138,7 +140,7 @@ export interface AccessCodeOptions {
 }
 
 /** What `issue` needs of an engine. */
-export type AccessCodeHost = GateHost & Pick<Engine, "numberOnFile">;
+export type AccessCodeHost = Pick<Engine, "workspaceId" | "grantAccess" | "accessGrants" | "numberOnFile">;
 
 export type RedeemResult = { ok: true; grant: SignedAccessGrant } | { ok: false };
 
@@ -147,7 +149,7 @@ export function accessCodeDigest(key: string | Uint8Array, door: { workspaceId: 
   return hmacSha256Hex(key, JSON.stringify(["access-code", door.workspaceId, door.audience, door.target, code]));
 }
 
-/** One-time access codes: name `codes.controller` in `gateModule({ controllers })`, then `codes.issue(...)`. */
+/** One-time access codes: name `codes.controller` in the engine's `access` adapter, then `codes.issue(...)`. */
 export function accessCodes(options: AccessCodeOptions): AccessCodes {
   return new AccessCodes(options);
 }
@@ -177,15 +179,15 @@ export class AccessCodes {
 
   /**
    * Issues an access grant through Gate for a target whose controller is `controller`, and texts
-   * its code to the number on file. Takes what `gate.grantAccess` takes and answers the same:
+   * its code to the number on file. Takes what `engine.grantAccess` takes and answers the same:
    * `delivered` once the code was texted, `refused` at a send limit or when the text failed (the
    * code is then revoked), `unknown` when that is not known.
    */
-  async issue(gate: GateModule, engine: AccessCodeHost, callId: string, input?: { target: string; lifetimeSeconds?: number }): Promise<AccessResult> {
+  async issue(engine: AccessCodeHost, callId: string, input?: { target: string; lifetimeSeconds?: number }): Promise<AccessResult> {
     const pending: Pending = { engine, callId };
     this.#pending.add(pending);
     try {
-      return await gate.grantAccess(engine, callId, input);
+      return await engine.grantAccess(callId, input);
     } finally {
       this.#pending.delete(pending);
     }
@@ -211,7 +213,7 @@ export class AccessCodes {
   /** The controller's `unlock`: Gate reserved and signed the grant; text a code for it instead. */
   async #text(grant: SignedAccessGrant): Promise<UnlockResult> {
     const body = grant.body;
-    const pending = await this.#callOf(body.grantId);
+    const pending = await this.#callOf(body);
     if (pending === null) return { outcome: "refused", reason: "not_requested" };
     const to = await pending.engine.numberOnFile(pending.callId);
     const now = this.#clock.now();
@@ -246,11 +248,18 @@ export class AccessCodes {
     }
   }
 
-  /** The running `issue` whose call holds this grant's reservation, or null. */
-  async #callOf(grantId: string): Promise<Pending | null> {
+  /**
+   * The running `issue` whose call holds this very grant in flight, or null: matched on the
+   * engine's workspace and the digest the engine recorded for the grant it signed, never on the
+   * grant id alone (two engines, or two workspaces, may hand out the same id), so a code is never
+   * texted to another call's number.
+   */
+  async #callOf(body: AccessGrantBody): Promise<Pending | null> {
+    const digest = accessGrantDigest(body);
     for (const pending of this.#pending) {
-      const slice = (await pending.engine.moduleState(pending.callId, GATE)) as unknown as GateSlice;
-      if (slice.grants.some((g) => g.grantId === grantId && g.status === "reserved")) return pending;
+      if (pending.engine.workspaceId !== body.workspaceId) continue;
+      const grants = await pending.engine.accessGrants(pending.callId);
+      if (grants.some((g) => g.grantId === body.grantId && g.status === "reserved" && g.digest === digest)) return pending;
     }
     return null;
   }

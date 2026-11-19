@@ -1,5 +1,5 @@
-// The demo's FlowConfig: one workspace with four flows. Gate must be installed with
-// `modules: [gateModule(...)]` for it to validate (its targets name the gate's "lobby" controller).
+// The demo's FlowConfig: one workspace with four flows. Gate needs the engine's `access` adapters
+// (its targets name the "lobby" controller) and an `accessSigner`.
 //
 // - `owner-command`: the line's owner keys their PIN; Badge checks it against a keyed hash and
 //   nothing else counts. The grant covers `owner.command` only. The ledger records it (Trace is

@@ -5,7 +5,7 @@ import type { JsonWebKey } from "node:crypto";
 
 import type { JsonValue } from "./canonical.ts";
 import type { Actor, EngineEventName } from "./events.ts";
-import type { CarrierSignalReport } from "./policy.ts";
+import type { AssuranceLevel, CarrierSignalReport } from "./policy.ts";
 
 /** Photo ID plus selfie by a link the caller opens on their phone (for example Stripe Identity). */
 export interface IdentityProvider {
@@ -192,4 +192,52 @@ export interface ReceiptSigner {
   sign(payload: Uint8Array): Promise<Uint8Array>;
   /** The public key, for publishing in a key set. */
   publicJwk(): JsonWebKey;
+}
+
+/** An access grant's signed body (Gate): what a door's relay checks. SPEC.md, section 17. */
+export interface AccessGrantBody {
+  v: 1;
+  kind: "access";
+  /** Unique per grant. A relay refuses an id it has seen until the grant expires. */
+  grantId: string;
+  /** The workspace that issued it. A relay checks it is its own. */
+  workspaceId: string;
+  /** The controller it is for: its name in the engine's `access` adapters. A relay checks it is its own. */
+  audience: string;
+  /** The door, lock or access point, as the controller names it. Set in config, never by the model. */
+  target: string;
+  action: "unlock";
+  /** The scope the call's verification grant covered. */
+  scope: string;
+  /** The level the caller was verified to. */
+  level: AssuranceLevel;
+  /** ISO 8601. */
+  issuedAt: string;
+  /** ISO 8601. Never later than the call's verification grant. */
+  expiresAt: string;
+}
+
+/** ES256 over the body's canonical JSON, the receipts' format. */
+export interface SignedAccessGrant {
+  body: AccessGrantBody;
+  alg: "ES256";
+  kid: string;
+  /** base64url of the 64-byte P1363 signature. */
+  signature: string;
+}
+
+/** What a door controller answered. A lost answer is a thrown error, never a value. */
+export type UnlockResult =
+  /** The controller took the request. `confirmed` only when it reports that the door actually moved. */
+  | { outcome: "delivered"; providerRef: string; confirmed: boolean }
+  /** The controller certainly did not act (it refused the grant, the door is offline). */
+  | { outcome: "refused"; reason: string };
+
+/**
+ * A door controller, lock or access system (Gate). The engine calls `unlock` once per grant and
+ * never retries: if the call throws or times out, the engine records "unknown", and opening again
+ * needs a fresh request (a new grant). An adapter must not retry on its own either.
+ */
+export interface AccessController {
+  unlock(input: { grant: SignedAccessGrant; target: string; idempotencyKey: string }): Promise<UnlockResult>;
 }

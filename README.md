@@ -25,9 +25,9 @@ added and removed per workspace config.
 | **Dossier** (file) | Intake the caller confirms: forms the organisation defines, values normalised by code, a structured record with a fingerprint. | Built. Read-backs, encrypted fields and delivery are planned. |
 | **Paylink** (pay) | Payment by a secure link texted to the number on file (a hosted page such as Stripe Checkout), on the business's own account (`connect`) or the platform's (`platform`), chosen per flow. Only methods that settle during the call; the link lives 15 minutes after it is texted by default, and the host calls `expirePaymentLinks` at that deadline (a timer or a sweep) so the engine expires it. The engine never handles card numbers. | Built on fakes, both modes. The Stripe adapter is planned. |
 | **Trace** (prove) | The hash-chained audit ledger, which is always on and cannot be turned off, plus optional signed receipts (ES256 over canonical JSON) and consent records with fingerprinted wording. | Built, in memory. Export, key rotation and revocation are planned. |
-| **Gate** (entry) | The outcome after verification: a signed, time-limited access grant for a door, never sent twice. Installed with `engine.use(gateModule(...))`. | Built, with the signed-webhook relay adapter and a fake. One-time codes, web sign-in step-up, Seam and direct vendor adapters are planned. |
+| **Gate** (entry) | The outcome after verification: a signed, time-limited access grant for a door, never sent twice, whose outcome the engine itself records from the door controller's answer. | Built, with the signed-webhook relay adapter and a fake. One-time codes, web sign-in step-up, Seam and direct vendor adapters are planned. |
 
-Outside modules plug in with `engine.use(module)`, and so does Gate, which runs on that same path. A module declares what it provides (factors,
+Outside modules plug in with `engine.use(module)`. A module declares what it provides (factors,
 flow steps, outcomes), the scopes it grants or needs, the adapters it requires and a validator for
 its settings. The code keeps the plain names `verify`, `file`, `pay` and `prove` for the folders.
 
@@ -73,9 +73,9 @@ when it is saved, never in the middle of a call. The engine runs a flow step by 
 only the current step's work, and none once the flow has ended. Money movement, contact changes and
 access can never go below level 2, whatever a scope is called, and level 2 always needs a factor
 that is not something the caller knows. Pay by link is level 2 by default. There is no configuration UI: config and API come first.
-This config turns Gate on, so the engine must be built with Gate installed (`modules:
-[gateModule(...)]`, as in "Using the engine" below): the validator refuses a module that is not
-installed.
+This config turns Gate on, so the engine needs Gate's adapters: its door controllers (`access`) and
+its grant signer (`accessSigner`), as in "Using the engine" below. The validator refuses the config
+without them, or with a target naming a controller the engine does not have.
 
 ## Try it
 
@@ -120,8 +120,8 @@ const engine = createEngine({
   knowledgeKey: process.env.KNOWLEDGE_KEY!, // per-workspace HMAC key, at least 16 bytes
   adapters: { ledger: new MemoryAuditLedger(), sessions, records, carrier, messages, payments, signer },
   config, // the workspace's FlowConfig; any problem throws a ConfigError listing all of them
-  // A config that turns Gate on needs it installed first:
-  // modules: [gateModule({ signer: gateSigner, controllers: { lobby: webhookRelay({ url }) } })],
+  // A config that turns Gate on needs its adapters among the others:
+  // access: { lobby: webhookRelay({ url }) }, accessSigner,
 });
 
 const { callId } = await engine.startCall({ locale: "fr", flow: "owner-command" });
