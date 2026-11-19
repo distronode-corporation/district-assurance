@@ -137,6 +137,39 @@ describe("findBankNumbers", () => {
   });
 });
 
+describe("the Quebec look-back", () => {
+  it("reads only a short window before each run, however long the transcript", () => {
+    const exec = RegExp.prototype.exec;
+    let longest = 0;
+    let calls = 0;
+    RegExp.prototype.exec = function (this: RegExp, input: string) {
+      if (this.source.includes("\\p{L}{4}")) {
+        calls++;
+        longest = Math.max(longest, input.length);
+      }
+      return exec.call(this, input);
+    };
+    const text = "date 7501 0112, ".repeat(400);
+    let found: RedactionFinding[];
+    try {
+      found = findHealthCardNumbers(text);
+    } finally {
+      RegExp.prototype.exec = exec;
+    }
+    assert.equal(found.length, 400, "every one is still found");
+    assert.ok(calls >= 400);
+    assert.ok(longest <= 48, `read ${longest} characters before a run`);
+  });
+
+  it("keeps the letter check at the edge of the window", () => {
+    const pad = "x".repeat(60);
+    assert.deepEqual(findHealthCardNumbers(`${pad} TREM 7501 0112`).length, 1);
+    assert.deepEqual(findHealthCardNumbers(`${pad}TREM 7501 0112`), [], "a word longer than four letters is no code");
+    assert.deepEqual(findHealthCardNumbers(`T${" ".repeat(9)}R E M 7501 0112`), [], "a gap of more than 8 separators ends the letters");
+    assert.deepEqual(findHealthCardNumbers(`${"y".repeat(44)}TREM 7501 0112`), [], "the letter before the code is seen at the window's edge");
+  });
+});
+
 describe("the redactors together", () => {
   it("compose, card numbers first, and their markers trip none of the others", () => {
     const all = composeRedactors(cardNumberRedactor, healthCardRedactor, sinRedactor, bankAccountRedactor);

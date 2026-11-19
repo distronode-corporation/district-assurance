@@ -20,7 +20,7 @@ import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
 import { hmacSha256Hex } from "./core/hash.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
 import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
-import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
+import { cardNumberRedactor, interruptLine, type RedactionFinding, type Redactor } from "./core/redaction.ts";
 import type { AdapterName, CallDraft, CallRecord, EngineAdapters, EngineRuntime, FlowStatus, Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
@@ -234,19 +234,24 @@ export class Engine {
   }
 
   /**
-   * Redacts text before the host stores or forwards it. `interrupt` tells the host to speak its
-   * fixed "please don't read card numbers" line.
+   * Redacts text before the host stores or forwards it. `interrupt` tells the host to speak `line`,
+   * the fixed line for what was found (a card number, a health card number, a SIN or banking
+   * details), in the call's language; `line` is null when nothing was found.
    */
-  async redact(callId: string, text: string): Promise<{ text: string; findings: RedactionFinding[]; interrupt: boolean }> {
+  async redact(callId: string, text: string): Promise<{ text: string; findings: RedactionFinding[]; interrupt: boolean; line: string | null }> {
     const result = this.#redactor.redact(text);
+    let locale: Locale;
     if (result.findings.length === 0) {
-      await this.#read(callId);
+      locale = (await this.#read(callId)).locale;
     } else {
       const kinds: Record<string, number> = {};
       for (const f of result.findings) kinds[f.kind] = (kinds[f.kind] ?? 0) + 1;
-      await this.#update(callId, (draft) => draft.emit("redaction.applied", "code", { kinds }));
+      locale = await this.#update(callId, (draft) => {
+        draft.emit("redaction.applied", "code", { kinds });
+        return draft.record.locale;
+      });
     }
-    return { ...result, interrupt: result.findings.length > 0 };
+    return { ...result, interrupt: result.findings.length > 0, line: interruptLine(result.findings, locale) };
   }
 
   /** Whether the call's grant covers a scope now. A scope the policy does not list is refused. */

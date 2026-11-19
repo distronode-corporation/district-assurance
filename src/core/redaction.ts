@@ -29,6 +29,38 @@ export interface Redactor {
   redact(text: string): RedactionResult;
 }
 
+/**
+ * The fixed line a host speaks when a redactor fires, per kind and language. Only a card number is
+ * offered a payment link instead; the other numbers are never needed on a call.
+ */
+export const INTERRUPT_LINES: Readonly<Record<RedactionKind, { en: string; fr: string }>> = {
+  card_number: {
+    en: "Please do not read card numbers aloud. I can text you a secure payment link instead.",
+    fr: "Veuillez ne pas lire de numéro de carte à voix haute. Je peux plutôt vous envoyer un lien de paiement sécurisé par texto.",
+  },
+  health_card: {
+    en: "Please do not read your health card number aloud. I do not need it on this call.",
+    fr: "Veuillez ne pas lire votre numéro d'assurance maladie à voix haute. Je n'en ai pas besoin pendant cet appel.",
+  },
+  sin: {
+    en: "Please do not read your social insurance number aloud. I do not need it on this call.",
+    fr: "Veuillez ne pas lire votre numéro d'assurance sociale à voix haute. Je n'en ai pas besoin pendant cet appel.",
+  },
+  bank_account: {
+    en: "Please do not read your banking details aloud. I do not need them on this call.",
+    fr: "Veuillez ne pas lire vos renseignements bancaires à voix haute. Je n'en ai pas besoin pendant cet appel.",
+  },
+};
+
+/** Which kind's line is spoken when several fire at once: a card number first, then this order. */
+const INTERRUPT_ORDER: readonly RedactionKind[] = ["card_number", "health_card", "sin", "bank_account"];
+
+/** The line for a set of findings in a language, or null when there are none. */
+export function interruptLine(findings: readonly RedactionFinding[], locale: "en" | "fr"): string | null {
+  const kind = INTERRUPT_ORDER.find((k) => findings.some((f) => f.kind === k));
+  return kind === undefined ? null : INTERRUPT_LINES[kind][locale];
+}
+
 export const REDACTION_MARKERS: Record<RedactionKind, string> = {
   card_number: "[card number removed]",
   sin: "[SIN removed]",
@@ -164,11 +196,23 @@ function groupedAs(run: readonly Token[], i: number, j: number, breaks: readonly
   return true;
 }
 
-const FOUR_LETTERS_BEFORE = /(?<!\p{L})(?:\p{L}{4}|\p{L}(?:[\s\-.,]+\p{L}){3})[\s\-.,]*$/u;
+// Four letters, each gap and the gap before the digits at most 8 separators, so a match is at most
+// 40 UTF-16 code units (astral letters included) and only a short window before a run is read.
+const FOUR_LETTERS_BEFORE = /(?<!\p{L})(?:\p{L}{4}|\p{L}(?:[\s\-.,]{1,8}\p{L}){3})[\s\-.,]{0,8}$/u;
+/**
+ * The look-back window, longer than any match (40), so a match never starts at the window's first
+ * character and its letter check always sees the real character before it.
+ */
+const FOUR_LETTERS_WINDOW = 48;
 
-/** Where the four letters before a run start, if they are there. */
+/**
+ * Where the four letters before a run start, if they are there. Only the last few characters before
+ * the run are read, so a long transcript with many candidate runs stays linear.
+ */
 function fourLettersBefore(text: string, at: number): number | undefined {
-  return FOUR_LETTERS_BEFORE.exec(text.slice(0, at))?.index;
+  const from = Math.max(0, at - FOUR_LETTERS_WINDOW);
+  const found = FOUR_LETTERS_BEFORE.exec(text.slice(from, at));
+  return found === null ? undefined : from + found.index;
 }
 
 /**

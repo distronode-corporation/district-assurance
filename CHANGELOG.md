@@ -32,6 +32,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `Engine.redact` also returns `line`, the fixed interrupt line for the kind found, in English or
+  French (`INTERRUPT_LINES`), so a SIN or banking details never get the card number wording (PRV-6).
 - `composeRedactors` reports finding offsets into the original input, no longer into the text each
   redactor saw (PRV-6).
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route

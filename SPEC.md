@@ -404,9 +404,12 @@ the currency's own decimals.
 Each detector is its own `Redactor`; a host composes the ones it wants with `composeRedactors`,
 card numbers first, then health card numbers, SINs and bank numbers (a 10-digit health card number
 can start with a valid SIN, so the health card pass must see it whole). Composed findings report
-offsets into the original input, in the order the redactors ran. The engine's default redactor is `cardNumberRedactor`, and `Engine.redact`
-sets `interrupt` on any finding, whichever redactor found it. A match is replaced by its kind's
-marker; `redaction.applied` counts findings per kind.
+offsets into the original input, in the order the redactors ran. The engine's default redactor
+is `cardNumberRedactor`. `Engine.redact` sets `interrupt` on any finding, whichever redactor found
+it, and returns `line`, the fixed line for the kind found (`INTERRUPT_LINES`, in the call's
+language; a card number first, then a health card number, a SIN, banking details; null when
+nothing was found). Only the card number line offers a payment link. A match is replaced by its
+kind's marker; `redaction.applied` counts findings per kind.
 
 Digits are read in runs: digit groups or single digit words (English and French) with only
 spaces, hyphens, dots or commas between them. In each run, matches are taken leftmost first,
@@ -418,7 +421,8 @@ digits read one by one) may break anywhere.
 |---|---|---|---|
 | `card_number` | `cardNumberRedactor` | 13 to 19 digits, Luhn | `[card number removed]` |
 | `sin` | `sinRedactor` | 9 digits, Luhn, groups 3-3-3 | `[SIN removed]` |
-| `health_card` | `healthCardRedactor` | Ontario: 10 digits, Luhn, groups 4-3-3 (a version code after it is kept). British Columbia: 10 digits starting with 9, mod 11 check digit (weights 2, 4, 8, 5, 10, 9, 7, 3 on digits 2 to 9), groups 4-3-3. Quebec: four letters right before the run, as one word or spelled one by one, then 8 digits whose 3rd to 6th give a month (or month plus 50) and a day, groups 4-4; the letters are removed too | `[health card number removed]` |
+| `health_card` | `healthCardRedactor` | Ontario: 10 digits, Luhn, groups 4-3-3 (a version code after it is kept). British Columbia: 10 digits starting with 9, mod 11 check digit (weights 2, 4, 8, 5, 10, 9, 7, 3 on digits 2 to 9), groups 4-3-3. Quebec: four letters right before the run, as one word or spelled one by one (at most 8
+separators in each gap and before the digits, so only the last 48 characters before a run are read), then 8 digits whose 3rd to 6th give a month (or month plus 50) and a day, groups 4-4; the letters are removed too | `[health card number removed]` |
 | `bank_account` | `bankAccountRedactor` | a whole run of 3 or more digits with a bank word among the last 4 words before it, counting only words after the previous run. English: bank, branch, transit, institution, account; French: banque, bancaire, succursale, compte, folio; each also in the plural | `[banking details removed]` |
 
 Bank numbers carry no check digit, so a bank word is what marks them; an account number read
