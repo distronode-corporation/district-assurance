@@ -26,6 +26,7 @@
     { "name": "French hundreds and thousands", "text": "cent deux, deux cents, deux mille vingt, mille", "runs": ["10220020201000"] },
     { "name": "Belgian and Swiss tens", "text": "septante nonante huitante octante", "runs": ["70908080"] },
     { "name": "et outside a number ends a run", "text": "quarante et merci", "runs": ["40"] },
+    { "name": "a decomposed accent is the same word", "text": "quatre ze\u0301ro deux", "runs": ["402"] },
     { "name": "words that are not numbers", "text": "constructor toString hasOwnProperty", "runs": [] },
     { "name": "number words joined to numerals", "text": "forty two 42 double 4", "runs": ["424244"] }
   ],

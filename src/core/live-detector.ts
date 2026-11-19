@@ -35,6 +35,9 @@ export interface LiveDetection {
 // makes sense before more digits ("and" or "et" inside a number, "double", "triple").
 const PENDING = /^[\s\-.,]*(?:(?:and|et|double|triple)[\s\-.,]*)?$/iu;
 const PENDING_WORD = /(?<!\p{L})(?:double|triple)[\s\-.,]*$/iu;
+// Separators at the end of what is kept: dropped, since the next chunk is joined with a space,
+// so empty or separator-only chunks never grow the kept text.
+const TRAILING = /[\s\-.,]+$/u;
 
 // How a part of a run is read depends on its own words and on at most three words after it
 // (redaction.ts looks that far for "and", "et" and "quatre-vingt-dix-sept"); one more for margin.
@@ -81,12 +84,12 @@ export class LiveCardNumberDetector {
       const settledBy = settledEnd(text);
       const keep = last.findIndex((p) => p.end > settledBy);
       this.#settled = digits - digitCount(last.slice(keep));
-      this.#tail = text.slice(last[keep]!.start);
+      this.#tail = text.slice(last[keep]!.start).replace(TRAILING, "");
       return { interrupt, digits };
     }
     const pending = PENDING_WORD.exec(text);
     this.#settled = 0;
-    this.#tail = pending === null ? "" : text.slice(pending.index);
+    this.#tail = pending === null ? "" : text.slice(pending.index).replace(TRAILING, "");
     return { interrupt, digits: 0 };
   }
 

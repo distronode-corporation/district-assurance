@@ -413,7 +413,8 @@ word or punctuation ends it. Spoken numbers are read as people say them:
 | `double` and `triple` before one digit: `double four`, `triple 0` | `44`, `000` |
 | scales: `four hundred and two`, `forty two hundred`, `cent deux`, `deux mille vingt` | `402`, `4200`, `102`, `2020` |
 
-Units do not combine (`four two` is 4 then 2). `quatre-vingts` and `deux cents` end a number,
+Words are compared in Unicode NFC, lower case, with their combining marks, so `zéro` written
+decomposed (`e` and U+0301) is still a number word. Units do not combine (`four two` is 4 then 2). `quatre-vingts` and `deux cents` end a number,
 since French writes the plural only there. `double` or `triple` before anything but one digit is
 an ordinary word.
 
@@ -428,8 +429,8 @@ or more (8 by default; an integer from 4 to 19, otherwise `invalid_input`), and 
 digits of the run still open at the end. There is no Luhn check, since a partial number cannot
 pass one, so a phone number read aloud interrupts too. A chunk that does not extend the run does
 not interrupt again. A run continues across chunks, also after a trailing `and`, `et`, `double` or
-`triple`. The detector keeps only the open run's text, never returns it, and forgets it on
-`reset()`. The host owns one detector per call and speaks its fixed line on `interrupt`.
+`triple`. The detector keeps only the open run's text, without trailing separators, so empty or
+separator-only chunks never grow what it keeps; it never returns it, and forgets it on `reset()`. The host owns one detector per call and speaks its fixed line on `interrupt`.
 
 **Corpus.** `test/corpus/card-numbers.json` holds the cases for runs, redaction and live detection
 as plain JSON, so an implementation in another language can be tested against the same cases.

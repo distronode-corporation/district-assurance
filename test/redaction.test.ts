@@ -112,6 +112,42 @@ describe("LiveCardNumberDetector", () => {
     assert.deepEqual(detector.push("four two"), { interrupt: false, digits: 2 });
   });
 
+  it("keeps what it reads bounded when chunks are empty or only separators", () => {
+    const longest = (feed: (d: LiveCardNumberDetector) => void) => {
+      const detector = new LiveCardNumberDetector();
+      const matchAll = String.prototype.matchAll;
+      let max = 0;
+      String.prototype.matchAll = function (this: string, ...args: Parameters<typeof matchAll>) {
+        max = Math.max(max, this.length);
+        return matchAll.apply(this, args);
+      } as typeof matchAll;
+      try {
+        feed(detector);
+      } finally {
+        String.prototype.matchAll = matchAll;
+      }
+      return { detector, max };
+    };
+    for (const first of ["four", "double"]) {
+      const { detector, max } = longest((d) => {
+        d.push(first);
+        for (let i = 0; i < 500; i++) d.push(i % 2 === 0 ? "" : " , - .");
+      });
+      assert.ok(max < 40, `${first}: read ${max} characters`);
+      assert.deepEqual(detector.push("four two four two four two four"), { interrupt: true, digits: 8 }, first);
+    }
+  });
+
+  it("reads a decomposed accent as the same word", () => {
+    const nfd = "z\u0065\u0301ro";
+    assert.deepEqual(digitRuns(`quatre ${nfd} ${nfd} deux`).map((r) => r.map((p) => p.digits).join("")), ["4002"]);
+    const card = "quatre deux quatre deux quatre deux quatre deux quatre deux quatre deux quatre deux quatre deux";
+    assert.equal(redact(`c'est ${card.normalize("NFD")}`), `c'est ${M}`);
+    assert.equal(redact(`${nfd} 4242424242424242`.replace(nfd, "Z\u00e9ro")).includes(M), true);
+    const detector = new LiveCardNumberDetector();
+    assert.deepEqual(detector.push(`quatre ${nfd} quatre ${nfd} quatre ${nfd} quatre ${nfd}`), { interrupt: true, digits: 8 });
+  });
+
   it("keeps a trailing double or triple with no run before it", () => {
     const detector = new LiveCardNumberDetector();
     assert.deepEqual(detector.push("it is triple"), { interrupt: false, digits: 0 });

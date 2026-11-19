@@ -3,8 +3,9 @@
 // The first detector is card numbers (PANs): 13 to 19 digits that pass the Luhn check, written as
 // digits or spoken in English or French (digit by digit, as numbers such as "forty two" or
 // "quarante-deux", or with "double" and "triple"), with spaces, hyphens, dots or commas between
-// groups. The same reading of spoken numbers feeds the live detector (live-detector.ts). A match is replaced by a fixed marker. Over-redaction is accepted; the
-// risk this guards against is a card number reaching storage.
+// groups. The same reading of spoken numbers feeds the live detector (live-detector.ts). A match
+// is replaced by a fixed marker. Over-redaction is accepted; the risk this guards against is a card
+// number reaching storage.
 
 export type RedactionKind = "card_number";
 
@@ -104,8 +105,11 @@ interface Parsed {
 
 type Parser = (lx: readonly Lexeme[], i: number, first: boolean) => Parsed | undefined;
 
-/** A word or numeral, as runs are read (live-detector.ts counts words with it too). */
-export const LEXEME = /\d+|\p{L}+/gu;
+/**
+ * A word or numeral, as runs are read (live-detector.ts counts words with it too). A word keeps its
+ * combining marks, so "zéro" written decomposed (e and U+0301) is one word, not "ze" and "ro".
+ */
+export const LEXEME = /\d+|\p{L}[\p{L}\p{M}]*/gu;
 const SEPARATOR = /^[\s\-.,]*$/u;
 
 function lexemes(text: string): Lexeme[] {
@@ -115,7 +119,7 @@ function lexemes(text: string): Lexeme[] {
     const raw = match[0];
     const start = match.index;
     const joined = out.length > 0 && SEPARATOR.test(text.slice(lastEnd, start));
-    out.push({ raw, word: raw.toLowerCase(), start, end: start + raw.length, joined });
+    out.push({ raw, word: raw.normalize("NFC").toLowerCase(), start, end: start + raw.length, joined });
     lastEnd = start + raw.length;
   }
   return out;
