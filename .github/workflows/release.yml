@@ -30,7 +30,9 @@ name: Release
 #
 # The `npm-publish` environment does not exist yet. GitHub creates an environment named by a job
 # the first time that job runs, WITHOUT protection rules, so create it with required reviewers
-# and a `v*` tag rule before the first manual publish run.
+# and a `v*` tag rule before the first manual publish run. Until then the publish job refuses:
+# its first step reads the environment back and stops unless it has a required reviewer and a
+# deployment rule, so an environment created without protection never lets a publish through.
 #
 # What each signature covers. npm provenance (the publish step) ties the tarball to this
 # commit and this workflow, and npm's registry signs it; `npm audit signatures` checks both.
@@ -251,10 +253,31 @@ jobs:
       id-token: write
       # Stores the SBOM attestation in this repository, where `gh attestation verify` finds it.
       attestations: write
+      # Reads the npm-publish environment's protection rules back (the first step).
+      actions: read
     steps:
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: audit
+      # The approval this job waited for is only as good as the environment's rules, and an
+      # environment GitHub created on first use has none. Fails closed: no reviewer, no deployment
+      # rule, or no answer from the API, and nothing is published.
+      - name: The npm-publish environment requires a reviewer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/environments/npm-publish" > "$RUNNER_TEMP/environment.json"
+          node -e '
+            const env = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+            const reviewers = (env.protection_rules ?? []).filter((rule) => rule.type === "required_reviewers").flatMap((rule) => rule.reviewers ?? []);
+            const deploymentRule = env.deployment_branch_policy?.custom_branch_policies === true;
+            if (reviewers.length === 0 || !deploymentRule) {
+              console.log("::error::The npm-publish environment needs required reviewers and a v* tag rule before anything is published.");
+              process.exit(1);
+            }
+            console.log(`npm-publish: ${reviewers.length} required reviewer(s), custom deployment rules`);
+          ' "$RUNNER_TEMP/environment.json"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
