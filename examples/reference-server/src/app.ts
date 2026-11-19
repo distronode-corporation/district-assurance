@@ -98,23 +98,26 @@ function decodeURIComponentSafe(value: string): string {
  * advises at most a year); one that expires within 30 days starts with a warning.
  */
 export function securityTxt(settings: SecurityTxtSettings, now: Date, warn: (message: string) => void): string {
-  if (settings.contact.length === 0) throw new Error("securityTxt: at least one contact is required");
-  for (const contact of settings.contact) checkUri("contact", contact, ["mailto:", "tel:", "https:"]);
-  if (settings.policy !== undefined) checkUri("policy", settings.policy, ["https:"]);
-  if (settings.canonical !== undefined) checkUri("canonical", settings.canonical, ["https:"]);
-  const expires = settings.expires.getTime();
+  // Read once: the contacts, links and expiry checked are the ones written into the file.
+  const contacts = [...settings.contact];
+  const { policy, canonical, expires: expiresAt } = settings;
+  if (contacts.length === 0) throw new Error("securityTxt: at least one contact is required");
+  for (const contact of contacts) checkUri("contact", contact, ["mailto:", "tel:", "https:"]);
+  if (policy !== undefined) checkUri("policy", policy, ["https:"]);
+  if (canonical !== undefined) checkUri("canonical", canonical, ["https:"]);
+  const expires = expiresAt.getTime();
   const yearAhead = new Date(now);
   yearAhead.setUTCFullYear(yearAhead.getUTCFullYear() + 1);
   if (Number.isNaN(expires) || expires <= now.getTime()) throw new Error("securityTxt: expires must be in the future");
   if (expires > yearAhead.getTime()) throw new Error("securityTxt: expires must be at most a year ahead");
   // Whole seconds drop the `.000`; any other milliseconds stay, so the file never advertises an
   // expiry earlier than the one the route enforces.
-  const stamp = settings.expires.toISOString().replace(/\.000Z$/, "Z");
-  if (expires - now.getTime() <= WARN_MS) warn(expiryWarning(settings.expires));
-  const lines = settings.contact.map((c) => `Contact: ${c}`);
+  const stamp = expiresAt.toISOString().replace(/\.000Z$/, "Z");
+  if (expires - now.getTime() <= WARN_MS) warn(expiryWarning(expiresAt));
+  const lines = contacts.map((c) => `Contact: ${c}`);
   lines.push(`Expires: ${stamp}`);
-  if (settings.policy !== undefined) lines.push(`Policy: ${settings.policy}`);
-  if (settings.canonical !== undefined) lines.push(`Canonical: ${settings.canonical}`);
+  if (policy !== undefined) lines.push(`Policy: ${policy}`);
+  if (canonical !== undefined) lines.push(`Canonical: ${canonical}`);
   return lines.join("\n") + "\n";
 }
 
@@ -155,7 +158,9 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   const security = options.securityTxt;
   const warn = options.warn ?? console.warn;
   const startedAt = options.clock.now();
-  const securityFile = security === undefined ? null : { text: securityTxt(security, startedAt, warn), expires: security.expires.getTime() };
+  // The expiry the route enforces is read with the one the file was built from, from one copy.
+  const securityCopy = security === undefined ? undefined : { ...security, contact: [...security.contact] };
+  const securityFile = securityCopy === undefined ? null : { text: securityTxt(securityCopy, startedAt, warn), expires: securityCopy.expires.getTime() };
   // A server that runs into the last 30 days, or past the expiry, says so once each, on the first
   // request for the file after it happens: the start-up check alone would never see it.
   let warnedSoon = securityFile !== null && securityFile.expires - startedAt.getTime() <= WARN_MS;
