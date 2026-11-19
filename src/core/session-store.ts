@@ -52,7 +52,7 @@ export class MemorySessionStore implements SessionStore {
     const out: string[] = [];
     for (const [key, stored] of this.#sessions) {
       const [workspace, callId] = JSON.parse(key) as [string, string];
-      if (workspace === workspaceId && (stored.record as { owesAlerts?: unknown }).owesAlerts === true) out.push(callId);
+      if (workspace === workspaceId && (stored.record as { owesAlerts?: unknown } | null)?.owesAlerts === true) out.push(callId);
     }
     return out;
   }

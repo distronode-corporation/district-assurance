@@ -67,6 +67,12 @@ type FlowStart = { over: AttemptCounterKey["scope"] | null; counted: string[] | 
 
 const UNCOUNTED: FlowStart = { over: null, counted: null, recorded: null };
 
+/**
+ * What one `#update` did to the store: nothing (`none`: no compare-and-set ran, or each one
+ * answered `ok: false`), `saved`, or `unknown` (a compare-and-set rejected, so it may have written).
+ */
+type WriteOutcome = { write: "none" | "saved" | "unknown" };
+
 const counterId = (key: AttemptCounterKey): string => `${key.scope}:${key.key}`;
 
 export interface EngineOptions {
@@ -282,7 +288,7 @@ export class Engine {
     }
     const named = new Set(this.#config.policy.levels.flatMap((rule) => rule.anyOf.flat()));
     if (this.isEnabled(badge.BADGE)) for (const kind of this.#rt.settings<BadgeSettings>(badge.BADGE).factors) named.add(kind);
-    const inUse = (this.registry.get(name)?.factorPlugins ?? []).filter((plugin) => named.has(plugin.kind));
+    const inUse = this.registry.judgesOf(name).filter((plugin) => named.has(plugin.kind));
     if (inUse.length > 0) throw new EngineError("precondition_failed", `${name} supplies the factor ${inUse[0]!.kind}, which the config uses; take it out first`);
     this.registry.remove(name);
     this.#swapBadge(this.#badge.withOutsideFactors(this.registry.factorPlugins()));
@@ -383,7 +389,14 @@ export class Engine {
     then(draft);
     this.#advance(draft);
     record.outbox = await Promise.all(events.map((event, i) => this.#outboxEntry(callId, 1, i, event)));
-    const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
+    let created: boolean;
+    try {
+      created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
+    } catch (error) {
+      // No answer, so the store may have written: read back, and a start the call does not hold is given back.
+      if (!(await this.#holdsFlow(callId, flow?.name, start))) await this.#uncount(start);
+      throw error;
+    }
     if (!created) {
       // Another start took the id first (a duplicate delivery racing this one): this start is not counted.
       await this.#uncount(start);
@@ -475,22 +488,21 @@ export class Engine {
     const before = await this.#read(callId);
     this.#keepNumber(before, numberKey);
     const start = await this.#countFlowStart(before, name, definition);
-    // Set when the write's own check refused the flow (a concurrent start attached one first), so
-    // nothing was written: only then is the start taken back. A write that saved and then failed
-    // (the ledger down) keeps its count.
-    let refused = false;
+    // The start is taken back when nothing was written (the write's own check refused the flow, every
+    // compare-and-set found the call moved, or a read failed first), or when a write with no answer
+    // is read back without this flow. A write that saved and then failed (the ledger down) keeps it.
+    const outcome: WriteOutcome = { write: "none" };
     try {
-      await this.#update(callId, (draft) => {
-        this.#keepNumber(draft.record, numberKey);
-        try {
+      await this.#update(
+        callId,
+        (draft) => {
+          this.#keepNumber(draft.record, numberKey);
           this.#attachFlow(draft, name, definition, revision, start);
-        } catch (error) {
-          refused = true;
-          throw error;
-        }
-      });
+        },
+        outcome,
+      );
     } catch (error) {
-      if (refused) await this.#uncount(start);
+      if (outcome.write === "none" || (outcome.write === "unknown" && !(await this.#holdsFlow(callId, name, start)))) await this.#uncount(start);
       throw error;
     }
     if (start.over !== null) throw new RateLimitedError(callId);
@@ -509,6 +521,20 @@ export class Engine {
     const keys = counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice);
     const { over, at } = await this.#countStarts(keys);
     return { over, counted: keys.map(counterId), recorded: at === null ? null : { keys, at } };
+  }
+
+  /**
+   * Whether the stored call holds this start's flow, read back after a write that gave no answer.
+   * A read that fails too answers true: the start stays counted, the safe side.
+   */
+  async #holdsFlow(callId: string, name: string | undefined, start: FlowStart): Promise<boolean> {
+    try {
+      const stored = await this.#sessions.get(this.workspaceId, callId);
+      const flow = (stored?.record as unknown as CallRecord | undefined)?.flow ?? null;
+      return flow !== null && flow.name === name && JSON.stringify(flow.counted) === JSON.stringify(start.counted);
+    } catch {
+      return true;
+    }
   }
 
   /** Takes back the starts a start recorded, once the call refused it: one entry per counter, at the time it was recorded. */
@@ -539,7 +565,8 @@ export class Engine {
     return steps.some((step) => {
       const owner = this.registry.stepOwner(step.type)!;
       const level = owner.stepLevel?.(step) ?? null;
-      const scopes = level === null ? [] : (owner.stepGrants?.(step) ?? scopesForLevel(policy, level as AssuranceLevel));
+      // A copy: the list a module returns may be its own, shared or frozen.
+      const scopes = [...(level === null ? [] : (owner.stepGrants?.(step) ?? scopesForLevel(policy, level as AssuranceLevel)))];
       const need = owner.manifest.scopes.needs[step.type];
       if (need !== undefined) scopes.push(need);
       return scopes.some((scope) => LIMITED_CLASSES.includes(scopeClass(scope, policy.scopeClasses, declared)));
@@ -599,7 +626,8 @@ export class Engine {
     // the same `rate_limited` as a refused start.
     const record = await this.#read(callId);
     const flow = record.flow;
-    if (flow === null || flow.counted === null) return;
+    // A flow started before `counted` existed (undefined) was never counted: it stays as it was. [] is a new limited flow.
+    if (flow === null || flow.counted === null || flow.counted === undefined) return;
     const keys = counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice).filter((key) => !flow.counted!.includes(counterId(key)));
     if (keys.length === 0) return;
     const { over } = await this.#countStarts(keys);
@@ -1112,7 +1140,7 @@ export class Engine {
     return structuredClone(stored.record) as unknown as CallRecord;
   }
 
-  async #update<R>(callId: string, fn: (draft: CallDraft) => R): Promise<R> {
+  async #update<R>(callId: string, fn: (draft: CallDraft) => R, outcome: WriteOutcome = { write: "none" }): Promise<R> {
     for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
       const stored = await this.#sessions.get(this.workspaceId, callId);
       if (stored === null) throw new EngineError("unknown_call", "no such call");
@@ -1131,7 +1159,9 @@ export class Engine {
       if (events.length > 0) record.ledgerWrites = (record.ledgerWrites ?? stored.version) + 1;
       record.outbox.push(...(await Promise.all(events.map((event, i) => this.#outboxEntry(callId, record.ledgerWrites!, i, event)))));
       markOwedAlerts(record);
+      outcome.write = "unknown";
       const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
+      outcome.write = saved.ok ? "saved" : "none";
       if (saved.ok) {
         try {
           await this.#flush(callId, version, record);
