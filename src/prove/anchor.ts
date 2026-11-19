@@ -350,7 +350,7 @@ export type LogCheck = { ok: true; logIndex: number } | { ok: false; reason: "lo
 /**
  * Checks a Rekor v2 entry (base64 of the JSON Rekor answered): a `hashedrekord` of `payload`, its
  * signature by the key it names, its inclusion proof, and the log's signed checkpoint for that
- * tree. Never throws.
+ * tree. A log index above Number.MAX_SAFE_INTEGER is refused. Never throws.
  */
 export function checkRekorEntry(entry: string, payload: Uint8Array, log: RekorLog): LogCheck {
   try {
@@ -361,8 +361,11 @@ export function checkRekorEntry(entry: string, payload: Uint8Array, log: RekorLo
     const signer = createPublicKey({ key: Buffer.from(spec.signature.verifier.publicKey.rawBytes, "base64"), format: "der", type: "spki" });
     const proof = parsed.inclusionProof;
     const size = BigInt(proof.treeSize);
-    const root = inclusionRoot(sha256(Buffer.from([0]), body), BigInt(proof.logIndex), size, proof.hashes.map((h) => Buffer.from(h, "base64")));
+    const index = BigInt(proof.logIndex);
+    const root = inclusionRoot(sha256(Buffer.from([0]), body), index, size, proof.hashes.map((h) => Buffer.from(h, "base64")));
     const valid =
+      // `logIndex` is a number: an index a number cannot hold exactly is refused, never reported rounded.
+      index <= BigInt(Number.MAX_SAFE_INTEGER) &&
       rekord.kind === "hashedrekord" &&
       spec.data.algorithm === "SHA2_256" &&
       spec.data.digest === sha256(payload).toString("base64") &&
@@ -370,7 +373,7 @@ export function checkRekorEntry(entry: string, payload: Uint8Array, log: RekorLo
       root !== null &&
       root.equals(Buffer.from(proof.rootHash, "base64")) &&
       checkpointValid(proof.checkpoint.envelope, log, size, root);
-    return valid ? { ok: true, logIndex: Number(proof.logIndex) } : { ok: false, reason: "log" };
+    return valid ? { ok: true, logIndex: Number(index) } : { ok: false, reason: "log" };
   } catch {
     return { ok: false, reason: "log" };
   }

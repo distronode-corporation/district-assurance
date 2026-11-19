@@ -1,10 +1,12 @@
 // Hostile-pass regressions for #109 (PRV-9, ledger anchors). Y1 failed before the listener was
 // handed a copy of the anchored entry's detail; the rest held.
 import { strict as assert } from "node:assert";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { describe, it } from "node:test";
 
 import type { AnchorProof, AuditEntry } from "../src/core/adapters.ts";
-import { verifyAnchor } from "../src/prove/anchor.ts";
+import { anchorPayload, checkRekorEntry, verifyAnchor } from "../src/prove/anchor.ts";
+import { hashedRekordBody, signedCheckpoint } from "./fixtures/anchor/build.ts";
 import { FakeTimestampAuthority } from "../src/testing/fakes.ts";
 import { createTestEngine } from "../src/testing/index.ts";
 
@@ -85,5 +87,51 @@ describe("hostile #109: verifyAnchor on what it is handed", () => {
     assert.deepEqual(verifyAnchor(entry, entries, { tsa: [] }), { ok: false, reason: "certificate" });
     assert.doesNotThrow(() => verifyAnchor(entry, entries, { tsa: [null, "pem"] as never }));
     assert.equal(verifyAnchor(entry, entries, { tsa: [null, "pem"] as never }).ok, false);
+  });
+});
+
+describe("hostile #109: a Rekor log index past what a number holds", () => {
+  const h = (...parts: Uint8Array[]) => {
+    const hash = createHash("sha256");
+    for (const part of parts) hash.update(part);
+    return hash.digest();
+  };
+  /** A valid entry at `index`, the last leaf of a tree of `index + 1` leaves, with made-up siblings. */
+  function entryAt(index: bigint) {
+    const log = generateKeyPairSync("ed25519");
+    const signer = generateKeyPairSync("ec", { namedCurve: "P-256" });
+    const payload = anchorPayload({ seq: 3, hash: "a".repeat(64) });
+    const body = hashedRekordBody(payload, sign("sha256", payload, signer.privateKey), signer.publicKey);
+    // The path for the last leaf: one sibling per set bit of the index, lowest first.
+    const siblings: Buffer[] = [];
+    let root = h(Buffer.from([0]), body);
+    for (let bit = 0n; index >> bit > 0n; bit++) {
+      if (((index >> bit) & 1n) === 1n) {
+        const sibling = h(Buffer.from(`sibling ${bit}`));
+        siblings.push(sibling);
+        root = h(Buffer.from([1]), sibling, root);
+      }
+    }
+    const size = index + 1n;
+    const entry = {
+      logIndex: String(index),
+      inclusionProof: {
+        logIndex: String(index),
+        rootHash: root.toString("base64"),
+        treeSize: String(size),
+        hashes: siblings.map((b) => b.toString("base64")),
+        checkpoint: { envelope: signedCheckpoint("log.example.test", size as unknown as number, root, log.privateKey, log.publicKey) },
+      },
+      canonicalizedBody: body.toString("base64"),
+    };
+    return { encoded: Buffer.from(JSON.stringify(entry)).toString("base64"), payload, log: { key: log.publicKey, origin: "log.example.test" } };
+  }
+
+  it("Y7: an index above Number.MAX_SAFE_INTEGER is refused, never reported rounded", () => {
+    const safe = BigInt(Number.MAX_SAFE_INTEGER);
+    const atLimit = entryAt(safe);
+    assert.deepEqual(checkRekorEntry(atLimit.encoded, atLimit.payload, atLimit.log), { ok: true, logIndex: Number.MAX_SAFE_INTEGER });
+    const past = entryAt(safe + 2n);
+    assert.deepEqual(checkRekorEntry(past.encoded, past.payload, past.log), { ok: false, reason: "log" });
   });
 });

@@ -307,7 +307,10 @@ holds the ledger could rebuild all of it. `engine.anchorLedger()` takes the ledg
 the same head append one entry). It refuses without the adapter or on an empty ledger
 (`precondition_failed`), and refuses a malformed proof (`invalid_input`). The host schedules it
 (daily, for example); the engine never calls out on its own. After the append the listener is
-told, best effort, with `callId` null.
+told, best effort, with `callId` null, and is handed a copy: what it does to the event never
+reaches the entry `anchorLedger` returns. Anchoring when nothing new was appended still appends an
+entry, on purpose: the previous `ledger.anchored` entry is the new head, so each run is a heartbeat
+that fixes in time that the ledger was still there, unchanged, and each grows the ledger by one.
 
 - Anchor payload: the UTF-8 bytes of `"district-assurance/ledger-anchor/v1\n" +
   canonicalJson({seq, hash})`. It is not JSON, so a signature over it never verifies as a receipt.
@@ -328,7 +331,8 @@ told, best effort, with `callId` null.
   it has a keyUsage extension) whose pathLenConstraint, if any, allows the CAs below it, all are valid at the token's time, the last is trusted as given
   (`certificate`); the imprint against the head recomputed from `entries` (`imprint`: the chain was
   changed or rebuilt after the anchor); for Rekor, the body's digest and signature, the RFC 9162
-  inclusion proof, and a checkpoint for that tree signed by the log under its origin (`log`). It
+  inclusion proof, and a checkpoint for that tree signed by the log under its origin (`log`); a
+  log index above `Number.MAX_SAFE_INTEGER` is refused (`log`), so `logIndex` is always exact. It
   returns `{seq, hash, time, logIndex}`.
 - The DER reader (`readDer`) takes one-byte tags and definite lengths up to four bytes.
 - The reference server has `TimestampAuthorityAnchor` (RFC 3161 over HTTP) and `RekorAnchor`
