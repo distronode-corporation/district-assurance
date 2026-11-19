@@ -65,7 +65,9 @@ export function moduleEnabled(config: FlowConfig, registry: ModuleRegistry, name
  */
 export function validateConfig(config: unknown, registry: ModuleRegistry): string[] {
   if (!isObject(config)) return ["the config must be an object"];
-  const problems: string[] = [];
+  // Config text reaches ledger entries, receipts and digests, all canonical JSON, which refuses a
+  // lone surrogate: a config holding one is refused here, not in the middle of a call.
+  const problems: string[] = loneSurrogates(config, "").map((at) => `${at}: holds a lone surrogate, which is not Unicode text`);
   for (const key of unknownKeys(config, ["version", "revision", "policy", "modules", "flows"])) problems.push(`${key}: not a config field`);
   if (config.version !== FLOW_CONFIG_VERSION) problems.push(`version: must be ${FLOW_CONFIG_VERSION}`);
   if (typeof config.revision !== "string" || !REVISION.test(config.revision)) {
@@ -175,6 +177,17 @@ export function validateConfig(config: unknown, registry: ModuleRegistry): strin
     }
   }
   return problems;
+}
+
+/** The path of every string or key holding a lone surrogate, in a config's plain data. */
+function loneSurrogates(value: unknown, path: string): string[] {
+  if (typeof value === "string") return value.isWellFormed() ? [] : [path];
+  if (Array.isArray(value)) return value.flatMap((item, i) => loneSurrogates(item, `${path}[${i}]`));
+  if (!isObject(value)) return [];
+  return Object.entries(value).flatMap(([key, item]) => {
+    const at = path === "" ? key.toWellFormed() : `${path}.${key.toWellFormed()}`;
+    return [...(key.isWellFormed() ? [] : [at]), ...loneSurrogates(item, at)];
+  });
 }
 
 /** Throws a ConfigError with every problem, or returns the config typed. */

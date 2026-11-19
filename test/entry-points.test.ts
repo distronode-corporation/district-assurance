@@ -27,6 +27,7 @@ describe("entry points", () => {
       "verifyChain",
       "signReceipt",
       "verifyReceipt",
+      "checkReceipt",
       "keyPairSigner",
       "derToP1363",
       "knowledgeHmac",

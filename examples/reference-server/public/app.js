@@ -8,10 +8,13 @@ const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
 
 const REASONS = {
   valid: "valid",
+  valid_retired_key: "valid, signed with a retired key",
+  retired_key_after: "signed by a retired key at or after its retirement",
   wrong_alg: "not ES256",
   unknown_kid: "signed by a key that is not in the key set",
   bad_key: "the key in the key set does not load",
   malformed_signature: "the signature is not 64 bytes of base64url",
+  malformed_body: "the body is not canonical JSON (a lone surrogate)",
   signature_mismatch: "the signature does not match the body",
 };
 
@@ -191,12 +194,17 @@ function resetReceipt() {
   for (const id of ["receipt-retry", "receipt-check", "tamper", "tamper-result", "receipt-details"]) $(id).hidden = true;
 }
 
-/** @param {{ ok: boolean, reason: keyof typeof REASONS }} result */
+/** "valid", or "valid, signed with a retired key (retired <time>)". @param {{ ok: boolean, retiredAt?: string }} result */
+function validWording(result) {
+  return result.retiredAt === undefined ? "valid" : `valid, signed with a retired key (retired ${result.retiredAt})`;
+}
+
+/** @param {{ ok: boolean, reason: keyof typeof REASONS, retiredAt?: string }} result */
 function verdict(node, result, kid) {
   node.hidden = false;
   node.className = `verdict ${result.ok ? "ok" : "bad"}`;
   node.textContent = result.ok
-    ? `Signature valid: ES256 over the canonical body, checked in this browser against key ${kid} from /.well-known/receipt-keys.json.`
+    ? `Signature ${validWording(result)}: ES256 over the canonical body, checked in this browser against key ${kid} from /.well-known/receipt-keys.json.`
     : `Signature rejected: ${REASONS[result.reason]}.`;
 }
 
@@ -221,7 +229,7 @@ async function showReceipt(callId) {
   $("tamper-result").hidden = true;
   $("receipt-json").textContent = JSON.stringify(receipt, null, 2);
   $("receipt-details").hidden = false;
-  return result.ok ? "Receipt signature valid." : `Receipt signature rejected: ${REASONS[result.reason]}.`;
+  return result.ok ? `Receipt signature ${validWording(result)}.` : `Receipt signature rejected: ${REASONS[result.reason]}.`;
 }
 
 /**

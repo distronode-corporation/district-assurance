@@ -106,7 +106,65 @@ export async function signReceipt(signer: ReceiptSigner, body: ReceiptBody): Pro
 
 /** Checks a receipt against a key set (`verifyDocument`). Never throws on bad input. */
 export function verifyReceipt(receipt: SignedReceipt, keys: ReadonlyArray<JsonWebKey & { kid?: string }>): boolean {
-  return verifyDocument(receipt, keys);
+  return checkReceipt(receipt, keys).valid;
+}
+
+/**
+ * A receipt's check: valid or not and, when valid, whether the key that signed it has since been
+ * retired (`retiredAt`, else null), so a page can say "valid, signed with a retired key".
+ */
+export type ReceiptCheck = { valid: true; retiredAt: string | null } | { valid: false; retiredAt?: undefined };
+
+/**
+ * Checks a receipt against a key set, as `verifyReceipt` does, and says whether the key that
+ * signed it is retired. A retired key (one with `retiredAt`) verifies only receipts issued
+ * before its retirement: one whose `issuedAt` is at or after `retiredAt` is invalid, as is any
+ * receipt under a retired key whose `retiredAt` is not an ISO 8601 UTC time.
+ */
+export function checkReceipt(receipt: SignedReceipt, keys: ReadonlyArray<JsonWebKey & { kid?: string; retiredAt?: unknown }>): ReceiptCheck {
+  // Bad input of any shape (a null receipt or body, a key set that is not a list, a getter that
+  // throws) is an invalid receipt, never an exception.
+  try {
+    return checkOnce(receipt, keys);
+  } catch {
+    return { valid: false };
+  }
+}
+
+function checkOnce(receipt: SignedReceipt, keys: ReadonlyArray<JsonWebKey & { kid?: string; retiredAt?: unknown }>): ReceiptCheck {
+  // Read once: the body whose issue time is checked against the key's retirement is the body whose
+  // signature is verified, and the key's retirement is read once too.
+  const { alg, kid, body, signature: sig } = receipt;
+  if (alg !== "ES256") return { valid: false };
+  // An entry that is not an object is skipped, as the stand-alone verifier skips it.
+  const jwk = keys.find((k: unknown) => typeof k === "object" && k !== null && (k as { kid?: unknown }).kid === kid);
+  if (jwk === undefined) return { valid: false };
+  const retired: unknown = jwk.retiredAt;
+  // The body is serialized once: the issue time checked below is read from those bytes, and those
+  // bytes are what the signature is verified over, so no getter can answer two different times.
+  const text = canonicalJson(body);
+  let retiredAt: string | null = null;
+  if (retired !== undefined) {
+    if (!isUtcTime(retired)) return { valid: false };
+    const issuedAt: unknown = (JSON.parse(text) as { issuedAt?: unknown }).issuedAt;
+    if (!isUtcTime(issuedAt) || Date.parse(issuedAt) >= Date.parse(retired)) return { valid: false };
+    retiredAt = retired;
+  }
+  try {
+    const key = createPublicKey({ key: jwk, format: "jwk" });
+    const signature = Buffer.from(sig, "base64url");
+    if (signature.length !== 64) return { valid: false };
+    return verify("sha256", new TextEncoder().encode(text), { key, dsaEncoding: "ieee-p1363" }, signature) ? { valid: true, retiredAt } : { valid: false };
+  } catch {
+    return { valid: false };
+  }
+}
+
+/** An ISO 8601 UTC time as the engine writes it (`toISOString`). */
+function isUtcTime(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const ms = Date.parse(value);
+  return !Number.isNaN(ms) && new Date(ms).toISOString() === value;
 }
 
 /**
@@ -152,4 +210,85 @@ export function keyPairSigner(keyId: string, privateKey: string | JsonWebKey): R
     sign: async (payload) => new Uint8Array(sign("sha256", payload, { key, dsaEncoding: "ieee-p1363" })),
     publicJwk: () => ({ ...publicJwk, kid: keyId, alg: "ES256", use: "sig" }) as JsonWebKey,
   };
+}
+
+/**
+ * A receipt signer that holds several keys and signs with one. Every receipt names its key by
+ * `kid`, so a key set that keeps the keys that signed before a rotation still verifies the
+ * receipts they signed. `keySet()` is what a host publishes.
+ */
+export interface ReceiptKeyRing extends ReceiptSigner {
+  /** The public keys a verifier needs: the active one first, then the other signers', then the retired ones. */
+  keySet(): JsonWebKey[];
+}
+
+export interface ReceiptKeyRingOptions {
+  /** The signers this process holds: the active one, and any next key published before it signs. */
+  signers: readonly ReceiptSigner[];
+  /** The `keyId` of the signer that signs new receipts. */
+  active: string;
+  /**
+   * The public keys, each with its `kid` and its `retiredAt` (an ISO 8601 UTC time), that signed
+   * earlier receipts and sign no more. Their private keys are not needed. A receipt under one
+   * verifies only when it was issued before `retiredAt`.
+   */
+  retired?: readonly RetiredReceiptKey[];
+}
+
+/** A retired receipt key: its public JWK, its `kid` and when it stopped signing. */
+export type RetiredReceiptKey = JsonWebKey & { kid?: string; retiredAt: string };
+
+/**
+ * Builds a key ring. Strict: an active kid no signer has, a key without a kid, two keys with one
+ * kid, a signer whose public key names another kid, a key with a private part, or a key that is
+ * not a P-256 public key, or a retired key without an ISO 8601 UTC `retiredAt`, throws a
+ * TypeError, so a bad key set is refused when the host builds it. Published keys carry only their
+ * public members, `kid`, `alg` and `use`, and a retired key also `retired: true` and `retiredAt`.
+ */
+export function receiptKeyRing(options: ReceiptKeyRingOptions): ReceiptKeyRing {
+  const active = options.signers.find((s) => s.keyId === options.active);
+  if (active === undefined) throw new TypeError(`receiptKeyRing: no signer has the active kid ${options.active}`);
+  const keys: JsonWebKey[] = [];
+  const add = (jwk: JsonWebKey, kid: unknown): void => {
+    if (typeof kid !== "string" || kid === "") throw new TypeError("receiptKeyRing: every key needs a kid");
+    if (keys.some((k) => k.kid === kid)) throw new TypeError(`receiptKeyRing: two keys have the kid ${kid}`);
+    keys.push(publishedKey(jwk, kid));
+  };
+  for (const signer of [active, ...options.signers.filter((s) => s !== active)]) add(signer.publicJwk(), signer.keyId);
+  for (const jwk of options.retired ?? []) {
+    add(jwk, jwk.kid);
+    if (!isUtcTime(jwk.retiredAt)) throw new TypeError(`receiptKeyRing: the retired key ${String(jwk.kid)} needs a retiredAt, an ISO 8601 UTC time`);
+    keys[keys.length - 1] = { ...keys.at(-1)!, retired: true, retiredAt: jwk.retiredAt } as JsonWebKey;
+  }
+  const own = keys[0]!;
+  return {
+    keyId: active.keyId,
+    algorithm: "ES256",
+    sign: (payload) => active.sign(payload),
+    publicJwk: () => ({ ...own }),
+    keySet: () => keys.map((k) => ({ ...k })),
+  };
+}
+
+/** The keys to publish for a signer: a key ring's whole set, or a single signer's one key. Empty without a signer. */
+export function receiptKeySet(signer: ReceiptSigner | undefined): JsonWebKey[] {
+  if (signer === undefined) return [];
+  return typeof (signer as Partial<ReceiptKeyRing>).keySet === "function" ? (signer as ReceiptKeyRing).keySet() : [signer.publicJwk()];
+}
+
+function publishedKey(jwk: JsonWebKey, kid: string): JsonWebKey {
+  if (jwk.d !== undefined) throw new TypeError(`receiptKeyRing: the key ${kid} has a private part, which is never published`);
+  if (jwk.kid !== undefined && jwk.kid !== kid) throw new TypeError(`receiptKeyRing: the signer ${kid} publishes a key named ${String(jwk.kid)}`);
+  const key = { kty: "EC", crv: "P-256", x: String(jwk.x), y: String(jwk.y) };
+  if (jwk.kty !== "EC" || jwk.crv !== "P-256" || !isPublicKey(key)) throw new TypeError(`receiptKeyRing: the key ${kid} is not a P-256 public key`);
+  return { ...key, kid, alg: "ES256", use: "sig" };
+}
+
+function isPublicKey(jwk: JsonWebKey): boolean {
+  try {
+    createPublicKey({ key: jwk, format: "jwk" });
+    return true;
+  } catch {
+    return false;
+  }
 }

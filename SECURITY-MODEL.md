@@ -416,7 +416,13 @@ depends on its whole call path.
 
 **Controls:** the ledger is hash-chained, and any changed, removed or reordered entry is detected
 (tested). Receipts are signed with ES256 over canonical JSON and carry the ledger head; one changed
-byte fails verification (tested). Planned: key rotation and a published key set history (PRV-1).
+byte fails verification (tested). Signing keys rotate with a key ring: one key signs, and the
+published key set keeps the public keys that signed before, so a receipt signed before a rotation
+still verifies after it (tested). The ring publishes only public P-256 members and refuses a key
+with a private part, two keys with one kid, or a kid that matches no signer (tested). Anyone can
+check a receipt without this package with `scripts/verify-receipt.mjs`, which has no dependencies,
+refuses a key set fetched over plain http from another machine, and reports a tampered receipt as
+invalid (tested).
 A step's ledger entries are saved with the step itself (an outbox in the call record) and
 appended by event id, once each; a ledger that fails leaves them pending, and the next write or
 `flushLedger` appends them, so no saved step is ever missing from the ledger for good (tested).
@@ -434,10 +440,17 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 asynchronous HMAC function that calls the host's key management service; the engine, the built-in
 factors and plug-ins all hash through that one function, an answer that is not a 64-character
 lower-case hex digest is refused without being quoted, and a key store that rejects fails closed:
-no factor, the attempt counted, nothing it was asked written to the ledger (tested). The receipt key stays behind `ReceiptSigner`; a signer that returns anything but
-a 64-byte P1363 signature is refused, and `derToP1363` converts a key store's DER answer, checked
+no factor, the attempt counted, nothing it was asked written to the ledger (tested). The receipt
+key stays behind `ReceiptSigner`; a signer that returns anything but a 64-byte P1363 signature is
+refused, and `derToP1363` converts a key store's DER answer, checked
 against `node:crypto` (tested). An HMAC function does not stop a process that can call it from
-computing digests, so who may call the key store remains the host's control.
+computing digests, so who may call the key store remains the host's control. A receipt key that
+leaked is removed from the key set, not retired, so the receipts it signed stop verifying. A
+retired key is published with its `retiredAt`, and a receipt it says it issued at or after that
+time is invalid (tested), but `issuedAt` is written by whoever holds the key, so retiring a key
+does not limit what a thief can sign with it. A key set saved to a file does not see that removal: verifying against a
+saved copy keeps accepting the leaked key, so a holder who needs current trust verifies against
+the key set URL or refreshes the copy.
 
 ## Open questions
 
@@ -465,6 +478,8 @@ computing digests, so who may call the key store remains the host's control.
   the call ends, a link lives as long as the provider keeps it. Calling `endCall` again when it
   failed at the provider, so the call's open links are expired and its receipt issued.
 - Refunding a late payment (one flagged `late` in the ledger) when the business does not want it.
+- Rotating receipt keys (publish the next key, then switch, then retire), keeping retired public
+  keys as long as their receipts matter, and removing a key that leaked.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
   guarantees (`sessionStoreContract` today; PRV-5 for the others), and one durable
   `AttemptCounters` store shared by every process of a workspace (`attemptCountersContract`).

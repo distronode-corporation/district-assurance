@@ -105,6 +105,14 @@ All notable changes to this project are documented here. The format follows
   `verification.factor_error`; the attempt stays counted.
 - Spoken answers (VER-3): `normaliseSpokenAnswer` reads Canadian postal codes, US ZIP codes and short references spoken in English or French, exactly or `unusable`, and the `spoken_knowledge` factor compares them like keypad fields under the policy's new `spoken` fields.
 - PIN enrolment and reset (VER-6): `enrolPin` lets a caller verified to level 2 on the call choose a PIN, keyed twice, weak PINs refused, stored through the new `RecordStore.putPinDigest`; `resetPin` is the business's host call; `pin.enrolled` and `pin.reset` events.
+- Receipt key sets and rotation (PRV-1): `receiptKeyRing` holds several signers with one active and
+  publishes retired public keys, `engine.receiptKeys()` and the reference server's key set route
+  serve the whole history, so a receipt signed before a rotation still verifies. A retired key is
+  published with `retired: true` and its `retiredAt`; `checkReceipt`, the stand-alone verifier and
+  the demo page call such a receipt "valid, signed with a retired key (retired <time>)", and a
+  receipt the retired key signed at or after its retirement invalid.
+- A stand-alone receipt verifier (PRV-2): `scripts/verify-receipt.mjs`, with no dependencies, checks
+  a receipt against a key set file or URL and prints valid or invalid; SPEC.md has a worked example.
 
 ### Changed
 
@@ -123,6 +131,11 @@ All notable changes to this project are documented here. The format follows
   amount too. A host that calls it directly calls `readBackPayment`, speaks the text, and calls
   `confirmPaymentAmount` on the caller's yes first (PAY-2). The demo's deposit, connect-mode and
   live e2e flows read their amounts back first.
+- `canonicalJson` refuses a string or property name holding a lone surrogate (RFC 8785, section
+  3.2.2.2), as do the stand-alone verifier and the demo page; an intake text value holding one is
+  refused as `not_text`. A step whose ledger detail canonical JSON refuses (a lone surrogate, a
+  `Date`) is refused before it is saved, `markUntrusted` repairs a lone surrogate in its label, and
+  `validateConfig` refuses a config holding one.
 
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.

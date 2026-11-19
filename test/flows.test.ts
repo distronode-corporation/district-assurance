@@ -437,6 +437,56 @@ describe("module switches", () => {
   });
 });
 
+describe("lone surrogates and other values the ledger cannot hash (PRV-2 review)", () => {
+  it("never saves a ledger entry it cannot append, so the call is never wedged", async () => {
+    const t = setup({ config: flowConfig(), modules: [loyaltyModule()] });
+    t.engine.configure(
+      flowConfig((c) => {
+        c.modules.loyalty = {};
+        c.flows.loyalty = { steps: [{ type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }, { type: "loyalty.lookup" }] };
+      }),
+    );
+    // Its step needs status.read (ADR-25, #47): the call verifies first, so only the detail is refused.
+    const { callId } = await t.engine.startCall({ flow: "loyalty" });
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    // An outside module's detail that canonical JSON refuses is refused in the step, not saved.
+    for (const bad of [{ note: "\uD800" }, { at: new Date(0) }] as unknown as { [key: string]: JsonValue }[]) {
+      await assert.rejects(t.engine.updateModule(callId, "loyalty", (slice, call) => (call.emit("noted", bad), slice)), rejects("invalid_input", /canonical JSON/));
+    }
+    // The taint always lands, whatever its label holds: a lone surrogate is replaced, not refused.
+    await t.engine.markUntrusted(callId, "crm note \uD800");
+    assert.equal((await t.engine.state(callId)).tainted, true);
+    // The call still ends (its flow has no receipt step since the ADR-25 adaptation).
+    await t.engine.endCall(callId);
+    const entries = await t.ledger.list();
+    assert.equal(entries.at(-1)!.event, "call.ended");
+    assert.deepEqual(entries.find((e) => e.event === "session.tainted")!.detail, { source: "crm note \uFFFD" });
+    assert.equal(entries.some((e) => e.event === "module.event"), false);
+  });
+
+  it("taints a call whose label carries a card number, with the number removed from the label", async () => {
+    const t = setup({ config: flowConfig() });
+    const { callId } = await t.engine.startCall();
+    await t.engine.markUntrusted(callId, "crm note 4111111111111111");
+    assert.equal((await t.engine.state(callId)).tainted, true);
+    const tainted = (await t.ledger.list()).find((e) => e.event === "session.tainted")!;
+    assert.deepEqual(tainted.detail, { source: "crm note [card number removed]" });
+    assert.equal(JSON.stringify(await t.engine.state(callId)).includes("4111111111111111"), false, "nor kept on the call");
+  });
+
+  it("refuses a config holding a lone surrogate anywhere, at save time", () => {
+    const problems = validateConfig(
+      flowConfig((c) => ((c.modules.trace!.settings as { wordings: { text: { en: string } }[] }).wordings[0]!.text.en = "May we text you? \uDC00")),
+      setup().engine.registry,
+    );
+    assert.deepEqual(problems, ["modules.trace.settings.wordings[0].text.en: holds a lone surrogate, which is not Unicode text"]);
+    const keyed = validateConfig(flowConfig((c) => (c.flows["x\uD800"] = c.flows["owner-command"]!)), setup().engine.registry);
+    assert.equal(keyed[0], "flows.x\uFFFD: holds a lone surrogate, which is not Unicode text", "a key is reported too, its path repaired");
+  });
+});
+
 describe("outside modules", () => {
   it("adds a module with engine.use, turns it on by config, and runs its step in a flow", async () => {
     const t = setup({ config: flowConfig() });

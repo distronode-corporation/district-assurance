@@ -618,12 +618,14 @@ describe("Engine ledger detail", () => {
   it("refuses detail the ledger could not hash before it is saved, so the call's ledger never blocks (CodeRabbit on 699637f)", async () => {
     const t = setup();
     const { callId } = await t.engine.startCall();
-    await assert.rejects(t.engine.markUntrusted(callId, "x\ud800"), rejects("invalid_input", /canonical JSON/));
-    assert.equal((await t.engine.state(callId)).tainted, false, "nothing was saved");
+    // The taint always lands (#75, PRV-2): its label is repaired, never a reason to refuse.
+    await t.engine.markUntrusted(callId, "x\ud800");
+    assert.equal((await t.engine.state(callId)).tainted, true);
     // The call's ledger still takes entries.
     await t.engine.markUntrusted(callId, "crm_note");
-    const events = (await t.ledger.list()).map((e) => e.event);
-    assert.deepEqual(events, ["call.started", "session.tainted"]);
+    const entries = await t.ledger.list();
+    assert.deepEqual(entries.map((e) => e.event), ["call.started", "session.tainted", "session.tainted"]);
+    assert.deepEqual(entries[1]!.detail, { source: "x\uFFFD" });
   });
 });
 

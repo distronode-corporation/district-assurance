@@ -34,7 +34,7 @@ import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
 import * as refunds from "./pay/refunds.ts";
 import type { ConsentRecord } from "./prove/consent.ts";
 import { detailCarriesCardNumber } from "./prove/ledger.ts";
-import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
+import { receiptKeySet, type ReceiptBody, type SignedReceipt } from "./prove/receipt.ts";
 import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
 import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
@@ -282,6 +282,8 @@ export class Engine {
 
   /** Untrusted text (a business webhook reply, a document) entered the conversation. */
   async markUntrusted(callId: string, source: string): Promise<void> {
+    // The taint always lands: a label that is not Unicode text is repaired, never a reason to refuse.
+    source = untrustedLabel(source);
     await this.#update(callId, (draft) => {
       draft.apply({ type: "untrusted_content", source });
       for (const module of this.registry.list()) {
@@ -616,9 +618,10 @@ export class Engine {
     return slice.receipt === null ? null : structuredClone(slice.receipt);
   }
 
-  /** The key set for verifying this engine's receipts (empty without a signer). */
+  /** The key set for verifying this engine's receipts: with a key ring, the retired keys too (empty without a signer). */
   receiptKeys(): JsonWebKey[] {
-    return this.#adapters.signer === undefined ? [] : [publicMembers(this.#adapters.signer.publicJwk())];
+    // Only public members, whatever the signer's publicJwk or key ring returns (#47's check); a ring's retiredAt is kept.
+    return receiptKeySet(this.#adapters.signer).map((jwk) => ({ ...publicMembers(jwk), ...((jwk as { retiredAt?: string }).retiredAt === undefined ? {} : { retiredAt: (jwk as { retiredAt?: string }).retiredAt }) }) as JsonWebKey);
   }
 
   // ---- outside modules ---------------------------------------------------------------------
@@ -783,12 +786,12 @@ export class Engine {
         // to be appended later, and a caller changing its object afterwards changes nothing.
         const copy = structuredClone(detail);
         if (detailCarriesCardNumber(copy)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
-        // The ledger hashes every entry as canonical JSON: detail it could not hash (a lone surrogate,
-        // a value JSON cannot carry) is refused here, or it would block the call's ledger for good.
+        // The ledger hashes the entry as canonical JSON after the step is saved: a detail it would
+        // refuse (a lone surrogate, a Date) is refused here, or it would block every later write.
         try {
           canonicalJson(copy);
         } catch {
-          throw new EngineError("invalid_input", "audit detail must be canonical JSON");
+          throw new EngineError("invalid_input", "audit detail must be canonical JSON: plain data, no lone surrogate");
         }
         events.push({ name, actor, at: this.#now(), detail: copy });
       },
@@ -908,4 +911,19 @@ function publicMembers(jwk: JsonWebKey & { kid?: string }): JsonWebKey {
 
 export function createEngine(options: EngineOptions): Engine {
   return new Engine(options);
+}
+
+/**
+ * markUntrusted's label as Unicode text with any card number removed (the ledger refuses detail
+ * that carries one, and the taint must land); a value that will not turn into a string is labelled
+ * "unlabelled".
+ */
+function untrustedLabel(source: unknown): string {
+  let text: string;
+  try {
+    text = String(source).toWellFormed();
+  } catch {
+    return "unlabelled";
+  }
+  return cardNumberRedactor.redact(text).text;
 }

@@ -504,8 +504,14 @@ a card number.
 
 Object keys sorted by UTF-16 code units, no whitespace, strings and numbers as ECMAScript
 `JSON.stringify` writes them. Refused: `undefined`, functions, symbols, bigints, non-finite
-numbers, sparse array holes, strings or keys with a lone UTF-16 surrogate (RFC 8785 says these
-must fail), and objects whose prototype is not `Object.prototype` or `null`.
+numbers, sparse array holes, objects whose prototype is not `Object.prototype` or `null`, and
+strings or property names holding a lone surrogate (RFC 8785, section 3.2.2.2); a valid surrogate
+pair is kept. The stand-alone verifier and the reference page refuse the same values, so a receipt
+body holding a lone surrogate is invalid (the engine cannot have signed it). So that no call is
+ever left with a ledger entry it cannot append, a step whose ledger detail canonical JSON refuses
+is refused with `invalid_input` before it is saved; `markUntrusted` replaces a lone surrogate in
+its label with U+FFFD and a card number with `[card number removed]`, so the taint always lands; and `validateConfig` refuses a config holding a
+lone surrogate in any string or key.
 
 ## 12. Receipts
 
@@ -558,6 +564,82 @@ receipt is issued that cannot verify. Most key management services return DER
 anything that is not a minimal DER encoding of two positive integers of at most 32 bytes with
 nothing after them. `publicJwk()` returns the public key published in the key set.
 
+### Key sets and rotation
+
+`receiptKeyRing({ signers, active, retired? })` is a `ReceiptSigner` that holds several signers
+and signs with the one whose `keyId` is `active`; a receipt's `kid` names the key that signed it.
+`retired` are public JWKs, each with its `kid` and its `retiredAt` (an ISO 8601 UTC time, as
+`toISOString` writes it), of keys that signed earlier receipts and sign no more; their private
+keys are not needed. `keySet()` lists the active key first, then the other signers' keys, then the
+retired ones, each as `{kty: "EC", crv: "P-256", x, y, kid, alg: "ES256", use: "sig"}`, a retired
+one also with `retired: true` and its `retiredAt`, and nothing else. The ring throws a TypeError,
+when the host builds it, for an active kid no signer has, a key without a kid, two keys with one
+kid, a signer whose public key names another kid, a key with a private part (`d`), a key that is
+not a P-256 public key, or a retired key without an ISO 8601 UTC `retiredAt`.
+
+A key with `retiredAt` verifies only a receipt whose `issuedAt` is before it. `checkReceipt(receipt,
+keys)` answers `{valid: true, retiredAt: null}` under a key that is not retired, `{valid: true,
+retiredAt}` under a retired key for a receipt issued before its retirement (shown as "valid,
+signed with a retired key (retired <retiredAt>)"), and `{valid: false}` otherwise, including a
+receipt the retired key signed at or after `retiredAt` and a `retiredAt` or `issuedAt` that is
+not an ISO 8601 UTC time. `verifyReceipt` is its `valid`.
+
+`engine.receiptKeys()` returns a key ring's whole `keySet()`, a single signer's one key, or `[]`
+without a signer. The reference server serves it at `GET /.well-known/receipt-keys.json` as
+`{"keys": [...]}`. To rotate without breaking old receipts:
+
+1. Add the new signer to every process's ring, still with the old `active`, so the new key is
+   published before it signs anything.
+2. Make the new key `active` in every process.
+3. Move the old key's public JWK to `retired`, with `retiredAt` the time the new key took over. Its
+   private key can then be destroyed.
+
+A retired key stays in the key set for as long as receipts it signed must verify. A key that
+leaked is removed, not retired: every receipt it signed then fails to verify, as it should, since
+anyone holding the key could have signed it.
+
+### Checking a receipt without this package
+
+`scripts/verify-receipt.mjs` is one file with no dependencies beyond Node 24.2 or later; it can be
+copied out of the repository on its own. It takes a receipt (a file, or `-` for standard input) and
+a key set (a file, or a URL), and repeats only what a verifier needs: the canonical JSON of
+section 11 and ES256 over it.
+
+```sh
+node scripts/verify-receipt.mjs <receipt.json | -> <keys.json | https://host/.well-known/receipt-keys.json>
+```
+
+| Exit | Output | When |
+|---|---|---|
+| 0 | `valid` | the key named by `kid` verifies the signature over `canonicalJson(body)` |
+| 0 | `valid, signed with a retired key (retired <retiredAt>)` | the same, under a retired key, for a receipt issued before its retirement |
+| 1 | `invalid: <reason>` | `body.v` is not 1, `alg` is not `ES256`, no key has the `kid`, the key is not a public P-256 key, the key is retired and the receipt was issued at or after its `retiredAt` (or either time is not ISO 8601 UTC), the signature is not 86 base64url characters (64 bytes), or it does not match the body |
+| 2 | a message on standard error | it could not check: wrong arguments, an unreadable or non-JSON file, a key set that is not `{"keys": [...]}` or a list, more than 1 MiB, or a URL it may not or cannot fetch |
+
+A key set URL must be `https`, or `http` on `127.0.0.1`, `localhost` or `[::1]`, because a key set
+fetched in the clear could be swapped for one that makes a forged receipt look valid. Redirects are
+refused. A worked example, against the demo server on this machine (`npm run ui`, after the
+`deposit` flow has run to its end in the page, which makes `call_1` with a payment of 15000):
+
+```sh
+$ curl -s http://127.0.0.1:8787/receipts/call_1 > receipt.json
+$ node scripts/verify-receipt.mjs receipt.json http://127.0.0.1:8787/.well-known/receipt-keys.json
+valid
+$ curl -s http://127.0.0.1:8787/.well-known/receipt-keys.json > keys.json   # or keep a copy
+$ sed 's/"amountMinor":15000/"amountMinor":1500/' receipt.json | node scripts/verify-receipt.mjs - keys.json
+invalid: the signature does not match the body
+$ echo $?
+1
+```
+
+The key set can be fetched once and kept: since retired keys stay in it, a copy taken after a
+receipt was issued verifies that receipt for as long as its key is not removed. A saved copy does
+not receive revocations: if a key is later removed from the published key set (because it was
+compromised), the saved `keys.json` still holds it and the verifier still accepts signatures made
+with it. A saved key set therefore preserves historical verification only; it says nothing about a
+key's current status. When current trust matters, verify against the key set URL, or refresh the
+saved copy from it first.
+
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
 `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
 
@@ -565,7 +647,7 @@ Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording 
 
 | Type | Accepted | Stored as |
 |---|---|---|
-| `text` | trimmed, non-empty, at most `maxLength` (500), and no card number | string |
+| `text` | trimmed, non-empty, well-formed Unicode (no lone surrogate), at most `maxLength` (500), and no card number | string |
 | `number` | `-?\d+(\.\d+)?` | number |
 | `date` | `YYYY-MM-DD` naming a real day | string |
 | `yes_no` | `yes`, `y`, `oui` / `no`, `n`, `non`, any case | boolean |

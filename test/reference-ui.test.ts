@@ -23,13 +23,14 @@ import {
   type DemoWorld,
 } from "../examples/reference-server/src/script.ts";
 import { STATIC_FILES, UI_CSP } from "../examples/reference-server/src/static.ts";
-import { EngineError, canonicalJson, signStripePayload, verifyReceipt, type AuditEntry, type PaymentLinks, type SignedReceipt } from "../src/index.ts";
+import { EngineError, canonicalJson, checkReceipt, signStripePayload, verifyReceipt, type AuditEntry, type PaymentLinks, type SignedReceipt } from "../src/index.ts";
 import { FixedClock, FakePaymentLinks } from "../src/testing/index.ts";
 import { confirmAmount } from "./helpers.ts";
 
 interface CheckResult {
   ok: boolean;
   reason: string;
+  retiredAt?: string;
 }
 interface ReceiptCheckModule {
   canonicalJson(value: unknown): string;
@@ -484,6 +485,9 @@ describe("reference UI: the page's checks (receipt-check.js, no DOM)", () => {
     assert.throws(() => check.canonicalJson({ n: Number.NaN }), TypeError);
     assert.throws(() => check.canonicalJson(undefined), TypeError);
     assert.throws(() => check.canonicalJson(() => 1), TypeError);
+    assert.throws(() => check.canonicalJson({ a: "\ud800" }), TypeError);
+    assert.throws(() => check.canonicalJson({ "\udc00": 1 }), TypeError);
+    assert.throws(() => canonicalJson({ a: "\ud800" }), TypeError);
   });
 
   it("accepts the engine's receipt, as verifyReceipt does, and rejects every kind of change", async () => {
@@ -510,12 +514,43 @@ describe("reference UI: the page's checks (receipt-check.js, no DOM)", () => {
     assert.deepEqual(await check.checkReceipt(receipt, [{ ...keys[0], x: "AAAA" }]), { ok: false, reason: "bad_key" });
     const other = createDemoWorld().engine.receiptKeys()[0] as Record<string, unknown>;
     assert.deepEqual(await check.checkReceipt(receipt, [{ ...other, kid: receipt.kid }]), { ok: false, reason: "signature_mismatch" });
+    const lone = structuredClone(receipt);
+    lone.body.callId = "\ud800";
+    assert.equal(verifyReceipt(lone, keys), false);
+    assert.deepEqual(await check.checkReceipt(lone, keys), { ok: false, reason: "malformed_body" });
+  });
+
+  it("says a receipt its key signed before retiring is valid under a retired key, and refuses one signed after, as checkReceipt does", async () => {
+    const issued = Date.parse(receipt.body.issuedAt);
+    const retiredAt = new Date(issued + 1000).toISOString();
+    const retired = keys.map((k) => ({ ...(k as object), retired: true, retiredAt }));
+    assert.deepEqual(await check.checkReceipt(receipt, retired), { ok: true, reason: "valid_retired_key", retiredAt });
+    assert.deepEqual(checkReceipt(receipt, retired), { valid: true, retiredAt }, "the engine agrees");
+    for (const at of [receipt.body.issuedAt, new Date(issued - 1000).toISOString()]) {
+      const before = keys.map((k) => ({ ...(k as object), retired: true, retiredAt: at }));
+      assert.deepEqual(await check.checkReceipt(receipt, before), { ok: false, reason: "retired_key_after" }, at);
+      assert.deepEqual(checkReceipt(receipt, before), { valid: false });
+    }
+    assert.deepEqual(await check.checkReceipt(receipt, keys.map((k) => ({ ...(k as object), retiredAt: "June" }))), { ok: false, reason: "bad_key" });
+    assert.deepEqual(await check.checkReceipt({ ...receipt, body: { ...receipt.body, issuedAt: "today" } }, retired), { ok: false, reason: "retired_key_after" });
+    // The issue time checked against the retirement is the one in the bytes whose signature is
+    // verified: neither a body swapped after the first read nor an issuedAt getter that changes passes.
+    const after = keys.map((k) => ({ ...(k as object), retired: true, retiredAt: receipt.body.issuedAt }));
+    const early = { ...receipt.body, issuedAt: new Date(issued - 60_000).toISOString() };
+    let bodyReads = 0;
+    const swapped = { alg: receipt.alg, kid: receipt.kid, signature: receipt.signature, get body() { return bodyReads++ === 0 ? early : receipt.body; } };
+    assert.equal((await check.checkReceipt(swapped, after)).ok, false);
+    let timeReads = 0;
+    const shifting = { ...receipt.body } as Record<string, unknown>;
+    Object.defineProperty(shifting, "issuedAt", { enumerable: true, get: () => (timeReads++ === 0 ? early.issuedAt : receipt.body.issuedAt) });
+    assert.equal((await check.checkReceipt({ ...receipt, body: shifting }, after)).ok, false);
   });
 
   it("recomputes every ledger entry's hash, and notices a change", async () => {
     for (const entry of entries) assert.equal(await check.entryHashMatches(entry), true);
     const changed = { ...entries[0]!, actor: "caller" };
     assert.equal(await check.entryHashMatches(changed), false);
+    assert.equal(await check.entryHashMatches({ ...entries[0]!, actor: "\ud800" }), false);
   });
 
   it("has small helpers that behave", async () => {
