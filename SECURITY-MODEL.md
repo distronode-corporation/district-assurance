@@ -74,7 +74,8 @@ allow-list, before texted codes ship (VER-2).
 
 Replayed webhooks, reused links, replayed tones. **Controls:** Stripe signatures are checked with a
 300-second window and constant-time comparison (tested); the reference server applies each event
-id once; the engine applies each identity session and each payment settlement once (tested).
+id once while it remembers it, 4 days and 10,000 ids at most so a flood of events cannot exhaust
+its memory (tested); the engine applies each identity session and each payment settlement once (tested).
 Identity links are single-use by the provider. Left to the host: whether keypad tones arrive as
 out-of-band events or as in-band audio on each carrier bridge, since in-band tones can be replayed
 acoustically and can reach speech-to-text.

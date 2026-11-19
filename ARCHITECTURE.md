@@ -125,7 +125,8 @@ process.
 - **Model output** is untrusted: it never reaches an engine argument that decides anything. Text
   from business endpoints or documents is marked with `markUntrusted`, which drops the grant.
 - **Webhooks** are untrusted until their signature verifies; the reference server checks it before
-  parsing, applies each event id once, and the engine applies each outcome once.
+  parsing, applies each event id once within a bounded memory (4 days, 10,000 ids, longer than
+  Stripe retries), and the engine applies each outcome once.
 - **Config** is untrusted until `validateConfig` passes: it comes from the host's storage and an
   operator's editor, and is checked field by field.
 - **Adapters and outside modules** are trusted to do what they say. A host's adapters and modules
