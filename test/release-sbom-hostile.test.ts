@@ -8,11 +8,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+/** Line endings as the checks expect them: a Windows checkout can hold the file with CRLF. */
+const lf = (text: string): string => text.replace(/\r\n/g, "\n");
+const raw = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+const workflow = lf(raw);
 
 /** Each inline sbom-check.mjs in the workflow, with the YAML block's indentation taken off. */
-function checkScripts(): string[] {
-  return [...workflow.matchAll(/cat > "\$RUNNER_TEMP\/sbom-check\.mjs" <<'EOF'\n([\s\S]*?)\n\s*EOF\n/g)].map((m) => {
+function checkScripts(text: string = workflow): string[] {
+  return [...text.matchAll(/cat > "\$RUNNER_TEMP\/sbom-check\.mjs" <<'EOF'\n([\s\S]*?)\n\s*EOF\n/g)].map((m) => {
     const lines = m[1]!.split("\n");
     const indent = Math.min(...lines.filter((l) => l.trim() !== "").map((l) => l.length - l.trimStart().length));
     return lines.map((l) => l.slice(indent)).join("\n");
@@ -55,6 +58,11 @@ describe("hostile #125: the release workflow's SBOM check", () => {
     ] as const) {
       assert.equal(runCheck(script!, bom, version).ok, false, why);
     }
+  });
+
+  it("reads the SBOM checks the same from a CRLF copy of the workflow, as a Windows checkout may hold it", () => {
+    assert.ok(checkScripts().length > 0);
+    assert.deepEqual(checkScripts(lf(raw.replace(/\r?\n/g, "\r\n"))), checkScripts());
   });
 
   it("R3: only the publish job may sign, and the job that writes the release holds no OIDC token", () => {
