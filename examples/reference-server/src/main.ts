@@ -64,7 +64,8 @@ export function createServe(options: ServeOptions): Serve {
   // A local server for trying things: a live key never belongs here.
   if (key !== "" && !key.startsWith("rk_test_")) throw new Error("STRIPE_IDENTITY_KEY must be a restricted test-mode key (rk_test_...)");
   const print = options.print ?? console.log;
-  const sessions: string[] = [];
+  // By call id, so overlapping trial calls each read their own session.
+  const sessions = new Map<string, string>();
   let trial: TestEngineOptions = {};
   if (key !== "") {
     const stripe = new StripeIdentityProvider(key, options.stripe);
@@ -73,7 +74,7 @@ export function createServe(options: ServeOptions): Serve {
         identity: {
           async createDocumentCheck(input: { callId: string; idempotencyKey: string }) {
             const check = await stripe.createDocumentCheck(input);
-            sessions.push(check.sessionId);
+            sessions.set(input.callId, check.sessionId);
             return check;
           },
         },
@@ -97,7 +98,7 @@ export function createServe(options: ServeOptions): Serve {
     await t.engine.submitKeypad(callId, { dob: TRIAL_DOB });
     await t.engine.closeSensitive(callId);
     await t.engine.startPhotoId(callId);
-    return { callId, sessionId: sessions.at(-1)! };
+    return { callId, sessionId: sessions.get(callId)! };
   };
   return { server, t, startTrialCall: key === "" ? null : startTrialCall };
 }

@@ -172,7 +172,9 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   new epoch; a factor result, a carrier report or a photo ID check from an earlier epoch is never
   applied (`precondition_failed`), and a change of subject drops pending photo ID checks.
 - The photo ID link is reserved, created, enrolled and texted in turn; after a failure,
-  `startPhotoId` resumes with the same idempotency keys, so a call never has two links. After `maxAttemptsPerCall`,
+  `startPhotoId` resumes with the same idempotency keys, so a call never has two links. If the
+  provider answers a resume with a new session (it pruned the key), that session is enrolled before
+  its link is texted, so its outcome applies; a repeated session is enrolled once. After `maxAttemptsPerCall`,
   `submitPin` returns `locked` without judging. Across calls: planned (VER-1). Enrolment: planned
   (VER-6).
 
@@ -404,7 +406,8 @@ and its `url` (which must be `https`) as the link. The constructor takes only a 
 (`rk_test_` or `rk_live_`); `npm run serve` takes only `rk_test_`. A refusal or a malformed answer
 throws `StripeApiError` with the HTTP status and Stripe's error type and code when they are plain
 identifiers, never Stripe's message or any value from the request or the answer. Requests time
-out after 10 seconds and never follow a redirect.
+out after 10 seconds and never follow a redirect. An `apiBase` option must be `https:`, or `http:`
+on a loopback host (`127.0.0.1`, `localhost`, `[::1]`) only; anything else throws in the constructor.
 
 ## 16. Texts
 

@@ -65,6 +65,25 @@ export function stripeIdempotencyKey(engineKey: string): string {
   return PLAIN_IDEMPOTENCY_KEY.test(engineKey) ? engineKey : `sha256:${createHash("sha256").update(engineKey, "utf8").digest("hex")}`;
 }
 
+/** Hosts that never leave the machine, the only ones a key may reach over plain `http:`. */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * The key goes in a bearer header, so the API base must be `https:`, or `http:` on a loopback
+ * host only (a local fake). Anything else fails here, before a request is sent. The message never
+ * echoes the value.
+ */
+function checkApiBase(apiBase: string): void {
+  let url: URL;
+  try {
+    url = new URL(apiBase);
+  } catch {
+    throw new Error("StripeIdentityProvider needs an https: apiBase (http: only on a loopback host)");
+  }
+  if (url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname))) return;
+  throw new Error("StripeIdentityProvider needs an https: apiBase (http: only on a loopback host)");
+}
+
 /** One form-encoded POST to Stripe. Answers the parsed JSON object, or throws StripeApiError. */
 async function stripePost(
   key: string,
@@ -109,6 +128,7 @@ export class StripeIdentityProvider implements IdentityProvider {
   /** `apiKey` is a restricted key with write access to Identity VerificationSessions and nothing else. */
   constructor(apiKey: string, options: StripeAdapterOptions = {}) {
     if (!RESTRICTED_KEY.test(apiKey)) throw new Error("StripeIdentityProvider needs a restricted key (rk_test_... or rk_live_...)");
+    if (options.apiBase !== undefined) checkApiBase(options.apiBase);
     this.#apiKey = apiKey;
     this.#options = options;
   }

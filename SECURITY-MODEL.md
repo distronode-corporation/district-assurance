@@ -80,7 +80,9 @@ sends the engine's idempotency key with every create, so a retried `startPhotoId
 session and link, never a second one (tested against a local fake). It never logs the link, and its
 errors carry a status and Stripe's error type and code only, never the link, the key or Stripe's
 message (tested). It takes a restricted key only, never a secret key, and `npm run serve` takes a
-test-mode one only (tested); the key comes from the environment. Left to the host: whether keypad tones arrive as
+test-mode one only (tested); the key comes from the environment. It refuses an API base
+that is not `https:`, except `http:` on a loopback host for a local fake, so the key never crosses a
+network in cleartext (tested). Left to the host: whether keypad tones arrive as
 out-of-band events or as in-band audio on each carrier bridge, since in-band tones can be replayed
 acoustically and can reach speech-to-text.
 

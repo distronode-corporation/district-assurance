@@ -48,6 +48,11 @@ class FakeStripe {
     this.base = `http://127.0.0.1:${(this.#server.address() as AddressInfo).port}`;
   }
 
+  /** The session id this fake handed out for an idempotency key. */
+  sessionFor(key: string): string {
+    return (JSON.parse(this.#byKey.get(key)!) as { id: string }).id;
+  }
+
   async stop(): Promise<void> {
     this.#server!.closeAllConnections();
     await new Promise<void>((resolve) => this.#server!.close(() => resolve()));
@@ -180,6 +185,23 @@ describe("StripeIdentityProvider", () => {
     assert.equal(seen, "https://api.stripe.com/v1/identity/verification_sessions");
   });
 
+  it("refuses an apiBase that would send the key in cleartext, before any request", () => {
+    let fetched = 0;
+    const fetchSpy = (async () => {
+      fetched++;
+      return new Response("{}");
+    }) as typeof fetch;
+    for (const apiBase of ["http://stripe-proxy.example", "http://10.0.0.1:8080", "ftp://api.stripe.com", "not a url", "http://localhost.example.com"]) {
+      assert.throws(() => new StripeIdentityProvider(KEY, { apiBase, fetch: fetchSpy }), {
+        message: "StripeIdentityProvider needs an https: apiBase (http: only on a loopback host)",
+      });
+    }
+    assert.equal(fetched, 0);
+    for (const apiBase of ["https://stripe-proxy.example", "http://127.0.0.1:12111", "http://localhost:12111", "http://[::1]:12111"]) {
+      new StripeIdentityProvider(KEY, { apiBase });
+    }
+  });
+
   it("takes restricted keys only", () => {
     for (const key of ["", "sk_test_abc", "sk_live_abc", "pk_test_abc", "rk_prod_abc", "rk_test_", "rk_test_a b"]) {
       assert.throws(() => new StripeIdentityProvider(key), { message: "StripeIdentityProvider needs a restricted key (rk_test_... or rk_live_...)" }, "the message never echoes the key");
@@ -286,6 +308,18 @@ describe("the reference server with Stripe Identity (npm run serve)", () => {
       assert.equal((await serve.t.engine.finishVerification(callId)).level, 3);
     } finally {
       await close();
+    }
+  });
+
+  it("pairs each overlapping trial call with its own session", async () => {
+    const serve = createServe({ env: { STRIPE_IDENTITY_KEY: KEY }, print: () => {}, stripe: { apiBase: stripe.base } });
+    const [a, b] = await Promise.all([serve.startTrialCall!(), serve.startTrialCall!()]);
+    assert.notEqual(a.callId, b.callId);
+    assert.notEqual(a.sessionId, b.sessionId);
+    for (const { callId, sessionId } of [a, b]) {
+      const created = stripe.seen.find((s) => s.form.get("metadata[call_id]") === callId);
+      assert.ok(created);
+      assert.equal(stripe.sessionFor(created.headers["idempotency-key"] as string), sessionId);
     }
   });
 
