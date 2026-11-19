@@ -179,8 +179,9 @@ link includes the mode.
 
 Money sent back twice or to no one, a refund started from a call, a refund on a disputed payment,
 or a dispute lost without the business hearing of it. **Controls:** in platform mode the platform
-is the merchant, so `validateConfig` refuses a platform step (and platform settings) unless the
-payments adapter has `refund`, read from the adapter itself (tested). `refundPayment` is a host
+is the merchant, so it refunds through `refundPayment`; an adapter without `refund` keeps platform
+payment flows valid (no flow step needs a refund) and `refundPayment` is refused at run time,
+while disputes are still recorded (tested). `refundPayment` is a host
 call made for the business: no grant reaches it and no flow step runs it, so neither the caller nor
 the model has a path to it; the host keeps it off every tool the model can call (left to the host).
 It refunds only a paid platform payment, never more in total than was paid, one refund in flight

@@ -86,9 +86,10 @@ export interface PaymentLinks {
    */
   expireLink(input: { linkId: string; mode: PaymentMode; connectedAccountId?: string; idempotencyKey: string }): Promise<{ state: "expired" | "not_open" }>;
   /**
-   * Refunds a paid platform payment on the platform's own account, in full or in part. Required
-   * when any payment can be taken in `platform` mode (`validateConfig` refuses the config
-   * otherwise); connect payments are refunded by the business on its own account, never here.
+   * Refunds a paid platform payment on the platform's own account, in full or in part. Optional:
+   * no flow step needs it, so a config is valid without it, and `refundPayment` is refused at run
+   * time when it is absent; connect payments are refunded by the business on its own account,
+   * never here.
    * A refund the provider refuses answers `failed`; only an answer that was lost (a timeout, a
    * dropped connection) may throw, since the engine keeps a refund that threw in flight and resumes
    * it, with the same key, until it gets an answer.

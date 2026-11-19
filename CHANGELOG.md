@@ -24,7 +24,7 @@ All notable changes to this project are documented here. The format follows
 - Refunds and disputes in platform mode (PAY-8): `refundPayment` (full or partial, a host call for
   the business, refused while a dispute is open), `PaymentLinks.refund`, Stripe's `charge.dispute.*`
   events found by payment intent, `payment.refunded` and `payment.disputed` ledger entries; a
-  platform payment needs a payments adapter with `refund`.
+  `PaymentLinks.refund` is optional, so a host without it keeps its platform payment flows.
 - Outside modules see the current step, the clock and an id source; outside a flow, their
   `updateModule` is held to every scope their manifest needs.
 - `PaymentLinks.capabilities` (modes, shortest and longest link life), checked when the engine is

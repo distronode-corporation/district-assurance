@@ -436,8 +436,8 @@ texted never expires this way; it stays open to resume.
 
 **Adapter capabilities.** `PaymentLinks.capabilities` declares `{modes, minLinkMinutes,
 maxLinkMinutes}`. When the config is saved, a step's mode (and Paylink's default mode) must be one
-the adapter takes, the link life no longer than its maximum, and a platform mode needs the
-adapter's `refund` (read from the adapter itself, never declared); malformed capabilities are a
+the adapter takes, and the link life no longer than its maximum (`refund` is optional: no flow
+step needs it, so a platform payment flow is valid without it); malformed capabilities are a
 problem too, and so is an engine's payments adapter that declares no capabilities at all (a plain
 JavaScript adapter). Adapters are given when the engine is built, so these checks run when the
 engine is built (`createEngine`) and when a config is saved (`configure`), not at `engine.use`,
@@ -485,8 +485,8 @@ the provider made whose answer was lost is learned even if a dispute opened sinc
 answers a refund the provider refused as `failed` and throws only when the answer was lost: a
 refund that threw stays in flight and the next `refundPayment` resumes it with the same key, so
 an adapter that throws for a refusal blocks the payment's refunds. A `pending` refund counts
-toward the total; its later outcome at the provider is not tracked yet, so one that fails later
-still counts until the business refunds the rest by hand at the provider.
+toward the total; its later outcome at the provider is not tracked yet (#117), so one that fails
+later still counts until the business refunds the rest by hand at the provider.
 
 A platform payment paid late (after the engine closed its link) keeps its payment intent too, so
 its disputes and refunds land like any other's.
@@ -506,9 +506,10 @@ already paid without one keeps it too. `won` and `lost` are
 final; an event that changes neither status nor amount is not written again.
 
 Refunds and disputes work after the flow and the call ended. They never change a payment's
-`status`, the flow, or the receipt already issued. `validateConfig` refuses a `platform` step, and
-Paylink's settings when their mode (default `platform`) is platform, when the payments adapter has
-no `refund` method; the engine reads that from the adapter itself, never from a declaration.
+`status`, the flow, or the receipt already issued. `PaymentLinks.refund` is optional: refunds and
+disputes are host calls and webhooks, never flow steps, so no config needs it and a platform
+payment flow is valid without it; `refundPayment` on an engine whose adapter has none is
+refused (`precondition_failed`), and disputes are still recorded.
 
 ## 15. Stripe webhooks
 

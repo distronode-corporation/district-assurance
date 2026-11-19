@@ -301,26 +301,19 @@ describe("refunds: disputes", () => {
 });
 
 describe("refunds: config", () => {
-  it("refuses a platform step, and platform payments outside a flow, when the payments adapter has no refund", () => {
+  it("keeps a platform payment flow valid for a host whose payments adapter has no refund, and refuses only the refund", async () => {
     const noRefund = () => Object.assign(new FakePaymentLinks(), { refund: undefined });
     const flow = testConfig((c) => {
       c.modules.paylink = { settings: { mode: "connect", connectedAccountId: ACCT } };
       c.flows = { deposit: { steps: [verify as never, { ...pay, mode: "platform" } as never] } };
     });
-    assert.throws(
-      () => setup({ adapters: { payments: noRefund() }, config: flow }),
-      (e: unknown) =>
-        e instanceof Error && /flows\.deposit\.steps\[1\] \(paylink\.request\): platform payments need a payments adapter with refund/.test(e.message) && !/modules\.paylink/.test(e.message),
-    );
-    assert.throws(() => setup({ adapters: { payments: noRefund() } }), /modules\.paylink: platform payments need a payments adapter with refund/, "the default mode is platform");
-    // Connect mode is unchanged: the business refunds on its own account.
-    const connect = testConfig((c) => {
-      c.modules.paylink = { settings: { mode: "connect", connectedAccountId: ACCT } };
-      c.flows = { deposit: { steps: [verify as never, { ...pay, mode: "connect" } as never] } };
-    });
-    assert.ok(setup({ adapters: { payments: noRefund() }, config: connect }).engine);
-    // A declaration cannot stand in for the method: the engine reads the adapter itself.
-    const claims = Object.assign(new FakePaymentLinks(), { refund: undefined, capabilities: { modes: ["platform", "connect"], minLinkMinutes: 30, maxLinkMinutes: 1440, refund: true } });
-    assert.throws(() => setup({ adapters: { payments: claims as never } }), /need a payments adapter with refund/);
+    assert.ok(setup({ adapters: { payments: noRefund() }, config: flow }).engine, "a platform step is valid without refund");
+    const t = setup({ adapters: { payments: noRefund() } });
+    assert.equal(t.engine.config.modules.paylink !== undefined, true, "the default platform mode is valid without refund");
+    const callId = await verifiedCall(t);
+    await t.engine.requestPayment(callId, request);
+    assert.equal((await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid", paymentIntentId: "pi_1" })).applied, true, "the payment is taken");
+    await assert.rejects(t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "requested_by_customer" }), rejects("precondition_failed", /cannot refund/));
+    assert.equal((await t.engine.applyDisputeOutcome(dispute())).applied, true, "its disputes are still recorded");
   });
 });

@@ -24,7 +24,6 @@ import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core
 import type { AdapterName, CallDraft, CallRecord, EngineAdapters, EngineRuntime, FlowStatus, Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
-import { isObject } from "./core/shape.ts";
 import * as dossier from "./file/dossier.ts";
 import * as gate from "./gate/gate.ts";
 import type { NormaliseResult } from "./file/intake.ts";
@@ -145,8 +144,6 @@ export class Engine {
           ? { controllers: Object.entries(value as Record<string, { unlock?: unknown } | undefined>).filter(([, c]) => typeof c?.unlock === "function").map(([n]) => n) }
           : (value as { capabilities?: unknown }).capabilities;
     }
-    // Whether the payments adapter can refund is read from the adapter, never taken from a declaration.
-    if (isObject(capabilities.payments)) capabilities.payments = { ...capabilities.payments, refund: typeof this.#adapters.payments!.refund === "function" };
     this.#receiptModules = builtInModules(this.#badge);
     this.registry = new ModuleRegistry({ adapters: present, capabilities, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
     this.#config = this.#prepare(options.config === undefined ? defaultConfig() : options.config);

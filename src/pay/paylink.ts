@@ -131,24 +131,18 @@ const SEND_LEASE_MS = 60_000;
 
 const CONNECT_NEEDS_ACCOUNT = "connect mode needs connectedAccountId in the paylink settings";
 
-/**
- * What the config validator sees of the payments adapter: what it declares, and `refund`, which
- * the engine fills in from the adapter itself (whether it has a `refund` method), never declared.
- */
-type AdapterCapabilities = PaymentLinkCapabilities & { refund?: boolean };
-
-function isCapabilities(value: unknown): value is AdapterCapabilities {
+function isCapabilities(value: unknown): value is PaymentLinkCapabilities {
   if (!isObject(value)) return false;
   const { modes, minLinkMinutes: min, maxLinkMinutes: max } = value;
   return Array.isArray(modes) && modes.every((m) => (PAYMENT_MODES as readonly unknown[]).includes(m)) && isIntegerIn(min, 0, 100_000) && isIntegerIn(max, 1, 100_000) && min <= max;
 }
 
 /** Problems between a mode and a link life and what the payments adapter declares it can do. */
-function adapterErrors(caps: AdapterCapabilities, mode: PaymentMode, lifeMinutes: number): string[] {
+function adapterErrors(caps: PaymentLinkCapabilities, mode: PaymentMode, lifeMinutes: number): string[] {
   const errors: string[] = [];
+  // A refund is optional for the adapter: no flow step needs one (refunds are host calls), so a
+  // platform payment flow is valid without it, and `refundPayment` is refused at run time instead.
   if (!caps.modes.includes(mode)) errors.push(`the payments adapter does not take ${mode} payments (it takes: ${caps.modes.join(", ") || "none"})`);
-  // The platform is the merchant in platform mode: it must be able to refund what it takes.
-  else if (mode === "platform" && caps.refund !== true) errors.push("platform payments need a payments adapter with refund: the platform refunds what it takes");
   if (lifeMinutes > caps.maxLinkMinutes) errors.push(`linkLifeMinutes ${lifeMinutes} is longer than the payments adapter keeps a link (${caps.maxLinkMinutes} minutes)`);
   return errors;
 }

@@ -126,7 +126,7 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
     throw new EngineError("invalid_input", "amountMinor must be a positive integer");
   }
   const payments = rt.adapter("payments");
-  // validateConfig refuses a platform payment without it, but a call paid on another engine can get here.
+  // Optional for the adapter (no flow step needs it): a refund without it is refused here.
   if (payments.refund === undefined) throw new EngineError("precondition_failed", "the payments adapter cannot refund");
   const { callId, paymentId } = input;
   const reserved = await rt.update(callId, (draft) => {
