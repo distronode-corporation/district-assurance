@@ -131,9 +131,16 @@ export class Engine {
     if ((options.adapters as Partial<EngineAdapters>).ledger === undefined) errors.push("the ledger adapter is required: the ledger is always on");
     // A store missing a method would fail only later, after a pass or a failure: refused now. A
     // store written before removeFailure existed would leave a failure on the line after every pass.
-    const counters = options.adapters.counters as unknown as Record<string, unknown> | undefined;
+    const counters = options.adapters.counters as unknown as Record<string, unknown> | null | undefined;
     if (counters !== undefined) {
-      const missing = COUNTER_METHODS.filter((name) => typeof counters[name] !== "function");
+      // null, anything that is not an object, or an object whose reads throw, has none of them.
+      const missing = COUNTER_METHODS.filter((name) => {
+        try {
+          return typeof counters?.[name] !== "function";
+        } catch {
+          return true;
+        }
+      });
       if (missing.length > 0) errors.push(`the counters adapter is missing ${missing.join(", ")}`);
     }
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
