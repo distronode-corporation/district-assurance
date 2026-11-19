@@ -6,7 +6,7 @@ import type { AttemptCounterKey } from "../src/core/adapters.ts";
 import type { FlowConfig } from "../src/core/config.ts";
 import { pinDigest, subjectKeyFor } from "../src/verify/knowledge.ts";
 import { TEST_KNOWLEDGE_KEY, testSubject, type TestEngine } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PIN, rejects, setup, testConfig } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig } from "./helpers.ts";
 
 const NEW_ACCOUNT = "20481937";
 const NEW_PHONE = "+15555550142";
@@ -105,7 +105,15 @@ describe("#74 hostile: the business's reset", () => {
     await t.engine.resetPin(OWNER);
     const key: AttemptCounterKey = { workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER };
     assert.deepEqual(await t.counters.get(key, "2000-01-01T00:00:00.000Z"), []);
-    t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: "+15555550100", knowledge: { dob: DOB }, pin: PIN }));
+    assert.equal((await t.records.getSubject("ws_test", OWNER))!.pinDigest, undefined, "the reset removed the PIN");
+    // The owner enrols again through the engine, on a fresh call verified to level 2.
+    t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+    const enrol = await t.engine.startCall();
+    await t.engine.beginVerification(enrol.callId, { accountNumber: ACCOUNT });
+    assert.deepEqual(await t.engine.submitKeypad(enrol.callId, { dob: DOB }), { matched: true, locked: false });
+    await t.engine.checkCarrier(enrol.callId);
+    assert.equal((await t.engine.finishVerification(enrol.callId)).level, 2);
+    assert.deepEqual(await t.engine.enrolPin(enrol.callId, { pin: PIN, confirm: PIN }), { enrolled: true });
     const next = await t.engine.startCall();
     await t.engine.beginVerification(next.callId, { accountNumber: ACCOUNT });
     assert.deepEqual(await t.engine.submitPin(next.callId, PIN), { matched: true, locked: false });
