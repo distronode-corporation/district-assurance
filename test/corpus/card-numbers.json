@@ -1,0 +1,117 @@
+{
+  "about": "Card numbers in transcripts, for any implementation of District Assurance redaction and live detection (SPEC.md, section 17). Every card number here is a public test number. `runs`: the digits of each run a text holds, in order. `redact`: the text after card-number redaction; the marker is \"[card number removed]\". `live`: chunks fed one at a time to a live detector with the default threshold of 8 digits unless `minDigits` is set; after each chunk, whether it signals an interrupt and how many digits the run still open at the end holds.",
+  "version": 1,
+  "runs": [
+    { "name": "numerals with separators", "text": "4242 4242-4242.4242", "runs": ["4242424242424242"] },
+    { "name": "other punctuation ends a run", "text": "4242/4242", "runs": ["4242", "4242"] },
+    { "name": "a word ends a run", "text": "4242 4242 and 4242 4242", "runs": ["42424242", "42424242"] },
+    { "name": "digit by digit", "text": "four two Four TWO", "runs": ["4242"] },
+    { "name": "oh is zero", "text": "four oh four", "runs": ["404"] },
+    { "name": "tens and units", "text": "forty two forty-two twenty", "runs": ["424220"] },
+    { "name": "teens", "text": "twelve thirteen nineteen ten", "runs": ["12131910"] },
+    { "name": "units do not combine", "text": "two three", "runs": ["23"] },
+    { "name": "double and triple", "text": "double four triple zero double 7", "runs": ["4400077"] },
+    { "name": "double without a digit is a word", "text": "4242 double trouble", "runs": ["4242"] },
+    { "name": "double before a two-digit numeral is a word", "text": "double 42", "runs": ["42"] },
+    { "name": "hundreds", "text": "four hundred and two, forty two hundred", "runs": ["4024200"] },
+    { "name": "a scale word takes the number after it", "text": "hundred forty two, cent deux", "runs": ["142102"] },
+    { "name": "and outside a number ends a run", "text": "forty two and twelve", "runs": ["42", "12"] },
+    { "name": "thousands", "text": "four thousand two hundred forty two", "runs": ["4242"] },
+    { "name": "two thousand and twenty", "text": "two thousand and twenty", "runs": ["2020"] },
+    { "name": "French units", "text": "zéro un une deux trois quatre cinq six sept huit neuf", "runs": ["01123456789"] },
+    { "name": "French tens", "text": "quarante-deux vingt et un soixante et onze trente", "runs": ["42217130"] },
+    { "name": "French seventies and nineties", "text": "soixante-dix soixante-douze soixante-dix-sept quatre-vingt-dix-neuf", "runs": ["70727799"] },
+    { "name": "French eighties", "text": "quatre-vingts quatre-vingt-un quatre vingt deux quatre-vingt", "runs": ["80818280"] },
+    { "name": "French teens", "text": "dix-sept dix-huit dix-neuf onze seize dix deux", "runs": ["1718191116102"] },
+    { "name": "French hundreds and thousands", "text": "cent deux, deux cents, deux mille vingt, mille", "runs": ["10220020201000"] },
+    { "name": "Belgian and Swiss tens", "text": "septante nonante huitante octante", "runs": ["70908080"] },
+    { "name": "et outside a number ends a run", "text": "quarante et merci", "runs": ["40"] },
+    { "name": "words that are not numbers", "text": "constructor toString hasOwnProperty", "runs": [] },
+    { "name": "number words joined to numerals", "text": "forty two 42 double 4", "runs": ["424244"] }
+  ],
+  "redact": [
+    { "name": "numerals", "text": "card 4242424242424242 thanks", "redacted": "card [card number removed] thanks" },
+    { "name": "digit words", "text": "my card is four two four two four two four two four two four two four two four two okay", "redacted": "my card is [card number removed] okay" },
+    { "name": "pairs in English", "text": "it is forty two forty two forty two forty two forty two forty two forty two forty two", "redacted": "it is [card number removed]" },
+    { "name": "pairs in French", "text": "c'est quarante-deux quarante-deux quarante-deux quarante-deux quarante-deux quarante-deux quarante-deux quarante-deux", "redacted": "c'est [card number removed]" },
+    { "name": "double", "text": "four one double one double one double one double one double one double one double one", "redacted": "[card number removed]" },
+    { "name": "French with onze", "text": "quatre onze onze onze onze onze onze onze un merci", "redacted": "[card number removed] merci" },
+    { "name": "Mastercard as pairs", "text": "fifty five fifty five fifty five fifty five fifty five fifty five forty four forty four", "redacted": "[card number removed]" },
+    { "name": "American Express, mixed", "text": "three seventy eight two eighty two two forty six three one double zero zero five", "redacted": "[card number removed]" },
+    { "name": "French groups of four", "text": "quatre mille deux cent quarante-deux, quatre mille deux cent quarante-deux, quatre mille deux cent quarante-deux, quatre mille deux cent quarante-deux.", "redacted": "[card number removed]." },
+    { "name": "mixed numerals and words", "text": "4242 forty two forty two 4242 4242", "redacted": "[card number removed]" },
+    { "name": "fails Luhn", "text": "twelve thirty four fifty six seventy eight twelve thirty four fifty six seventy eight", "redacted": "twelve thirty four fifty six seventy eight twelve thirty four fifty six seventy eight" },
+    { "name": "the longest part that passes Luhn", "text": "forty two forty two forty two forty two forty two forty two forty two forty three", "redacted": "[card number removed] forty three" },
+    { "name": "ordinary speech", "text": "I am forty two and I live at twelve thirty four Main", "redacted": "I am forty two and I live at twelve thirty four Main" },
+    { "name": "a phone number is not a card number", "text": "four one six five five five zero one double zero", "redacted": "four one six five five five zero one double zero" }
+  ],
+  "live": [
+    {
+      "name": "digit by digit, across chunks",
+      "chunks": ["my card is four two", "four two four two", "four two", "four two"],
+      "interrupts": [false, false, true, true],
+      "digits": [2, 6, 8, 10]
+    },
+    {
+      "name": "spoken pairs",
+      "chunks": ["forty two forty two", "forty two", "forty two"],
+      "interrupts": [false, false, true],
+      "digits": [4, 6, 8]
+    },
+    {
+      "name": "French pairs",
+      "chunks": ["quarante-deux quarante-deux quarante-deux", "quarante-deux"],
+      "interrupts": [false, true],
+      "digits": [6, 8]
+    },
+    {
+      "name": "a number spoken across two chunks",
+      "chunks": ["4242 4242 forty", "two"],
+      "interrupts": [true, true],
+      "digits": [10, 10]
+    },
+    {
+      "name": "double forms",
+      "chunks": ["four double one double", "one double one one"],
+      "interrupts": [false, true],
+      "digits": [3, 8]
+    },
+    {
+      "name": "double waits for its digit",
+      "chunks": ["4242 4242", "thanks double", "four four four four four four four"],
+      "interrupts": [true, false, true],
+      "digits": [8, 0, 8]
+    },
+    {
+      "name": "a word between breaks the run",
+      "chunks": ["4242", "my 4242", "4242"],
+      "interrupts": [false, false, true],
+      "digits": [4, 4, 8]
+    },
+    {
+      "name": "a chunk that does not extend the run does not interrupt again",
+      "chunks": ["4242 4242", "and", "thanks", "4242"],
+      "interrupts": [true, false, false, false],
+      "digits": [8, 8, 0, 4]
+    },
+    {
+      "name": "and inside a number",
+      "chunks": ["4242 4242 four hundred and", "two"],
+      "interrupts": [true, true],
+      "digits": [11, 11]
+    },
+    {
+      "name": "a lower threshold",
+      "minDigits": 4,
+      "chunks": ["one two three", "four"],
+      "interrupts": [false, true],
+      "digits": [3, 4]
+    },
+    {
+      "name": "ordinary speech",
+      "chunks": ["I am forty two", "and I live at twelve thirty four", "Main Street"],
+      "interrupts": [false, false, false],
+      "digits": [2, 4, 0]
+    }
+  ]
+}

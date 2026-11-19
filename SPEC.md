@@ -398,3 +398,38 @@ subject's number on file. Identity link: "Your one-time identity check link: URL
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
 the currency's own decimals.
+
+## 17. Card numbers in transcripts
+
+**Runs of digits.** `digitRuns(text)` reads a text into runs of digits. A run is numerals and spoken
+numbers in English or French with only spaces, hyphens, dots or commas between them; any other
+word or punctuation ends it. Spoken numbers are read as people say them:
+
+| Spoken | Digits |
+|---|---|
+| digit by digit: `four two`, `oh`, `zéro`, `un`, `une` | `42`, `0`, `0`, `1`, `1` |
+| tens and units: `forty two`, `quarante-deux`, `vingt et un`, `soixante et onze`, `soixante-douze`, `quatre-vingt-dix-sept`, `septante`, `nonante` | `42`, `42`, `21`, `71`, `72`, `97`, `70`, `90` |
+| teens: `twelve`, `dix-sept` | `12`, `17` |
+| `double` and `triple` before one digit: `double four`, `triple 0` | `44`, `000` |
+| scales: `four hundred and two`, `forty two hundred`, `cent deux`, `deux mille vingt` | `402`, `4200`, `102`, `2020` |
+
+Units do not combine (`four two` is 4 then 2). `quatre-vingts` and `deux cents` end a number,
+since French writes the plural only there. `double` or `triple` before anything but one digit is
+an ordinary word.
+
+**Redaction.** `findCardNumbers` looks, in each run, for 13 to 19 digits that pass the Luhn check,
+starting and ending on a numeral or spoken number, leftmost first and longest at each position,
+never overlapping; `cardNumberRedactor` replaces each with `[card number removed]`.
+
+**Live detection.** `LiveCardNumberDetector` is fed a call's transcript one chunk at a time
+(`push(chunk)`; chunks are joined with a space, so each must end at a word boundary). It answers
+`{interrupt, digits}`: `interrupt` is true when a run the chunk added to holds `minDigits` digits
+or more (8 by default; an integer from 4 to 19, otherwise `invalid_input`), and `digits` counts the
+digits of the run still open at the end. There is no Luhn check, since a partial number cannot
+pass one, so a phone number read aloud interrupts too. A chunk that does not extend the run does
+not interrupt again. A run continues across chunks, also after a trailing `and`, `et`, `double` or
+`triple`. The detector keeps only the open run's text, never returns it, and forgets it on
+`reset()`. The host owns one detector per call and speaks its fixed line on `interrupt`.
+
+**Corpus.** `test/corpus/card-numbers.json` holds the cases for runs, redaction and live detection
+as plain JSON, so an implementation in another language can be tested against the same cases.

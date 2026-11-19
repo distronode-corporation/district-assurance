@@ -6,6 +6,7 @@ export * from "./errors.ts";
 export * from "./events.ts";
 export * from "./flow.ts";
 export * from "./hash.ts";
+export * from "./live-detector.ts";
 export * from "./module.ts";
 export * from "./policy.ts";
 export * from "./redaction.ts";

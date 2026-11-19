@@ -121,8 +121,14 @@ the host's code with an `amountSource`, and destinations come from the subject r
 ### Card data and PCI DSS scope
 
 **Controls:** Pay is by a hosted payment page; the engine sees a link id and a status, never a card
-number. Card numbers in transcripts are detected (Luhn, digits and English or French digit words)
-and replaced, and the host is told to interrupt (tested). Intake refuses a value carrying a card
+number. Card numbers in transcripts are detected (Luhn, digits, and English or French number words
+read digit by digit, as numbers such as "forty two" or "quarante-deux", or with "double") and
+replaced, and the host is told to interrupt (tested over a shared JSON corpus). While the caller
+is still reading, the live detector tells the host to interrupt once a run reaches 8 digits, before
+a whole number has been spoken (tested over the same corpus); it keeps only the open run in memory
+and never returns it. Over-redaction and over-interrupting (a phone number read aloud) are
+accepted. Speech-to-text that renders a number in a way the corpus does not cover can still slip
+past both; the host's sensitive pause around payment stays the main control. Intake refuses a value carrying a card
 number, and the ledger refuses detail carrying one (tested). Keypad card capture is planned only
 through a PCI-certified carrier service on a call path where tones never reach this engine
 (PAY-6), after an assessor's scoping. Nothing here is a PCI DSS attestation; a host's scope

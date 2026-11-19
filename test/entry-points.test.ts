@@ -20,6 +20,8 @@ describe("entry points", () => {
       "reduce",
       "cardNumberRedactor",
       "luhnValid",
+      "digitRuns",
+      "LiveCardNumberDetector",
       "judgeKeypadFactors",
       "normaliseFieldValue",
       "settlementFor",

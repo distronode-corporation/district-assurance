@@ -1,10 +1,14 @@
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
+import { EngineError } from "../src/core/errors.ts";
+import { LIVE_DETECTOR_MIN_DIGITS, LiveCardNumberDetector } from "../src/core/live-detector.ts";
 import {
   applyFindings,
   cardNumberRedactor,
   composeRedactors,
+  digitRuns,
   findCardNumbers,
   luhnValid,
   REDACTION_MARKERS,
@@ -13,6 +17,120 @@ import {
 
 const M = REDACTION_MARKERS.card_number;
 const redact = (text: string) => cardNumberRedactor.redact(text).text;
+
+/** The shared corpus (test/corpus/card-numbers.json), the test source for any implementation. */
+interface Corpus {
+  version: number;
+  runs: Array<{ name: string; text: string; runs: string[] }>;
+  redact: Array<{ name: string; text: string; redacted: string }>;
+  live: Array<{ name: string; minDigits?: number; chunks: string[]; interrupts: boolean[]; digits: number[] }>;
+}
+const corpus = JSON.parse(readFileSync(new URL("./corpus/card-numbers.json", import.meta.url), "utf8")) as Corpus;
+
+describe("the card-number corpus", () => {
+  it("is version 1 and uses the same marker", () => {
+    assert.equal(corpus.version, 1);
+    assert.equal(M, "[card number removed]");
+  });
+
+  for (const c of corpus.runs) {
+    it(`reads runs of digits: ${c.name}`, () => {
+      assert.deepEqual(digitRuns(c.text).map((run) => run.map((p) => p.digits).join("")), c.runs);
+    });
+  }
+
+  for (const c of corpus.redact) {
+    it(`redacts: ${c.name}`, () => {
+      assert.equal(redact(c.text), c.redacted);
+    });
+  }
+
+  for (const c of corpus.live) {
+    it(`detects live: ${c.name}`, () => {
+      assert.equal(c.interrupts.length, c.chunks.length);
+      assert.equal(c.digits.length, c.chunks.length);
+      const detector = new LiveCardNumberDetector(c.minDigits === undefined ? {} : { minDigits: c.minDigits });
+      const seen = c.chunks.map((chunk) => detector.push(chunk));
+      assert.deepEqual(seen.map((s) => s.interrupt), c.interrupts);
+      assert.deepEqual(seen.map((s) => s.digits), c.digits);
+    });
+  }
+});
+
+describe("digitRuns", () => {
+  it("gives each part its offsets", () => {
+    assert.deepEqual(digitRuns("is forty-two 4242, double 7 ok"), [
+      [
+        { digits: "42", start: 3, end: 12 },
+        { digits: "4242", start: 13, end: 17 },
+        { digits: "77", start: 19, end: 27 },
+      ],
+    ]);
+  });
+
+  it("needs separators inside a spoken number", () => {
+    // A slash between words of a number splits it, as it splits numerals.
+    assert.deepEqual(digitRuns("forty/two").map((r) => r.map((p) => p.digits)), [["40"], ["2"]]);
+    assert.deepEqual(digitRuns("four hundred/two").map((r) => r.map((p) => p.digits)), [["400"], ["2"]]);
+    assert.deepEqual(digitRuns("double/4 double").map((r) => r.map((p) => p.digits)), [["4"]]);
+    assert.deepEqual(digitRuns("vingt et/un").map((r) => r.map((p) => p.digits)), [["20"], ["1"]]);
+  });
+
+  it("joins only the right words to tens, teens and scales", () => {
+    const read = (text: string) => digitRuns(text).map((r) => r.map((p) => p.digits));
+    assert.deepEqual(read("vingt et deux"), [["20"], ["2"]]);
+    assert.deepEqual(read("twenty oh"), [["20", "0"]]);
+    assert.deepEqual(read("ten seven"), [["10", "7"]]);
+    assert.deepEqual(read("dix six"), [["10", "6"]]);
+    assert.deepEqual(read("quatre trente"), [["4", "30"]]);
+    assert.deepEqual(read("hundred and"), [["100"]]);
+    assert.deepEqual(read("thousand hundred"), [["1100"]]);
+    assert.deepEqual(read("soixante seize"), [["76"]]);
+    assert.deepEqual(read("sixty sixteen"), [["60", "16"]]);
+  });
+});
+
+describe("LiveCardNumberDetector", () => {
+  it("interrupts at 8 digits by default and refuses another threshold out of range", () => {
+    assert.equal(LIVE_DETECTOR_MIN_DIGITS, 8);
+    const detector = new LiveCardNumberDetector();
+    assert.deepEqual(detector.push("4242 424"), { interrupt: false, digits: 7 });
+    assert.deepEqual(detector.push("2"), { interrupt: true, digits: 8 });
+    for (const minDigits of [3, 20, 7.5, Number.NaN]) {
+      assert.throws(
+        () => new LiveCardNumberDetector({ minDigits }),
+        (e: unknown) => e instanceof EngineError && e.code === "invalid_input" && !e.message.includes(String(minDigits)),
+      );
+    }
+    assert.doesNotThrow(() => new LiveCardNumberDetector({ minDigits: 19 }));
+  });
+
+  it("forgets the open run on reset", () => {
+    const detector = new LiveCardNumberDetector();
+    assert.deepEqual(detector.push("four two four two four two"), { interrupt: false, digits: 6 });
+    detector.reset();
+    assert.deepEqual(detector.push("four two"), { interrupt: false, digits: 2 });
+  });
+
+  it("keeps a trailing double or triple with no run before it", () => {
+    const detector = new LiveCardNumberDetector();
+    assert.deepEqual(detector.push("it is triple"), { interrupt: false, digits: 0 });
+    assert.deepEqual(detector.push("four 42424"), { interrupt: true, digits: 8 });
+    // A word that only ends in "double" is not one.
+    const other = new LiveCardNumberDetector();
+    assert.deepEqual(other.push("redouble"), { interrupt: false, digits: 0 });
+    assert.deepEqual(other.push("four 4242424"), { interrupt: true, digits: 8 });
+    assert.deepEqual(other.push("thanks"), { interrupt: false, digits: 0 });
+    assert.deepEqual(other.push(""), { interrupt: false, digits: 0 });
+  });
+
+  it("never returns the text it heard", () => {
+    const detector = new LiveCardNumberDetector();
+    const result = detector.push("4242 4242 4242 4242");
+    assert.deepEqual(Object.keys(result).sort(), ["digits", "interrupt"]);
+    assert.ok(!JSON.stringify(result).includes("4242"));
+  });
+});
 
 describe("luhnValid", () => {
   it("accepts valid test numbers and refuses others", () => {
