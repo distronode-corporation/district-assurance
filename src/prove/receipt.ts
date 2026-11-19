@@ -74,20 +74,25 @@ export type ReceiptCheck = { valid: true; retiredAt: string | null } | { valid: 
  * receipt under a retired key whose `retiredAt` is not an ISO 8601 UTC time.
  */
 export function checkReceipt(receipt: SignedReceipt, keys: ReadonlyArray<JsonWebKey & { kid?: string; retiredAt?: unknown }>): ReceiptCheck {
-  if (receipt.alg !== "ES256") return { valid: false };
-  const jwk = keys.find((k) => k.kid === receipt.kid);
+  // Read once: the body whose issue time is checked against the key's retirement is the body whose
+  // signature is verified, and the key's retirement is read once too.
+  const { alg, kid, body, signature: sig } = receipt;
+  if (alg !== "ES256") return { valid: false };
+  const jwk = keys.find((k) => k.kid === kid);
   if (jwk === undefined) return { valid: false };
+  const retired: unknown = jwk.retiredAt;
   let retiredAt: string | null = null;
-  if (jwk.retiredAt !== undefined) {
-    if (!isUtcTime(jwk.retiredAt)) return { valid: false };
-    if (!isUtcTime(receipt.body.issuedAt) || Date.parse(receipt.body.issuedAt) >= Date.parse(jwk.retiredAt)) return { valid: false };
-    retiredAt = jwk.retiredAt;
+  if (retired !== undefined) {
+    if (!isUtcTime(retired)) return { valid: false };
+    const issuedAt: unknown = body.issuedAt;
+    if (!isUtcTime(issuedAt) || Date.parse(issuedAt) >= Date.parse(retired)) return { valid: false };
+    retiredAt = retired;
   }
   try {
     const key = createPublicKey({ key: jwk, format: "jwk" });
-    const signature = Buffer.from(receipt.signature, "base64url");
+    const signature = Buffer.from(sig, "base64url");
     if (signature.length !== 64) return { valid: false };
-    return verify("sha256", receiptPayload(receipt.body), { key, dsaEncoding: "ieee-p1363" }, signature) ? { valid: true, retiredAt } : { valid: false };
+    return verify("sha256", receiptPayload(body), { key, dsaEncoding: "ieee-p1363" }, signature) ? { valid: true, retiredAt } : { valid: false };
   } catch {
     return { valid: false };
   }
