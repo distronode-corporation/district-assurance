@@ -148,6 +148,7 @@ export class MemoryRecordStore implements RecordStore {
     if (digest === null) {
       delete subject.pinDigest;
       delete subject.pinEnrolmentId;
+      delete subject.duressDigest;
     } else if (subject.pinDigest !== undefined) return false;
     else {
       subject.pinDigest = digest;

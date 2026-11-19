@@ -119,6 +119,7 @@ export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: 
   const wellFormed = isKeypadEntry(pin) && pin.length >= settings.minDigits && pin.length <= settings.maxDigits;
   let match: boolean;
   let duress: boolean;
+  let brokenSubject = false;
   if (settings.mode === "verifier") {
     // The verifier is asked every time, with a stand-in for a malformed entry or a non-keypad
     // account, so the answer's timing never says which it was. The stand-in's answer is ignored.
@@ -134,12 +135,14 @@ export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: 
     const entry = wellFormed ? pin : "";
     match = hexDigestsEqual(input.hmac(`pin:${input.subjectKey ?? ""}:${entry}`), onFile?.pinDigest ?? "");
     duress = hexDigestsEqual(input.hmac(`duress:${input.subjectKey ?? ""}:${entry}`), onFile?.duressDigest ?? "");
+    // The two digests are keyed apart, so they are equal only on a subject imported wrongly.
+    brokenSubject = hexDigestsEqual(onFile?.pinDigest ?? "", onFile?.duressDigest ?? "") && onFile?.pinDigest !== undefined;
   }
   // A subject on file implies a keypad-shaped account or a host's subject key, never the stand-in.
   if (!wellFormed || input.subject === null) return "fail";
-  // An entry that is both the PIN and the duress PIN (a subject imported with the two equal) is
-  // refused: it can be neither a real login nor a real alarm.
-  if (match && duress && settings.mode === "keyed_hash") return "fail";
+  // An entry that is both the PIN and the duress PIN, in either mode, and a subject imported with
+  // the two digests equal, are refused like a wrong PIN, with no alarm: neither a login nor an alarm.
+  if ((match && duress) || brokenSubject) return "fail";
   if (duress && settings.duress !== undefined) return "duress";
   return match ? "pass" : "fail";
 }

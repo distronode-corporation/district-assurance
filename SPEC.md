@@ -211,8 +211,9 @@ the duress PIN is off unless it is set.
   `verifier` mode the host's store resets its own PIN. Either way it clears the subject's PIN
   failure counters when the engine has a `counters` adapter (VER-1; a stand-in with only `reset`,
   in VER-1's shape `reset({workspaceId, factor: "pin", scope: "subject", key})`, until VER-1
-  lands), and appends `pin.reset` to the ledger with no call. In `keyed_hash` mode it
-  also removes the duress PIN (`putDuressDigest` with null).
+  lands), and appends `pin.reset` to the ledger with no call. In `keyed_hash` mode
+  `putPinDigest` with null removes the duress PIN too, in the same atomic step, so a duress PIN the
+  business enrols against a PIN chosen after the reset began is never removed by it.
 
 ### Duress PIN (VER-12)
 
@@ -241,8 +242,10 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   both), counts even on a call that began verification before it. In `verifier` mode `PinVerifier.verify`
   may answer `{duress: true}`, and `matched` is then ignored. A duress match counts only on a
   subject on file, with a well-formed entry, while `pin.duress` is set; otherwise it fails like a
-  wrong PIN. In `keyed_hash` mode an entry that matches both (a subject imported with the PIN equal to
-  the duress PIN) fails like a wrong PIN; in `verifier` mode a `duress: true` answer wins.
+  wrong PIN. An entry that matches both the PIN and the duress PIN (a subject imported with the two
+  PINs equal), in either mode, and in `keyed_hash` mode any entry on a subject whose two digests
+  are byte for byte equal, fail like a wrong PIN, with no alarm: in `verifier` mode, an answer
+  `{matched: true, duress: true}` fails.
 - A duress entry is a pass everywhere the caller can reach: the same `submitPin` answer, the same
   factor, level, grant, state, events and receipt as the PIN. The call record's Badge part gets
   `duress: {refuseScopes}` (the setting as it was then), which nothing clears for the rest of the
@@ -250,14 +253,19 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   (so `requestPayment` is refused with `scope_denied`). Anything sent after the call (PRV-10)
   follows the same rule as on a normal call.
 - Every duress entry owes an alert: in the same write, Badge's part of the call record gets
-  `duressAlerts` `{alertId, subjectKey, at}` and `duress`, even when verification restarted or the
+  `duressAlerts` `{alertId, subjectKey, at}` and `duress`, and the record `owesAlerts: true` until
+  none is owed; `alertId` is `JSON.stringify(["duress", callId, n])` for the call's `n`th duress
+  entry, unique across engines whatever their id generators, even when verification restarted or the
   call ended while the entry was judged (the entry is then not a factor, and `submitPin` throws the
   same error as for any other stale entry). After a write, `flushLedger` included, and even when its
   ledger append failed, the engine calls `DuressNotifier.notify({alertId, workspaceId, subjectKey,
   callId, at})` for each alert the call owes, off the response path (after the reply), and takes the
   alert off the record once `notify` resolves. An alert stays owed until then, and is sent again on
   the next write, `flushLedger` or `deliverDuressAlerts(callId)` (the host's sweep, which waits and
-  answers how many were acknowledged); one engine sends an alert once at a time, again after 30
+  answers how many were acknowledged), or `sweepAlerts()`, which finds the calls without their ids
+  through the optional `SessionStore.listCallsOwingAlerts(workspaceId)` (the calls whose record has
+  `owesAlerts: true`; `precondition_failed` without it) and answers `{sent, failed}`: the calls that
+  owe nothing now, and those that still owe one; one engine sends an alert once at a time, again after 30
   seconds without an answer. So `notify` may see an `alertId` more than once. A notifier that throws,
   rejects or never answers changes nothing on the call; it must not block.
 - The ledger tag: every `verification.factor` entry with `kind: "pin"` carries `tag` =

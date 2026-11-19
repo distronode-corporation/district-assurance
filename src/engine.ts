@@ -582,6 +582,7 @@ export class Engine {
       // leaves them in the record, and the next write (or flushLedger) appends them, once each.
       const version = stored.version + 1;
       events.forEach((event, i) => record.outbox.push(this.#outboxEntry(callId, version, i, event)));
+      markOwedAlerts(record);
       const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
       if (saved.ok) {
         try {
@@ -703,6 +704,23 @@ export class Engine {
     return this.#sendDuressAlerts(callId);
   }
 
+  /**
+   * Sends the alerts every call of this workspace still owes (VER-12), for a host after a crash or
+   * on a schedule, without knowing the call ids: the session store lists them
+   * (`listCallsOwingAlerts`). `sent`: calls that owe nothing now; `failed`: calls that still owe one.
+   */
+  async sweepAlerts(): Promise<{ sent: string[]; failed: string[] }> {
+    const list = this.#sessions.listCallsOwingAlerts?.bind(this.#sessions);
+    if (list === undefined) throw new EngineError("precondition_failed", "the session store cannot list the calls that owe alerts (listCallsOwingAlerts)");
+    const result = { sent: [] as string[], failed: [] as string[] };
+    for (const callId of await list(this.workspaceId)) {
+      await this.#sendDuressAlerts(callId);
+      const owed = badge.owedDuressAlerts(await this.#read(callId)).length;
+      (owed === 0 ? result.sent : result.failed).push(callId);
+    }
+    return result;
+  }
+
   /** Off the caller's response path: after the reply, so neither the notifier's time nor its failure reaches the caller. */
   #sendDuressAlertsSoon(callId: string, record: CallRecord): void {
     if (badge.owedDuressAlerts(record).length === 0) return;
@@ -741,6 +759,7 @@ export class Engine {
       const stored = (await this.#sessions.get(this.workspaceId, callId))!;
       const record = structuredClone(stored.record) as unknown as CallRecord;
       badge.acknowledgeDuressAlert(record, alertId);
+      markOwedAlerts(record);
       if ((await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue)).ok) return;
     }
     throw new EngineError("conflict", `the call changed under every one of ${MAX_WRITE_ATTEMPTS} attempts`);
@@ -749,4 +768,10 @@ export class Engine {
 
 export function createEngine(options: EngineOptions): Engine {
   return new Engine(options);
+}
+
+/** Marks a record that owes an alert, so a session store can list it for a sweep, and unmarks one that does not. */
+function markOwedAlerts(record: CallRecord): void {
+  if (badge.owedDuressAlerts(record).length > 0) record.owesAlerts = true;
+  else delete record.owesAlerts;
 }

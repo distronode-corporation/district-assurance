@@ -70,6 +70,11 @@ export interface CallRecord {
   modules: Record<string, JsonValue>;
   /** Ledger entries saved with a change and not yet known to be appended. */
   outbox: Array<{ eventId: string; name: EngineEventName; actor: Actor; at: string; detail: { [key: string]: JsonValue } }>;
+  /**
+   * Present, and true, while the call owes an alert to a host adapter (a duress alert, VER-12), so a
+   * session store can index the calls a sweep must visit (`SessionStore.listCallsOwingAlerts`).
+   */
+  owesAlerts?: true;
 }
 
 /** A call being changed inside one compare-and-set attempt. Everything here is synchronous and pure. */

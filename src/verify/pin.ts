@@ -182,11 +182,9 @@ export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: 
 export async function resetPin(rt: EngineRuntime, subjectKey: string, counters: AttemptCounters | undefined): Promise<void> {
   const settings = pinSettings(rt);
   if (!SUBJECT_KEY.test(subjectKey)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
-  if (settings.mode === "keyed_hash") {
-    // The duress PIN goes too: it must differ from the PIN, and the next PIN is not chosen yet.
-    await rt.adapter("records").putPinDigest(rt.workspaceId, subjectKey, null);
-    await rt.adapter("records").putDuressDigest(rt.workspaceId, subjectKey, null);
-  }
+  // The duress PIN goes too, in the store's same atomic step: it must differ from the PIN, the next
+  // PIN is not chosen yet, and a duress PIN the business enrols against that next PIN must survive.
+  if (settings.mode === "keyed_hash") await rt.adapter("records").putPinDigest(rt.workspaceId, subjectKey, null);
   await counters?.reset({ workspaceId: rt.workspaceId, factor: "pin", scope: "subject", key: subjectKey });
   await rt.adapter("ledger").append({ callId: null, actor: "member", event: "pin.reset", at: rt.now(), detail: { subjectKey } });
 }

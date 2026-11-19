@@ -72,6 +72,8 @@ export interface BadgeSlice {
    * entry and removed once `notify` resolved. Never the PIN. Absent until the first.
    */
   duressAlerts?: Array<{ alertId: string; subjectKey: string; at: string }>;
+  /** Duress entries on this call so far, numbering their alerts. Absent until the first. */
+  duressEntries?: number;
   /** A keypad or PIN factor matched since verification last started from nothing. */
   knowledgeMatched: boolean;
   carrier: CarrierSignalReport | null;
@@ -397,7 +399,10 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     // the alert after this write (and retries it until the notifier answers).
     if (outcome === "duress") {
       s.duress ??= { refuseScopes: [...settings.pin!.duress!.refuseScopes] };
-      s.duressAlerts = [...(s.duressAlerts ?? []), { alertId: rt.ids.next("duress"), subjectKey: reserved.subjectKey!, at }];
+      // Unique without the id generator: the call and the number of this duress entry on it, which
+      // the compare-and-set write makes one per entry across every engine.
+      s.duressEntries = (s.duressEntries ?? 0) + 1;
+      s.duressAlerts = [...(s.duressAlerts ?? []), { alertId: JSON.stringify(["duress", callId, s.duressEntries]), subjectKey: reserved.subjectKey!, at }];
     }
     // Otherwise the result is applied only to the verification it was judged for, as for any factor;
     // a stale one is refused with the same error either way, after the write.

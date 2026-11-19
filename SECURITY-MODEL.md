@@ -93,10 +93,15 @@ against the call even if verification restarted or the call ended while it was j
 The engine sends it to the host's `DuressNotifier` after that write, off the caller's response path
 (so a slow notifier delays nothing the caller hears), even when the ledger append fails (tested),
 and keeps it owed until `notify` resolves: the call's next write, `flushLedger` and the host's sweep
-`deliverDuressAlerts` retry it, at least once by `alertId` (tested). A notifier that fails changes
+`deliverDuressAlerts` retry it, at least once by `alertId`, which the call's id and entry number
+make unique across engines (tested); after a crash `sweepAlerts` finds every call that still owes
+one without knowing its id (tested). A notifier that fails changes
 nothing on the call (tested). `putDuressDigest` stores only while the PIN checked against is still on
-file, so a reset and a new PIN meanwhile can never make the duress PIN equal the PIN (tested), and an
-entry that matches both on an imported subject is refused, neither a login nor an alarm (tested). Every PIN ledger entry carries a
+file, so a reset and a new PIN meanwhile can never make the duress PIN equal the PIN (tested); a
+reset removes the PIN and the duress PIN in one store step, so it never removes a duress PIN
+enrolled against a newer PIN (tested); and an entry that matches both, on an imported subject or in
+the host's verifier's answer, or any entry on a subject whose two digests are equal, is refused like
+a wrong PIN, neither a login nor an alarm (tested). Every PIN ledger entry carries a
 `tag` keyed to its event id and outcome, so only the holder of the knowledge key can tell a duress
 pass from a normal one (tested); enrolling or removing a duress PIN writes nothing to the ledger.
 A PIN reset removes the duress PIN too.
@@ -215,8 +220,10 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
   digest on file is the one given, atomically.
 - A `DuressNotifier` that alerts someone the business named, away from the call, and never
   through anything the caller or the person beside them can see; that never blocks (it queues the
-  alert and returns); that drops repeats by `alertId`; and a sweep calling `deliverDuressAlerts`
-  for recent calls, in case a process stopped with an alert owed; and, in `verifier` mode, a
+  alert and returns); that drops repeats by `alertId`; and a sweep calling `sweepAlerts` (with a
+  session store that lists the calls owing alerts) or `deliverDuressAlerts` for recent calls, in
+  case a process stopped with an alert owed; a `RecordStore` whose `putPinDigest(null)` also
+  removes the duress digest in the same step; and, in `verifier` mode, a
   `PinVerifier` that answers a duress PIN in the same time as any other entry.
 - Who may edit a workspace's FlowConfig, and keeping its revisions.
 - Outside modules: their code runs inside the engine's writes and is part of the host's security

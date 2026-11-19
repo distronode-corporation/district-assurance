@@ -125,6 +125,12 @@ export interface SessionStore {
   /** Points a provider reference (an identity session, a payment link) at a call. The first binding wins. */
   bindRef(workspaceId: string, ref: string, callId: string): Promise<boolean>;
   resolveRef(workspaceId: string, ref: string): Promise<string | null>;
+  /**
+   * The ids of the workspace's calls whose stored record has `owesAlerts: true`, for
+   * `Engine.sweepAlerts` after a crash (VER-12). Optional: without it the host sweeps by call id
+   * (`deliverDuressAlerts`). A durable store indexes that one field.
+   */
+  listCallsOwingAlerts?(workspaceId: string): Promise<string[]>;
 }
 
 export interface IntakeRecord {
@@ -148,7 +154,9 @@ export interface RecordStore {
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
   /**
    * Stores a subject's PIN digest (`pinDigest`) with the id of the enrolment that chose it
-   * (`pinEnrolmentId`), or removes both with null (a reset by the business). Never given the PIN
+   * (`pinEnrolmentId`), or removes both with null (a reset by the business), and the duress PIN
+   * (`duressDigest`, VER-12) in the same atomic step, so no duress PIN enrolled against a newer PIN
+   * is ever removed by an older reset. Never given the PIN
    * itself. A digest is stored only if the subject has none, as one atomic step (of two enrolments at
    * once, one wins and the other replaces nothing); the answer says whether it was stored. Null always
    * removes and answers true. A subject the store does not have is left alone, and the answer is false.
