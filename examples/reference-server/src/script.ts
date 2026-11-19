@@ -228,7 +228,8 @@ const deposit: ScriptStep[] = [
     async run(w, call) {
       const done = await w.engine.flowPosition(call.callId);
       call.receipt = await w.engine.endCall(call.callId);
-      // The host would text this link to the caller; the server keeps only the token's hash.
+      // The host would text this link to the caller. The link store keeps only the token's hash;
+      // this demo run keeps the raw token in memory to show the link, which a host would not do.
       call.receiptToken = call.receipt === null ? null : w.links.issue(call.callId);
       return { detail: `flow ${done!.status} (${done!.index} steps), receipt ${call.receipt === null ? "MISSING" : "signed, link issued"}`, ok: call.receipt !== null };
     },
