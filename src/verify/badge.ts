@@ -69,6 +69,12 @@ export interface BadgeSlice {
   finished: number;
   lastLevel: AssuranceLevel;
   lastMethods: FactorKind[];
+  /**
+   * The epoch of the verification a taint landed in (Sean, 2026-11-19): that verification grants no
+   * level, whatever matched before or after the taint, and the caller must start a new one, which
+   * bumps the epoch. Absent on a call never tainted, and on a call stored before the rule.
+   */
+  voidedEpoch?: number;
 }
 
 export interface KeypadResult {
@@ -230,8 +236,10 @@ export class BadgeModule implements AssuranceModule {
 
   onUntrusted(s: JsonValue): JsonValue {
     // A photo ID link sent before the taint no longer counts. One link per call still holds.
+    // The verification open now (or the last one) is void: it never grants a level. The next
+    // beginVerification bumps the epoch, so a new verification counts as usual.
     const badge = s as unknown as BadgeSlice;
-    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink) } as unknown as JsonValue;
+    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink), voidedEpoch: badge.epoch } as unknown as JsonValue;
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
@@ -452,7 +460,9 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
   return rt.update(callId, (draft) => {
     const step = stepOfType<BadgeVerifyStep>(draft.record, "badge.verify");
     const s = draft.slice<BadgeSlice>(BADGE);
-    const factors = draft.record.state.factors.filter((f) => step === null || step.factors.includes(f.kind));
+    // A taint landed in this verification: it fails, with no level (Sean, 2026-11-19).
+    const voidedByTaint = s.voidedEpoch === s.epoch;
+    const factors = voidedByTaint ? [] : draft.record.state.factors.filter((f) => step === null || step.factors.includes(f.kind));
     const result = evaluateAssurance(rt.policy, factors, s.carrier);
     const scopes = scopesForLevel(rt.policy, result.level).filter((scope) => step?.scopes === undefined || step.scopes.includes(scope));
     const issuedAt = rt.clock.now();
@@ -470,7 +480,12 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
     s.finished++;
     s.lastLevel = result.level;
     s.lastMethods = result.counted;
-    draft.emit("verification.finished", "code", { level: result.level, methods: result.counted, discounted: result.discounted.map((d) => d.kind) });
+    draft.emit("verification.finished", "code", {
+      level: result.level,
+      methods: result.counted,
+      discounted: result.discounted.map((d) => d.kind),
+      ...(voidedByTaint ? { voidedByTaint: true } : {}),
+    });
     if (grant !== null) draft.emit("grant.issued", "code", { grantId: grant.grantId, level: grant.level, scopes, expiresAt: grant.expiresAt });
     return { level: result.level, scopes: grant === null ? [] : scopes };
   });

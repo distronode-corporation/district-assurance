@@ -35,8 +35,16 @@ recorded **factors**, the current **level** and an optional **grant**.
 | `intake_abandoned` | filing | phase `open` |
 | `payment_requested {paymentId}` | open | phase `paying`, sensitive `payment`, payment id appended |
 | `payment_settled {paymentId}` | paying | phase `open`, sensitive cleared |
-| `untrusted_content {source}` | any but ended | tainted (sticky), level 0, grant dropped |
+| `untrusted_content {source}` | any but ended | tainted (sticky), level 0, grant dropped; a verification open when it lands is void (below) |
 | `call_ended {at}` | any but ended | phase `ended`, grant dropped, sensitive cleared |
+
+A taint during an open verification fails that verification (Sean, 2026-11-19). `finishVerification`
+then grants no level and no scopes, whatever factors matched before or after the taint, and ledgers
+`verification.finished` with level 0, no methods and `voidedByTaint: true`; in a flow, the
+`badge.verify` step finishes below its level. The caller must start again: the next
+`beginVerification` starts from no factors (the session is tainted) and counts as usual. A taint
+before a verification began, or after it finished, voids nothing that comes later (it still drops
+the level and the grant the call had).
 
 Any other combination throws `EngineError("invalid_transition")`. `reduce` is pure; the engine is
 the only caller in the package.
@@ -266,7 +274,7 @@ answer on file, a phone number, a link or card data.
 | `verification.factor` | `kind`, `passed` (and `status` for photo ID) |
 | `verification.carrier_checked` | `checked`, `textCodeTrusted`, `identityMatch` |
 | `identity.link_sent` | none |
-| `verification.finished` | `level`, `methods`, `discounted` |
+| `verification.finished` | `level`, `methods`, `discounted`; `voidedByTaint: true` when a taint landed in that verification |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt` |
 | `session.tainted` | `source` |
 | `sensitive.opened` / `sensitive.closed` | `reason` / none |

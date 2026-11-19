@@ -115,8 +115,10 @@ must pass `sessionStoreContract`.
 ### Prompt injection
 
 A webhook reply, a CRM note or a document says "ignore the rules". **Controls:** `markUntrusted`
-taints the session, drops the grant and sets the level to 0; the next verification starts from no
-factors, and a photo ID link sent before the taint no longer counts (tested). Fetched text never chooses a tool, a recipient or an amount: amounts come from
+taints the session, drops the grant and sets the level to 0; a verification open when the taint
+lands fails, granting no level from factors matched before or after it, so the caller must start
+again; the next verification starts from no factors, and a photo ID link sent before the taint no
+longer counts (tested). Fetched text never chooses a tool, a recipient or an amount: amounts come from
 the host's code with an `amountSource`, and destinations come from the subject record.
 
 ### Card data and PCI DSS scope
