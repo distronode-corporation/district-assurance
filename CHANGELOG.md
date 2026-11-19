@@ -25,6 +25,10 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Amounts from code, read back first (PAY-2): an `AmountSource` adapter (`amounts`, reference
+  `PriceListAmounts`) resolves a `paylink.request` step's `amountRef`; `readBackPayment` builds the
+  amount read-back in English or French and `confirmPaymentAmount` records the caller's yes before
+  the link is texted. The `AmountSource` string type is renamed `AmountSourceKind`.
 
 ### Changed
 

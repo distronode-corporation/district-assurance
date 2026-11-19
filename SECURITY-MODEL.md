@@ -116,7 +116,23 @@ must pass `sessionStoreContract`.
 A webhook reply, a CRM note or a document says "ignore the rules". **Controls:** `markUntrusted`
 taints the session, drops the grant and sets the level to 0; the next verification starts from no
 factors, and a photo ID link sent before the taint no longer counts (tested). Fetched text never chooses a tool, a recipient or an amount: amounts come from
-the host's code with an `amountSource`, and destinations come from the subject record.
+the host's code with an `amountSource`, or from the host's `AmountSource` adapter by a reference
+the config names, and destinations come from the subject record. Untrusted content also drops an
+amount read back and confirmed before it, so the caller hears it again (tested).
+
+### Wrong or surprise amounts
+
+A link for an amount the caller never agreed to: a mistyped price, a business endpoint that
+answers wrong, or a request changed between what was said and what was sent. **Controls:** an
+amount from the `AmountSource` adapter is checked like any amount (a positive integer, a lower-case
+currency, under the limit) and is never texted until code has read it back in the caller's
+language and the caller confirmed that exact read-back, bound by its digest (tested). Once an
+amount is read back on a call, the next link must be for that request and confirmed, and is for the
+amount the caller heard; a different request, a stale digest or an unconfirmed read-back is
+refused (tested). The ledger records the read-back and the confirmation, with the amount and the
+digest but never the reference. Left to the host: speaking the read-back as built, and taking the
+caller's yes by keypad or voice outside the model. A fixed amount in the config or the host's
+code can still be sent without a read-back.
 
 ### Card data and PCI DSS scope
 

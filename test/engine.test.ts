@@ -7,11 +7,14 @@ import type { EngineEvent } from "../src/core/events.ts";
 import { defaultVerificationPolicy } from "../src/core/policy.ts";
 import { createEngine } from "../src/engine.ts";
 import { defaultConfig } from "../src/modules.ts";
-import { formatAmount } from "../src/pay/paylink.ts";
+import type { AmountLookup, AmountSource } from "../src/core/runtime.ts";
+import { PriceListAmounts, buildAmountReadBack } from "../src/pay/amount.ts";
+import { formatAmount, type PaylinkSlice } from "../src/pay/paylink.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import { verifyReceipt } from "../src/prove/receipt.ts";
 import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
-import { TEST_KNOWLEDGE_KEY, createTestEngine } from "../src/testing/index.ts";
+import { TEST_KNOWLEDGE_KEY, createTestEngine, type TestEngine } from "../src/testing/index.ts";
+import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
 describe("Engine construction", () => {
@@ -558,6 +561,163 @@ describe("Engine pay", () => {
     assert.equal(formatAmount("en", 15000, "cad"), "$150.00");
     assert.match(formatAmount("en", 150, "jpy"), /^JP¥150$|^¥150$/u);
     assert.match(formatAmount("fr", 15000, "cad"), /^150,00\s\$$/u);
+  });
+});
+
+describe("Engine pay: amounts from code, read back first (PAY-2)", () => {
+  const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
+  const byRef = { amountRef: "deposit.standard", description: "Repair deposit", amountSource: "price_list" as const };
+  const prices = () => new PriceListAmounts({ "deposit.standard": { amountMinor: 12500, currency: "cad" } });
+
+  /** A flow that verifies to level 3 and then asks for the price list's deposit. */
+  function refFlow(amounts: AmountSource) {
+    return setup({
+      adapters: { amounts },
+      config: testConfig((c) => {
+        c.flows = {
+          deposit: {
+            steps: [
+              { type: "badge.verify", level: 3, factors: ["keypad_knowledge", "photo_id"], scopes: ["payment.request"] },
+              { type: "paylink.request", ...byRef },
+            ],
+          },
+        };
+      }),
+    });
+  }
+
+  async function verify(t: TestEngine, callId: string): Promise<void> {
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.startPhotoId(callId);
+    await t.engine.applyIdentityOutcome({ sessionId: t.identity.created.at(-1)!.sessionId, status: "verified" });
+    await t.engine.finishVerification(callId);
+  }
+
+  it("reads a fixed amount back and sends the link only for the amount the caller confirmed", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const back = await t.engine.readBackPayment(callId, request);
+    assert.equal(back.text, "The amount to pay is $150.00, for Deposit. Is that correct?");
+    assert.deepEqual(back, buildAmountReadBack("en", { amountMinor: 15000, currency: "cad", description: "Deposit" }));
+    assert.match(back.digest, /^[0-9a-f]{64}$/);
+    await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /not confirmed/));
+    await assert.rejects(t.engine.requestPayment(callId, { ...request, amountMinor: 100 }), rejects("precondition_failed", /not the amount read back/));
+    await assert.rejects(t.engine.confirmPaymentAmount(callId, { digest: "0".repeat(64), confirmedBy: "keypad" }), rejects("precondition_failed", /not the amount last read back/));
+    await t.engine.confirmPaymentAmount(callId, { digest: back.digest, confirmedBy: "keypad" });
+    await t.engine.confirmPaymentAmount(callId, { digest: back.digest, confirmedBy: "keypad" });
+    assert.deepEqual(await t.engine.requestPayment(callId), { paymentId: "pay_1", status: "open" }, "outside a flow, the confirmed read-back is the request");
+    assert.equal(t.messages.sent.at(-1)!.body, "Your secure payment link for $150.00: https://pay.example.test/c/cs_fake_1");
+    await assert.rejects(t.engine.confirmPaymentAmount(callId, { digest: back.digest, confirmedBy: "voice" }), rejects("precondition_failed", /no amount was read back/), "a read-back serves one link");
+    await assert.rejects(t.engine.readBackPayment(callId, request), rejects("invalid_transition", /while paying/));
+    const entries = await t.ledger.list();
+    assert.deepEqual(entries.filter((e) => e.event.startsWith("payment.")).map((e) => [e.event, e.detail]), [
+      ["payment.amount_read_back", { amountMinor: 15000, currency: "cad", amountSource: "price_list", digest: back.digest }],
+      ["payment.amount_confirmed", { digest: back.digest, confirmedBy: "keypad" }],
+      ["payment.link_sent", { paymentId: "pay_1", linkId: "cs_fake_1", amountMinor: 15000, currency: "cad", amountSource: "price_list" }],
+    ]);
+    assert.equal(entries.find((e) => e.event === "payment.amount_confirmed")!.actor, "caller");
+  });
+
+  it("builds the read-back in French, and a new read-back replaces the one before", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t, "fr");
+    const first = await t.engine.readBackPayment(callId, request);
+    assert.match(first.text, /^Le montant à payer est de 150,00\s\$, pour Deposit\. Est-ce exact \?$/u);
+    const second = await t.engine.readBackPayment(callId, { ...request, amountMinor: 9900, description: "  Repair  " });
+    assert.equal(second.description, "Repair");
+    await assert.rejects(t.engine.confirmPaymentAmount(callId, { digest: first.digest, confirmedBy: "voice" }), rejects("precondition_failed"));
+    await t.engine.confirmPaymentAmount(callId, { digest: second.digest, confirmedBy: "voice" });
+    // The confirmed amount still has to fit the limit in force when the link is sent.
+    t.engine.configure(testConfig((c) => (c.modules.paylink = { settings: { maxAmountMinor: 5000 } })));
+    await assert.rejects(t.engine.requestPayment(callId), rejects("invalid_input", /above the limit/));
+    const bare = setup({ config: testConfig((c) => (c.modules.paylink = {})) });
+    const big = await verifiedCall(bare);
+    assert.equal((await bare.engine.readBackPayment(big, { ...request, amountMinor: 1_000_000 })).amountMinor, 1_000_000, "no settings: the package's own limit");
+  });
+
+  it("resolves a flow step's amountRef, reads it back and texts the link only after the caller confirmed", async () => {
+    const lookups: AmountLookup[] = [];
+    const list = prices();
+    const t = refFlow({ resolve: (input) => (lookups.push(input), list.resolve(input)) });
+    const { callId } = await t.engine.startCall({ locale: "fr", flow: "deposit" });
+    await assert.rejects(t.engine.readBackPayment(callId), rejects("precondition_failed", /badge\.verify/));
+    await verify(t, callId);
+    await assert.rejects(t.engine.requestPayment(callId), rejects("precondition_failed", /read back and confirmed before/));
+    await assert.rejects(t.engine.readBackPayment(callId, request), rejects("invalid_input", /pass no input/));
+    const back = await t.engine.readBackPayment(callId);
+    assert.match(back.text, /^Le montant à payer est de 125,00\s\$, pour Repair deposit\. Est-ce exact \?$/u);
+    assert.deepEqual(lookups, [
+      { workspaceId: "ws_test", callId, source: "price_list", reference: "deposit.standard", subjectKey: subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT), recordIds: [] },
+    ]);
+    await t.engine.confirmPaymentAmount(callId, { digest: back.digest, confirmedBy: "voice" });
+    assert.equal((await t.engine.requestPayment(callId)).status, "open");
+    assert.equal(t.payments.created[0]!.amountMinor, 12500);
+    await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" });
+    assert.equal((await t.engine.flowPosition(callId))!.status, "completed");
+    const sent = (await t.ledger.list()).find((e) => e.event === "payment.link_sent")!;
+    assert.deepEqual([sent.detail.amountMinor, sent.detail.currency], [12500, "cad"]);
+    assert.equal(JSON.stringify(await t.ledger.list()).includes("deposit.standard"), false, "the reference stays out of the ledger");
+  });
+
+  it("refuses an amountRef nobody can resolve, a bad answer, and a link without a read-back", async () => {
+    const plain = setup();
+    const call = await verifiedCall(plain);
+    await assert.rejects(plain.engine.readBackPayment(call, byRef), rejects("precondition_failed", /amounts adapter/));
+    await assert.rejects(plain.engine.requestPayment(call, byRef), rejects("precondition_failed", /read back and confirmed before/));
+    await assert.rejects(plain.engine.readBackPayment(call), rejects("invalid_input", /outside a flow/));
+    await assert.rejects(plain.engine.readBackPayment(call, { ...byRef, amountRef: "two words" }), rejects("invalid_input", /amountRef must be/));
+    await assert.rejects(plain.engine.readBackPayment(call, { ...byRef, ...request }), rejects("invalid_input", /not both/));
+    const unverified = await plain.engine.startCall();
+    await assert.rejects(plain.engine.readBackPayment(unverified.callId, request), rejects("scope_denied"));
+    await assert.rejects(plain.engine.confirmPaymentAmount(unverified.callId, { digest: "0".repeat(64), confirmedBy: "voice" }), rejects("scope_denied"));
+
+    let answer: { amountMinor: number; currency: string } | null = { amountMinor: 0, currency: "CAD" };
+    const t = setup({
+      adapters: { amounts: { resolve: async () => answer } },
+      config: testConfig((c) => (c.modules.paylink = { settings: { maxAmountMinor: 10000 } })),
+    });
+    const callId = await verifiedCall(t);
+    await assert.rejects(
+      t.engine.readBackPayment(callId, byRef),
+      rejects("invalid_input", /^the amount source answered with a bad amount: amountMinor must be a positive integer; currency must be a lower-case ISO 4217 code$/),
+    );
+    answer = { amountMinor: 10001, currency: "cad" };
+    await assert.rejects(t.engine.readBackPayment(callId, byRef), rejects("invalid_input", /above the limit/));
+    answer = null;
+    await assert.rejects(t.engine.readBackPayment(callId, byRef), rejects("precondition_failed", /no amount for this reference/));
+    assert.equal((await t.ledger.list()).some((e) => e.event === "payment.amount_read_back"), false);
+
+    const list = prices();
+    assert.deepEqual(await list.resolve({ workspaceId: "w", callId: "c", source: "price_list", reference: "deposit.standard", subjectKey: "s", recordIds: [] }), { amountMinor: 12500, currency: "cad" });
+    assert.equal(await list.resolve({ workspaceId: "w", callId: "c", source: "price_list", reference: "other", subjectKey: "s", recordIds: [] }), null);
+    assert.equal(await list.resolve({ workspaceId: "w", callId: "c", source: "business_endpoint", reference: "deposit.standard", subjectKey: "s", recordIds: [] }), null);
+  });
+
+  it("checks the call again after the lookup, and drops a confirmation when untrusted text arrives", async () => {
+    let t: TestEngine;
+    let ending = false;
+    t = setup({
+      adapters: {
+        amounts: {
+          resolve: async (input) => {
+            if (ending) await t.engine.endCall(input.callId);
+            return prices().resolve(input);
+          },
+        },
+      },
+    });
+    const callId = await verifiedCall(t);
+    const back = await t.engine.readBackPayment(callId, byRef);
+    await t.engine.confirmPaymentAmount(callId, { digest: back.digest, confirmedBy: "keypad" });
+    await t.engine.markUntrusted(callId, "crm_note");
+    const stored = await t.sessions.get("ws_test", callId);
+    assert.equal((stored!.record as unknown as { modules: { paylink: PaylinkSlice } }).modules.paylink.quote, null);
+
+    const other = await verifiedCall(t);
+    ending = true;
+    await assert.rejects(t.engine.readBackPayment(other, byRef), rejects("scope_denied"), "the call ended while the amount was looked up");
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "payment.amount_read_back").length, 1);
   });
 });
 

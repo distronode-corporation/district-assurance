@@ -21,6 +21,30 @@ import type { SessionEvent, SessionState } from "./session.ts";
 
 export type Locale = "en" | "fr";
 
+/** What the engine asks an `AmountSource` for: the reference a step or the host's code named, and whose call it is. */
+export interface AmountLookup {
+  workspaceId: string;
+  callId: string;
+  /** Where the amount comes from: `intake_record`, `business_endpoint` or `price_list`. */
+  source: string;
+  /** The reference the `paylink.request` step (or the host's code) names, for example a price list entry. */
+  reference: string;
+  /** The subject Badge matched on this call (a keyed hash, never an account number). */
+  subjectKey: string;
+  /** The records filed on this call so far, oldest first. */
+  recordIds: readonly string[];
+}
+
+/**
+ * Resolves a payment amount from a reference: a record, the business's endpoint or a price list
+ * (PAY-2). Code asks it, never the model; the engine checks the answer like any other amount and
+ * reads it back to the caller before a link is sent.
+ */
+export interface AmountSource {
+  /** The amount in minor units and its currency, or null when the reference names none. */
+  resolve(input: AmountLookup): Promise<{ amountMinor: number; currency: string } | null>;
+}
+
 /**
  * Everything the engine can be given. Only `ledger` is always required (the ledger is always on);
  * `sessions` defaults to a `MemorySessionStore`. Each module says which of the others it needs, and
@@ -36,6 +60,8 @@ export interface EngineAdapters {
   payments?: PaymentLinks;
   signer?: ReceiptSigner;
   pinVerifier?: PinVerifier;
+  /** Needed by a `paylink.request` step that names an `amountRef`. */
+  amounts?: AmountSource;
 }
 
 export type AdapterName = keyof EngineAdapters;

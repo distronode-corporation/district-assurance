@@ -2,7 +2,8 @@
 // texts the link to the number on file, and learns the result from a signed webhook. The amount
 // comes from code (a record, the business's endpoint, a price list), never from the model.
 
-export type AmountSource = "intake_record" | "business_endpoint" | "price_list";
+/** Where an amount comes from. The `AmountSource` adapter (PAY-2) resolves a reference from one of them. */
+export type AmountSourceKind = "intake_record" | "business_endpoint" | "price_list";
 
 export type PaymentStatus = "open" | "paid" | "failed" | "expired";
 
@@ -12,7 +13,7 @@ export interface PaymentRequest {
   amountMinor: number;
   currency: string;
   description: string;
-  amountSource: AmountSource;
+  amountSource: AmountSourceKind;
   /** The provider's id for the hosted page (for example a Checkout Session id). */
   linkId: string;
   status: PaymentStatus;
