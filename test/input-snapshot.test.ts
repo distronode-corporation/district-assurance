@@ -91,3 +91,32 @@ describe("host inputs are read once", () => {
     assert.equal(verifyStripeSignature(lying as never).ok, true, "the clock that was checked is the one used");
   });
 });
+
+describe("host values that reach the ledger are checked", () => {
+  it("recordConsent refuses an answer other than yes or no before any write", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    const version = (await t.sessions.get("ws_test", callId))!.version;
+    for (const answer of ["maybe", "", "YES", PHONE_ON_FILE, null, true, 1, ["yes"], "\ud800", "__proto__"]) {
+      await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer } as never), rejects("invalid_input", /answer must be yes or no/), String(answer));
+    }
+    assert.equal((await t.sessions.get("ws_test", callId))!.version, version, "no write");
+    assert.equal((await t.ledger.list()).some((e) => e.event === "consent.recorded"), false);
+    assert.equal((await t.engine.recordConsent(callId, { purpose: "texts", answer: "no" })).answer, "no");
+  });
+
+  it("applyIdentityOutcome refuses a status other than the provider's three before any lookup or write", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.startPhotoId(callId);
+    const sessionId = t.identity.created.at(-1)!.sessionId;
+    const entries = (await t.ledger.list()).length;
+    for (const status of ["processing", "", "VERIFIED", PHONE_ON_FILE, null, true, 1, "\ud800", "__proto__", "constructor"]) {
+      await assert.rejects(t.engine.applyIdentityOutcome({ sessionId, status } as never), rejects("invalid_input", /status must be/), String(status));
+    }
+    assert.equal((await t.ledger.list()).length, entries, "nothing ledgered");
+    assert.deepEqual(await t.engine.applyIdentityOutcome({ sessionId, status: "requires_input" }), { applied: true, callId }, "the session was not consumed by a refusal");
+  });
+});

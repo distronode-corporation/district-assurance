@@ -421,9 +421,13 @@ export async function startPhotoId(rt: EngineRuntime, callId: string): Promise<{
 }
 
 /** The identity provider's verified webhook outcome. Unknown, late or tainted sessions are ignored. */
+const IDENTITY_STATUSES: readonly unknown[] = ["verified", "requires_input", "canceled"];
+
 export async function applyIdentityOutcome(rt: EngineRuntime, outcome: IdentityOutcome): Promise<OutcomeResult> {
   // Read once: the session looked up is the one consumed, and the status that passed is the one ledgered.
   const { sessionId, status } = outcome;
+  // The status goes into the ledger as it is: anything but the provider's three is refused first.
+  if (!IDENTITY_STATUSES.includes(status)) throw new EngineError("invalid_input", "status must be verified, requires_input or canceled");
   const callId = await rt.resolveRef(`identity:${sessionId}`);
   if (callId === null) return { applied: false };
   return rt.update(callId, (draft): OutcomeResult => {

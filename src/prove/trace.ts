@@ -130,6 +130,8 @@ export async function recordConsent(
 ): Promise<ConsentRecord> {
   // Read once: the purpose a wording was found for is the one the flow step is checked against.
   const { purpose, answer, channel } = input;
+  // The answer goes into the record, the receipt and the ledger as it is: refused before any write.
+  if (answer !== "yes" && answer !== "no") throw new EngineError("invalid_input", "answer must be yes or no");
   return rt.update(callId, (draft) => {
     const wording = draft.slice<TraceSlice>(TRACE).wordings.find((w) => w.purpose === purpose);
     if (wording === undefined) throw new EngineError("invalid_input", `no wording for ${purpose} in this call's trace settings`);
