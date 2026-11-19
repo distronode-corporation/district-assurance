@@ -1,12 +1,12 @@
 // The demo's scripted calls, one step at a time. `npm run demo` runs every step of both flows in a
-// row and prints a line per step; the browser UI (`npm run ui`) runs the same steps one click at a
-// time. A step takes no input: what the caller keys is fixed here, so the UI can only replay the
+// row, then a callback, and prints a line per step; the browser UI (`npm run ui`) runs the two
+// flows' steps one click at a time. A step takes no input: what the caller keys is fixed here, so the UI can only replay the
 // script, never drive the engine with values of its own.
 //
 // Everything is made up: the accounts, the PIN, the date of birth and the phone numbers (555
 // numbers). The Stripe webhooks are signed here with a demo secret and posted to the reference
 // server over the loopback.
-import { createEngine, signStripePayload, subjectKeyFor, type Engine, type SignedReceipt } from "../../../src/index.ts";
+import { createEngine, signStripePayload, subjectKeyFor, type Engine, type FlowConfig, type SignedReceipt } from "../../../src/index.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, generateTestSigner, testSubject, type TestEngine } from "../../../src/testing/index.ts";
 import { demoConfig } from "./flows.ts";
 
@@ -28,8 +28,23 @@ export interface DemoWorld {
   stripe(path: string, type: string, object: Record<string, unknown>): Promise<Record<string, unknown>>;
 }
 
+/**
+ * The demo's FlowConfig plus the callback factor (VER-9): on in Badge, a PIN and a callback reach
+ * level 2, and the `owner-callback` flow asks for it on its first step. Owner commands stay at level 1.
+ */
+export function demoCallbackConfig(): FlowConfig {
+  const config = demoConfig();
+  (config.modules.badge!.settings as { factors: string[] }).factors.push("callback");
+  config.policy.levels[1]!.anyOf.push(["pin", "callback"]);
+  config.flows["owner-callback"] = {
+    summary: "The owner's PIN, then a callback to the number on file, which runs the step again on its own call.",
+    steps: [{ type: "badge.verify", level: 2, factors: ["pin", "callback", "carrier_identity_match"], scopes: ["owner.command"] }],
+  };
+  return config;
+}
+
 export function createDemoWorld(): DemoWorld {
-  const t = createTestEngine({ config: demoConfig() });
+  const t = createTestEngine({ config: demoCallbackConfig() });
   t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: OWNER_ACCOUNT, phoneOnFile: "+15555550101", knowledge: {}, pin: OWNER_PIN }));
   t.records.putSubject(
     "ws_test",
@@ -39,10 +54,10 @@ export function createDemoWorld(): DemoWorld {
   const other = createEngine({
     workspaceId: "ws_test",
     knowledgeKey: TEST_KNOWLEDGE_KEY,
-    config: demoConfig(),
+    config: demoCallbackConfig(),
     clock: t.clock,
     ids: t.ids,
-    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments: t.payments, counters: t.counters, signer: generateTestSigner() },
+    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments: t.payments, counters: t.counters, dialer: t.dialer, signer: generateTestSigner() },
   });
   let n = 0;
   const world: DemoWorld = {
@@ -66,6 +81,8 @@ export interface ScriptRun {
   /** This call's payment link, once requested: runs share the fakes, so never "the latest link". */
   linkId: string;
   receipt: SignedReceipt | null;
+  /** The call the engine placed back to the number on file, in the callback script. */
+  callbackCallId?: string;
 }
 
 /** What a step did, in one line, and whether the demo's check on it held. */
@@ -230,6 +247,63 @@ const deposit: ScriptStep[] = [
 ];
 
 export const SCRIPTS: Readonly<Record<DemoFlow, readonly ScriptStep[]>> = { "owner-command": ownerCommand, deposit };
+
+/**
+ * A callback (VER-9), run by `npm run demo` after the two flows. Someone calls from a number that is
+ * not the owner's and keys the owner's PIN; the first call is ended and earns nothing. The engine
+ * calls the number on file back, the owner keys the confirmation and the PIN again, and only the
+ * callback call reaches level 2.
+ */
+export const CALLBACK_SCRIPT: readonly ScriptStep[] = [
+  {
+    label: "callback: PIN from another number",
+    async run(w, call) {
+      call.callId = (await w.engine.startCall({ flow: "owner-callback" })).callId;
+      await w.engine.beginVerification(call.callId, { subjectKey: subjectKeyFor(TEST_KNOWLEDGE_KEY, OWNER_ACCOUNT), callingNumber: "+15555550199" });
+      const pin = await w.engine.submitPin(call.callId, OWNER_PIN);
+      return { detail: pin.matched ? "matched, but caller ID can be spoofed" : "no match", ok: pin.matched };
+    },
+  },
+  {
+    label: "callback: asked, first call ended",
+    async run(w, call) {
+      await w.engine.requestCallback(call.callId);
+      const first = await w.engine.state(call.callId);
+      const position = await w.engine.flowPosition(call.callId);
+      return { detail: `first call ${first.phase}, level ${first.level}, flow ${position!.status}`, ok: first.phase === "ended" && first.level === 0 };
+    },
+  },
+  {
+    label: "callback: number on file answered",
+    async run(w, call) {
+      const dial = w.t.dialer.dialed.at(-1)!;
+      call.callbackCallId = dial.callId;
+      const outcome = await w.other.applyCallbackOutcome({ ref: dial.ref, answered: true, confirmed: true });
+      return { detail: `${dial.callId} rang the number on file, confirmation keyed, applied: ${String(outcome.applied)}`, ok: outcome.applied };
+    },
+  },
+  {
+    label: "callback: PIN again, carrier checked",
+    async run(w, call) {
+      const callbackCallId = call.callbackCallId!;
+      const pin = await w.engine.submitPin(callbackCallId, OWNER_PIN);
+      const carrier = await w.engine.checkCarrier(callbackCallId);
+      const verified = await w.engine.finishVerification(callbackCallId);
+      const first = await w.engine.state(call.callId);
+      return {
+        detail: `callback call level ${verified.level} (callback trusted: ${carrier.textCodeTrusted}), first call level ${first.level}`,
+        ok: pin.matched && verified.level === 2 && first.level === 0,
+      };
+    },
+  },
+  {
+    label: "callback: call ended",
+    async run(w, call) {
+      call.receipt = await w.engine.endCall(call.callbackCallId!);
+      return { detail: "no receipt in this flow, the ledger has both calls", ok: call.receipt === null };
+    },
+  },
+];
 
 export function isDemoFlow(name: unknown): name is DemoFlow {
   return name === "owner-command" || name === "deposit";

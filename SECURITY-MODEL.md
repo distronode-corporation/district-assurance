@@ -18,7 +18,7 @@ claim.
 | Trusted | Untrusted |
 |---|---|
 | The host's code paths that call the engine | Everything the caller says |
-| The adapters the host plugs in | Everything the model says or proposes |
+| The adapters the host plugs in (the callback dialer's report included) | Everything the model says or proposes |
 | The knowledge key and the receipt signing key | Caller ID and any number given on the call |
 | The clock and id source | Webhook bodies until their signature verifies |
 | The outside modules the host installs | Text from business endpoints, CRMs and documents |
@@ -77,13 +77,33 @@ texted code counts only when the carrier answered and reported no SIM change or 
 policy window (72 hours by default); without a carrier answer it does not count unless the policy
 says so (tested). A texted code is never a factor alone, and level 3 requires a photo ID plus
 selfie, which a stolen SIM alone does not pass. Contact and payout scopes default to level 3.
+A callback (VER-9) has the same weaknesses and the same controls: the policy refuses it alone or
+with only a texted code, the carrier rule discounts it, and level 3 still needs photo ID (tested).
+
+### Spoofed caller ID and the callback
+
+Caller ID can be spoofed, so it is never a factor. A callback rings the number on file, whatever
+number the first call came from. **Controls:** the first call is ended, never held, and never
+gains a level, a factor or a grant from the callback (tested). The callback is its own call, for
+the subject the first call matched (not a factor), and `callback` is recorded there only when the
+dialer reports that the number on file answered and the person keyed the confirmation: keys, not
+speech, so voicemail or an answering machine never passes (tested). It is possession of the line
+only, so the callback call needs a PIN or keypad match too, under the policy. A request is
+refused without a keypad or PIN match or a number on file, and a refused request returns the same
+and ends the first call the same way as a placed one, so a caller cannot tell them apart; only the
+ledger says which (tested). Left to the host: call forwarding and someone else answering the line on file, which
+the carrier rule does not see.
 
 ### Text flooding and SMS pumping
 
 Repeated calls triggering texts to a real customer, or to premium numbers. **Controls:** texts go
 only to the number on file, only after a keypad match, and at most one photo ID link per call
 (tested). Planned: rate limits per subject and per calling number, and a destination country
-allow-list, before texted codes ship (VER-2).
+allow-list, before texted codes ship (VER-2). Callbacks ring a real customer's line, so they are
+limited too: one per call, only after a keypad or PIN match, at most 3 placed per subject in 24
+hours on any call or engine, and each counted as a failure before it is dialed, under the subject
+and the first call's calling number, so failed callbacks bring the same waits and hard lock as
+wrong PINs (tested, including two requests racing for the last one).
 
 ### Replay
 
@@ -176,6 +196,10 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 - A lockout is also a way to lock someone out: anyone who knows a subject (the owner of a line)
   can spend its 10 failures. Watching `verification.locked`, the person path for a locked caller,
   and who may lift a lock (`AttemptCounters.reset`) are the host's.
+- A `CallbackDialer` that dials only the number the engine gives, honours the idempotency key,
+  plays a fixed prompt, and reports `confirmed` only for the confirmation key, never for speech or
+  a machine. Speaking the same "we will call you back" line and hanging up whatever
+  `requestCallback` decides, without waiting on it, so its timing tells the caller nothing.
 - Choosing the subject when it starts verification with a subject key (for example the owner of
   the line it was called on). That choice is not a factor: the PIN or other factors still decide.
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.

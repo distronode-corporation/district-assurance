@@ -4,7 +4,7 @@
 // Every runtime function takes the engine's runtime and works in compare-and-set steps: an attempt
 // is counted in one write before it is judged, and a link is reserved in one write before it is
 // sent, so two processes running the same call can never get two attempts or two links for one.
-import type { SubjectRecord } from "../core/adapters.ts";
+import type { AttemptCounterKey, SubjectRecord } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError, NotImplementedError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
@@ -72,6 +72,26 @@ export interface BadgeSlice {
   finished: number;
   lastLevel: AssuranceLevel;
   lastMethods: FactorKind[];
+  /** The callback this call asked for, or the one it is (callback.ts). */
+  callback: CallbackState;
+}
+
+/** A call's part in a callback (VER-9). One per call. */
+export interface CallbackState {
+  /**
+   * On the call that asks: `none`, `requested` while it is decided, then `placed` or `refused`.
+   * On the callback call: `dialing`, `dialed` once the dialer's reference is kept, then `passed` or
+   * `failed`; `void` if untrusted content entered it or its subject changed before the outcome.
+   */
+  status: "none" | "requested" | "placed" | "refused" | "dialing" | "dialed" | "passed" | "failed" | "void";
+  /** The other call: the callback call, on the call that asked; the call that asked, on the callback call. */
+  callId: string | null;
+  /** The dialer's reference, on the callback call. */
+  ref: string | null;
+  /** The counters a failed callback stays counted under, and a pass resets. */
+  keys: AttemptCounterKey[];
+  /** The hard lock this callback's failure starts, written to the ledger if it fails. */
+  lock: Lock | null;
 }
 
 export interface KeypadResult {
@@ -229,6 +249,7 @@ export class BadgeModule implements AssuranceModule {
       finished: 0,
       lastLevel: 0,
       lastMethods: [],
+      callback: { status: "none", callId: null, ref: null, keys: [], lock: null },
     };
     return initial as unknown as JsonValue;
   }
@@ -244,9 +265,9 @@ export class BadgeModule implements AssuranceModule {
   }
 
   onUntrusted(s: JsonValue): JsonValue {
-    // A photo ID link sent before the taint no longer counts. One link per call still holds.
+    // A photo ID link sent before the taint no longer counts, nor does a callback still ringing. One link per call still holds.
     const badge = s as unknown as BadgeSlice;
-    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink) } as unknown as JsonValue;
+    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink), callback: voidedCallback(badge.callback) } as unknown as JsonValue;
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
@@ -257,6 +278,11 @@ export class BadgeModule implements AssuranceModule {
 /** A link not yet delivered can no longer count: it is void. One delivered stays delivered (and stops any other). */
 function voided(link: BadgeSlice["identityLink"]): BadgeSlice["identityLink"] {
   return link === "reserved" || link === "sent" ? "void" : link;
+}
+
+/** A callback whose outcome has not arrived can no longer count: it is void. */
+function voidedCallback(callback: CallbackState): CallbackState {
+  return callback.status === "dialing" || callback.status === "dialed" ? { ...callback, status: "void" } : callback;
 }
 
 /** Refuses to apply a result judged for an earlier verification of this call. */
@@ -277,7 +303,7 @@ function pinSettingsErrors(pin: unknown): string[] {
 // ---- runtime -------------------------------------------------------------------------------
 
 /** Refuses a factor that is off, or that the current flow step does not allow. */
-function allowFactor(rt: EngineRuntime, record: CallRecord, kind: string): void {
+export function allowFactor(rt: EngineRuntime, record: CallRecord, kind: string): void {
   const settings = rt.settings<BadgeSettings>(BADGE);
   if (!settings.factors.includes(kind)) throw new EngineError("precondition_failed", `the ${kind} factor is turned off`);
   const step = stepOfType<BadgeVerifyStep>(record, "badge.verify");
@@ -320,6 +346,7 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
       // Another subject: nothing collected for the previous one can count for this one.
       s.identitySessions = [];
       s.identityLink = voided(s.identityLink);
+      s.callback = voidedCallback(s.callback);
     }
     if (draft.record.state.factors.length === 0) {
       s.knowledgeMatched = false;

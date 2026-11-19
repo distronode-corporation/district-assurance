@@ -4,6 +4,7 @@
 import type {
   AttemptCounters,
   AuditLedger,
+  CallbackDialer,
   CarrierSignals,
   IdentityProvider,
   MessageSender,
@@ -39,6 +40,8 @@ export interface EngineAdapters {
   pinVerifier?: PinVerifier;
   /** Failures across calls, shared by every engine of the workspace. Badge needs it when a factor the caller enters is on. */
   counters?: AttemptCounters;
+  /** Places callbacks to the number on file. Badge needs it when the `callback` factor is on. */
+  dialer?: CallbackDialer;
 }
 
 export type AdapterName = keyof EngineAdapters;

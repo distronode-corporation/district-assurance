@@ -60,7 +60,7 @@ The record lives in a `SessionStore`:
 - `compareAndSet(workspaceId, callId, expectedVersion, record)` writes only if the stored version is
   `expectedVersion`, and the new version is `expectedVersion + 1`; otherwise `{ok: false}`.
 - `bindRef(workspaceId, ref, callId)` points a provider reference (`identity:<session id>`,
-  `payment:<link id>`) at a call, first binding wins; `resolveRef` reads it.
+  `payment:<link id>`, `callback:<dialer ref>`) at a call, first binding wins; `resolveRef` reads it.
 
 Every engine step reads the record, applies one pure change, and writes it with compare-and-set.
 On `{ok: false}` the step starts again from a fresh read, up to 5 attempts (`MAX_WRITE_ATTEMPTS`),
@@ -89,7 +89,7 @@ module the config has on.
 
 | Built-in | Steps | Needs | Adapters |
 |---|---|---|---|
-| `badge` | `badge.verify` | | `records`; `counters` with any factor the caller enters (`keypad_knowledge`, `pin`, plug-ins); `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `pinVerifier` with `pin` in verifier mode |
+| `badge` | `badge.verify` | | `records`; `counters` with any factor the caller enters (`keypad_knowledge`, `pin`, plug-ins); `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `dialer`, `counters` with `callback`; `pinVerifier` with `pin` in verifier mode |
 | `dossier` | `dossier.collect` | `intake.file` | `records` |
 | `paylink` | `paylink.request` | `payment.request` | `payments`, `messages` |
 | `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
@@ -97,7 +97,8 @@ module the config has on.
 ## 4. Factors, levels and scopes
 
 Built-in factor kinds: `keypad_knowledge`, `pin`, `carrier_identity_match`, `photo_id`,
-`text_code` (planned, VER-2) and `spoken_knowledge` (planned, VER-3). A **factor plug-in** adds a
+`callback` (section 6), `text_code` (planned, VER-2) and `spoken_knowledge` (planned, VER-3). A
+**factor plug-in** adds a
 kind the caller enters and code judges: `{kind, summary, maxAttemptsPerCall (1 to 5), adapters,
 judge}`, installed with `badgeModule({ factors })`. Its kind is snake_case, 3 to 32 characters, not
 a built-in kind, and never `caller_id`, `calling_number`, `ani` or `cli`. Its judge gets the
@@ -110,10 +111,11 @@ of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:
 - a level outside 1 to 3, a level defined twice, an empty set, an unknown or repeated kind;
 - at level 2 or 3, a set with fewer than two different kinds;
 - at level 3, a set without `photo_id`;
-- a set that is `text_code` alone;
+- a set made only of possession of the number on file (`text_code`, `callback`): `[text_code]`,
+  `[callback]` and `[text_code, callback]` are refused at every level;
 - a set at level 2 or 3 made only of things the caller knows: it needs `text_code`,
-  `carrier_identity_match` or `photo_id` (keypad knowledge, the PIN, spoken answers and plug-ins
-  are knowledge);
+  `carrier_identity_match`, `photo_id` or `callback` (keypad knowledge, the PIN, spoken answers and
+  plug-ins are knowledge);
 - a scope with no class, or below its class's floor. A scope's class is the strictest of what its
   name implies (`payment.`, `payout.`, `refund.`, `transfer.`, `charge.`: money; `contact.`:
   contact; `entry.`, `access.`: access; `status.`, `intake.`: none), what an installed module's
@@ -126,8 +128,11 @@ It checks every part in one pass: a malformed part is reported and the others ar
 The default policy: level 1 is keypad knowledge; level 2 is keypad plus a trusted texted code, or
 keypad plus carrier identity match, or a PIN plus a texted code; level 3 is keypad plus photo ID.
 Scopes: `status.read` 1, `intake.file` 1, `payment.request` 2, `contact.update` 3, `payout.update`
-3. Two keypad attempts per call. A texted code counts only when the carrier answered and reported
-no SIM change or port in the last 72 hours.
+3. Two keypad attempts per call. A texted code or a callback counts only when the carrier answered
+and reported no SIM change or port in the last 72 hours (`simSwapWindowHours`; without an answer,
+only when `trustTextCodeWithoutCarrierCheck` is true); otherwise `verification.finished` lists it
+in `discounted`. The default policy has no `callback` set: a host that turns the factor on adds
+one, for example `[pin, callback]` at level 2.
 
 Badge's settings turn factors on (`factors`, at least one), set the grant lifetime
 (`grantTtlSeconds`, default 900, at most 3600), the lockouts across calls (`lockout`, section 6)
@@ -139,9 +144,9 @@ when the step lists them), and an expiry. `authorize(callId, scope)` is true onl
 policy lists, on a call that has not ended, whose minimum is 0 or whose grant includes it, has not
 expired, and has a level at or above the scope's minimum under the config in force now.
 
-Links go only to the subject's number on file, and only after a `keypad_knowledge` or `pin`
-factor passed since verification last started from nothing. A plug-in's pass does not unlock
-texts.
+Links and callbacks go only to the subject's number on file, and only after a `keypad_knowledge`
+or `pin` factor passed since verification last started from nothing. A plug-in's pass does not
+unlock texts or callbacks.
 
 ## 5. Keypad knowledge
 
@@ -214,6 +219,40 @@ when there is a number.
   one that starts a hard lock returns `locked: true` and writes `verification.locked`. A judge or
   verifier that throws leaves its failure counted.
 - Lifting a lock early is the host's: `AttemptCounters.reset` with the keys (`counterKeys`).
+
+**Callback (VER-9).** A built-in factor, not a plug-in: the business calls back the number on
+file, which proves possession of that line whatever number the first call came from. Badge needs
+the `dialer` (`CallbackDialer`) and `counters` adapters when it is on.
+
+- `requestCallback(callId)`, while verifying, on a call where `callback` is on and, in a flow, on
+  the flow's first step, a `badge.verify` step that lists `callback`; otherwise it is refused
+  (`precondition_failed`, `invalid_transition`). One per call: a second request, or a request on a
+  callback call, is refused (`precondition_failed`).
+- The request is decided in one write that reserves it (`requested`), then refused when no
+  `keypad_knowledge` or `pin` factor passed since verification last started from nothing, when the
+  subject's `phoneOnFile` is not E.164 (no number on file), when a `callback` counter is locked
+  (section 6 rules, under the subject key and the first call's calling number), or when the
+  subject already had `MAX_CALLBACKS_PER_DAY` (3) callbacks placed in the last 24 hours (counted
+  in `AttemptCounters` under the key `callback.placed`, recorded before the dial, so of two
+  requests racing for the last one only one is placed). Otherwise it is placed, and a failure is
+  recorded on the `callback` counters before the line is dialed; a pass resets them.
+- Either way the call that asked is ended (`endCall`, a running flow abandoned) and
+  `requestCallback` returns nothing: a refused request looks and sounds the same as a placed one.
+  The first call never gains a level, a factor or a grant from the callback. Asked again, it gives
+  the same answer, and a placed callback whose call or dial failed is resumed with the same ids and
+  idempotency key.
+- A placed callback creates the callback call (an id from the id source, the first call's locale
+  and revision, and its flow's steps from the first step) and, in the same write, starts
+  verification on it for the subject the first call matched, with no factors; choosing the subject
+  is not a factor. The dialer then rings the number on file (`dial({callId, to, locale,
+  idempotencyKey})`), its reference is kept on the callback call and bound (`callback:<ref>`).
+- `applyCallbackOutcome({ref, answered, confirmed})` records `callback` on the callback call:
+  passed only when the number on file answered and the person keyed the confirmation. Keys, not
+  speech: voicemail or an answering machine is `answered` without `confirmed`, and fails. An
+  unknown reference, a second outcome, an outcome after the callback call left verification or
+  ended, and one for a callback voided by untrusted content or a change of subject are ignored.
+- Its level and grant belong to the callback call alone: the caller there keys the PIN (or keypad
+  knowledge) again, and the policy decides as for any call.
 
 ## 7. FlowConfig
 
@@ -301,10 +340,12 @@ answer on file, a phone number, a link or card data.
 | `flow.step_completed` / `flow.failed` | `flow`, `step` (index), `type` |
 | `flow.completed` | `flow`, `steps` |
 | `flow.abandoned` | `flow`, `step` |
-| `verification.started` | `subject`: `account` or `host` |
+| `verification.started` | `subject`: `account`, `host` or `callback` (with `requestedOn`, the call that asked) |
 | `verification.factor` | `kind`, `passed` (and `status` for photo ID) |
 | `verification.carrier_checked` | `checked`, `textCodeTrusted`, `identityMatch` |
 | `verification.locked` | `kind`, `scope` (`subject` or `number`), `hard`, `until`: never the subject key, the number or its hash |
+| `verification.callback_started` | `callbackCallId`, on the call that asked, when a callback is placed |
+| `verification.callback_finished` | `outcome`: `refused` on the call that asked; `passed`, `no_answer` or `no_confirmation` on the callback call, with `requestedOn`. Never the number |
 | `identity.link_sent` | none |
 | `verification.finished` | `level`, `methods`, `discounted` |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt` |

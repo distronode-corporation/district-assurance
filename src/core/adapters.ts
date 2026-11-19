@@ -22,6 +22,27 @@ export interface CarrierSignals {
   check(input: { phoneNumber: string }): Promise<CarrierSignalReport>;
 }
 
+/**
+ * Places a callback (VER-9): the host's telephony dials the number on file as a new outbound call
+ * and, when it is answered, plays a fixed prompt asking the person to key a confirmation. Keys only:
+ * speech never confirms, so voicemail or an answering machine never passes. The host reports the
+ * result with `Engine.applyCallbackOutcome({ ref, answered, confirmed })`. A retried dial with the
+ * same idempotency key must not ring the line twice.
+ */
+export interface CallbackDialer {
+  dial(input: {
+    /** The callback call the engine created; the host runs the rest of the callback on it. */
+    callId: string;
+    /** E.164. Always the number on file, resolved by the engine. */
+    to: string;
+    locale: "en" | "fr";
+    idempotencyKey: string;
+  }): Promise<{
+    /** The dialer's reference for the outbound call; its outcome names it. */
+    ref: string;
+  }>;
+}
+
 export type MessagePurpose = "identity_link" | "payment_link" | "one_time_code" | "reference";
 
 /** Texts sent by code. The destination is always the number on file, resolved by the engine. */
@@ -49,7 +70,11 @@ export interface PaymentLinks {
 export interface SubjectRecord {
   /** HMAC of the account number under the workspace's knowledge key. */
   subjectKey: string;
-  /** E.164. Where texted links and codes go. Never the calling number unless they are the same. */
+  /**
+   * E.164. Where texted links and codes go, and the line a callback dials. Never the calling number
+   * unless they are the same. A value that is not E.164 (an empty string) means no number on file,
+   * and a callback is refused.
+   */
   phoneOnFile: string;
   /** Field name to the HMAC of its value (`knowledgeDigest`). */
   knowledge: Record<string, string>;

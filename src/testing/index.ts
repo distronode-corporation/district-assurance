@@ -5,6 +5,7 @@ import { MemorySessionStore } from "../core/session-store.ts";
 import { createEngine, type Engine, type EngineOptions } from "../engine.ts";
 import { MemoryAuditLedger } from "../prove/ledger.ts";
 import {
+  FakeCallbackDialer,
   FakeCarrierSignals,
   FakeIdentityProvider,
   FakeMessageSender,
@@ -35,6 +36,7 @@ export interface TestEngine {
   sessions: SessionStore;
   pinVerifier: FakePinVerifier;
   counters: AttemptCounters;
+  dialer: FakeCallbackDialer;
 }
 
 export type TestEngineOptions = Partial<Omit<EngineOptions, "adapters">> & {
@@ -59,6 +61,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     sessions: new MemorySessionStore() as SessionStore,
     pinVerifier: new FakePinVerifier(),
     counters: new MemoryAttemptCounters() as AttemptCounters,
+    dialer: new FakeCallbackDialer(),
   };
   const { adapters: overrides = {}, ...rest } = options;
   const adapters = {
@@ -71,6 +74,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     sessions: parts.sessions,
     pinVerifier: parts.pinVerifier,
     counters: parts.counters,
+    dialer: parts.dialer,
     signer: generateTestSigner(),
     ...overrides,
   } as EngineAdapters;
