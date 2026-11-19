@@ -314,9 +314,9 @@ the model has a path to it; the host keeps it off every tool the model can call 
 It refunds only a paid platform payment, never more in total than was paid, one refund in flight
 per payment, each with its own idempotency key, saved with the refund's intent before the provider
 is asked and made of the payment and the refund's sequence number; a refund whose answer was lost
-resumes with the same key, so the provider refunds once, and a host that names the sequence number
-gets a committed refund's saved result back when it lost the engine's answer, never a second
-refund (tested). A refund is refused while a dispute is open or
+resumes with the same key, so the provider refunds once; the sequence number is required, so a
+host that lost the engine's answer and asks again gets the committed refund's saved result back,
+never a second refund (tested). A refund is refused while a dispute is open or
 after it was lost (tested). Dispute events come only through the signed payments webhook, are found
 by the payment intent bound when the payment was paid, and a connected account's is ignored and
 written down (tested). Refunds and disputes are ledger entries with amounts and statuses, never

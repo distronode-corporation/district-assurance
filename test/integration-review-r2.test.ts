@@ -396,6 +396,17 @@ describe("L1 review round 2: refunds and disputes", () => {
     for (const sequence of [0, 1.5, "1"]) await assert.rejects(refund({ sequence }), rejects("invalid_input", /sequence/), String(sequence));
   });
 
+  it("refuses a refund with no sequence, or an invalid one, before any write (sequence is required)", async () => {
+    const { t, callId } = await paidCall();
+    const before = (await t.sessions.get("ws_test", callId))!.version;
+    for (const sequence of [undefined, null, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "1", 2 ** 53]) {
+      const input = { callId, paymentId: "pay_1", reason: "requested_by_customer", ...(sequence === undefined ? {} : { sequence }) };
+      await assert.rejects(t.engine.refundPayment(input as never), rejects("invalid_input", /sequence must be an integer of 1 or more/), String(sequence));
+    }
+    assert.equal((await t.sessions.get("ws_test", callId))!.version, before, "no write");
+    assert.equal(t.payments.refunds.length, 0, "the provider was never asked");
+  });
+
   it("resumes a numbered refund whose provider answer was lost with the same key, and refunds once", async () => {
     const { t, callId } = await paidCall();
     const keys: string[] = [];
@@ -424,7 +435,7 @@ describe("L1 review round 2: refunds and disputes", () => {
     assert.deepEqual(await t.engine.applyDisputeOutcome(dispute({ occurredAt: at(30) })), { applied: false }, "nothing changed, no entry");
     assert.deepEqual(await t.engine.applyDisputeOutcome(dispute({ status: "warning_needs_response", occurredAt: at(20) })), { applied: false }, "older than t30");
     assert.equal((await t.ledger.list()).filter((e) => e.event === "payment.disputed").length, 1);
-    assert.equal((await t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "requested_by_customer" })).status, "succeeded");
+    assert.equal((await t.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", reason: "requested_by_customer" })).status, "succeeded");
   });
 
   it("acknowledges a connected account's dispute for a payment intent no call holds, never asking for it again (round 2, second pass)", async () => {

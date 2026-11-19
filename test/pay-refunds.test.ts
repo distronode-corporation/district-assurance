@@ -46,7 +46,7 @@ describe("refunds: a late platform payment", () => {
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid", paymentIntentId: "pi_late" }), { applied: true, callId, status: "paid" });
     assert.deepEqual((await t.ledger.list()).filter((e) => e.event === "payment.settled").at(-1)!.detail, { paymentId, status: "paid", late: true });
     assert.deepEqual(await t.engine.applyDisputeOutcome(dispute({ paymentIntentId: "pi_late" })), { applied: true, callId, status: "needs_response" });
-    await assert.rejects(t.engine.refundPayment({ callId, paymentId, reason: "requested_by_customer" }), rejects("precondition_failed", /disputed/));
+    await assert.rejects(t.engine.refundPayment({ sequence: 1, callId, paymentId, reason: "requested_by_customer" }), rejects("precondition_failed", /disputed/));
   });
 });
 
@@ -61,7 +61,7 @@ describe("refunds: platform payments", () => {
       keys.push(input.idempotencyKey);
       return refund(input);
     };
-    assert.deepEqual(await t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "requested_by_customer" }), {
+    assert.deepEqual(await t.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", reason: "requested_by_customer" }), {
       refundId: "ref_1",
       status: "succeeded",
       amountMinor: 15000,
@@ -73,13 +73,19 @@ describe("refunds: platform payments", () => {
     assert.deepEqual(await entries(t, "payment.refunded"), [detail]);
     assert.deepEqual(told.filter((e) => e.name === "payment.refunded").map((e) => e.detail), [detail], "the host's listener tells the business");
     assert.equal((await t.engine.state(callId)).phase, "open", "a refund changes nothing in the session");
-    await assert.rejects(t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "duplicate" }), rejects("precondition_failed", /refunded in full/));
+    await assert.rejects(t.engine.refundPayment({ sequence: 2, callId, paymentId: "pay_1", reason: "duplicate" }), rejects("precondition_failed", /refunded in full/));
   });
 
   it("refunds in parts, never more in total than was paid", async () => {
     const t = setup();
     const callId = await paidCall(t);
-    const refund = (amountMinor?: number) => t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "requested_by_customer", ...(amountMinor === undefined ? {} : { amountMinor }) });
+    // The refund's number goes up only with a refund made: a refused request writes nothing.
+    let sequence = 1;
+    const refund = async (amountMinor?: number) => {
+      const made = await t.engine.refundPayment({ sequence, callId, paymentId: "pay_1", reason: "requested_by_customer", ...(amountMinor === undefined ? {} : { amountMinor }) });
+      sequence += 1;
+      return made;
+    };
     assert.equal((await refund(5000)).refundedMinor, 5000);
     assert.equal((await refund(4000)).refundedMinor, 9000);
     await assert.rejects(refund(6001), rejects("invalid_input", /more than was paid/));
@@ -97,7 +103,7 @@ describe("refunds: platform payments", () => {
     await confirmAmount(t.engine, callId, request);
     await t.engine.requestPayment(callId, request);
     await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" });
-    await t.engine.refundPayment({ callId, paymentId: "pay_1", amountMinor: 100, reason: "duplicate" });
+    await t.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", amountMinor: 100, reason: "duplicate" });
     assert.deepEqual(t.payments.refunds, [{ linkId: "cs_fake_1", mode: "platform", amountMinor: 100, currency: "cad", reason: "duplicate", refundId: "re_fake_1" }]);
   });
 
@@ -105,9 +111,9 @@ describe("refunds: platform payments", () => {
     const t = setup();
     const callId = await paidCall(t);
     t.payments.refundStatus = "failed";
-    assert.deepEqual(await t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "duplicate" }), { refundId: "ref_1", status: "failed", amountMinor: 15000, refundedMinor: 0 });
+    assert.deepEqual(await t.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", reason: "duplicate" }), { refundId: "ref_1", status: "failed", amountMinor: 15000, refundedMinor: 0 });
     t.payments.refundStatus = "pending";
-    assert.deepEqual(await t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "duplicate" }), { refundId: "ref_2", status: "pending", amountMinor: 15000, refundedMinor: 15000 });
+    assert.deepEqual(await t.engine.refundPayment({ sequence: 2, callId, paymentId: "pay_1", reason: "duplicate" }), { refundId: "ref_2", status: "pending", amountMinor: 15000, refundedMinor: 15000 });
     assert.deepEqual((await entries(t, "payment.refunded")).map((d) => d.status), ["failed", "pending"]);
   });
 
@@ -121,16 +127,16 @@ describe("refunds: platform payments", () => {
       await refund(input);
       throw new Error("the answer was lost");
     };
-    await assert.rejects(t.engine.refundPayment({ callId, paymentId: "pay_1", amountMinor: 5000, reason: "requested_by_customer" }), /the answer was lost/);
+    await assert.rejects(t.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", amountMinor: 5000, reason: "requested_by_customer" }), /the answer was lost/);
     await assert.rejects(
-      t.engine.refundPayment({ callId, paymentId: "pay_1", amountMinor: 7000, reason: "requested_by_customer" }),
-      rejects("invalid_input", /still being sent/),
+      t.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", amountMinor: 7000, reason: "requested_by_customer" }),
+      rejects("invalid_input", /another amount/),
     );
     t.payments.refund = (input) => {
       keys.push(input.idempotencyKey);
       return refund(input);
     };
-    assert.deepEqual(await t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "requested_by_customer" }), { refundId: "ref_1", status: "succeeded", amountMinor: 5000, refundedMinor: 5000 });
+    assert.deepEqual(await t.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", reason: "requested_by_customer" }), { refundId: "ref_1", status: "succeeded", amountMinor: 5000, refundedMinor: 5000 });
     assert.equal(keys.length, 2);
     assert.equal(keys[0], keys[1], "the same idempotency key");
     assert.equal(t.payments.refunds.length, 1, "the provider refunded once");
@@ -143,12 +149,12 @@ describe("refunds: platform payments", () => {
     let inner: Promise<unknown> | null = null;
     u.payments.refund = async (input) => {
       if (inner === null) {
-        inner = u.engine.refundPayment({ callId: c2, paymentId: "pay_1", reason: "requested_by_customer" });
+        inner = u.engine.refundPayment({ sequence: 1, callId: c2, paymentId: "pay_1", reason: "requested_by_customer" });
         await inner;
       }
       return uRefund(input);
     };
-    assert.deepEqual(await u.engine.refundPayment({ callId: c2, paymentId: "pay_1", reason: "requested_by_customer" }), { refundId: "ref_1", status: "succeeded", amountMinor: 15000, refundedMinor: 15000 });
+    assert.deepEqual(await u.engine.refundPayment({ sequence: 1, callId: c2, paymentId: "pay_1", reason: "requested_by_customer" }), { refundId: "ref_1", status: "succeeded", amountMinor: 15000, refundedMinor: 15000 });
     assert.equal(u.payments.refunds.length, 1);
     assert.equal((await entries(u, "payment.refunded")).length, 1);
   });
@@ -159,7 +165,7 @@ describe("refunds: platform payments", () => {
     const receipt = await t.engine.endCall(callId);
     assert.equal(receipt!.body.payments[0]!.status, "paid");
     t.clock.advance(3 * 24 * 3600_000);
-    assert.equal((await t.engine.refundPayment({ callId, paymentId: "pay_1", amountMinor: 1000, reason: "requested_by_customer" })).status, "succeeded");
+    assert.equal((await t.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", amountMinor: 1000, reason: "requested_by_customer" })).status, "succeeded");
     assert.equal((await t.engine.applyDisputeOutcome(dispute({ disputeId: "dp_9", status: "warning_needs_response" }))).applied, true, "a dispute after the end too");
     assert.deepEqual(await t.engine.receipt(callId), receipt);
     assert.equal((await t.engine.state(callId)).phase, "ended");
@@ -170,7 +176,7 @@ describe("refunds: platform payments", () => {
     const callId = await verifiedCall(t);
     await confirmAmount(t.engine, callId, request);
     await t.engine.requestPayment(callId, request);
-    const base = { callId, paymentId: "pay_1", reason: "requested_by_customer" as const };
+    const base = { callId, paymentId: "pay_1", reason: "requested_by_customer" as const, sequence: 1 };
     await assert.rejects(t.engine.refundPayment(base), rejects("precondition_failed", /only a paid payment/));
     await assert.rejects(t.engine.refundPayment({ ...base, paymentId: "pay_x" }), rejects("invalid_input", /no such payment/));
     await assert.rejects(t.engine.refundPayment({ ...base, reason: "goodwill" as never }), rejects("invalid_input", /reason must be one of/));
@@ -191,7 +197,7 @@ describe("refunds: platform payments", () => {
       adapters: { sessions: t.sessions, ledger: t.ledger, payments: connectOnly },
       config: testConfig((c) => (c.modules.paylink = { settings: { mode: "connect", connectedAccountId: ACCT } })),
     });
-    await assert.rejects(other.engine.refundPayment({ callId, paymentId: "pay_1", reason: "duplicate" }), rejects("precondition_failed", /cannot refund/));
+    await assert.rejects(other.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", reason: "duplicate" }), rejects("precondition_failed", /cannot refund/));
   });
 });
 
@@ -217,7 +223,12 @@ describe("refunds: disputes", () => {
   it("refuses a refund while a dispute is open or after it was lost, and allows one after it was won", async () => {
     const t = setup();
     const callId = await paidCall(t);
-    const refund = () => t.engine.refundPayment({ callId, paymentId: "pay_1", amountMinor: 1000, reason: "requested_by_customer" });
+    let sequence = 1;
+    const refund = async () => {
+      const made = await t.engine.refundPayment({ sequence, callId, paymentId: "pay_1", amountMinor: 1000, reason: "requested_by_customer" });
+      sequence += 1;
+      return made;
+    };
     await t.engine.applyDisputeOutcome(dispute({ status: "warning_needs_response" }));
     await assert.rejects(refund(), rejects("precondition_failed", /disputed/));
     await t.engine.applyDisputeOutcome(dispute({ status: "warning_closed" }));
@@ -231,7 +242,7 @@ describe("refunds: disputes", () => {
     const u = setup();
     const c2 = await paidCall(u);
     await u.engine.applyDisputeOutcome(dispute({ status: "lost" }));
-    await assert.rejects(u.engine.refundPayment({ callId: c2, paymentId: "pay_1", reason: "duplicate" }), rejects("precondition_failed", /after it was lost/));
+    await assert.rejects(u.engine.refundPayment({ sequence: 1, callId: c2, paymentId: "pay_1", reason: "duplicate" }), rejects("precondition_failed", /after it was lost/));
   });
 
   it("keeps a payment intent named by a later paid outcome, and resumes a lost refund though a dispute opened since", async () => {
@@ -249,12 +260,12 @@ describe("refunds: disputes", () => {
       await refund(input);
       throw new Error("the answer was lost");
     };
-    await assert.rejects(t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "requested_by_customer" }), /answer was lost/);
+    await assert.rejects(t.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", reason: "requested_by_customer" }), /answer was lost/);
     assert.equal((await t.engine.applyDisputeOutcome(dispute())).applied, true, "the later payment intent was kept");
     t.payments.refund = refund;
-    assert.deepEqual(await t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "requested_by_customer" }), { refundId: "ref_1", status: "succeeded", amountMinor: 15000, refundedMinor: 15000 });
+    assert.deepEqual(await t.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", reason: "requested_by_customer" }), { refundId: "ref_1", status: "succeeded", amountMinor: 15000, refundedMinor: 15000 });
     assert.equal(t.payments.refunds.length, 1, "the provider made it once");
-    await assert.rejects(t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "duplicate" }), rejects("precondition_failed"));
+    await assert.rejects(t.engine.refundPayment({ sequence: 2, callId, paymentId: "pay_1", reason: "duplicate" }), rejects("precondition_failed"));
   });
 
   it("ignores a dispute it cannot place, and one from a connected account", async () => {
@@ -303,7 +314,7 @@ describe("refunds: disputes", () => {
       { applied: true, callId: connectCall, status: "paid" },
     );
     assert.deepEqual(await connect.engine.applyDisputeOutcome(dispute({ account: ACCT })), { applied: false }, "never bound, and a connected account's event is not retried");
-    await assert.rejects(connect.engine.refundPayment({ callId: connectCall, paymentId: "pay_1", reason: "duplicate" }), rejects("precondition_failed", /business's/));
+    await assert.rejects(connect.engine.refundPayment({ sequence: 1, callId: connectCall, paymentId: "pay_1", reason: "duplicate" }), rejects("precondition_failed", /business's/));
     assert.equal(connect.payments.refunds.length, 0);
   });
 });
@@ -322,7 +333,7 @@ describe("refunds: config", () => {
     await confirmAmount(t.engine, callId, request);
     await t.engine.requestPayment(callId, request);
     assert.equal((await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid", paymentIntentId: "pi_1" })).applied, true, "the payment is taken");
-    await assert.rejects(t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "requested_by_customer" }), rejects("precondition_failed", /cannot refund/));
+    await assert.rejects(t.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", reason: "requested_by_customer" }), rejects("precondition_failed", /cannot refund/));
     assert.equal((await t.engine.applyDisputeOutcome(dispute())).applied, true, "its disputes are still recorded");
   });
 });
