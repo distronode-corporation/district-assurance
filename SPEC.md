@@ -402,12 +402,15 @@ headers `Authorization: Bearer <restricted key>`, `Idempotency-Key`, and a pinne
 1 to 255 printable ASCII characters without spaces, and otherwise `sha256:` and the hex SHA-256 of
 it, so the same engine key always sends the same header and a resumed `startPhotoId` gets the same
 session and link. It answers the session's `id` (which must start with `vs_`) as the session id
-and its `url` (which must be `https`) as the link. The constructor takes only a restricted key
+and its `url` (which must be `https://` and then 1 to 2,040 printable ASCII characters, no space,
+line break or control character, since it goes into a text message as is) as the link. The constructor takes only a restricted key
 (`rk_test_` or `rk_live_`); `npm run serve` takes only `rk_test_`. A refusal or a malformed answer
 throws `StripeApiError` with the HTTP status and Stripe's error type and code when they are plain
 identifiers, never Stripe's message or any value from the request or the answer. Requests time
-out after 10 seconds and never follow a redirect. An `apiBase` option must be `https:`, or `http:`
-on a loopback host (`127.0.0.1`, `localhost`, `[::1]`) only; anything else throws in the constructor.
+out after 10 seconds (`timeoutMs`, a whole number from 1 to 60,000) and never follow a redirect.
+An `apiBase` option must be `https:`, or `http:` on a loopback host (`127.0.0.1`, `localhost`,
+`[::1]`) only, with no credentials in it; anything else, and a bad `timeoutMs`, throws in the
+constructor, never quoting the value.
 
 ## 16. Texts
 

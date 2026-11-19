@@ -80,6 +80,8 @@ function checkApiBase(apiBase: string): void {
   } catch {
     throw new Error("StripeIdentityProvider needs an https: apiBase (http: only on a loopback host)");
   }
+  // No credentials in it: fetch refuses such a URL and quotes it, password and all, in its error.
+  if (url.username !== "" || url.password !== "") throw new Error("StripeIdentityProvider's apiBase carries no credentials");
   if (url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname))) return;
   throw new Error("StripeIdentityProvider needs an https: apiBase (http: only on a loopback host)");
 }
@@ -129,6 +131,10 @@ export class StripeIdentityProvider implements IdentityProvider {
   constructor(apiKey: string, options: StripeAdapterOptions = {}) {
     if (!RESTRICTED_KEY.test(apiKey)) throw new Error("StripeIdentityProvider needs a restricted key (rk_test_... or rk_live_...)");
     if (options.apiBase !== undefined) checkApiBase(options.apiBase);
+    // AbortSignal.timeout throws on anything else, at every request instead of here.
+    if (options.timeoutMs !== undefined && !(Number.isInteger(options.timeoutMs) && options.timeoutMs >= 1 && options.timeoutMs <= 60_000)) {
+      throw new Error("StripeIdentityProvider timeoutMs must be a whole number of milliseconds from 1 to 60000");
+    }
     this.#apiKey = apiKey;
     this.#options = options;
   }
@@ -145,7 +151,9 @@ export class StripeIdentityProvider implements IdentityProvider {
     form.set("metadata[call_id]", input.callId);
     const session = await stripePost(this.#apiKey, this.#options, "/v1/identity/verification_sessions", form, input.idempotencyKey);
     const { id, url } = session;
-    if (typeof id !== "string" || !/^vs_[A-Za-z0-9]{1,255}$/.test(id) || typeof url !== "string" || !url.startsWith("https://")) {
+    // The URL goes into a text message as is: an https link of printable ASCII and nothing else (no
+    // space, line break or control character that would put more than a link into the SMS).
+    if (typeof id !== "string" || !/^vs_[A-Za-z0-9]{1,255}$/.test(id) || typeof url !== "string" || !/^https:\/\/[\x21-\x7e]{1,2040}$/.test(url)) {
       throw new StripeApiError(200, "malformed_response", null);
     }
     return { sessionId: id, url };
