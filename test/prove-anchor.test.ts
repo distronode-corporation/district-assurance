@@ -498,3 +498,32 @@ describe("recorded fixtures", () => {
     assert.deepEqual(checkRekorEntry(recordedEntry.toString("base64"), payload, recordedLog), { ok: true, logIndex: 9 });
   });
 });
+
+describe("verifyAnchor reads what it is handed once", () => {
+  it("verifies the trust and the proof that passed its checks, and never throws on a changing object", async () => {
+    const { engine, ledger, tsa } = await anchoredEngine();
+    const entry = await engine.anchorLedger();
+    const entries = await ledger.list();
+    let trustReads = 0;
+    const trust = {
+      get tsa() {
+        trustReads += 1;
+        return trustReads === 1 ? tsa.chain : "not a chain";
+      },
+    };
+    assert.equal(verifyAnchor(entry, entries, trust as never).ok, true, "the chain checked is the chain used");
+    const proof = entry.detail.proof as Record<string, unknown>;
+    let tokenReads = 0;
+    const changing = {
+      kind: proof.kind,
+      get token() {
+        tokenReads += 1;
+        return tokenReads === 1 ? proof.token : 42;
+      },
+    };
+    const swapped = { ...entry, detail: { seq: entry.detail.seq, proof: changing } };
+    assert.equal(verifyAnchor(swapped as never, entries, { tsa: tsa.chain }).ok, true, "the token checked is the token verified");
+    const odd = { ...entry, detail: { seq: entry.detail.seq, proof: { kind: "rfc3161", token: () => "x" } } };
+    assert.deepEqual(verifyAnchor(odd as never, entries, { tsa: tsa.chain }), { ok: false, reason: "malformed" });
+  });
+});

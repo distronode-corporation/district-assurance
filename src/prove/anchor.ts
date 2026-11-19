@@ -400,20 +400,30 @@ export type AnchorCheck =
  */
 export function verifyAnchor(anchored: AuditEntry, entries: readonly AuditEntry[], trust: AnchorTrust): AnchorCheck {
   // What a verifier is handed is not trusted: anything that is not an entry, a list or a trust is malformed.
+  // Each is read once: the proof and the trust that pass these checks are the ones verified.
   const detail: unknown = isObject(anchored) ? anchored.detail : undefined;
-  if (!isObject(detail) || !Array.isArray(entries) || !isObject(trust) || !Array.isArray(trust.tsa)) return { ok: false, reason: "malformed" };
-  const { seq, proof } = detail;
+  const tsa: unknown = isObject(trust) ? trust.tsa : undefined;
+  const rekor = isObject(trust) ? trust.rekor : undefined;
+  if (!isObject(detail) || !Array.isArray(entries) || !Array.isArray(tsa)) return { ok: false, reason: "malformed" };
+  const { seq, proof: given } = detail;
+  // A plain copy of the proof: a getter in it answers once, here, and anything not plain data is malformed.
+  let proof: unknown;
+  try {
+    proof = structuredClone(given);
+  } catch {
+    return { ok: false, reason: "malformed" };
+  }
   if (anchored.event !== "ledger.anchored" || !Number.isSafeInteger(seq) || (seq as number) < 1 || !isAnchorProof(proof)) {
     return { ok: false, reason: "malformed" };
   }
   const chain = verifyChain(entries.slice(0, seq as number));
   if (!chain.ok || chain.head.seq !== seq) return { ok: false, reason: "chain" };
   const payload = anchorPayload(chain.head);
-  const stamp = checkTimestamp(proof.token, payload, trust.tsa);
+  const stamp = checkTimestamp(proof.token, payload, tsa as readonly X509Certificate[]);
   if (!stamp.ok) return stamp;
   let logIndex: number | null = null;
   if (proof.kind === "rekor") {
-    const logged: LogCheck = trust.rekor === undefined ? { ok: false, reason: "log" } : checkRekorEntry(proof.entry, payload, trust.rekor);
+    const logged: LogCheck = rekor === undefined ? { ok: false, reason: "log" } : checkRekorEntry(proof.entry, payload, rekor);
     if (!logged.ok) return logged;
     logIndex = logged.logIndex;
   }
