@@ -17,6 +17,7 @@ import {
   findSocialInsuranceNumbers,
   healthCardRedactor,
   luhnValid,
+  numberLanguagesFor,
   REDACTION_MARKERS,
   SEPARATOR_CLASS,
   sinRedactor,
@@ -26,17 +27,17 @@ import {
 } from "../src/core/redaction.ts";
 
 /** A shared corpus file: each case lists the exact substrings a redactor must find, in order. */
-interface Corpus {
+interface DetectorCorpus {
   description: string;
   kind: RedactionKind;
   cases: { lang: "en" | "fr" | "es"; text: string; found: string[] }[];
 }
 
-const corpus = (name: string): Corpus =>
-  JSON.parse(readFileSync(join(import.meta.dirname, "corpus", name), "utf8")) as Corpus;
+const detectorCorpus = (name: string): DetectorCorpus =>
+  JSON.parse(readFileSync(join(import.meta.dirname, "corpus", name), "utf8")) as DetectorCorpus;
 
 function runCorpus(name: string, find: (text: string) => RedactionFinding[], redactor: Redactor): void {
-  const { kind, cases } = corpus(name);
+  const { kind, cases } = detectorCorpus(name);
   it(`passes every case in corpus/${name}`, () => {
     assert.ok(cases.some((c) => c.lang === "en") && cases.some((c) => c.lang === "fr"));
     for (const c of cases) {
@@ -368,6 +369,17 @@ describe("findBankNumbers", () => {
     for (const word of [...words, ...words.map((w) => w.toUpperCase()), ...words.map((w) => w.normalize("NFD"))]) {
       const text = `${word} 1234567`;
       assert.deepEqual(findBankNumbers(text).map((f) => text.slice(f.start, f.end)), ["1234567"], word);
+    }
+  });
+
+  it("reads each language's bank words only where #89 reads its number words (numberLanguagesFor)", () => {
+    const spanish = "cuenta 1234567";
+    const english = "account 1234567";
+    for (const [locale, found] of [["en", []], ["fr", []], ["es", ["1234567"]], [undefined, ["1234567"]]] as const) {
+      const languages = numberLanguagesFor(locale);
+      assert.deepEqual(findBankNumbers(spanish, languages).map((f) => spanish.slice(f.start, f.end)), found, String(locale));
+      assert.deepEqual(findBankNumbers(english, languages).map((f) => english.slice(f.start, f.end)), ["1234567"], String(locale));
+      assert.equal(bankAccountRedactor.redact(spanish, locale === undefined ? {} : { locale }).findings.length, found.length, String(locale));
     }
   });
 

@@ -606,16 +606,24 @@ export function findHealthCardNumbers(text: string, languages: readonly NumberLa
 export const healthCardRedactor: Redactor = redactorFor(findHealthCardNumbers);
 
 /**
- * Words that mark a number after them as a bank number, in English, French and Spanish, plurals
- * too, and Spanish with or without its accents. All three are read on every call: this file has no
- * call language, and a Spanish word on an English call can only remove more, the safe side.
+ * Words that mark a number after them as a bank number, by language: plurals too, and Spanish with
+ * or without its accents. A call reads the languages #89 reads number words in (numberLanguagesFor):
+ * English and French on every call, Spanish on a Spanish call and on text with no call.
  */
-const BANK_WORDS = new Set([
-  "bank", "banks", "branch", "branches", "transit", "transits", "institution", "institutions", "account", "accounts",
-  "banque", "banques", "bancaire", "bancaires", "succursale", "succursales", "compte", "comptes", "folio", "folios",
-  "banco", "bancos", "bancaria", "bancarias", "bancario", "bancarios", "sucursal", "sucursales", "cuenta", "cuentas",
-  "tránsito", "tránsitos", "transito", "transitos", "institución", "instituciones", "institucion",
-]);
+export const BANK_WORDS: Record<Locale, readonly string[]> = {
+  en: ["bank", "banks", "branch", "branches", "transit", "transits", "institution", "institutions", "account", "accounts"],
+  fr: ["banque", "banques", "bancaire", "bancaires", "succursale", "succursales", "transit", "transits", "institution", "institutions", "compte", "comptes", "folio", "folios"],
+  es: [
+    "banco", "bancos", "bancaria", "bancarias", "bancario", "bancarios", "sucursal", "sucursales", "cuenta", "cuentas",
+    "tránsito", "tránsitos", "transito", "transitos", "institución", "instituciones", "institucion",
+  ],
+};
+
+const BANK_WORD_SETS: Record<Locale, ReadonlySet<string>> = {
+  en: new Set(BANK_WORDS.en),
+  fr: new Set(BANK_WORDS.fr),
+  es: new Set(BANK_WORDS.es),
+};
 
 /** A word, with any combining accents kept in it, so a decomposed "tránsito" is still one word. */
 const WORD = /[\p{L}\p{M}]+/gu;
@@ -627,6 +635,7 @@ const WORD = /[\p{L}\p{M}]+/gu;
  */
 export function findBankNumbers(text: string, languages: readonly NumberLanguage[] = NUMBER_LANGUAGES): RedactionFinding[] {
   const findings: RedactionFinding[] = [];
+  const isBankWord = (w: string) => languages.some((l) => BANK_WORD_SETS[l].has(w.normalize("NFC").toLowerCase()));
   let from = 0;
   for (const run of digitRuns(text, languages)) {
     const first = run[0]!;
@@ -634,7 +643,7 @@ export function findBankNumbers(text: string, languages: readonly NumberLanguage
     const words = text.slice(from, first.start).match(WORD) ?? [];
     from = last.end;
     const digits = run.reduce((n, t) => n + t.digits.length, 0);
-    if (digits >= 3 && words.slice(-4).some((w) => BANK_WORDS.has(w.normalize("NFC").toLowerCase()))) {
+    if (digits >= 3 && words.slice(-4).some(isBankWord)) {
       findings.push({ kind: "bank_account", start: first.start, end: last.end });
     }
   }
