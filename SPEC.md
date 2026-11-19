@@ -273,7 +273,7 @@ answer on file, a phone number, a link or card data.
 | `intake.started` | `formId`, `version` |
 | `intake.confirmed` | `recordId`, `formId`, `digest`, `confirmedBy` |
 | `intake.abandoned` | none |
-| `delivery.attempted` | `recordId`, `destination` (the destination's id), `attempt`, `outcome` (`delivered`, `retry`, `failed`), `status` (HTTP, or null for no answer); actor `system` |
+| `delivery.attempted` | `recordId`, `destination` (the destination's id), `attempt`, `outcome` (`delivered`, `retry`, `failed`), `status` (HTTP, an integer from 100 to 599, or null for no answer, which is also what an adapter answer without such a status counts as); actor `system` |
 | `redaction.applied` | `kinds` (counts per kind) |
 | `payment.link_sent` | `paymentId`, `linkId`, `amountMinor`, `currency`, `amountSource` |
 | `payment.settled` | `paymentId`, `status` |

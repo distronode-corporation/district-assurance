@@ -100,6 +100,12 @@ export function timerSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** The HTTP status in an adapter's answer, read once, or null when it carries none. */
+function httpStatus(answer: unknown): number | null {
+  const status: unknown = isObject(answer) ? answer.status : undefined;
+  return typeof status === "number" && isIntegerIn(status, 100, 599) ? status : null;
+}
+
 function destinationProblem(d: DeliveryDestination): string | null {
   // From the host's configuration, read with no type guarantee: each field is checked for its type first.
   if (!isObject(d)) return "the destination must be an object with destinationId, url and secret";
@@ -148,8 +154,10 @@ export async function deliverRecord(input: DeliverRecordInput): Promise<Delivery
       "idempotency-key": idempotencyKey,
       [DELIVERY_SIGNATURE_HEADER]: signDelivery(body, destination.secret, timestamp),
     };
+    // The adapter's answer goes into the ledger: only an HTTP status (an integer from 100 to 599)
+    // counts; anything else (a string, NaN, no object) is no answer, retried like a lost one.
     const status = await delivery.post({ url: destination.url, headers, body }).then(
-      (answer) => answer.status,
+      (answer: unknown) => httpStatus(answer),
       () => null,
     );
     const delivered = status !== null && status >= 200 && status < 300;
