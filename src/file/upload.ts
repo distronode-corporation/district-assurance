@@ -84,7 +84,9 @@ export async function createUploadLink(input: UploadLinkInput, context: UploadCo
   const allowedTypes = [...(input.allowedTypes ?? DOCUMENT_TYPES)];
   const maxBytes = input.maxBytes ?? DEFAULT_UPLOAD_MAX_BYTES;
   const problems: string[] = [];
-  if (callId === "" || recordId === "") problems.push("callId and recordId are required");
+  // Strings only: a record store keyed by text finds a record for ["rec_1"] too, and the link would
+  // then be bound to an array.
+  if (typeof callId !== "string" || typeof recordId !== "string" || callId === "" || recordId === "") problems.push("callId and recordId are required");
   if (locale !== "en" && locale !== "fr") problems.push("locale is en or fr");
   if (allowedTypes.length === 0 || !allowedTypes.every(isDocumentType) || new Set(allowedTypes).size !== allowedTypes.length) {
     problems.push(`allowedTypes is a non-empty list of distinct types from ${DOCUMENT_TYPES.join(", ")}`);
@@ -174,7 +176,8 @@ export async function acceptUpload(
 }
 
 async function usableLink(token: string, context: UploadContext): Promise<UploadLinkRecord | null> {
-  if (!TOKEN.test(token)) return null;
+  // A string only: a regex test turns an array into its text, which would pass, and hashing it throws.
+  if (typeof token !== "string" || !TOKEN.test(token)) return null;
   const link = await context.documents.getUploadLink(context.workspaceId, sha256Hex(token));
   if (link === null) return null;
   const now = context.clock.now();

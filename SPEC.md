@@ -406,7 +406,8 @@ A caller adds a photo or a PDF to a record they confirmed through a single-use l
 clock, plus the `RecordStore` to create a link and an id generator and a `DocumentScanner` to
 accept an upload.
 
-- `createUploadLink({callId, recordId, locale?, allowedTypes?, maxBytes?})` refuses
+- `createUploadLink({callId, recordId, locale?, allowedTypes?, maxBytes?})` (`callId` and `recordId`
+  non-empty strings; a token that is not a string is a link not usable, never an error) refuses
   (`invalid_input`) an empty id, a locale other than `en` or `fr`, `allowedTypes` that is empty,
   repeats a type or names one outside `image/jpeg`, `image/png`, `application/pdf`, and a
   `maxBytes` outside 1 to 26,214,400 (25 MiB); defaults are every type and 10 MiB. It refuses
