@@ -92,7 +92,7 @@ async function captureOutput(fn: () => Promise<unknown>): Promise<string[]> {
   const saved = methods.map((m) => console[m]);
   for (const m of methods) console[m] = (...args: unknown[]) => void written.push(args.map(String).join(" "));
   try {
-    await fn().catch(() => undefined);
+    await fn();
   } finally {
     methods.forEach((m, i) => (console[m] = saved[i]!));
   }
@@ -229,6 +229,9 @@ describe("StripeIdentityProvider", () => {
       "[1]",
       JSON.stringify({ ...CREATED, url: null }),
       JSON.stringify({ ...CREATED, url: "http://verify.stripe.com/start/test_x" }),
+      // https and printable, but no host to open.
+      JSON.stringify({ ...CREATED, url: "https://:443" }),
+      JSON.stringify({ ...CREATED, url: "https://[x" }),
       JSON.stringify({ ...CREATED, id: "cs_1Qwrong" }),
       JSON.stringify({ ...CREATED, id: 42 }),
     ];
@@ -256,7 +259,7 @@ describe("StripeIdentityProvider", () => {
     const written = await captureOutput(async () => {
       url = (await provider().createDocumentCheck({ callId: "call_log", idempotencyKey: "log-1" })).url;
       stripe.next = { status: 200, body: JSON.stringify({ ...CREATED, id: "bad", url }) };
-      await provider().createDocumentCheck({ callId: "call_log", idempotencyKey: "log-2" });
+      await assert.rejects(provider().createDocumentCheck({ callId: "call_log", idempotencyKey: "log-2" }), StripeApiError, "the failure path is the one exercised");
     });
     assert.match(url, /^https:/);
     assert.deepEqual(written, []);

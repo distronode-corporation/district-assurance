@@ -196,8 +196,11 @@ describe("au: loss paths", () => {
     await t.engine.submitPin(callId, DURESS);
     await tick(20);
     // Write-path sends: first alert hangs, the second write's loop skips it and sends the second.
+    assert.equal(seen.length, 2, `both alerts sent before any re-send: ${JSON.stringify(seen)}`);
+    assert.notEqual(seen[0], seen[1], "two distinct alerts");
     t.clock.advance(31_000);
     assert.equal(await off.deliverDuressAlerts(callId), 1, "the 30 s re-send got an answer");
+    assert.deepEqual(seen.slice(2), [seen[0]], "the re-send repeats the first alert's id");
   });
 
   it("owes at most one alert per PIN try the call allows, whatever the notifier does", async () => {

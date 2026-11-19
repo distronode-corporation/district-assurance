@@ -68,7 +68,7 @@ describe("refunds: platform payments", () => {
       refundedMinor: 15000,
     });
     assert.deepEqual(t.payments.refunds, [{ linkId: "cs_fake_1", paymentIntentId: "pi_1", mode: "platform", amountMinor: 15000, currency: "cad", reason: "requested_by_customer", refundId: "re_fake_1" }]);
-    assert.deepEqual(JSON.parse(keys[0]!), ["ws_test", callId, "pay_1", "refund", "ref_1"]);
+    assert.deepEqual(JSON.parse(keys[0]!), ["ws_test", callId, "pay_1", "refund", "1"]);
     const detail = { paymentId: "pay_1", refundId: "ref_1", providerRef: "re_fake_1", amountMinor: 15000, currency: "cad", reason: "requested_by_customer", status: "succeeded" };
     assert.deepEqual(await entries(t, "payment.refunded"), [detail]);
     assert.deepEqual(told.filter((e) => e.name === "payment.refunded").map((e) => e.detail), [detail], "the host's listener tells the business");

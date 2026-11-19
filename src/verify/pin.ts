@@ -14,7 +14,7 @@ import type { AttemptCounters, AuditEntry, SubjectRecord } from "../core/adapter
 import { EngineError } from "../core/errors.ts";
 import { assertFlowNotEnded, currentStep } from "../core/flow.ts";
 import { hexDigestsEqual } from "../core/hash.ts";
-import type { EngineRuntime } from "../core/runtime.ts";
+import type { CallRecord, EngineRuntime } from "../core/runtime.ts";
 import { BADGE, type BadgeSlice } from "./badge.ts";
 import { hiddenCounterKey } from "./duress-flag.ts";
 import { PIN_OUTCOMES, pinTag, type BadgeSettings, type PinOutcome, type PinSettings } from "./factors.ts";
@@ -91,6 +91,24 @@ export async function duressPinProblem(
   return (await knowledgeOnFile(hmac, subject, pin)) || samePin || isWeakPin(pin) ? "weak" : null;
 }
 
+/**
+ * What choosing a PIN needs of the call: no flow running or ended, the call open, and a grant at
+ * PIN_ENROLMENT_LEVEL or above that has not expired. With a subject key, also that verification is
+ * still for that subject.
+ */
+function assertCanEnrol(rt: EngineRuntime, record: CallRecord, subjectKey?: string): void {
+  assertFlowNotEnded(record);
+  if (currentStep(record) !== null) throw new EngineError("precondition_failed", "a PIN is chosen outside a flow, not during one");
+  if (record.state.phase !== "open") throw new EngineError("invalid_transition", `a PIN is chosen on an open call, not while ${record.state.phase}`);
+  const grant = record.state.grant;
+  if (grant === null || grant.level < PIN_ENROLMENT_LEVEL || rt.clock.now().getTime() >= Date.parse(grant.expiresAt)) {
+    throw new EngineError("scope_denied", `choosing a PIN needs a verification at level ${PIN_ENROLMENT_LEVEL} or above on this call`);
+  }
+  if (subjectKey !== undefined && (record.modules[BADGE] as unknown as BadgeSlice).subjectKey !== subjectKey) {
+    throw new EngineError("precondition_failed", "verification restarted for another subject; choose the PIN again");
+  }
+}
+
 /** Badge's PIN settings. Enrolment and reset are refused while the `pin` factor is off. */
 function pinSettings(rt: EngineRuntime): PinSettings {
   const settings = rt.settings<BadgeSettings>(BADGE);
@@ -116,14 +134,7 @@ export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: 
   const pin = typeof given.pin === "string" ? given.pin : "";
   const confirm = typeof given.confirm === "string" ? given.confirm : "";
   const reserved = await rt.update(callId, (draft) => {
-    const record = draft.record;
-    assertFlowNotEnded(record);
-    if (currentStep(record) !== null) throw new EngineError("precondition_failed", "a PIN is chosen outside a flow, not during one");
-    if (record.state.phase !== "open") throw new EngineError("invalid_transition", `a PIN is chosen on an open call, not while ${record.state.phase}`);
-    const grant = record.state.grant;
-    if (grant === null || grant.level < PIN_ENROLMENT_LEVEL || rt.clock.now().getTime() >= Date.parse(grant.expiresAt)) {
-      throw new EngineError("scope_denied", `choosing a PIN needs a verification at level ${PIN_ENROLMENT_LEVEL} or above on this call`);
-    }
+    assertCanEnrol(rt, draft.record);
     const s = draft.slice<BadgeSlice>(BADGE);
     const pending = [...(s.pinPending ?? [])];
     const used = s.pinEnrolments ?? 0;
@@ -153,17 +164,29 @@ export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: 
     enrolmentId = reserved.enrolmentId!;
     // Recorded before the store's write, so a retry can finish an enrolment whose last write failed.
     // Each try adds its own entry, so two tries at once on this call never overwrite each other's.
+    // Only while the call can still choose a PIN for this subject: it may have ended, lost its grant
+    // or restarted verification for another subject while the try was judged.
     await rt.update(callId, (draft) => {
+      assertCanEnrol(rt, draft.record, reserved.subjectKey);
       const s = draft.slice<BadgeSlice>(BADGE);
       s.pinPending = [...(s.pinPending ?? []), { subjectKey: reserved.subjectKey, digest, enrolmentId }];
     });
-    // Stored only if the subject still has no PIN: of two enrolments at once, one wins and the
-    // other is refused without replacing the winner's PIN, and takes its own entry back.
-    if (!(await records.putPinDigest(rt.workspaceId, reserved.subjectKey, digest, enrolmentId))) {
-      await rt.update(callId, (draft) => {
+    const takeBack = () =>
+      rt.update(callId, (draft) => {
         const s = draft.slice<BadgeSlice>(BADGE);
         s.pinPending = s.pinPending!.filter((p) => p.enrolmentId !== enrolmentId);
       });
+    // Checked again, as the call is now, with nothing in between this check and the store's write.
+    try {
+      assertCanEnrol(rt, await rt.read(callId), reserved.subjectKey);
+    } catch (error) {
+      await takeBack();
+      throw error;
+    }
+    // Stored only if the subject still has no PIN: of two enrolments at once, one wins and the
+    // other is refused without replacing the winner's PIN, and takes its own entry back.
+    if (!(await records.putPinDigest(rt.workspaceId, reserved.subjectKey, digest, enrolmentId))) {
+      await takeBack();
       throw new EngineError("precondition_failed", "a PIN is on file; only the business can reset it");
     }
   }

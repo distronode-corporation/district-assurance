@@ -191,7 +191,7 @@ describe("reference UI: static files", () => {
     const res = await raw(s.port, "/webhooks/stripe/payments", { host, "stripe-signature": signature, "content-type": "application/json" }, "POST", payload);
     assert.deepEqual([res.status, JSON.parse(res.body)], [403, { error: "host_not_allowed" }]);
     const local = await raw(s.port, "/webhooks/stripe/payments", { host: `127.0.0.1:${s.port}`, "stripe-signature": signature }, "POST", payload);
-    assert.deepEqual([local.status, JSON.parse(local.body)], [200, { received: true, applied: false }], "the same event on this machine's name is read");
+    assert.deepEqual([local.status, JSON.parse(local.body)], [503, { received: true, applied: false, retry: true }], "the same event on this machine's name is read (no call holds its link yet)");
   });
 
   it("answers 400 to a request target that is not a path", async () => {
@@ -609,6 +609,18 @@ describe("reference UI: the demo world's adapters and clock (review of #50)", ()
     assert.deepEqual(links, [{ paymentId: "pay_1", linkId: "cs_pay_1", url: "https://checkout.example/cs_pay_1" }]);
   });
 
+  it("wraps a frozen adapter too (L1 review round 2)", async () => {
+    const links: CreatedLink[] = [];
+    const fake = new FakePaymentLinks();
+    // An object-literal adapter, frozen: its methods are its own, non-writable and non-configurable.
+    const literal: PaymentLinks = { capabilities: fake.capabilities, createLink: (input) => fake.createLink(input), expireLink: (input) => fake.expireLink(input), refund: (input) => fake.refund(input) };
+    const frozen = Object.freeze(literal);
+    const wrapped = recordLinks(frozen, links);
+    assert.equal((await wrapped.createLink({ callId: "c", paymentId: "pay_1", amountMinor: 100, currency: "cad", description: "d", mode: "platform", paymentMethods: ["card"], expiresAt: new Date(Date.now() + 3_600_000).toISOString(), idempotencyKey: "k" })).linkId, "cs_fake_1");
+    assert.equal(links.length, 1);
+    assert.equal(typeof wrapped.refund, "function");
+  });
+
   it("leaves an optional method missing when the real adapter lacks it", () => {
     const plain: PaymentLinks = { capabilities: new FakePaymentLinks().capabilities, createLink: async () => ({ linkId: "l", url: "u" }), expireLink: async () => ({ state: "expired" }) };
     const wrapped = recordLinks(plain, []) as PaymentLinks & { cancel?: unknown; refund?: unknown };
@@ -693,13 +705,17 @@ describe("reference UI: the demo world's adapters and clock (review of #50)", ()
     const call = { callId: "", linkId: "", receipt: null, receiptToken: null };
     const steps = SCRIPTS["owner-command"];
     for (const step of steps.slice(0, 2)) assert.ok((await step.run(world, call)).ok);
+    // Watch the right PIN itself, not the whole step: it must not be keyed before the wait passes.
+    const pins: string[] = [];
+    const submit = world.engine.submitPin.bind(world.engine);
+    world.engine.submitPin = (callId, pin) => (pins.push(pin), submit(callId, pin));
     try {
-      let settled = false;
-      const right = steps[2]!.run(world, call).then((outcome) => ((settled = true), outcome));
+      const right = steps[2]!.run(world, call);
       await new Promise<void>((resolve) => setImmediate(resolve));
-      assert.equal(settled, false, "keyed the right PIN before VER-1's wait passed");
+      assert.deepEqual(pins, [], "keyed the right PIN before VER-1's wait passed");
       mock.timers.tick(FIRST_FAILURE_WAIT_MS + 100);
       assert.ok((await right).ok);
+      assert.equal(pins.length, 1, "keyed once, after the wait");
     } finally {
       mock.timers.reset();
     }

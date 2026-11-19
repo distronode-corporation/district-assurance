@@ -10,7 +10,7 @@
 // throws NotImplementedError. SPEC.md describes the flow.
 import { createPublicKey, type JsonWebKey } from "node:crypto";
 
-import type { AttemptCounterKey, AuditEntry, AuditInput, ConsentChannel, ConsentRecord, ConsentRevocation, IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
+import type { AccessController, AttemptCounterKey, AuditEntry, AuditInput, ConsentChannel, ConsentRecord, ConsentRevocation, IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
 import { canonicalJson, hasLoneSurrogate, type JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
@@ -67,6 +67,12 @@ const LIMITED_CLASSES: ReadonlyArray<ScopeClass | null> = ["money", "contact", "
 type FlowStart = { over: AttemptCounterKey["scope"] | null; counted: string[] | null; recorded: { keys: readonly AttemptCounterKey[]; at: string } | null };
 
 const UNCOUNTED: FlowStart = { over: null, counted: null, recorded: null };
+
+/**
+ * What one `#update` did to the store: nothing (`none`: no compare-and-set ran, or each one
+ * answered `ok: false`), `saved`, or `unknown` (a compare-and-set rejected, so it may have written).
+ */
+type WriteOutcome = { write: "none" | "saved" | "unknown" };
 
 const counterId = (key: AttemptCounterKey): string => `${key.scope}:${key.key}`;
 
@@ -292,7 +298,7 @@ export class Engine {
     }
     const named = new Set(this.#config.policy.levels.flatMap((rule) => rule.anyOf.flat()));
     if (this.isEnabled(badge.BADGE)) for (const kind of this.#rt.settings<BadgeSettings>(badge.BADGE).factors) named.add(kind);
-    const inUse = (this.registry.get(name)?.factorPlugins ?? []).filter((plugin) => named.has(plugin.kind));
+    const inUse = this.registry.judgesOf(name).filter((plugin) => named.has(plugin.kind));
     if (inUse.length > 0) throw new EngineError("precondition_failed", `${name} supplies the factor ${inUse[0]!.kind}, which the config uses; take it out first`);
     this.registry.remove(name);
     this.#swapBadge(this.#badge.withOutsideFactors(this.registry.factorPlugins()));
@@ -398,7 +404,14 @@ export class Engine {
     then(draft);
     this.#advance(draft);
     record.outbox = await Promise.all(events.map((event, i) => this.#outboxEntry(callId, 1, i, event)));
-    const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
+    let created: boolean;
+    try {
+      created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
+    } catch (error) {
+      // No answer, so the store may have written: read back, and a start the call does not hold is given back.
+      if (!(await this.#holdsFlow(callId, flow?.name, start))) await this.#uncount(start);
+      throw error;
+    }
     if (!created) {
       // Another start took the id first (a duplicate delivery racing this one): this start is not counted.
       await this.#uncount(start);
@@ -430,6 +443,9 @@ export class Engine {
   async markUntrusted(callId: string, source: string): Promise<void> {
     // The taint always lands: a label that is not Unicode text is repaired, never a reason to refuse.
     source = untrustedLabel(source);
+    // A grant that may still be acted on when the taint lands is written down with it, and its
+    // controller is asked to withdraw it where it can (Gate, SPEC.md section 17).
+    let tainted: gate.AccessRecord[] = [];
     await this.#update(callId, (draft) => {
       draft.apply({ type: "untrusted_content", source });
       for (const module of this.registry.list()) {
@@ -438,7 +454,9 @@ export class Engine {
         if (module.onUntrusted !== undefined && slice !== undefined) draft.record.modules[name] = module.onUntrusted(slice);
       }
       draft.emit("session.tainted", "code", { source });
+      tainted = gate.noteTaintedGrants(this.#rt, draft);
     });
+    await gate.revokeTainted(this.#rt, callId, tainted);
   }
 
   /** Keypad entry is open: the host pauses transcripts, cuts audio to the model and holds listen-in. */
@@ -525,22 +543,21 @@ export class Engine {
     const before = await this.#read(callId);
     this.#keepNumber(before, numberKey);
     const start = await this.#countFlowStart(before, name, definition);
-    // Set when the write's own check refused the flow (a concurrent start attached one first), so
-    // nothing was written: only then is the start taken back. A write that saved and then failed
-    // (the ledger down) keeps its count.
-    let refused = false;
+    // The start is taken back when nothing was written (the write's own check refused the flow, every
+    // compare-and-set found the call moved, or a read failed first), or when a write with no answer
+    // is read back without this flow. A write that saved and then failed (the ledger down) keeps it.
+    const outcome: WriteOutcome = { write: "none" };
     try {
-      await this.#update(callId, (draft) => {
-        this.#keepNumber(draft.record, numberKey);
-        try {
+      await this.#update(
+        callId,
+        (draft) => {
+          this.#keepNumber(draft.record, numberKey);
           this.#attachFlow(draft, name, definition, revision, start);
-        } catch (error) {
-          refused = true;
-          throw error;
-        }
-      });
+        },
+        outcome,
+      );
     } catch (error) {
-      if (refused) await this.#uncount(start);
+      if (outcome.write === "none" || (outcome.write === "unknown" && !(await this.#holdsFlow(callId, name, start)))) await this.#uncount(start);
       throw error;
     }
     if (start.over !== null) throw new RateLimitedError(callId);
@@ -559,6 +576,20 @@ export class Engine {
     const keys = counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice);
     const { over, at } = await this.#countStarts(keys);
     return { over, counted: keys.map(counterId), recorded: at === null ? null : { keys, at } };
+  }
+
+  /**
+   * Whether the stored call holds this start's flow, read back after a write that gave no answer.
+   * A read that fails too answers true: the start stays counted, the safe side.
+   */
+  async #holdsFlow(callId: string, name: string | undefined, start: FlowStart): Promise<boolean> {
+    try {
+      const stored = await this.#sessions.get(this.workspaceId, callId);
+      const flow = (stored?.record as unknown as CallRecord | undefined)?.flow ?? null;
+      return flow !== null && flow.name === name && JSON.stringify(flow.counted) === JSON.stringify(start.counted);
+    } catch {
+      return true;
+    }
   }
 
   /** Takes back the starts a start recorded, once the call refused it: one entry per counter, at the time it was recorded. */
@@ -589,7 +620,8 @@ export class Engine {
     return steps.some((step) => {
       const owner = this.registry.stepOwner(step.type)!;
       const level = owner.stepLevel?.(step) ?? null;
-      const scopes = level === null ? [] : (owner.stepGrants?.(step) ?? scopesForLevel(policy, level as AssuranceLevel));
+      // A copy: the list a module returns may be its own, shared or frozen.
+      const scopes = [...(level === null ? [] : (owner.stepGrants?.(step) ?? scopesForLevel(policy, level as AssuranceLevel)))];
       const need = owner.manifest.scopes.needs[step.type];
       if (need !== undefined) scopes.push(need);
       return scopes.some((scope) => LIMITED_CLASSES.includes(scopeClass(scope, policy.scopeClasses, declared)));
@@ -650,7 +682,8 @@ export class Engine {
     // the same `rate_limited` as a refused start.
     const record = await this.#read(callId);
     const flow = record.flow;
-    if (flow === null || flow.counted === null) return;
+    // A flow started before `counted` existed (undefined) was never counted: it stays as it was. [] is a new limited flow.
+    if (flow === null || flow.counted === null || flow.counted === undefined) return;
     const keys = counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice).filter((key) => !flow.counted!.includes(counterId(key)));
     if (keys.length === 0) return;
     const { over } = await this.#countStarts(keys);
@@ -802,7 +835,7 @@ export class Engine {
     const { workspaceId, factor, scope, key, memberId }: { [K in keyof UnlockInput]: unknown } = input;
     const errors: string[] = [];
     if (workspaceId !== this.workspaceId) errors.push("workspaceId is not this engine's workspace");
-    if (typeof factor !== "string" || !this.#badge.manifest.provides.factors.includes(factor)) errors.push("factor is not an installed factor kind");
+    if (typeof factor !== "string" || !this.#badge.installedFactors().includes(factor)) errors.push("factor is not an installed factor kind");
     if (scope !== "subject" && scope !== "number") errors.push("scope must be subject or number");
     // Strings only: a regex test turns an array or an object into a string, which would pass here,
     // be recorded, and then clear no counter.
@@ -896,8 +929,9 @@ export class Engine {
   /**
    * A provider's verified outcome. A payment the engine closed that is paid after all is recorded
    * paid, flagged `late`. A platform payment's `paymentIntentId` is bound to the call, for its disputes.
+   * `unbound`: no call holds the link (yet); have the event delivered again.
    */
-  applyPaymentOutcome(outcome: PaymentOutcome & { paymentIntentId?: string }): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
+  applyPaymentOutcome(outcome: PaymentOutcome & { paymentIntentId?: string }): Promise<{ applied: false; unbound?: true } | { applied: true; callId: string; status: PaymentStatus }> {
     return paylink.applyPaymentOutcome(this.#rt, outcome);
   }
 
@@ -918,8 +952,22 @@ export class Engine {
   // ---- Gate (entry) ------------------------------------------------------------------------
 
   /** Issues an access grant and sends it to its door controller, once (SPEC.md, section 17). */
-  grantAccess(callId: string, input?: { target: string; lifetimeSeconds?: number }): Promise<gate.AccessResult> {
-    return gate.grantAccess(this.#rt, callId, input);
+  grantAccess(callId: string, input?: { target: string; lifetimeSeconds?: number }, only?: { controller: AccessController }): Promise<gate.AccessResult> {
+    return gate.grantAccess(this.#rt, callId, input, only);
+  }
+
+  /**
+   * Has every access controller that owes the ledger something write it (`AccessController.flush`:
+   * a spent access code's entry whose append failed), for the whole workspace. Call it on a
+   * schedule. `failed`: the controllers that could not, to try again on the next sweep.
+   */
+  async sweepAccess(): Promise<{ failed: string[] }> {
+    const failed: string[] = [];
+    for (const [name, controller] of Object.entries(this.#adapters.access ?? {})) {
+      if (typeof controller.flush !== "function") continue;
+      await controller.flush({ workspaceId: this.workspaceId }).catch(() => failed.push(name));
+    }
+    return { failed };
   }
 
   /** A call's access grants, as the engine recorded them. Never the signed grants themselves. */
@@ -1023,6 +1071,11 @@ export class Engine {
       return structuredClone(draft.record);
     });
     await this.#deliverAlerts(callId);
+    // What an access controller still owes the ledger for this call is written now, before the
+    // receipt's head is taken; one that fails is left to the next sweep (it opens nothing).
+    for (const controller of Object.values(this.#adapters.access ?? {})) {
+      if (typeof controller.flush === "function") await controller.flush({ workspaceId: this.workspaceId, callId }).catch(() => undefined);
+    }
     // No new payment can start once the call ended, so this closes every link the call will have.
     await paylink.expireOpenPayments(this.#rt, ended);
     const record = paylink.openPayments(ended).length === 0 ? ended : await this.#read(callId);
@@ -1256,7 +1309,7 @@ export class Engine {
     return structuredClone(stored.record) as unknown as CallRecord;
   }
 
-  async #update<R>(callId: string, fn: (draft: CallDraft) => R): Promise<R> {
+  async #update<R>(callId: string, fn: (draft: CallDraft) => R, outcome: WriteOutcome = { write: "none" }): Promise<R> {
     for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
       const stored = await this.#sessions.get(this.workspaceId, callId);
       if (stored === null) throw new EngineError("unknown_call", "no such call");
@@ -1275,14 +1328,13 @@ export class Engine {
       if (events.length > 0) record.ledgerWrites = (record.ledgerWrites ?? stored.version) + 1;
       record.outbox.push(...(await Promise.all(events.map((event, i) => this.#outboxEntry(callId, record.ledgerWrites!, i, event)))));
       markOwedAlerts(record);
+      outcome.write = "unknown";
       const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
+      outcome.write = saved.ok ? "saved" : "none";
       if (saved.ok) {
-        try {
-          await this.#flush(callId, version, record);
-        } finally {
-          // Saved, so owed duress alerts go out even if the ledger is down.
-          this.#sendDuressAlertsSoon(callId, record);
-        }
+        // Saved, so owed duress alerts go out before the ledger is tried: one down or stalled never holds them.
+        this.#sendDuressAlertsSoon(callId, record);
+        await this.#flush(callId, version, record);
         // An alert owed (a contact change notice) is sent once its debt is saved, on this write or
         // the next one on the call; a failure leaves it owed for the next write, endCall or sweepAlerts.
         if (trace.noticeDue(record)) await this.#deliverAlerts(callId).catch(() => false);
@@ -1439,7 +1491,8 @@ export class Engine {
     if (record.outbox.length === 0) return;
     for (const queued of record.outbox) {
       await this.#append({ eventId: queued.eventId, callId, actor: queued.actor, event: queued.name, at: queued.at, detail: queued.detail });
-      if (queued.counter !== undefined) await this.#notifyLock(queued.counter, queued.detail);
+      // Not awaited: a notice store that stalls holds up neither the rest of the outbox nor the call. It never rejects.
+      if (queued.counter !== undefined) void this.#notifyLock(queued.counter, queued.detail);
     }
     await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue);
   }
@@ -1469,8 +1522,8 @@ export class Engine {
 
   /**
    * Tells the host's notifier of a lock whose ledger entry was just appended: once per lock and
-   * capped per workspace (`claimNotice`). Best effort, like the listener: the notifier is not
-   * awaited, and nothing it or the bookkeeping does, thrown or rejected, stops the call or the ledger.
+   * capped per workspace (`claimNotice`, before the notifier). Best effort, like the listener: neither
+   * it nor the notifier is awaited, and nothing either does, thrown or rejected, stops the call or the ledger.
    */
   async #notifyLock(counter: AttemptCounterKey, detail: { [key: string]: JsonValue }): Promise<void> {
     const notifier = this.#adapters.notifier;
@@ -1514,11 +1567,8 @@ export class Engine {
     const stored = await this.#sessions.get(this.workspaceId, callId);
     if (stored === null) throw new EngineError("unknown_call", "no such call");
     const record = structuredClone(stored.record) as unknown as CallRecord;
-    try {
-      await this.#flush(callId, stored.version, record);
-    } finally {
-      this.#sendDuressAlertsSoon(callId, record);
-    }
+    this.#sendDuressAlertsSoon(callId, record);
+    await this.#flush(callId, stored.version, record);
   }
 
   /**
@@ -1539,23 +1589,24 @@ export class Engine {
   async sweepAlerts(): Promise<{ sent: string[]; failed: string[] }> {
     const list = this.#sessions.listCallsOwingAlerts?.bind(this.#sessions);
     if (list === undefined) throw new EngineError("precondition_failed", "the session store cannot list the calls that owe alerts (listCallsOwingAlerts)");
-    const result = { sent: [] as string[], failed: [] as string[] };
-    for (const callId of await list(this.workspaceId)) {
-      let owed: boolean;
-      try {
-        // One outbox for both kinds (#112's contact notices, #124's duress alerts): the index lists a
-        // call while it owes either (decision 8).
-        await this.#deliverAlerts(callId);
-        await this.#sendDuressAlerts(callId);
-        const now = await this.#read(callId);
-        owed = badge.owedDuressAlerts(now).length > 0 || trace.noticeDue(now);
-      } catch {
-        // A call the store cannot read now, or no longer holds, is reported, and the sweep goes on.
-        owed = true;
-      }
-      (owed ? result.failed : result.sent).push(callId);
-    }
-    return result;
+    const callIds = await list(this.workspaceId);
+    // Every call's send starts at once, so a notifier that never answers for one does not hold up the rest.
+    const owed = await Promise.all(
+      callIds.map(async (callId) => {
+        try {
+          // One outbox for both kinds (#112's contact notices, #124's duress alerts): the index lists a
+          // call while it owes either (decision 8).
+          await this.#deliverAlerts(callId);
+          await this.#sendDuressAlerts(callId);
+          const now = await this.#read(callId);
+          return badge.owedDuressAlerts(now).length > 0 || trace.noticeDue(now);
+        } catch {
+          // A call the store cannot read now, or no longer holds, is reported, and the sweep goes on.
+          return true;
+        }
+      }),
+    );
+    return { sent: callIds.filter((_, i) => !owed[i]), failed: callIds.filter((_, i) => owed[i]) };
   }
 
   /** Off the caller's response path: after the reply, so neither the notifier's time nor its failure reaches the caller. */

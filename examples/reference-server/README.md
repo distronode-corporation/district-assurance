@@ -79,8 +79,7 @@ How the page is kept small and safe:
 | `src/ui.ts` | `npm run ui`: the server with the demo UI |
 | `public/` | the page: `index.html`, `style.css`, `app.js`, and `receipt-check.js` (no DOM, tested in Node) |
 | `src/e2e.ts` | `npm run demo:e2e`: the UI, the door relay and a real Stripe Checkout in test mode; `owner-command` and `visit` |
-| `src/stripe-adapters.ts` | `StripeCheckoutLinks`, a minimal PAY-1 Checkout adapter (test-mode keys only, platform mode, built-in fetch); Stripe Identity planned (VER-5) |
-| `src/stripe-adapters.ts` | the Stripe Identity adapter (VER-5) |
+| `src/stripe-adapters.ts` | `StripeCheckoutLinks`, a minimal PAY-1 Checkout adapter (test-mode keys only, platform mode, built-in fetch), and `StripeIdentityProvider`, the Stripe Identity adapter (VER-5) |
 | `src/carrier-adapters.ts` | Twilio Lookup and Telnyx Number Lookup carrier signal adapters (VER-4) |
 
 ## Trying it with your own Stripe test account
@@ -98,16 +97,15 @@ How the page is kept small and safe:
    ```
 
 3. Trigger a test event (`stripe trigger checkout.session.completed`). The server checks the
-   signature and answers `{"received": true, "applied": false}`: the signature is good, and the
-   session is unknown to this engine because `npm run serve` runs on fake adapters (for a real
-   Checkout Session in test mode, use `npm run demo:e2e`). A wrong secret
+   signature and answers `503` with `{"received": true, "applied": false, "retry": true}`: the
+   signature is good, and no call holds the session because `npm run serve` runs on fake adapters
+   (for a real Checkout Session in test mode, use `npm run demo:e2e`), so the server asks Stripe to
+   deliver it again, as it would for a link still being bound. A wrong secret
    answers `400` with the reason. Then prove the Connect side the same way, with a test connected
    account: `stripe trigger checkout.session.completed --stripe-account acct_...`, and check that
    `/webhooks/stripe/connect` (not `/payments`) answered it. Filter each listener to its own event
    types (`--events checkout.session.completed,...`), so an event never reaches an endpoint that
    does not handle it.
-   session is unknown to this engine because the Checkout adapter is not built yet (PAY-1). A wrong
-   secret answers `400` with the reason.
 
 For a photo ID check that goes to Stripe Identity and back, applied to a call, follow "Trying
 Stripe Identity with your own test account" in the repository's README.md.
@@ -123,7 +121,9 @@ table does not list, a missing value and a value the host cannot read all map to
 | Carrier value | `attestation` |
 |---|---|
 | Twilio `StirVerstat`: `TN-Validation-Passed-A`, `-B`, `-C` | `A`, `B`, `C` |
-| Twilio `StirVerstat`: `TN-Validation-Failed-A`, `-B`, `-C`, `TN-Validation-Failed` | `failed` |
+| Twilio `StirVerstat`: `TN-Validation-Failed-A`, `-B`, `-C`, `TN-Validation-Failed`, `NULL` | `failed` |
+| Twilio `StirVerstat`: `TN-Validation-Failed-A-Diverted`, `-B-Diverted`, `-C-Diverted` | `failed` |
+| Twilio `StirVerstat`: `TN-Validation-Failed-A-Passthrough`, `-B-Passthrough`, `-C-Passthrough` | `failed` |
 | Twilio `StirVerstat`: `No-TN-Validation`, or no `StirVerstat` | `none` |
 | Telnyx SIP `verstat=TN-Validation-Passed` | `A` |
 | Telnyx SIP `verstat=TN-Validation-Passed-B` | `B` |
@@ -173,7 +173,8 @@ How the answers are read:
   `swapped_period` is the window Twilio looked at, not the age of a change, so it is never read as
   one when the change fell inside it. Anything else is no answer.
 - **Identity match:** `match` when `summary_score` is at least `identityMinScore` (1 to 100, 80
-  by default; anything else throws when the adapter is built), else `no_match`. The identity
+  by default; anything else throws when the adapter is built), else `no_match`; a
+  `summary_score` outside 0 to 100 is no answer. The identity
   comes from the host's `identityFor(phoneNumber)`; without it only SIM Swap is asked. Twilio
   takes the identity in the query string.
 - **Porting:** `N` is none known; `Y` gives the hours from the last moment the port date ends
@@ -183,7 +184,7 @@ How the answers are read:
 
 Every failure answers `checked: false` with nothing known, and never throws into the call: a
 number that is not E.164, an answer for a country outside the allow-list, a timeout (`timeoutMs`,
-3000 by default, over the whole exchange), a network or HTTP error, a field error (a feature the
+3000 by default, over the whole exchange, the host's `identityFor` included), a network or HTTP error, a field error (a feature the
 account is not approved for, or a country it does not cover), or an answer that cannot be read. A
 Twilio report is `checked` only when every field asked for answered. The optional `onUnavailable`
 listener hears why (`vendor`, `reason`, the HTTP `status` and the vendor's error `code`), never

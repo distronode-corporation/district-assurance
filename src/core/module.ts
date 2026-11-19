@@ -206,7 +206,12 @@ const SELF_JUDGING_MODULE = "badge";
  * clashes are checked with the manifest.
  */
 export function checkFactorPlugins(module: AssuranceModule, given: readonly FactorPlugin[] | undefined = module.factorPlugins): string[] {
-  const { name, provides } = module.manifest;
+  return judgeListErrors(module.manifest, given);
+}
+
+/** The same check on a list already read: `undefined` is a module that gave none, never a cue to read it again. */
+function judgeListErrors(manifest: ModuleManifest, given: readonly FactorPlugin[] | undefined): string[] {
+  const { name, provides } = manifest;
   if (given === undefined && name === SELF_JUDGING_MODULE) return [];
   const plugins = given ?? [];
   const errors: string[] = [];
@@ -290,7 +295,10 @@ export class ModuleRegistry {
    */
   replace(module: AssuranceModule): void {
     const name = module.manifest.name;
-    if (!this.#modules.has(name)) throw new EngineError("invalid_input", `no module named ${name} is installed`);
+    const current = this.#modules.get(name);
+    if (current === undefined) throw new EngineError("invalid_input", `no module named ${name} is installed`);
+    // Otherwise a build without the flag would make the ledger's module removable.
+    if ((module.manifest.alwaysOn === true) !== (current.manifest.alwaysOn === true)) throw new EngineError("invalid_input", `a new build of ${name} cannot change alwaysOn`);
     const judges = this.#check(module, this.list().filter((m) => m.manifest.name !== name));
     this.#modules.set(name, module);
     this.#judges.set(name, judges);
@@ -300,7 +308,7 @@ export class ModuleRegistry {
   #check(module: AssuranceModule, others: readonly AssuranceModule[]): readonly FactorPlugin[] {
     const given = module.factorPlugins;
     const judges = given === undefined ? undefined : Array.from(given, snapshotFactorPlugin);
-    const errors = [...checkManifest(module.manifest, others), ...checkFactorPlugins(module, judges)];
+    const errors = [...checkManifest(module.manifest, others), ...judgeListErrors(module.manifest, judges)];
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     return judges ?? [];
   }
@@ -340,6 +348,11 @@ export class ModuleRegistry {
   /** Every factor kind the installed modules provide. */
   factorKinds(): string[] {
     return this.list().flatMap((m) => [...m.manifest.provides.factors]);
+  }
+
+  /** The judges a module supplied, as installed (none for a module not installed). */
+  judgesOf(name: string): readonly FactorPlugin[] {
+    return this.#judges.get(name) ?? [];
   }
 
   /** The judges outside modules supply for their factors. Badge's own plug-ins are inside Badge. */

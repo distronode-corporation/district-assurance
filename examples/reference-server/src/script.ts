@@ -11,6 +11,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import {
+  RateLimitedError,
   canonicalJson,
   createEngine,
   signStripePayload,
@@ -109,13 +110,13 @@ export function recordLinks(real: PaymentLinks, links: CreatedLink[]): PaymentLi
     links.push({ paymentId: input.paymentId, linkId: link.linkId, url: link.url });
     return link;
   };
-  return new Proxy(real, {
-    get(target, name) {
-      if (name === "createLink") return createLink;
-      const value: unknown = Reflect.get(target, name, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
+  // A plain forwarding object, not a Proxy of the adapter: a Proxy must answer a frozen adapter's
+  // own methods as they are, so swapping `createLink` on one would throw.
+  const facade: PaymentLinks = { capabilities: real.capabilities, createLink, expireLink: (input) => real.expireLink(input) };
+  const { cancel, refund } = real;
+  if (typeof cancel === "function") facade.cancel = (input) => cancel.call(real, input);
+  if (typeof refund === "function") facade.refund = (input) => refund.call(real, input);
+  return facade;
 }
 
 /**
@@ -355,7 +356,8 @@ const deposit: ScriptStep[] = [
   {
     label: "verify: keypad checks",
     async run(w, call) {
-      await w.engine.beginVerification(call.callId, { accountNumber: "12345678" });
+      const refused = await beginOrEnd(w, call, { accountNumber: "12345678" });
+      if (refused !== null) return refused;
       await w.engine.openSensitive(call.callId, "keypad");
       const keypad = await w.engine.submitKeypad(call.callId, { dob: "19850214" });
       await w.engine.closeSensitive(call.callId);
@@ -449,8 +451,25 @@ const deposit: ScriptStep[] = [
 ];
 
 /** Keypad and carrier to level 2, the scopes the flow's verify step names. */
+/**
+ * Begins verification for a flow with an hourly limit. Over it, the engine fails the flow and
+ * throws `RateLimitedError` with the call still open; the host ends that call, so the step ends it
+ * and fails. Null when verification began.
+ */
+async function beginOrEnd(w: DemoWorld, call: ScriptRun, input: { accountNumber: string }): Promise<StepOutcome | null> {
+  try {
+    await w.engine.beginVerification(call.callId, input);
+    return null;
+  } catch (error) {
+    if (!(error instanceof RateLimitedError)) throw error;
+    call.receipt = await w.engine.endCall(error.callId);
+    return { detail: `refused: rate_limited, call ${error.callId} ended`, ok: false };
+  }
+}
+
 export async function verifyToLevel2(w: DemoWorld, call: ScriptRun, scope: string): Promise<StepOutcome> {
-  await w.engine.beginVerification(call.callId, { accountNumber: "12345678" });
+  const refused = await beginOrEnd(w, call, { accountNumber: "12345678" });
+  if (refused !== null) return refused;
   await w.engine.submitKeypad(call.callId, { dob: "19850214" });
   await w.engine.checkCarrier(call.callId);
   const verified = await w.engine.finishVerification(call.callId);

@@ -98,10 +98,11 @@ export interface BadgeSlice {
   /** The texted code this call holds: null before any send, and after a taint or a change of subject. */
   textCode: TextCodeState | null;
   /**
-   * A texted code's send whose ledger entry is not written yet (VER-2): the call does not end until
-   * it is, or until `until` passes, so no send's entry follows the receipt. Absent otherwise.
+   * The texted code sends whose ledger entries are not written yet (VER-2), one hold per send: the
+   * call does not end while any is held, each until its own entry is written or its `until` passes,
+   * so no send's entry follows the receipt. Absent until the first send.
    */
-  textSend?: { sendId: string; until: string };
+  textSends?: Array<{ sendId: string; until: string }>;
   /** How many verifications finished on this call, and the last one's level and counted methods. */
   finished: number;
   lastLevel: AssuranceLevel;
@@ -117,10 +118,12 @@ export interface BadgeSlice {
   /**
    * An accepted pass whose counters are not yet cleaned up (`forgetPass`): saved with the pass, so a
    * write that fails after the pass was saved (its ledger entry) still gets the cleanup, in the same
-   * call to `submitFactor` or the call's next. Absent when nothing is owed.
+   * call to `submitFactor` or the call's next. Absent when nothing is owed. `hidden` is the duress
+   * PIN's hidden counter (VER-12), when it is on: a pass not under duress resets it, a duress entry
+   * takes off only its own failure. Absent on a pass saved before it was kept here.
    */
-  forgetOwed?: { keys: AttemptCounterKey[]; at: string };
-  /** The callback this call asked for, or the one it is (callback.ts). */
+  forgetOwed?: { keys: AttemptCounterKey[]; at: string; hidden?: { key: AttemptCounterKey; duress: boolean } };
+  /** The callback this call asked for, or the one it is (callback.ts). Absent on calls saved before: read it with `callbackOf`. */
   callback: CallbackState;
   /** Untrusted content seen on this call so far (onUntrusted counts it), so an entry judged across one is known. Absent on calls saved before. */
   taints?: number;
@@ -157,6 +160,12 @@ export interface CallbackState {
   at: string | null;
   /** On a passed callback call: its failure is still to be forgotten. A replayed outcome retries that. */
   forgetPending: boolean;
+  /** On the callback call: the number the dial goes to, kept in the write that claims the dial, and the one the carrier check asks about. */
+  to?: string;
+  /** On the callback call: how often the number on file changed between tries of the dial. Each number gets its own idempotency key. */
+  redials?: number;
+  /** On the callback call: ISO 8601, when a dial resumed a day or more after `at` was counted toward the daily limit again. */
+  countedAt?: string;
 }
 
 export interface KeypadResult {
@@ -255,10 +264,15 @@ export class BadgeModule implements AssuranceModule {
     return this.#plugins.get(kind) ?? this.#outside.get(kind);
   }
 
+  /** Every factor kind Badge judges, on or off: its own, the host's plug-ins and the outside modules' judges. */
+  installedFactors(): string[] {
+    return [...this.manifest.provides.factors, ...this.#outside.keys()];
+  }
+
   validateSettings(settings: unknown): string[] {
     if (!isObject(settings)) return ["must be an object with the factors that are on"];
     const errors = unknownKeys(settings, SETTINGS_KEYS).map((k) => `${k} is not a badge setting`);
-    const known = [...this.manifest.provides.factors, ...this.#outside.keys()];
+    const known = this.installedFactors();
     if (!isStringArray(settings.factors) || settings.factors.length === 0) {
       errors.push("factors must list at least one factor");
     } else {
@@ -358,7 +372,7 @@ export class BadgeModule implements AssuranceModule {
       lastLevel: 0,
       lastMethods: [],
       lastJudgedBy: null,
-      callback: { status: "none", callId: null, ref: null, keys: [], lock: null, subjectKey: null, subject: null, epoch: null, at: null, forgetPending: false },
+      callback: noCallback(),
       taints: 0,
     };
     return initial as unknown as JsonValue;
@@ -369,8 +383,8 @@ export class BadgeModule implements AssuranceModule {
   }
 
   blocksEnd(s: JsonValue, now: Date): string | null {
-    const send = (s as unknown as BadgeSlice).textSend;
-    return send !== undefined && now.getTime() < Date.parse(send.until) ? "a texted code is still being sent; end the call once it is sent" : null;
+    const held = ((s as unknown as BadgeSlice).textSends ?? []).some((send) => now.getTime() < Date.parse(send.until));
+    return held ? "a texted code is still being sent; end the call once it is sent" : null;
   }
 
   stepStatus(step: FlowStep, view: StepView): StepStatus {
@@ -387,7 +401,7 @@ export class BadgeModule implements AssuranceModule {
     // one) is void: it never grants a level. The next beginVerification moves it on again, so a new
     // verification counts as usual.
     const badge = s as unknown as BadgeSlice;
-    return { ...badge, epoch: badge.epoch + 1, knowledgeMatched: false, identitySessions: [], identityLink: voided(badge.identityLink), textCode: null, callback: voidedCallback(badge.callback), voidedEpoch: badge.epoch + 1, taints: (badge.taints ?? 0) + 1 } as unknown as JsonValue;
+    return { ...badge, epoch: badge.epoch + 1, knowledgeMatched: false, identitySessions: [], identityLink: voided(badge.identityLink), textCode: null, callback: voidedCallback(callbackOf(badge)), voidedEpoch: badge.epoch + 1, taints: (badge.taints ?? 0) + 1 } as unknown as JsonValue;
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
@@ -410,6 +424,16 @@ export class BadgeModule implements AssuranceModule {
 /** A link not yet delivered can no longer count: it is void. One delivered stays delivered (and stops any other). */
 function voided(link: BadgeSlice["identityLink"]): BadgeSlice["identityLink"] {
   return link === "reserved" || link === "sent" ? "void" : link;
+}
+
+/** The callback state of a call that asked for none. */
+function noCallback(): CallbackState {
+  return { status: "none", callId: null, ref: null, keys: [], lock: null, subjectKey: null, subject: null, epoch: null, at: null, forgetPending: false };
+}
+
+/** A call's callback state. A slice stored before `callback` existed has none: it reads as a call that asked for none. */
+export function callbackOf(s: BadgeSlice): CallbackState {
+  return (s as { callback?: CallbackState }).callback ?? noCallback();
 }
 
 /** A callback whose outcome has not arrived, or whose request is still being decided, can no longer count: it is void. */
@@ -548,7 +572,7 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
       // Another subject: nothing collected for the previous one can count for this one.
       s.identitySessions = [];
       s.identityLink = voided(s.identityLink);
-      s.callback = voidedCallback(s.callback);
+      s.callback = voidedCallback(callbackOf(s));
       s.textCode = null;
     }
     if (draft.record.state.factors.length === 0) {
@@ -728,7 +752,10 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
       draft.apply({ type: "factor_recorded", factor });
       if (passed && KNOWLEDGE_FACTORS.includes(kind)) s.knowledgeMatched = true;
       // The cleanup is owed with the pass, in the same write: never for a pass that was not saved.
-      if (passed) s.forgetOwed = { keys: structuredClone(keys), at: at.toISOString() };
+      if (passed) {
+        s.forgetOwed = { keys: structuredClone(keys), at: at.toISOString() };
+        if (hidden !== null) s.forgetOwed.hidden = { key: structuredClone(hidden), duress: outcome === "duress" };
+      }
       draft.emit("verification.factor", "code", { kind, passed }, kind === "pin" ? outcome : undefined);
       if (hard !== null) draft.emit("verification.locked", "code", { kind, scope: hard.scope, hard: true, until: hard.until });
       return null;
@@ -747,12 +774,6 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   // attempt's own: they may be against other accounts, so a pass on this one must not clear them.
   if (passed) await settleForget(rt, callId, at.toISOString());
   if (failed !== null) throw failed.error;
-  // The hidden counter forgets only on a pass that is not under duress; a duress entry takes off its
-  // own failure, as a pass does, and keeps the rest.
-  if (passed && hidden !== null) {
-    if (outcome === "duress") await counters.removeFailure(hidden, at.toISOString());
-    else await counters.reset(hidden);
-  }
   return { matched: passed, locked: !passed && (reserved.last || hard !== null) };
 }
 
@@ -764,7 +785,14 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
 async function settleForget(rt: EngineRuntime, callId: string, at: string): Promise<void> {
   const owed = (await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice;
   if (owed.forgetOwed?.at !== at) return;
-  await forgetPass(rt.adapter("counters"), owed.forgetOwed.keys, new Date(at));
+  const counters = rt.adapter("counters");
+  await forgetPass(counters, owed.forgetOwed.keys, new Date(at));
+  // The hidden counter forgets only on a pass that is not under duress; a duress entry takes off its
+  // own failure, as a pass does, and keeps the rest. One write either way, so the round trips never
+  // tell a duress pass from another.
+  const hidden = owed.forgetOwed.hidden;
+  if (hidden?.duress === true) await counters.removeFailure(hidden.key, at);
+  else if (hidden !== undefined) await counters.reset(hidden.key);
   await rt
     .update(callId, (draft) => {
       const s = draft.slice<BadgeSlice>(BADGE);
@@ -795,9 +823,9 @@ export async function clearDuress(rt: EngineRuntime, module: BadgeModule, subjec
   // Counted before the flag goes, so an alert of an earlier entry, delivered later, never sets it again.
   await recordClear(counters, rt.workspaceId, subjectKey, rt.clock.now());
   await counters.reset(duressFlagKey(rt.workspaceId, subjectKey));
-  // Every installed factor's hidden counter, not only those on now: a factor turned off while the
-  // subject is cleared keeps no hidden lock to hold when it is turned on again.
-  for (const kind of module.manifest.provides.factors) await counters.reset(hiddenCounterKey(rt.workspaceId, kind, subjectKey));
+  // Every installed factor's hidden counter, outside modules' included, not only those on now: a
+  // factor turned off while the subject is cleared keeps no hidden lock to hold when it is turned on again.
+  for (const kind of module.installedFactors()) await counters.reset(hiddenCounterKey(rt.workspaceId, kind, subjectKey));
 }
 
 /**
@@ -831,8 +859,11 @@ export async function checkCarrier(rt: EngineRuntime, callId: string): Promise<{
   if (!canApply(before.state, { type: "factor_recorded", factor: { kind: "carrier_identity_match", passed: false, at: rt.now() } })) {
     throw new EngineError("invalid_transition", `the carrier is checked while verifying, not while ${before.state.phase}`);
   }
-  const epoch = (before.modules[BADGE] as unknown as BadgeSlice).epoch;
-  const report = await rt.adapter("carrier").check({ phoneNumber: subject.phoneOnFile });
+  const { epoch, callback } = before.modules[BADGE] as unknown as BadgeSlice;
+  // On a callback call, the line the dial rang, which the business may have changed since the
+  // subject was copied: never another line's evidence beside possession of this one.
+  if (callback.status === "dialing") throw new EngineError("precondition_failed", "the carrier is checked on a callback call once it is dialed");
+  const report = await rt.adapter("carrier").check({ phoneNumber: callback.to ?? subject.phoneOnFile });
   const trusted = textCodeTrusted(rt.policy, report);
   await rt.update(callId, (draft) => {
     allowFactor(rt, draft.record, "carrier_identity_match");

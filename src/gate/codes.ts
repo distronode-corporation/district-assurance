@@ -81,8 +81,14 @@ export interface AccessCodeStore {
    * A spent entry is never taken: it is left in place, and null returned.
    */
   take(workspaceId: string, digest: string, grantId?: string): Promise<AccessCodeEntry | null>;
-  /** Removes the code for a grant, a spent one too. Success when it is already gone. */
-  revoke(workspaceId: string, grantId: string): Promise<void>;
+  /**
+   * Removes the code for a grant, a spent one too. Success when it is already gone. With `callId`,
+   * only that call's entry: grant ids are unique within a call, so another call's code under the
+   * same grant id stays. Every store must honor it.
+   */
+  revoke(workspaceId: string, grantId: string, callId?: string): Promise<void>;
+  /** Every spent entry of the workspace still held (its ledger entry not yet written), of one call with `callId`. */
+  spent(workspaceId: string, callId?: string): Promise<AccessCodeEntry[]>;
   /**
    * Counts one wrong guess against every live entry for this door (the grant body's `audience`
    * and `target`), and marks those that reached `limit` spent, atomically: two wrong guesses at
@@ -119,8 +125,14 @@ export class MemoryAccessCodeStore implements AccessCodeStore {
     return entry;
   }
 
-  async revoke(workspaceId: string, grantId: string): Promise<void> {
-    for (const [key, e] of this.#entries) if (e.workspaceId === workspaceId && e.grantId === grantId) this.#entries.delete(key);
+  async revoke(workspaceId: string, grantId: string, callId?: string): Promise<void> {
+    for (const [key, e] of this.#entries) {
+      if (e.workspaceId === workspaceId && e.grantId === grantId && (callId === undefined || e.callId === callId)) this.#entries.delete(key);
+    }
+  }
+
+  async spent(workspaceId: string, callId?: string): Promise<AccessCodeEntry[]> {
+    return [...this.#entries.values()].filter((e) => e.spent === true && e.workspaceId === workspaceId && (callId === undefined || e.callId === callId)).map((e) => structuredClone(e));
   }
 
   async miss(workspaceId: string, door: { audience: string; target: string }, limit: number, now: Date): Promise<AccessCodeEntry[]> {
@@ -174,7 +186,7 @@ export interface AccessCodeOptions {
 }
 
 /** What `issue` needs of an engine. */
-export type AccessCodeHost = Pick<Engine, "workspaceId" | "grantAccess" | "accessGrants" | "numberOnFile">;
+export type AccessCodeHost = Pick<Engine, "workspaceId" | "grantAccess" | "accessGrants" | "numberOnFile" | "authorize">;
 
 export type RedeemResult = { ok: true; grant: SignedAccessGrant } | { ok: false };
 
@@ -216,14 +228,21 @@ export class AccessCodes {
     this.#options = options;
     this.#clock = options.clock ?? systemClock;
     this.#newCode = options.newCode ?? (() => String(randomInt(0, 10 ** ACCESS_CODE_DIGITS)).padStart(ACCESS_CODE_DIGITS, "0"));
-    this.controller = { unlock: (input) => this.#text(input.grant) };
+    this.controller = {
+      unlock: (input) => this.#text(input.grant),
+      // A call tainted while its code may still be redeemed: the code is taken out, so it opens nothing.
+      revoke: (input) => this.#options.store.revoke(input.grant.workspaceId, input.grant.grantId, input.callId),
+      flush: (input) => this.#flushSpent(input.workspaceId, input.callId),
+    };
   }
 
   /**
    * Issues an access grant through Gate for a target whose controller is `controller`, and texts
    * its code to the number on file. Takes what `engine.grantAccess` takes and answers the same:
    * `delivered` once the code was texted, `refused` at a send limit or when the text failed (the
-   * code is then revoked), `unknown` when that is not known.
+   * code is then revoked), `unknown` when that is not known. A target whose controller is not
+   * `controller` is refused (`invalid_input`) before anything is reserved: a code request never
+   * sets off a live door.
    */
   async issue(engine: AccessCodeHost, callId: string, input?: { target: string; lifetimeSeconds?: number }): Promise<AccessResult> {
     // The host's generator is checked before anything is reserved, counted or stored: a code that
@@ -237,7 +256,7 @@ export class AccessCodes {
     const pending: Pending = { engine, callId, candidates };
     this.#pending.add(pending);
     try {
-      return await engine.grantAccess(callId, input);
+      return await engine.grantAccess(callId, input, { controller: this.controller });
     } finally {
       this.#pending.delete(pending);
     }
@@ -287,23 +306,38 @@ export class AccessCodes {
     if (failures.length > 0) throw failures[0];
   }
 
+  /**
+   * Appends every spent code's entry still owed (an append that failed before), of one call or the
+   * whole workspace, without waiting for another wrong guess: the controller's `flush`, which the
+   * engine calls when a call ends and from `sweepAccess`. The first failure is thrown once all were tried.
+   */
+  async #flushSpent(workspaceId: string, callId?: string): Promise<void> {
+    const now = this.#clock.now();
+    const failures: unknown[] = [];
+    for (const entry of await this.#options.store.spent(workspaceId, callId)) {
+      await this.#recordSpent(entry, now).catch((error: unknown) => failures.push(error));
+    }
+    if (failures.length > 0) throw failures[0];
+  }
+
   /** One spent code's ledger entry, then its removal from the store. */
   async #recordSpent(entry: AccessCodeEntry, now: Date): Promise<void> {
     await this.#options.ledger.append({
-      // The workspace first, as every engine event id has it, so reports attribute the entry (PRV-8).
-      eventId: JSON.stringify([entry.workspaceId, "access.code_spent", entry.grantId]),
+      // The workspace first, as every engine event id has it, so reports attribute the entry (PRV-8);
+      // the call too: grant ids are unique within a call, so two calls' spent codes never share one.
+      eventId: JSON.stringify([entry.workspaceId, "access.code_spent", entry.callId, entry.grantId]),
       callId: entry.callId,
       actor: "system",
       event: "access.code_spent",
       at: now.toISOString(),
       detail: { grantId: entry.grantId, reason: "wrong_guesses", guesses: this.#maxWrongGuesses },
     });
-    await this.#options.store.revoke(entry.workspaceId, entry.grantId);
+    await this.#options.store.revoke(entry.workspaceId, entry.grantId, entry.callId);
   }
 
-  /** Removes a grant's code before its end. Success when it is already gone. */
-  async revoke(workspaceId: string, grantId: string): Promise<void> {
-    await this.#options.store.revoke(workspaceId, grantId);
+  /** Removes a grant's code before its end, of one call with `callId`. Success when it is already gone. */
+  async revoke(workspaceId: string, grantId: string, callId?: string): Promise<void> {
+    await this.#options.store.revoke(workspaceId, grantId, callId);
   }
 
   /** The controller's `unlock`: Gate reserved and signed the grant; text a code for it instead. */
@@ -313,7 +347,13 @@ export class AccessCodes {
     if (pending === null) return { outcome: "refused", reason: "not_requested" };
     const to = await pending.engine.numberOnFile(pending.callId);
     const now = this.#clock.now();
-    const counted = await this.#options.limits.take({ workspaceId: body.workspaceId, key: { scope: "subject", key: to.subjectKey }, at: now.toISOString(), ...ACCESS_CODE_SEND_LIMITS });
+    let counted: boolean;
+    try {
+      counted = await this.#options.limits.take({ workspaceId: body.workspaceId, key: { scope: "subject", key: to.subjectKey }, at: now.toISOString(), ...ACCESS_CODE_SEND_LIMITS });
+    } catch {
+      // The limiter failed before anything was stored or texted: the door certainly gets nothing.
+      return { outcome: "refused", reason: "send_limit_unavailable" };
+    }
     if (!counted) {
       return { outcome: "refused", reason: "send_limit" };
     }
@@ -327,6 +367,12 @@ export class AccessCodes {
     if (code === null) return { outcome: "refused", reason: "no_free_code" };
     // The limiter and the store can be slow: a grant that expired meanwhile is never texted, and
     // the minutes in the text count from now.
+    // So can a taint land meanwhile: a call no longer authorized is never texted its code (one that
+    // lands after this check finds the code stored, and `revoke` takes it out).
+    if (!(await pending.engine.authorize(pending.callId, "entry.open"))) {
+      await this.#options.store.take(body.workspaceId, digest, body.grantId);
+      return { outcome: "refused", reason: "not_authorized" };
+    }
     const sendAt = this.#clock.now().getTime();
     if (Date.parse(body.expiresAt) <= sendAt) {
       await this.#options.store.take(body.workspaceId, digest, body.grantId);

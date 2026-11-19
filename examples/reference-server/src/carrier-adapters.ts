@@ -103,6 +103,15 @@ export function uncheckedReport(): CarrierSignalReport {
   return { ...UNCHECKED };
 }
 
+/** `work`, or a rejection when `signal` aborts first. The listener goes when either settles. */
+function beforeDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason as Error);
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(work).then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 const isObject = (value: unknown): value is Json => typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** Whole hours from `at` to now, never negative. Rounded down, so a change is never reported older than it is. */
@@ -193,9 +202,18 @@ abstract class LookupAdapter implements CarrierSignals {
     return typeof country === "string" && this.#countries.has(country.toUpperCase());
   }
 
-  /** One GET with a deadline over the whole exchange. Never throws. */
-  protected async getJson(url: string, headers: Record<string, string>, errorCode: (body: unknown) => string | undefined): Promise<Fetched> {
-    const signal = AbortSignal.timeout(this.#timeoutMs);
+  /** The deadline for one lookup, started before anything it waits on. */
+  protected deadline(): AbortSignal {
+    return AbortSignal.timeout(this.#timeoutMs);
+  }
+
+  /** One GET under the lookup's deadline, connection and body included. Never throws. */
+  protected async getJson(
+    url: string,
+    headers: Record<string, string>,
+    errorCode: (body: unknown) => string | undefined,
+    signal: AbortSignal,
+  ): Promise<Fetched> {
     let status: number;
     let text: string;
     try {
@@ -258,11 +276,14 @@ export class TwilioLookupSignals extends LookupAdapter {
 
   async check(input: { phoneNumber: string }): Promise<CarrierSignalReport> {
     if (!this.validNumber(input.phoneNumber)) return this.unavailable({ reason: "invalid_number" });
+    // The identity on file counts against the deadline: one that never answers is a timeout, and
+    // the vendor is not asked.
+    const signal = this.deadline();
     let identity: IdentityOnFile | null = null;
     try {
-      identity = this.#identityFor === undefined ? null : await this.#identityFor(input.phoneNumber);
+      identity = this.#identityFor === undefined ? null : await beforeDeadline(this.#identityFor(input.phoneNumber), signal);
     } catch {
-      return this.unavailable({ reason: "identity_on_file" });
+      return this.unavailable({ reason: signal.aborted ? "timeout" : "identity_on_file" });
     }
     const params = new URLSearchParams({ Fields: identity === null ? "sim_swap" : "sim_swap,identity_match" });
     for (const [key, param] of TWILIO_IDENTITY_PARAMS) {
@@ -270,8 +291,11 @@ export class TwilioLookupSignals extends LookupAdapter {
       if (value !== undefined && value !== "") params.set(param, value);
     }
     const url = `${this.baseUrl}/v2/PhoneNumbers/${encodeURIComponent(input.phoneNumber)}?${params.toString()}`;
-    const fetched = await this.getJson(url, { authorization: this.#authorization }, (body) =>
-      isObject(body) && (typeof body.code === "number" || typeof body.code === "string") ? String(body.code) : undefined,
+    const fetched = await this.getJson(
+      url,
+      { authorization: this.#authorization },
+      (body) => (isObject(body) && (typeof body.code === "number" || typeof body.code === "string") ? String(body.code) : undefined),
+      signal,
     );
     if (!fetched.ok) return this.unavailable(fetched.failure);
     const body = fetched.body;
@@ -317,7 +341,8 @@ export class TwilioLookupSignals extends LookupAdapter {
     if (!isObject(field)) return { reason: "bad_response" };
     if (field.error_code !== null && field.error_code !== undefined) return { reason: "feature_unavailable", code: String(field.error_code) };
     const score = field.summary_score;
-    if (typeof score !== "number" || !Number.isFinite(score)) return { reason: "bad_response" };
+    // Twilio scores 0 to 100; anything else is not an answer, never a match.
+    if (typeof score !== "number" || !(score >= 0 && score <= 100)) return { reason: "bad_response" };
     return score >= this.#minScore ? "match" : "no_match";
   }
 }
@@ -344,10 +369,15 @@ export class TelnyxNumberLookupSignals extends LookupAdapter {
   async lookup(input: { phoneNumber: string }): Promise<{ report: CarrierSignalReport; carrier: TelnyxCarrier | null }> {
     if (!this.validNumber(input.phoneNumber)) return { report: this.unavailable({ reason: "invalid_number" }), carrier: null };
     const url = `${this.baseUrl}/v2/number_lookup/${encodeURIComponent(input.phoneNumber)}?type=carrier`;
-    const fetched = await this.getJson(url, { authorization: this.#authorization }, (body) => {
-      const first = isObject(body) && Array.isArray(body.errors) ? (body.errors[0] as unknown) : undefined;
-      return isObject(first) && (typeof first.code === "string" || typeof first.code === "number") ? String(first.code) : undefined;
-    });
+    const fetched = await this.getJson(
+      url,
+      { authorization: this.#authorization },
+      (body) => {
+        const first = isObject(body) && Array.isArray(body.errors) ? (body.errors[0] as unknown) : undefined;
+        return isObject(first) && (typeof first.code === "string" || typeof first.code === "number") ? String(first.code) : undefined;
+      },
+      this.deadline(),
+    );
     if (!fetched.ok) return { report: this.unavailable(fetched.failure), carrier: null };
     const data = fetched.body.data;
     if (!isObject(data)) return { report: this.unavailable({ reason: "bad_response" }), carrier: null };

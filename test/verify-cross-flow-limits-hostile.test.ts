@@ -42,8 +42,10 @@ describe("#120 hostile: counting starts", () => {
   it("X2b ...and the same races on a flow whose starts are not limited count nothing", async () => {
     const t = setup({ config: cfg() });
     const { callId } = await t.engine.startCall({ callingNumber: CALLING });
-    await Promise.allSettled([t.engine.startFlow(callId, "status"), t.engine.startFlow(callId, "status")]);
-    await Promise.allSettled([1, 2].map(() => t.engine.startCall({ callId: "call_status", flow: "status", callingNumber: CALLING })));
+    const flows = await Promise.allSettled([t.engine.startFlow(callId, "status"), t.engine.startFlow(callId, "status")]);
+    const calls = await Promise.allSettled([1, 2].map(() => t.engine.startCall({ callId: "call_status", flow: "status", callingNumber: CALLING })));
+    assert.deepEqual(flows.map((r) => r.status).sort(), ["fulfilled", "rejected"], "one startFlow wins");
+    assert.deepEqual(calls.map((r) => r.status).sort(), ["fulfilled", "rejected"], "one startCall wins");
     assert.equal(await starts(t), 0);
   });
 
@@ -112,5 +114,11 @@ describe("#120 double reads", () => {
     assert.deepEqual(reads, { flow: 1, callingNumber: 1 });
     assert.equal((await t.engine.flowPosition(state.callId))!.flow, "pay");
     assert.equal(await starts(t), 1, "counted on the number that was checked");
+    // The call kept that number: a failure later, with no number given again, counts on it.
+    await t.engine.beginVerification(state.callId, { accountNumber: ACCOUNT });
+    assert.equal((await t.engine.submitKeypad(state.callId, { dob: "1" })).matched, false);
+    const failures = (key: string) => t.counters.get({ workspaceId: "ws_test", factor: "keypad_knowledge", scope: "number", key }, LONG_AGO);
+    assert.equal((await failures(NUMBER)).length, 1, "the failure counts on the number kept");
+    assert.equal((await failures(numberKeyFor(TEST_KNOWLEDGE_KEY, "+15555550111"))).length, 0);
   });
 });

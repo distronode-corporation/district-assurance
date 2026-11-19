@@ -69,6 +69,7 @@ describe("Caller ID attestation", () => {
       assert.equal(state.grant?.level ?? 0, cap);
       assert.equal(await t.engine.authorize(callId, "payout.update"), cap === 3);
       assert.equal(await t.engine.authorize(callId, "payment.request"), cap >= 2);
+      assert.equal(await t.engine.authorize(callId, "status.read"), cap >= 1, "level one's scope only from cap 1");
       assert.deepEqual(await finished(t), { level: cap, methods: ["keypad_knowledge", "photo_id"], discounted: [], capped: cap < 3, policyVersion: "default-1", configRevision: "default" });
       const receipt = (await t.engine.endCall(callId))!;
       assert.equal(receipt.body.attestation, attestation);

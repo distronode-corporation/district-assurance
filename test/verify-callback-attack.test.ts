@@ -10,7 +10,7 @@ import type { FlowConfig } from "../src/core/config.ts";
 import { CALLBACKS_PLACED } from "../src/verify/callback.ts";
 import { FakeCallbackDialer, MemoryAttemptCounters, TEST_KNOWLEDGE_KEY, testSubject, type TestEngine, type TestEngineOptions } from "../src/testing/index.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
-import { ACCOUNT, DOB, PIN, setup, testConfig } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, setup, testConfig } from "./helpers.ts";
 
 const CALLING = "+15555550199";
 const NEW_PHONE = "+15555550222";
@@ -155,16 +155,21 @@ describe("zz attack: races on the asking call", () => {
     assert.equal((await t.engine.state(first)).level, 0);
   });
 
-  it("two concurrent requests on one call: one ring, counted once, and both resolve", async () => {
+  it("two concurrent requests on one call: one ring, counted once, and both resolve", { timeout: 10_000 }, async () => {
     const counters = new Gated();
     const t = world({ adapters: { counters } });
     const first = await firstCall(t);
     counters.arm();
     const a = t.engine.requestCallback(first);
     await counters.reached;
+    const releaseA = counters.release;
+    // The second request reaches its own read of the limit while the first is still held there.
+    counters.arm();
     const b = t.engine.requestCallback(first);
-    counters.release();
+    await counters.reached;
+    releaseA();
     await a;
+    counters.release();
     assert.equal(await b, undefined, "the second ends the call idempotently");
     assert.equal(t.dialer.dialed.length, 1);
     const since = "2000-01-01T00:00:00.000Z";
@@ -212,7 +217,13 @@ describe("zz attack: outcomes", () => {
 
 describe("zz attack: oracles", () => {
   it("a telephony error answers as a refusal does, so the result never says whether a number is on file", async () => {
-    const dialer: CallbackDialer = { async dial() { throw new Error("telephony down"); } };
+    const attempts: string[] = [];
+    const dialer: CallbackDialer = {
+      async dial({ to }) {
+        attempts.push(to);
+        throw new Error("telephony down");
+      },
+    };
     const t = world({ adapters: { dialer } });
     t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: "87654321", phoneOnFile: "", knowledge: { dob: DOB }, pin: PIN }));
     const withNumber = await firstCall(t);
@@ -220,7 +231,9 @@ describe("zz attack: oracles", () => {
     await t.engine.beginVerification(callId, { accountNumber: "87654321", callingNumber: CALLING });
     assert.equal((await t.engine.submitPin(callId, PIN)).matched, true);
     assert.equal(await t.engine.requestCallback(withNumber), undefined, "a number on file, the dial failed");
+    assert.deepEqual(attempts, [PHONE_ON_FILE], "the account with a number reached the failing dialer once");
     assert.equal(await t.engine.requestCallback(callId), undefined, "no number on file, refused");
+    assert.deepEqual(attempts, [PHONE_ON_FILE], "the account without a number never reached the dialer");
   });
 });
 

@@ -6,7 +6,7 @@
 //
 // A failure is recorded before the entry is judged, like the per-call attempt, so a crash, a
 // failing verifier or a second process never gives a free try. A pass forgets the
-// subject's failures and its own on the number; the number's others stay until they leave the
+// subject's failures up to it and its own on the number; the number's others stay until they leave the
 // window, so a pass on the caller's own account never clears what the line ran up against others.
 // Subjects are counted by subject key whether or not they exist, so a lock never says which
 // accounts are real. The calling number is counted as a keyed hash, never as the number.
@@ -53,6 +53,7 @@ export const FLOW_START = "flow.start";
 const LOCKOUT_KEYS = ["backoffSeconds", "lockAfterFailures", "windowHours", "flowStartsPerHour"];
 const FLOW_START_SCOPES = ["subject", "number"] as const;
 const HOUR_MS = 3_600_000;
+const FOREVER = "1970-01-01T00:00:00.000Z";
 const CALLING_NUMBER = /^\+[1-9][0-9]{1,14}$/;
 
 /** What a lock says: which counter, whether only the business (or time) lifts it, and until when. */
@@ -208,15 +209,27 @@ export function recordedAt(failures: readonly string[], at: string): string[] | 
 }
 
 /**
- * After a pass whose failure was recorded at `at`: forgets the subject's failures, and takes only
- * this attempt's own failure off the number's, in one atomic step of the store. The number's other
- * failures may be against other accounts, so they stay until they leave the window, and so does
- * any failure another call records while the pass is being forgotten.
+ * After a pass whose failure was recorded at `at`: forgets the subject's failures up to the pass
+ * (`forgetUpTo`), and takes only this attempt's own failure off the number's, in one atomic step of
+ * the store. The number's other failures may be against other accounts, so they stay until they
+ * leave the window, and so does any failure another call records while the pass is being forgotten.
  */
 export async function forgetPass(counters: AttemptCounters, keys: readonly AttemptCounterKey[], at: Date): Promise<void> {
   for (const key of keys) {
-    if (key.scope === "subject") await counters.reset(key);
+    if (key.scope === "subject") await forgetUpTo(counters, key, at);
     else await counters.removeFailure(key, at.toISOString());
+  }
+}
+
+/**
+ * Forgets a counter's failures recorded at or before `at`, one by one, and keeps every later one: a
+ * failure recorded after the pass is not the pass's to forget. So a cleanup run again (its owed
+ * marker not cleared) forgets nothing recorded since. Older failures than the window go too, as a
+ * reset would, so a longer window set later never brings them back.
+ */
+export async function forgetUpTo(counters: AttemptCounters, key: AttemptCounterKey, at: Date): Promise<void> {
+  for (const failure of await counters.get(key, FOREVER)) {
+    if (Date.parse(failure) <= at.getTime()) await counters.removeFailure(key, failure);
   }
 }
 

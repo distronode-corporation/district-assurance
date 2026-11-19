@@ -183,17 +183,12 @@ describe("receipt signer contract (INT-4)", () => {
   it("converts node:crypto's DER signatures to the P1363 form node:crypto verifies", () => {
     const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
     const payload = receiptPayload(body());
-    const lengths = new Set<number>();
-    // Enough signatures to see an r or s with its sign-bit padding byte and without it.
-    for (let i = 0; i < 64; i++) {
-      const signature = sign("sha256", payload, { key: privateKey, dsaEncoding: "der" });
-      lengths.add(signature.length);
-      const p1363 = derToP1363(signature);
-      assert.equal(p1363.byteLength, 64);
-      assert.equal(verify("sha256", payload, { key: publicKey, dsaEncoding: "ieee-p1363" }, p1363), true);
-      assert.equal(verify("sha256", payload, { key: publicKey, dsaEncoding: "der" }, signature), true);
-    }
-    assert.ok(lengths.size > 1, "DER lengths vary with the integers' leading bytes");
+    // One real signature for the round trip; the fixed vectors below cover padding and short integers.
+    const signature = sign("sha256", payload, { key: privateKey, dsaEncoding: "der" });
+    const p1363 = derToP1363(signature);
+    assert.equal(p1363.byteLength, 64);
+    assert.equal(verify("sha256", payload, { key: publicKey, dsaEncoding: "ieee-p1363" }, p1363), true);
+    assert.equal(verify("sha256", payload, { key: publicKey, dsaEncoding: "der" }, signature), true);
   });
 
   it("left-pads short integers and drops the sign-bit padding byte", () => {

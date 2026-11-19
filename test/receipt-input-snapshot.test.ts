@@ -29,6 +29,8 @@ describe("receipts: checkReceipt reads the receipt once", () => {
       },
     };
     assert.deepEqual(checkReceipt(forged as never, keys), { valid: false });
+    // A second read could answer another body for the signature check: body is read at most once.
+    assert.ok(reads <= 1, `body read ${reads} times`);
   });
 
   it("checks the issue time in the bytes it verifies: a body whose issuedAt getter changes is never valid", async () => {

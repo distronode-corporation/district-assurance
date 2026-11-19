@@ -73,8 +73,8 @@ crash, a failing verifier or a second process never gives a free try; the counte
 the attempt, and an attempt that finds a lock another engine just set is refused unjudged (tested,
 two engines racing). A locked line answers `locked` even to the right PIN, on any call and either
 engine, until the window passes or a member of the business lifts the lock with `unlock`
-(INT-7, below), which clears that one counter entirely (tested). A pass resets the subject's
-counter but takes only its own failure off the number's: a line's failures against other accounts
+(INT-7, below), which clears that one counter entirely (tested). A pass takes off the subject's
+failures recorded up to it (a later one, by another call, stays) but takes only its own failure off the number's: a line's failures against other accounts
 stay through a pass on its own account, so alternating with that pass does not escape the lock per
 calling number (tested). Taking it off is one atomic step of the store
 (`removeFailure`), so a failure another call records on the same number meanwhile is never lost
@@ -637,8 +637,11 @@ while disputes are still recorded (tested). `refundPayment` is a host
 call made for the business: no grant reaches it and no flow step runs it, so neither the caller nor
 the model has a path to it; the host keeps it off every tool the model can call (left to the host).
 It refunds only a paid platform payment, never more in total than was paid, one refund in flight
-per payment, each with its own idempotency key; a refund whose answer was lost resumes with the
-same key, so the provider refunds once (tested). A refund is refused while a dispute is open or
+per payment, each with its own idempotency key, saved with the refund's intent before the provider
+is asked and made of the payment and the refund's sequence number; a refund whose answer was lost
+resumes with the same key, so the provider refunds once, and a host that names the sequence number
+gets a committed refund's saved result back when it lost the engine's answer, never a second
+refund (tested). A refund is refused while a dispute is open or
 after it was lost (tested). Dispute events come only through the signed payments webhook, are found
 by the payment intent bound when the payment was paid, and a connected account's is ignored and
 written down (tested). Refunds and disputes are ledger entries with amounts and statuses, never
@@ -764,11 +767,6 @@ the key set URL or refreshes the copy.
 
 ## Open questions
 
-- **Who carries refunds and disputes in platform mode.** The engine now refunds platform payments
-  and records their disputes (above), but who bears a lost dispute, and on what terms between the
-  platform and the business, is a legal and payment provider question that is not decided.
-  Refund status changes after the provider's first answer (`charge.refund.updated`) are not
-  followed yet.
 - **Seam in the door path.** The adapter is built (GAT-5), but putting a paid third party between
   the engine and a door in production still waits on its pricing and its handling of Canadian data
   being checked, and on one unlock proven by hand in Seam's sandbox.
@@ -814,6 +812,13 @@ receipt, guesses the values and hashes them. Treat the ledger and receipts as pe
 information for retention and access control. The export lists these as kept, with that reason.
 Records filed on a call with no matched subject cannot be found by subject; the export says so.
 Consents stay in their call records until PRV-3's `ConsentStore`; counters across calls are VER-1's.
+- **Who carries refunds and disputes in platform mode.** The engine now refunds platform payments
+  and records their disputes (above), but who bears a lost dispute, and on what terms between the
+  platform and the business, is a legal and payment provider question that is not decided.
+  Refund status changes after the provider's first answer (`charge.refund.updated`,
+  `refund.updated`) are not followed yet: a `pending` refund counts as pending until a provider
+  update arrives, and the engine has no path for one, so a pending refund that later fails still
+  counts against the payment until the business refunds the rest by hand at the provider (#117).
 
 ## Left to the host
 

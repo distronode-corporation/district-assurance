@@ -8,7 +8,7 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { DemoRuns, type RunView } from "../examples/reference-server/src/demo-runs.ts";
 import { e2eConfig, e2eScripts, shortSessionId, startE2eDemo } from "../examples/reference-server/src/e2e.ts";
 import { createDemoWorld } from "../examples/reference-server/src/script.ts";
-import { StripeApiError, StripeCheckoutLinks, StripeKeyRefused, assertTestModeSecretKey, checkoutPaymentMethodTypes } from "../examples/reference-server/src/stripe-adapters.ts";
+import { STRIPE_API_VERSION, StripeApiError, StripeCheckoutLinks, StripeKeyRefused, assertTestModeSecretKey, checkoutPaymentMethodTypes, stripeMetadataCallId } from "../examples/reference-server/src/stripe-adapters.ts";
 import { systemClock, type Clock, type PaymentLinkRequest } from "../src/index.ts";
 
 // Made up, shaped like a test key; never a real one.
@@ -282,6 +282,36 @@ describe("Stripe Checkout adapter against a local fake", () => {
     await assert.rejects(links.expireLink({ linkId: "cs_test_../../v1/x", mode: "platform", idempotencyKey: "e" }), TypeError);
   });
 
+  it("expires only on Stripe's own word: a 200 that is not this session, expired, in test mode, is read back (L1 review round 2)", async () => {
+    for (const patch of [null, { id: "cs_test_other" }, { status: "open" }, { livemode: true }]) {
+      const open = await links.createLink(request());
+      const body = patch === null ? "{}" : JSON.stringify({ id: open.linkId, status: "expired", livemode: false, ...patch });
+      const expire = (key: string) => {
+        fake.next = { status: 200, body };
+        return links.expireLink({ linkId: open.linkId, mode: "platform", idempotencyKey: key });
+      };
+      // Still open when read back: the close is not established.
+      await assert.rejects(expire("a"), /did not expire the Checkout Session \(HTTP 200\)/, body);
+      fake.sessions.get(open.linkId)!.status = "expired";
+      assert.deepEqual(await expire("b"), { state: "expired" }, body);
+      fake.sessions.get(open.linkId)!.status = "complete";
+      assert.deepEqual(await expire("c"), { state: "not_open" }, body);
+    }
+  });
+
+  it("refuses a Checkout URL that opens nothing, bounds the call id in metadata, and pins the API version (L1 review round 2)", async () => {
+    fake.next = { status: 200, body: JSON.stringify({ id: "cs_test_x", url: "https://", livemode: false }) };
+    await assert.rejects(links.createLink(request()), /did not create/);
+    const long = "c".repeat(501);
+    await links.createLink(request({ callId: long }));
+    assert.equal(fake.seen.at(-1)!.form.get("metadata[call_id]"), stripeMetadataCallId(long));
+    assert.match(fake.seen.at(-1)!.form.get("metadata[call_id]")!, /^sha256:[0-9a-f]{64}$/);
+    const open = await links.createLink(request());
+    await links.readLink(open.linkId);
+    await links.expireLink({ linkId: open.linkId, mode: "platform", idempotencyKey: "v" });
+    for (const seen of fake.seen) assert.equal(seen.headers["stripe-version"], STRIPE_API_VERSION, `${seen.method} ${seen.path}`);
+  });
+
   it("reads a session back, read only, and refuses an answer it cannot trust", async () => {
     const open = await links.createLink(request());
     fake.seen = [];
@@ -405,12 +435,26 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
     }
   });
 
+  it("never sleeps past the end of the wait, however long the poll interval (L1 review round 2)", { timeout: 10_000 }, async () => {
+    const { relay, runs } = await world({ pollMs: 600_000, waitMs: 30 });
+    try {
+      const started = Date.now();
+      const visit = await runAll(runs, "visit");
+      assert.ok(Date.now() - started < 5000, "stopped at the end of the wait, not after a poll interval");
+      assert.equal(visit.results.at(-1)!.ok, false);
+    } finally {
+      await new Promise<void>((resolve) => relay.close(() => resolve()));
+    }
+  });
+
   it("ends the run on a payment that does not come, and on a session that expired, before any door", async () => {
     const lines: string[] = [];
     const { w, relay, runs } = await world({ pollMs: 1, waitMs: 30, log: (label, detail) => lines.push(`${label} ${detail}`) });
     try {
       let visit = await runAll(runs, "visit");
-      assert.deepEqual([visit.results.at(-1)!.label, visit.results.at(-1)!.ok, visit.results.at(-1)!.detail], [WAIT, false, "not paid in time: start a new run"]);
+      assert.deepEqual([visit.results.at(-1)!.label, visit.results.at(-1)!.ok, visit.results.at(-1)!.detail], [WAIT, false, "not paid in time: the Checkout page is closed, start a new run"]);
+      // The wait ended before the link's deadline: the page is closed at Stripe all the same (L1 review round 2).
+      assert.equal(fake.sessions.get(w.links.at(-1)!.linkId)!.status, "expired");
       assert.equal(visit.done, true, "a failed check ends the run: no door step after it");
       assert.deepEqual(await runs.step(visit.runId), { ok: false, status: 409, error: "done" });
       assert.deepEqual(w.doorsOpened, []);
@@ -444,7 +488,7 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
       offset = 20 * 60_000;
       const closed = await runs.step(run.runId);
       assert.ok(closed.ok);
-      assert.deepEqual([closed.view.results.at(-1)!.ok, closed.view.results.at(-1)!.detail], [false, "not paid before the link's deadline: the Checkout page is closed, start a new run"]);
+      assert.deepEqual([closed.view.results.at(-1)!.ok, closed.view.results.at(-1)!.detail], [false, "not paid in time: the Checkout page is closed, start a new run"]);
       assert.equal(fake.sessions.get(w.links.at(-1)!.linkId)!.status, "expired");
       assert.deepEqual((await w.engine.state(closed.view.callId!)).paymentIds.length, 1);
 

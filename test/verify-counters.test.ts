@@ -283,19 +283,21 @@ describe("lockouts across calls", () => {
   it("runs a cleanup a call still owes before its next factor, after the cleanup itself failed", async () => {
     let fail = true;
     class Flaky extends MemoryAttemptCounters {
-      override async reset(key: AttemptCounterKey): Promise<void> {
+      override async removeFailure(key: AttemptCounterKey, at: string): Promise<void> {
         if (fail) {
           fail = false;
           throw new Error("counters down");
         }
-        return super.reset(key);
+        return super.removeFailure(key, at);
       }
     }
     const t = setup({ adapters: { counters: new Flaky() }, config: testConfig((c) => ((c.modules.badge!.settings as { lockout?: unknown }).lockout = { lockAfterFailures: 1 })) });
     const callId = await call(t);
     await assert.rejects(t.engine.submitKeypad(callId, { dob: DOB }), /counters down/);
     assert.equal((await t.counters.get(subjectCounter("keypad_knowledge"), LONG_AGO)).length, 1, "still counted");
-    await t.engine.submitPin(callId, "0000").catch(() => undefined);
+    // The next factor completes: judged and recorded (one failure locks here), not refused before it.
+    assert.deepEqual(await t.engine.submitPin(callId, "0000"), { matched: false, locked: true });
+    assert.deepEqual((await t.engine.state(callId)).factors.at(-1), { kind: "pin", passed: false, at: t.clock.now().toISOString() }, "the PIN was judged");
     assert.equal((await t.counters.get(subjectCounter("keypad_knowledge"), LONG_AGO)).length, 0, "cleaned up before the next factor");
   });
 

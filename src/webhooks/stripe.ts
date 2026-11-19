@@ -120,7 +120,10 @@ export function parseStripeEvent(body: string): ParsedStripeEvent | null {
     // newer one. One that is present but not Unix seconds is not a well-formed event.
     const created = event.created;
     if (created !== undefined && (!Number.isSafeInteger(created) || (created as number) < 0)) return null;
-    const at = created === undefined ? {} : { occurredAt: new Date((created as number) * 1000).toISOString() };
+    // Unix seconds past what a Date can hold (8.64e12 seconds) are not a time either: never a throw.
+    const when = created === undefined ? null : new Date((created as number) * 1000);
+    if (when !== null && !Number.isFinite(when.getTime())) return null;
+    const at = when === null ? {} : { occurredAt: when.toISOString() };
     const dispute = disputeOutcome(object);
     return dispute === null ? null : { ...base, kind: "dispute", outcome: { ...dispute, ...account, ...at } };
   }
