@@ -349,7 +349,7 @@ Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording 
 
 | Type | Accepted | Stored as |
 |---|---|---|
-| `text` | trimmed, non-empty, at most `maxLength` (500), no card number, and matching `pattern` whole if set (`no_match`) | string |
+| `text` | trimmed, non-empty, Unicode text (a lone surrogate is `not_text`), at most `maxLength` (500), no card number, and matching `pattern` whole if set (`no_match`) | string |
 | `number` | `-?\d+(\.\d+)?`, from `min` to `max` if set (`below_min`, `above_max`) | number |
 | `date` | `YYYY-MM-DD` naming a real day, from `min` to `max` if set | string |
 | `yes_no` | `yes`, `y`, `oui` / `no`, `n`, `non`, any case | boolean |
