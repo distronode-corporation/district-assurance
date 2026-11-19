@@ -159,7 +159,7 @@ describe("#124 slot 1: the ledger never shows a duress entry", () => {
     await t.engine.endCall(callId);
     const ids = (await t.ledger.list()).filter((e) => e.callId === callId).map((e) => e.eventId);
     assert.equal(new Set(ids).size, ids.length);
-    const writes = ids.map((id) => (JSON.parse(id!) as number[])[2]!);
+    const writes = ids.map((id) => (JSON.parse(id!) as number[])[3]!);
     assert.deepEqual(writes, [...writes].sort((a, b) => a - b), "ids only go up");
   });
 });

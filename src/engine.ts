@@ -613,7 +613,8 @@ export class Engine {
       const version = stored.version + 1;
       // Entries are numbered by the writes that queue them, not by the store's version, so a write
       // with none (a duress alert's acknowledgement, VER-12) leaves no gap a ledger reader could see.
-      // A record from before the count continues from its version, above every id it used.
+      // A record from before the count continues from its version (its ids are tagged, so they
+      // could not meet the older ones anyway; continuing keeps the numbers going up).
       if (events.length > 0) record.ledgerWrites = (record.ledgerWrites ?? stored.version) + 1;
       events.forEach((event, i) => record.outbox.push(this.#outboxEntry(callId, record.ledgerWrites!, i, event)));
       markOwedAlerts(record);
@@ -712,9 +713,14 @@ export class Engine {
     return { eventId, ...event };
   }
 
-  /** A ledger event id, unique across workspaces sharing one ledger: a JSON tuple, so no two ids collide. */
-  #eventId(callId: string, version: number, index: number): string {
-    return JSON.stringify([this.workspaceId, callId, version, index]);
+  /**
+   * A ledger event id, unique across workspaces sharing one ledger: a JSON tuple, so no two ids
+   * collide. `write` counts the call's writes that queued entries (VER-12); the tag "w" gives these
+   * ids a shape of their own, so they never equal the `[workspaceId, callId, version, index]` ids an
+   * older build writes on the same call during a rolling deploy (the ledger would drop one as a replay).
+   */
+  #eventId(callId: string, write: number, index: number): string {
+    return JSON.stringify([this.workspaceId, callId, "w", write, index]);
   }
 
   /** Appends any ledger entries a call still has pending (after a ledger outage), and sends any owed duress alert. Every write does this too. */

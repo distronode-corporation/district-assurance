@@ -461,10 +461,14 @@ answer on file, a phone number, a link or card data.
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
 A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
-with an `eventId` (the JSON tuple `[workspaceId, callId, n, index]` for the call's `n`th write that
-queued entries, unique on a ledger that several workspaces share; numbered by those writes, not the
-store's version, so a write that queues none, such as a duress alert's acknowledgement, leaves no
-gap in the ids), then appended in order; an entry the ledger would refuse (card data) is
+with an `eventId`, then appended in order. How an event id is formed: the JSON tuple
+`[workspaceId, callId, "w", n, index]`, for the `index`th entry (from 0) of the call's `n`th write
+that queued entries. The workspace first makes it unique on a ledger that several workspaces
+share. It is numbered by those writes, not the store's version, so a write that queues none, such
+as a duress alert's acknowledgement, leaves no gap in the ids. The tag `"w"` keeps these ids apart
+from the `[workspaceId, callId, version, index]` ids that builds before VER-12 form: an older and a
+newer build writing one call on one store (a rolling deploy) never give two entries one id, so the
+ledger never drops one as a replay; an entry the ledger would refuse (card data) is
 refused before it is saved; the outbox is cleared by
 a further write if nobody wrote since. A failed append leaves them pending, and the next write or
 `flushLedger(callId)` appends them. A ledger appends an `eventId` once (a second append returns the
