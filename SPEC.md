@@ -675,9 +675,13 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   through the optional `SessionStore.listCallsOwingAlerts(workspaceId)` (the calls whose record has
   `owesAlerts: true`; `precondition_failed` without it) and answers `{sent, failed}`: the calls that
   owe nothing now, and those that still owe one or could not be read (a listed call the store cannot
-  read, or no longer holds, is reported and the sweep goes on); one engine sends an alert once at a time, again after 30
-  seconds without an answer. So `notify` may see an `alertId` more than once. A notifier that throws,
-  rejects or never answers changes nothing on the call; it must not block.
+  read, or no longer holds, is reported and the sweep goes on); the sweep starts every listed call's
+  sends at once. Each `notify` gets at most `notifyTimeoutMs` milliseconds (an engine option, a whole number from 100 to
+  30000, default 30000; anything else is `invalid_input` when the engine is made): one not settled by then
+  counts as failed for that write, delivery or sweep (the call is in `failed`), its alert stays owed for
+  the next, and its late answer, resolve or reject, records nothing. One engine sends an alert once at a
+  time, again after 30 seconds without an answer. So `notify` may see an `alertId` more than once. A
+  notifier that throws, rejects or never answers changes nothing on the call; it must not block.
 - The ledger tag: every `verification.factor` entry with `kind: "pin"` carries `tag` =
   `HMAC-SHA256(knowledgeKey, JSON.stringify(["pin.tag", eventId, outcome]))`, outcome `fail`,
   `pass` or `duress`, whether or not the duress PIN is on. `readPinTag(entry)` on the engine (and
