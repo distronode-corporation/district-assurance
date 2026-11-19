@@ -81,8 +81,9 @@ no timestamp, so a captured Twilio request verifies again when replayed; the ref
 acknowledges carrier webhooks today, and a host that acts on one must apply each event once itself
 (left to the host). The identity is the event, not the call or message: one call sends several
 callbacks with the same call id, so a host keys on the carrier's event id where there is one, and
-on `CallSid` plus `SequenceNumber` for Twilio call-progress callbacks. An unsigned or wrongly signed carrier request is
-refused, and a carrier with no key configured refuses everything (tested).
+on `CallSid` plus `SequenceNumber` for Twilio call-progress callbacks. An unsigned or wrongly
+signed carrier request is refused, and a carrier with no key configured refuses everything
+(tested).
 Identity links are single-use by the provider. Left to the host: whether keypad tones arrive as
 out-of-band events or as in-band audio on each carrier bridge, since in-band tones can be replayed
 acoustically and can reach speech-to-text.

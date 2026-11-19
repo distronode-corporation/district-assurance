@@ -224,6 +224,10 @@ describe("verifyTelnyxSignature", () => {
     assert.deepEqual(telnyx({ now: new Date(now.getTime() + 301_000) }), { ok: false, reason: "timestamp_out_of_tolerance" });
     assert.deepEqual(telnyx({ now: new Date(now.getTime() - 301_000) }), { ok: false, reason: "timestamp_out_of_tolerance" });
     assert.equal(telnyx({ now: new Date(now.getTime() + 301_000), toleranceSeconds: 600 }).ok, true);
+    for (const toleranceSeconds of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 86_401]) {
+      assert.throws(() => telnyx({ now: new Date(now.getTime() + 10 ** 9), toleranceSeconds }), /toleranceSeconds must be an integer/, String(toleranceSeconds));
+    }
+    assert.deepEqual(telnyx({ now: new Date(Number.NaN) }), { ok: false, reason: "timestamp_out_of_tolerance" }, "an invalid clock never passes");
     assert.deepEqual(telnyx({ payload: `${TELNYX_BODY} ` }), { ok: false, reason: "no_matching_signature" });
     assert.deepEqual(telnyx({ timestampHeader: `${t + 1}` }), { ok: false, reason: "no_matching_signature" }, "the timestamp is signed");
     assert.deepEqual(telnyx({ publicKeys: [Buffer.alloc(32, 7).toString("base64")] }), { ok: false, reason: "no_matching_signature" });

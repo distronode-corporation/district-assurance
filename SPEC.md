@@ -417,7 +417,8 @@ passes if any configured auth token matches. Refusals: `no_secret`, `missing_hea
 `verifyTelnyxSignature` follows Telnyx's published scheme: the `telnyx-signature-ed25519` header is
 the base64 Ed25519 signature of `telnyx-timestamp + "|" + raw body`. Public keys are the base64 of
 32 raw bytes; any other value is skipped. The check passes if the signature verifies under any
-configured key and the timestamp is within 300 seconds of now (configurable), either way. It
+configured key and the timestamp is within 300 seconds of now (configurable, an integer from 0 to
+86,400, else `invalid_input`), either way; an invalid `now` is out of tolerance. It
 returns the same `SignatureCheck` as Stripe's: `no_secret`, `missing_header` (either header),
 `malformed_header` (a signature that is not 64 bytes of base64, a timestamp that is not 1 to 12
 digits), `timestamp_out_of_tolerance`, `no_matching_signature`.

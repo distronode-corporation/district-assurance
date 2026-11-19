@@ -12,6 +12,8 @@
 // raw bytes, as the Telnyx portal shows it.
 import { createHash, createHmac, createPublicKey, timingSafeEqual, verify } from "node:crypto";
 
+import { EngineError } from "../core/errors.ts";
+import { isIntegerIn } from "../core/shape.ts";
 import type { SignatureCheck } from "./stripe.ts";
 
 export type TwilioSignatureCheck =
@@ -103,7 +105,7 @@ export interface TelnyxSignatureInput {
   /** The account's public keys, each the base64 of 32 raw bytes; more than one while a key is rolled. */
   publicKeys: readonly string[];
   now: Date;
-  /** Default 300 seconds, as Telnyx's own libraries. Applies to the past and the future. */
+  /** Default 300 seconds, as Telnyx's own libraries; an integer from 0 to 86,400. Applies to the past and the future. */
   toleranceSeconds?: number;
 }
 
@@ -120,7 +122,10 @@ export function verifyTelnyxSignature(input: TelnyxSignatureInput): SignatureChe
   if (!ED25519_SIGNATURE.test(signature) || !/^\d{1,12}$/.test(stamp)) return { ok: false, reason: "malformed_header" };
   const timestamp = Number(stamp);
   const tolerance = input.toleranceSeconds ?? 300;
-  if (Math.abs(Math.floor(input.now.getTime() / 1000) - timestamp) > tolerance) {
+  // A NaN or infinite tolerance would compare false against every skew and turn the window off.
+  if (!isIntegerIn(tolerance, 0, 86_400)) throw new EngineError("invalid_input", "toleranceSeconds must be an integer from 0 to 86,400");
+  // Written so that an invalid `now` (a NaN skew) is refused too.
+  if (!(Math.abs(Math.floor(input.now.getTime() / 1000) - timestamp) <= tolerance)) {
     return { ok: false, reason: "timestamp_out_of_tolerance" };
   }
   const signed = Buffer.from(`${stamp}|${input.payload}`);
