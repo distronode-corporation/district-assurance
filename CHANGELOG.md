@@ -30,8 +30,8 @@ All notable changes to this project are documented here. The format follows
   and French with its signature check, and `/r/:token.json`. `GET /receipts/:callId` is removed.
 - Receipt link texted to the caller (PRV-10): `textReceiptLink(callId, url)` after a money, contact
   or access step, when the flow's `trace.receipt` step has `textLink` and the caller consented, at
-  most once, to the number on file; a contact change always texts a security notice to the number
-  on file before the change. New message purposes `receipt_link` and `contact_changed`, Trace's
+  most once, to the number on file; each contact change always texts a security notice to the
+  changed subject's number on file before the change, never twice to the same subject and number. New message purposes `receipt_link` and `contact_changed`, Trace's
   `businessName` setting, events `receipt.link_texted` and `contact.notice_sent`.
 
 ### Changed

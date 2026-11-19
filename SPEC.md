@@ -419,29 +419,34 @@ AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the a
 the currency's own decimals.
 
 **Actions.** When a flow step whose needed scope is of class money, contact or access completes
-(section 4), the call notes the class, once each. The first contact step also keeps the matched
-subject's number on file as Badge read it when verification started, before the change; Badge's
-keypad or PIN match always stands then, since such a step follows a level 2 verification.
+(section 4), the call notes the class, once each. Each contact step also keeps the matched
+subject and its number on file as Badge read it when verification started, before the change,
+unless the call already kept that same subject with that same number; Badge's keypad or PIN match
+always stands then, since such a step follows a level 2 verification.
 
 **Receipt link** (purpose `receipt_link`). `textReceiptLink(callId, url)` texts the host's
 capability link to an ended call's receipt (section 12, an `https` URL of at most 512 characters,
 else `invalid_input`; a call not ended or without its receipt yet: `precondition_failed`). It
 returns `{texted: true}` only when the flow's `trace.receipt` step has `textLink`, an action was
-noted, the caller answered "yes" to `textLink.consent`, a keypad or PIN match still stands (or the
-call kept a number before a contact change), and no link was texted on this call yet; otherwise
-`{texted: false}` and nothing is sent. It goes to the number kept before a contact change, else the
-subject's number on file. "Receipt from BUSINESS for ACTIONS on your call: URL" / "Reçu de BUSINESS
+noted, the caller's latest answer to `textLink.consent` is "yes" (a later "no" withdraws an
+earlier "yes"), a keypad or PIN match still stands (or the call kept a number for Badge's current
+subject before a contact change), and no link was texted on this call yet; otherwise
+`{texted: false}` and nothing is sent. It goes to the first number kept for Badge's current subject
+before a contact change, else that subject's number on file; a number kept for another subject is
+never used. "Receipt from BUSINESS for ACTIONS on your call: URL" / "Reçu de BUSINESS
 pour ACTIONS lors de votre appel : URL", where ACTIONS lists, in order, "a payment", "a change to
 your contact details", "an access request" / "un paiement", "une modification de vos coordonnées",
 "une demande d'accès". No amount, code or personal value. A retry after a failure sends with the
 same idempotency key; the ledger gets one `receipt.link_texted`.
 
-**Contact change notice** (purpose `contact_changed`). A call that noted a contact action owes a
-security notice, whatever the caller answered about receipts: it is not a receipt and has no
-setting. `endCall` sends it to the number kept before the change, before signing the receipt; if
-the text fails, `endCall` throws, and calling it again sends the notice (and the receipt) without
-ending the call again. "BUSINESS: the contact details on your account were changed during a call.
+**Contact change notice** (purpose `contact_changed`). Each subject and number a contact step kept
+is owed a security notice, whatever the caller answered about receipts: it is not a receipt and
+has no setting. `endCall` sends each, in order, to the number kept before the change, before
+signing the receipt, with one idempotency key per notice; if a text fails, `endCall` throws, and
+calling it again sends the notices still owed (and the receipt) without ending the call again. A
+call that ended with ledger entries still pending (a notice or receipt saved, then not appended)
+is finished the same way: `endCall` appends them and returns the kept receipt, or null. "BUSINESS: the contact details on your account were changed during a call.
 If it was not you, contact us right away." / "BUSINESS : les coordonnées de votre compte ont été
 modifiées pendant un appel. Si ce n'était pas vous, communiquez avec nous sans tarder.", with
 "Security notice" / "Avis de sécurité" in place of BUSINESS when Trace has no `businessName`. It
-never says which detail changed or to what. The ledger gets one `contact.notice_sent`.
+never says which detail changed or to what. The ledger gets one `contact.notice_sent` per notice.

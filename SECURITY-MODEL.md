@@ -66,11 +66,14 @@ selfie, which a stolen SIM alone does not pass. Contact and payout scopes defaul
 ### Account takeover by a contact change
 
 Someone who passed verification changes the phone number on file, so the real customer hears
-nothing from then on. **Controls:** a flow step that needs a contact-class scope makes the call
-owe a security notice, sent by `endCall` to the number on file as Badge read it before the change,
-whatever the caller answered about receipt texts; nobody on the call can turn it off, and the
-receipt link of that call goes to the same earlier number (tested in
-`prove-receipt-text.test.ts`). A config with such a step is refused without a `messages` adapter.
+nothing from then on. **Controls:** each flow step that needs a contact-class scope makes the call
+owe a security notice, sent by `endCall` to the changed subject's number on file as Badge read it
+before the change, whatever the caller answered about receipt texts; a call that changes two
+subjects, or the same subject under two numbers, sends one to each, and never two to the same
+subject's same number. Nobody on the call can turn it off. The receipt link of that call goes to
+the earlier number only when it was kept for the subject the receipt link is for; a number kept
+for another subject is never used (tested in `prove-receipt-text.test.ts`). A notice texted but not
+yet logged (a ledger outage) is logged by the next `endCall`, which neither texts nor ends again. A config with such a step is refused without a `messages` adapter.
 The notice carries no values, not even which detail changed. Left to the host: a contact change
 made outside a flow step is not seen by the engine, and owes no notice.
 
@@ -79,8 +82,9 @@ made outside a flow step is not seen by the engine, and owes no notice.
 Repeated calls triggering texts to a real customer, or to premium numbers. **Controls:** texts go
 only to the number on file, only after a keypad match, and at most one photo ID link per call
 (tested). A receipt link goes at most once per call, only after a money, contact or access step,
-with the caller's consent and a standing keypad or PIN match; a contact change notice at most
-once (tested). Planned: rate limits per subject and per calling number, and a destination country
+with the caller's consent (the latest answer for the purpose: a later "no" withdraws a "yes") and
+a standing keypad or PIN match; a contact change notice at most once per subject and number
+(tested). Planned: rate limits per subject and per calling number, and a destination country
 allow-list, before texted codes ship (VER-2).
 
 ### Replay

@@ -383,7 +383,9 @@ export class Engine {
     // A call that ended without its receipt (the signer failed) or its notice gets it now, without ending again.
     const before = await this.#read(callId);
     const receiptPending = trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null;
-    const pending = before.state.phase === "ended" && (receiptPending || trace.noticeDue(before));
+    // Ledger entries a failed append left behind (a notice or receipt saved, then not logged) count too.
+    const pending = before.state.phase === "ended" && (receiptPending || trace.noticeDue(before) || before.outbox.length > 0);
+    if (pending) await this.flushLedger(callId);
     const record = pending ? before : await this.#update(callId, (draft) => {
       // The built-in modules' guards run even after a module was removed, as their receipt parts do.
       const guards = [...this.#receiptModules, ...this.registry.list().filter((m) => !this.#receiptModules.includes(m))];
@@ -403,6 +405,8 @@ export class Engine {
     });
     await trace.sendContactNotice(this.#rt, record);
     if (!trace.wantsReceipt(this.#rt, record)) return null;
+    const issued = trace.receiptOf(record);
+    if (issued !== null) return structuredClone(issued);
     const head = await trace.endedHead(this.#rt, record, () => this.#adapters.ledger.head());
     const parts: Pick<ReceiptBody, "verification" | "records" | "payments"> = { verification: { level: 0, methods: [] }, records: [], payments: [] };
     // The built-in contributors, not the registry: a module removed after this call filed or paid still appears on its receipt.
@@ -419,7 +423,7 @@ export class Engine {
    * step completed, the caller consented and a keypad or PIN factor matched. At most once per call.
    */
   textReceiptLink(callId: string, url: string): Promise<{ texted: boolean }> {
-    return trace.textReceiptLink(this.#rt, callId, url, (record) => this.#numberOnFile(record));
+    return trace.textReceiptLink(this.#rt, callId, url, (record) => this.#currentSubject(record));
   }
 
   async receipt(callId: string): Promise<SignedReceipt | null> {
@@ -609,7 +613,7 @@ export class Engine {
       // Such a step follows a level 2 verification, which a keypad or PIN match always unlocked:
       // matchedSubject fails closed if that ever did not hold.
       const action = this.#actionClass(owner!, step.type);
-      if (action !== null) trace.noteAction(record, action, badge.matchedSubject(record).phoneOnFile);
+      if (action !== null) trace.noteAction(record, action, badge.matchedSubject(record));
       flow.index++;
       const next = flow.steps[flow.index];
       if (next === undefined) {
@@ -631,13 +635,14 @@ export class Engine {
   }
 
   /**
-   * The number texts may go to: the matched subject's number on file, as Badge read it when
-   * verification started, or null when no keypad or PIN match stands (a later verification started
-   * from nothing). Only asked about a call whose flow completed a scoped step, so Badge's part exists.
+   * The subject Badge holds now, and the number texts may go to: its number on file, as Badge read
+   * it when verification started, or null when no keypad or PIN match stands (a later verification
+   * started from nothing). Only asked about a call whose flow completed a scoped step, so Badge's
+   * part exists.
    */
-  #numberOnFile(record: CallRecord): string | null {
+  #currentSubject(record: CallRecord): { subjectKey: string | null; numberOnFile: string | null } {
     const s = record.modules[badge.BADGE] as unknown as badge.BadgeSlice;
-    return s.knowledgeMatched ? s.subject!.phoneOnFile : null;
+    return { subjectKey: s.subject?.subjectKey ?? null, numberOnFile: s.knowledgeMatched ? s.subject!.phoneOnFile : null };
   }
 
   /**

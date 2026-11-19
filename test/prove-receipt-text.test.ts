@@ -13,7 +13,11 @@ import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, wording } from
 
 const NEW_PHONE = "+15555550199";
 const BUSINESS = "Maple Property Management";
-const LINK = "https://receipts.example.test/r/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const TOKEN = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const LINK = `https://receipts.example.test/r/${TOKEN}`;
+const OTHER_ACCOUNT = "87654321";
+const OTHER_DOB = "19700101";
+const OTHER_PHONE = "+15555550142";
 const consentWording = { purpose: "receipt_texts", version: "1", text: { en: "May we text you a receipt?", fr: "Pouvons-nous vous texter un reçu?" } };
 const pay = { type: "paylink.request", amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" } as const;
 const verify = (scopes: string[]) => ({ type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes });
@@ -62,6 +66,9 @@ function config(patch: (c: FlowConfig) => void = () => undefined): FlowConfig {
       },
       "change-only": { steps: [verify(["contact.update"]), { type: "acme.change_phone" }] },
       repay: { steps: [verify(["payment.request"]), pay, consent, { type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }, textedReceipt] },
+      // A contact change for one subject, then a second verification and a payment for another.
+      "two-subjects": { steps: [verify(["contact.update"]), { type: "acme.change_phone" }, verify(["contact.update", "payment.request"]), { type: "acme.change_email" }, pay, consent, textedReceipt] },
+      "change-then-other": { steps: [verify(["contact.update"]), { type: "acme.change_phone" }, verify(["payment.request"]), pay, consent, textedReceipt] },
     };
     patch(c);
   });
@@ -70,7 +77,17 @@ function config(patch: (c: FlowConfig) => void = () => undefined): FlowConfig {
 function engine(patch?: (c: FlowConfig) => void, options: Parameters<typeof setup>[0] = {}): TestEngine {
   const t = setup({ config: config(patch), modules: [acmeModule()], ...options });
   t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+  t.carrier.set(OTHER_PHONE, { identityMatch: "match" });
+  t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: OTHER_ACCOUNT, phoneOnFile: OTHER_PHONE, knowledge: { dob: OTHER_DOB } }));
   return t;
+}
+
+/** A second verification on the same call, for the other subject. */
+async function verifyOther(t: TestEngine, callId: string): Promise<void> {
+  await t.engine.beginVerification(callId, { accountNumber: OTHER_ACCOUNT });
+  await t.engine.submitKeypad(callId, { dob: OTHER_DOB });
+  await t.engine.checkCarrier(callId);
+  assert.equal((await t.engine.finishVerification(callId)).level, 2);
 }
 
 async function verified(t: TestEngine, flow: string, locale: "en" | "fr" = "en"): Promise<string> {
@@ -117,7 +134,7 @@ describe("receipt link text", () => {
     for (const value of ["150", "15000", ACCOUNT, DOB, PHONE_ON_FILE, "cad"]) assert.ok(!sent[0]!.body.replace(LINK, "").includes(value), value);
     const logged = await events(t, "receipt.link_texted");
     assert.deepEqual(logged.map((e) => e.detail), [{ actions: ["money"] }]);
-    assert.ok(!JSON.stringify(await t.ledger.list()).includes(LINK), "the link never reaches the ledger");
+    assert.ok(!JSON.stringify(await t.ledger.list()).includes(TOKEN), "the link never reaches the ledger");
     assert.equal(texts(t, "contact_changed").length, 0, "no notice without a contact change");
   });
 
@@ -161,6 +178,35 @@ describe("receipt link text", () => {
     await t.engine.endCall(callId);
     assert.deepEqual(await t.engine.textReceiptLink(callId, LINK), { texted: false });
     assert.equal(texts(t, "receipt_link").length, 0);
+  });
+
+  it("is not sent when the caller's latest answer withdrew an earlier yes", async () => {
+    const t = engine();
+    // A "yes" recorded before the flow started, while no step was active, then a "no" at the step.
+    const { callId } = await t.engine.startCall();
+    await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "yes" });
+    await t.engine.startFlow(callId, "deposit");
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.checkCarrier(callId);
+    await t.engine.finishVerification(callId);
+    await paid(t, callId);
+    await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "no" });
+    assert.notEqual(await t.engine.endCall(callId), null);
+    assert.deepEqual(await t.engine.textReceiptLink(callId, LINK), { texted: false });
+    assert.equal(texts(t, "receipt_link").length, 0);
+  });
+
+  it("is not sent after a later verification for an unknown account", async () => {
+    const t = engine();
+    const callId = await verified(t, "repay");
+    await paid(t, callId);
+    await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "yes" });
+    await t.engine.markUntrusted(callId, "crm_note");
+    await t.engine.beginVerification(callId, { accountNumber: "99999999" });
+    await t.engine.finishVerification(callId);
+    await t.engine.endCall(callId);
+    assert.deepEqual(await t.engine.textReceiptLink(callId, LINK), { texted: false });
   });
 
   it("refuses a bad link, a call still running and a call without a receipt", async () => {
@@ -207,7 +253,7 @@ describe("contact change security notice", () => {
     await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "yes" });
     await t.engine.endCall(callId);
     const notices = texts(t, "contact_changed");
-    assert.equal(notices.length, 1, "one notice, though two contact steps ran");
+    assert.equal(notices.length, 1, "one notice: both contact steps changed the same subject's same number on file");
     assert.equal(notices[0]!.to, PHONE_ON_FILE);
     assert.equal(notices[0]!.body, contactNoticeText("en", BUSINESS));
     assert.equal(notices[0]!.body, `${BUSINESS}: the contact details on your account were changed during a call. If it was not you, contact us right away.`);
@@ -259,6 +305,74 @@ describe("contact change security notice", () => {
     assert.equal(texts(t, "contact_changed")[0]!.body, contactNoticeText("en", null));
     assert.equal((await events(t, "call.ended")).length, 1);
     await assert.rejects(t.engine.endCall(callId), rejects("invalid_transition"));
+  });
+
+  it("goes for each subject whose contact details changed, and the receipt link only to its own subject", async () => {
+    const t = engine();
+    const callId = await verified(t, "two-subjects");
+    await changePhone(t, callId);
+    await verifyOther(t, callId);
+    await t.engine.updateModule(callId, "acme", (s) => ({ done: (s as { done: number }).done + 1 }));
+    await paid(t, callId);
+    await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "yes" });
+    await t.engine.endCall(callId);
+    assert.deepEqual(texts(t, "contact_changed").map((n) => n.to), [PHONE_ON_FILE, OTHER_PHONE]);
+    assert.equal((await events(t, "contact.notice_sent")).length, 2);
+    assert.deepEqual(await t.engine.textReceiptLink(callId, LINK), { texted: true });
+    assert.deepEqual(texts(t, "receipt_link").map((m) => m.to), [OTHER_PHONE]);
+  });
+
+  it("never sends another subject's receipt link to the number kept for a contact change", async () => {
+    const t = engine();
+    const callId = await verified(t, "change-then-other");
+    await changePhone(t, callId);
+    await verifyOther(t, callId);
+    await paid(t, callId);
+    await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "yes" });
+    await t.engine.endCall(callId);
+    assert.deepEqual(texts(t, "contact_changed").map((n) => n.to), [PHONE_ON_FILE], "the notice still goes to the first subject's earlier number");
+    assert.deepEqual(await t.engine.textReceiptLink(callId, LINK), { texted: true });
+    assert.deepEqual(texts(t, "receipt_link").map((m) => m.to), [OTHER_PHONE], "the receipt goes to its own subject's number");
+  });
+
+  it("finishes after the notice was sent but its ledger entry failed, without ending or texting again", async () => {
+    const t = engine();
+    const callId = await verified(t, "change-only");
+    await changePhone(t, callId);
+    const append = t.ledger.append.bind(t.ledger);
+    t.ledger.append = async (input) => {
+      if (input.event === "contact.notice_sent") {
+        t.ledger.append = append;
+        throw new Error("ledger down");
+      }
+      return append(input);
+    };
+    await assert.rejects(t.engine.endCall(callId), /ledger down/);
+    assert.equal(await t.engine.endCall(callId), null);
+    assert.equal(texts(t, "contact_changed").length, 1);
+    assert.equal((await events(t, "contact.notice_sent")).length, 1);
+    assert.equal((await events(t, "call.ended")).length, 1);
+    await assert.rejects(t.engine.endCall(callId), rejects("invalid_transition"));
+  });
+
+  it("returns the receipt kept when its ledger entry failed, without signing again", async () => {
+    const t = engine();
+    const callId = await verified(t, "deposit");
+    await paid(t, callId);
+    await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "yes" });
+    const append = t.ledger.append.bind(t.ledger);
+    t.ledger.append = async (input) => {
+      if (input.event === "receipt.issued") {
+        t.ledger.append = append;
+        throw new Error("ledger down");
+      }
+      return append(input);
+    };
+    await assert.rejects(t.engine.endCall(callId), /ledger down/);
+    const kept = await t.engine.receipt(callId);
+    assert.notEqual(kept, null);
+    assert.deepEqual(await t.engine.endCall(callId), kept);
+    assert.equal((await events(t, "receipt.issued")).length, 1);
   });
 
   it("records one notice when two processes send it at once", async () => {

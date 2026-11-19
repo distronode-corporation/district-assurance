@@ -35,13 +35,20 @@ export interface TraceReceiptStep extends FlowStep {
 /** What a completed flow step did, by the class of the scope it needed. */
 export type ActionClass = Exclude<ScopeClass, "none">;
 
+/** A security notice a contact change owes: to the number on file of the subject it changed, before the change. */
+export interface ContactNotice {
+  /** The subject whose contact details changed. */
+  subjectKey: string;
+  /** Their number on file before the change, as Badge read it. */
+  to: string;
+  sent: boolean;
+}
+
 export interface TraceTexts {
   /** The classes of the money, contact and access steps the call completed, each once, in order. */
   actions: ActionClass[];
-  /** The number on file before the call's first contact change, where both texts go after one. */
-  priorNumber: string | null;
-  /** The contact change notice: due once a contact step completed after a keypad or PIN match. */
-  notice: "none" | "due" | "sent";
+  /** One notice per contact change, in order, but never two to the same subject's same number. */
+  notices: ContactNotice[];
   receiptLink: "none" | "sent";
 }
 
@@ -146,7 +153,7 @@ export const traceModule: AssuranceModule = {
   initCall(settings: unknown): JsonValue {
     const wordings = (settings as TraceSettings | undefined)?.wordings ?? [];
     const businessName = (settings as TraceSettings | undefined)?.businessName ?? null;
-    const texts: TraceTexts = { actions: [], priorNumber: null, notice: "none", receiptLink: "none" };
+    const texts: TraceTexts = { actions: [], notices: [], receiptLink: "none" };
     return { wordings: structuredClone(wordings), consents: [], endedHead: null, receipt: null, businessName, texts } as unknown as JsonValue;
   },
 
@@ -279,61 +286,64 @@ function textsOf(record: CallRecord): TraceTexts {
 }
 
 /**
- * A flow step that needed a money, contact or access scope completed. The first contact step keeps
- * `numberOnFile`, the matched subject's number as Badge read it before the change, and makes the
- * security notice due.
+ * A flow step that needed a money, contact or access scope completed, for `subject`, the matched
+ * subject as Badge read it when verification started. Each class is noted once. Each contact step
+ * owes a security notice to the subject's number on file before the change, unless one is owed or
+ * sent to that same number for that same subject already (no two identical texts to one number).
  */
-export function noteAction(record: CallRecord, action: ActionClass, numberOnFile: string): void {
+export function noteAction(record: CallRecord, action: ActionClass, subject: { subjectKey: string; phoneOnFile: string }): void {
   const texts = textsOf(record);
-  if (texts.actions.includes(action)) return;
-  texts.actions.push(action);
-  if (action === "contact") {
-    texts.priorNumber = numberOnFile;
-    texts.notice = "due";
-  }
+  if (!texts.actions.includes(action)) texts.actions.push(action);
+  if (action !== "contact") return;
+  if (texts.notices.some((n) => n.subjectKey === subject.subjectKey && n.to === subject.phoneOnFile)) return;
+  texts.notices.push({ subjectKey: subject.subjectKey, to: subject.phoneOnFile, sent: false });
 }
 
-/** Whether the call still owes the security notice of a contact change. */
+/** Whether the call still owes a security notice of a contact change. */
 export function noticeDue(record: CallRecord): boolean {
-  return textsOf(record).notice === "due";
+  return textsOf(record).notices.some((n) => !n.sent);
 }
 
 /**
- * Texts the security notice of a contact change to the number on file before the change, once.
- * Nobody can turn it off: it is an alert to the real customer, not a receipt. A retry after a
- * failure sends again with the same idempotency key.
+ * Texts each owed security notice of a contact change to the number on file before that change,
+ * once each. Nobody can turn them off: they alert the real customer, they are not receipts. A
+ * retry after a failure sends again with the same idempotency key, one key per notice.
  */
 export async function sendContactNotice(rt: EngineRuntime, record: CallRecord): Promise<void> {
-  if (!noticeDue(record)) return;
   const callId = record.state.callId;
   const slice = record.modules[TRACE] as unknown as TraceSlice;
-  await rt.adapter("messages").sendText({
-    to: slice.texts.priorNumber!,
-    body: contactNoticeText(record.locale, slice.businessName),
-    purpose: "contact_changed",
-    idempotencyKey: rt.idempotencyKey(callId, "contact-notice", "text"),
-  });
-  await rt.update(callId, (draft) => {
-    const texts = draft.slice<TraceSlice>(TRACE).texts;
-    // Two processes can both send (one text, by its key): the first records it, once.
-    if (texts.notice !== "due") return;
-    texts.notice = "sent";
-    draft.emit("contact.notice_sent", "code", {});
-  });
+  for (const [index, notice] of slice.texts.notices.entries()) {
+    if (notice.sent) continue;
+    await rt.adapter("messages").sendText({
+      to: notice.to,
+      body: contactNoticeText(record.locale, slice.businessName),
+      purpose: "contact_changed",
+      idempotencyKey: rt.idempotencyKey(callId, "contact-notice", String(index), "text"),
+    });
+    await rt.update(callId, (draft) => {
+      const kept = draft.slice<TraceSlice>(TRACE).texts.notices[index]!;
+      // Two processes can both send (one text, by its key): the first records it, once.
+      if (kept.sent) return;
+      kept.sent = true;
+      draft.emit("contact.notice_sent", "code", {});
+    });
+  }
 }
 
 /**
  * Texts a link to an ended call's receipt (the host's capability link, SRV-3) to the number on
  * file, at most once per call. It goes only when the flow's `trace.receipt` step asks for it, a
  * money, contact or access step completed, the caller said "yes" to the step's consent purpose, and
- * a keypad or PIN factor matched; after a contact change, to the number on file before it. `texted`
- * is false when any of that does not hold, or the link was texted already.
+ * a keypad or PIN factor matched; after a contact change, to the number on file before it. Only the
+ * caller's latest answer for the purpose counts. The link goes only to a number of the subject
+ * Badge holds last (`subject`), whose receipt it is, never to a number kept for another subject.
+ * `texted` is false when any of that does not hold, or the link was texted already.
  */
 export async function textReceiptLink(
   rt: EngineRuntime,
   callId: string,
   url: string,
-  numberOnFile: (record: CallRecord) => string | null,
+  subject: (record: CallRecord) => { subjectKey: string | null; numberOnFile: string | null },
 ): Promise<{ texted: boolean }> {
   if (!isReceiptLink(url)) throw new EngineError("invalid_input", "the receipt link must be an https URL of at most 512 characters");
   const record = await rt.read(callId);
@@ -343,9 +353,12 @@ export async function textReceiptLink(
   const step = record.flow?.steps.find((s): s is TraceReceiptStep => s.type === "trace.receipt");
   const texts = slice.texts;
   const consent = step?.textLink?.consent;
-  const consented = slice.consents.some((c) => c.purpose === consent && c.answer === "yes");
+  // Answers are appended: a later "no" withdraws an earlier "yes".
+  const consented = slice.consents.findLast((c) => c.purpose === consent)?.answer === "yes";
   if (consent === undefined || texts.receiptLink === "sent" || texts.actions.length === 0 || !consented) return { texted: false };
-  const to = texts.priorNumber ?? numberOnFile(record);
+  const current = subject(record);
+  const kept = texts.notices.find((n) => n.subjectKey === current.subjectKey);
+  const to = kept?.to ?? current.numberOnFile;
   if (to === null) return { texted: false };
   await rt.adapter("messages").sendText({
     to,
