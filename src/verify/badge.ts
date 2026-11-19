@@ -19,7 +19,6 @@ import {
   type AssuranceLevel,
   type CarrierSignalReport,
   type FactorKind,
-  type SpokenPolicy,
 } from "../core/policy.ts";
 import type { CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
 import { canApply, type SessionState } from "../core/session.ts";
@@ -382,7 +381,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
       : kind === "pin"
         ? await judgePin(rt, rt.settings<BadgeSettings>(BADGE).pin as PinSettings, input)
         : kind === "spoken_knowledge"
-          ? await judgeSpoken(spokenFields(rt), input)
+          ? await judgeSpoken(rt.policy.spoken!, input, spokenKeypadFields(rt))
           : (await plugin!.judge(input)) === true;
   await rt.update(callId, (draft) => {
     assertSameVerification(draft.slice<BadgeSlice>(BADGE), reserved.epoch);
@@ -395,16 +394,13 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
 }
 
 /**
- * The fields one spoken_knowledge answer must give: the policy's spoken fields, plus the keypad
- * fields Badge's settings let a caller say instead of key, read as `reference` (4 to 12 letters
- * and digits; a keypad value on file is digits) and compared like the keypad field they are. The
- * attempt limit stays the policy's.
+ * The keypad fields Badge's settings let a caller say instead of key. One spoken_knowledge answer
+ * gives them with the policy's spoken fields; each is read as 1 to 32 digits, every value a keypad
+ * field can hold, and compared like the keypad field it is. The attempt limit stays the policy's.
  */
-function spokenFields(rt: EngineRuntime): SpokenPolicy {
-  const spoken = rt.policy.spoken!;
+function spokenKeypadFields(rt: EngineRuntime): string[] {
   const keypadFields = rt.policy.keypadFields;
-  const said = (rt.settings<BadgeSettings>(BADGE).accessibility?.spokenKeypadFields ?? []).filter((f) => keypadFields.includes(f));
-  return { ...spoken, fields: { ...spoken.fields, ...Object.fromEntries(said.map((f) => [f, "reference" as const])) } };
+  return (rt.settings<BadgeSettings>(BADGE).accessibility?.spokenKeypadFields ?? []).filter((f) => keypadFields.includes(f));
 }
 
 /**

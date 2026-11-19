@@ -9,6 +9,7 @@
 // unusable. Any other word, any other character, or a result that is not the field's format makes
 // the answer unusable. Nothing is guessed: "oh" is the letter O, never zero, and there is no near
 // match. The normalised value is compared like a keypad field (spoken_knowledge in factors.ts).
+// A keypad field said instead of keyed (VER-11) is read the same way and must be 1 to 32 digits.
 import { EngineError } from "../core/errors.ts";
 import { SPOKEN_FORMATS, type SpokenFormat } from "../core/policy.ts";
 import type { Locale } from "../core/runtime.ts";
@@ -87,14 +88,30 @@ const UNUSABLE: SpokenAnswer = { status: "unusable" };
 export function normaliseSpokenAnswer(input: { field: SpokenFormat; transcript: string; locale: Locale }): SpokenAnswer {
   if (!(SPOKEN_FORMATS as readonly string[]).includes(input.field)) throw new EngineError("invalid_input", `field must be one of ${SPOKEN_FORMATS.join(", ")}`);
   if (input.locale !== "en" && input.locale !== "fr") throw new EngineError("invalid_input", "locale must be en or fr");
-  const { transcript } = input;
+  return normalise(FORMATS[input.field], input.transcript, input.locale);
+}
+
+/** A keypad value on file: 1 to 32 digits, the entries a keypad accepts. */
+const KEYPAD_DIGITS = /^\d{1,32}$/;
+
+/**
+ * Normalises a spoken answer to a keypad field a caller says instead of keys: the same exact
+ * reading as `normaliseSpokenAnswer`, and a result that must be 1 to 32 digits, so every value a
+ * keypad field can hold can be said and nothing else can.
+ */
+export function normaliseSpokenKeypadEntry(input: { transcript: string; locale: Locale }): SpokenAnswer {
+  if (input.locale !== "en" && input.locale !== "fr") throw new EngineError("invalid_input", "locale must be en or fr");
+  return normalise(KEYPAD_DIGITS, input.transcript, input.locale);
+}
+
+function normalise(format: RegExp, transcript: string, locale: Locale): SpokenAnswer {
   if (typeof transcript !== "string" || transcript.length > MAX_SPOKEN_TRANSCRIPT) return UNUSABLE;
   const folded = transcript.toLowerCase().normalize("NFD").replace(/\p{M}/gu, "");
   if (!ALLOWED.test(folded)) return UNUSABLE;
-  const chars = readTokens(folded.split(SEPARATORS).filter((t) => t !== ""), VOCABULARIES[input.locale]);
+  const chars = readTokens(folded.split(SEPARATORS).filter((t) => t !== ""), VOCABULARIES[locale]);
   if (chars === null) return UNUSABLE;
   const value = chars.join("");
-  return FORMATS[input.field].test(value) ? { status: "normalised", value } : UNUSABLE;
+  return format.test(value) ? { status: "normalised", value } : UNUSABLE;
 }
 
 /** The letters and digits the tokens spell, or null when any token cannot be read exactly. */

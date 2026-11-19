@@ -90,6 +90,25 @@ describe("a keypad field said instead of keyed", () => {
     assert.deepEqual(await t.engine.submitFactor(callId, "spoken_knowledge", { dob: DOB }), { matched: false, locked: true });
   });
 
+  it("matches every value a keypad field can hold, 1 to 32 digits, and nothing else", async () => {
+    for (const [value, said] of [
+      ["7", "seven"],
+      ["123", "one two three"],
+      ["1234567890123", "1234567890123"],
+      ["9".repeat(32), "9".repeat(32)],
+    ] as const) {
+      const t = setup({ config: accessibleConfig() });
+      t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: value, postal_code: POSTAL } }));
+      const callId = await verifying(t);
+      assert.deepEqual(await t.engine.submitFactor(callId, "spoken_knowledge", { postal_code: POSTAL, dob: said }), { matched: true, locked: false }, value);
+    }
+    const t = setup({ config: accessibleConfig() });
+    t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: "9".repeat(32), postal_code: POSTAL } }));
+    const callId = await verifying(t);
+    assert.deepEqual(await t.engine.submitFactor(callId, "spoken_knowledge", { postal_code: POSTAL, dob: "9".repeat(33) }), { matched: false, locked: false }, "33 digits");
+    assert.deepEqual(await t.engine.submitFactor(callId, "spoken_knowledge", { postal_code: POSTAL, dob: "A123" }), { matched: false, locked: true }, "a letter");
+  });
+
   it("only counts the policy's keypad fields, whatever a step-less config lists", async () => {
     const t = accessibleSetup(accessibleConfig({ spokenKeypadFields: ["dob", "pet_name"] }));
     const callId = await verifying(t);
@@ -209,8 +228,28 @@ describe("the keypad collector (stand-in for INT-1)", () => {
     const { digits, press } = collector({ maxLength: 3 });
     press("1234#");
     assert.deepEqual(digits, [], "the fourth digit dropped the buffer, so no part of the entry is handed over");
+    press("1234567#");
+    assert.deepEqual(digits, [], "the digits after the overflow never start a new entry");
     press("12B#");
     assert.deepEqual(digits, ["12"]);
+    press("123#");
+    assert.deepEqual(digits, ["12", "123"], "an entry at the maximum is handed over");
+  });
+
+  it("ends an overlong entry on a request or the idle timeout, and the next entry counts", () => {
+    const { c, digits, requests, press, timeouts } = collector({ maxLength: 3 });
+    press("12345*", 0);
+    assert.equal(c.collecting, false);
+    press("678#", 0);
+    assert.deepEqual(requests, ["repeat"]);
+    assert.deepEqual(digits, ["678"]);
+    press("12345", 1000);
+    assert.equal(c.collecting, true, "an overlong entry is still under way");
+    c.tick(6000);
+    assert.equal(c.collecting, false);
+    assert.equal(timeouts(), 1);
+    press("9#", 7000);
+    assert.deepEqual(digits, ["678", "9"]);
   });
 
   it("hands a repeat or slower request instead of digits, and drops the partial entry", () => {

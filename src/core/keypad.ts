@@ -19,7 +19,7 @@ export const DEFAULT_KEYPAD_IDLE_SECONDS = 10;
 const REQUEST_KEYS = ["*", "A", "B", "C", "D"];
 
 export interface KeypadCollectorOptions {
-  /** The longest entry, 1 to 32 digits. A tone past it drops the buffer. */
+  /** The longest entry, 1 to 32 digits. A tone past it discards the whole entry, up to `#`, a request or the idle timeout. */
   maxLength: number;
   /** Idle timeout in milliseconds, 1000 or more. */
   idleTimeoutMs: number;
@@ -40,6 +40,8 @@ export class KeypadCollector {
   readonly #maxIdleTimeoutMs: number;
   #idleTimeoutMs: number;
   #digits = "";
+  /** An entry ran past `maxLength`: the rest of it is discarded until `#`, a request or the idle timeout. */
+  #overflow = false;
   #lastAt = 0;
 
   constructor(options: KeypadCollectorOptions) {
@@ -84,33 +86,45 @@ export class KeypadCollector {
     this.tick(nowMs);
     this.#lastAt = nowMs;
     if (/^[0-9]$/.test(key)) {
-      this.#digits = this.#digits.length < this.#options.maxLength ? this.#digits + key : "";
+      if (this.#overflow) return;
+      if (this.#digits.length < this.#options.maxLength) {
+        this.#digits += key;
+      } else {
+        // An overlong entry is discarded whole: the digits after it never start a new entry.
+        this.#digits = "";
+        this.#overflow = true;
+      }
       return;
     }
     if (key === "#") {
       const digits = this.#digits;
-      this.#digits = "";
+      this.#clear();
       if (digits !== "") this.#options.onDigits(digits);
       return;
     }
     const request = Object.hasOwn(this.#options.requestKeys ?? {}, key) ? this.#options.requestKeys![key] : undefined;
     if (request !== undefined) {
-      this.#digits = "";
+      this.#clear();
       this.#options.onRequest!(request);
     }
   }
 
-  /** Drops a partial entry once the caller has been idle for the timeout. The host calls it from its own timer. */
+  /** Drops a partial or overlong entry once the caller has been idle for the timeout. The host calls it from its own timer. */
   tick(nowMs: number): void {
-    if (this.#digits !== "" && nowMs - this.#lastAt >= this.#idleTimeoutMs) {
-      this.#digits = "";
+    if (this.collecting && nowMs - this.#lastAt >= this.#idleTimeoutMs) {
+      this.#clear();
       this.#options.onTimeout?.();
     }
   }
 
-  /** Whether a partial entry is buffered. Never how long it is or what it holds. */
+  /** Whether an entry is under way (an overlong one included). Never how long it is or what it holds. */
   get collecting(): boolean {
-    return this.#digits !== "";
+    return this.#digits !== "" || this.#overflow;
+  }
+
+  #clear(): void {
+    this.#digits = "";
+    this.#overflow = false;
   }
 
   toString(): string {

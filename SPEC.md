@@ -199,9 +199,11 @@ maxKeypadIdleSeconds?}`.
   duplicates, never `pin`, and only with the `spoken_knowledge` factor on; a `badge.verify` step
   that lists `spoken_knowledge` refuses a field that is not one of the policy's `keypadFields`.
   These fields join the policy's spoken fields in the `spoken_knowledge` factor: one answer gives
-  all of them, judged together as in section 5. A keypad field is read as the `reference` format
-  (4 to 12 letters and digits) and compared as `HMAC-SHA256(knowledgeKey, "field:" + field + ":"
-  + value)`, so only the digits on file match. The factor recorded is `spoken_knowledge`, never
+  all of them, judged together as in section 5. A keypad field is read with the same exact rules
+  as section 5 (`normaliseSpokenKeypadEntry({transcript, locale})`), and the result must be 1 to
+  32 digits, every value a keypad entry can be (any letter, or more digits, is `unusable`). It is
+  compared as `HMAC-SHA256(knowledgeKey, "field:" + field + ":" + value)`, so only the digits on
+  file match. The factor recorded is `spoken_knowledge`, never
   `keypad_knowledge`: it reaches only what the policy's sets give `spoken_knowledge`, under
   `spoken.maxAttemptsPerCall`, and without `spoken` in the policy it is never judged.
 - `keypadIdleSeconds` (5 to 60, default 10) is a call's keypad idle timeout;
@@ -220,8 +222,10 @@ the host passes the time with each tone and calls `tick(nowMs)` from its own tim
 `onDigits`, `onRequest` (required with `requestKeys`), `onTimeout`.
 
 - Digits are buffered; `#` hands a non-empty buffer to `onDigits`. A digit past `maxLength`
-  drops the buffer. Other keys are ignored.
-- A request key drops the buffer and hands its request to `onRequest` instead of digits. The
+  drops the buffer and discards the rest of that entry: later digits are ignored until `#`
+  (which hands nothing over), a request key or the idle timeout, so no part of an overlong entry
+  is ever handed over. Other keys are ignored.
+- A request key drops the buffer (and ends an overlong entry) and hands its request to `onRequest` instead of digits. The
   host replays its fixed line (slower for `slower`). A request is never an attempt: nothing
   reaches the engine, so no attempt is used, added or given back.
 - A partial entry idle for the timeout is dropped (on `tick` or the next tone) and `onTimeout`

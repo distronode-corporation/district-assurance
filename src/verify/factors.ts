@@ -4,11 +4,11 @@
 // with `badgeModule({ factors: [...] })`.
 import type { SubjectRecord } from "../core/adapters.ts";
 import { hexDigestsEqual } from "../core/hash.ts";
-import { FACTOR_KINDS, FORBIDDEN_FACTOR_KINDS, type SpokenPolicy, type VerificationPolicy } from "../core/policy.ts";
+import { FACTOR_KINDS, FORBIDDEN_FACTOR_KINDS, type SpokenFormat, type SpokenPolicy, type VerificationPolicy } from "../core/policy.ts";
 import { isIntegerIn } from "../core/shape.ts";
 import type { AdapterName, EngineRuntime, Locale } from "../core/runtime.ts";
 import { isKeypadEntry, judgeKeypadWith } from "./knowledge.ts";
-import { normaliseSpokenAnswer } from "./spoken.ts";
+import { normaliseSpokenAnswer, normaliseSpokenKeypadEntry } from "./spoken.ts";
 
 /** What the caller entered: one string (a PIN), or one value per field (keypad knowledge, spoken transcripts). */
 export type FactorEntry = string | Readonly<Record<string, string>>;
@@ -130,13 +130,17 @@ export async function judgeKeypad(policy: VerificationPolicy, input: FactorJudge
  * The spoken knowledge factor's judge: every spoken field at once, one answer. Each transcript is
  * normalised exactly (spoken.ts) and compared like a keypad field, as the keyed digest of
  * `field:<name>:<value>` in constant time; an unusable answer does the same work and fails.
+ * `keypadFields` are keypad fields said instead of keyed (VER-11): each is read as 1 to 32 digits,
+ * every value a keypad field can hold.
  */
-export async function judgeSpoken(spoken: SpokenPolicy, input: FactorJudgeInput): Promise<boolean> {
+export async function judgeSpoken(spoken: SpokenPolicy, input: FactorJudgeInput, keypadFields: readonly string[] = []): Promise<boolean> {
   const entries = typeof input.entry === "string" ? {} : input.entry;
-  const fields = Object.entries(spoken.fields);
+  const fields: Array<readonly [string, SpokenFormat | null]> = [...Object.entries(spoken.fields), ...keypadFields.map((f) => [f, null] as const)];
   let ok = input.subject !== null && fields.length > 0;
   for (const [field, format] of fields) {
-    const answer = normaliseSpokenAnswer({ field: format, transcript: entries[field] ?? "", locale: input.locale });
+    const transcript = entries[field] ?? "";
+    const answer =
+      format === null ? normaliseSpokenKeypadEntry({ transcript, locale: input.locale }) : normaliseSpokenAnswer({ field: format, transcript, locale: input.locale });
     const value = answer.status === "normalised" ? answer.value : "";
     const match = hexDigestsEqual(input.hmac(`field:${field}:${value}`), input.subject?.knowledge[field] ?? "");
     ok = ok && match && answer.status === "normalised";

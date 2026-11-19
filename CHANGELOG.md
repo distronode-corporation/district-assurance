@@ -9,7 +9,8 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - The accessible verification path (VER-11): keypad fields said instead of keyed through
-  `spoken_knowledge` (never the PIN), `KeypadCollector` repeat and slower requests and longer idle
+  `spoken_knowledge` (never the PIN; read as 1 to 32 digits with `normaliseSpokenKeypadEntry`),
+  `KeypadCollector` (an overlong entry is discarded whole) repeat and slower requests and longer idle
   timeouts (a stand-in for INT-1), and relay or TTY calls with longer timeouts and no other change.
 - The modular core. A module registry and module interface (what a module provides, the scopes it
   grants or needs, the adapters it requires, its settings validator); Badge, Dossier, Paylink and
