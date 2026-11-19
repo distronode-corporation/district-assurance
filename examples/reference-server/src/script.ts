@@ -176,7 +176,9 @@ const deposit: ScriptStep[] = [
       await w.engine.startIntake(call.callId, "maintenance");
       await w.engine.setIntakeField(call.callId, "issue", "Water leak under the kitchen sink");
       await w.engine.setIntakeField(call.callId, "urgent", "yes");
-      const record = await w.engine.confirmIntake(call.callId, { confirmedBy: "voice" });
+      // The host speaks the read-back's text, and the caller's yes confirms the digest of what they heard.
+      const readBack = await w.engine.intakeReadBack(call.callId);
+      const record = await w.engine.confirmIntake(call.callId, { confirmedBy: "voice", readBack: readBack.digest });
       return pass(`${record.recordId}, digest ${record.digest.slice(0, 16)}...`);
     },
   },

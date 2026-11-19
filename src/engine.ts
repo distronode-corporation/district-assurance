@@ -26,6 +26,7 @@ import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
 import * as dossier from "./file/dossier.ts";
 import type { NormaliseResult } from "./file/intake.ts";
+import type { ReadBack } from "./file/readback.ts";
 import { BUILT_IN_MODULES, builtInModules, defaultConfig } from "./modules.ts";
 import * as paylink from "./pay/paylink.ts";
 import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
@@ -350,7 +351,13 @@ export class Engine {
     return dossier.setIntakeField(this.#rt, callId, key, raw);
   }
 
-  confirmIntake(callId: string, input: { confirmedBy: "voice" | "keypad" }): Promise<IntakeRecord> {
+  /** The read-back of the open draft in the call's locale: speak `text`, then pass `digest` to `confirmIntake`. */
+  intakeReadBack(callId: string): Promise<ReadBack> {
+    return dossier.intakeReadBack(this.#rt, callId);
+  }
+
+  /** Files the draft the caller confirmed. `readBack` is the digest of the read-back they heard; a draft changed since is refused. */
+  confirmIntake(callId: string, input: { confirmedBy: "voice" | "keypad"; readBack: string }): Promise<IntakeRecord> {
     return dossier.confirmIntake(this.#rt, callId, input);
   }
 

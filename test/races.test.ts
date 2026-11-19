@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import type { AuditInput } from "../src/core/adapters.ts";
 import { MemoryAuditLedger } from "../src/prove/ledger.ts";
 import { generateTestSigner } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, heard, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
 class FlakyLedger extends MemoryAuditLedger {
   failures = 0;
@@ -117,8 +117,9 @@ describe("overlapping retries", () => {
     await t.engine.startIntake(callId, "repair");
     await t.engine.setIntakeField(callId, "issue", "leak");
     ledger.failures = 1;
-    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /ledger down/);
-    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    const readBack = await heard(t, callId);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack }), /ledger down/);
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack });
     assert.equal(record.recordId, "rec_1");
     assert.equal((await ledger.list()).filter((e) => e.event === "intake.confirmed").length, 1, "appended once, by the retry");
     assert.deepEqual((await t.engine.state(callId)).recordIds, ["rec_1"]);
@@ -135,7 +136,7 @@ describe("overlapping retries", () => {
       ended = await t.engine.endCall(callId).catch((e: unknown) => e);
       return put(record);
     };
-    await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     assert.ok(rejects("precondition_failed", /being filed/)(ended));
     const receipt = await t.engine.endCall(callId);
     assert.deepEqual(receipt!.body.records.map((r) => r.recordId), ["rec_1"]);
@@ -154,7 +155,7 @@ describe("overlapping retries", () => {
       ended = await t.engine.endCall(callId).catch((e: unknown) => e);
       return put(record);
     };
-    await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     assert.ok(rejects("precondition_failed", /being filed/)(ended));
     assert.deepEqual((await t.engine.endCall(callId))!.body.records.map((r) => r.recordId), ["rec_1"]);
   });

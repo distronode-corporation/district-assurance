@@ -31,6 +31,9 @@ All notable changes to this project are documented here. The format follows
 - `auditLedgerContract` and `recordStoreContract` in `district-assurance/testing` (PRV-5), which
   the memory adapters pass; `MemoryRecordStore` now keys by JSON tuples, so two workspace and id
   pairs can no longer share a key.
+- Read-backs in English and French (FIL-1): `buildReadBack` and `engine.intakeReadBack` speak each
+  field by type (dates in full, yes and no, numbers) with a fixed confirm prompt and never read a
+  sensitive value; `confirmIntake` now requires the read-back's digest and refuses a draft changed since.
 
 ### Changed
 

@@ -97,6 +97,18 @@ scope has a class (by its name, a module's manifest, or the policy's `scopeClass
 winning), money, contact and access are never below level 2, and a scope with no class is refused
 (tested). Level 2 and above need a factor that is not something the caller knows (tested).
 
+### Filing what the caller did not hear
+
+A model that paraphrases a value, or a host path that changes the draft after the caller agreed,
+so the record filed is not the one confirmed. **Controls:** the read-back is built by code from the
+draft, in the call's language (`buildReadBack`, SPEC.md section 13), never by the model.
+`confirmIntake` takes the digest of the read-back the caller heard, which covers the spoken text
+and the record digest of every value, and refuses a draft that no longer reads back to it, so a
+value changed since, a sensitive one included, is never filed on an old yes (tested). A sensitive
+value is never read back: its line says only that it was given, so it does not reach the
+transcript, the model or anyone listening in (tested). The digest says no more about the values
+than the record digest the ledger and the receipt already carry.
+
 ### Config tampering
 
 Someone who can edit a workspace's FlowConfig. **Controls:** the engine refuses any config with a

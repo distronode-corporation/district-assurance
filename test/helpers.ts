@@ -49,6 +49,11 @@ export function setup(options: TestEngineOptions = {}): TestEngine {
 export const rejects = (code: EngineErrorCode, message?: RegExp) => (e: unknown) =>
   e instanceof EngineError && e.code === code && (message === undefined || message.test(e.message));
 
+/** The digest of the read-back the caller hears now, for `confirmIntake`. */
+export async function heard(t: TestEngine, callId: string): Promise<string> {
+  return (await t.engine.intakeReadBack(callId)).digest;
+}
+
 /** A call verified to level 3 by keypad and photo ID, in the open phase. */
 export async function verifiedCall(t: TestEngine, locale: "en" | "fr" = "en"): Promise<string> {
   const { callId } = await t.engine.startCall({ locale });

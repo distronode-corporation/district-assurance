@@ -357,6 +357,29 @@ Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording 
 Forms live in Dossier's settings: a `formId` (lower case, digits, `-`, `_`), a `version` and
 fields with snake_case unique keys, a known type and an English and a French label.
 `validateConfig` refuses fields marked `sensitive` until field encryption exists (FIL-2).
+**Read-back** (FIL-1). `buildReadBack(form, values, locale)` builds, in English or French, what the
+host speaks before the caller confirms: an opening, one sentence per field with a value, in form
+order, and the fixed confirm prompt. `text` is all three, one space apart; `lines` and `prompt`
+are its parts.
+
+| Type | English | French |
+|---|---|---|
+| `text` | `Issue: Leak.` (as given; a full stop unless it ends in `.`, `!` or `?`) | `Problème : Leak.` |
+| `number` | `1,234.5`, `minus 2` (never in exponent form) | `1 234,5` (a non-breaking space), `moins 2` |
+| `date` | `Tuesday, September 1, 2026` | `le mardi 1er septembre 2026` |
+| `yes_no` | `yes` / `no` | `oui` / `non` |
+| sensitive | `Label: given, and not read aloud for your security.` | `Libellé : fourni, mais pas lu à voix haute, pour votre sécurité.` |
+
+Opening: "Here is what will be filed." / "Voici ce que nous allons enregistrer." Prompt: "Is that
+correct? Say yes or press 1 to confirm." / "Est-ce exact? Dites oui ou appuyez sur le 1 pour
+confirmer." A sensitive field's value is never in the read-back, its text or its lines. The
+`digest` is `SHA-256(canonicalJson({v: 1, locale, text, record}))`, where `record` is the record
+digest of the values (section 12), so a change to any value, a sensitive one included, changes it.
+`intakeReadBack(callId)` builds the read-back of the open draft in the call's locale.
+`confirmIntake(callId, {confirmedBy, readBack})` takes the digest of the read-back the caller
+heard, and refuses with `precondition_failed` unless the draft reads back to that digest now; a
+confirmation retried after its record was filed returns that record.
+
 `startIntake(callId, formId)` names the form, and the draft keeps the form as it was then, so a
 config change mid-intake never changes what is filed; a call also keeps the forms (and Trace the
 wordings) in force when it started. A draft being filed refuses changes. A filing that failed

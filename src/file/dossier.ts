@@ -4,11 +4,13 @@ import type { IntakeRecord } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
+import { hexDigestsEqual } from "../core/hash.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
 import type { EngineRuntime } from "../core/runtime.ts";
 import type { SessionState } from "../core/session.ts";
 import { isDenseArray, isObject, unknownKeys } from "../core/shape.ts";
 import { intakeDigest, missingRequired, normaliseFieldValue, validateForm, type FieldValue, type IntakeForm, type NormaliseResult } from "./intake.ts";
+import { buildReadBack, type ReadBack } from "./readback.ts";
 
 export const DOSSIER = "dossier";
 
@@ -148,12 +150,24 @@ export async function setIntakeField(rt: EngineRuntime, callId: string, key: str
   });
 }
 
+/** The read-back of the open draft, in the call's locale, for the host to speak before the caller confirms. */
+export async function intakeReadBack(rt: EngineRuntime, callId: string): Promise<ReadBack> {
+  rt.settings(DOSSIER);
+  const record = await rt.read(callId);
+  const s = record.modules[DOSSIER] as unknown as DossierSlice | undefined;
+  if (s === undefined) throw new EngineError("module_disabled", `${DOSSIER} was off when this call started`);
+  if (s.intake === null) throw new EngineError("invalid_transition", "no intake is open on this call");
+  return buildReadBack(s.intake.form, s.intake.values, record.locale);
+}
+
 /**
- * Files the draft once the caller confirmed the read-back: reserved, stored, then recorded. A
- * filing that failed anywhere after the reservation (the store, a lost write) resumes with the
- * same record on the next call; the draft stays closed to changes until it is filed.
+ * Files the draft once the caller confirmed the read-back: reserved, stored, then recorded. The
+ * host passes the digest of the read-back the caller heard (`intakeReadBack`), and a draft that
+ * would no longer read back the same is refused. A filing that failed anywhere after the
+ * reservation (the store, a lost write) resumes with the same record on the next call; the draft
+ * stays closed to changes until it is filed.
  */
-export async function confirmIntake(rt: EngineRuntime, callId: string, input: { confirmedBy: "voice" | "keypad" }): Promise<IntakeRecord> {
+export async function confirmIntake(rt: EngineRuntime, callId: string, input: { confirmedBy: "voice" | "keypad"; readBack: string }): Promise<IntakeRecord> {
   rt.settings(DOSSIER);
   const reserved = await rt.update(callId, (draft): { record: IntakeRecord; filed: boolean } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
@@ -162,6 +176,10 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
     // entry, and the same record comes back.
     if (intake === null && s.confirmed !== null) return { record: s.confirmed, filed: true };
     if (intake === null) throw new EngineError("invalid_transition", "no intake is open on this call");
+    const heard = buildReadBack(intake.form, intake.values, draft.record.locale).digest;
+    if (typeof input.readBack !== "string" || !hexDigestsEqual(input.readBack, heard)) {
+      throw new EngineError("precondition_failed", "the draft changed since the caller heard its read-back; read it back again");
+    }
     if (intake.filing !== null) return { record: intake.filing, filed: false };
     if (!rt.authorized(draft.record, "intake.file")) throw new EngineError("scope_denied", "the grant does not cover intake.file");
     const missing = missingRequired(intake.form, intake.values);
