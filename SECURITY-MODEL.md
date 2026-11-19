@@ -160,7 +160,11 @@ byte-identical across two builds and a third on a fresh runner, holds only `dist
 documents, and passes an unpack-and-import smoke test before it is published (`release.yml`).
 There is no npm token: trusted publishing uses the publish job's short-lived OIDC token, the only
 job granted `id-token: write`, and npm provenance ties the tarball to the commit and workflow
-that built it.
+that built it. Today one maintainer can approve a publish, so the environment does not prevent
+self-review; once there is a second maintainer, a second reviewer is required (the environment's
+"prevent self-review" on). The runners' egress is audited, not blocked (harden-runner); before the
+second publish it switches to block, allowing only the endpoints the first real publish run's
+audit log shows.
 
 ## Left to the host
 
