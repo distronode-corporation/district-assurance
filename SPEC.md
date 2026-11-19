@@ -580,6 +580,11 @@ it), per calling number and per subject.
   counted on the number's counter and, when the call already named a subject, the subject's.
   `beginVerification` on a call running a limited flow counts it on the subject's counter (and on a
   number given only then), once per counter per call: a restart for the same subject counts nothing.
+  The count is the reservation: each counter is counted first, then taken on the call in one write.
+  A count is taken back (`removeFailure` at its time) only once it is known not to have been taken:
+  an overlapping `beginVerification` on the call took that counter first, or the write saved nothing
+  (no compare-and-set ran, or each answered `ok: false`). A write with no answer, or a process that stops
+  between the count and the write, leaves it counted: at most one start too many, the safe side.
 - Badge's `lockout.flowStartsPerHour`: `{subject, number}`, defaults `5` and `10`, which are also
   the most a config may allow (1 up to the default); `validateConfig` refuses anything else. A
   start exactly an hour old has left the hour. An engine with a limited flow in its config needs

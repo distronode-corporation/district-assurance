@@ -93,20 +93,6 @@ export interface FlowCursor {
    * twice; null for a flow whose starts are not limited (no money, contact or access scope).
    */
   counted: string[] | null;
-  /**
-   * Late counters (named once verification found a subject or number) reserved in `counted` and
-   * not yet known to be charged, each with the time it is charged at. `failed` marks a charge that
-   * threw, which the next `beginVerification` resumes. Absent when none is owed.
-   */
-  charging?: FlowCharge[];
-}
-
-/** One late flow-start charge reserved on a call. */
-export interface FlowCharge {
-  scope: "subject" | "number";
-  key: string;
-  at: string;
-  failed?: true;
 }
 
 /** One call, as the SessionStore holds it. JSON only. */
