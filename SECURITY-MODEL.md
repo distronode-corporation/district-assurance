@@ -66,9 +66,20 @@ selfie, which a stolen SIM alone does not pass. Contact and payout scopes defaul
 ### Text flooding and SMS pumping
 
 Repeated calls triggering texts to a real customer, or to premium numbers. **Controls:** texts go
-only to the number on file, only after a keypad match, and at most one photo ID link per call
-(tested). Planned: rate limits per subject and per calling number, and a destination country
-allow-list, before texted codes ship (VER-2).
+only to the number on file, only after a keypad or PIN match, and at most one photo ID link per
+call (tested). Texted codes go only to the country calling codes the policy lists, none without a
+list (tested); at most 5 per subject and 10 per calling number in 24 hours, 60 seconds apart,
+counted across calls and engines in the shared `CodeStore` before the text goes out (tested). A
+refused send answers exactly like a sent one, with a code that never matches and the same tries
+and expiry, so the line never tells a caller that a limit was hit or which one (tested); the
+ledger says why. A withheld calling number is held to the per-subject limit only.
+
+### Guessing a texted code
+
+**Controls:** 6 digits, 5 tries per code (a malformed entry is one), 10 minutes, used once, bound
+to the call by its HMAC (the same digits on another call fail) and dropped on a taint or a change
+of subject (tested). With the send limit, a subject faces at most 25 tries a day, a chance of
+about 1 in 40,000.
 
 ### Replay
 
@@ -142,7 +153,8 @@ appended by event id, once each; a ledger that fails leaves them pending, and th
 **Controls:** reference values are HMACs under a per-workspace key, because a plain hash of a date
 of birth is reversed by trying every date; the caller's entries are never stored. Sensitive intake
 fields are refused by `validateConfig` until field encryption exists (FIL-2). PINs on file are
-HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode).
+HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode). A texted code
+is kept only as an HMAC bound to its call, and a calling number only as an HMAC.
 
 ## Left to the host
 
@@ -150,7 +162,10 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
   speech-to-text and the model while `sensitive` is set.
 - Keeping the knowledge key and the receipt signing key in a key store.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
-  guarantees (`sessionStoreContract` today; PRV-5 for the others).
+  guarantees (`sessionStoreContract` today; PRV-5 for the others), and a durable `CodeStore`
+  shared by every engine of a workspace that passes `codeStoreContract`.
+- Passing the calling number to `beginVerification` when the carrier gives one, so the per-number
+  limit applies, and speaking the same line, at the same moment, whether a code was sent or not.
 - Choosing the subject when it starts verification with a subject key (for example the owner of
   the line it was called on). That choice is not a factor: the PIN or other factors still decide.
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.

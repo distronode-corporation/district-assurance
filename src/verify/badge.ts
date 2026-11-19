@@ -6,7 +6,7 @@
 // sent, so two processes running the same call can never get two attempts or two links for one.
 import type { SubjectRecord } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
-import { EngineError, NotImplementedError } from "../core/errors.ts";
+import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import { isStepLevel } from "../core/config.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
@@ -35,6 +35,7 @@ import {
   type PinSettings,
 } from "./factors.ts";
 import { isKeypadEntry } from "./knowledge.ts";
+import type { TextCodeState } from "./text-code.ts";
 
 export const BADGE = "badge";
 
@@ -50,6 +51,8 @@ export interface BadgeVerifyStep extends FlowStep {
 export interface BadgeSlice {
   subjectKey: string | null;
   subject: SubjectRecord | null;
+  /** The keyed hash of the calling number the host gave, for the send limits across calls; null without one. */
+  numberKey: string | null;
   /** Judged attempts per factor kind on this call. */
   attempts: Record<string, number>;
   /** A keypad or PIN factor matched since verification last started from nothing. */
@@ -65,6 +68,8 @@ export interface BadgeSlice {
   epoch: number;
   /** Identity sessions whose outcome may still count. */
   identitySessions: string[];
+  /** The texted code this call holds: null before any send, and after a taint or a change of subject. */
+  textCode: TextCodeState | null;
   /** How many verifications finished on this call, and the last one's level and counted methods. */
   finished: number;
   lastLevel: AssuranceLevel;
@@ -83,9 +88,15 @@ export interface VerificationResult {
   scopes: string[];
 }
 
+/** The subject (an account number keyed, or a subject key the host chose) and, unless withheld, the calling number. */
+export type BeginVerificationInput = ({ accountNumber: string } | { subjectKey: string }) & { callingNumber?: string };
+
 export type OutcomeResult = { applied: false } | { applied: true; callId: string };
 
-const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin"];
+/** A calling number the engine counts: E.164. A withheld number is left out. (A stand-in for VER-1's `isCallingNumber`.) */
+const CALLING_NUMBER = /^\+[1-9][0-9]{1,14}$/;
+
+const SETTINGS_KEYS =["factors", "grantTtlSeconds", "pin"];
 const PIN_KEYS = ["mode", "minDigits", "maxDigits", "maxAttemptsPerCall"];
 
 /** The subject whose number links may go to: only once a keypad or PIN factor matched. */
@@ -177,6 +188,9 @@ export class BadgeModule implements AssuranceModule {
       const level = step.level;
       const reachable = ctx.policy.levels.some((rule) => rule.level >= level && rule.anyOf.some((set) => set.every((k) => factors.includes(k))));
       if (!reachable) errors.push(`level ${level} cannot be reached with [${factors.join(", ")}] under the policy`);
+      if (factors.includes("text_code") && ctx.policy.textCodeCountryCodes === undefined) {
+        errors.push("factor text_code needs the policy's textCodeCountryCodes, or no code is ever texted");
+      }
     }
     return errors;
   }
@@ -205,12 +219,14 @@ export class BadgeModule implements AssuranceModule {
     const initial: BadgeSlice = {
       subjectKey: null,
       subject: null,
+      numberKey: null,
       attempts: {},
       knowledgeMatched: false,
       carrier: null,
       identityLink: "none",
       epoch: 0,
       identitySessions: [],
+      textCode: null,
       finished: 0,
       lastLevel: 0,
       lastMethods: [],
@@ -229,9 +245,9 @@ export class BadgeModule implements AssuranceModule {
   }
 
   onUntrusted(s: JsonValue): JsonValue {
-    // A photo ID link sent before the taint no longer counts. One link per call still holds.
+    // A photo ID link or a texted code sent before the taint no longer counts. One link per call still holds.
     const badge = s as unknown as BadgeSlice;
-    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink) } as unknown as JsonValue;
+    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink), textCode: null } as unknown as JsonValue;
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
@@ -245,7 +261,7 @@ function voided(link: BadgeSlice["identityLink"]): BadgeSlice["identityLink"] {
 }
 
 /** Refuses to apply a result judged for an earlier verification of this call. */
-function assertSameVerification(s: BadgeSlice, epoch: number): void {
+export function assertSameVerification(s: BadgeSlice, epoch: number): void {
   if (s.epoch !== epoch) throw new EngineError("precondition_failed", "verification restarted while this result was on its way; it does not count");
 }
 
@@ -262,7 +278,7 @@ function pinSettingsErrors(pin: unknown): string[] {
 // ---- runtime -------------------------------------------------------------------------------
 
 /** Refuses a factor that is off, or that the current flow step does not allow. */
-function allowFactor(rt: EngineRuntime, record: CallRecord, kind: string): void {
+export function allowFactor(rt: EngineRuntime, record: CallRecord, kind: string): void {
   const settings = rt.settings<BadgeSettings>(BADGE);
   if (!settings.factors.includes(kind)) throw new EngineError("precondition_failed", `the ${kind} factor is turned off`);
   const step = stepOfType<BadgeVerifyStep>(record, "badge.verify");
@@ -278,9 +294,11 @@ function maxAttempts(rt: EngineRuntime, module: BadgeModule, kind: string): numb
 /**
  * Starts (or restarts) verification. The subject is either the account number the caller keyed
  * (hashed under the knowledge key) or a subject key the host's code chose, for example the owner
- * of the line. Choosing the subject is not a factor: only factors raise the level.
+ * of the line. Choosing the subject is not a factor: only factors raise the level. With a calling
+ * number, texted codes are also limited per that number across calls; a later restart that leaves
+ * it out keeps it. (The calling number belongs to VER-1; this is a stand-in of the same shape.)
  */
-export async function beginVerification(rt: EngineRuntime, callId: string, input: { accountNumber: string } | { subjectKey: string }): Promise<void> {
+export async function beginVerification(rt: EngineRuntime, callId: string, input: BeginVerificationInput): Promise<void> {
   rt.settings(BADGE);
   let subjectKey: string | null;
   if ("subjectKey" in input) {
@@ -289,6 +307,9 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
   } else {
     subjectKey = isKeypadEntry(input.accountNumber) ? rt.hmac(`subject:${input.accountNumber}`) : null;
   }
+  const number = input.callingNumber;
+  if (number !== undefined && !CALLING_NUMBER.test(number)) throw new EngineError("invalid_input", "callingNumber must be E.164; leave it out when the number is withheld");
+  const numberKey = number === undefined ? null : rt.hmac(`number:${number}`);
   const subject = subjectKey === null ? null : await rt.adapter("records").getSubject(rt.workspaceId, subjectKey);
   await rt.update(callId, (draft) => {
     stepOfType(draft.record, "badge.verify");
@@ -300,6 +321,7 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
       // Another subject: nothing collected for the previous one can count for this one.
       s.identitySessions = [];
       s.identityLink = voided(s.identityLink);
+      s.textCode = null;
     }
     if (draft.record.state.factors.length === 0) {
       s.knowledgeMatched = false;
@@ -307,6 +329,7 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
     }
     s.subjectKey = subjectKey;
     s.subject = subject;
+    if (numberKey !== null) s.numberKey = numberKey;
     draft.emit("verification.started", "code", { subject: "subjectKey" in input ? "host" : "account" });
   });
 }
@@ -372,12 +395,6 @@ export async function checkCarrier(rt: EngineRuntime, callId: string): Promise<{
     draft.emit("verification.carrier_checked", "code", { checked: report.checked, textCodeTrusted: trusted, identityMatch: report.identityMatch });
   });
   return { textCodeTrusted: trusted };
-}
-
-/** The texted one-time code. Planned (VER-2): limits per subject and per number come first. */
-export async function sendTextCode(rt: EngineRuntime, callId: string): Promise<never> {
-  matchedSubject(await rt.read(callId));
-  throw new NotImplementedError("Engine.sendTextCode", "VER-2");
 }
 
 /**

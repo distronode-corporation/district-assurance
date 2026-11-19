@@ -11,6 +11,7 @@ import {
   FakePaymentLinks,
   FakePinVerifier,
   FixedClock,
+  MemoryCodeStore,
   MemoryRecordStore,
   SequentialIds,
   generateTestSigner,
@@ -33,6 +34,7 @@ export interface TestEngine {
   ledger: MemoryAuditLedger;
   sessions: SessionStore;
   pinVerifier: FakePinVerifier;
+  codes: MemoryCodeStore;
 }
 
 export type TestEngineOptions = Partial<Omit<EngineOptions, "adapters">> & {
@@ -56,6 +58,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     ledger: new MemoryAuditLedger(),
     sessions: new MemorySessionStore() as SessionStore,
     pinVerifier: new FakePinVerifier(),
+    codes: new MemoryCodeStore(),
   };
   const { adapters: overrides = {}, ...rest } = options;
   const adapters = {
@@ -67,6 +70,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     ledger: parts.ledger,
     sessions: parts.sessions,
     pinVerifier: parts.pinVerifier,
+    codes: parts.codes,
     signer: generateTestSigner(),
     ...overrides,
   } as EngineAdapters;

@@ -89,7 +89,7 @@ module the config has on.
 
 | Built-in | Steps | Needs | Adapters |
 |---|---|---|---|
-| `badge` | `badge.verify` | | `records`; `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `pinVerifier` with `pin` in verifier mode |
+| `badge` | `badge.verify` | | `records`; `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `messages`, `codes` with `text_code`; `pinVerifier` with `pin` in verifier mode |
 | `dossier` | `dossier.collect` | `intake.file` | `records` |
 | `paylink` | `paylink.request` | `payment.request` | `payments`, `messages` |
 | `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
@@ -97,7 +97,7 @@ module the config has on.
 ## 4. Factors, levels and scopes
 
 Built-in factor kinds: `keypad_knowledge`, `pin`, `carrier_identity_match`, `photo_id`,
-`text_code` (planned, VER-2) and `spoken_knowledge` (planned, VER-3). A **factor plug-in** adds a
+`text_code` (below) and `spoken_knowledge` (planned, VER-3). A **factor plug-in** adds a
 kind the caller enters and code judges: `{kind, summary, maxAttemptsPerCall (1 to 5), adapters,
 judge}`, installed with `badgeModule({ factors })`. Its kind is snake_case, 3 to 32 characters, not
 a built-in kind, and never `caller_id`, `calling_number`, `ani` or `cli`. Its judge gets the
@@ -119,7 +119,9 @@ of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:
   contact; `entry.`, `access.`: access; `status.`, `intake.`: none), what an installed module's
   manifest declares (`scopes.classes`), and the policy's own `scopeClasses`. Money, contact and
   access are at least level 2; none is at least 0;
-- `maxKeypadAttemptsPerCall` outside 1 to 5.
+- `maxKeypadAttemptsPerCall` outside 1 to 5;
+- a `textCodeCountryCodes` that is not a list of distinct E.164 country calling codes (1 to 6
+  digits, no `+`, not starting with 0).
 
 It checks every part in one pass: a malformed part is reported and the others are still checked.
 
@@ -141,6 +143,34 @@ expired, and has a level at or above the scope's minimum under the config in for
 Links go only to the subject's number on file, and only after a `keypad_knowledge` or `pin`
 factor passed since verification last started from nothing. A plug-in's pass does not unlock
 texts.
+
+**Texted codes** (`text_code`, needs the `messages` and `codes` adapters).
+`sendTextCode(callId)` needs the factor on (and listed by the current `badge.verify` step), a
+keypad or PIN match as above, and a call that is verifying. It sends only when, in order:
+
+1. the number on file starts with `+` and one of the policy's `textCodeCountryCodes` (a country
+   calling code such as `1` or `33`, or a longer prefix such as `1204`); without the list, nowhere;
+2. the `CodeStore` counts the send against the subject: at most 5 in 24 hours, and none in the 60
+   seconds before (`TEXT_CODE_LIMITS`);
+3. when the host gave a calling number to `beginVerification` (`callingNumber`, E.164; left out
+   when withheld), the `CodeStore` counts it against that number, kept as
+   `HMAC-SHA256(knowledgeKey, "number:" + number)`: at most 10 in 24 hours, none in 60 seconds.
+
+A send counted at step 2 stays counted when step 3 refuses it, or when the text fails. A send is
+6 random digits, kept in the call record only as `HMAC-SHA256(knowledgeKey, "text_code:" + callId
++ ":" + code)`, valid for 10 minutes and 5 tries, and replaces any earlier code on the call.
+Whether it sent or was refused, `sendTextCode` returns `{sent: true}`: a refused send leaves the
+call with a code that has no digest (it never matches) and the same expiry and tries, unless a code
+from an earlier send is still live, which it keeps. The ledger says which (`verification.code_sent`,
+or `verification.code_refused` with `reason`: `country`, `subject_limit` or `number_limit`).
+
+`checkTextCode(callId, code)` counts and judges a try in one write and records a `text_code`
+factor, passed or not. An entry that is not 6 ASCII digits is a try and fails. After the 5th try,
+after 10 minutes, or once the code matched (single use), it returns `locked` without judging or
+recording. Without a code it is refused (`precondition_failed`). A taint or a change of subject
+drops the code. A passed code counts toward a level only under the carrier rule above.
+`codeStoreContract(factory)` in `district-assurance/testing` is the suite a durable `CodeStore`
+must pass (atomic counting, no count for a refusal); `MemoryCodeStore` is the reference.
 
 ## 5. Keypad knowledge
 
@@ -183,7 +213,7 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   "version": 1,
   "revision": "2026-11-18.1",
   "policy": { "version": "...", "levels": [], "scopes": {}, "keypadFields": [], "maxKeypadAttemptsPerCall": 2,
-              "simSwapWindowHours": 72, "trustTextCodeWithoutCarrierCheck": false },
+              "simSwapWindowHours": 72, "trustTextCodeWithoutCarrierCheck": false, "textCodeCountryCodes": ["1"] },
   "modules": { "<name>": { "enabled": true, "settings": {} } },
   "flows": { "<name>": { "summary": "...", "steps": [{ "type": "<module>.<step>" }] } }
 }
@@ -207,7 +237,7 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 
 | Step | Fields |
 |---|---|
-| `badge.verify` | `level` 1 to 3; `factors`, at least one, each on in Badge's settings, together reaching `level` under the policy; optional `scopes`, each in the policy at or below `level` |
+| `badge.verify` | `level` 1 to 3; `factors`, at least one, each on in Badge's settings, together reaching `level` under the policy, and `text_code` only with the policy's `textCodeCountryCodes`; optional `scopes`, each in the policy at or below `level` |
 | `dossier.collect` | `form`, a form id in Dossier's settings |
 | `paylink.request` | `amountMinor`, `currency`, `description`, `amountSource` (section 14); `mode` is refused until PAY-7 |
 | `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
@@ -266,6 +296,8 @@ answer on file, a phone number, a link or card data.
 | `verification.factor` | `kind`, `passed` (and `status` for photo ID) |
 | `verification.carrier_checked` | `checked`, `textCodeTrusted`, `identityMatch` |
 | `identity.link_sent` | none |
+| `verification.code_sent` | none |
+| `verification.code_refused` | `reason`: `country`, `subject_limit` or `number_limit` |
 | `verification.finished` | `level`, `methods`, `discounted` |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt` |
 | `session.tainted` | `source` |
@@ -397,4 +429,6 @@ Code builds every text, in the call's locale (English or French). The destinatio
 subject's number on file. Identity link: "Your one-time identity check link: URL" / "Votre lien
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
-the currency's own decimals.
+the currency's own decimals. Texted code: "Your one-time verification code: CODE. It expires in 10
+minutes. Do not share it." / "Votre code de vérification à usage unique : CODE. Il expire dans 10
+minutes. Ne le communiquez à personne."

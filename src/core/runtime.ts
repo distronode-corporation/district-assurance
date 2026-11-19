@@ -4,6 +4,7 @@
 import type {
   AuditLedger,
   CarrierSignals,
+  CodeStore,
   IdentityProvider,
   MessageSender,
   PaymentLinks,
@@ -36,6 +37,8 @@ export interface EngineAdapters {
   payments?: PaymentLinks;
   signer?: ReceiptSigner;
   pinVerifier?: PinVerifier;
+  /** Send limits for texted codes, shared by every engine of the workspace. */
+  codes?: CodeStore;
 }
 
 export type AdapterName = keyof EngineAdapters;

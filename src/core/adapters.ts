@@ -31,6 +31,29 @@ export interface MessageSender {
   }>;
 }
 
+/** What a texted code's send is counted against: one subject (its subject key) or one calling number (a keyed hash). */
+export interface CodeSendKey {
+  scope: "subject" | "number";
+  /** The subject key, or the keyed hash of the calling number. 64 lower-case hex characters, never a number. */
+  key: string;
+}
+
+/**
+ * The send limits for texted codes, across calls: every engine of a workspace shares one, as they
+ * share the SessionStore. The codes themselves live in the call record; this holds only when codes
+ * were sent, per subject and per calling number. `codeStoreContract` in
+ * `district-assurance/testing` is the suite a durable one must pass; `MemoryCodeStore` is the
+ * reference.
+ */
+export interface CodeStore {
+  /**
+   * Counts one send against the key, atomically, only if the key had fewer than `max` sends in the
+   * `windowSeconds` up to `at` and none in the `minIntervalSeconds` up to `at`. True when it
+   * counted; false, and nothing counted, otherwise. Two concurrent calls never both count past a limit.
+   */
+  take(input: { workspaceId: string; key: CodeSendKey; at: string; max: number; windowSeconds: number; minIntervalSeconds: number }): Promise<boolean>;
+}
+
 /** Hosted payment pages (for example Stripe Checkout on the business's own account). */
 export interface PaymentLinks {
   createLink(input: {

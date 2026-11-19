@@ -64,7 +64,7 @@ export const BUILT_IN_FACTORS: Readonly<Record<(typeof FACTOR_KINDS)[number], { 
   pin: { entered: true, adapters: [] },
   carrier_identity_match: { entered: false, adapters: ["carrier"] },
   photo_id: { entered: false, adapters: ["identity", "messages"] },
-  text_code: { entered: false, adapters: ["messages"], planned: "VER-2" },
+  text_code: { entered: false, adapters: ["messages", "codes"] },
   spoken_knowledge: { entered: true, adapters: [], planned: "VER-3" },
 };
 

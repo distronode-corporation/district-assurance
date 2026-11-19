@@ -4,6 +4,7 @@
 // from them here, and a scope is allowed only when the level reaches the scope's minimum. Caller
 // ID is not a factor kind at all, so no policy can count it, and no factor plug-in may take a name
 // that means it (FORBIDDEN_FACTOR_KINDS).
+import { isStringArray } from "./shape.ts";
 
 export type AssuranceLevel = 0 | 1 | 2 | 3;
 
@@ -68,6 +69,12 @@ export interface VerificationPolicy {
   /** When the carrier could not answer, whether a texted code still counts. Default policy: no. */
   trustTextCodeWithoutCarrierCheck: boolean;
   /**
+   * Where a texted code may go: E.164 country calling codes, digits only (`"1"`, `"33"`), or a
+   * longer prefix that narrows one (`"1204"`, one area code), matched against the number on file.
+   * Absent, no code is texted anywhere, and a `badge.verify` step that uses `text_code` is refused.
+   */
+  textCodeCountryCodes?: string[];
+  /**
    * The class of each scope whose name does not imply one (SCOPE_PREFIX_CLASSES), for example
    * `{ "owner.command": "none" }`. A scope with no class is refused, so a new money scope cannot
    * slip under the floor by its name. A class here can make a scope stricter, never looser.
@@ -101,6 +108,9 @@ export const SCOPE_PREFIX_CLASSES: ReadonlyArray<readonly [prefix: string, cls: 
 
 /** Factors that are not something the caller knows. Level 2 and above need one of them. */
 export const NON_KNOWLEDGE_FACTORS: readonly string[] = ["text_code", "carrier_identity_match", "photo_id"];
+
+/** A destination prefix in `textCodeCountryCodes`: a country calling code, or a longer prefix of one. */
+const COUNTRY_CODE = /^[1-9][0-9]{0,5}$/;
 
 /** The policy's limit on keypad attempts per call, like the PIN's. */
 export const MAX_KEYPAD_ATTEMPTS = 5;
@@ -201,6 +211,14 @@ export function validatePolicy(
   }
   if (typeof p.simSwapWindowHours !== "number" || !(p.simSwapWindowHours > 0)) errors.push("simSwapWindowHours must be a positive number");
   if (typeof p.trustTextCodeWithoutCarrierCheck !== "boolean") errors.push("trustTextCodeWithoutCarrierCheck must be true or false");
+  const countries = p.textCodeCountryCodes;
+  if (countries !== undefined) {
+    if (!isStringArray(countries) || countries.length === 0 || !countries.every((c) => COUNTRY_CODE.test(c))) {
+      errors.push("textCodeCountryCodes must list E.164 country calling codes, 1 to 6 digits without the +");
+    } else if (new Set(countries).size !== countries.length) {
+      errors.push("textCodeCountryCodes has duplicates");
+    }
+  }
   return errors;
 }
 

@@ -35,6 +35,7 @@ import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
 import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
 import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
+import * as textCode from "./verify/text-code.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
 export type { EngineAdapters, Locale } from "./core/runtime.ts";
@@ -300,8 +301,11 @@ export class Engine {
 
   // ---- Badge (verify) ----------------------------------------------------------------------
 
-  /** Starts (or restarts) verification, with the account number the caller keyed or a subject key the host's code chose. */
-  beginVerification(callId: string, input: { accountNumber: string } | { subjectKey: string }): Promise<void> {
+  /**
+   * Starts (or restarts) verification, with the account number the caller keyed or a subject key the
+   * host's code chose, and the calling number unless it is withheld (counted, never a factor).
+   */
+  beginVerification(callId: string, input: badge.BeginVerificationInput): Promise<void> {
     return badge.beginVerification(this.#rt, callId, input);
   }
 
@@ -324,8 +328,17 @@ export class Engine {
     return badge.checkCarrier(this.#rt, callId);
   }
 
-  sendTextCode(callId: string): Promise<never> {
-    return badge.sendTextCode(this.#rt, callId);
+  /**
+   * Texts a one-time code to the number on file, after a keypad or PIN match. Always `{ sent: true }`:
+   * a send refused by the country allow-list or a limit looks the same, so the host speaks one line.
+   */
+  sendTextCode(callId: string): Promise<{ sent: true }> {
+    return textCode.sendTextCode(this.#rt, callId);
+  }
+
+  /** Judges a texted code and records a `text_code` factor. 5 tries per code, 10 minutes, used once. */
+  checkTextCode(callId: string, code: string): Promise<badge.KeypadResult> {
+    return textCode.checkTextCode(this.#rt, callId, code);
   }
 
   startPhotoId(callId: string): Promise<{ sent: true }> {

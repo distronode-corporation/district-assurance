@@ -4,6 +4,8 @@ import { generateKeyPairSync } from "node:crypto";
 
 import type {
   CarrierSignals,
+  CodeSendKey,
+  CodeStore,
   IdentityProvider,
   IntakeRecord,
   MessagePurpose,
@@ -154,6 +156,24 @@ export class FakePinVerifier implements PinVerifier {
   async verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean }> {
     this.asked.push(input.subjectKey);
     return { matched: this.#pins.get(`${input.workspaceId}/${input.subjectKey}`) === input.pin };
+  }
+}
+
+/**
+ * The reference `CodeStore`: send times per key, in memory. Share one between the engines of a
+ * workspace, as a durable one is shared.
+ */
+export class MemoryCodeStore implements CodeStore {
+  readonly #sends = new Map<string, number[]>();
+
+  async take(input: { workspaceId: string; key: CodeSendKey; at: string; max: number; windowSeconds: number; minIntervalSeconds: number }): Promise<boolean> {
+    const id = JSON.stringify([input.workspaceId, input.key.scope, input.key.key]);
+    const at = Date.parse(input.at);
+    const recent = (this.#sends.get(id) ?? []).filter((t) => t > at - input.windowSeconds * 1000);
+    if (recent.length >= input.max || recent.some((t) => t > at - input.minIntervalSeconds * 1000)) return false;
+    recent.push(at);
+    this.#sends.set(id, recent);
+    return true;
   }
 }
 
