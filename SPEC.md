@@ -314,7 +314,9 @@ its JSON string, since `node:sqlite` binds text as UTF-8 and would turn a lone s
 U+FFFD, so two ids that differ only there stay apart; `putIntakeRecord` keeps the first filing of a
 `recordId`, and `putSubject` adds or replaces a subject. `openSqliteStores(path)` opens both on one
 file in WAL mode, created with mode 0600, with a 5-second busy timeout; it takes a filesystem path
-or `:memory:`, and refuses a `file:` URI, whose file would not get that mode. Both pass
+or `:memory:`, and refuses a `file:` URI, whose file would not get that mode. It also refuses an
+existing database file, or a `-wal` or `-shm` file beside it, that is readable or writable by group
+or others (SQLite keeps an existing file's mode). Both pass
 `auditLedgerContract` and `recordStoreContract` (PRV-5) and keep what they hold across a restart.
 
 ## 11. Canonical JSON

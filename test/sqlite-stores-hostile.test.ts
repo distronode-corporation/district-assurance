@@ -50,6 +50,18 @@ describe("attack: file modes", { skip: process.platform === "win32" }, () => {
     chmodSync(path, 0o600);
     track(openSqliteDatabase(path)).close();
   });
+
+  it("a WAL or shared-memory file left beside the database readable by others is refused too", () => {
+    for (const suffix of ["-wal", "-shm"]) {
+      const path = newFile();
+      closeSync(openSync(path, "w", 0o600));
+      closeSync(openSync(`${path}${suffix}`, "w", 0o644));
+      chmodSync(`${path}${suffix}`, 0o644);
+      assert.throws(() => track(openSqliteDatabase(path)), new RegExp(`${suffix}.*readable or writable by others`), suffix);
+      chmodSync(`${path}${suffix}`, 0o600);
+      track(openSqliteDatabase(path)).close();
+    }
+  });
 });
 
 describe("attack: hostile input against the memory reference", () => {

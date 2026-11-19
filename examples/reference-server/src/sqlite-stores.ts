@@ -12,7 +12,7 @@
 // IMMEDIATE), so several processes on one file also keep one chain; a process waits up to the busy
 // timeout for another's lock, blocking its event loop meanwhile. Fine for a reference server, not
 // tuned for production.
-import { closeSync, openSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
 import { GENESIS_HASH, chainEntry, type AuditEntry, type AuditInput, type AuditLedger, type IntakeRecord, type RecordStore, type SubjectRecord } from "../../../src/index.ts";
@@ -26,16 +26,23 @@ export const SQLITE_BUSY_TIMEOUT_MS = 5_000;
  * connection. A `file:` URI is refused: SQLite would open the file the URI names, not the path
  * whose mode was set, so the database could be created readable by others. A file that already
  * exists readable or writable by group or others is refused too (the mode only applies when the
- * file is created), since its subjects and records would be readable to them. SQLite creates its
- * WAL and shared-memory files with the database file's mode.
+ * file is created), since its subjects and records would be readable to them, and so is a WAL or
+ * shared-memory file left beside it (SQLite creates new ones with the database file's mode, but
+ * keeps the mode of one that exists).
  */
 export function openSqliteDatabase(path: string): DatabaseSync {
   if (/^file:/i.test(path)) throw new Error("openSqliteDatabase takes a filesystem path, not a file: URI");
   if (path !== ":memory:") {
     closeSync(openSync(path, "a", 0o600));
-    // Windows has no group or other bits to check.
-    if (process.platform !== "win32" && (statSync(path).mode & 0o077) !== 0) {
-      throw new Error(`the database file ${path} is readable or writable by others; make it owner-only (chmod 600) first`);
+    // Windows has no group or other bits to check. A WAL or shared-memory file left from an earlier
+    // run keeps its own mode (SQLite reuses it), so each that exists is checked as the database is.
+    if (process.platform !== "win32") {
+      for (const file of [path, `${path}-wal`, `${path}-shm`]) {
+        if (file !== path && !existsSync(file)) continue;
+        if ((statSync(file).mode & 0o077) !== 0) {
+          throw new Error(`the database file ${file} is readable or writable by others; make it owner-only (chmod 600) first`);
+        }
+      }
     }
   }
   const db = new DatabaseSync(path, { timeout: SQLITE_BUSY_TIMEOUT_MS });
