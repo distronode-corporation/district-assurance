@@ -45,12 +45,18 @@ export function receiptDigest(body: ReceiptBody): string {
 /**
  * Signs a receipt body. The signer must keep its contract: an ES256 signature in IEEE P1363 form,
  * exactly 64 bytes (`derToP1363` converts the DER most key stores return). Any other length is
- * refused here (`invalid_input`), so a DER signature never reaches a receipt that cannot verify.
+ * refused here (`invalid_input`), and so is a signature that does not verify against the signer's
+ * own public key (a wrong key, a DER signature that happens to be 64 bytes, bytes that are not a
+ * signature): no receipt is issued that cannot verify.
  */
 export async function signReceipt(signer: ReceiptSigner, body: ReceiptBody): Promise<SignedReceipt> {
   const signature = await signer.sign(receiptPayload(body));
   if (signature.byteLength !== 64) throw new EngineError("invalid_input", `the receipt signer returned ${signature.byteLength} bytes, not a 64-byte P1363 signature`);
-  return { body, alg: signer.algorithm, kid: signer.keyId, signature: Buffer.from(signature).toString("base64url") };
+  const receipt: SignedReceipt = { body, alg: signer.algorithm, kid: signer.keyId, signature: Buffer.from(signature).toString("base64url") };
+  if (!verifyReceipt(receipt, [{ ...signer.publicJwk(), kid: signer.keyId }])) {
+    throw new EngineError("invalid_input", "the receipt signer's signature does not verify against its own public key");
+  }
+  return receipt;
 }
 
 /**
