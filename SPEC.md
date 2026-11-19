@@ -589,7 +589,10 @@ it), per calling number and per subject.
   limit refuses it too (that start stays counted). A start the call itself then refuses, because a
   concurrent `startFlow` attached a flow first or a concurrent `startCall` took the id first, is
   taken back off each counter (`removeFailure` at the time it was recorded); one whose write saved
-  and then failed (the ledger down) stays counted. A `callingNumber` that is not a string is
+  and then failed (the ledger down) stays counted. A counter write that fails while the start is
+  counted passes its error on, after the starts already counted are taken back; the failed write's
+  own (kept or not) and one the store refuses to take back stay as the store left them (fail
+  closed). A `callingNumber` that is not a string is
   `invalid_input`, like one that is not E.164.
 - A refused start throws `RateLimitedError` (an `EngineError` with code `rate_limited`) with one
   message, whichever limit was hit, and the `callId` of the call it was refused on, so a host that
