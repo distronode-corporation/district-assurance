@@ -5,10 +5,46 @@
 // A module declares four things in code: what it provides (factors, flow steps, outcomes), the
 // scopes it grants or needs, the adapters it requires, and a validator for its settings. The
 // registry holds the installed modules; a workspace's FlowConfig turns each one on or off.
+//
+// Factor plug-ins are described here too, because the registry checks them: a host adds one to
+// Badge (at construction, or later with `engine.useFactor`), or an outside module supplies the
+// judges for the factors its manifest provides. Badge runs them all.
+import type { SubjectRecord } from "./adapters.ts";
 import type { JsonValue } from "./canonical.ts";
 import { EngineError } from "./errors.ts";
-import { scopeClass, type ScopeClass, type VerificationPolicy } from "./policy.ts";
+import { FORBIDDEN_FACTOR_KINDS, scopeClass, type ScopeClass, type VerificationPolicy } from "./policy.ts";
+import type { AdapterName, Locale } from "./runtime.ts";
 import type { SessionState } from "./session.ts";
+import { isIntegerIn, isStringArray } from "./shape.ts";
+
+/** What the caller entered: one string (a PIN), or one value per field (keypad knowledge). */
+export type FactorEntry = string | Readonly<Record<string, string>>;
+
+export interface FactorJudgeInput {
+  workspaceId: string;
+  /** Null when the account number was not something a keypad can produce. */
+  subjectKey: string | null;
+  /** Null for an unknown subject. Judge it the same way, and give the same answer as a wrong entry. */
+  subject: SubjectRecord | null;
+  /** From a code path, never from the model. Discarded after judging. */
+  entry: FactorEntry;
+  /** HMAC-SHA256 under the workspace's knowledge key, hex. Asynchronous: the key may live in a key management service. */
+  hmac(data: string): Promise<string>;
+  /** The call's language, which decides how a spoken answer is read. */
+  locale: Locale;
+}
+
+/** A factor the caller enters and code judges. The engine counts each attempt before judging it. */
+export interface FactorPlugin {
+  /** snake_case, 3 to 32 characters. Never a name for caller ID. */
+  kind: string;
+  summary: string;
+  /** Attempts per call, 1 to 5. */
+  maxAttemptsPerCall: number;
+  /** Adapter names the judge needs. */
+  adapters: readonly AdapterName[];
+  judge(input: FactorJudgeInput): Promise<boolean>;
+}
 
 /** One step of a flow, as stored in a FlowConfig: `type` is `<module>.<step>`, the rest is the step's own. */
 export interface FlowStep {
@@ -67,6 +103,12 @@ export type StepStatus = "pending" | "complete" | "failed";
 
 export interface AssuranceModule {
   readonly manifest: ModuleManifest;
+  /**
+   * The judges for the factors this module's manifest provides, one per factor, when an outside
+   * module brings its own factors. Badge runs them like its own plug-ins, and Badge's settings turn
+   * them on. Badge leaves this out: its own code judges its factors.
+   */
+  readonly factorPlugins?: readonly FactorPlugin[];
   /** Every problem with this module's settings, as sentences. Settings come from storage: check every type. */
   validateSettings(settings: unknown): string[];
   /** Every adapter valid settings need, the manifest's included. */
@@ -108,6 +150,75 @@ export interface AssuranceModule {
 
 const MODULE_NAME = /^[a-z][a-z0-9-]{1,31}$/;
 const STEP_NAME = /^[a-z][a-z0-9_]{0,31}$/;
+const FACTOR_KIND = /^[a-z][a-z0-9_]{2,31}$/;
+
+/** Every problem with a factor kind's name: snake_case, 3 to 32 characters, and never caller ID. */
+export function checkFactorKind(kind: string): string[] {
+  const errors: string[] = [];
+  if (!FACTOR_KIND.test(kind)) errors.push(`factor kind ${JSON.stringify(kind)} must be snake_case, 3 to 32 characters`);
+  if (FORBIDDEN_FACTOR_KINDS.includes(kind)) errors.push(`factor kind ${kind} would make caller ID a factor, which it never is`);
+  return errors;
+}
+
+/**
+ * A plug-in as it is when it is registered: its fields read once into a frozen copy, and its judge
+ * called on the original. What is checked is what runs: a host that changes the object later (a
+ * higher attempt limit, another kind) changes nothing, and a getter answers once.
+ */
+export function snapshotFactorPlugin(plugin: FactorPlugin): FactorPlugin {
+  const { kind, summary, maxAttemptsPerCall, adapters, judge } = plugin;
+  return Object.freeze({
+    kind,
+    summary,
+    maxAttemptsPerCall,
+    adapters: Array.isArray(adapters) ? Object.freeze([...adapters]) : adapters,
+    judge: typeof judge === "function" ? (input: FactorJudgeInput) => judge.call(plugin, input) : judge,
+  });
+}
+
+/** Every problem with a factor plug-in, given the kinds already taken. */
+export function checkFactorPlugin(plugin: FactorPlugin, taken: readonly string[]): string[] {
+  // A kind that is not a string (an object whose toString passes the pattern) would never match
+  // the name a config uses, so it is refused before anything compares it.
+  if (typeof plugin.kind !== "string") return ["factor kind must be a string"];
+  const errors = checkFactorKind(plugin.kind);
+  if (taken.includes(plugin.kind)) errors.push(`factor kind ${plugin.kind} already exists`);
+  errors.push(...judgeErrors(plugin).map((e) => `factor ${plugin.kind}: ${e}`));
+  return errors;
+}
+
+function judgeErrors(plugin: FactorPlugin): string[] {
+  const errors: string[] = [];
+  if (!isIntegerIn(plugin.maxAttemptsPerCall, 1, 5)) errors.push("maxAttemptsPerCall must be 1 to 5");
+  if (typeof plugin.judge !== "function") errors.push("judge must be a function");
+  // A string here would be read one character at a time as adapter names.
+  if (!isStringArray(plugin.adapters)) errors.push("adapters must be a list of adapter names");
+  return errors;
+}
+
+/** The one module whose own code judges the factors it provides, so it supplies no judges. */
+const SELF_JUDGING_MODULE = "badge";
+
+/**
+ * Every problem with the judges a module supplies: exactly one for each factor its manifest
+ * provides, whether or not it gives a list (only Badge judges its own). The kinds' names and
+ * clashes are checked with the manifest.
+ */
+export function checkFactorPlugins(module: AssuranceModule, given: readonly FactorPlugin[] | undefined = module.factorPlugins): string[] {
+  const { name, provides } = module.manifest;
+  if (given === undefined && name === SELF_JUDGING_MODULE) return [];
+  const plugins = given ?? [];
+  const errors: string[] = [];
+  const judged: string[] = [];
+  for (const plugin of plugins) {
+    if (!provides.factors.includes(plugin.kind)) errors.push(`module ${name}: judges ${plugin.kind}, a factor its manifest does not provide`);
+    if (judged.includes(plugin.kind)) errors.push(`module ${name}: judges ${plugin.kind} twice`);
+    errors.push(...judgeErrors(plugin).map((e) => `module ${name}: factor ${plugin.kind}: ${e}`));
+    judged.push(plugin.kind);
+  }
+  for (const kind of provides.factors) if (!judged.includes(kind)) errors.push(`module ${name}: factor ${kind} has no judge`);
+  return errors;
+}
 
 /** Names the package keeps for itself: its own modules, and words that would read as the core. */
 export const RESERVED_MODULE_NAMES: readonly string[] = ["core", "engine", "flow", "module"];
@@ -130,6 +241,7 @@ export function checkManifest(manifest: ModuleManifest, installed: readonly Assu
     if (!manifest.provides.steps.includes(step)) errors.push(`module ${name}: needs a scope for ${step}, which it does not provide`);
   }
   for (const factor of manifest.provides.factors) {
+    errors.push(...checkFactorKind(factor).map((e) => `module ${name}: ${e}`));
     const owner = installed.find((m) => m.manifest.provides.factors.includes(factor));
     if (owner !== undefined) errors.push(`module ${name}: factor ${factor} is already provided by ${owner.manifest.name}`);
   }
@@ -151,6 +263,8 @@ export class ModuleRegistry {
   /** Names only the constructor may install (an engine's built-in modules): refused later, even after a removal. */
   readonly #reserved: ReadonlySet<string>;
   #sealed = false;
+  /** The judges each module supplied, as they were checked when it was installed. */
+  readonly #judges = new Map<string, readonly FactorPlugin[]>();
 
   constructor(options: { adapters?: Iterable<string>; capabilities?: Readonly<Record<string, unknown>>; modules?: readonly AssuranceModule[]; reserved?: readonly string[] } = {}) {
     this.adapters = new Set(options.adapters ?? []);
@@ -160,13 +274,34 @@ export class ModuleRegistry {
     this.#sealed = true;
   }
 
-  /** Installs a module. Refuses a bad or clashing manifest with every problem. */
+  /** Installs a module. Refuses a bad or clashing manifest, or bad factor judges, with every problem. */
   use(module: AssuranceModule): this {
     if (this.#sealed && this.#reserved.has(module.manifest.name)) throw new EngineError("invalid_input", `${module.manifest.name} is the name of a built-in module`);
-    const errors = checkManifest(module.manifest, this.list());
-    if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+    const judges = this.#check(module, this.list());
     this.#modules.set(module.manifest.name, module);
+    this.#judges.set(module.manifest.name, judges);
     return this;
+  }
+
+  /**
+   * Swaps an installed module for a new build of it under the same name (Badge with one more
+   * factor), checked against the other modules as a new one would be. It keeps its place in the order.
+   */
+  replace(module: AssuranceModule): void {
+    const name = module.manifest.name;
+    if (!this.#modules.has(name)) throw new EngineError("invalid_input", `no module named ${name} is installed`);
+    const judges = this.#check(module, this.list().filter((m) => m.manifest.name !== name));
+    this.#modules.set(name, module);
+    this.#judges.set(name, judges);
+  }
+
+  /** Checks a module and returns the judges it supplies, copied once: a list changed later is never read again. */
+  #check(module: AssuranceModule, others: readonly AssuranceModule[]): readonly FactorPlugin[] {
+    const given = module.factorPlugins;
+    const judges = given === undefined ? undefined : Array.from(given, snapshotFactorPlugin);
+    const errors = [...checkManifest(module.manifest, others), ...checkFactorPlugins(module, judges)];
+    if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+    return judges ?? [];
   }
 
   /** Uninstalls a module. The ledger's module cannot be removed. */
@@ -175,6 +310,7 @@ export class ModuleRegistry {
     if (module === undefined) throw new EngineError("invalid_input", `no module named ${name} is installed`);
     if (module.manifest.alwaysOn === true) throw new EngineError("precondition_failed", `${name} holds the audit ledger and cannot be removed`);
     this.#modules.delete(name);
+    this.#judges.delete(name);
   }
 
   get(name: string): AssuranceModule | undefined {
@@ -203,5 +339,11 @@ export class ModuleRegistry {
   /** Every factor kind the installed modules provide. */
   factorKinds(): string[] {
     return this.list().flatMap((m) => [...m.manifest.provides.factors]);
+  }
+
+  /** The judges outside modules supply for their factors. Badge's own plug-ins are inside Badge. */
+  factorPlugins(): FactorPlugin[] {
+    // Every installed module has its entry: use() and replace() set it with the module.
+    return this.list().flatMap((m) => [...this.#judges.get(m.manifest.name)!]);
   }
 }

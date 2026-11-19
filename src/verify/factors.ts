@@ -1,44 +1,17 @@
 // Badge factors are plug-ins. Each factor kind says how it is entered, how many attempts a call
 // gets, and which adapters it needs; Badge's settings turn each one on or off, and a flow step
 // says which of them may count. A host adds its own factor (one the caller enters and code judges)
-// with `badgeModule({ factors: [...] })`.
-import type { SubjectRecord } from "../core/adapters.ts";
+// with `badgeModule({ factors: [...] })` or, after the engine is built, `engine.useFactor`. The
+// plug-in types and their checks live in the core (core/module.ts), where the registry uses them.
 import { hexDigestsEqual, hmacSha256Hex } from "../core/hash.ts";
-import { FACTOR_KINDS, FORBIDDEN_FACTOR_KINDS, type SpokenPolicy, type VerificationPolicy } from "../core/policy.ts";
-import { isIntegerIn } from "../core/shape.ts";
-import type { AdapterName, EngineRuntime, Locale } from "../core/runtime.ts";
+import type { FactorJudgeInput } from "../core/module.ts";
+import { FACTOR_KINDS, type SpokenPolicy, type VerificationPolicy } from "../core/policy.ts";
+import type { AdapterName, EngineRuntime } from "../core/runtime.ts";
 import type { LockoutSettings } from "./counters.ts";
 import { isKeypadEntry, judgeKeypadWith } from "./knowledge.ts";
 import { normaliseSpokenAnswer } from "./spoken.ts";
 
-/** What the caller entered: one string (a PIN), or one value per field (keypad knowledge, spoken transcripts). */
-export type FactorEntry = string | Readonly<Record<string, string>>;
-
-export interface FactorJudgeInput {
-  workspaceId: string;
-  /** Null when the account number was not something a keypad can produce. */
-  subjectKey: string | null;
-  /** Null for an unknown subject. Judge it the same way, and give the same answer as a wrong entry. */
-  subject: SubjectRecord | null;
-  /** From a code path, never from the model. Discarded after judging. */
-  entry: FactorEntry;
-  /** HMAC-SHA256 under the workspace's knowledge key, hex. Asynchronous: the key may live in a key management service. */
-  hmac(data: string): Promise<string>;
-  /** The call's language, which decides how a spoken answer is read. */
-  locale: Locale;
-}
-
-/** A factor the caller enters and code judges. The engine counts each attempt before judging it. */
-export interface FactorPlugin {
-  /** snake_case, 3 to 32 characters. Never a name for caller ID. */
-  kind: string;
-  summary: string;
-  /** Attempts per call, 1 to 5. */
-  maxAttemptsPerCall: number;
-  /** Adapter names the judge needs. */
-  adapters: readonly AdapterName[];
-  judge(input: FactorJudgeInput): Promise<boolean>;
-}
+export { checkFactorPlugin, snapshotFactorPlugin, type FactorEntry, type FactorJudgeInput, type FactorPlugin } from "../core/module.ts";
 
 export type PinMode = "keyed_hash" | "verifier";
 
@@ -109,18 +82,6 @@ export const BUILT_IN_FACTORS: Readonly<Record<(typeof FACTOR_KINDS)[number], { 
  * known to more people.
  */
 export const KNOWLEDGE_FACTORS: readonly string[] = ["keypad_knowledge", "pin"];
-
-const PLUGIN_KIND = /^[a-z][a-z0-9_]{2,31}$/;
-
-/** Every problem with a factor plug-in. */
-export function checkFactorPlugin(plugin: FactorPlugin, taken: readonly string[]): string[] {
-  const errors: string[] = [];
-  if (!PLUGIN_KIND.test(plugin.kind)) errors.push(`factor kind ${JSON.stringify(plugin.kind)} must be snake_case, 3 to 32 characters`);
-  if (FORBIDDEN_FACTOR_KINDS.includes(plugin.kind)) errors.push(`factor kind ${plugin.kind} would make caller ID a factor, which it never is`);
-  if (taken.includes(plugin.kind)) errors.push(`factor kind ${plugin.kind} already exists`);
-  if (!isIntegerIn(plugin.maxAttemptsPerCall, 1, 5)) errors.push(`factor ${plugin.kind}: maxAttemptsPerCall must be 1 to 5`);
-  return errors;
-}
 
 /**
  * The PIN factor's judge: a keyed hash on file, or the host's verifier. Unknown subjects do the same

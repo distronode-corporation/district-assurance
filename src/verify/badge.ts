@@ -28,6 +28,7 @@ import {
   BUILT_IN_FACTORS,
   KNOWLEDGE_FACTORS,
   checkFactorPlugin,
+  snapshotFactorPlugin,
   judgeKeypad,
   judgePin,
   judgeSpoken,
@@ -195,18 +196,29 @@ export function badgeModule(options: { factors?: readonly FactorPlugin[] } = {})
   return new BadgeModule(options.factors ?? []);
 }
 
+/**
+ * Badge never changes once built: a factor added later (`withFactor`) or supplied by an outside
+ * module (`withOutsideFactors`) gives a new Badge, which the engine swaps into its registry. So a
+ * Badge shared by several engines never gains a factor through one of them.
+ */
 export class BadgeModule implements AssuranceModule {
   readonly manifest: AssuranceModule["manifest"];
+  /** The host's plug-ins: Badge provides them, in its manifest. */
   readonly #plugins = new Map<string, FactorPlugin>();
+  /** The judges outside modules supply: those modules provide the factors (and the registry checked them); Badge runs them. */
+  readonly #outside = new Map<string, FactorPlugin>();
 
-  constructor(plugins: readonly FactorPlugin[]) {
+  constructor(plugins: readonly FactorPlugin[], outside: readonly FactorPlugin[] = []) {
     const errors: string[] = [];
-    for (const plugin of plugins) {
+    for (const given of plugins) {
+      // Read once: the copy that passes the checks is the one Badge keeps and runs.
+      const plugin = snapshotFactorPlugin(given);
       const problems = checkFactorPlugin(plugin, [...FACTOR_KINDS, ...this.#plugins.keys()]);
       errors.push(...problems);
       if (problems.length === 0) this.#plugins.set(plugin.kind, plugin);
     }
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+    for (const plugin of outside) this.#outside.set(plugin.kind, plugin);
     this.manifest = {
       name: BADGE,
       version: "1",
@@ -217,14 +229,24 @@ export class BadgeModule implements AssuranceModule {
     };
   }
 
+  /** This Badge with one more plug-in of the host's. Refuses a bad plug-in or a kind Badge already has. */
+  withFactor(plugin: FactorPlugin): BadgeModule {
+    return new BadgeModule([...this.#plugins.values(), plugin], [...this.#outside.values()]);
+  }
+
+  /** This Badge running the judges the installed outside modules supply (all of them, replacing the last set). */
+  withOutsideFactors(outside: readonly FactorPlugin[]): BadgeModule {
+    return new BadgeModule([...this.#plugins.values()], outside);
+  }
+
   plugin(kind: string): FactorPlugin | undefined {
-    return this.#plugins.get(kind);
+    return this.#plugins.get(kind) ?? this.#outside.get(kind);
   }
 
   validateSettings(settings: unknown): string[] {
     if (!isObject(settings)) return ["must be an object with the factors that are on"];
     const errors = unknownKeys(settings, SETTINGS_KEYS).map((k) => `${k} is not a badge setting`);
-    const known = this.manifest.provides.factors;
+    const known = [...this.manifest.provides.factors, ...this.#outside.keys()];
     if (!isStringArray(settings.factors) || settings.factors.length === 0) {
       errors.push("factors must list at least one factor");
     } else {
@@ -248,7 +270,7 @@ export class BadgeModule implements AssuranceModule {
     const adapters = new Set<string>(this.manifest.adapters);
     for (const kind of s.factors) {
       const builtIn = BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS];
-      for (const a of builtIn?.adapters ?? this.#plugins.get(kind)!.adapters) adapters.add(a);
+      for (const a of builtIn?.adapters ?? this.plugin(kind)!.adapters) adapters.add(a);
       // A factor the caller enters (a plug-in always is) is counted across calls.
       if (builtIn?.entered !== false) adapters.add("counters");
     }
@@ -549,7 +571,8 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   const reserved = await rt.update(callId, (draft) => {
     const s = assertAttempt(rt, draft, kind, current.epoch);
     const max = maxAttempts(rt, module, kind);
-    const used = s.attempts[kind] ?? 0;
+    // Own keys only: an inherited one (`constructor`) must never stand in for a count.
+    const used = Object.hasOwn(s.attempts, kind) ? s.attempts[kind]! : 0;
     if (used >= max) return null;
     s.attempts[kind] = used + 1;
     return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch, locale: draft.record.locale, taints: s.taints };

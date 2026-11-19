@@ -130,6 +130,9 @@ All notable changes to this project are documented here. The format follows
 - An adversarial suite in English and Canadian French (VER-7): scripted dialogues run through a
   scripted host, checking no grant without factors, no text before a match, identical answers for
   unknown and wrong, and no grant after a taint.
+- Badge factor plug-ins after the engine is built (MOD-3): `engine.useFactor(plugin)`, and outside
+  modules that supply `factorPlugins` for the factors their manifest provides. The registry checks
+  them for clashes and caller-ID names; they stay off until a config turns them on.
 
 ### Changed
 

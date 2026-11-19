@@ -14,7 +14,7 @@ import type { AttemptCounterKey, AuditEntry, IntakeRecord, ReceiptSigner, Sessio
 import { canonicalJson, hasLoneSurrogate, type JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
-import { EngineError, NotImplementedError, RateLimitedError } from "./core/errors.ts";
+import { EngineError, RateLimitedError } from "./core/errors.ts";
 import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
 import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
@@ -152,13 +152,14 @@ export class Engine {
   readonly #ids: IdGenerator;
   readonly #redactor: Redactor;
   readonly #onEvent: EventListener | undefined;
-  readonly #badge: badge.BadgeModule;
+  /** Badge as installed now: a new build replaces it when a factor is added (`useFactor`, `use`). */
+  #badge: badge.BadgeModule;
   readonly #rt: EngineRuntime;
   /** Duress alerts this engine is sending now, by id, with when it started: one send at a time, retried after a while. */
   readonly #sending = new Map<string, number>();
   /** Per call, the owed alerts of the duress alert send scheduled and not yet started (`#sendDuressAlertsSoon`). */
   readonly #sendScheduled = new Map<string, string>();
-  readonly #receiptModules: readonly AssuranceModule[];
+  #receiptModules: readonly AssuranceModule[];
   #config: FlowConfig;
 
   constructor(options: EngineOptions) {
@@ -220,6 +221,9 @@ export class Engine {
     }
     this.#receiptModules = builtInModules(this.#badge);
     this.registry = new ModuleRegistry({ adapters: present, capabilities, reserved: BUILT_IN_MODULES, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
+    // This engine's own build of Badge, running the judges the outside modules given here supply.
+    // A Badge shared by several engines never gains a factor through one of them.
+    this.#swapBadge(this.#badge.withOutsideFactors(this.registry.factorPlugins()));
     this.#config = this.#prepare(options.config === undefined ? defaultConfig() : options.config);
     this.#rt = this.#runtime();
   }
@@ -240,7 +244,11 @@ export class Engine {
     this.#config = this.#prepare(config);
   }
 
-  /** Installs an outside module. It stays off until a config turns it on. */
+  /**
+   * Installs an outside module. It stays off until a config turns it on. The factors its manifest
+   * provides, with the judges it supplies, are run by Badge and stay off until Badge's settings
+   * in a config turn them on.
+   */
   use(module: AssuranceModule): this {
     // A built-in module's name stays the engine's, even after the module was removed: a host's
     // module can never stand in for Gate's grants or Paylink's payments.
@@ -248,23 +256,43 @@ export class Engine {
       throw new EngineError("invalid_input", `${module.manifest.name} is the name of a built-in module`);
     }
     this.registry.use(module);
+    this.#swapBadge(this.#badge.withOutsideFactors(this.registry.factorPlugins()));
     return this;
   }
 
   /**
-   * Adds a Badge factor plug-in after the engine was built. Planned (MOD-3): today plug-ins are
-   * given at construction, with `badge: badgeModule({ factors })`.
+   * Adds a Badge factor plug-in after the engine was built, as `badge: badgeModule({ factors })`
+   * does at construction. The registry refuses a bad kind, a name for caller ID, or a kind another
+   * module provides. The factor stays off until a config turns it on in Badge's settings; the
+   * config in force is unchanged, and `validateConfig` with this engine's registry knows the kind.
    */
-  useFactor(_plugin: FactorPlugin): never {
-    throw new NotImplementedError("Engine.useFactor", "MOD-3");
+  useFactor(plugin: FactorPlugin): this {
+    if (this.registry.get(badge.BADGE) !== this.#badge) throw new EngineError("precondition_failed", "the badge module is not installed");
+    this.#swapBadge(this.#badge.withFactor(plugin));
+    return this;
   }
 
-  /** Uninstalls a module that the config has turned off. The ledger's module cannot be removed. */
+  /**
+   * Uninstalls a module that the config has turned off. The ledger's module cannot be removed, nor
+   * a module supplying a factor the config in force names (in the policy or Badge's settings).
+   */
   remove(name: string): void {
     if (moduleEnabled(this.#config, this.registry, name) && this.registry.get(name)?.manifest.alwaysOn !== true) {
       throw new EngineError("precondition_failed", `${name} is on in the config; turn it off first`);
     }
+    const named = new Set(this.#config.policy.levels.flatMap((rule) => rule.anyOf.flat()));
+    if (this.isEnabled(badge.BADGE)) for (const kind of this.#rt.settings<BadgeSettings>(badge.BADGE).factors) named.add(kind);
+    const inUse = (this.registry.get(name)?.factorPlugins ?? []).filter((plugin) => named.has(plugin.kind));
+    if (inUse.length > 0) throw new EngineError("precondition_failed", `${name} supplies the factor ${inUse[0]!.kind}, which the config uses; take it out first`);
     this.registry.remove(name);
+    this.#swapBadge(this.#badge.withOutsideFactors(this.registry.factorPlugins()));
+  }
+
+  /** Puts a new build of Badge in place of the old, in the registry (when Badge is installed) and for the runtime. */
+  #swapBadge(next: badge.BadgeModule): void {
+    if (this.registry.get(badge.BADGE) === this.#badge) this.registry.replace(next);
+    this.#receiptModules = this.#receiptModules.map((m) => (m === this.#badge ? next : m));
+    this.#badge = next;
   }
 
   isEnabled(name: string): boolean {

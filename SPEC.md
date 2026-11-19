@@ -92,9 +92,15 @@ A module is an `AssuranceModule`: a `manifest` and pure functions.
 | `alwaysOn` | true only for Trace, which holds the ledger |
 
 `ModuleRegistry.use` refuses a manifest with a bad or reserved name, a name or factor already
-installed, a step not prefixed with the module's name, a scope need for a step it does not
-provide, or a second `alwaysOn` module. `remove` refuses Trace. `Engine.remove` also refuses a
-module the config has on.
+installed, a factor kind that is not snake_case of 3 to 32 characters or is a name for caller ID
+(section 4), a step not prefixed with the module's name, a scope need for a step it does not
+provide, or a second `alwaysOn` module. A module whose manifest provides factors supplies
+`factorPlugins`, the judges for them: exactly one per factor, none for a factor it does not provide,
+each with `maxAttemptsPerCall` 1 to 5 and a `judge` function. A module that leaves the list out is
+refused if it provides any factor; only Badge, whose own code judges its factors, is exempt. `replace` swaps an installed module for a
+new build under the same name, checked against the others the same way, in its place. `remove`
+refuses Trace. `Engine.remove` also refuses a module the config has on, and a module supplying a
+factor the config in force names (in the policy or Badge's `factors`).
 
 | Built-in | Steps | Needs | Adapters |
 |---|---|---|---|
@@ -127,10 +133,21 @@ Built-in factor kinds: `keypad_knowledge`, `pin`, `carrier_identity_match`, `pho
 `spoken_knowledge` (section 5), `callback` (section 6) and `text_code` (section 4, below). A
 **factor plug-in** adds a
 kind the caller enters and code judges: `{kind, summary, maxAttemptsPerCall (1 to 5), adapters,
-judge}`, installed with `badgeModule({ factors })`. Its kind is snake_case, 3 to 32 characters, not
-a built-in kind, and never `caller_id`, `calling_number`, `ani` or `cli`. Its judge gets the
-subject, the entry and `hmac(data)` under the knowledge key (asynchronous, a `Promise` of the hex
-digest), never the key. Caller ID is not a kind.
+judge}`, installed with `badgeModule({ factors })` when the engine is built, or later with
+`engine.useFactor(plugin)`, or supplied by an outside module installed with `engine.use(module)`
+whose manifest provides the factor (section 3). `adapters` is a list of adapter names. Its kind
+is a string, snake_case, 3 to 32 characters, not a
+built-in kind or a kind another installed module provides, and never `caller_id`,
+`calling_number`, `ani` or `cli`; the registry refuses it otherwise, and nothing changes. Its
+judge gets the subject, the entry and `hmac(data)` under the knowledge key (asynchronous, a
+`Promise` of the hex digest), never the key. Caller
+ID is not a kind. Badge runs every plug-in the same way, whoever supplied it.
+
+`useFactor` gives the engine a new build of Badge with the plug-in added (Badge never changes once
+built, so engines built with the same Badge do not share factors added later) and needs Badge
+installed. A factor added after a config was applied is off: the config in force does not change,
+and the factor counts only once a config turns it on in Badge's `factors`. `validateConfig(config,
+engine.registry)` knows it from then on, in the policy and in Badge's settings.
 
 A policy lists, per level 1 to 3, sets of factor kinds; a level is reached when every kind in one
 of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:

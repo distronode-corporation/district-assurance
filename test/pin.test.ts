@@ -2,8 +2,11 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
+import { validateConfig } from "../src/core/config.ts";
+import { ModuleRegistry, type AssuranceModule } from "../src/core/module.ts";
+import { builtInModules } from "../src/modules.ts";
 import { badgeModule } from "../src/verify/badge.ts";
-import type { FactorJudgeInput } from "../src/verify/factors.ts";
+import type { FactorJudgeInput, FactorPlugin } from "../src/verify/factors.ts";
 import { numberKeyFor } from "../src/verify/counters.ts";
 import { pinDigest, subjectKeyFor } from "../src/verify/knowledge.ts";
 import { isWeakPin } from "../src/verify/pin.ts";
@@ -265,6 +268,175 @@ describe("factor plug-ins", () => {
     await t.engine.beginVerification(again.callId, { accountNumber: ACCOUNT });
     await t.engine.submitFactor(again.callId, "voice_passphrase", "open sesame");
     await assert.rejects(t.engine.startPhotoId(again.callId), rejects("precondition_failed"), "a plug-in match does not unlock texts to the number on file");
+  });
+});
+
+describe("factor plug-ins added after the engine is built (MOD-3)", () => {
+  const token = (judged: FactorJudgeInput[] = []): FactorPlugin => ({
+    kind: "hardware_token",
+    summary: "a code from a token the organisation issued",
+    maxAttemptsPerCall: 2,
+    adapters: [],
+    judge: async (input) => {
+      judged.push(input);
+      return input.entry === "246810" && input.subject !== null;
+    },
+  });
+  /** The test config with hardware_token in the policy at level 1 and, unless told not to, on in Badge's settings. */
+  const tokenConfig = (on = true) =>
+    testConfig((c) => {
+      c.policy.levels[0] = { level: 1, anyOf: [["keypad_knowledge"], ["hardware_token"]] };
+      if (on) (c.modules.badge!.settings as { factors: string[] }).factors.push("hardware_token");
+    });
+  /** An outside module whose manifest provides a factor and supplies its judge. */
+  const tokenModule = (plugin: FactorPlugin = token()): AssuranceModule => ({
+    manifest: {
+      name: "token-check",
+      version: "1",
+      summary: "hardware tokens",
+      provides: { factors: [plugin.kind], steps: [], outcomes: [] },
+      scopes: { grants: [], needs: {} },
+      adapters: [],
+    },
+    factorPlugins: [plugin],
+    validateSettings: () => [],
+    requiredAdapters: () => [],
+    validateStep: () => [],
+    initCall: () => null,
+    enterStep: () => null,
+    stepStatus: () => "pending",
+  });
+
+  it("useFactor: off under the config in force, known to validateConfig, judged once a config turns it on", async () => {
+    const judged: FactorJudgeInput[] = [];
+    const t = setup();
+    const before = t.engine.config;
+    assert.equal(t.engine.useFactor(token(judged)), t.engine);
+    assert.ok(t.engine.registry.factorKinds().includes("hardware_token"));
+    assert.deepEqual(t.engine.config, before, "the config in force is unchanged");
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await assert.rejects(t.engine.submitFactor(callId, "hardware_token", "246810"), rejects("precondition_failed", /turned off/));
+    // validateConfig sees the new kind with this engine's registry; a registry without it does not.
+    assert.deepEqual(validateConfig(tokenConfig(), t.engine.registry), []);
+    assert.deepEqual(validateConfig(tokenConfig(), new ModuleRegistry({ adapters: t.engine.registry.adapters, modules: builtInModules() })), [
+      "policy: level 1 set [hardware_token]: unknown factor hardware_token",
+      "modules.badge.settings: factor hardware_token is not installed",
+    ]);
+    t.engine.configure(tokenConfig());
+    assert.deepEqual(await t.engine.submitFactor(callId, "hardware_token", "000000"), { matched: false, locked: false });
+    // A failure starts a wait across calls (VER-1, #71).
+    t.clock.advance(900_000);
+    assert.deepEqual(await t.engine.submitFactor(callId, "hardware_token", "246810"), { matched: true, locked: false });
+    assert.equal((await t.engine.finishVerification(callId)).level, 1);
+    assert.equal(judged.length, 2);
+    assert.equal(Object.values(judged[0]!).includes(TEST_KNOWLEDGE_KEY), false, "the judge gets hmac, never the key");
+    const entries = await t.ledger.list();
+    assert.equal(JSON.stringify(entries).includes("246810"), false, "the entry is never written");
+  });
+
+  it("useFactor: a kind named like an inherited key (constructor) still stops at its attempt limit", async () => {
+    const judged: FactorJudgeInput[] = [];
+    const t = setup();
+    t.engine.useFactor({ ...token(judged), kind: "constructor", maxAttemptsPerCall: 1 });
+    t.engine.configure(
+      testConfig((c) => {
+        c.policy.levels[0] = { level: 1, anyOf: [["keypad_knowledge"], ["constructor"]] };
+        (c.modules.badge!.settings as { factors: string[] }).factors.push("constructor");
+      }),
+    );
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    assert.deepEqual(await t.engine.submitFactor(callId, "constructor", "000000"), { matched: false, locked: true });
+    assert.deepEqual(await t.engine.submitFactor(callId, "constructor", "246810"), { matched: false, locked: true }, "not judged past the limit");
+    assert.equal(judged.length, 1);
+  });
+
+  it("useFactor: the registry refuses clashes and caller-ID names, and nothing changes", () => {
+    const t = setup();
+    t.engine.use(tokenModule());
+    const kinds = t.engine.registry.factorKinds();
+    const badge = t.engine.registry.get("badge");
+    assert.throws(() => t.engine.useFactor({ ...token(), kind: "caller_id" }), rejects("invalid_input", /would make caller ID a factor/));
+    assert.throws(() => t.engine.useFactor({ ...token(), kind: "pin" }), rejects("invalid_input", /factor kind pin already exists/));
+    assert.throws(() => t.engine.useFactor(token()), rejects("invalid_input", /factor hardware_token is already provided by token-check/));
+    assert.throws(() => t.engine.useFactor({ ...token(), kind: "ab", maxAttemptsPerCall: 9 }), rejects("invalid_input", /snake_case.*maxAttemptsPerCall/));
+    assert.throws(() => t.engine.useFactor({ ...token(), kind: { toString: () => "desk_code" } as unknown as string }), rejects("invalid_input", /factor kind must be a string/));
+    assert.throws(() => t.engine.useFactor({ ...token(), kind: "desk_code", adapters: "records" as unknown as [] }), rejects("invalid_input", /adapters must be a list of adapter names/));
+    const fob = tokenModule({ ...token(), kind: "key_fob", adapters: "records" as unknown as [] });
+    assert.throws(() => t.engine.use({ ...fob, manifest: { ...fob.manifest, name: "fob-check" } }), rejects("invalid_input", /^module fob-check: factor key_fob: adapters must be a list of adapter names$/));
+    t.engine.useFactor({ ...token(), kind: "desk_code" });
+    assert.throws(() => t.engine.useFactor({ ...token(), kind: "desk_code" }), rejects("invalid_input", /desk_code already exists/));
+    // After the built-in kinds (#110's callback among them), before the outside modules' ones.
+    assert.deepEqual(t.engine.registry.factorKinds(), [...kinds.slice(0, 7), "desk_code", ...kinds.slice(7)]);
+    assert.notEqual(t.engine.registry.get("badge"), badge, "a new build of Badge");
+    assert.deepEqual(t.engine.registry.list().map((m) => m.manifest.name), ["badge", "dossier", "paylink", "trace", "gate", "step-up", "token-check"], "in its place");
+  });
+
+  it("useFactor on one engine never reaches another engine built with the same Badge", () => {
+    const shared = badgeModule();
+    const one = setup({ badge: shared });
+    const two = setup({ badge: shared });
+    one.engine.useFactor(token());
+    assert.ok(one.engine.registry.factorKinds().includes("hardware_token"));
+    assert.equal(two.engine.registry.factorKinds().includes("hardware_token"), false);
+    assert.equal(shared.manifest.provides.factors.includes("hardware_token"), false);
+    assert.deepEqual(validateConfig(tokenConfig(), two.engine.registry).length, 2);
+  });
+
+  it("useFactor needs Badge installed", () => {
+    const t = setup({ config: testConfig((c) => (c.modules.badge = { enabled: false })) });
+    t.engine.remove("badge");
+    assert.throws(() => t.engine.useFactor(token()), rejects("precondition_failed", /badge module is not installed/));
+    // An outside module's factors install without Badge; nothing runs them.
+    t.engine.use(tokenModule());
+    assert.ok(t.engine.registry.factorKinds().includes("hardware_token"));
+    t.engine.remove("token-check");
+    assert.equal(t.engine.registry.get("badge"), undefined);
+  });
+
+  it("use: an outside module's factor and judge, off until a config turns it on, at construction or later", async () => {
+    const judged: FactorJudgeInput[] = [];
+    const t = setup();
+    t.engine.use(tokenModule(token(judged)));
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await assert.rejects(t.engine.submitFactor(callId, "hardware_token", "246810"), rejects("precondition_failed", /turned off/));
+    assert.deepEqual(validateConfig(tokenConfig(), t.engine.registry), []);
+    t.engine.configure(tokenConfig());
+    assert.deepEqual(await t.engine.submitFactor(callId, "hardware_token", "246810"), { matched: true, locked: false });
+    assert.equal((await t.engine.finishVerification(callId)).level, 1);
+    assert.equal(judged.length, 1);
+    // Given at construction, with a config that already turns it on.
+    const built = setup({ modules: [tokenModule()], config: tokenConfig() });
+    const call = await built.engine.startCall();
+    await built.engine.beginVerification(call.callId, { accountNumber: ACCOUNT });
+    assert.equal((await built.engine.submitFactor(call.callId, "hardware_token", "246810")).matched, true);
+    // The registry refuses an outside module whose factor clashes, is named for caller ID, or has no judge.
+    assert.throws(() => t.engine.use({ ...tokenModule(), manifest: { ...tokenModule().manifest, name: "pin-two", provides: { factors: ["pin"], steps: [], outcomes: [] } } }), rejects("invalid_input", /factor pin is already provided by badge/));
+    assert.throws(() => t.engine.use(tokenModule({ ...token(), kind: "ani" })), rejects("invalid_input", /factor kind ani would make caller ID a factor/));
+    assert.throws(() => t.engine.use({ ...tokenModule(), manifest: { ...tokenModule().manifest, name: "no-judge" }, factorPlugins: [] }), rejects("invalid_input", /factor hardware_token is already provided by token-check; module no-judge: factor hardware_token has no judge/));
+    const { factorPlugins: _omitted, ...withoutList } = tokenModule({ ...token(), kind: "desk_code" });
+    assert.throws(() => t.engine.use({ ...withoutList, manifest: { ...withoutList.manifest, name: "no-list" } }), rejects("invalid_input", /module no-list: factor desk_code has no judge/));
+    assert.equal(t.engine.registry.get("no-list"), undefined);
+  });
+
+  it("remove: refuses a module whose factor the config names, then takes its factor away", async () => {
+    const t = setup({ modules: [tokenModule()], config: tokenConfig() });
+    assert.throws(() => t.engine.remove("token-check"), rejects("precondition_failed", /supplies the factor hardware_token, which the config uses/));
+    t.engine.configure(tokenConfig(false));
+    assert.throws(() => t.engine.remove("token-check"), rejects("precondition_failed", /which the config uses/), "the policy names it");
+    t.engine.configure(testConfig());
+    t.engine.remove("token-check");
+    assert.equal(t.engine.registry.factorKinds().includes("hardware_token"), false);
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await assert.rejects(t.engine.submitFactor(callId, "hardware_token", "246810"), rejects("invalid_input", /not a factor the caller enters/));
+    assert.deepEqual(validateConfig(tokenConfig(), t.engine.registry).length, 2);
+    // With Badge off, only the policy counts.
+    const off = setup({ modules: [tokenModule()], config: testConfig((c) => (c.modules.badge = { enabled: false })) });
+    off.engine.remove("token-check");
+    assert.throws(() => off.engine.remove("token-check"), rejects("invalid_input", /no module named token-check/));
   });
 });
 

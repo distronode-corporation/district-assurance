@@ -8,7 +8,6 @@ import { buildReadBack, createUploadLink, deliverRecord } from "../src/file/late
 import { chargeSavedCard, startKeypadCardCapture } from "../src/pay/later.ts";
 import { revokeConsent } from "../src/prove/consent.ts";
 import { exportLedger } from "../src/prove/later.ts";
-import { createTestEngine } from "../src/testing/index.ts";
 import { verifyTelnyxSignature, verifyTwilioSignature } from "../src/webhooks/carrier.ts";
 
 const form = { formId: "f", version: "1", fields: [] };
@@ -24,7 +23,6 @@ const STUBS: Array<[string, () => unknown]> = [
   ["PRV-4", () => exportLedger({ fromSeq: 1 })],
   ["SRV-1", () => verifyTwilioSignature(hook)],
   ["SRV-1", () => verifyTelnyxSignature(hook)],
-  ["MOD-3", () => createTestEngine().engine.useFactor({ kind: "x_factor", summary: "x", maxAttemptsPerCall: 1, adapters: [], judge: async () => false })],
 ];
 
 /** Planned work a validator refuses by id (so a config can never reach it mid-call). */

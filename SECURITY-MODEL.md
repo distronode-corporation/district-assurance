@@ -331,6 +331,11 @@ it ran under. Every grant, its `verification.finished` and `grant.issued` entrie
 receipt name the policy version and the config revision that judged the caller, so a verification
 judged under a config changed mid-call is told apart from one judged under the call's own (tested).
 Who may edit a config, and how its history is kept, is the host's (left to the host).
+A factor added after the engine was built (`engine.useFactor`, or an outside module's factor and
+judge with `engine.use`) is off until a config turns it on in Badge's settings; adding one never
+changes the config in force (tested). The registry refuses a factor whose kind another module
+provides or is a name for caller ID, from a plug-in and from any module's manifest alike (tested).
+A module cannot be removed while the config in force names a factor it supplies (tested).
 
 ### Races across processes
 
@@ -679,7 +684,9 @@ the key set URL or refreshes the copy.
 - Keeping `refundPayment` on the business's side (a back office, staff tools), never on a tool the
   model can call, and deciding who in the business may ask for a refund.
 - Outside modules: their code runs inside the engine's writes and is part of the host's security
-  model.
+  model. So do factor judges, the host's plug-ins and those an outside module supplies: the
+  engine counts and limits their attempts, but whether a judge answers the same way for an unknown
+  subject and a wrong entry is the judge's.
 - The person path: a caller who fails or cannot use a keypad reaches someone who can help.
 - Disclosure that an automated assistant answers and that the call is transcribed.
 - Deciding who may switch these modules on (business verification), so the line cannot be used to
