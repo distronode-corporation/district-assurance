@@ -369,11 +369,11 @@ describe("callback: resuming after a failure", () => {
   });
 });
 
-/** A store that can fail once before or after a write, fail a reset once, or run a step after a read. */
+/** A store that can fail once before or after a write, fail a removal once, or run a step after a read. */
 class Faulty extends MemoryAttemptCounters {
   failBefore: ((key: AttemptCounterKey) => boolean) | null = null;
   failAfter: ((key: AttemptCounterKey) => boolean) | null = null;
-  failReset = false;
+  failRemove = false;
   onGet: (() => Promise<void>) | null = null;
 
   override async get(key: AttemptCounterKey, since: string): Promise<string[]> {
@@ -397,12 +397,12 @@ class Faulty extends MemoryAttemptCounters {
     return failures;
   }
 
-  override async reset(key: AttemptCounterKey): Promise<void> {
-    if (this.failReset) {
-      this.failReset = false;
+  override async removeFailure(key: AttemptCounterKey, at: string): Promise<void> {
+    if (this.failRemove) {
+      this.failRemove = false;
       throw new Error("store down");
     }
-    return super.reset(key);
+    return super.removeFailure(key, at);
   }
 }
 
@@ -472,7 +472,7 @@ describe("callback: a pass whose failure was not yet forgotten", () => {
     const t = world({ adapters: { counters } });
     await t.engine.requestCallback(await firstCall(t));
     const { ref, callId } = lastDial(t);
-    counters.failReset = true;
+    counters.failRemove = true;
     await assert.rejects(t.engine.applyCallbackOutcome({ ref, answered: true, confirmed: true }), /store down/);
     assert.equal((await counters.get(counter("callback"), SINCE)).length, 1);
     assert.deepEqual(await t.engine.applyCallbackOutcome({ ref, answered: true, confirmed: true }), { applied: false });
