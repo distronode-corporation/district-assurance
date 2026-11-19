@@ -9,6 +9,7 @@ import { hmacSha256Hex } from "../src/core/hash.ts";
 import type { EngineEvent } from "../src/core/events.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { defaultVerificationPolicy } from "../src/core/policy.ts";
+import { INTERRUPT_LINES, bankAccountRedactor, cardNumberRedactor, composeRedactors, healthCardRedactor, sinRedactor } from "../src/core/redaction.ts";
 import { createEngine } from "../src/engine.ts";
 import { intakeDigest, type IntakeForm } from "../src/file/intake.ts";
 import { defaultConfig } from "../src/modules.ts";
@@ -229,10 +230,28 @@ describe("Engine sessions", () => {
     assert.equal((await t.engine.state(callId)).sensitive, null);
   });
 
+  it("speaks the line for what was found, in the call's language", async () => {
+    const redactor = composeRedactors(cardNumberRedactor, healthCardRedactor, sinRedactor, bankAccountRedactor);
+    const t = setup({ redactor });
+    const en = (await t.engine.startCall()).callId;
+    const fr = (await t.engine.startCall({ locale: "fr" })).callId;
+    assert.equal((await t.engine.redact(en, "my SIN is 046 454 286")).line, INTERRUPT_LINES.en.sin);
+    assert.equal((await t.engine.redact(fr, "mon NAS est le 046 454 286")).line, INTERRUPT_LINES.fr.sin);
+    assert.equal((await t.engine.redact(fr, "carte santé 1234 567 897")).line, INTERRUPT_LINES.fr.health_card);
+    assert.equal((await t.engine.redact(en, "account 1234567")).line, INTERRUPT_LINES.en.bank_account);
+    assert.equal((await t.engine.redact(en, "account 1234567, card 4242 4242 4242 4242")).line, INTERRUPT_LINES.en.card_number, "a card number's line comes first");
+    assert.equal((await t.engine.redact(en, "nothing here")).line, null);
+    for (const kind of Object.keys(INTERRUPT_LINES.en) as Array<keyof typeof INTERRUPT_LINES.en>) {
+      const said = [INTERRUPT_LINES.en[kind], INTERRUPT_LINES.fr[kind], INTERRUPT_LINES.es[kind]];
+      assert.ok(said.every((line) => line !== "") && new Set(said).size === said.length);
+    }
+    assert.equal(INTERRUPT_LINES.en.sin.includes("card"), false, "no card wording for a SIN");
+  });
+
   it("redacts text and counts findings by kind, without logging the text", async () => {
     const t = setup();
     const { callId } = await t.engine.startCall();
-    assert.deepEqual(await t.engine.redact(callId, "hello"), { text: "hello", findings: [], interrupt: false });
+    assert.deepEqual(await t.engine.redact(callId, "hello"), { text: "hello", findings: [], interrupt: false, line: null });
     const result = await t.engine.redact(callId, "4242424242424242 and 5555 5555 5555 4444");
     assert.equal(result.text, "[card number removed] and [card number removed]");
     assert.equal(result.interrupt, true);

@@ -1,0 +1,32 @@
+{
+  "description": "Provincial health card numbers. Ontario: 10 digits, Luhn, grouped 4-3-3 or not at all; a version code after it is kept. British Columbia: 10 digits starting with 9, mod 11 check digit over digits 2 to 9, grouped 4-3-3 or not at all. Quebec: four letters, as one word or spelled out, then 8 digits (birth year, month or month plus 50, day, two more), grouped 4-4 or not at all; the letters are found too. Digits may be spoken as digit words in English or French. Each case lists the exact substrings a redactor must find, in order. Every number is made up.",
+  "kind": "health_card",
+  "cases": [
+    { "lang": "en", "text": "health card 1234 567 897 AB", "found": ["1234 567 897"] },
+    { "lang": "en", "text": "OHIP 1234-567-897", "found": ["1234-567-897"] },
+    { "lang": "en", "text": "it is 9876543217.", "found": ["9876543217"] },
+    { "lang": "fr", "text": "carte santé un deux trois quatre cinq six sept huit neuf sept", "found": ["un deux trois quatre cinq six sept huit neuf sept"] },
+    { "lang": "en", "text": "1234 567 890", "found": [] },
+    { "lang": "en", "text": "123 456 7897", "found": [] },
+    { "lang": "en", "text": "PHN 9123 456 702", "found": ["9123 456 702"] },
+    { "lang": "en", "text": "nine one two three four five six seven zero two", "found": ["nine one two three four five six seven zero two"] },
+    { "lang": "fr", "text": "numéro 9234 567 897 en Colombie-Britannique", "found": ["9234 567 897"] },
+    { "lang": "en", "text": "9123 456 703", "found": [] },
+    { "lang": "en", "text": "9123 456 712", "found": [] },
+    { "lang": "fr", "text": "carte RAMQ TREM 7501 0112", "found": ["TREM 7501 0112"] },
+    { "lang": "fr", "text": "BOUD 8562 1534, merci", "found": ["BOUD 8562 1534"] },
+    { "lang": "fr", "text": "TREM75010112", "found": ["TREM75010112"] },
+    { "lang": "fr", "text": "c'est t r e m sept cinq zéro un zéro un un deux", "found": ["t r e m sept cinq zéro un zéro un un deux"] },
+    { "lang": "en", "text": "T. R. E. M. seven five zero one, zero one one two", "found": ["T. R. E. M. seven five zero one, zero one one two"] },
+    { "lang": "fr", "text": "TREM 7513 0112", "found": [] },
+    { "lang": "fr", "text": "TREM 7550 0112", "found": [] },
+    { "lang": "fr", "text": "TREM 7501 3212", "found": [] },
+    { "lang": "fr", "text": "TREM 7501 0012", "found": [] },
+    { "lang": "fr", "text": "TREM 750 10112", "found": [] },
+    { "lang": "fr", "text": "7501 0112", "found": [] },
+    { "lang": "fr", "text": "ABC 7501 0112", "found": [] },
+    { "lang": "fr", "text": "ABCDE 7501 0112", "found": [] },
+    { "lang": "fr", "text": "huit 7501 0112", "found": [] },
+    { "lang": "en", "text": "phone 416 555 0100", "found": [] }
+  ]
+}

@@ -19,7 +19,7 @@ import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
 import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
 import { ATTESTATIONS, capCallLevel, scopeClass, scopesForLevel, type AssuranceLevel, type Attestation, type ScopeClass, type VerificationPolicy } from "./core/policy.ts";
-import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
+import { cardNumberRedactor, interruptLine, type RedactionFinding, type Redactor } from "./core/redaction.ts";
 import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
@@ -450,20 +450,24 @@ export class Engine {
   }
 
   /**
-   * Redacts text before the host stores or forwards it. `interrupt` tells the host to speak its
-   * fixed "please don't read card numbers" line.
+   * Redacts text before the host stores or forwards it. `interrupt` tells the host to speak `line`,
+   * the fixed line for what was found (a card number, a health card number, a SIN or banking
+   * details), in the call's language; `line` is null when nothing was found.
    */
-  async redact(callId: string, text: string): Promise<{ text: string; findings: RedactionFinding[]; interrupt: boolean }> {
+  async redact(callId: string, text: string): Promise<{ text: string; findings: RedactionFinding[]; interrupt: boolean; line: string | null }> {
     // The call's language decides whose number words are read: English and French always, Spanish
-    // only on a Spanish call ("once" is a number only in Spanish).
-    const { locale } = await this.#read(callId);
+    // only on a Spanish call ("once" is a number only in Spanish), and the line's language.
+    let { locale } = await this.#read(callId);
     const result = this.#redactor.redact(text, { locale });
     if (result.findings.length > 0) {
       const kinds: Record<string, number> = {};
       for (const f of result.findings) kinds[f.kind] = (kinds[f.kind] ?? 0) + 1;
-      await this.#update(callId, (draft) => draft.emit("redaction.applied", "code", { kinds }));
+      locale = await this.#update(callId, (draft) => {
+        draft.emit("redaction.applied", "code", { kinds });
+        return draft.record.locale;
+      });
     }
-    return { ...result, interrupt: result.findings.length > 0 };
+    return { ...result, interrupt: result.findings.length > 0, line: interruptLine(result.findings, locale) };
   }
 
   /** Whether the call's grant covers a scope now. A scope the policy does not list is refused. */

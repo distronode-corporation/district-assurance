@@ -2116,3 +2116,42 @@ separator-only chunks never grow what it keeps; it never returns it, and forgets
 
 **Corpus.** `test/corpus/card-numbers.json` holds the cases for runs, redaction and live detection
 as plain JSON, so an implementation in another language can be tested against the same cases.
+## 17. Redaction
+
+Each detector is its own `Redactor`; a host composes the ones it wants with `composeRedactors`,
+card numbers first, then health card numbers, SINs and bank numbers (a 10-digit health card number
+can start with a valid SIN, so the health card pass must see it whole). Composed findings report
+offsets into the original input, in the order the redactors ran; `applyFindings(text, findings)`
+takes findings in any order (it sorts them by position and merges overlapping ones, marked with
+the kind of the one that starts first), so a host can apply composed findings to the original
+text as they come. The engine's default redactor
+is `cardNumberRedactor`. `Engine.redact` sets `interrupt` on any finding, whichever redactor found
+it, and returns `line`, the fixed line for the kind found (`INTERRUPT_LINES`, in the call's
+language; a card number first, then a health card number, a SIN, banking details; null when
+nothing was found). Only the card number line offers a payment link. A match is replaced by its
+kind's marker; `redaction.applied` counts findings per kind.
+
+Digits are read in runs: digit groups or single digit words (English and French) with only
+separators between them: spaces, any dash, the minus sign, dots, commas, slashes, underscores,
+middle dots, and the characters a reader never sees (zero-width spaces and joiners, soft hyphens,
+bidi controls, combining marks: `SEPARATOR_CLASS`). A numeral is any run of Unicode decimal digits
+(fullwidth, Arabic-Indic and the rest), read by its values for every check, and the original span
+is what is removed. Joining this widely can join things that are not one number; over-redaction is
+the safe side, since the risk is a number reaching storage. In each run, matches are taken leftmost first,
+longest at each position, never overlapping. A format with groups accepts a written number only
+when its groups break where the format's do, or not at all; single digits (spoken digit words, or
+digits read one by one) may break anywhere.
+
+| Kind | Redactor | Matches | Marker |
+|---|---|---|---|
+| `card_number` | `cardNumberRedactor` | 13 to 19 digits, Luhn | `[card number removed]` |
+| `sin` | `sinRedactor` | 9 digits, Luhn, groups 3-3-3 | `[SIN removed]` |
+| `health_card` | `healthCardRedactor` | Ontario: 10 digits, Luhn, groups 4-3-3 (a version code after it is kept). British Columbia: 10 digits starting with 9, mod 11 check digit (weights 2, 4, 8, 5, 10, 9, 7, 3 on digits 2 to 9), groups 4-3-3. Quebec: four letters right before the run, as one word or spelled one by one (at most 8
+separators in each gap and before the digits, so only the last 48 characters before a run are read), then 8 digits whose 3rd to 6th give a month (or month plus 50) and a day, groups 4-4; the letters are removed too | `[health card number removed]` |
+| `bank_account` | `bankAccountRedactor` | a whole run of 3 or more digits with a bank word among the last 4 words before it, counting only words after the previous run. English: bank, branch, transit, institution, account; French: banque, bancaire, succursale, compte, folio; Spanish: banco, bancaria, bancario, sucursal, cuenta, tránsito, institución, with or without accents; each also in the plural; every language on every call | `[banking details removed]` |
+
+Bank numbers carry no check digit, so a bank word is what marks them; an account number read
+with no bank word before it is not found. Health card numbers of other provinces are not found
+yet. Number words ("forty two", "quarante-deux") and "double" forms are planned (PAY-5). The test
+corpus is shared JSON in `test/corpus/`, one file per kind: each case gives a text, its language
+and the exact substrings a redactor must find, in order.

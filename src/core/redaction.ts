@@ -7,9 +7,14 @@
 // characters (SEPARATOR_CLASS). The same reading of spoken numbers feeds the live detector (live-detector.ts). A match
 // is replaced by a fixed marker. Over-redaction is accepted; the risk this guards against is a card
 // number reaching storage.
+//
+// Further detectors, each its own `Redactor` over the same digit runs (PRV-6): Canadian social
+// insurance numbers, provincial health card numbers, and bank transit and account numbers. A
+// host composes the ones it wants with `composeRedactors`, card numbers first, then health card
+// numbers, SINs and bank numbers.
 import { SUPPORTED_LOCALES, type Locale } from "./runtime.ts";
 
-export type RedactionKind = "card_number";
+export type RedactionKind = "card_number" | "sin" | "health_card" | "bank_account";
 
 export interface RedactionFinding {
   kind: RedactionKind;
@@ -33,8 +38,45 @@ export interface Redactor {
   redact(text: string, context?: RedactionContext): RedactionResult;
 }
 
+/**
+ * The fixed line a host speaks when a redactor fires, per kind and language. Only a card number is
+ * offered a payment link instead; the other numbers are never needed on a call.
+ */
+export const INTERRUPT_LINES: Record<Locale, Readonly<Record<RedactionKind, string>>> = {
+  en: {
+    card_number: "Please do not read card numbers aloud. I can text you a secure payment link instead.",
+    health_card: "Please do not read your health card number aloud. I do not need it on this call.",
+    sin: "Please do not read your social insurance number aloud. I do not need it on this call.",
+    bank_account: "Please do not read your banking details aloud. I do not need them on this call.",
+  },
+  fr: {
+    card_number: "Veuillez ne pas lire de numéro de carte à voix haute. Je peux plutôt vous envoyer un lien de paiement sécurisé par texto.",
+    health_card: "Veuillez ne pas lire votre numéro d'assurance maladie à voix haute. Je n'en ai pas besoin pendant cet appel.",
+    sin: "Veuillez ne pas lire votre numéro d'assurance sociale à voix haute. Je n'en ai pas besoin pendant cet appel.",
+    bank_account: "Veuillez ne pas lire vos renseignements bancaires à voix haute. Je n'en ai pas besoin pendant cet appel.",
+  },
+  es: {
+    card_number: "Por favor, no lea números de tarjeta en voz alta. Puedo enviarle por mensaje de texto un enlace de pago seguro.",
+    health_card: "Por favor, no lea su número de tarjeta sanitaria en voz alta. No lo necesito en esta llamada.",
+    sin: "Por favor, no lea su número de seguro social en voz alta. No lo necesito en esta llamada.",
+    bank_account: "Por favor, no lea sus datos bancarios en voz alta. No los necesito en esta llamada.",
+  },
+};
+
+/** Which kind's line is spoken when several fire at once: a card number first, then this order. */
+const INTERRUPT_ORDER: readonly RedactionKind[] = ["card_number", "health_card", "sin", "bank_account"];
+
+/** The line for a set of findings in a language, or null when there are none. */
+export function interruptLine(findings: readonly RedactionFinding[], locale: Locale): string | null {
+  const kind = INTERRUPT_ORDER.find((k) => findings.some((f) => f.kind === k));
+  return kind === undefined ? null : INTERRUPT_LINES[locale][kind];
+}
+
 export const REDACTION_MARKERS: Record<RedactionKind, string> = {
   card_number: "[card number removed]",
+  sin: "[SIN removed]",
+  health_card: "[health card number removed]",
+  bank_account: "[banking details removed]",
 };
 
 /** The Luhn (mod 10) check over a string of digits. */
@@ -430,26 +472,237 @@ export function applyFindings(text: string, findings: readonly RedactionFinding[
   return out + text.slice(at);
 }
 
-export const cardNumberRedactor: Redactor = {
-  redact(text, context) {
-    const findings = findCardNumbers(text, numberLanguagesFor(context?.locale));
-    return { text: applyFindings(text, findings), findings };
-  },
-};
+function redactorFor(find: (text: string, languages: readonly NumberLanguage[]) => RedactionFinding[]): Redactor {
+  return {
+    redact(text, context) {
+      const findings = find(text, numberLanguagesFor(context?.locale));
+      return { text: applyFindings(text, findings), findings };
+    },
+  };
+}
+
+export const cardNumberRedactor: Redactor = redactorFor(findCardNumbers);
+
+/** A number with a fixed count of digits, the places a written form may break, and a check. */
+interface NumberFormat {
+  length: number;
+  /** Digit offsets where written groups may break: 3 and 6 for "046 454 286". */
+  breaks: readonly number[];
+  valid(digits: string): boolean;
+  /** Four letters come just before the digits, as one word or spelled out ("TREM", "t r e m"). */
+  afterFourLetters?: boolean;
+}
 
 /**
- * Runs redactors in order, each over the previous one's output. Finding offsets refer to the text
- * each redactor saw, so they are reported per stage, in order.
+ * Whether tokens i to j of a run are grouped as the format allows. A break between two written
+ * groups must fall on one of the format's breaks; single digits (spoken digit words, or digits
+ * read one by one) may break anywhere.
+ */
+function groupedAs(run: readonly DigitPart[], i: number, j: number, breaks: readonly number[]): boolean {
+  let at = 0;
+  for (let k = i; k < j; k++) {
+    at += run[k]!.digits.length;
+    const singles = run[k]!.digits.length === 1 && run[k + 1]!.digits.length === 1;
+    if (!singles && !breaks.includes(at)) return false;
+  }
+  return true;
+}
+
+// Four letters, each gap and the gap before the digits at most 8 separators, so a match is at most
+// 40 UTF-16 code units (astral letters included) and only a short window before a run is read.
+const FOUR_LETTERS_BEFORE = new RegExp(String.raw`(?<!\p{L})(?:\p{L}{4}|\p{L}(?:${SEPARATOR_CLASS}{1,8}\p{L}){3})${SEPARATOR_CLASS}{0,8}$`, "u");
+/**
+ * The look-back window, longer than any match (40), so a match never starts at the window's first
+ * character and its letter check always sees the real character before it.
+ */
+const FOUR_LETTERS_WINDOW = 48;
+
+/**
+ * Where the four letters before a run start, if they are there. Only the last few characters before
+ * the run are read, so a long transcript with many candidate runs stays linear.
+ */
+function fourLettersBefore(text: string, at: number): number | undefined {
+  const from = Math.max(0, at - FOUR_LETTERS_WINDOW);
+  const found = FOUR_LETTERS_BEFORE.exec(text.slice(from, at));
+  return found === null ? undefined : from + found.index;
+}
+
+/**
+ * Numbers of the given formats in a text, leftmost first, longest match at each position, never
+ * overlapping. A match starts at the first run token it uses, or at its four letters.
+ */
+function findFormatted(text: string, kind: RedactionKind, formats: readonly NumberFormat[], languages: readonly NumberLanguage[]): RedactionFinding[] {
+  const longest = Math.max(...formats.map((f) => f.length));
+  const findings: RedactionFinding[] = [];
+  for (const run of digitRuns(text, languages)) {
+    let i = 0;
+    while (i < run.length) {
+      let best = -1;
+      let start = 0;
+      let digits = "";
+      for (let j = i; j < run.length; j++) {
+        digits += run[j]!.digits;
+        if (digits.length > longest) break;
+        for (const f of formats) {
+          if (f.length !== digits.length || !groupedAs(run, i, j, f.breaks) || !f.valid(digits)) continue;
+          // The letters must come before the run itself, never be a digit word inside it.
+          let from: number | undefined = run[i]!.start;
+          if (f.afterFourLetters === true) from = i === 0 ? fourLettersBefore(text, from) : undefined;
+          if (from !== undefined) {
+            best = j;
+            start = from;
+          }
+        }
+      }
+      if (best >= 0) {
+        findings.push({ kind, start, end: run[best]!.end });
+        i = best + 1;
+      } else {
+        i++;
+      }
+    }
+  }
+  return findings;
+}
+
+/** Canadian social insurance numbers: 9 digits, Luhn, grouped 3-3-3 when written in groups. */
+export function findSocialInsuranceNumbers(text: string, languages: readonly NumberLanguage[] = NUMBER_LANGUAGES): RedactionFinding[] {
+  return findFormatted(text, "sin", [{ length: 9, breaks: [3, 6], valid: luhnValid }], languages);
+}
+
+export const sinRedactor: Redactor = redactorFor(findSocialInsuranceNumbers);
+
+/** The British Columbia personal health number check: a 9, then mod 11 over digits 2 to 9. */
+function bcPhnValid(digits: string): boolean {
+  if (digits[0] !== "9") return false;
+  const weights = [2, 4, 8, 5, 10, 9, 7, 3];
+  let sum = 0;
+  for (let k = 0; k < 8; k++) sum += (digits.charCodeAt(k + 1) - 48) * weights[k]!;
+  const check = 11 - (sum % 11);
+  return check < 10 && check === digits.charCodeAt(9) - 48;
+}
+
+/** Quebec health insurance digits: birth year, month (plus 50 for women), day, then two more. */
+function ramqDigitsValid(digits: string): boolean {
+  const month = Number(digits.slice(2, 4)) % 50;
+  const day = Number(digits.slice(4, 6));
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+}
+
+const HEALTH_CARDS: readonly NumberFormat[] = [
+  // Ontario: 10 digits, Luhn, written 1234 567 890. A version code may follow and is kept.
+  { length: 10, breaks: [4, 7], valid: luhnValid },
+  // British Columbia: 10 digits starting with 9, mod 11 check digit, written 9123 456 789.
+  { length: 10, breaks: [4, 7], valid: bcPhnValid },
+  // Quebec: four letters, then 8 digits, written TREM 7501 0112. The letters are removed too.
+  { length: 8, breaks: [4], valid: ramqDigitsValid, afterFourLetters: true },
+];
+
+/** Provincial health card numbers in the Ontario, British Columbia and Quebec formats. */
+export function findHealthCardNumbers(text: string, languages: readonly NumberLanguage[] = NUMBER_LANGUAGES): RedactionFinding[] {
+  return findFormatted(text, "health_card", HEALTH_CARDS, languages);
+}
+
+export const healthCardRedactor: Redactor = redactorFor(findHealthCardNumbers);
+
+/**
+ * Words that mark a number after them as a bank number, in English, French and Spanish, plurals
+ * too, and Spanish with or without its accents. All three are read on every call: this file has no
+ * call language, and a Spanish word on an English call can only remove more, the safe side.
+ */
+const BANK_WORDS = new Set([
+  "bank", "banks", "branch", "branches", "transit", "transits", "institution", "institutions", "account", "accounts",
+  "banque", "banques", "bancaire", "bancaires", "succursale", "succursales", "compte", "comptes", "folio", "folios",
+  "banco", "bancos", "bancaria", "bancarias", "bancario", "bancarios", "sucursal", "sucursales", "cuenta", "cuentas",
+  "tránsito", "tránsitos", "transito", "transitos", "institución", "instituciones", "institucion",
+]);
+
+/** A word, with any combining accents kept in it, so a decomposed "tránsito" is still one word. */
+const WORD = /[\p{L}\p{M}]+/gu;
+
+/**
+ * Bank numbers: a digit run of 3 or more digits (an institution number is 3, a transit number 5,
+ * an account number 7 to 12, or several read together) with a bank word among the last 4 words
+ * before it, since the previous run. Bank numbers carry no check digit, so the word marks them.
+ */
+export function findBankNumbers(text: string, languages: readonly NumberLanguage[] = NUMBER_LANGUAGES): RedactionFinding[] {
+  const findings: RedactionFinding[] = [];
+  let from = 0;
+  for (const run of digitRuns(text, languages)) {
+    const first = run[0]!;
+    const last = run[run.length - 1]!;
+    const words = text.slice(from, first.start).match(WORD) ?? [];
+    from = last.end;
+    const digits = run.reduce((n, t) => n + t.digits.length, 0);
+    if (digits >= 3 && words.slice(-4).some((w) => BANK_WORDS.has(w.normalize("NFC").toLowerCase()))) {
+      findings.push({ kind: "bank_account", start: first.start, end: last.end });
+    }
+  }
+  return findings;
+}
+
+export const bankAccountRedactor: Redactor = redactorFor(findBankNumbers);
+
+/** A marker in the composed text so far, with the span of the original input it replaced. */
+interface Replaced {
+  start: number;
+  end: number;
+  originalStart: number;
+  originalEnd: number;
+}
+
+/**
+ * Maps an offset in the composed text back to the original input. An offset inside a marker maps
+ * to the start or the end of what the marker replaced, so a finding over it covers all of it.
+ */
+function toOriginal(at: number, replaced: readonly Replaced[], side: "start" | "end"): number {
+  let shift = 0;
+  for (const r of replaced) {
+    if (at <= r.start) break;
+    if (at < r.end) return side === "start" ? r.originalStart : r.originalEnd;
+    shift = r.originalEnd - r.end;
+  }
+  return at + shift;
+}
+
+/**
+ * Runs redactors in order, each over the previous one's output, and reports their findings in that
+ * order, with offsets into the original input. Each redactor must replace each of its findings
+ * with its kind's marker and leave the rest of the text as it was, as the redactors here do, and
+ * report its findings sorted and not overlapping. A composed redactor does not, so list every
+ * redactor in one call rather than composing compositions.
+ *
+ * Put health card numbers before SINs: a 10-digit health card number can start with a valid SIN,
+ * and a SIN pass run first would replace that prefix and leave the last digit.
  */
 export function composeRedactors(...redactors: Redactor[]): Redactor {
   return {
     redact(text, context) {
       let current = text;
+      let replaced: Replaced[] = [];
       const findings: RedactionFinding[] = [];
       for (const r of redactors) {
         const result = r.redact(current, context);
+        const next: Replaced[] = [];
+        let delta = 0;
+        let k = 0;
+        for (const f of result.findings) {
+          // Earlier markers before this finding move by the length change so far; any it covers go.
+          for (; k < replaced.length && replaced[k]!.start < f.end; k++) {
+            const old = replaced[k]!;
+            if (old.end <= f.start) next.push({ ...old, start: old.start + delta, end: old.end + delta });
+          }
+          const originalStart = toOriginal(f.start, replaced, "start");
+          const originalEnd = toOriginal(f.end, replaced, "end");
+          const start = f.start + delta;
+          const end = start + REDACTION_MARKERS[f.kind].length;
+          next.push({ start, end, originalStart, originalEnd });
+          findings.push({ kind: f.kind, start: originalStart, end: originalEnd });
+          delta = end - f.end;
+        }
+        for (const old of replaced.slice(k)) next.push({ ...old, start: old.start + delta, end: old.end + delta });
+        replaced = next;
         current = result.text;
-        findings.push(...result.findings);
       }
       return { text: current, findings };
     },
