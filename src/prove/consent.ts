@@ -3,6 +3,7 @@
 import { canonicalJson } from "../core/canonical.ts";
 import { NotImplementedError } from "../core/errors.ts";
 import { sha256Hex } from "../core/hash.ts";
+import type { Locale } from "../core/runtime.ts";
 
 export interface ConsentWording {
   purpose: string;
@@ -16,7 +17,7 @@ export interface ConsentRecord {
   purpose: string;
   wordingVersion: string;
   wordingDigest: string;
-  locale: "en" | "fr";
+  locale: Locale;
   answer: "yes" | "no";
   channel: "call" | "text" | "web";
   at: string;

@@ -12,8 +12,10 @@
 //
 // An unlock is never retried. It is reserved in one write (one in flight per call), signed, sent
 // once, and its answer committed. A lost answer is "unknown", and opening again needs a fresh
-// request: a new grant, within the per-call limit. Ending the call settles a grant still in flight
-// as unknown, before the receipt's ledger head is taken, so no outcome ever follows the receipt.
+// request: a new grant, within the per-call limit. Ending the call is refused while a signed grant
+// may still be acted on (at its door, or answered unknown and not yet expired); a grant reserved
+// but not yet signed, or past its expiry, is settled unknown in the write that ends the call,
+// before the receipt's ledger head is taken, so no outcome ever follows the receipt.
 import type { AccessController, AccessGrantBody, SignedAccessGrant, UnlockResult } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
@@ -173,7 +175,8 @@ export const gateModule: AssuranceModule = {
     const slice = view.slice as unknown as GateSlice;
     const mine = slice.grants.slice(view.mark as number);
     if (mine.some((g) => g.status === "delivered")) return "complete";
-    // Every grant the call may have is used and none is in flight: the door was never opened by this step.
+    // Every grant the call may have is used, none delivered in this step and none in flight: the step
+    // fails. A last grant whose answer was lost may still have opened the door; the ledger says unknown.
     const inFlight = mine.some((g) => g.status === "reserved");
     return !inFlight && slice.grants.length >= slice.maxGrantsPerCall ? "failed" : "pending";
   },
@@ -187,8 +190,9 @@ function gateSlice(draft: CallDraft): GateSlice {
 
 /**
  * Settles, inside a write of the engine's, every grant still reserved past its expiry as unknown
- * (the process that sent it stopped before recording the answer). With `all`, every grant still
- * in flight, whatever its expiry: the call is ending.
+ * (the process that sent it stopped before recording the answer). With `call_ended`, it first
+ * refuses (`precondition_failed`) while a signed grant may still be acted on, then settles every
+ * grant still reserved (not yet signed, or past its expiry) as unknown: the call is ending.
  */
 export function settleInFlight(rt: EngineRuntime, draft: CallDraft, reason: "no_answer_recorded" | "call_ended"): void {
   const slice = draft.record.modules[GATE] as unknown as GateSlice | undefined;
@@ -323,8 +327,13 @@ function reserve(rt: EngineRuntime, draft: CallDraft, input: { target: string; l
   // `entry.open` is an access scope, never below level 2, so an authorized call holds a grant.
   const verification = draft.record.state.grant!;
   const now = rt.now();
+  // Grant ids come from the host's id generator; one that repeats an id on this call (a second
+  // process with its own sequence) would send a grant the relay takes for a replay, and leave this
+  // reservation unanswerable (every write finds the first grant of that id). Refused: try again.
+  const grantId = rt.ids.next("acc");
+  if (slice.grants.some((g) => g.grantId === grantId)) throw new EngineError("conflict", "the id generator gave an access grant id this call already used; try again");
   const record: AccessRecord = {
-    grantId: rt.ids.next("acc"),
+    grantId,
     target: target.id,
     controller: target.controller,
     ref: target.ref,
