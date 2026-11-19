@@ -7,6 +7,7 @@
 // characters (SEPARATOR_CLASS). The same reading of spoken numbers feeds the live detector (live-detector.ts). A match
 // is replaced by a fixed marker. Over-redaction is accepted; the risk this guards against is a card
 // number reaching storage.
+import { SUPPORTED_LOCALES, type Locale } from "./runtime.ts";
 
 export type RedactionKind = "card_number";
 
@@ -64,12 +65,15 @@ interface NumberWord {
  * (`once`, `dos` and `y` are Spanish numbers but English words). Text redacted with no call reads
  * every language, the safe side.
  */
-export type NumberLanguage = "en" | "fr" | "es";
-export const NUMBER_LANGUAGES: readonly NumberLanguage[] = ["en", "fr", "es"];
+export type NumberLanguage = Locale;
+export const NUMBER_LANGUAGES: readonly NumberLanguage[] = SUPPORTED_LOCALES;
+
+/** The languages whose number words are read on a call in each locale. */
+export const NUMBER_LANGUAGES_BY_LOCALE: Record<Locale, readonly NumberLanguage[]> = { en: ["en", "fr"], fr: ["en", "fr"], es: NUMBER_LANGUAGES };
 
 /** The languages whose number words are read on a call in `locale`; every language with none. */
 export function numberLanguagesFor(locale: NumberLanguage | undefined): readonly NumberLanguage[] {
-  return locale === undefined || locale === "es" ? NUMBER_LANGUAGES : ["en", "fr"];
+  return locale === undefined ? NUMBER_LANGUAGES : NUMBER_LANGUAGES_BY_LOCALE[locale];
 }
 
 type WordList = ReadonlyArray<readonly [NumberWordKind, string, number]>;
@@ -131,7 +135,7 @@ const NUMBER_WORDS: Readonly<Record<NumberLanguage, ReadonlyMap<string, NumberWo
 };
 
 /** The word inside a number in each language: "four hundred and two", "vingt et un", "cuarenta y uno". */
-export const NUMBER_CONNECTORS: Readonly<Record<NumberLanguage, string>> = { en: "and", fr: "et", es: "y" };
+export const NUMBER_CONNECTORS: Record<Locale, string> = { en: "and", fr: "et", es: "y" };
 
 /** The number words and connectors of some languages. Unknown names are ignored. */
 interface Vocabulary {

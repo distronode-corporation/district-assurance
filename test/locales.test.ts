@@ -7,7 +7,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { SUPPORTED_LOCALES, isSupportedLocale } from "../src/engine.ts";
-import { DIGIT_WORDS_BY_LOCALE } from "../src/core/redaction.ts";
+import { NUMBER_CONNECTORS, NUMBER_LANGUAGES_BY_LOCALE } from "../src/core/redaction.ts";
 import { AMOUNT_READBACK_TEXT } from "../src/pay/amount.ts";
 import { READBACK_WORDING } from "../src/file/readback.ts";
 import { ACTION_WORDS, CONTACT_NOTICE_TEXT, LIST_REGION, RECEIPT_LINK_TEXT } from "../src/prove/trace.ts";
@@ -18,7 +18,7 @@ import { TEXT_CODE_TEXT } from "../src/verify/text-code.ts";
 import { rejects, setup } from "./helpers.ts";
 
 /** Every catalog in src/, by its exported name. The source scan below fails when one is missing here. */
-const CATALOGS: Record<string, Record<string, unknown>> = { IDENTITY_TEXT, PAYMENT_TEXT, AMOUNT_READBACK_TEXT, AMOUNT_REGION, DIGIT_WORDS_BY_LOCALE, ACCESS_CODE_TEXT, TEXT_CODE_TEXT, READBACK_WORDING, ACTION_WORDS, LIST_REGION, RECEIPT_LINK_TEXT, CONTACT_NOTICE_TEXT };
+const CATALOGS: Record<string, Record<string, unknown>> = { IDENTITY_TEXT, PAYMENT_TEXT, AMOUNT_READBACK_TEXT, AMOUNT_REGION, NUMBER_LANGUAGES_BY_LOCALE, NUMBER_CONNECTORS, ACCESS_CODE_TEXT, TEXT_CODE_TEXT, READBACK_WORDING, ACTION_WORDS, LIST_REGION, RECEIPT_LINK_TEXT, CONTACT_NOTICE_TEXT };
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
