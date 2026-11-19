@@ -292,7 +292,8 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
   const onFile = subjectKey === null ? null : await rt.adapter("records").getSubject(rt.workspaceId, subjectKey);
   // The call keeps no copy of the PIN digest: the PIN is judged against the store on every attempt,
   // so a digest erased or reset since verification began never counts, and no call record holds it.
-  const subject = onFile === null ? null : (({ pinDigest: _, ...rest }) => rest)(onFile);
+  const subject = onFile === null ? null : structuredClone(onFile);
+  if (subject !== null) delete subject.pinDigest;
   await rt.update(callId, (draft) => {
     stepOfType(draft.record, "badge.verify");
     const s = draft.slice<BadgeSlice>(BADGE);
