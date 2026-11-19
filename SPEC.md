@@ -224,7 +224,10 @@ where the workspace wrote it. A call in `es` is refused (`precondition_failed`) 
 `startCall` or `startFlow`, has a `dossier.collect` step whose form lacks a Spanish label on any
 field, or a `trace.consent` step whose wording has no Spanish text. Outside a flow, the same call
 is refused at `startIntake` for such a form and at `recordConsent` for such a wording, and
-`buildReadBack` refuses such a form in Spanish.
+`buildReadBack` refuses such a form in Spanish. Spanish spoken answers are refused until a reviewed vocabulary exists: the
+engine takes no spoken "sí" and no voice confirmation on a Spanish call, and a host recording a
+Spanish caller's consent (`recordConsent`, whose `answer` the host maps) must take it on the keypad
+too, never from a spoken answer, until then.
 
 ## 8. Flow execution
 
