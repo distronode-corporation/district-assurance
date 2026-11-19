@@ -107,13 +107,13 @@ export function recordLinks(real: PaymentLinks, links: CreatedLink[]): PaymentLi
     links.push({ paymentId: input.paymentId, linkId: link.linkId, url: link.url });
     return link;
   };
-  return new Proxy(real, {
-    get(target, name) {
-      if (name === "createLink") return createLink;
-      const value: unknown = Reflect.get(target, name, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
+  // A plain forwarding object, not a Proxy of the adapter: a Proxy must answer a frozen adapter's
+  // own methods as they are, so swapping `createLink` on one would throw.
+  const facade: PaymentLinks = { capabilities: real.capabilities, createLink, expireLink: (input) => real.expireLink(input) };
+  const { cancel, refund } = real;
+  if (typeof cancel === "function") facade.cancel = (input) => cancel.call(real, input);
+  if (typeof refund === "function") facade.refund = (input) => refund.call(real, input);
+  return facade;
 }
 
 /**

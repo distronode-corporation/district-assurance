@@ -252,16 +252,10 @@ describe("hostile #88: descriptions", () => {
   it("two descriptions that differ only in a lone surrogate never share a digest", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
-    const outcomes: string[] = [];
+    // Each lone surrogate is refused, so no two descriptions can collapse into one read-back.
     for (const description of ["Deposit \ud800", "Deposit \udc00"]) {
-      try {
-        outcomes.push((await t.engine.readBackPayment(callId, { ...request, description })).digest);
-      } catch (e) {
-        assert.ok(rejects("invalid_input", /description/)(e), String(e));
-        outcomes.push("refused");
-      }
+      await assert.rejects(t.engine.readBackPayment(callId, { ...request, description }), rejects("invalid_input", /description/), JSON.stringify(description));
     }
-    assert.ok(outcomes[0] === "refused" || outcomes[0] !== outcomes[1], "a stale confirmation would count for a different read-back");
   });
 
   it("a verified subject's account number stays out of the lookup", async () => {

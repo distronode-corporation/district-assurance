@@ -71,8 +71,7 @@ How the page is kept small and safe:
 | `src/ui.ts` | `npm run ui`: the server with the demo UI |
 | `public/` | the page: `index.html`, `style.css`, `app.js`, and `receipt-check.js` (no DOM, tested in Node) |
 | `src/e2e.ts` | `npm run demo:e2e`: the UI, the door relay and a real Stripe Checkout in test mode; `owner-command` and `visit` |
-| `src/stripe-adapters.ts` | `StripeCheckoutLinks`, a minimal PAY-1 Checkout adapter (test-mode keys only, platform mode, built-in fetch); Stripe Identity planned (VER-5) |
-| `src/stripe-adapters.ts` | the Stripe Identity adapter (VER-5) |
+| `src/stripe-adapters.ts` | `StripeCheckoutLinks`, a minimal PAY-1 Checkout adapter (test-mode keys only, platform mode, built-in fetch), and `StripeIdentityProvider`, the Stripe Identity adapter (VER-5) |
 | `src/carrier-adapters.ts` | Twilio Lookup and Telnyx Number Lookup carrier signal adapters (VER-4) |
 
 ## Trying it with your own Stripe test account
@@ -90,16 +89,15 @@ How the page is kept small and safe:
    ```
 
 3. Trigger a test event (`stripe trigger checkout.session.completed`). The server checks the
-   signature and answers `{"received": true, "applied": false}`: the signature is good, and the
-   session is unknown to this engine because `npm run serve` runs on fake adapters (for a real
-   Checkout Session in test mode, use `npm run demo:e2e`). A wrong secret
+   signature and answers `503` with `{"received": true, "applied": false, "retry": true}`: the
+   signature is good, and no call holds the session because `npm run serve` runs on fake adapters
+   (for a real Checkout Session in test mode, use `npm run demo:e2e`), so the server asks Stripe to
+   deliver it again, as it would for a link still being bound. A wrong secret
    answers `400` with the reason. Then prove the Connect side the same way, with a test connected
    account: `stripe trigger checkout.session.completed --stripe-account acct_...`, and check that
    `/webhooks/stripe/connect` (not `/payments`) answered it. Filter each listener to its own event
    types (`--events checkout.session.completed,...`), so an event never reaches an endpoint that
    does not handle it.
-   session is unknown to this engine because the Checkout adapter is not built yet (PAY-1). A wrong
-   secret answers `400` with the reason.
 
 For a photo ID check that goes to Stripe Identity and back, applied to a call, follow "Trying
 Stripe Identity with your own test account" in the repository's README.md.

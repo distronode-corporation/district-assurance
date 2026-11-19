@@ -684,7 +684,7 @@ describe("Engine pay", () => {
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "async_succeeded", linkId }), { applied: true, callId, status: "paid" });
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "async_failed", linkId }), { applied: false }, "settled once");
     assert.equal((await t.engine.state(callId)).phase, "open");
-    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "expired", linkId: "cs_unknown" }), { applied: false });
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "expired", linkId: "cs_unknown" }), { applied: false, unbound: true }, "no call holds it (yet)");
     const receipt = await t.engine.endCall(callId);
     assert.deepEqual(receipt!.body.payments, [{ paymentId, status: "paid", amountMinor: 15000, currency: "cad", mode: "platform", providerRef: linkId }]);
   });

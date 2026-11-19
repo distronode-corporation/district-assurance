@@ -211,7 +211,7 @@ Entry where no controller can be called live: a short code, texted to the number
 
 ## Acceptance criteria
 
-- [ ] `issueAccessCode` (it throws `NotImplementedError` today) through an `AccessController.issueCode` method: a code valid from `startsAt` to `endsAt`, single use where the lock supports it, bound to the access grant and its lifetime, texted only to the number on file and never written to the ledger.
+- [ ] `issueAccessCode` (built as `accessCodes(...)` and `codes.issue`, SPEC.md section 17; acceptance still open) through an `AccessController.issueCode` method: a code valid from `startsAt` to `endsAt`, single use where the lock supports it, bound to the access grant and its lifetime, texted only to the number on file and never written to the ledger.
 - [ ] Codes stored by the engine only as keyed hashes; `revoke` removes a code before its end, and revoking one already gone is success.
 - [ ] Send limits shared with texted codes (VER-2).
 
@@ -243,7 +243,7 @@ Digital entry: a verified call lets the same person finish signing in on the web
 
 ## Acceptance criteria
 
-- [ ] `issueStepUpToken` (it throws `NotImplementedError` today): a compact JWS (`alg: ES256`) with `iss`, `aud` (the site), `sub` (an opaque handle the site knows), `iat`, `exp` (2 to 5 minutes), `jti`, `acr` (the level) and the site's `nonce`, which the caller keys on the call.
+- [ ] `issueStepUpToken` (built: `engine.issueStepUpToken` and its one-time `exchangeStepUpToken`, ADR-25 and SPEC.md section 18; acceptance still open): a compact JWS (`alg: ES256`) with `iss`, `aud` (the site), `sub` (an opaque handle the site knows), `iat`, `exp` (2 to 5 minutes), `jti`, `acr` (the level) and the site's `nonce`, which the caller keys on the call.
 - [ ] A JWKS document of the step-up keys, its own `kid`, for `/.well-known/jwks.json`; checked with an off-the-shelf JOSE library in a test (development dependency only).
 - [ ] Delivered by a text to the number on file or a POST to the site's registered callback; refused after the call is tainted; each `jti` used once by the site.
 
@@ -274,7 +274,7 @@ One public, self-serve API with a sandbox reaches August, Yale, Nuki, Salto KS, 
 
 ## Acceptance criteria
 
-- [ ] `seamAccessController` (it throws `NotImplementedError` today): `unlock` through Seam's lock unlock call, checking the device can unlock remotely first; `confirmed` only when Seam reports that the device confirmed it.
+- [ ] `seamAccessController` (built, SPEC.md section 17; the sandbox proof is still open): `unlock` through Seam's lock unlock call, checking the device can unlock remotely first; `confirmed` only when Seam reports that the device confirmed it.
 - [ ] No retries (Seam documents no idempotency key on unlock); a lost answer is `unknown`, as Gate requires.
 - [ ] Tested against a local fake HTTP server replaying recorded sandbox responses; proven once by hand in Seam's sandbox.
 
@@ -305,7 +305,7 @@ For access systems no aggregator reaches (Verkada, for example) or a host that h
 
 ## Acceptance criteria
 
-- [ ] `vendorAccessController` (it throws `NotImplementedError` today) for Kisi and Verkada, each through the vendor's documented unlock call, with the same never-retry rule.
+- [ ] `vendorAccessController` (built, SPEC.md section 17; the proof on each vendor is still open) for Kisi and Verkada, each through the vendor's documented unlock call, with the same never-retry rule.
 - [ ] Each tested against a local fake HTTP server; proven once by hand on the vendor's own test setup.
 
 ## Files
@@ -736,7 +736,7 @@ A link should not outlive its purpose. The engine already expires a link at its 
 
 ## Acceptance criteria
 
-- [ ] `cancelPaymentLink` (the caller changed their mind) through `PaymentLinks.expireLink`; open links are expired when the call ends, and the receipt shows them as expired.
+- [ ] `cancelPaymentLink` (the caller changed their mind) through `PaymentLinks.cancel` when the adapter has it, else `PaymentLinks.expireLink`; open links are expired when the call ends, and the receipt shows them as expired.
 - [ ] A late `paid` after cancellation is still recorded as paid and flagged in the ledger: the engine already does this for any request it expired (`late: true`); keep it for cancellations.
 
 ## Files

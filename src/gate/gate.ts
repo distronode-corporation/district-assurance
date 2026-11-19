@@ -230,7 +230,7 @@ export function settleInFlight(rt: EngineRuntime, draft: CallDraft, reason: "no_
  * names the target and its lifetime (pass no input); outside one the host's code passes them.
  * Returns the outcome the call holds; an `unknown` one is never retried here.
  */
-export async function grantAccess(rt: EngineRuntime, callId: string, input?: { target: string; lifetimeSeconds?: number }): Promise<AccessResult> {
+export async function grantAccess(rt: EngineRuntime, callId: string, input?: { target: string; lifetimeSeconds?: number }, only?: { controller: AccessController }): Promise<AccessResult> {
   rt.settings(GATE);
   // A stale reservation is settled in a write of its own, so the settlement holds even when the
   // request that follows is refused (at the grant limit, the step then fails instead of waiting).
@@ -239,20 +239,8 @@ export async function grantAccess(rt: EngineRuntime, callId: string, input?: { t
   if (before?.grants.some((g) => g.status === "reserved" && Date.parse(g.expiresAt) <= now) === true) {
     await rt.update(callId, (draft) => settleInFlight(rt, draft, "no_answer_recorded"));
   }
-  const record = await rt.update(callId, (draft) => reserve(rt, draft, input));
-  const body: AccessGrantBody = {
-    v: 1,
-    kind: "access",
-    grantId: record.grantId,
-    workspaceId: rt.workspaceId,
-    audience: record.controller,
-    target: record.ref,
-    action: "unlock",
-    scope: ENTRY_SCOPE,
-    level: record.level,
-    issuedAt: record.issuedAt,
-    expiresAt: record.expiresAt,
-  };
+  const record = await rt.update(callId, (draft) => reserve(rt, draft, input, only));
+  const body = grantBody(rt, record);
   let grant: SignedAccessGrant;
   try {
     grant = await signDocument(rt.adapter("accessSigner"), body);
@@ -316,8 +304,65 @@ export async function grantAccess(rt: EngineRuntime, callId: string, input?: { t
   });
 }
 
+/** The body of a grant as the engine signs it, from its record. */
+function grantBody(rt: EngineRuntime, record: AccessRecord): AccessGrantBody {
+  return {
+    v: 1,
+    kind: "access",
+    grantId: record.grantId,
+    workspaceId: rt.workspaceId,
+    audience: record.controller,
+    target: record.ref,
+    action: "unlock",
+    scope: ENTRY_SCOPE,
+    level: record.level,
+    issuedAt: record.issuedAt,
+    expiresAt: record.expiresAt,
+  };
+}
+
+/**
+ * In the taint's own write: every grant of the call that may still be acted on (signed and not
+ * expired: at its door, delivered, or answered unknown) is written down with the taint, and
+ * returned, for `revokeTainted`. A taint never pulls back a door that already opened.
+ */
+export function noteTaintedGrants(rt: EngineRuntime, draft: CallDraft): AccessRecord[] {
+  const slice = draft.record.modules[GATE] as unknown as GateSlice | undefined;
+  if (slice === undefined) return [];
+  const now = Date.parse(rt.now());
+  const live = slice.grants.filter((g) => g.digest !== null && g.status !== "failed" && g.status !== "refused" && Date.parse(g.expiresAt) > now);
+  for (const g of live) {
+    const controller = controllerOf(rt, g.controller);
+    draft.emit("access.tainted", "system", { grantId: g.grantId, digest: g.digest!, status: g.status, revocable: controller !== null && typeof controller.revoke === "function" });
+  }
+  return structuredClone(live);
+}
+
+/**
+ * After the taint: asks each tainted grant's controller to withdraw it, once, where it can
+ * (`AccessController.revoke`), and records each answer. One that cannot is left to expire; a
+ * revoke that throws is recorded as failed, and the taint stands either way.
+ */
+export async function revokeTainted(rt: EngineRuntime, callId: string, grants: readonly AccessRecord[]): Promise<void> {
+  const outcomes: Array<{ grantId: string; outcome: "revoked" | "failed" }> = [];
+  for (const g of grants) {
+    const controller = controllerOf(rt, g.controller);
+    if (controller === null || typeof controller.revoke !== "function") continue;
+    try {
+      await controller.revoke({ grant: grantBody(rt, g), target: g.ref, callId, idempotencyKey: rt.idempotencyKey(callId, g.grantId, "revoke") });
+      outcomes.push({ grantId: g.grantId, outcome: "revoked" });
+    } catch {
+      outcomes.push({ grantId: g.grantId, outcome: "failed" });
+    }
+  }
+  if (outcomes.length === 0) return;
+  await rt.update(callId, (draft) => {
+    for (const o of outcomes) draft.emit("access.revoked", "system", o);
+  });
+}
+
 /** The one write that reserves a grant: checked against the call, the step, the scope and the limits. */
-function reserve(rt: EngineRuntime, draft: CallDraft, input: { target: string; lifetimeSeconds?: number } | undefined): AccessRecord {
+function reserve(rt: EngineRuntime, draft: CallDraft, input: { target: string; lifetimeSeconds?: number } | undefined, only: { controller: AccessController } | undefined): AccessRecord {
   const step = stepOfType<GateGrantStep>(draft.record, "gate.grant");
   // The scope is checked on every request, in a flow and outside one.
   if (!rt.authorized(draft.record, ENTRY_SCOPE)) throw new EngineError("scope_denied", `the grant does not cover ${ENTRY_SCOPE}`);
@@ -328,7 +373,11 @@ function reserve(rt: EngineRuntime, draft: CallDraft, input: { target: string; l
   const slice = gateSlice(draft);
   const target = slice.targets.find((t) => t.id === wanted.target);
   if (target === undefined) throw new EngineError("invalid_input", `no target ${wanted.target} on this call`);
-  if (controllerOf(rt, target.controller) === null) throw new EngineError("precondition_failed", `the engine has no access controller named ${target.controller}`);
+  const controller = controllerOf(rt, target.controller);
+  if (controller === null) throw new EngineError("precondition_failed", `the engine has no access controller named ${target.controller}`);
+  // A caller that works only one controller (access codes) never sets off another: a target that
+  // names a live door is refused here, before anything is reserved or sent.
+  if (only !== undefined && controller !== only.controller) throw new EngineError("invalid_input", `target ${target.id} is not worked by that controller`);
   const lifetime = wanted.lifetimeSeconds ?? DEFAULT_ACCESS_SECONDS;
   if (!isIntegerIn(lifetime, MIN_ACCESS_SECONDS, MAX_ACCESS_GRANT_SECONDS)) {
     throw new EngineError("invalid_input", `lifetimeSeconds must be an integer from ${MIN_ACCESS_SECONDS} to ${MAX_ACCESS_GRANT_SECONDS}`);

@@ -10,7 +10,7 @@
 // throws NotImplementedError. SPEC.md describes the flow.
 import { createPublicKey, type JsonWebKey } from "node:crypto";
 
-import type { AttemptCounterKey, AuditEntry, IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
+import type { AccessController, AttemptCounterKey, AuditEntry, IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
 import { canonicalJson, hasLoneSurrogate, type JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
@@ -428,6 +428,9 @@ export class Engine {
   async markUntrusted(callId: string, source: string): Promise<void> {
     // The taint always lands: a label that is not Unicode text is repaired, never a reason to refuse.
     source = untrustedLabel(source);
+    // A grant that may still be acted on when the taint lands is written down with it, and its
+    // controller is asked to withdraw it where it can (Gate, SPEC.md section 17).
+    let tainted: gate.AccessRecord[] = [];
     await this.#update(callId, (draft) => {
       draft.apply({ type: "untrusted_content", source });
       for (const module of this.registry.list()) {
@@ -436,7 +439,9 @@ export class Engine {
         if (module.onUntrusted !== undefined && slice !== undefined) draft.record.modules[name] = module.onUntrusted(slice);
       }
       draft.emit("session.tainted", "code", { source });
+      tainted = gate.noteTaintedGrants(this.#rt, draft);
     });
+    await gate.revokeTainted(this.#rt, callId, tainted);
   }
 
   /** Keypad entry is open: the host pauses transcripts, cuts audio to the model and holds listen-in. */
@@ -859,8 +864,9 @@ export class Engine {
   /**
    * A provider's verified outcome. A payment the engine closed that is paid after all is recorded
    * paid, flagged `late`. A platform payment's `paymentIntentId` is bound to the call, for its disputes.
+   * `unbound`: no call holds the link (yet); have the event delivered again.
    */
-  applyPaymentOutcome(outcome: PaymentOutcome & { paymentIntentId?: string }): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
+  applyPaymentOutcome(outcome: PaymentOutcome & { paymentIntentId?: string }): Promise<{ applied: false; unbound?: true } | { applied: true; callId: string; status: PaymentStatus }> {
     return paylink.applyPaymentOutcome(this.#rt, outcome);
   }
 
@@ -881,8 +887,22 @@ export class Engine {
   // ---- Gate (entry) ------------------------------------------------------------------------
 
   /** Issues an access grant and sends it to its door controller, once (SPEC.md, section 17). */
-  grantAccess(callId: string, input?: { target: string; lifetimeSeconds?: number }): Promise<gate.AccessResult> {
-    return gate.grantAccess(this.#rt, callId, input);
+  grantAccess(callId: string, input?: { target: string; lifetimeSeconds?: number }, only?: { controller: AccessController }): Promise<gate.AccessResult> {
+    return gate.grantAccess(this.#rt, callId, input, only);
+  }
+
+  /**
+   * Has every access controller that owes the ledger something write it (`AccessController.flush`:
+   * a spent access code's entry whose append failed), for the whole workspace. Call it on a
+   * schedule. `failed`: the controllers that could not, to try again on the next sweep.
+   */
+  async sweepAccess(): Promise<{ failed: string[] }> {
+    const failed: string[] = [];
+    for (const [name, controller] of Object.entries(this.#adapters.access ?? {})) {
+      if (typeof controller.flush !== "function") continue;
+      await controller.flush({ workspaceId: this.workspaceId }).catch(() => failed.push(name));
+    }
+    return { failed };
   }
 
   /** A call's access grants, as the engine recorded them. Never the signed grants themselves. */
@@ -966,6 +986,11 @@ export class Engine {
       draft.emit("call.ended", "system", {});
       return structuredClone(draft.record);
     });
+    // What an access controller still owes the ledger for this call is written now, before the
+    // receipt's head is taken; one that fails is left to the next sweep (it opens nothing).
+    for (const controller of Object.values(this.#adapters.access ?? {})) {
+      if (typeof controller.flush === "function") await controller.flush({ workspaceId: this.workspaceId, callId }).catch(() => undefined);
+    }
     // No new payment can start once the call ended, so this closes every link the call will have.
     await paylink.expireOpenPayments(this.#rt, ended);
     const record = paylink.openPayments(ended).length === 0 ? ended : await this.#read(callId);

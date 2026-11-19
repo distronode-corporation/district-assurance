@@ -220,3 +220,30 @@ All notable changes to this project are documented here. The format follows
     or call end claims the close before asking the provider, so a resume never texts that link.
   - A dispute event older than the status recorded (by Stripe's event time, or by stage) never
     replaces it, so a late inquiry snapshot cannot reopen `warning_closed`.
+- Integration review, round 2 (L1):
+  - A taint that lands while an access grant may still be acted on is ledgered against the grant
+    (`access.tainted`), and the controller is asked to withdraw it through the new optional
+    `AccessController.revoke` (`access.revoked`); access codes implement it. A grant already
+    delivered and acted on cannot be pulled back. An access code is never texted to a call tainted
+    while it was stored.
+  - `codes.issue` refuses a target that `codes.controller` does not work, before anything is
+    reserved (`grantAccess` takes an optional `{controller}` guard); a limiter that throws is
+    `refused` (`send_limit_unavailable`), never `unknown`.
+  - `access.code_spent` event ids carry the call id, and `AccessCodeStore.revoke` takes an optional
+    `callId`, so two calls that share a grant id never lose each other's records or codes. A failed
+    `access.code_spent` append is also made when the call ends and on `engine.sweepAccess()`
+    (`AccessController.flush`, `AccessCodeStore.spent`).
+  - `refundPayment` takes an optional `sequence`: the refund's key is the payment and that number,
+    saved before the provider is asked, so a retry after a lost answer resumes the same key or gets
+    the saved result back, and refunds once.
+  - A newer dispute snapshot that changes nothing still moves its time on; a Stripe event whose
+    `created` is past what a `Date` holds is malformed, not a throw.
+  - `requestPayment` checks a saved step's mode and link life against this engine's adapter,
+    returns early when another resume already recorded the text, checks the link's life again
+    after the lease is renewed, and tells the host to wait when a late link is `not_open`.
+  - `applyPaymentOutcome` answers `unbound` for a link no call holds yet, and the reference server
+    has Stripe deliver it again (503).
+  - Reference server: Checkout's `expireLink` confirms Stripe expired that very session, Checkout
+    and Identity URLs must parse as https, a long call id is hashed in Checkout metadata, every
+    Checkout request pins `Stripe-Version`, the e2e payment wait closes its link at Stripe when it
+    ends early and never sleeps past it, and `recordLinks` wraps a frozen adapter.
