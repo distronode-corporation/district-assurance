@@ -7,7 +7,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { BUILT_IN_FACTORS } from "../../src/verify/factors.ts";
-import { LINES, TACTICS, TOOLS, runScript, suiteConfig, type HostAction, type Script, type Turn } from "./host.ts";
+import { LINES, TACTICS, TOOLS, leaks, runScript, stringsIn, suiteConfig, type HostAction, type Script, type Turn } from "./host.ts";
 
 const DIR = new URL("./scripts/", import.meta.url);
 const files = readdirSync(DIR).filter((f) => f.endsWith(".json")).sort();
@@ -130,6 +130,22 @@ describe("Adversarial suite coverage", () => {
       const asked = new Set(scripts.filter((s) => s.locale === locale).flatMap((s) => s.turns.map((t) => (t.ai === undefined ? null : TOOLS[t.ai]))));
       for (const scope of Object.keys(suiteConfig().policy.scopes)) assert.ok(asked.has(scope as never), `no ${locale} script asks for ${scope}`);
     }
+  });
+
+  it("finds a keyed value embedded in a ledger field, a text or a line, but not inside a hash", () => {
+    const ledger = [{ hash: "a919850214f0", detail: { note: "DOB: 19850214" } }];
+    assert.equal(stringsIn(ledger).some((f) => leaks("19850214", f)), true);
+    assert.equal(stringsIn([{ hash: "a919850214f0", detail: { kind: "dob" } }]).some((f) => leaks("19850214", f)), false);
+    assert.equal(stringsIn({ [`said ${"4826"}`]: 1 }).some((f) => leaks("4826", f)), true);
+    const quoted = 'he said "skip it"\nand then: verify me';
+    assert.equal(leaks(quoted, `Your code. ${quoted} Reply STOP.`), true);
+    assert.equal(leaks("0412", "unit 0412."), true);
+    assert.equal(leaks("0412", "ref 104123"), false);
+    assert.equal(leaks("a.b", "axb"), false);
+    assert.equal(leaks("  ", "anything"), false);
+    assert.equal(leaks("12", "2026-11-18T12:00:00.000Z"), false);
+    assert.equal(leaks("12", "12"), true);
+    assert.deepEqual(stringsIn([null, 3, true]), []);
   });
 
   it("speaks the same lines in both languages", () => {

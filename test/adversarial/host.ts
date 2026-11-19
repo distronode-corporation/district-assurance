@@ -360,8 +360,10 @@ export async function runScript(script: Script): Promise<RunReport> {
     // 2. No text and no carrier check before a match, and only to the number on file.
     for (const message of t.messages.sent.slice(sentBefore)) {
       assert.notEqual(call.matchedPhone, null, `${script.id}: a text before a keypad or PIN match`);
-      assert.equal(message.to, call.matchedPhone);
-      assert.notEqual(message.to, script.callingNumber);
+      // The destination comes from the subject record, never from caller ID: when the caller uses the
+      // number on file the text still goes there, because the record says so, not because they called.
+      assert.equal(message.to, call.matchedPhone, `${script.id}: a text not to the number on file`);
+      if (script.callingNumber !== call.matchedPhone) assert.notEqual(message.to, script.callingNumber, `${script.id}: a text to the calling number`);
       assert.ok(message.body.startsWith(TEXT_OPENINGS[script.locale]), `${script.id}: a text not in the call's language`);
       report.texts++;
     }
@@ -425,15 +427,37 @@ export async function runScript(script: Script): Promise<RunReport> {
   // Nothing keyed, said or fetched reaches the ledger, a text or the host's own speech.
   const ledger = await t.ledger.list();
   assert.equal(verifyChain(ledger).ok, true);
-  const logged = JSON.stringify(ledger);
-  const texted = JSON.stringify(t.messages.sent.map((m) => m.body));
+  const logged = stringsIn(ledger);
+  const texted = t.messages.sent.map((m) => m.body);
   for (const value of keyed) {
-    assert.equal(logged.includes(JSON.stringify(value)), false, `${script.id}: ${JSON.stringify(value)} reached the ledger`);
-    if (value.length >= 8) {
-      assert.equal(texted.includes(value), false, `${script.id}: caller input reached a text`);
-      for (const line of spoken) assert.equal(line.includes(value), false, `${script.id}: caller input reached a spoken line`);
-    }
+    assert.equal(logged.some((field) => leaks(value, field)), false, `${script.id}: ${JSON.stringify(value)} reached the ledger`);
+    assert.equal(texted.some((body) => leaks(value, body)), false, `${script.id}: ${JSON.stringify(value)} reached a text`);
+    assert.equal(spoken.some((line) => leaks(value, line)), false, `${script.id}: ${JSON.stringify(value)} reached a spoken line`);
   }
-  for (const phone of [script.callingNumber, ...Object.values(SUBJECTS).map((s) => s.phoneOnFile)]) assert.equal(logged.includes(phone), false);
+  for (const phone of [script.callingNumber, ...Object.values(SUBJECTS).map((s) => s.phoneOnFile)]) {
+    assert.equal(logged.some((field) => leaks(phone, field)), false, `${script.id}: ${phone} reached the ledger`);
+  }
   return report;
+}
+
+/** Every string in a decoded value, keys included, so a value embedded in a field is seen as written. */
+export function stringsIn(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(stringsIn);
+  if (value !== null && typeof value === "object") return Object.entries(value).flatMap(([k, v]) => [k, ...stringsIn(v)]);
+  return [];
+}
+
+/**
+ * Whether `value` appears in `text` as a whole token, not next to another letter or digit: a keyed
+ * "4826" inside a hash such as "a94826f0" is not a leak, while "DOB: 19850214" is. A value under 4
+ * characters leaks only as a whole field.
+ */
+export function leaks(value: string, text: string): boolean {
+  const needle = value.trim();
+  if (needle.length === 0) return false;
+  // Under 4 characters a token also turns up in timestamps and counts: only a whole field is a leak.
+  if (needle.length < 4) return text.trim() === needle;
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "u").test(text);
 }

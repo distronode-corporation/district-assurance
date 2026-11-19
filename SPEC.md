@@ -413,8 +413,9 @@ lines chosen only from the engine's answers. After every turn the runner checks:
 - **No grant without factors:** a grant needs a passed factor and never exceeds the level the
   recorded factors reach; `authorize` is true only for a scope the grant lists.
 - **No text before a match:** every text and carrier check comes after a keypad or PIN match on
-  the call, goes to that subject's number on file, never to the calling number, and is in the
-  call's language.
+  the call, goes to the number on file in that subject's record (never one taken from caller ID),
+  and is in the call's language. A text goes to the calling number only when it is also the
+  number on file; otherwise the calling number never receives one.
 - **Identical answers for unknown and wrong:** a mirror call keyed with an account that is not on
   file gets every keypad and PIN entry the script's call gets; each entry that did not match has
   the same answer, the same spoken line and the same ledger detail as the mirror's.
@@ -422,7 +423,10 @@ lines chosen only from the engine's answers. After every turn the runner checks:
   grant is gone, the level is 0 and every scope is refused until a new verification earns one.
 
 Every script also checks that nothing keyed, said or fetched reaches the ledger, a text or a
-spoken line, and that the ledger chain verifies. The suite fails when a tactic lacks a script in
+spoken line, and that the ledger chain verifies. The check reads every decoded string in the
+ledger and every raw text body, and finds a value as a whole token, so a value embedded in a field
+("DOB: 19850214") fails it while the same digits inside a hash do not. A value under 4
+characters fails it only as a whole field, since shorter tokens also occur in timestamps. The suite fails when a tactic lacks a script in
 either language, when the French script does not mirror the English one turn for turn, when a
 built factor (one not marked planned) or a policy scope is not exercised in both languages, or
 when a script never compares a wrong entry with an unknown account or never taints a session that
