@@ -92,7 +92,7 @@ module the config has on.
 | `badge` | `badge.verify` | | `records`; `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `pinVerifier` with `pin` in verifier mode |
 | `dossier` | `dossier.collect` | `intake.file` | `records` |
 | `paylink` | `paylink.request` | `payment.request` | `payments`, `messages` |
-| `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
+| `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false; `consents` (optional) to revoke consents (section 17) |
 
 ## 4. Factors, levels and scopes
 
@@ -277,6 +277,7 @@ answer on file, a phone number, a link or card data.
 | `payment.link_sent` | `paymentId`, `linkId`, `amountMinor`, `currency`, `amountSource` |
 | `payment.settled` | `paymentId`, `status` |
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
+| `consent.revoked` | `consentId`, `purpose`, `wordingVersion`, `via` (`call`, `text` or `web`) |
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
@@ -289,7 +290,9 @@ refused before it is saved; the outbox is cleared by
 a further write if nobody wrote since. A failed append leaves them pending, and the next write or
 `flushLedger(callId)` appends them. A ledger appends an `eventId` once (a second append returns the
 first entry), so nothing is lost or doubled. The listener is told after each append, at least once
-and best effort.
+and best effort. `consent.revoked` is the one entry written outside a call's write, since a consent
+can be revoked after its call: its `eventId` is `[workspaceId, callId, "consent.revoked",
+consentId]`, so a consent is revoked in the ledger once (section 17).
 
 ## 10. Audit ledger
 
@@ -398,3 +401,36 @@ subject's number on file. Identity link: "Your one-time identity check link: URL
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
 the currency's own decimals.
+
+## 17. Consent revocation
+
+A consent is revoked by voice, text or dashboard with `revokeConsent({consentId, via})`, where
+`via` is `call`, `text` or `web`, during its call or after it. It needs the host's `ConsentStore`
+(the `consents` adapter):
+
+- `putConsent(workspaceId, record)` keeps a `ConsentRecord`; idempotent by `consentId`.
+- `getConsent(workspaceId, consentId)` returns `{consent, revoked}` (`revoked` is null or the
+  revocation), or null.
+- `revokeConsent(workspaceId, {consentId, via, at})` keeps a revocation beside the consent; the
+  first one wins and is returned to every later call.
+
+With the adapter, `recordConsent` reserves the consent on the call, writes it to the store and
+then records it (`consent.recorded`, and the flow step judged). If the store write fails the
+consent stays reserved: the call cannot end, a consent with another purpose or answer is refused
+(`precondition_failed`), and the next `recordConsent` with the same purpose and answer resumes it
+with the same record. Without the adapter, consents live on the call record only and
+`revokeConsent` is refused (`precondition_failed`).
+
+`revokeConsent` refuses an empty id or an unknown `via` (`invalid_input`), a consent the store does
+not have for this workspace (`invalid_input`) and a consent answered "no" (`precondition_failed`).
+Otherwise it stores the revocation, appends `consent.revoked` (actor `member` for `web`, else
+`caller`) at the revocation's time, tells the listener, and returns the revocation. A second
+revocation, or a retry after the ledger failed, returns the first one and completes its entry
+without writing a second. Revoking does not change the call record or a receipt already signed:
+the receipt proves what was answered then, and the ledger proves the revocation.
+
+`isStopRequest(text)` is true when a text or a spoken answer, apart from spaces and a closing `.`
+or `!`, is STOP or one of its French forms ARRÊT, ARRÊTE, ARRÊTER, in any case, with or without
+accents. A word inside a longer message ("don't stop") is not a match. The host decides which
+consents a match revokes (for example every consent texted to that number) and calls
+`revokeConsent` for each.

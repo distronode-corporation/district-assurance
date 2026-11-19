@@ -6,7 +6,6 @@ import { describe, it } from "node:test";
 import { NotImplementedError } from "../src/core/errors.ts";
 import { buildReadBack, createUploadLink, deliverRecord } from "../src/file/later.ts";
 import { cancelPaymentLink, chargeSavedCard, startKeypadCardCapture } from "../src/pay/later.ts";
-import { revokeConsent } from "../src/prove/consent.ts";
 import { exportLedger } from "../src/prove/later.ts";
 import { gateModule } from "../src/gate/later.ts";
 import { createTestEngine } from "../src/testing/index.ts";
@@ -28,7 +27,6 @@ const STUBS: Array<[string, () => unknown]> = [
   ["PAY-3", () => cancelPaymentLink({ callId: "c", paymentId: "p" })],
   ["PAY-4", () => chargeSavedCard({ callId: "c", paymentId: "p" })],
   ["PAY-6", () => startKeypadCardCapture({ callId: "c", paymentId: "p" })],
-  ["PRV-3", () => revokeConsent({ consentId: "x", via: "call" })],
   ["PRV-4", () => exportLedger({ fromSeq: 1 })],
   ["SRV-1", () => verifyTwilioSignature(hook)],
   ["SRV-1", () => verifyTelnyxSignature(hook)],

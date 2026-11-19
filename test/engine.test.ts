@@ -10,7 +10,8 @@ import { defaultConfig } from "../src/modules.ts";
 import { formatAmount } from "../src/pay/paylink.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import { verifyReceipt } from "../src/prove/receipt.ts";
-import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
+import { isStopRequest } from "../src/prove/consent.ts";
+import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryConsentStore, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
@@ -647,5 +648,147 @@ describe("Engine prove", () => {
     for (const secret of [ACCOUNT, DOB, PHONE_ON_FILE, "identity.example.test", "pay.example.test"]) {
       assert.equal(ledgerText.includes(secret), false, secret);
     }
+  });
+});
+
+describe("Engine consent revocation", () => {
+  /** A ConsentStore whose next `putConsent` calls fail, or wait for `release`. */
+  function gatedStore(): MemoryConsentStore & { failNext: number; hold: boolean; release: () => void } {
+    const store = new MemoryConsentStore() as MemoryConsentStore & { failNext: number; hold: boolean; release: () => void };
+    const put = store.putConsent.bind(store);
+    const waiting: Array<() => void> = [];
+    store.failNext = 0;
+    store.hold = false;
+    store.release = () => waiting.splice(0).forEach((go) => go());
+    store.putConsent = async (workspaceId, record) => {
+      if (store.failNext > 0) {
+        store.failNext--;
+        throw new Error("consent store down");
+      }
+      if (store.hold) await new Promise<void>((go) => waiting.push(go));
+      return put(workspaceId, record);
+    };
+    return store;
+  }
+
+  const flowWithConsent = () => testConfig((c) => (c.flows = { f: { steps: [{ type: "trace.consent", purpose: "texts" }, { type: "trace.receipt" }] } }));
+
+  it("maps STOP and its French forms to revocation, and nothing else", () => {
+    for (const text of ["STOP", "stop", " Stop. ", "STOP!", "ARRÊT", "arret", "Arrête", "ARRETER", "arrêter !"]) assert.equal(isStopRequest(text), true, text);
+    for (const text of ["", "yes", "oui", "don't stop", "stop texting me please", "stopper", "arrêt maintenant", "ST0P"]) assert.equal(isStopRequest(text), false, text);
+  });
+
+  it("stores each consent, and revokes one by text after the call ended, once, in the ledger", async () => {
+    const consents = new MemoryConsentStore();
+    const events: EngineEvent[] = [];
+    const t = setup({ adapters: { consents }, onEvent: (e) => events.push(e) });
+    const callId = await verifiedCall(t);
+    const yes = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    assert.deepEqual(await consents.getConsent("ws_test", yes.consentId), { consent: yes, revoked: null });
+    const receipt = (await t.engine.endCall(callId))!;
+    t.clock.advance(86_400_000);
+    assert.equal(isStopRequest("ARRÊT"), true);
+    const revoked = await t.engine.revokeConsent({ consentId: yes.consentId, via: "text" });
+    assert.deepEqual(revoked, { consentId: yes.consentId, via: "text", at: "2026-01-02T00:00:00.000Z" });
+    assert.deepEqual((await consents.getConsent("ws_test", yes.consentId))!.revoked, revoked);
+    // A second revocation, from the dashboard, returns the first and writes nothing more.
+    t.clock.advance(1000);
+    assert.deepEqual(await t.engine.revokeConsent({ consentId: yes.consentId, via: "web" }), revoked);
+    const entries = await t.ledger.list();
+    assert.equal(verifyChain(entries).ok, true);
+    const revocations = entries.filter((e) => e.event === "consent.revoked");
+    assert.equal(revocations.length, 1);
+    assert.deepEqual(
+      { callId: revocations[0]!.callId, actor: revocations[0]!.actor, at: revocations[0]!.at, detail: revocations[0]!.detail },
+      { callId, actor: "caller", at: revoked.at, detail: { consentId: yes.consentId, purpose: "texts", wordingVersion: "1", via: "text" } },
+    );
+    assert.equal(events.at(-1)!.name, "consent.revoked", "the listener is told");
+    assert.equal(verifyReceipt(receipt, t.engine.receiptKeys()), true, "the receipt still proves what was answered then");
+    const ledgerText = JSON.stringify(entries);
+    for (const secret of [ACCOUNT, DOB, PHONE_ON_FILE]) assert.equal(ledgerText.includes(secret), false, secret);
+  });
+
+  it("records a dashboard revocation as a member's, during the call", async () => {
+    const t = setup({ adapters: { consents: new MemoryConsentStore() } });
+    const { callId } = await t.engine.startCall();
+    const yes = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await t.engine.revokeConsent({ consentId: yes.consentId, via: "web" });
+    const entry = (await t.ledger.list()).at(-1)!;
+    assert.deepEqual([entry.event, entry.actor, entry.detail.via], ["consent.revoked", "member", "web"]);
+  });
+
+  it("refuses a revocation without a store, a bad input, an unknown consent, a no, and another workspace's consent", async () => {
+    const consents = new MemoryConsentStore();
+    const t = setup({ adapters: { consents } });
+    const { callId } = await t.engine.startCall();
+    const no = await t.engine.recordConsent(callId, { purpose: "texts", answer: "no" });
+    const yes = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await assert.rejects(t.engine.revokeConsent({ consentId: "", via: "text" }), rejects("invalid_input", /consentId/));
+    await assert.rejects(t.engine.revokeConsent(null as never), rejects("invalid_input", /consentId/));
+    await assert.rejects(t.engine.revokeConsent({ consentId: yes.consentId, via: "fax" as never }), rejects("invalid_input", /via/));
+    await assert.rejects(t.engine.revokeConsent({ consentId: "cns_404", via: "text" }), rejects("invalid_input", /no such consent/));
+    await assert.rejects(t.engine.revokeConsent({ consentId: no.consentId, via: "text" }), rejects("precondition_failed", /nothing to revoke/));
+    const other = createTestEngine({ workspaceId: "ws_other", config: testConfig(), adapters: { consents } });
+    await assert.rejects(other.engine.revokeConsent({ consentId: yes.consentId, via: "text" }), rejects("invalid_input", /no such consent/));
+    const bare = setup();
+    const { callId: bareCall } = await bare.engine.startCall();
+    const kept = await bare.engine.recordConsent(bareCall, { purpose: "texts", answer: "yes" });
+    await assert.rejects(bare.engine.revokeConsent({ consentId: kept.consentId, via: "call" }), rejects("precondition_failed", /consents adapter/));
+    await assert.rejects(consents.revokeConsent("ws_test", { consentId: "cns_404", via: "text", at: "x" }), /no such consent/);
+    assert.equal((await t.ledger.list()).some((e) => e.event === "consent.revoked"), false);
+  });
+
+  it("keeps a consent reserved when the store fails, and resumes it with the same record", async () => {
+    const consents = gatedStore();
+    const t = setup({ adapters: { consents }, config: flowWithConsent() });
+    const { callId } = await t.engine.startCall({ flow: "f" });
+    consents.failNext = 1;
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), /consent store down/);
+    assert.equal((await t.engine.flowPosition(callId))!.index, 0, "not recorded yet");
+    await assert.rejects(t.engine.endCall(callId), rejects("precondition_failed", /consent is being stored/));
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "no" }), rejects("precondition_failed", /being stored/));
+    const consent = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    assert.equal(consent.consentId, "cns_1");
+    assert.equal((await t.engine.flowPosition(callId))!.status, "completed");
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "consent.recorded").length, 1);
+    assert.notEqual(await consents.getConsent("ws_test", "cns_1"), null);
+    assert.equal((await t.engine.endCall(callId))!.body.consents.length, 1);
+  });
+
+  it("records one consent when two processes resume it at once", async () => {
+    const consents = gatedStore();
+    const t = setup({ adapters: { consents } });
+    const { callId } = await t.engine.startCall();
+    consents.hold = true;
+    const first = t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    const second = t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await new Promise((resolve) => setImmediate(resolve));
+    consents.release();
+    const [a, b] = await Promise.all([first, second]);
+    assert.equal(a.consentId, b.consentId);
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "consent.recorded").length, 1);
+  });
+
+  it("completes a revocation whose ledger entry failed, with its first time and channel", async () => {
+    const ledger = new MemoryAuditLedger();
+    let failRevocation = true;
+    const flaky = Object.assign(Object.create(ledger) as MemoryAuditLedger, {
+      append: async (input: Parameters<MemoryAuditLedger["append"]>[0]) => {
+        if (input.event === "consent.revoked" && failRevocation) {
+          failRevocation = false;
+          throw new Error("ledger down");
+        }
+        return ledger.append(input);
+      },
+    });
+    const t = setup({ adapters: { consents: new MemoryConsentStore(), ledger: flaky } });
+    const { callId } = await t.engine.startCall();
+    const yes = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await assert.rejects(t.engine.revokeConsent({ consentId: yes.consentId, via: "call" }), /ledger down/);
+    t.clock.advance(5000);
+    const revoked = await t.engine.revokeConsent({ consentId: yes.consentId, via: "web" });
+    assert.deepEqual([revoked.via, revoked.at], ["call", "2026-01-01T00:00:00.000Z"]);
+    const entry = (await ledger.list()).find((e) => e.event === "consent.revoked")!;
+    assert.deepEqual([entry.actor, entry.at, entry.detail.via], ["caller", revoked.at, "call"]);
   });
 });

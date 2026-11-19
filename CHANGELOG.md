@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Consent revocation (PRV-3): `Engine.revokeConsent` by voice, text or dashboard through a new
+  `ConsentStore` adapter (`consents`; `MemoryConsentStore` in the fakes), a `consent.revoked`
+  ledger event written once per consent, and `isStopRequest` for STOP, ARRÊT, ARRÊTE and ARRÊTER.
 
 ### Changed
 

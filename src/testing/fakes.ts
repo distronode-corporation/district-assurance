@@ -4,6 +4,9 @@ import { generateKeyPairSync } from "node:crypto";
 
 import type {
   CarrierSignals,
+  ConsentRecord,
+  ConsentRevocation,
+  ConsentStore,
   IdentityProvider,
   IntakeRecord,
   MessagePurpose,
@@ -136,6 +139,28 @@ export class MemoryRecordStore implements RecordStore {
   async getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null> {
     const record = this.#records.get(`${workspaceId}/${recordId}`);
     return record === undefined ? null : structuredClone(record);
+  }
+}
+
+/** Consents and their revocations, in memory. The first revocation of a consent wins. */
+export class MemoryConsentStore implements ConsentStore {
+  readonly #consents = new Map<string, { consent: ConsentRecord; revoked: ConsentRevocation | null }>();
+
+  async putConsent(workspaceId: string, record: ConsentRecord): Promise<void> {
+    const key = `${workspaceId}/${record.consentId}`;
+    if (!this.#consents.has(key)) this.#consents.set(key, { consent: structuredClone(record), revoked: null });
+  }
+
+  async getConsent(workspaceId: string, consentId: string): Promise<{ consent: ConsentRecord; revoked: ConsentRevocation | null } | null> {
+    const stored = this.#consents.get(`${workspaceId}/${consentId}`);
+    return stored === undefined ? null : structuredClone(stored);
+  }
+
+  async revokeConsent(workspaceId: string, revocation: ConsentRevocation): Promise<ConsentRevocation> {
+    const stored = this.#consents.get(`${workspaceId}/${revocation.consentId}`);
+    if (stored === undefined) throw new Error("no such consent");
+    stored.revoked ??= structuredClone(revocation);
+    return structuredClone(stored.revoked);
   }
 }
 

@@ -25,6 +25,7 @@ export const ENGINE_EVENTS = [
   "payment.link_sent",
   "payment.settled",
   "consent.recorded",
+  "consent.revoked",
   "call.ended",
   "receipt.issued",
   "module.event",
