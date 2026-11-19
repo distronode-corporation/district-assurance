@@ -114,8 +114,23 @@ export interface TelnyxSignatureInput {
 const ED25519_PUBLIC_KEY = /^[A-Za-z0-9+/]{43}=$/;
 const ED25519_SIGNATURE = /^[A-Za-z0-9+/]{86}==$/;
 
+const ED25519_P = 2n ** 255n - 19n;
+/**
+ * The y coordinates of Ed25519's eight small-order points: the identity (1), order 2 (p - 1),
+ * order 4 (0) and order 8 (two values). A key on one of them verifies forged signatures on some
+ * platforms (Node 24.2's crypto accepted one under the all-zero key), so it is never used.
+ */
+const SMALL_ORDER_Y = new Set([0n, 1n, ED25519_P - 1n, 0x5fc536d880238b13933c6d305acdfd5f098eff289f4c345b027b2c28f95e826n, 0x7a03ac9277fdc74ec6cc392cfa53202a0f67100d760b3cba4fd84d3d706a17c7n]);
+
+/** Whether a 32-byte Ed25519 key encodes a small-order point, in any form (sign bit set, y + p). */
+function isSmallOrderKey(key: Buffer): boolean {
+  let y = 0n;
+  for (let i = 31; i >= 0; i--) y = (y << 8n) | BigInt(i === 31 ? key[i]! & 0x7f : key[i]!);
+  return SMALL_ORDER_Y.has(y % ED25519_P);
+}
+
 export function verifyTelnyxSignature(input: TelnyxSignatureInput): SignatureCheck {
-  const keys = input.publicKeys.filter((k) => ED25519_PUBLIC_KEY.test(k));
+  const keys = input.publicKeys.filter((k) => ED25519_PUBLIC_KEY.test(k) && !isSmallOrderKey(Buffer.from(k, "base64")));
   if (keys.length === 0) return { ok: false, reason: "no_secret" };
   const { signatureHeader: signature, timestampHeader: stamp } = input;
   if (signature === null || signature === undefined || signature === "" || stamp === null || stamp === undefined || stamp === "") {

@@ -28,6 +28,29 @@ describe("hostile #92: Telnyx", () => {
     }
   });
 
+  it("P1b: every small-order key encoding is skipped before verifying, whatever the platform's Ed25519 accepts", () => {
+    // y of the eight small-order points (identity, order 2, 4 and 8), little-endian, each with its
+    // sign bit clear and set, plus the non-canonical y + p forms of 0 and 1. Node 24.2's crypto
+    // accepted a forged signature under the all-zero key, so the verifier refuses these itself.
+    const p = 2n ** 255n - 19n;
+    const ys = [0n, 1n, p - 1n, 0x5fc536d880238b13933c6d305acdfd5f098eff289f4c345b027b2c28f95e826n, 0x7a03ac9277fdc74ec6cc392cfa53202a0f67100d760b3cba4fd84d3d706a17c7n, p, p + 1n];
+    const le = (y: bigint, sign: boolean) => {
+      const b = Buffer.alloc(32);
+      for (let i = 0; i < 32; i++) b[i] = Number((y >> BigInt(8 * i)) & 0xffn);
+      if (sign) b[31]! |= 0x80;
+      return b.toString("base64");
+    };
+    const forged = Buffer.concat([Buffer.from([1]), Buffer.alloc(63)]).toString("base64");
+    for (const y of ys) {
+      for (const sign of [false, true]) {
+        const key = le(y, sign);
+        const r = verifyTelnyxSignature({ payload: '{"forged":true}', signatureHeader: forged, timestampHeader: `${t}`, publicKeys: [key], now });
+        assert.deepEqual(r, { ok: false, reason: "no_secret" }, key);
+      }
+    }
+    assert.deepEqual(telnyx({ publicKeys: [le(0n, false), KEY] }), { ok: true, timestamp: t }, "the next key still verifies");
+  });
+
   it("P2: a tolerance that is not an integer from 0 to 86,400 is refused, whatever its type", () => {
     for (const toleranceSeconds of ["300", Number.MAX_VALUE, -Number.MIN_VALUE, Number.NEGATIVE_INFINITY, 2 ** 53, {}]) {
       assert.throws(() => telnyx({ toleranceSeconds: toleranceSeconds as number }), /toleranceSeconds must be an integer/, String(toleranceSeconds));
