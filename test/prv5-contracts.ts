@@ -1,7 +1,7 @@
 // A stand-in for the PRV-5 contract suites until they reach main: a copy of `auditLedgerContract`
 // and `recordStoreContract` from src/testing/contracts.ts on branch wp-c (commit 4aec656), with
 // imports pointed at src/. When PRV-5 is merged, delete this file and import both suites from
-// "../src/testing/index.ts" instead.
+// "../src/testing/index.ts" instead. The two `limit` cases are copied from jr/wp-c 5e51dc6.
 import { strict as assert } from "node:assert";
 
 import type { AuditEntry, AuditInput, AuditLedger, IntakeRecord, RecordStore, SubjectRecord } from "../src/core/adapters.ts";
@@ -59,6 +59,32 @@ export function auditLedgerContract(factory: () => AuditLedger | Promise<AuditLe
         assert.deepEqual(tail, appended.slice(2));
         assert.equal(verifyChain(tail, { seq: 2, hash: appended[1]!.hash }).ok, true);
         assert.deepEqual(await ledger.list(5), []);
+      },
+    ],
+    [
+      "lists at most `limit` entries from a seq, as one page",
+      async (ledger) => {
+        const appended: AuditEntry[] = [];
+        for (let n = 1; n <= 5; n++) appended.push(await ledger.append(contractEntry(n)));
+        assert.deepEqual(await ledger.list(1), appended, "no limit, every entry");
+        assert.deepEqual(await ledger.list(undefined, 2), appended.slice(0, 2), "a limit from the start");
+        assert.deepEqual(await ledger.list(1, 1), appended.slice(0, 1), "a page of one");
+        assert.deepEqual(await ledger.list(1, 5), appended, "a page of exactly all");
+        assert.deepEqual(await ledger.list(2, 2), appended.slice(1, 3), "fromSeq plus limit");
+        const page = await ledger.list(4, 10);
+        assert.deepEqual(page, appended.slice(3), "a limit beyond the rest gives the rest");
+        assert.equal(verifyChain(page, { seq: 3, hash: appended[2]!.hash }).ok, true, "a page continues the chain");
+        assert.deepEqual(await ledger.list(6, 3), [], "past the head, nothing");
+      },
+    ],
+    [
+      "refuses a limit that is not an integer of 1 or more",
+      async (ledger) => {
+        await ledger.append(contractEntry(1));
+        for (const limit of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+          await assert.rejects(ledger.list(1, limit), `limit ${limit}`);
+        }
+        assert.equal((await ledger.list()).length, 1, "and still lists");
       },
     ],
     [

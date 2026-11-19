@@ -113,10 +113,12 @@ export class SqliteAuditLedger implements AuditLedger {
     return this.#head();
   }
 
-  async list(fromSeq = 1): Promise<AuditEntry[]> {
+  /** One page: SQLite reads at most `limit` rows (LIMIT -1 is no limit). */
+  async list(fromSeq = 1, limit?: number): Promise<AuditEntry[]> {
+    if (limit !== undefined && !(Number.isSafeInteger(limit) && limit >= 1)) throw new TypeError("SqliteAuditLedger.list: limit must be an integer of 1 or more");
     return this.#db
-      .prepare("SELECT entry FROM audit_entries WHERE seq >= ? ORDER BY seq")
-      .all(fromSeq)
+      .prepare("SELECT entry FROM audit_entries WHERE seq >= ? ORDER BY seq LIMIT ?")
+      .all(fromSeq, limit ?? -1)
       .map((row) => JSON.parse(row.entry as string) as AuditEntry);
   }
 

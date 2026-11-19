@@ -27,7 +27,9 @@ All notable changes to this project are documented here. The format follows
   `npm run demo` and the UI.
 - Optional SQLite stores for the reference server (SRV-4): `SqliteRecordStore` and an append-only
   `SqliteAuditLedger` on `node:sqlite`, with no new dependency, that pass the PRV-5 contract suites
-  and keep their data across a restart.
+  and keep their data across a restart. `SqliteAuditLedger.list(fromSeq?, limit?)` reads one page
+  of at most `limit` rows and refuses a `limit` that is not an integer of 1 or more, as the
+  hardened ledger contract (#73) asks.
 
 ### Changed
 

@@ -8,7 +8,7 @@ import { after, describe, it } from "node:test";
 
 import { SqliteAuditLedger, SqliteRecordStore, openSqliteDatabase, openSqliteStores } from "../examples/reference-server/src/sqlite-stores.ts";
 import type { IntakeRecord } from "../src/core/adapters.ts";
-import { verifyChain } from "../src/prove/ledger.ts";
+import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, testConfig } from "./helpers.ts";
 import { auditLedgerContract, recordStoreContract } from "./prv5-contracts.ts";
@@ -49,6 +49,10 @@ const record = (recordId: string, issue = "leaking tap"): IntakeRecord => ({
 });
 
 const entry = (n: number) => ({ callId: `call_${n}`, actor: "code" as const, event: "module.event" as const, at: "2026-01-01T00:00:00.000Z", detail: { n } });
+
+describe("MemoryAuditLedger passes the copied AuditLedger contract", () => {
+  for (const c of auditLedgerContract(() => new MemoryAuditLedger())) it(c.name, c.run);
+});
 
 describe("SqliteAuditLedger passes the AuditLedger contract", () => {
   for (const c of auditLedgerContract(() => new SqliteAuditLedger(openSqliteDatabase(":memory:")))) it(c.name, c.run);
