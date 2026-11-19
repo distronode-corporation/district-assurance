@@ -54,8 +54,10 @@ export interface MonthlyReport {
   unattributed: number;
   /**
    * Entries anywhere in the ledger whose time does not read (any workspace's, or none): their month
-   * is unknown, so they are counted here, never above and never for a workspace. Only the first
-   * one's `seq` is given, never its content, so one bad entry never stops any workspace's report.
+   * is unknown, so they are counted here, never above and never for a workspace. So are this
+   * workspace's entries in the month whose detail does not read (a consent answer other than yes or
+   * no, a link amount that is not a whole number, a level that is not one). Only the first one's
+   * `seq` is given, never its content, so one bad entry never stops any workspace's report.
    */
   malformed: { count: number; firstSeq: number | null };
 }
@@ -94,6 +96,21 @@ function monthReader(timeZone: string): (at: string) => string | null {
 }
 
 const SETTLED = ["paid", "failed", "expired"] as const;
+
+/** Whether an entry the report tallies has the detail the engine writes for it. */
+function readable(name: string, d: AuditEntry["detail"]): boolean {
+  switch (name) {
+    case "payment.link_sent":
+      return Number.isSafeInteger(d.amountMinor) && (d.amountMinor as number) >= 0 && typeof d.currency === "string" && /^[a-z]{3}$/.test(d.currency);
+    case "verification.finished":
+      // Any whole level is counted by its number (a later level included); anything else is not a level.
+      return Number.isSafeInteger(d.level) && (d.level as number) >= 0;
+    case "consent.recorded":
+      return typeof d.purpose === "string" && (d.answer === "yes" || d.answer === "no");
+    default:
+      return true;
+  }
+}
 
 function tally(): PaymentTally {
   return { count: 0, totals: {} };
@@ -163,6 +180,15 @@ export async function monthlyReport(input: { ledger: AuditLedger; workspaceId: s
     // Events other packages will add (VER-1, GAT-1) are matched by name.
     const name: string = entry.event;
     const d = entry.detail;
+    // A detail that does not read as the engine writes it is counted apart, never in a tally, so one
+    // odd entry can never put NaN or a stray key in the report and stop it being signed.
+    if (!readable(name, d)) {
+      if (inMonth) {
+        report.malformed.count++;
+        report.malformed.firstSeq ??= entry.seq;
+      }
+      continue;
+    }
     if (name === "payment.link_sent") links.set(linkKey(entry), { amountMinor: d.amountMinor as number, currency: d.currency as string });
     if (!inMonth) continue;
     switch (name) {

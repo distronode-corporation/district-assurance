@@ -345,7 +345,11 @@ whose `at` is not a UTC time as the engine writes it (`toISOString`), or names a
 not exist, has no month: it is counted in `malformed.count` (across the whole ledger, whatever
 workspace it names) with the first one's `seq` in `malformed.firstSeq` (null when none), never
 anywhere else and never for a workspace, so one bad entry in a shared ledger never stops any
-workspace's report. A bad `workspaceId`, `month` or `timeZone` is refused with `invalid_input`.
+workspace's report. So is an entry of the workspace in the month whose detail does not read as the
+engine writes it (a consent answer other than `yes` or `no`, a link amount that is not a whole
+number with a lower-case currency, a level that is not a whole number): it is never tallied, so it can never
+put a non-number in the report and stop it being signed. A bad `workspaceId`, `month` or
+`timeZone` is refused with `invalid_input`.
 
 | Field | From |
 |---|---|
