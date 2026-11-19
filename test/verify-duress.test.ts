@@ -115,12 +115,21 @@ describe("Duress PIN: what the caller sees", () => {
   });
 
   it("refuses money, contact, access and the business's own scopes, as a scope without a grant", async () => {
-    const normal = await duressSetup();
-    const duress = await duressSetup();
+    // A contact scope and an access scope a level 2 call is granted, so the normal call can use both.
+    const reachable = (c: FlowConfig) => {
+      c.policy.scopes["contact.email"] = 2;
+      c.policy.scopes["access.door"] = 2;
+    };
+    const normal = await duressSetup(reachable);
+    const duress = await duressSetup(reachable);
     const a = await pinCall(normal, PIN);
     const b = await pinCall(duress, DURESS);
     assert.deepEqual(a.scopes, { "status.read": true, "intake.file": true, "owner.command": true, "payment.request": true, "contact.update": false });
     assert.deepEqual(b.scopes, { "status.read": true, "intake.file": true, "owner.command": false, "payment.request": false, "contact.update": false });
+    for (const scope of ["contact.email", "access.door"]) {
+      assert.equal(await normal.engine.authorize(a.callId, scope), true, `${scope} on the normal call`);
+      assert.equal(await duress.engine.authorize(b.callId, scope), false, `${scope} on the duress call`);
+    }
     const request = { amountMinor: 1500, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
     let duressError: unknown;
     await duress.engine.requestPayment(b.callId, request).catch((e: unknown) => (duressError = e));
