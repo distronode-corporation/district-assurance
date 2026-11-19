@@ -231,8 +231,11 @@ when there is a number.
   `subject` or `number`, a key that is not 64 lower-case hex, and a `memberId` that is not 1 to 128
   of letters, digits, `.`, `_`, `:`, `@`, `-` or that carries a card number; an engine without
   `counters` refuses with `precondition_failed`. It appends `verification.unlocked` (call id null,
-  actor `member`; the listener, which hears of calls, is not told), then clears that one counter and its notices, and nothing else: the other scope,
-  other factor kinds and other subjects stay locked. It grants nothing: no call changes, and the
+  actor `member`; the listener, which hears of calls, is not told), then clears that one counter
+  and its notices, and nothing else: the other scope, other factor kinds and other subjects stay
+  locked. Unlike a pass, which takes only its own failure off a number's counter, an unlock clears
+  the whole counter it names, a number's failures against other accounts included: the business's
+  deliberate act, in the ledger. It grants nothing: no call changes, and the
   caller verifies from no factors like anyone else.
 
 ## 7. FlowConfig
