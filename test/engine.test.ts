@@ -1,18 +1,22 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
+import type { IntakeRecord } from "../src/core/adapters.ts";
+import { canonicalJson, type JsonValue } from "../src/core/canonical.ts";
 import { ConfigError } from "../src/core/config.ts";
+import { hmacSha256Hex } from "../src/core/hash.ts";
 import { NotImplementedError } from "../src/core/errors.ts";
 import type { EngineEvent } from "../src/core/events.ts";
 import { defaultVerificationPolicy } from "../src/core/policy.ts";
 import { createEngine } from "../src/engine.ts";
+import { intakeDigest, type IntakeForm } from "../src/file/intake.ts";
 import { defaultConfig } from "../src/modules.ts";
 import { formatAmount } from "../src/pay/paylink.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import { verifyReceipt } from "../src/prove/receipt.ts";
-import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
+import { FakeCarrierSignals, FakeFieldCipher, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, form, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
 describe("Engine construction", () => {
   it("refuses a short key, an empty workspace, a missing ledger and a bad config", () => {
@@ -463,6 +467,87 @@ describe("Engine file", () => {
     await assert.rejects(t.engine.setIntakeField(callId, "issue", "changed"), rejects("precondition_failed"), "still reserved after the failed write");
     const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
     assert.deepEqual([record.recordId, record.values.issue, record.confirmedBy], ["rec_1", "leak", "voice"], "the same record, written again");
+  });
+
+  describe("sensitive fields", () => {
+    const SIN = "046 454 286"; // a made-up number, not a secret
+    const secure: IntakeForm = {
+      formId: "secure",
+      version: "1",
+      fields: [
+        { key: "issue", label: { en: "Issue", fr: "Problème" }, type: "text", required: true },
+        { key: "sin", label: { en: "SIN", fr: "NAS" }, type: "text", required: true, sensitive: true },
+        { key: "pets", label: { en: "Pets", fr: "Animaux" }, type: "number", required: false, sensitive: true },
+      ],
+    };
+    const withSecure = () => testConfig((c) => (c.modules.dossier = { settings: { forms: [structuredClone(form), structuredClone(secure)] } as unknown as JsonValue }));
+    /** The digest the engine must give: the plaintext, with each sensitive value as an HMAC bound to the record and field. */
+    const expectedDigest = (recordId: string, values: Record<string, string | number>) => {
+      const covered: Record<string, string | number> = { ...values };
+      for (const key of ["sin", "pets"]) if (key in values) covered[key] = hmacSha256Hex(TEST_KNOWLEDGE_KEY, canonicalJson(["intake", recordId, key, values[key]!]));
+      return intakeDigest(secure, covered);
+    };
+
+    it("stores ciphertext, with a digest that does not depend on it and that stays the same on a retry", async () => {
+      const cipher = new FakeFieldCipher();
+      const t = setup({ config: withSecure(), adapters: { fieldCipher: cipher } });
+      const callId = await verifiedCall(t);
+      await t.engine.startIntake(callId, "secure");
+      await t.engine.setIntakeField(callId, "issue", "Leak");
+      await t.engine.setIntakeField(callId, "sin", SIN);
+      const put = t.records.putIntakeRecord.bind(t.records);
+      const attempts: IntakeRecord[] = [];
+      t.records.putIntakeRecord = async (record) => {
+        attempts.push(structuredClone(record));
+        if (attempts.length === 1) throw new Error("database down");
+        return put(record);
+      };
+      await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /database down/);
+      const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+      assert.equal(record.values.issue, "Leak", "a field that is not sensitive stays in the clear");
+      assert.equal(Object.hasOwn(record.values, "pets"), false, "an optional sensitive field left empty is not encrypted");
+      assert.match(String(record.values.sin), /^fake-cipher:2:/);
+      assert.equal(cipher.decrypt(String(record.values.sin)), SIN);
+      assert.deepEqual(cipher.encrypted, [1, 2].map(() => ({ workspaceId: "ws_test", recordId: record.recordId, field: "sin" })), "encrypted again on the retry");
+      assert.notEqual(attempts[0]!.values.sin, attempts[1]!.values.sin, "a different ciphertext each time");
+      assert.equal(attempts[0]!.digest, attempts[1]!.digest, "the same digest each time");
+      assert.equal(record.digest, expectedDigest(record.recordId, { issue: "Leak", sin: SIN }));
+      assert.notEqual(record.digest, intakeDigest(secure, { issue: "Leak", sin: SIN }), "a receipt is no oracle for the plain value");
+      assert.notEqual(record.digest, intakeDigest(secure, { issue: "Leak", sin: String(record.values.sin) }), "nor the ciphertext");
+      assert.deepEqual(await t.records.getIntakeRecord("ws_test", record.recordId), record);
+      assert.equal(await t.engine.confirmIntake(callId, { confirmedBy: "voice" }).then((r) => r.values.sin), record.values.sin, "a retry after filing returns the stored record");
+      const receipt = (await t.engine.endCall(callId))!;
+      assert.equal(receipt.body.records[0]!.digest, record.digest);
+      const stored = JSON.stringify([await t.sessions.get("ws_test", callId), await t.ledger.list(), receipt]);
+      assert.equal(stored.includes(SIN), false, "the call record, the ledger and the receipt keep no plain value");
+    });
+
+    it("encrypts a number as text", async () => {
+      const cipher = new FakeFieldCipher();
+      const t = setup({ config: withSecure(), adapters: { fieldCipher: cipher } });
+      const callId = await verifiedCall(t);
+      await t.engine.startIntake(callId, "secure");
+      for (const [key, value] of [["issue", "Leak"], ["sin", SIN], ["pets", "2"]]) await t.engine.setIntakeField(callId, key!, value!);
+      const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
+      assert.deepEqual([cipher.decrypt(String(record.values.sin)), cipher.decrypt(String(record.values.pets))], [SIN, "2"]);
+      assert.equal(record.digest, expectedDigest(record.recordId, { issue: "Leak", sin: SIN, pets: 2 }));
+    });
+
+    it("refuses a sensitive form without the cipher, and an engine without one never files it", async () => {
+      assert.throws(() => setup({ config: withSecure() }), (e: unknown) => e instanceof ConfigError && e.problems.includes("modules.dossier: needs the fieldCipher adapter, which the engine does not have"));
+      // Two engines on one store: the call keeps the secure form, the second engine has no cipher.
+      const a = setup({ config: withSecure(), adapters: { fieldCipher: new FakeFieldCipher() } });
+      const b = setup({ adapters: { sessions: a.sessions, records: a.records } });
+      const callId = await verifiedCall(a);
+      await a.engine.startIntake(callId, "secure");
+      await a.engine.setIntakeField(callId, "issue", "Leak");
+      await a.engine.setIntakeField(callId, "sin", SIN);
+      await assert.rejects(b.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("precondition_failed", /needs the fieldCipher adapter/));
+      assert.equal(await a.records.getIntakeRecord("ws_test", "rec_1"), null, "nothing stored");
+      const record = await a.engine.confirmIntake(callId, { confirmedBy: "voice" });
+      assert.equal(record.recordId, "rec_1", "the reservation is resumed by an engine with a cipher");
+      assert.notEqual((await a.records.getIntakeRecord("ws_test", "rec_1"))!.values.sin, SIN);
+    });
   });
 });
 

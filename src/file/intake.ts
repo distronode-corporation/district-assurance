@@ -12,7 +12,7 @@ export interface IntakeField {
   label: { en: string; fr: string };
   type: FieldType;
   required: boolean;
-  /** Stored encrypted (FIL-2). Forms with sensitive fields are refused until that is built. */
+  /** Stored encrypted by the host's `FieldCipher`; a form with one needs that adapter. */
   sensitive?: boolean;
   /** Text fields only. Default 500. */
   maxLength?: number;

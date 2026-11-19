@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Encrypted sensitive intake fields (FIL-2): a `fieldCipher` adapter (`FieldCipher`, now in the
+  core, and `FakeFieldCipher`) that Dossier needs once a form has a sensitive field; values are
+  encrypted before `putIntakeRecord`, and the record digest keys them (ADR-21).
 
 ### Changed
 

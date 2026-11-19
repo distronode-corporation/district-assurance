@@ -90,7 +90,7 @@ module the config has on.
 | Built-in | Steps | Needs | Adapters |
 |---|---|---|---|
 | `badge` | `badge.verify` | | `records`; `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `pinVerifier` with `pin` in verifier mode |
-| `dossier` | `dossier.collect` | `intake.file` | `records` |
+| `dossier` | `dossier.collect` | `intake.file` | `records`; `fieldCipher` once a form has a sensitive field |
 | `paylink` | `paylink.request` | `payment.request` | `payments`, `messages` |
 | `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
 
@@ -213,8 +213,8 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 | `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
 | `trace.receipt` | none; needs the `signer` adapter |
 
-Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
-until FIL-2); Paylink `{maxAmountMinor?}` (1 to 1,000,000); Trace `{receipts?, wordings?}`
+Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique; a sensitive field
+needs the `fieldCipher` adapter); Paylink `{maxAmountMinor?}` (1 to 1,000,000); Trace `{receipts?, wordings?}`
 (`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr}}`, purposes
 unique).
 
@@ -331,7 +331,10 @@ false. `endCall` returns it, or null. `verification` comes from Badge, `records`
 part. `ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
 the ended call issues the receipt later with the same head, without ending the call again. `verifyReceipt(receipt, keys)` picks the key by `kid`
 and returns false for any change, a wrong algorithm, a malformed signature or an unknown key.
-Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
+Record digests are `SHA-256(canonicalJson({formId, version, values}))` over the values the caller
+confirmed, where each sensitive value is replaced by
+`HMAC-SHA256(knowledgeKey, canonicalJson(["intake", recordId, field, value]))`, hex (section 13);
+wording digests are
 `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
 
 ## 13. Intake values
@@ -345,7 +348,17 @@ Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording 
 
 Forms live in Dossier's settings: a `formId` (lower case, digits, `-`, `_`), a `version` and
 fields with snake_case unique keys, a known type and an English and a French label.
-`validateConfig` refuses fields marked `sensitive` until field encryption exists (FIL-2).
+A field marked `sensitive` is stored encrypted: `validateConfig` refuses a form with one unless
+the engine has the `fieldCipher` adapter (`modules.dossier: needs the fieldCipher adapter, which
+the engine does not have`). `confirmIntake` computes the digest (section 12) when it reserves the
+record, then, on every attempt to store it, asks `FieldCipher.encrypt(text, {workspaceId,
+recordId, field})` for each sensitive value given (a number or a yes/no as JSON writes it) and
+stores and returns the record with the ciphertext in its place; the engine never decrypts. The
+digest does not depend on the ciphertext, so it is the same when a retry encrypts again. An
+engine without a cipher (another process on the same SessionStore) refuses to file such a record
+(`precondition_failed`) and leaves it reserved. Until the record is filed or abandoned, the draft
+in the call record holds sensitive values in the clear; afterwards the call record keeps only the
+encrypted record.
 `startIntake(callId, formId)` names the form, and the draft keeps the form as it was then, so a
 config change mid-intake never changes what is filed; a call also keeps the forms (and Trace the
 wordings) in force when it started. A draft being filed refuses changes. A filing that failed

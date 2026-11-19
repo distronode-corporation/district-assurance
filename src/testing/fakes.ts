@@ -16,6 +16,7 @@ import type {
 } from "../core/adapters.ts";
 import type { Clock, IdGenerator } from "../core/clock.ts";
 import type { CarrierSignalReport } from "../core/policy.ts";
+import type { FieldCipher } from "../core/runtime.ts";
 import { keyPairSigner } from "../prove/receipt.ts";
 import { knowledgeDigest, pinDigest, subjectKeyFor } from "../verify/knowledge.ts";
 
@@ -154,6 +155,23 @@ export class FakePinVerifier implements PinVerifier {
   async verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean }> {
     this.asked.push(input.subjectKey);
     return { matched: this.#pins.get(`${input.workspaceId}/${input.subjectKey}`) === input.pin };
+  }
+}
+
+/**
+ * A field cipher that does not encrypt: it wraps the value in base64url with a counter, so every
+ * answer differs, like a real cipher with a fresh nonce, and `decrypt` reads it back. Tests only.
+ */
+export class FakeFieldCipher implements FieldCipher {
+  readonly encrypted: Array<{ workspaceId: string; recordId: string; field: string }> = [];
+
+  async encrypt(plain: string, context: { workspaceId: string; recordId: string; field: string }): Promise<string> {
+    this.encrypted.push({ ...context });
+    return `fake-cipher:${this.encrypted.length}:${Buffer.from(plain, "utf8").toString("base64url")}`;
+  }
+
+  decrypt(ciphertext: string): string {
+    return Buffer.from(ciphertext.split(":")[2]!, "base64url").toString("utf8");
   }
 }
 

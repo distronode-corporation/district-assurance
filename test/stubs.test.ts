@@ -37,7 +37,7 @@ const STUBS: Array<[string, () => unknown]> = [
 ];
 
 /** Planned work a validator refuses by id (so a config can never reach it mid-call). */
-const REFUSED_BY_VALIDATORS = ["VER-2", "VER-3", "FIL-2", "PAY-7"];
+const REFUSED_BY_VALIDATORS = ["VER-2", "VER-3", "PAY-7"];
 
 /** One `new NotImplementedError(<string literal>, "<ID>")`, whatever the quotes, commas or escapes in the first argument. */
 const STUB_CALL = /new NotImplementedError\(\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)\s*,\s*["'`]([A-Z]{3}-\d+)["'`]\s*\)/g;

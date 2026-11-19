@@ -141,7 +141,13 @@ appended by event id, once each; a ledger that fails leaves them pending, and th
 
 **Controls:** reference values are HMACs under a per-workspace key, because a plain hash of a date
 of birth is reversed by trying every date; the caller's entries are never stored. Sensitive intake
-fields are refused by `validateConfig` until field encryption exists (FIL-2). PINs on file are
+fields are encrypted by the host's `FieldCipher` before the record reaches the `RecordStore`, and
+a config with one is refused without a cipher; an engine without one refuses to file such a
+record (tested). The record's digest, which receipts and the ledger carry, covers a sensitive
+value only as an HMAC under the knowledge key, so a receipt cannot be used to test guesses at a
+short value such as a SIN (tested, ADR-21). Left open: while a draft is open or being filed, its
+sensitive values sit in the clear in the call record, so a durable `SessionStore` holds them until
+the record is filed or abandoned. PINs on file are
 HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode).
 
 ## Left to the host
@@ -149,6 +155,9 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
   speech-to-text and the model while `sensitive` is set.
 - Keeping the knowledge key and the receipt signing key in a key store.
+- A `FieldCipher` with authenticated encryption under a key the host keeps in a key store, binding
+  the context (workspace, record, field) so a ciphertext moved elsewhere fails to decrypt; and
+  protecting a durable `SessionStore` as it would the records, since an open draft is in the clear.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
   guarantees (`sessionStoreContract` today; PRV-5 for the others).
 - Choosing the subject when it starts verification with a subject key (for example the owner of
