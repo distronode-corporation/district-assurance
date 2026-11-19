@@ -812,6 +812,31 @@ describe("access grants: the verifier and replay", () => {
     assert.deepEqual(check({ ...good, alg: "none" }), { ok: false, reason: "signature" });
   });
 
+  it("lets one forward clock jump refuse no fresh grant afterwards (review of 1d52bfb, A4)", () => {
+    const seen = new SeenGrants();
+    assert.equal(seen.accept({ ...body, grantId: "x", issuedAt: "2030-01-01T00:00:00.000Z", expiresAt: "2030-01-01T00:01:00.000Z" }, new Date("2030-01-01T00:00:00.000Z")), true);
+    assert.equal(seen.accept({ ...body, grantId: "acc_fresh" }, new Date("2026-01-01T00:00:10.000Z")), true, "the fresh grant is accepted");
+    assert.equal(seen.accept({ ...body, grantId: "acc_fresh" }, new Date("2026-01-01T00:00:20.000Z")), false, "and still never twice");
+  });
+
+  it("never replays an earlier grant after a forward jump followed by a rollback (review of 1d52bfb)", () => {
+    const seen = new SeenGrants();
+    const g1 = { ...body, grantId: "g1" };
+    const g2 = { ...body, grantId: "g2", issuedAt: "2026-01-01T00:30:00.000Z", expiresAt: "2026-01-01T00:31:00.000Z" };
+    assert.equal(seen.accept(g1, new Date("2026-01-01T00:00:00.000Z")), true);
+    // The clock jumps forward and a grant valid then is accepted: g1 is forgotten on the way.
+    assert.equal(seen.accept(g2, new Date("2026-01-01T00:30:00.000Z")), true);
+    // Then it rolls back to inside g1's validity: neither g1 nor g2 is ever accepted again.
+    for (const at of ["2026-01-01T00:00:30.000Z", "2026-01-01T00:30:30.000Z", "2026-01-01T00:00:59.999Z"]) {
+      assert.equal(seen.accept(g1, new Date(at)), false, `g1 at ${at}`);
+      assert.equal(seen.accept(g2, new Date(at)), false, `g2 at ${at}`);
+    }
+    // A forward jump past everything, then a rollback: still never.
+    assert.equal(seen.accept({ ...body, grantId: "g3", issuedAt: "2026-01-01T02:00:00.000Z", expiresAt: "2026-01-01T02:01:00.000Z" }, new Date("2026-01-01T02:00:00.000Z")), true);
+    assert.equal(seen.accept(g2, new Date("2026-01-01T00:30:30.000Z")), false);
+    assert.equal(seen.accept(g1, new Date("2026-01-01T00:00:30.000Z")), false);
+  });
+
   it("never accepts a forgotten grant again when the relay's clock moves back (review of #50, M1)", async () => {
     const seen = new SeenGrants();
     const first = await sign();
