@@ -45,8 +45,9 @@ describe("the AuditLedger contract", () => {
         const last = this.entries.at(-1);
         return { seq: last?.seq ?? 0, hash: last?.hash ?? GENESIS_HASH };
       }
-      async list(fromSeq = 1) {
-        return this.entries.filter((e) => e.seq >= fromSeq);
+      async list(fromSeq = 1, limit?: number) {
+        if (limit !== undefined && !(Number.isSafeInteger(limit) && limit >= 1)) throw new TypeError("bad limit");
+        return this.entries.filter((e) => e.seq >= fromSeq).slice(0, limit);
       }
     }
     assert.deepEqual(await failing(auditLedgerContract(() => new Leaky())), [
@@ -54,6 +55,18 @@ describe("the AuditLedger contract", () => {
       "appends an eventId once: a second append returns the first entry",
       "keeps eventIds that differ only in a lone UTF-16 surrogate apart",
       "stores one entry for concurrent appends of one eventId",
+    ]);
+  });
+
+  it("catches a ledger that ignores the page size, or takes any limit", async () => {
+    class Unpaged extends MemoryAuditLedger {
+      override list(fromSeq?: number): Promise<AuditEntry[]> {
+        return super.list(fromSeq);
+      }
+    }
+    assert.deepEqual(await failing(auditLedgerContract(() => new Unpaged())), [
+      "lists at most `limit` entries from a seq, as one page",
+      "refuses a limit that is not an integer of 1 or more",
     ]);
   });
 
