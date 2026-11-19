@@ -14,6 +14,7 @@ import type { AttemptCounters, AuditEntry, SubjectRecord } from "../core/adapter
 import { EngineError } from "../core/errors.ts";
 import { assertFlowNotEnded, currentStep } from "../core/flow.ts";
 import { hexDigestsEqual } from "../core/hash.ts";
+import { capCallLevel } from "../core/policy.ts";
 import type { CallRecord, EngineRuntime } from "../core/runtime.ts";
 import { BADGE, type BadgeSlice } from "./badge.ts";
 import { hiddenCounterKey } from "./duress-flag.ts";
@@ -93,7 +94,7 @@ export async function duressPinProblem(
 
 /**
  * What choosing a PIN needs of the call: no flow running or ended, the call open, and a grant at
- * PIN_ENROLMENT_LEVEL or above that has not expired. With a subject key, also that verification is
+ * PIN_ENROLMENT_LEVEL or above (under the attestation cap) that has not expired. With a subject key, also that verification is
  * still for that subject.
  */
 function assertCanEnrol(rt: EngineRuntime, record: CallRecord, subjectKey?: string): void {
@@ -101,7 +102,9 @@ function assertCanEnrol(rt: EngineRuntime, record: CallRecord, subjectKey?: stri
   if (currentStep(record) !== null) throw new EngineError("precondition_failed", "a PIN is chosen outside a flow, not during one");
   if (record.state.phase !== "open") throw new EngineError("invalid_transition", `a PIN is chosen on an open call, not while ${record.state.phase}`);
   const grant = record.state.grant;
-  if (grant === null || grant.level < PIN_ENROLMENT_LEVEL || rt.clock.now().getTime() >= Date.parse(grant.expiresAt)) {
+  // The grant's level under today's attestation cap, as `authorize` reads it: a cap turned on since
+  // the grant was issued applies to it.
+  if (grant === null || capCallLevel(rt.policy, grant.level, record) < PIN_ENROLMENT_LEVEL || rt.clock.now().getTime() >= Date.parse(grant.expiresAt)) {
     throw new EngineError("scope_denied", `choosing a PIN needs a verification at level ${PIN_ENROLMENT_LEVEL} or above on this call`);
   }
   if (subjectKey !== undefined && (record.modules[BADGE] as unknown as BadgeSlice).subjectKey !== subjectKey) {
@@ -137,12 +140,15 @@ export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: 
     assertCanEnrol(rt, draft.record);
     const s = draft.slice<BadgeSlice>(BADGE);
     const pending = [...(s.pinPending ?? [])];
+    // The enrolment this call recorded whose pin.enrolled the ledger has not taken yet: entries are
+    // appended in order, so one waiting in the outbox is that last one's.
+    const owed = s.pinEnrolled !== undefined && draft.record.outbox.some((e) => e.name === "pin.enrolled") ? [s.pinEnrolled] : [];
     const used = s.pinEnrolments ?? 0;
     // Past the limit, a try may only finish an enrolment this call already stored: it is not counted.
-    if (used >= settings.maxAttemptsPerCall) return pending.length === 0 ? null : { subjectKey: s.subjectKey!, pending, overLimit: true, enrolmentId: null };
+    if (used >= settings.maxAttemptsPerCall) return pending.length === 0 && owed.length === 0 ? null : { subjectKey: s.subjectKey!, pending, done: owed, overLimit: true, enrolmentId: null };
     s.pinEnrolments = used + 1;
     // This try's own id: the call and its try number, so no other call or try shares it.
-    return { subjectKey: s.subjectKey!, pending, overLimit: false, enrolmentId: `${callId}:${used + 1}` };
+    return { subjectKey: s.subjectKey!, pending, done: owed, overLimit: false, enrolmentId: `${callId}:${used + 1}` };
   });
   if (reserved === null) return { enrolled: false, reason: "locked" };
   const records = rt.adapter("records");
@@ -154,7 +160,11 @@ export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: 
   // write failed, and the same PIN again finishes that enrolment. Another call's enrolment of the
   // same PIN, or one after a reset, never passes for this call's.
   const stored = subject.pinDigest !== undefined && hexDigestsEqual(subject.pinDigest, digest) ? subject.pinEnrolmentId : undefined;
-  const resuming = stored !== undefined && reserved.pending.some((p) => p.enrolmentId === stored && p.subjectKey === reserved.subjectKey);
+  const mine = (p: { subjectKey: string; enrolmentId: string }) => p.enrolmentId === stored && p.subjectKey === reserved.subjectKey;
+  // Recorded by this call, and its ledger entry failed after the write that recorded it (this
+  // try's write appended it): the same PIN again is that enrolment, finished.
+  if (stored !== undefined && reserved.done.some(mine)) return { enrolled: true };
+  const resuming = stored !== undefined && reserved.pending.some(mine);
   if (reserved.overLimit && !resuming) return { enrolled: false, reason: "locked" };
   if (subject.pinDigest !== undefined && !resuming) throw new EngineError("precondition_failed", "a PIN is on file; only the business can reset it");
   const problem = await pinEnrolmentProblem(settings, (d) => rt.hmac(d), subject, pin, confirm);
@@ -197,6 +207,7 @@ export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: 
     const left = s.pinPending!.filter((p) => p.enrolmentId !== enrolmentId);
     if (left.length === s.pinPending!.length) return;
     s.pinPending = left;
+    s.pinEnrolled = { subjectKey: reserved.subjectKey, enrolmentId };
     draft.emit("pin.enrolled", "caller", {});
   });
   return { enrolled: true };

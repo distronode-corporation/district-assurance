@@ -126,7 +126,8 @@ export async function sendTextCode(rt: EngineRuntime, callId: string): Promise<{
     // Read after the counters and the HMAC: their time takes nothing from the code's life or the hold.
     const now = rt.clock.now();
     // A refused send never replaces a code still live, so a send that lost a race cannot void the one that won.
-    if (code !== null || !isLive(slice.textCode, now)) {
+    // A call stored before the field was kept has none: no code.
+    if (code !== null || !isLive(slice.textCode ?? null, now)) {
       const expiresAt = new Date(now.getTime() + TEXT_CODE_TTL_SECONDS * 1000).toISOString();
       slice.textCode = { digest, expiresAt, tries: 0 };
     }
@@ -144,11 +145,19 @@ export async function sendTextCode(rt: EngineRuntime, callId: string): Promise<{
 async function finishSend(rt: EngineRuntime, callId: string, code: string | null, refusal: TextCodeRefusal | null, send: { to: string; locale: Locale; sendId: string }): Promise<void> {
   let outcome = refusal;
   if (code !== null) {
-    const body = textCodeText(send.locale, code);
-    await rt
-      .adapter("messages")
-      .sendText({ to: send.to, body, purpose: "one_time_code", idempotencyKey: rt.idempotencyKey(callId, "text_code", send.sendId) })
-      .catch(() => (outcome = "send_failed"));
+    // Claimed against the call as it is now: only under this send's own hold, still within its time.
+    // endCall refuses while any hold is within its time, so a call that ended has none, and a job
+    // that starts too late texts nothing; its send is recorded as failed (the call may still be open).
+    const held = (await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice;
+    const now = rt.clock.now().getTime();
+    if (!held.textSends!.some((h) => h.sendId === send.sendId && now < Date.parse(h.until))) outcome = "send_failed";
+    else {
+      const body = textCodeText(send.locale, code);
+      await rt
+        .adapter("messages")
+        .sendText({ to: send.to, body, purpose: "one_time_code", idempotencyKey: rt.idempotencyKey(callId, "text_code", send.sendId) })
+        .catch(() => (outcome = "send_failed"));
+    }
   }
   await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
@@ -178,7 +187,8 @@ export async function checkTextCode(rt: EngineRuntime, callId: string, code: str
     allowFactor(rt, draft.record, "text_code");
     draft.assertCan({ type: "factor_recorded", factor: { kind: "text_code", passed: false, at: rt.now() } });
     const s = draft.slice<BadgeSlice>(BADGE);
-    const held = s.textCode;
+    // A call stored before the field was kept has none: no code was sent.
+    const held = s.textCode ?? null;
     if (held === null) throw new EngineError("precondition_failed", "no code was sent for this verification");
     if (!isLive(held, now)) return { matched: false, locked: true };
     held.tries++;
