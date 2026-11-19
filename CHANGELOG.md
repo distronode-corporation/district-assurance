@@ -27,9 +27,12 @@ All notable changes to this project are documented here. The format follows
   `npm run demo` and the UI.
 - Reference server limits and logging (SRV-2): a body limit per route, request timeouts (408 and
   503), a per-address rate limit (429), and structured request logs by route pattern with no
-  headers or bodies (`logJsonLines`, on in `npm run serve`). `maxBodyBytes` is now `bodyLimits`.
+  headers or bodies (`logJsonLines`, on in `npm run serve`).
 
 ### Changed
+
+- Breaking, reference server: the `maxBodyBytes` option of `createReferenceServer` is replaced by
+  `bodyLimits`, one limit per route that reads a body (SRV-2).
 
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
