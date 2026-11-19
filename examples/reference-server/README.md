@@ -104,9 +104,16 @@ table does not list, a missing value and a value the host cannot read all map to
 | Telnyx SIP `verstat=TN-Validation-Passed-C` | `C` |
 | Telnyx SIP `verstat=TN-Validation-Failed` | `failed` |
 | Telnyx SIP `verstat=No-TN-Validation`, or no `verstat` | `none` |
+| Telnyx TeXML `ShakenStirAttestation` `A`, `B`, `C` with `ShakenStirValidated` true | `A`, `B`, `C` |
+| Telnyx TeXML `ShakenStirAttestation` with `ShakenStirValidated` false | `failed` |
+| Telnyx TeXML without `ShakenStirAttestation` | `none` |
 
 `A`, `B` or `C` means the receiving carrier's check of the signature passed; never pass a level
-from a signature that was not checked, or whose check failed. Twilio documents `StirVerstat` for
+from a signature that was not checked, or whose check failed. A level reported without its check
+result, such as `shaken_stir_attestation` in the Voice API's `call.initiated` screening result,
+is not listed here, so it maps to `none`; and a TeXML `ShakenStirAttestation` is never read
+without `ShakenStirValidated`. The Telnyx rows follow Telnyx's SIP header parameters page
+(`TN-Validation-Passed` is A, `-B` and `-C` are B and C) and its TeXML callback fields. Twilio documents `StirVerstat` for
 the United States and France. Coverage for Canadian numbers is checked per carrier before it is
 documented here.
 
