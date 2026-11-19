@@ -25,6 +25,12 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- `KeypadCollector` (INT-1): a pure buffer for keypad tones until `#`, with a maximum length and an
+  idle timeout, that shows no digit through `toString`, JSON or `util.inspect` and hands each entry
+  to one callback.
+- `auditLedgerContract` and `recordStoreContract` in `district-assurance/testing` (PRV-5), which
+  the memory adapters pass; `MemoryRecordStore` now keys by JSON tuples, so two workspace and id
+  pairs can no longer share a key.
 
 ### Changed
 

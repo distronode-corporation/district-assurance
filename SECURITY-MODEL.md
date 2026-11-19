@@ -136,6 +136,9 @@ byte fails verification (tested). Planned: key rotation and a published key set 
 A step's ledger entries are saved with the step itself (an outbox in the call record) and
 appended by event id, once each; a ledger that fails leaves them pending, and the next write or
 `flushLedger` appends them, so no saved step is ever missing from the ledger for good (tested).
+A durable ledger must pass `auditLedgerContract`: append-only, one valid chain under concurrent
+appends, each `eventId` once, copies in and out, and card data refused (tested on
+`MemoryAuditLedger`).
 
 ### Breach of stored data
 
@@ -146,11 +149,16 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 
 ## Left to the host
 
-- Buffering keypad digits outside the model, never logging them, and cutting audio to
-  speech-to-text and the model while `sensitive` is set.
+- Routing keypad tones to a buffer outside the model, never logging them or the string its
+  callback receives, and cutting audio to speech-to-text and the model while `sensitive` is set.
+  `KeypadCollector` is that buffer (SPEC.md, section 17): it shows no digit, nor how many, through
+  `toString`, JSON or `util.inspect`, discards an entry that is too long, idle or ends in an
+  unexpected tone, and gives the digits only to its one callback (tested). JavaScript cannot wipe a
+  string, so the buffer is dropped, not overwritten.
 - Keeping the knowledge key and the receipt signing key in a key store.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
-  guarantees (`sessionStoreContract` today; PRV-5 for the others).
+  guarantees: they must pass `sessionStoreContract`, `recordStoreContract` and
+  `auditLedgerContract` from `district-assurance/testing`, as the memory adapters do (tested).
 - Choosing the subject when it starts verification with a subject key (for example the owner of
   the line it was called on). That choice is not a factor: the PIN or other factors still decide.
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.

@@ -116,25 +116,26 @@ export class FakePaymentLinks implements PaymentLinks {
   }
 }
 
+/** Keys are JSON tuples, so no pair of workspace and id can collide with another (`"a/b", "c"` is not `"a", "b/c"`). */
 export class MemoryRecordStore implements RecordStore {
   readonly #subjects = new Map<string, SubjectRecord>();
   readonly #records = new Map<string, IntakeRecord>();
 
   putSubject(workspaceId: string, subject: SubjectRecord): void {
-    this.#subjects.set(`${workspaceId}/${subject.subjectKey}`, structuredClone(subject));
+    this.#subjects.set(JSON.stringify([workspaceId, subject.subjectKey]), structuredClone(subject));
   }
 
   async getSubject(workspaceId: string, subjectKey: string): Promise<SubjectRecord | null> {
-    const subject = this.#subjects.get(`${workspaceId}/${subjectKey}`);
+    const subject = this.#subjects.get(JSON.stringify([workspaceId, subjectKey]));
     return subject === undefined ? null : structuredClone(subject);
   }
 
   async putIntakeRecord(record: IntakeRecord): Promise<void> {
-    this.#records.set(`${record.workspaceId}/${record.recordId}`, structuredClone(record));
+    this.#records.set(JSON.stringify([record.workspaceId, record.recordId]), structuredClone(record));
   }
 
   async getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null> {
-    const record = this.#records.get(`${workspaceId}/${recordId}`);
+    const record = this.#records.get(JSON.stringify([workspaceId, recordId]));
     return record === undefined ? null : structuredClone(record);
   }
 }
