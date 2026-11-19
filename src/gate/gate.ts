@@ -194,14 +194,16 @@ export function settleInFlight(rt: EngineRuntime, draft: CallDraft, reason: "no_
   if (slice === undefined) return;
   const now = Date.parse(rt.now());
   for (const g of slice.grants) {
-    if (g.status !== "reserved") continue;
     const expired = Date.parse(g.expiresAt) <= now;
-    if (reason === "call_ended" && !expired && g.digest !== null) {
-      // Signed and checked: it is at its door, or on its way. The call ends once the answer is
-      // recorded or the grant expires (after which a relay refuses it), never while it can still
-      // open a door: so no door acts on a grant after the receipt.
-      throw new EngineError("precondition_failed", "an access grant is at its door; end the call once it answers or expires");
+    // A grant that was signed and may still be acted on: at its door now (reserved), or sent with
+    // its answer lost (unknown, which the controller may still be working on). The call ends once
+    // its answer is recorded or it expires (after which a relay refuses it), never while it can
+    // still open a door: so no door acts on a grant after the receipt. Stale grants are expired.
+    const live = (g.status === "reserved" || g.status === "unknown") && g.digest !== null && !expired;
+    if (reason === "call_ended" && live) {
+      throw new EngineError("precondition_failed", "an access grant may still be acted on at its door; end the call once it answers or expires");
     }
+    if (g.status !== "reserved") continue;
     if (reason === "call_ended" || expired) {
       g.status = "unknown";
       draft.emit("access.unknown", "system", { grantId: g.grantId, ...(g.digest === null ? {} : { digest: g.digest, kid: g.kid! }), reason: expired ? "no_answer_recorded" : reason });

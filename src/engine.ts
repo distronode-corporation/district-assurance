@@ -136,8 +136,12 @@ export class Engine {
     // validator can tell "declared nothing" (refused where capabilities are required) from "unknown".
     for (const [name, value] of Object.entries(this.#adapters)) {
       if (value === undefined) continue;
-      // The access adapter is a map of controllers: what it declares is their names.
-      capabilities[name] = name === "access" ? { controllers: Object.keys(value as object) } : (value as { capabilities?: unknown }).capabilities;
+      // The access adapter is a map of controllers: what it declares is the names of those it can use
+      // (an `unlock` function, own or from a class), so a target naming anything else is refused at save.
+      capabilities[name] =
+        name === "access"
+          ? { controllers: Object.entries(value as Record<string, { unlock?: unknown } | undefined>).filter(([, c]) => typeof c?.unlock === "function").map(([n]) => n) }
+          : (value as { capabilities?: unknown }).capabilities;
     }
     this.#receiptModules = builtInModules(this.#badge);
     this.registry = new ModuleRegistry({ adapters: present, capabilities, modules: [...this.#receiptModules, ...(options.modules ?? [])] });

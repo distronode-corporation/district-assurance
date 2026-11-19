@@ -69,7 +69,9 @@ export function verifyAccessGrant(
   // accept anything (Infinity): refused, so the check fails closed.
   if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return { ok: false, reason: "invalid_options" };
   const skew = seconds * 1000;
-  const now = expect.now.getTime();
+  // An unusable clock reading would make both time checks false and let an expired grant through.
+  const now = expect.now instanceof Date ? expect.now.getTime() : Number.NaN;
+  if (!Number.isFinite(now)) return { ok: false, reason: "invalid_options" };
   const issued = Date.parse(body.issuedAt);
   const expires = Date.parse(body.expiresAt);
   if (expires - issued > MAX_ACCESS_GRANT_SECONDS * 1000 || expires < issued) return { ok: false, reason: "lifetime" };

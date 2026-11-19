@@ -482,8 +482,9 @@ the currency's own decimals.
 ## 17. Gate and access grants
 
 Gate's settings: `targets`, at least one, each `{id, controller, ref}`: `id` lower-case letters,
-digits and `-` (unique), `controller` the name of one of the engine's `access` adapters (checked
-when the engine is built and when a config is saved), `ref` the controller's own name for the
+digits and `-` (unique), `controller` the name of one of the engine's `access` adapters that has an
+`unlock` function, own or from its class (checked when the engine is built and when a config is
+saved), `ref` the controller's own name for the
 door, 1 to 200 characters; `maxGrantsPerCall` 1 to 5, default 3. A call keeps the targets in force
 when it started; a flow attached later is refused when a step names a target the call did not keep.
 
@@ -529,9 +530,11 @@ receipt never verifies as an access grant. A host's module can never take a buil
    `grantId`, `digest` and `kid`, never the grant or its signature. A fresh request after `unknown`
    is a new grant.
 
-**Ending a call** is refused (`precondition_failed`) while a signed grant is at its door (step 4
-passed, its answer not yet recorded, not yet expired): the end waits for the answer, bounded by the
-controller's timeout, or for the grant's expiry if its process stopped. A grant reserved but not yet
+**Ending a call** is refused (`precondition_failed`) while a signed grant may still be acted on: at
+its door (step 4 passed, its answer not yet recorded) or sent with its answer lost (`unknown`, the
+controller may still be working on it), and not yet expired. A definitive answer (`delivered`,
+`refused`) lets the call end at once. The end waits for an answer still due, bounded by the
+controller's timeout, or for the grant's expiry if the answer was lost or its process stopped. A grant reserved but not yet
 signed is settled `unknown` (reason `call_ended`) in the same write that ends the call, and is then
 never sent (step 4 finds it settled); one that expired is settled `unknown` (reason
 `no_answer_recorded`). All of it happens before the receipt's ledger head is taken, so no access
@@ -554,7 +557,8 @@ check.
 
 `verifyAccessGrant(grant, keys, {workspaceId, audience, now, clockSkewSeconds?})` returns `{ok:
 true, body}` or `{ok: false, reason}`: `invalid_options` (a `clockSkewSeconds` that is not a
-finite, non-negative number: refused, so the not-before check never turns off), `malformed` (not
+finite, non-negative number, or a `now` that is not a valid date: refused, so neither time check
+ever turns off), `malformed` (not
 this shape), `signature` (unknown `kid`,
 another algorithm, any change), `workspace` (issued by another workspace, or no `workspaceId`
 given: it is required, so workspaces sharing a key and a controller name never open each other's

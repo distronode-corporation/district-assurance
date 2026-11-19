@@ -278,7 +278,9 @@ Stripe Checkout's shortest `expires_at` is 30 minutes. Two times are kept apart:
 expiry (`providerExpiresAt`, set when the request is reserved, from twice the link life within the
 adapter's declared range, plus a margin over its minimum) is what `createLink` receives as
 `expiresAt`; the engine's deadline (the text plus the link life, never past the provider expiry) is
-what `requestPayment` returns and `expirePaymentLinks` enforces. A link may offer only methods that settle
+what `requestPayment` returns and `expirePaymentLinks` enforces. The engine has no timer: the host
+must call `expirePaymentLinks` at `expiresAt` (a timer or a sweep), or the link stays payable until
+the provider expiry, and a payment in that window is still recorded. A link may offer only methods that settle
 during the call: card (credit, and Visa and Mastercard debit), Apple Pay, Google Pay and Link, the
 default; the validator refuses anything else, pre-authorized debit and Interac by name. A
 provider outcome whose connected account is not the payment's is ignored and written to the

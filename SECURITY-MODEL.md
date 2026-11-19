@@ -141,8 +141,8 @@ public key, so taking a relay over does not let anyone mint grants, and one chan
 (tested). A grant is bound to its workspace: a verifier must name the workspace it serves, so
 workspaces that share a key and a controller name never open each other's doors (tested). The
 example relay refuses a grant id it has seen (`SeenGrants`, tested in the demo). A call never ends
-while a signed grant is at its door: the end waits for the answer, or for the grant's expiry if its
-process stopped, so no access outcome follows the receipt and no grant reaches a door after it
+while a signed grant may still be acted on (at its door, or sent with its answer lost): the end
+waits for the answer, or for the grant's expiry, so no access outcome follows the receipt and no grant reaches a door after it
 while it can still open one (tested). Left as a limit, stated plainly: a door controller that does
 not check a grant's expiry could act on a request delayed past it, after the call ended; the relay
 contract requires the check, and the record would then say `unknown`, never `delivered`. The access

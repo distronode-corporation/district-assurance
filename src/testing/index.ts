@@ -34,7 +34,10 @@ export interface TestEngine {
   ledger: MemoryAuditLedger;
   sessions: SessionStore;
   pinVerifier: FakePinVerifier;
-  /** Gate's door, wired as the access controller named `door`. */
+  /**
+   * The default fake door, wired as the access controller named `door`. Only the default: a test
+   * that passes its own `adapters.access` inspects its own controllers, not this one.
+   */
   door: FakeAccessController;
 }
 

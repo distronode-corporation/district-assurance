@@ -132,6 +132,14 @@ describe("gate: config", () => {
       "modules.gate: target garage names the controller lobby, which the access adapter does not have (it has: side)",
     ]);
     assert.throws(() => setup({ config: gateConfig(), adapters: { access: {} } }), /the access adapter does not have \(it has: none\)/);
+    // Only a controller with an unlock function counts, own or from its class.
+    assert.throws(() => setup({ config: gateConfig(), adapters: { access: { lobby: { unlock: "not a function" } as never } } }), /names the controller lobby, which the access adapter does not have/);
+    class Door {
+      async unlock(): Promise<UnlockResult> {
+        return { outcome: "delivered", providerRef: "p", confirmed: true };
+      }
+    }
+    assert.doesNotThrow(() => setup({ config: gateConfig(), adapters: { access: { lobby: new Door() } } }), "a class-based adapter");
   });
 
   it("checks gate.grant steps, and holds them to entry.open at level 2", () => {
@@ -531,6 +539,22 @@ describe("gate: the engine owns every outcome (ADR-25)", () => {
     assert.ok((await t.ledger.list()).find((e) => e.event === "access.delivered")!.seq <= receipt.body.ledger.seq);
   });
 
+  it("never ends a call while a grant whose answer was lost may still be acted on, until it expires", async () => {
+    const t = gateSetup({ mode: "lose" });
+    const callId = await verified(t, null);
+    assert.equal((await t.engine.grantAccess(callId, { target: "front-door" })).status, "unknown");
+    // The controller timed out, but may still be working on the request: the call waits for the expiry.
+    await assert.rejects(t.engine.endCall(callId), rejects("precondition_failed", /may still be acted on/));
+    t.clock.advance(60_000);
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.deepEqual(verifyAccessGrant(t.door.received[0]!.grant, t.engine.accessKeys(), { workspaceId: "ws_test", audience: "lobby", now: new Date(Date.parse(receipt.body.issuedAt) + 1) }), { ok: false, reason: "expired" });
+    // A definitive answer lets the call end at once.
+    const r = gateSetup({ mode: "refuse" });
+    const c2 = await verified(r, null);
+    await r.engine.grantAccess(c2, { target: "front-door" });
+    assert.notEqual(await r.engine.endCall(c2), null);
+  });
+
   it("ends a call whose grant's process stopped at the door once that grant expired, recording it unknown", async () => {
     const t = gateSetup();
     const callId = await verified(t, null);
@@ -683,6 +707,14 @@ describe("access grants: the verifier and replay", () => {
     }
     assert.deepEqual(check(early, now, { clockSkewSeconds: 0 }), { ok: false, reason: "not_yet_valid" }, "zero is a valid skew");
     assert.deepEqual(check(early, now), { ok: false, reason: "not_yet_valid" }, "and the default holds the check");
+  });
+
+  it("refuses an unusable clock reading, so an expired grant never passes", async () => {
+    const expired = await sign({ issuedAt: "2025-01-01T00:00:00.000Z", expiresAt: "2025-01-01T00:01:00.000Z" });
+    for (const bad of [new Date(Number.NaN), undefined, "2026-01-01", 0]) {
+      assert.deepEqual(verifyAccessGrant(expired, keys, { workspaceId: "w", audience: "lobby", now: bad as never }), { ok: false, reason: "invalid_options" }, String(bad));
+    }
+    assert.deepEqual(check(expired), { ok: false, reason: "expired" });
   });
 
   it("refuses a grant another workspace issued, even on a shared key and controller name (review R1)", async () => {
