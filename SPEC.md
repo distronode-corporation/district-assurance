@@ -151,9 +151,10 @@ A factor that is off is refused at every entry point. A planned factor cannot be
 A **grant** carries the level, the scopes at or below it (narrowed to the verify step's `scopes`
 when the step lists them), an expiry, and what judged it: `policyVersion` (the policy's `version`)
 and `configRevision` (the `revision` of the FlowConfig in force when the verification finished,
-newer than the call's own `revision` when the config changed during the call). `authorize(callId, scope)` is true only for a scope the
-policy lists, on a call that has not ended, whose minimum is 0 or whose grant includes it, has not
-expired, and has a level at or above the scope's minimum under the config in force now.
+newer than the call's own `revision` when the config changed during the call).
+`authorize(callId, scope)` is true only for a scope the policy lists, on a call that has not
+ended, whose minimum is 0 or whose grant includes it, has not expired, and has a level at or
+above the scope's minimum under the config in force now.
 
 Links go only to the subject's number on file, and only after a `keypad_knowledge` or `pin`
 factor passed since verification last started from nothing. A plug-in's pass does not unlock
