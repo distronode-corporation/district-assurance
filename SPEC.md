@@ -151,7 +151,9 @@ Badge's settings turn factors on (`factors`, at least one), set the grant lifeti
 A factor that is off is refused at every entry point. A planned factor cannot be turned on.
 
 A **grant** carries the level, the scopes at or below it (narrowed to the verify step's `scopes`
-when the step lists them), and an expiry. `authorize(callId, scope)` is true only for a scope the
+when the step lists them), an expiry, and what judged it: `policyVersion` (the policy's `version`)
+and `configRevision` (the `revision` of the FlowConfig in force when the verification finished,
+newer than the call's own `revision` when the config changed during the call). `authorize(callId, scope)` is true only for a scope the
 policy lists, on a call that has not ended, whose minimum is 0 or whose grant includes it, has not
 expired, and has a level at or above the scope's minimum under the config in force now.
 
@@ -290,8 +292,8 @@ answer on file, a phone number, a link or card data.
 | `verification.factor` | `kind`, `passed` (and `status` for photo ID) |
 | `verification.carrier_checked` | `checked`, `textCodeTrusted`, `identityMatch` |
 | `identity.link_sent` | none |
-| `verification.finished` | `level`, `methods`, `discounted` |
-| `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt` |
+| `verification.finished` | `level`, `methods`, `discounted`, `policyVersion`, `configRevision` |
+| `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt`, `policyVersion`, `configRevision` |
 | `session.tainted` | `source` |
 | `sensitive.opened` / `sensitive.closed` | `reason` / none |
 | `intake.started` | `formId`, `version` |
@@ -338,7 +340,8 @@ numbers, sparse array holes, and objects whose prototype is not `Object.prototyp
   "body": {
     "v": 1, "receiptId": "...", "callId": "...", "workspaceId": "...",
     "startedAt": "...", "endedAt": "...", "issuedAt": "...",
-    "verification": { "level": 3, "methods": ["keypad_knowledge", "photo_id"] },
+    "verification": { "level": 3, "methods": ["keypad_knowledge", "photo_id"],
+                      "policyVersion": "default-1", "configRevision": "2026-11-18.1" },
     "records":  [{ "recordId": "...", "formId": "...", "digest": "<sha256 hex>" }],
     "payments": [{ "paymentId": "...", "status": "paid", "amountMinor": 15000, "currency": "cad", "mode": "platform", "providerRef": "cs_..." }],
     "consents": [{ "purpose": "...", "wordingVersion": "1", "wordingDigest": "<sha256 hex>", "answer": "yes" }],
@@ -354,7 +357,11 @@ A call gets a receipt when its flow has a `trace.receipt` step (wherever it is, 
 or not the flow finished), or, for a call that ran no flow, when Trace's `receipts` setting is not
 false. `endCall` returns it, or null. `verification` comes from Badge, `records` from Dossier,
 `payments` from Paylink and `consents` from Trace; a module that is off contributes an empty
-part. `ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
+part. `verification.policyVersion` and `verification.configRevision` name the policy and the
+FlowConfig revision that judged the call's last finished verification (whatever level it reached);
+both are absent when no verification finished on the call. They are optional, so the format stays
+at `v: 1`, and a reader that does not know them still checks the signature over the whole body.
+`ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
 the ended call issues the receipt later with the same head, without ending the call again. `verifyReceipt(receipt, keys)` picks the key by `kid`
 and returns false for any change, a wrong algorithm, a malformed signature or an unknown key.
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are

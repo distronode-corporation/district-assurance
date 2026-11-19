@@ -89,6 +89,8 @@ export interface EngineRuntime {
   readonly clock: Clock;
   readonly ids: IdGenerator;
   readonly policy: VerificationPolicy;
+  /** The revision of the config in force now (a call keeps the one it started under in `CallRecord.revision`). */
+  readonly revision: string;
   now(): string;
   /** HMAC-SHA256 under the workspace's knowledge key, hex. The key itself never leaves the engine. */
   hmac(data: string): string;

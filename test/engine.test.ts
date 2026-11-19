@@ -573,7 +573,7 @@ describe("Engine prove", () => {
     const receipt = (await t.engine.endCall(callId))!;
     assert.equal(verifyReceipt(receipt, t.engine.receiptKeys()), true);
     assert.deepEqual(await t.engine.receipt(callId), receipt);
-    assert.deepEqual(receipt.body.verification, { level: 3, methods: ["keypad_knowledge", "photo_id"] });
+    assert.deepEqual(receipt.body.verification, { level: 3, methods: ["keypad_knowledge", "photo_id"], policyVersion: "default-1", configRevision: "default" });
     assert.equal(receipt.body.consents.length, 2);
     const entries = await t.ledger.list();
     assert.equal(verifyChain(entries).ok, true);
@@ -582,6 +582,51 @@ describe("Engine prove", () => {
     assert.equal(entries.at(-1)!.event, "receipt.issued");
     await assert.rejects(t.engine.endCall(callId), rejects("invalid_transition"));
     await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), rejects("invalid_transition"));
+  });
+
+  it("names the policy version and config revision that judged the caller in the grant, the events and the receipt", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    const first = (await t.engine.state(callId)).grant!;
+    assert.deepEqual([first.policyVersion, first.configRevision], ["default-1", "default"]);
+    // A newer config judges the next verification: the call keeps the revision it started under, the grant names the newer one.
+    t.engine.configure(testConfig((c) => {
+      c.revision = "2026-11-18.2";
+      c.policy.version = "custom-2";
+    }));
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    const second = (await t.engine.state(callId)).grant!;
+    assert.deepEqual([second.policyVersion, second.configRevision], ["custom-2", "2026-11-18.2"]);
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.deepEqual(receipt.body.verification, { level: 1, methods: ["keypad_knowledge"], policyVersion: "custom-2", configRevision: "2026-11-18.2" });
+    assert.equal(verifyReceipt(receipt, t.engine.receiptKeys()), true);
+    assert.equal(receipt.body.v, 1, "the fields are optional, so the format stays at version 1");
+    const entries = await t.ledger.list();
+    assert.deepEqual(entries.find((e) => e.event === "call.started")!.detail, { locale: "en", revision: "default" });
+    assert.deepEqual(
+      entries.filter((e) => e.event === "verification.finished").map((e) => [e.detail.policyVersion, e.detail.configRevision]),
+      [["default-1", "default"], ["custom-2", "2026-11-18.2"]],
+    );
+    assert.deepEqual(
+      entries.filter((e) => e.event === "grant.issued").map((e) => [e.detail.policyVersion, e.detail.configRevision]),
+      [["default-1", "default"], ["custom-2", "2026-11-18.2"]],
+    );
+  });
+
+  it("names the policy that judged a verification that reached no level", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: "1" });
+    assert.deepEqual(await t.engine.finishVerification(callId), { level: 0, scopes: [] });
+    assert.equal((await t.engine.state(callId)).grant, null);
+    const receipt = await t.engine.endCall(callId);
+    assert.deepEqual(receipt!.body.verification, { level: 0, methods: [], policyVersion: "default-1", configRevision: "default" });
   });
 
   it("lists no methods on a receipt for an unverified call", async () => {

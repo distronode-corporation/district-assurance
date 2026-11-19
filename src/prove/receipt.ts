@@ -18,7 +18,11 @@ export interface ReceiptBody {
   startedAt: string;
   endedAt: string;
   issuedAt: string;
-  verification: { level: AssuranceLevel; methods: FactorKind[] };
+  /**
+   * `policyVersion` and `configRevision` name the policy and the FlowConfig revision that judged the
+   * call's last finished verification; both are absent when no verification finished.
+   */
+  verification: { level: AssuranceLevel; methods: FactorKind[]; policyVersion?: string; configRevision?: string };
   records: Array<{ recordId: string; formId: string; digest: string }>;
   payments: Array<{ paymentId: string; status: string; amountMinor: number; currency: string; mode: string; providerRef: string }>;
   consents: Array<{ purpose: string; wordingVersion: string; wordingDigest: string; answer: "yes" | "no" }>;

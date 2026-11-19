@@ -193,7 +193,7 @@ describe("flows", () => {
     const done = await t.engine.flowPosition(callId);
     assert.deepEqual([done!.status, done!.index], ["completed", 5]);
     const receipt = await t.engine.endCall(callId);
-    assert.deepEqual(receipt!.body.verification, { level: 2, methods: ["carrier_identity_match", "keypad_knowledge"] });
+    assert.deepEqual(receipt!.body.verification, { level: 2, methods: ["carrier_identity_match", "keypad_knowledge"], policyVersion: "default-1", configRevision: "default" });
     assert.equal(receipt!.body.records.length, 1);
   });
 

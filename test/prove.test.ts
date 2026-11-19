@@ -120,6 +120,21 @@ describe("receipts", () => {
     assert.equal(verifyReceipt(receipt, [{ kid: "k1", kty: "EC", crv: "P-256", x: "bad", y: "bad" }]), false);
   });
 
+  it("signs the policy version and config revision when the verification names them, and stays at version 1", async () => {
+    const signer = generateTestSigner("k1");
+    const keys = [signer.publicJwk()];
+    const judged = body({ verification: { level: 3, methods: ["keypad_knowledge", "photo_id"], policyVersion: "default-1", configRevision: "2026-11-18.1" } });
+    const receipt = await signReceipt(signer, judged);
+    assert.equal(receipt.body.v, 1);
+    assert.equal(verifyReceipt(receipt, keys), true);
+    assert.match(new TextDecoder().decode(receiptPayload(judged)), /"verification":\{"configRevision":"2026-11-18.1","level":3,"methods":\["keypad_knowledge","photo_id"\],"policyVersion":"default-1"\}/);
+    const swapped = { ...receipt, body: body({ verification: { ...judged.verification, policyVersion: "default-2" } }) };
+    assert.equal(verifyReceipt(swapped, keys), false, "the policy version is signed");
+    const dropped = { ...receipt, body: body() };
+    assert.equal(verifyReceipt(dropped, keys), false, "dropping the fields breaks the signature");
+    assert.notEqual(receiptDigest(judged), receiptDigest(body()));
+  });
+
   it("builds a signer from a PEM or a JWK, P-256 only", async () => {
     const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
     const fromJwk = keyPairSigner("j", privateKey.export({ format: "jwk" }));
