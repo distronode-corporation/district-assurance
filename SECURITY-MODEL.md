@@ -67,7 +67,9 @@ and the two digests compared in constant time; only a subject with no PIN on fil
 caller can never replace a PIN: changing one is `resetPin`, a host call from the business's own
 tools (tested). The store writes a digest only if none is on file, in one atomic step, so of two
 enrolments at once one wins and the other is refused without replacing it, and a retry of the loser
-is refused too; whichever try stored the PIN writes `pin.enrolled`, once, even when two tries on one
+is refused too, even when its take-back write failed, because a retry finishes only an enrolment
+whose id, stored with the digest, is the retrying call's own; whichever try stored the PIN writes
+`pin.enrolled`, once, even when two tries on one
 call race or the session write after the store's fails on the call's last try (tested). The PIN factor
 reads the digest from the store on every attempt, so after a reset the old PIN fails even on a call
 that began verification before it (tested). In `verifier` mode the engine never enrols. `pin.enrolled` and `pin.reset` carry no
