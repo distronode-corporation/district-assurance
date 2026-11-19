@@ -295,7 +295,9 @@ describe("lockouts across calls", () => {
     const callId = await call(t);
     await assert.rejects(t.engine.submitKeypad(callId, { dob: DOB }), /counters down/);
     assert.equal((await t.counters.get(subjectCounter("keypad_knowledge"), LONG_AGO)).length, 1, "still counted");
-    await t.engine.submitPin(callId, "0000").catch(() => undefined);
+    // The next factor completes: judged and recorded (one failure locks here), not refused before it.
+    assert.deepEqual(await t.engine.submitPin(callId, "0000"), { matched: false, locked: true });
+    assert.deepEqual((await t.engine.state(callId)).factors.at(-1), { kind: "pin", passed: false, at: t.clock.now().toISOString() }, "the PIN was judged");
     assert.equal((await t.counters.get(subjectCounter("keypad_knowledge"), LONG_AGO)).length, 0, "cleaned up before the next factor");
   });
 
