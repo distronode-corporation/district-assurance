@@ -82,7 +82,8 @@ export function lockoutOf(settings: LockoutSettings | undefined): Lockout {
 
 /** Whether a string is a calling number the engine counts: E.164. A withheld number is not passed at all. */
 export function isCallingNumber(value: string): boolean {
-  return CALLING_NUMBER.test(value);
+  // A string only: a regex test turns an array or an object into one, which would pass.
+  return typeof value === "string" && CALLING_NUMBER.test(value);
 }
 
 /** The key a calling number is counted under: `HMAC-SHA256(knowledgeKey, "number:" + number)`, hex. */
