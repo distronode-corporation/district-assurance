@@ -4,7 +4,7 @@ import { request } from "node:http";
 import { connect, type AddressInfo } from "node:net";
 import { after, before, describe, it, type TestContext } from "node:test";
 
-import { DEFAULT_BODY_LIMITS, createReferenceServer, logJsonLines, type ReferenceServerOptions, type RequestLog } from "../examples/reference-server/src/app.ts";
+import { DEFAULT_BODY_LIMITS, createReferenceServer, logJsonLines, rateLimitKey, type ReferenceServerOptions, type RequestLog } from "../examples/reference-server/src/app.ts";
 import { DemoRuns } from "../examples/reference-server/src/demo-runs.ts";
 import { runDemo } from "../examples/reference-server/src/demo.ts";
 import { createDemoWorld } from "../examples/reference-server/src/script.ts";
@@ -216,6 +216,31 @@ describe("reference server limits", () => {
       assert.throws(() => createReferenceServer({ ...base, ...options }), /must be a whole number from 1/, label);
     }
     assert.ok(createReferenceServer({ ...base, timeoutMs: 2 ** 31 - 1, rateLimit: { requests: 1, windowMs: 1, addresses: 1 }, bodyLimits: { demo: 1 } }));
+  });
+
+  it("counts an IPv6 address by its /64 and an IPv4-mapped one as its IPv4 address, and logs what it counts", async (ctx) => {
+    // On every address, IPv4 loopback reaches the socket as ::ffff:127.0.0.1.
+    const clock = new FixedClock();
+    const logs: RequestLog[] = [];
+    const s = await serve(ctx, { clock, rateLimit: { requests: 1, windowMs: 60_000, clock }, log: (e) => logs.push(e) }, "::");
+    assert.equal((await fetch(`http://127.0.0.1:${s.port}/healthz`)).status, 200);
+    assert.equal((await fetch(`http://[::1]:${s.port}/healthz`)).status, 200, "IPv6 loopback is another /64");
+    assert.deepEqual(logs.map((e) => e.address), ["127.0.0.1", "0:0:0:0::/64"]);
+    // One subscriber usually holds a whole /64, so counting each address would let it rotate freely.
+    for (const [a, b] of [
+      ["2001:db8:1:2::1", "2001:db8:1:2:ffff:ffff:ffff:fffe"],
+      ["2001:0DB8:0001:0002:0:0:0:9", "2001:db8:1:2::a%eth0"],
+      ["::1", "::"],
+      ["64:ff9b::192.0.2.1", "64:ff9b::198.51.100.7"],
+    ]) {
+      assert.equal(rateLimitKey(a!), rateLimitKey(b!), `${a} and ${b} share a /64`);
+    }
+    assert.equal(rateLimitKey("2001:db8:1:2::1"), "2001:db8:1:2::/64");
+    assert.notEqual(rateLimitKey("2001:db8:1:2::1"), rateLimitKey("2001:db8:1:3::1"), "the next /64 is another caller");
+    assert.equal(rateLimitKey("::ffff:192.0.2.1"), "192.0.2.1");
+    assert.equal(rateLimitKey("::FFFF:192.0.2.1"), "192.0.2.1");
+    assert.equal(rateLimitKey("192.0.2.1"), "192.0.2.1");
+    assert.equal(rateLimitKey("unknown"), "unknown");
   });
 
   it("tracks a bounded number of addresses, forgetting ended windows first, then the oldest", async (ctx) => {

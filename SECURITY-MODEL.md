@@ -84,8 +84,9 @@ acoustically and can reach speech-to-text.
 Large or slow requests, many requests from one address, and logs that leak what a request carried.
 **Controls (reference server, SPEC.md section 17):** a body limit per route, refused on the declared
 length before reading and cut off while streaming; deadlines to receive a request (408) and to
-answer it (503); a fixed-window rate limit per socket address that ignores `X-Forwarded-For` and
-tracks a bounded number of addresses; and one structured log entry per request that names the
+answer it (503); a fixed-window rate limit per socket address, an IPv6 address counted by its /64
+so one subscriber cannot rotate through it, that ignores `X-Forwarded-For` and tracks a bounded
+number of addresses; and one structured log entry per request that names the
 route pattern, never the path, and holds no header, query string or body, so signatures, call ids
 and future capability tokens stay out of the logs (tested). Left to the host: limits in front of
 the server (a proxy shares one address for all its callers here), and limits across replicas.

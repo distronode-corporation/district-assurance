@@ -406,7 +406,8 @@ each body limit is a whole number from 1 (the timeout at most 2,147,483,647 ms, 
 can wait); anything else throws when the server is created, since 0 or NaN would switch a limit
 off. Each request is handled in this order, and every refusal is JSON `{"error": code}`:
 
-- **Rate limit**, first, before any other work: each remote address, as the socket reports it,
+- **Rate limit**, first, before any other work: each caller, from the socket's address (an IPv6
+  address counts by its /64, an IPv4-mapped one such as `::ffff:192.0.2.1` as its IPv4 address),
   gets `rateLimit.requests` requests per fixed window of `rateLimit.windowMs` (default 300 a
   minute), counted on `rateLimit.clock`, the system clock by default and never the server's
   `clock`, which the demo fixes. Every request counts, whatever its route or answer. Over the limit:
@@ -427,7 +428,8 @@ off. Each request is handled in this order, and every refusal is JSON `{"error":
   nothing more and is closed.
 - **Logs**: with `log`, one entry per answered request, after the answer is written, including the
   refusals above: `{time, address, method, route, status, error?, ms}`. `time` is from the
-  server's clock; `method` is `unknown` when the request was refused before its headers were read;
+  server's clock; `address` is the caller the rate limit counts (an IPv6 /64, never the whole
+  address); `method` is `unknown` when the request was refused before its headers were read;
   `route` is the matched pattern (`/receipts/:callId`, `/demo/runs/:runId/next`) or `unmatched`,
   never the path as sent; `error` is the answer's error code. An entry holds no header, query
   string or body. A `log` that throws loses that entry; the server and the answer are unaffected. `logJsonLines` writes each entry as one line of JSON on standard output, and

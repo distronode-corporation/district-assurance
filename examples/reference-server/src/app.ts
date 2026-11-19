@@ -6,7 +6,7 @@
 // answered request can be logged as one structured entry that never holds a body or a header.
 // Still not hardened for production; ROADMAP.md, "Reference server", lists what else that takes.
 import { STATUS_CODES, createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { Socket } from "node:net";
+import { isIPv6, type Socket } from "node:net";
 import { performance } from "node:perf_hooks";
 
 import { EngineError, parseStripeEvent, systemClock, verifyStripeSignature, type Clock, type Engine } from "../../../src/index.ts";
@@ -61,7 +61,7 @@ export const DEFAULT_BODY_LIMITS: Readonly<BodyLimits> = { stripeIdentity: 64 * 
 export interface RequestLog {
   /** From the server's clock, ISO 8601. */
   time: string;
-  /** The remote address the rate limit counts, as the socket reports it. */
+  /** The caller the rate limit counts: the socket's IPv4 address, or its IPv6 /64 (`rateLimitKey`). */
   address: string;
   /** `unknown` when the request was refused before its headers were read. */
   method: string;
@@ -368,7 +368,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       socket.write(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\n${head.join("")}\r\n${body}`);
       const answered = exchange ?? { started: performance.now(), method: "unknown", seen: { route: "unmatched" }, done: false };
       answered.done = true;
-      record(answered, socket.remoteAddress ?? "unknown", status, code);
+      record(answered, rateLimitKey(socket.remoteAddress ?? "unknown"), status, code);
     }
     socket.destroy(err);
   });
@@ -392,7 +392,26 @@ const CLIENT_ERRORS: Readonly<Record<string, readonly [number, string]>> = {
 };
 
 function addressOf(req: IncomingMessage): string {
-  return req.socket.remoteAddress ?? "unknown";
+  return rateLimitKey(req.socket.remoteAddress ?? "unknown");
+}
+
+/**
+ * The caller the rate limit counts, and logs, for a socket address. An IPv6 address counts by its
+ * /64 (`2001:db8:1:2::/64`), since one subscriber usually holds a whole /64 and could otherwise
+ * rotate through it; an IPv4-mapped one (`::ffff:192.0.2.1`, as a server on `::` sees IPv4) as its
+ * IPv4 address. Anything else is counted as given.
+ */
+export function rateLimitKey(address: string): string {
+  const plain = address.split("%")[0]!.toLowerCase();
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(plain);
+  if (mapped !== null) return mapped[1]!;
+  if (!isIPv6(plain)) return address;
+  // An embedded IPv4 address is the last two groups, which the /64 never reaches.
+  const groups = (part: string) => (part === "" ? [] : part.split(":")).flatMap((g) => (g.includes(".") ? ["0", "0"] : [g]));
+  const [head, tail] = plain.split("::") as [string, string | undefined];
+  const left = groups(head);
+  const all = tail === undefined ? left : [...left, ...Array<string>(8 - left.length - groups(tail).length).fill("0"), ...groups(tail)];
+  return `${all.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(":")}::/64`;
 }
 
 /** The request target as a URL; a target that is not a path (an absolute URL, garbage) is a 400. */
