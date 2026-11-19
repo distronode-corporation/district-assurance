@@ -223,6 +223,8 @@ export async function dialCallback(rt: EngineRuntime, callId: string): Promise<v
 export async function applyCallbackOutcome(rt: EngineRuntime, outcome: CallbackOutcome): Promise<OutcomeResult> {
   // Read once: the answer that decided the factor is the one the ledger's outcome names.
   const { ref, answered, confirmed } = outcome;
+  // Booleans only: a truthy "yes" or 1 would pass the factor, and the ledger would carry it as given.
+  if (typeof answered !== "boolean" || typeof confirmed !== "boolean") throw new EngineError("invalid_input", "answered and confirmed must be booleans");
   const callId = await rt.resolveRef(`callback:${ref}`);
   if (callId === null) return { applied: false };
   const done = await rt.update(callId, (draft) => {
