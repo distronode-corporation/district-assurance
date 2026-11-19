@@ -455,6 +455,10 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   let outcome: PinOutcome;
   if (kind === "pin") outcome = await judgePin(rt, settings.pin as PinSettings, input);
   else outcome = (kind === "keypad_knowledge" ? await judgeKeypad(rt.policy, input) : (await plugin!.judge(input)) === true) ? "pass" : "fail";
+  // Only an entry of the duress PIN itself sets the flag. A pass that is a duress entry because the
+  // flag was set when it was read never writes it again: a clearing that lands while it is judged
+  // stays cleared, and the pass does the same store work as any pass.
+  const pinDuress = outcome === "duress";
   // A subject under duress stays so: every pass on it, on any call, is a duress entry until the
   // business clears the flag (clearDuress).
   if (outcome === "pass" && flag !== null && (await isUnderDuress(counters, flag))) outcome = "duress";
@@ -487,8 +491,8 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     if (hard !== null) draft.emit("verification.locked", "code", { kind, scope: hard.scope, hard: true, until: hard.until });
     return null;
   });
-  // A duress entry flags its subject, even a stale one: durable and hidden, before the visible reset.
-  if (outcome === "duress") await flagDuress(counters, flag!, at);
+  // A duress PIN entry flags its subject, even a stale one: durable and hidden, before the visible reset.
+  if (pinDuress) await flagDuress(counters, flag!, at);
   // A stale entry's failure stays counted across calls, as for any entry that was not accepted.
   if (stale !== null) throw stale;
   // Only once the result is accepted. The number keeps its failures but this attempt's own: they

@@ -290,9 +290,11 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   call, and `authorize` refuses as section 4 says, with the same `false` as a scope with no grant
   (so `requestPayment` is refused with `scope_denied`). Anything sent after the call (PRV-10)
   follows the same rule as on a normal call.
-- Flag until cleared: a duress entry also flags its subject, durably and hidden, in the
+- Flag until cleared: an entry of the duress PIN also flags its subject, durably and hidden, in the
   `AttemptCounters` store every engine shares (kind `duress.flag`), after the call's write and
-  before the counters' visible reset, even when the entry was stale. While the flag is set, every
+  before the counters' visible reset, even when the entry was stale. A pass that is a duress entry
+  only because the flag was set never writes the flag again, so a `clearDuress` that lands while it
+  is judged stays cleared, and the pass does the same store work as a pass on a subject not flagged. While the flag is set, every
   later pass on the subject, on any call and by any entered factor, is a duress entry: alerted, its
   scopes refused, and the same to the caller as any pass. A duress entry resets the visible
   counters as a pass does, so it looks like one; every entered factor's failures on the subject are

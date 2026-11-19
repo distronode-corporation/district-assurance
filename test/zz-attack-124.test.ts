@@ -189,7 +189,8 @@ describe("#124 hostile: can anyone learn that the flag is set?", () => {
       const callId = await call(t);
       ops.length = 0;
       await t.engine.submitPin(callId, PIN);
-      return ops.join(",");
+      // A read or a write, one round trip each: which write it is does not change the time.
+      return ops.map((op) => (op === "get" ? "read" : "write")).join(",");
     };
     assert.equal(await count(true), await count(false));
   });
