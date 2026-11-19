@@ -22,6 +22,8 @@ function sourceFiles(dir: string): string[] {
 }
 
 const SOURCES = sourceFiles(new URL("../src", import.meta.url).pathname).map((path) => ({ path, text: readFileSync(path, "utf8") }));
+/** The demo, the e2e demo and the UI's server code: they start calls too, and could grow a catalog of their own. */
+const DEMO_SOURCES = sourceFiles(new URL("../examples/reference-server/src", import.meta.url).pathname).map((path) => ({ path, text: readFileSync(path, "utf8") }));
 
 describe("supported locales", () => {
   it("are en and fr, in one frozen list", () => {
@@ -64,6 +66,21 @@ describe("supported locales", () => {
     for (const { path, text } of SOURCES) {
       assert.doesNotMatch(text, /locale === "|locale !== "/, `${path}: pick words from a Record<Locale, ...> catalog`);
       assert.doesNotMatch(text, /"en" \| "fr"/, `${path}: use the Locale type`);
+    }
+  });
+
+  it("are the only locales the demo, the e2e demo and the UI start calls in, and the demo keeps no catalog of its own", () => {
+    const passed = DEMO_SOURCES.flatMap(({ path, text }) => [...text.matchAll(/startCall\(\{[^}]*\blocale:\s*([^,}\s]+)/g)].map((m) => ({ path, value: m[1]! })));
+    assert.ok(passed.length >= 3, "the scan finds the demo's calls");
+    for (const { path, value } of passed) {
+      const literal = /^"([^"]*)"$/.exec(value);
+      assert.ok(literal !== null, `${path}: a call's locale is a literal, so this scan can check it (${value})`);
+      assert.equal(isSupportedLocale(literal[1]), true, `${path}: ${value}`);
+    }
+    for (const { path, text } of DEMO_SOURCES) {
+      // A demo-side Record<Locale, ...> would need a place in CATALOGS above; there is none today.
+      assert.doesNotMatch(text, /Record<Locale\b/, `${path}: register a demo catalog in CATALOGS`);
+      assert.doesNotMatch(text, /locale === "|locale !== "|"en" \| "fr"/, `${path}: pick words by Locale`);
     }
   });
 });
