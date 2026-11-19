@@ -46,3 +46,12 @@ describe("#81 hostile: what the delivery adapter answers", () => {
     }
   });
 });
+
+describe("#81 hostile: the sample receiver's limits are documented", () => {
+  it("D3 the reference server README says received keys live in memory only, so a real receiver stores them durably", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const readme = (await readFile(new URL("../examples/reference-server/README.md", import.meta.url), "utf8")).replace(/\s+/g, " ");
+    assert.match(readme, /sample receiver[^.]*keeps the idempotency keys it has received in memory only/);
+    assert.match(readme, /real receiver must store them durably/);
+  });
+});
