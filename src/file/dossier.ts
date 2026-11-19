@@ -166,9 +166,11 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
     // entry, and the same record comes back.
     if (intake === null && s.confirmed !== null) return { record: s.confirmed, filed: true };
     if (intake === null) throw new EngineError("invalid_transition", "no intake is open on this call");
-    if (intake.filing !== null) return { record: intake.filing, filed: false };
+    // Checked again before a reserved filing resumes too: a step-up rule raised since the
+    // reservation holds it. A refused resume keeps the reservation; abandonIntake releases it.
     const refused = rt.requireScope(draft, "intake.file", undefined);
     if (refused !== null) return { refused };
+    if (intake.filing !== null) return { record: intake.filing, filed: false };
     const missing = missingRequired(intake.form, intake.values);
     if (missing.length > 0) throw new EngineError("invalid_input", `required fields missing: ${missing.join(", ")}`);
     const built: IntakeRecord = {
@@ -195,6 +197,8 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
   await rt.update(callId, (draft) => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     if (s.records.some((r) => r.recordId === record.recordId)) return;
+    // Abandoned while it was written: the record was deleted, and its late write stored nothing.
+    if (s.intake?.filing?.recordId !== record.recordId) throw new EngineError("precondition_failed", "the filing was abandoned while it was written");
     draft.apply({ type: "intake_confirmed", recordId: record.recordId });
     s.intake = null;
     s.confirmed = record;
@@ -204,11 +208,20 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
   return record;
 }
 
+/**
+ * Drops the draft. A reserved filing (one whose resume was refused, or whose write failed) is
+ * released too: its record, which the store may already hold, is deleted by id first, so a write
+ * still in flight stores nothing, and the call can end.
+ */
 export async function abandonIntake(rt: EngineRuntime, callId: string): Promise<void> {
   rt.settings(DOSSIER);
+  const reserved = ((await rt.read(callId)).modules[DOSSIER] as unknown as DossierSlice | undefined)?.intake?.filing ?? null;
+  if (reserved !== null) await rt.adapter("records").deleteIntakeRecords(rt.workspaceId, [reserved.recordId]);
   await rt.update(callId, (draft) => {
     const s = draft.slice<DossierSlice>(DOSSIER);
-    if (s.intake !== null) openIntake(s);
+    const filing = s.intake?.filing ?? null;
+    // A filing reserved since the read is not released here: its record was not deleted.
+    if (filing !== null && filing.recordId !== reserved?.recordId) throw new EngineError("precondition_failed", "the intake is being filed");
     draft.apply({ type: "intake_abandoned" });
     s.intake = null;
     s.confirmed = null;

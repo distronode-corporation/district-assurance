@@ -110,9 +110,18 @@ export interface IntakeRecord {
 /** The host's records: subjects to verify against, and the intake records callers confirm. */
 export interface RecordStore {
   getSubject(workspaceId: string, subjectKey: string): Promise<SubjectRecord | null>;
-  /** Idempotent by `recordId`: the engine retries a write whose outcome it could not see, with the same record. */
+  /**
+   * Idempotent by `recordId`: the engine retries a write whose outcome it could not see, with the
+   * same record. Stores nothing for a `recordId` that `deleteIntakeRecords` deleted: a filing still
+   * in flight when it was abandoned must not bring the values back.
+   */
   putIntakeRecord(record: IntakeRecord): Promise<void>;
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
+  /**
+   * Deletes intake records by id, and remembers each id (the id alone, no value) so a later
+   * `putIntakeRecord` of it stores nothing. Idempotent: an id already gone is skipped.
+   */
+  deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void>;
 }
 
 export interface AuditInput {

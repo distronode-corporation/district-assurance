@@ -116,26 +116,42 @@ export class FakePaymentLinks implements PaymentLinks {
   }
 }
 
+/** A map key for an id within a workspace that no two pairs share, whatever either holds ("/" included). */
+function scoped(workspaceId: string, id: string): string {
+  return JSON.stringify([workspaceId, id]);
+}
+
 export class MemoryRecordStore implements RecordStore {
   readonly #subjects = new Map<string, SubjectRecord>();
   readonly #records = new Map<string, IntakeRecord>();
+  /** Ids of deleted records: a late write of one stores nothing. */
+  readonly #deleted = new Set<string>();
 
   putSubject(workspaceId: string, subject: SubjectRecord): void {
-    this.#subjects.set(`${workspaceId}/${subject.subjectKey}`, structuredClone(subject));
+    this.#subjects.set(scoped(workspaceId, subject.subjectKey), structuredClone(subject));
   }
 
   async getSubject(workspaceId: string, subjectKey: string): Promise<SubjectRecord | null> {
-    const subject = this.#subjects.get(`${workspaceId}/${subjectKey}`);
+    const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
     return subject === undefined ? null : structuredClone(subject);
   }
 
   async putIntakeRecord(record: IntakeRecord): Promise<void> {
-    this.#records.set(`${record.workspaceId}/${record.recordId}`, structuredClone(record));
+    const key = scoped(record.workspaceId, record.recordId);
+    if (this.#deleted.has(key)) return;
+    this.#records.set(key, structuredClone(record));
   }
 
   async getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null> {
-    const record = this.#records.get(`${workspaceId}/${recordId}`);
+    const record = this.#records.get(scoped(workspaceId, recordId));
     return record === undefined ? null : structuredClone(record);
+  }
+
+  async deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void> {
+    for (const recordId of recordIds) {
+      this.#records.delete(scoped(workspaceId, recordId));
+      this.#deleted.add(scoped(workspaceId, recordId));
+    }
   }
 }
 

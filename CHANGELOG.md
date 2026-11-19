@@ -32,6 +32,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `RecordStore` gains `deleteIntakeRecords` (required): `abandonIntake` releases a reserved filing by
+  deleting its record by id, and a later write of that id stores nothing. A reserved filing resumes
+  only while `intake.file` is still granted.
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

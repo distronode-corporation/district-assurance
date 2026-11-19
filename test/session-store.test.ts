@@ -109,7 +109,7 @@ describe("compare-and-set conflicts", () => {
       sessions.losses = MAX_WRITE_ATTEMPTS;
     };
     await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("conflict"));
-    await assert.rejects(t.engine.abandonIntake(callId), rejects("precondition_failed"), "the draft stays reserved for its record");
+    await assert.rejects(t.engine.setIntakeField(callId, "issue", "changed"), rejects("precondition_failed"), "the draft stays reserved for its record");
     t.records.putIntakeRecord = put;
     const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
     assert.equal(record.recordId, "rec_1");

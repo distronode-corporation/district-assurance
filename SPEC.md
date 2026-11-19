@@ -389,7 +389,12 @@ config change mid-intake never changes what is filed; a call also keeps the form
 wordings) in force when it started. A draft being filed refuses changes. A filing that failed
 after its reservation (the store refused it, or the last write was lost) stays reserved and
 resumes with the same record on the next `confirmIntake`, so `RecordStore.putIntakeRecord` must be
-idempotent by `recordId`; two confirmations at once file one record. A confirmation retried after its record was
+idempotent by `recordId`; two confirmations at once file one record. A resume needs `intake.file`
+again, as a first confirmation does: refused (`scope_denied`), the filing stays reserved.
+`abandonIntake` releases a reserved filing: it deletes the record by id first
+(`RecordStore.deleteIntakeRecords`, which also makes a later write of that id store nothing), then
+drops the draft, so the call can end; a confirmation whose write was in flight then fails
+(`precondition_failed`) and files nothing. A confirmation retried after its record was
 filed (its ledger entry failed) returns the same record. `endCall` is refused while a record is
 being filed. Provider idempotency keys are JSON tuples of the workspace, the call and the
 operation, so workspaces sharing an adapter never share a key. A flow attached to a running call
