@@ -176,11 +176,11 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   account a keypad cannot produce, with a stand-in (`minDigits` zeros, an HMAC subject key) whose
   answer is ignored. A subject the `RecordStore` does not have never passes, whatever it says.
 - Each attempt is counted in its own write before it is judged. A judge that throws (the knowledge
-  key store, a `PinVerifier`, a plug-in) records no factor, writes `verification.factor_error` and
-  passes the error to the host. The attempt is not refunded, so an entry crafted to make a judge
-  throw never gives a free try; a key store outage can use up the call's attempts. Every
-  `beginVerification` starts a
-  new epoch; a factor result, a carrier report or a photo ID check from an earlier epoch is never
+  key store, a `PinVerifier`, a plug-in) records no factor, writes `verification.factor_error`
+  (unless the call ended or the verification restarted meanwhile) and passes the error to the
+  host. The attempt is not refunded, so an entry crafted to make a judge throw never gives a free
+  try; a key store outage can use up the call's attempts. Every `beginVerification` starts a new
+  epoch; a factor result, a carrier report or a photo ID check from an earlier epoch is never
   applied (`precondition_failed`), and a change of subject drops pending photo ID checks.
 - The photo ID link is reserved, created, enrolled and texted in turn; after a failure,
   `startPhotoId` resumes with the same idempotency keys, so a call never has two links. After `maxAttemptsPerCall`,

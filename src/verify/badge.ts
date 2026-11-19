@@ -343,8 +343,15 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   } catch (error) {
     // A key store, PIN verifier or plug-in that throws is not a wrong answer: no factor is recorded
     // and the error reaches the host. The attempt stays counted, so an entry crafted to make a judge
-    // throw never gives a free try. The ledger notes the failure; a failed note never hides the error.
-    await Promise.allSettled([rt.update(callId, (draft) => draft.emit("verification.factor_error", "code", { kind }))]);
+    // throw never gives a free try. The ledger notes the failure, as the success path would, only on
+    // the same verification of a call still open; a note refused or failed never hides the error.
+    await rt
+      .update(callId, (draft) => {
+        assertSameVerification(draft.slice<BadgeSlice>(BADGE), reserved.epoch);
+        draft.assertCan({ type: "factor_recorded", factor: { kind, passed: false, at: rt.now() } });
+        draft.emit("verification.factor_error", "code", { kind });
+      })
+      .catch(() => undefined);
     throw error;
   }
   await rt.update(callId, (draft) => {
