@@ -95,8 +95,11 @@ export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: 
     const { matched } = await rt.adapter("pinVerifier").verify({ workspaceId: input.workspaceId, subjectKey, pin: wellFormed ? pin : "0".repeat(settings.minDigits) });
     return matched && usable && input.subject !== null;
   }
+  // The digest on file is read from the store now, not from the call's copy of the subject, so a
+  // reset since verification began counts. An unknown subject is looked up the same way.
+  const onFile = await rt.adapter("records").getSubject(input.workspaceId, input.subjectKey ?? input.hmac("subject:"));
   const digest = input.hmac(`pin:${input.subjectKey ?? ""}:${wellFormed ? pin : ""}`);
-  const match = hexDigestsEqual(digest, input.subject?.pinDigest ?? "");
+  const match = hexDigestsEqual(digest, onFile?.pinDigest ?? "");
   return match && wellFormed && input.subject !== null;
 }
 

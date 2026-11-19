@@ -138,11 +138,13 @@ export class MemoryRecordStore implements RecordStore {
     return record === undefined ? null : structuredClone(record);
   }
 
-  async putPinDigest(workspaceId: string, subjectKey: string, digest: string | null): Promise<void> {
+  async putPinDigest(workspaceId: string, subjectKey: string, digest: string | null): Promise<boolean> {
     const subject = this.#subjects.get(`${workspaceId}/${subjectKey}`);
-    if (subject === undefined) return;
+    if (subject === undefined) return false;
     if (digest === null) delete subject.pinDigest;
+    else if (subject.pinDigest !== undefined) return false;
     else subject.pinDigest = digest;
+    return true;
   }
 }
 

@@ -115,9 +115,12 @@ export interface RecordStore {
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
   /**
    * Stores a subject's PIN digest (`pinDigest`), or removes it with null (a reset by the business).
-   * Never given the PIN itself. A subject the store does not have is left alone.
+   * Never given the PIN itself. A digest is stored only if the subject has none, as one atomic step
+   * (of two enrolments at once, one wins and the other replaces nothing); the answer says whether it
+   * was stored. Null always removes and answers true. A subject the store does not have is left
+   * alone, and the answer is false.
    */
-  putPinDigest(workspaceId: string, subjectKey: string, digest: string | null): Promise<void>;
+  putPinDigest(workspaceId: string, subjectKey: string, digest: string | null): Promise<boolean>;
 }
 
 /**

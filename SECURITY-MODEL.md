@@ -65,7 +65,10 @@ which always includes a factor that is not knowledge, on an open call outside an
 counted before they are judged and limited to the PIN's attempts per call; the PIN is keyed twice
 and the two digests compared in constant time; only a subject with no PIN on file can enrol, so a
 caller can never replace a PIN: changing one is `resetPin`, a host call from the business's own
-tools (tested). In `verifier` mode the engine never enrols. `pin.enrolled` and `pin.reset` carry no
+tools (tested). The store writes a digest only if none is on file, in one atomic step, so of two
+enrolments at once one wins and the other is refused without replacing it (tested). The PIN factor
+reads the digest from the store on every attempt, so after a reset the old PIN fails even on a call
+that began verification before it (tested). In `verifier` mode the engine never enrols. `pin.enrolled` and `pin.reset` carry no
 digits (tested). Who may call `resetPin`, and how the business confirms the request first, is the
 host's (left to the host).
 
@@ -170,7 +173,7 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.
 - Calling `resetPin` only from the business's own staff tools, after the business has confirmed
   the request, never from a path a caller or the model can reach; and a `RecordStore.putPinDigest`
-  that stores only the digest it is given.
+  that stores only the digest it is given, and only if the subject has none, atomically.
 - Who may edit a workspace's FlowConfig, and keeping its revisions.
 - Outside modules: their code runs inside the engine's writes and is part of the host's security
   model.

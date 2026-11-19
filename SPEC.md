@@ -161,8 +161,9 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
 - An entry is well formed when it is ASCII digits with a length from `minDigits` to `maxDigits`.
   A malformed entry is still an attempt, and fails.
 - `keyed_hash` mode: the stored digest is `pinDigest(knowledgeKey, subjectKey, pin)` =
-  `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`, in `SubjectRecord.pinDigest`. The
-  entry is hashed the same way and compared in constant time; an unknown subject, a subject without
+  `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`, in `SubjectRecord.pinDigest`,
+  read from the `RecordStore` at every attempt (not from the call's copy of the subject), so a
+  reset or an enrolment since verification began counts. The entry is hashed the same way and compared in constant time; an unknown subject, a subject without
   a digest and a malformed entry do the same work and give the same answer.
 - `verifier` mode: the host's `PinVerifier.verify({workspaceId, subjectKey, pin})` decides; the
   PIN is passed once and kept nowhere. It is asked for every attempt: for a malformed entry or an
@@ -187,7 +188,12 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   same, a run up or down with 0 following 9, as in 1234, 4321 or 7890, or a PIN equal to the
   subject's account number or any keypad knowledge on file, compared as keyed hashes; `weak` does
   not say which), or `{enrolled: true}` once `RecordStore.putPinDigest(workspaceId, subjectKey,
-  digest)` stored it. Then `pin.enrolled`.
+  digest)` stored it. Then `pin.enrolled`. The call records the digest as pending before the
+  store's write. `putPinDigest` stores a digest only if the subject has none, in one atomic step,
+  and answers whether it did; when it did not (another call enrolled first) the try is refused
+  (`precondition_failed`) and nothing is replaced. If the session write after a stored digest
+  fails, a retry on the same call with the same PIN finishes that enrolment (`{enrolled: true}`,
+  one `pin.enrolled`); any other PIN is refused as one on file.
 - Reset: `resetPin(subjectKey)` is a host call for the business's own staff tools, never on a
   caller's request, and needs the `pin` factor on. In `keyed_hash` mode it removes the digest
   (`putPinDigest` with null), so the subject has no PIN until they enrol again at level 2; in
