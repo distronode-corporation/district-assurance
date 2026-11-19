@@ -314,6 +314,11 @@ const PAGE_TEXT = {
   },
 } as const;
 
+/** A word from a page table by its own key, else the key itself: `constructor` is a name, never Object's. */
+function word(table: Readonly<Record<string, string>>, key: string): string {
+  return Object.hasOwn(table, key) ? table[key]! : key;
+}
+
 function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
@@ -327,15 +332,15 @@ function receiptPage(receipt: SignedReceipt, keys: Parameters<typeof verifyRecei
   const t = PAGE_TEXT[locale];
   const b = receipt.body;
   const list = (items: string[]) => (items.length === 0 ? t.none : items.join("; "));
-  const methods = b.verification.methods.map((m) => t.methods[m] ?? m).join(", ");
+  const methods = b.verification.methods.map((m) => word(t.methods, m)).join(", ");
   const rows: Array<[string, string]> = [
     [t.receipt, b.receiptId],
     [t.started, b.startedAt],
     [t.ended, b.endedAt],
     [t.identity, t.level(b.verification.level, methods)],
     [t.records, list(b.records.map((r) => `${r.formId}, ${t.fingerprint} ${r.digest}`))],
-    [t.payments, list(b.payments.map((p) => `${formatAmount(locale, p.amountMinor, p.currency)}, ${t.status[p.status] ?? p.status}`))],
-    [t.consents, list(b.consents.map((c) => `${c.purpose}: ${t.answer[c.answer]}`))],
+    [t.payments, list(b.payments.map((p) => `${formatAmount(locale, p.amountMinor, p.currency)}, ${word(t.status, p.status)}`))],
+    [t.consents, list(b.consents.map((c) => `${c.purpose}: ${word(t.answer, c.answer)}`))],
     [t.ledger, t.head(b.ledger.seq, b.ledger.hash)],
   ];
   const valid = verifyReceipt(receipt, keys);
