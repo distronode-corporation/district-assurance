@@ -48,7 +48,7 @@ export type TestEngineOptions = Partial<Omit<EngineOptions, "adapters">> & {
 
 /**
  * An engine on fakes only: a fixed clock, sequential ids, in-memory stores, throwaway signing keys
- * (receipts, and Gate's `accessSigner`), a fake door as the `access` controller `door`, every adapter wired, and `defaultConfig()` unless a config is given.
+ * (receipts, Gate's `accessSigner` and step-up's `stepUpSigner`), a fake door as the `access` controller `door`, every adapter wired, and `defaultConfig()` unless a config is given.
  */
 export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
   const parts = {
@@ -77,6 +77,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     signer: generateTestSigner(),
     access: { door: parts.door },
     accessSigner: generateTestSigner("test-access-key-1"),
+    stepUpSigner: generateTestSigner("test-step-up-key-1"),
     ...overrides,
   } as EngineAdapters;
   if (overrides.sessions !== undefined) parts.sessions = overrides.sessions;

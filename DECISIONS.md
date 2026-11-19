@@ -344,4 +344,12 @@ its answer), designed once, not per module.
 the door acts on it later, when the code is redeemed, which may follow `receipt.issued` (until the
 grant expires, at most 15 minutes). The ledger still gets no access entry after the receipt: the
 redemption is the door's to log, and the host revokes a code it no longer wants.
+**Amended (GAT-4):** web sign-in step-up is built in on the same terms: the engine reserves,
+signs and validates each step-up token and records its one exchange, under the `stepUpSigner`
+adapter (a key of its own, apart from the receipt and access signers). The write that ends a
+call fails a token still being signed and refuses every issued token its call no longer vouches
+for (tainted, a new verification running, or another grant). Whether a token issued for the grant
+the call still holds at its end stays exchangeable until it expires (at most 5 minutes), with its
+exchange entry then written before or after `receipt.issued`, is a pending decision; the code does so for now,
+and the receipt lists the call's tokens.
 

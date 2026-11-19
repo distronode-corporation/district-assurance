@@ -187,7 +187,7 @@ export async function issueReceipt(
   rt: EngineRuntime,
   record: CallRecord,
   head: { seq: number; hash: string },
-  parts: Pick<ReceiptBody, "verification" | "records" | "payments">,
+  parts: Pick<ReceiptBody, "verification" | "records" | "payments" | "stepUp">,
 ): Promise<SignedReceipt> {
   const callId = record.state.callId;
   const body: ReceiptBody = {
@@ -207,6 +207,7 @@ export async function issueReceipt(
       wordingDigest: c.wordingDigest,
       answer: c.answer,
     })),
+    ...(parts.stepUp === undefined || parts.stepUp.length === 0 ? {} : { stepUp: parts.stepUp }),
     ledger: head,
   };
   const signer = rt.adapter("signer");

@@ -11,6 +11,7 @@ claim.
   or payout details.
 - Card data, which the engine must never receive.
 - Doors and other access: what a verified caller may open, and when.
+- Web sign-ins a verified call steps up, and for whom.
 - Whose account a payment lands on (the business's, or the platform's).
 - The record of what happened on a call: the ledger and the receipts.
 - The workspace's FlowConfig: which modules run, which factors count, which scopes a flow grants.
@@ -21,7 +22,7 @@ claim.
 |---|---|
 | The host's code paths that call the engine | Everything the caller says |
 | The adapters the host plugs in | Everything the model says or proposes |
-| The knowledge key, the receipt signing key and the access signing key | Caller ID and any number given on the call |
+| The knowledge key, the receipt signing key, the access signing key and the step-up signing key | Caller ID and any number given on the call |
 | The clock and id source | Webhook bodies until their signature verifies |
 | The outside modules the host installs | Text from business endpoints, CRMs and documents |
 | The door controllers and relays the host configures | A door relay's answer, beyond "took it", "refused" or "lost" |
@@ -195,6 +196,41 @@ door after the receipt, until its expiry, and that redemption is not in the call
 host revokes a code it no longer wants, and logs redemptions at the door). A code is texted only
 to the call whose in-flight grant has the digest the engine recorded, never one matched on its
 grant id alone (tested).
+### Web sign-in step-up: stolen, replayed or misdirected tokens
+
+Someone replays a step-up token, uses one meant for another person or site, or keeps using one
+after the call turned untrusted. **Controls:** a token is issued only with a verification grant
+covering `entry.sign_in` (level 2 or more), checked by the engine on every request and once more
+after signing, so a call tainted, verified again, ended or expired while it was signed gets
+nothing (tested). Step-up is built in (ADR-25): the engine issues every token and records its
+exchange, and no module code can write a token or its outcome (tested). It is an ES256 JWT under
+its own key (`stepUpSigner`), which the engine refuses to share with the receipt or access signer,
+by key id or key material (tested); it lives 2 to 5 minutes and never past the verification grant
+(tested). It is bound to the site's audience, to
+the subject the verification grant was issued for (never one the host or the model names, and
+none while a new verification runs), to the grant itself and to the nonce the site showed
+(tested). The web sign-in exchanges it through the engine, which accepts only the exact bytes the
+call issued, once: the exchange settles the token in the engine's own write, so a second one is
+refused, on any process (tested). An exchange after the call was tainted, while a new verification runs on it, after the call was verified again,
+after expiry, or for another site, subject or nonce is refused and uses the token up; a forged or
+altered token is refused without using up the real one (tested). The ledger holds the token's
+digest and outcome, never the token, the nonce or the subject handle, and the call record keeps
+no nonce (tested). `sub` is a handle per site, so a `sub` alone cannot link one person across sites (tested); `sid` (the call) and `grant` are the same in every token of one call, so two sites given tokens from the same call can link those tokens.
+Hanging up never revives a token: the write that ends the call refuses every issued token whose
+call is tainted, has a new verification running or no longer holds the token's grant (verified
+again, as that subject or another), since the ended call holds no grant to judge it by later
+(tested). Only a token for the grant the call still holds as it ends stays exchangeable, until it
+expires (at most 5 minutes; whether it should is a pending decision), its exchange written before
+or after `receipt.issued` and never changing the receipt; the receipt lists the call's tokens as the end left them
+(tested). A refused exchange is final, so anyone holding a token can use it up with a wrong nonce
+and deny that one sign-in (it starts again with a new nonce); a guessed nonce never gets a second
+try (tested). Published key sets carry only public key members, whatever a signer returns
+(tested).
+Left to the host: exchanging every token through the engine (checking the JWS against the JWKS
+alone gives neither the single use nor the refusal after taint), handing the token only to the
+browser session that showed the nonce, a nonce of at least 6 digits that lives no longer than
+the token, and the words the caller hears before keying it ("you are signing in to ... on the
+web"), since a person can be talked into keying someone else's nonce.
 
 ### Money on the wrong account
 
@@ -257,6 +293,10 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
   key in a key store, the access key apart from the receipts'.
 - A door keypad that slows after wrong access codes, and a durable `AccessCodeStore` whose
   `take` and `miss` are atomic across processes.
+- Keeping the knowledge key, the receipt signing key, the access signing key and the step-up
+  signing key in a key store, each apart from the others.
+- Exchanging each step-up token through the engine (`exchangeStepUpToken`), and only for the
+  browser session that showed its nonce.
 - Calling `expirePaymentLinks` at each link's `expiresAt` (a timer or a sweep); until it does, a
   link lives as long as the provider keeps it.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same

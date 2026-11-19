@@ -26,6 +26,12 @@ export interface ReceiptBody {
   records: Array<{ recordId: string; formId: string; digest: string }>;
   payments: Array<{ paymentId: string; status: string; amountMinor: number; currency: string; mode: string; providerRef: string }>;
   consents: Array<{ purpose: string; wordingVersion: string; wordingDigest: string; answer: "yes" | "no" }>;
+  /**
+   * The call's web sign-in step-up tokens as the call ended: `issued` ones may still be exchanged
+   * until `expiresAt`, so a later `stepup.exchanged` or `stepup.refused` entry names one of these.
+   * Absent on a call that issued none, so the format stays at `v: 1`.
+   */
+  stepUp?: Array<{ tokenId: string; expiresAt: string; status: string }>;
   ledger: { seq: number; hash: string };
 }
 

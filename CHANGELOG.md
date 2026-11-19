@@ -12,6 +12,18 @@ All notable changes to this project are documented here. The format follows
   `isSupportedLocale`: `startCall` checks a locale against it, and the texts the engine sends, the
   amount formats and the spoken digit words are `Record<Locale, ...>` catalogs (`IDENTITY_TEXT`,
   `PAYMENT_TEXT`, `AMOUNT_REGION`, `DIGIT_WORDS_BY_LOCALE`) that a test holds to every supported locale.
+- Web sign-in step-up (GAT-4), the sixth built-in module (`step-up`, step `step-up.issue`, scope
+  `entry.sign_in`): a 2 to 5 minute ES256 JWT bound to the site's nonce, the verified subject and
+  the verification grant, with an OpenID Connect `acr`. The engine issues it and records its one
+  exchange itself (ADR-25): `Engine.issueStepUpToken`, `exchangeStepUpToken`, `stepUpTokens` and
+  `stepUpKeys` (the JWKS); the `stepUpSigner` adapter, its own key; `stepup.*` ledger events.
+  Refused after the call is tainted or verified again, including when the call ends: the end
+  refuses every token its call no longer vouches for. Receipts list a call's tokens (`stepUp`,
+  optional, so receipts stay at `v: 1`).
+- `validateConfig` refuses a flow with more `step-up.issue` steps than the step-up
+  `maxTokensPerCall`, which could never complete; modules gain an optional `validateFlow` hook for
+  such whole-flow checks.
+- Published key sets (`receiptKeys`, `accessKeys`, `stepUpKeys`) carry only public key members.
 - Gate, the fifth built-in module (GAT-1, ADR-25): signed, time-limited access grants (ES256 over
   canonical JSON, like receipts) after verification to `entry.open` (level 2 or more), delivered
   once through an `AccessController`. The engine owns every grant and outcome: it reserves, signs,

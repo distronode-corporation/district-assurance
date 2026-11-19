@@ -418,7 +418,7 @@ describe("validateConfig: flows", () => {
     const door = outside("door", { scopes: { grants: [], needs: { "door.lookup": "door.open" }, classes: { "door.open": "access" } }, provides: { factors: [], steps: ["door.lookup"], outcomes: [] } });
     const lax = outside("lax", { scopes: { grants: [], needs: {}, classes: { "door.open": "none" } }, provides: { factors: [], steps: ["lax.lookup"], outcomes: [] } });
     const reg = registry(ALL_ADAPTERS, [door, lax]);
-    assert.deepEqual(reg.scopeClasses(), { "payment.request": "money", "intake.file": "none", "entry.open": "access", "door.open": "access" });
+    assert.deepEqual(reg.scopeClasses(), { "payment.request": "money", "intake.file": "none", "entry.open": "access", "entry.sign_in": "access", "door.open": "access" });
     const problems = validateConfig(config((c) => (c.policy.scopes["door.open"] = 1)), reg);
     assert.deepEqual(problems, ["policy: scope door.open is access, and below its floor of level 2"]);
   });
@@ -461,7 +461,7 @@ describe("validateConfig: flows", () => {
 describe("module registry", () => {
   it("installs, lists, finds and removes modules", () => {
     const reg = registry(["ledger"], [outside("loyalty")]);
-    assert.deepEqual(reg.list().map((m) => m.manifest.name), ["badge", "dossier", "paylink", "trace", "gate", "loyalty"]);
+    assert.deepEqual(reg.list().map((m) => m.manifest.name), ["badge", "dossier", "paylink", "trace", "gate", "step-up", "loyalty"]);
     assert.equal(reg.stepOwner("loyalty.lookup")?.manifest.name, "loyalty");
     assert.equal(reg.stepOwner("nope.step"), undefined);
     assert.ok(reg.factorKinds().includes("pin"));

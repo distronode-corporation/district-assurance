@@ -10,7 +10,7 @@
 // throws NotImplementedError. SPEC.md describes the flow.
 import { createPublicKey, type JsonWebKey } from "node:crypto";
 
-import type { IntakeRecord, SessionStore } from "./core/adapters.ts";
+import type { IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
 import { canonicalJson, hasLoneSurrogate, type JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
@@ -26,6 +26,7 @@ import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
 import * as dossier from "./file/dossier.ts";
 import * as gate from "./gate/gate.ts";
+import * as stepUp from "./gate/step-up.ts";
 import type { NormaliseResult } from "./file/intake.ts";
 import { BUILT_IN_MODULES, builtInModules, defaultConfig } from "./modules.ts";
 import * as paylink from "./pay/paylink.ts";
@@ -444,6 +445,31 @@ export class Engine {
     return this.#adapters.accessSigner === undefined ? [] : [publicMembers(this.#adapters.accessSigner.publicJwk())];
   }
 
+  // ---- Step-up (web sign-in) ---------------------------------------------------------------
+
+  /** Issues a web sign-in step-up token for the nonce the caller keyed (SPEC.md, section 18). Hand it to the waiting sign-in only. */
+  issueStepUpToken(callId: string, input: { nonce: string; site?: string; lifetimeSeconds?: number }): Promise<stepUp.StepUpToken> {
+    return stepUp.issueStepUpToken(this.#rt, callId, input);
+  }
+
+  /** The host's web sign-in exchanges a step-up token, once. Never throws for a bad token. */
+  exchangeStepUpToken(token: unknown, expect: { audience: string; subjectKey: string; nonce: string }): Promise<stepUp.StepUpExchange> {
+    return stepUp.exchangeStepUpToken(this.#rt, token, expect);
+  }
+
+  /** A call's step-up tokens, as the engine recorded them. Never the tokens or the nonces. */
+  async stepUpTokens(callId: string): Promise<stepUp.StepUpRecord[]> {
+    const slice = (await this.#read(callId)).modules[stepUp.STEP_UP] as unknown as stepUp.StepUpSlice | undefined;
+    return slice === undefined ? [] : structuredClone(slice.tokens);
+  }
+
+  /** The JWKS document for the step-up issuer's `/.well-known/jwks.json` (no keys without a step-up signer). */
+  stepUpKeys(): { keys: JsonWebKey[] } {
+    const signer = this.#adapters.stepUpSigner;
+    // The published `kid` is the one the tokens' header carries, whatever the signer's JWK says.
+    return { keys: signer === undefined ? [] : [{ ...publicMembers(signer.publicJwk()), kid: signer.keyId } as JsonWebKey] };
+  }
+
   // ---- Trace (prove) -----------------------------------------------------------------------
 
   recordConsent(callId: string, input: { purpose: string; answer: "yes" | "no"; channel?: ConsentRecord["channel"] }): Promise<ConsentRecord> {
@@ -467,6 +493,8 @@ export class Engine {
       // signed (or past its expiry) is settled now, as unknown, before the receipt's ledger head is
       // taken: no access outcome can ever follow the receipt.
       gate.settleInFlight(this.#rt, draft, "call_ended");
+      // Likewise a step-up token still being signed: it is failed, never handed out after the end.
+      stepUp.settleStepUpInFlight(draft);
       draft.apply({ type: "call_ended", at: this.#now() });
       const flow = draft.record.flow;
       if (flow !== null && flow.status === "running") {
@@ -478,7 +506,7 @@ export class Engine {
     });
     if (!trace.wantsReceipt(this.#rt, record)) return null;
     const head = await trace.endedHead(this.#rt, record, () => this.#adapters.ledger.head());
-    const parts: Pick<ReceiptBody, "verification" | "records" | "payments"> = { verification: { level: 0, methods: [] }, records: [], payments: [] };
+    const parts: Pick<ReceiptBody, "verification" | "records" | "payments" | "stepUp"> = { verification: { level: 0, methods: [] }, records: [], payments: [] };
     // The built-in contributors, not the registry: a module removed after this call filed or paid still appears on its receipt.
     for (const module of this.#receiptModules) {
       const slice = record.modules[module.manifest.name];
@@ -735,13 +763,11 @@ export class Engine {
 }
 
 /**
- * The access signer must be its own key, never the receipt signer's: a receipt must never verify as
- * an access grant, nor the reverse. Refused by key id and by public key.
+ * The receipt, access and step-up signers must each be their own key: a receipt must never verify
+ * as an access grant or a step-up token, nor any of them as another. Refused by key id and by
+ * public key, for every pair the engine has.
  */
 function distinctSigners(adapters: EngineAdapters): string[] {
-  const { signer, accessSigner } = adapters;
-  if (signer === undefined || accessSigner === undefined) return [];
-  if (signer.keyId === accessSigner.keyId) return ["accessSigner must have its own key id, not the receipt signer's"];
   // Compared as key material, not text: one key can be written with or without padding, in either
   // base64 alphabet. A key that does not import is left for its signer to fail on.
   const der = (jwk: JsonWebKey) => {
@@ -751,9 +777,25 @@ function distinctSigners(adapters: EngineAdapters): string[] {
       return null;
     }
   };
-  const a = der(signer.publicJwk());
-  const b = der(accessSigner.publicJwk());
-  return a !== null && b !== null && a.equals(b) ? ["accessSigner must be its own key, not the receipt signer's"] : [];
+  const named: Array<[string, ReceiptSigner | undefined]> = [
+    ["receipt signer", adapters.signer],
+    ["accessSigner", adapters.accessSigner],
+    ["stepUpSigner", adapters.stepUpSigner],
+  ];
+  const present = named.filter((n): n is [string, ReceiptSigner] => n[1] !== undefined);
+  const errors: string[] = [];
+  present.forEach(([later, b], j) => {
+    for (const [earlier, a] of present.slice(0, j)) {
+      if (a.keyId === b.keyId) {
+        errors.push(`${later} must have its own key id, not the ${earlier}'s`);
+        continue;
+      }
+      const x = der(a.publicJwk());
+      const y = der(b.publicJwk());
+      if (x !== null && y !== null && x.equals(y)) errors.push(`${later} must be its own key, not the ${earlier}'s`);
+    }
+  });
+  return errors;
 }
 
 /**

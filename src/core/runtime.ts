@@ -53,6 +53,8 @@ export interface EngineAdapters {
   access?: Readonly<Record<string, AccessController>>;
   /** Signs Gate's access grants. Its own key (its own `kid`), not the receipt key. */
   accessSigner?: ReceiptSigner;
+  /** Signs web sign-in step-up tokens. Its own key (its own `kid`), not the receipt or access key. */
+  stepUpSigner?: ReceiptSigner;
 }
 
 export type AdapterName = keyof EngineAdapters;

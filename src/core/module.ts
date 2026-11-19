@@ -75,6 +75,11 @@ export interface AssuranceModule {
   checkAdapters?(settings: unknown, capabilities: Readonly<Record<string, unknown>>): string[];
   /** Every problem with one flow step whose type this module provides. */
   validateStep(step: FlowStep, ctx: StepContext): string[];
+  /**
+   * Every problem with a whole flow, given its steps in order, for what one step cannot show (a
+   * per-call limit the flow's steps would exceed). Called once per flow that has a step of this module.
+   */
+  validateFlow?(steps: readonly FlowStep[], ctx: StepContext): string[];
   /** The level a step verifies to, so later steps can be checked against their scope floors. */
   stepLevel?(step: FlowStep): number | null;
   /** The scopes a step's grant is limited to, when it names them (null: every scope its level reaches). */
