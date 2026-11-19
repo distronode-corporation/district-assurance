@@ -50,7 +50,23 @@ export interface DisputeRecord {
   amountMinor: number;
   currency: string;
   updatedAt: string;
+  /** When the provider produced the event this status came from (Stripe's event `created`), when it said. */
+  occurredAt?: string;
 }
+
+/**
+ * Where each status stands in a dispute's life, in Stripe's order: an inquiry (`warning_*`) is
+ * answered, reviewed and closed, or becomes a dispute, which is answered, reviewed, then won or lost.
+ */
+const DISPUTE_STAGE: Readonly<Record<DisputeStatus, number>> = {
+  warning_needs_response: 0,
+  warning_under_review: 1,
+  warning_closed: 2,
+  needs_response: 3,
+  under_review: 4,
+  won: 5,
+  lost: 5,
+};
 
 /**
  * What a platform payment gains once paid: the provider's payment intent (which its disputes
@@ -75,6 +91,12 @@ export interface DisputeOutcome {
   amountMinor: number;
   currency: string;
   account?: string;
+  /**
+   * When the provider produced the event (ISO 8601; Stripe's event `created`). Webhooks arrive in
+   * any order: an event older than the one recorded is ignored. Without it on either side, a status
+   * earlier in the dispute's life than the one recorded is ignored instead.
+   */
+  occurredAt?: string;
 }
 
 /** A dispute event's result. `unbound`: no payment is bound to its payment intent yet; deliver it again later. */
@@ -97,6 +119,16 @@ export interface RefundResult {
 }
 
 type Payment = PaymentRequest & PaymentAfterwards;
+
+/**
+ * Whether a dispute event is older than the status recorded, so it must not replace it (a late
+ * `warning_needs_response` after `warning_closed` would block refunds again). By the provider's
+ * times when both are known and differ; otherwise by where the statuses stand in a dispute's life.
+ */
+function stale(known: DisputeRecord, status: DisputeStatus, occurredAt: string | undefined): boolean {
+  if (known.occurredAt !== undefined && occurredAt !== undefined && known.occurredAt !== occurredAt) return Date.parse(occurredAt) < Date.parse(known.occurredAt);
+  return DISPUTE_STAGE[status] < DISPUTE_STAGE[known.status];
+}
 
 /** Whether a dispute stops a refund: while it is open, and once it was lost (the money went back already). */
 function blocksRefund(dispute: DisputeRecord): boolean {
@@ -206,7 +238,7 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
  */
 export async function applyDisputeOutcome(rt: EngineRuntime, outcome: DisputeOutcome): Promise<DisputeApplied> {
   // Read once: the payment intent looked up is the one searched, and the status compared is the one recorded.
-  const { paymentIntentId, account, disputeId, status, amountMinor, currency } = outcome;
+  const { paymentIntentId, account, disputeId, status, amountMinor, currency, occurredAt } = outcome;
   // What the parser would never produce from a provider's event is refused before any lookup: the
   // status decides whether refunds are blocked, and every field goes into the ledger.
   if (
@@ -217,9 +249,10 @@ export async function applyDisputeOutcome(rt: EngineRuntime, outcome: DisputeOut
     !Number.isSafeInteger(amountMinor) ||
     amountMinor < 0 ||
     typeof currency !== "string" ||
-    !/^[a-z]{3}$/.test(currency)
+    !/^[a-z]{3}$/.test(currency) ||
+    (occurredAt !== undefined && (typeof occurredAt !== "string" || !Number.isFinite(Date.parse(occurredAt))))
   ) {
-    throw new EngineError("invalid_input", "a dispute outcome is a dispute id, a payment intent or null, a known status, a whole amount and a lower-case currency");
+    throw new EngineError("invalid_input", "a dispute outcome is a dispute id, a payment intent or null, a known status, a whole amount, a lower-case currency and, if any, a time");
   }
   if (paymentIntentId === null) return { applied: false };
   const callId = await rt.resolveRef(paymentIntentRef(paymentIntentId));
@@ -235,10 +268,10 @@ export async function applyDisputeOutcome(rt: EngineRuntime, outcome: DisputeOut
     }
     const disputes = (payment.disputes ??= []);
     const known = disputes.find((d) => d.disputeId === disputeId);
-    if (known !== undefined && (known.status === "won" || known.status === "lost" || (known.status === status && known.amountMinor === amountMinor))) {
+    if (known !== undefined && (known.status === "won" || known.status === "lost" || (known.status === status && known.amountMinor === amountMinor) || stale(known, status, occurredAt))) {
       return { applied: false } as const;
     }
-    const dispute: DisputeRecord = { disputeId, status, amountMinor, currency, updatedAt: rt.now() };
+    const dispute: DisputeRecord = { disputeId, status, amountMinor, currency, updatedAt: rt.now(), ...(occurredAt === undefined ? {} : { occurredAt }) };
     if (known === undefined) disputes.push(dispute);
     else Object.assign(known, dispute);
     draft.emit("payment.disputed", "system", { paymentId: payment.paymentId, disputeId, status, amountMinor, currency });

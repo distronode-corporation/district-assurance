@@ -81,7 +81,7 @@ export type ParsedStripeEvent =
   | { eventId: string; livemode: boolean; kind: "dispute"; outcome: DisputeOutcome }
   | { eventId: string; livemode: boolean; kind: "ignored"; type: string };
 
-/** Stripe's dispute events. Each carries the dispute as it is now; the engine keeps the latest. */
+/** Stripe's dispute events. Each carries the dispute as it was when the event was made; the engine keeps the latest. */
 const DISPUTE_TYPES = new Set(["charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed", "charge.dispute.funds_withdrawn", "charge.dispute.funds_reinstated"]);
 
 const IDENTITY_TYPES: Record<string, IdentityOutcome["status"]> = {
@@ -116,8 +116,13 @@ export function parseStripeEvent(body: string): ParsedStripeEvent | null {
   const identity = IDENTITY_TYPES[event.type];
   if (identity !== undefined) return { ...base, kind: "identity", outcome: { sessionId: linkId, status: identity } };
   if (DISPUTE_TYPES.has(event.type)) {
+    // The event's own time goes with the dispute, so a snapshot that arrives late never replaces a
+    // newer one. One that is present but not Unix seconds is not a well-formed event.
+    const created = event.created;
+    if (created !== undefined && (!Number.isSafeInteger(created) || (created as number) < 0)) return null;
+    const at = created === undefined ? {} : { occurredAt: new Date((created as number) * 1000).toISOString() };
     const dispute = disputeOutcome(object);
-    return dispute === null ? null : { ...base, kind: "dispute", outcome: { ...dispute, ...account } };
+    return dispute === null ? null : { ...base, kind: "dispute", outcome: { ...dispute, ...account, ...at } };
   }
   // A Checkout Session names its payment intent; a platform payment's disputes are found by it.
   const intent = typeof object.payment_intent === "string" ? { paymentIntentId: object.payment_intent } : {};
