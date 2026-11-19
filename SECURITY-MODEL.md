@@ -63,11 +63,24 @@ policy window (72 hours by default); without a carrier answer it does not count 
 says so (tested). A texted code is never a factor alone, and level 3 requires a photo ID plus
 selfie, which a stolen SIM alone does not pass. Contact and payout scopes default to level 3.
 
+### Account takeover by a contact change
+
+Someone who passed verification changes the phone number on file, so the real customer hears
+nothing from then on. **Controls:** a flow step that needs a contact-class scope makes the call
+owe a security notice, sent by `endCall` to the number on file as Badge read it before the change,
+whatever the caller answered about receipt texts; nobody on the call can turn it off, and the
+receipt link of that call goes to the same earlier number (tested in
+`prove-receipt-text.test.ts`). A config with such a step is refused without a `messages` adapter.
+The notice carries no values, not even which detail changed. Left to the host: a contact change
+made outside a flow step is not seen by the engine, and owes no notice.
+
 ### Text flooding and SMS pumping
 
 Repeated calls triggering texts to a real customer, or to premium numbers. **Controls:** texts go
 only to the number on file, only after a keypad match, and at most one photo ID link per call
-(tested). Planned: rate limits per subject and per calling number, and a destination country
+(tested). A receipt link goes at most once per call, only after a money, contact or access step,
+with the caller's consent and a standing keypad or PIN match; a contact change notice at most
+once (tested). Planned: rate limits per subject and per calling number, and a destination country
 allow-list, before texted codes ship (VER-2).
 
 ### Replay
@@ -144,8 +157,9 @@ Call ids are not secrets, and a receipt says how a caller was verified, what the
 random bits issued for that call; it keeps only the token's SHA-256, so its store never holds a
 working link; an unknown, malformed or not yet usable token gives the same `404`; there is no
 route by call id (tested). The page carries no script, is never cached or indexed, and sends no
-Referer, so the token does not leak to another site (tested). Left to the host: sending the link
-only to the number on file, rate limits on `/r/` (SRV-2), a durable store for the hashes (SRV-4),
+Referer, so the token does not leak to another site (tested). `textReceiptLink` sends the host's
+link only to the number on file and never writes the link to the ledger (tested). Left to the
+host: issuing the token and building the link, rate limits on `/r/` (SRV-2), a durable store for the hashes (SRV-4),
 and expiry or revocation of a link, which are not built.
 
 ### Breach of stored data

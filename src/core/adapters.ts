@@ -22,7 +22,12 @@ export interface CarrierSignals {
   check(input: { phoneNumber: string }): Promise<CarrierSignalReport>;
 }
 
-export type MessagePurpose = "identity_link" | "payment_link" | "one_time_code" | "reference";
+/**
+ * Why a text is sent. `receipt_link`: a link to the call's receipt after a money, contact or access
+ * step, with the caller's consent. `contact_changed`: the security notice after a contact change,
+ * which the caller cannot turn off. Neither carries an amount, a code or a personal value.
+ */
+export type MessagePurpose = "identity_link" | "payment_link" | "one_time_code" | "reference" | "receipt_link" | "contact_changed";
 
 /** Texts sent by code. The destination is always the number on file, resolved by the engine. */
 export interface MessageSender {

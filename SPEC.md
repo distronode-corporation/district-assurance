@@ -201,7 +201,8 @@ unknown fields at every level, the policy's shape and then its rules against the
 factors, every module's switch and settings, every adapter an enabled module's settings need,
 every step's module (installed and on) and the step itself, and, walking each flow in order, that
 every step needing a scope comes after a `badge.verify` step whose level reaches that scope's
-minimum and whose `scopes`, if listed, include it. Cross-checks against a module's settings or the
+minimum and whose `scopes`, if listed, include it, and that the engine has the `messages` adapter
+when a step needs a contact-class scope (its security notice, section 16). Cross-checks against a module's settings or the
 policy are skipped when those did not validate (their own problems are reported). The engine
 refuses a config with any problem (`ConfigError`, code `invalid_input`, with `problems`).
 
@@ -211,12 +212,13 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 | `dossier.collect` | `form`, a form id in Dossier's settings |
 | `paylink.request` | `amountMinor`, `currency`, `description`, `amountSource` (section 14); `mode` is refused until PAY-7 |
 | `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
-| `trace.receipt` | none; needs the `signer` adapter |
+| `trace.receipt` | optional `textLink: {consent}`, a wording purpose in Trace's settings, which also needs Trace's `businessName` and the `messages` adapter (section 16); needs the `signer` adapter |
 
 Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
-until FIL-2); Paylink `{maxAmountMinor?}` (1 to 1,000,000); Trace `{receipts?, wordings?}`
-(`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr}}`, purposes
-unique).
+until FIL-2); Paylink `{maxAmountMinor?}` (1 to 1,000,000); Trace `{receipts?, wordings?,
+businessName?}` (`receipts` default true; wordings `{purpose (snake_case), version, text: {en,
+fr}}`, purposes unique; `businessName` 1 to 64 characters on one line, kept by a call when it
+starts, like the wordings, so a flow with `textLink` cannot be attached to a call that kept none).
 
 ## 8. Flow execution
 
@@ -279,6 +281,8 @@ answer on file, a phone number, a link or card data.
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
+| `receipt.link_texted` | `actions` (the classes: `money`, `contact`, `access`) |
+| `contact.notice_sent` | none |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
@@ -413,3 +417,31 @@ subject's number on file. Identity link: "Your one-time identity check link: URL
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
 the currency's own decimals.
+
+**Actions.** When a flow step whose needed scope is of class money, contact or access completes
+(section 4), the call notes the class, once each. The first contact step also keeps the matched
+subject's number on file as Badge read it when verification started, before the change; Badge's
+keypad or PIN match always stands then, since such a step follows a level 2 verification.
+
+**Receipt link** (purpose `receipt_link`). `textReceiptLink(callId, url)` texts the host's
+capability link to an ended call's receipt (section 12, an `https` URL of at most 512 characters,
+else `invalid_input`; a call not ended or without its receipt yet: `precondition_failed`). It
+returns `{texted: true}` only when the flow's `trace.receipt` step has `textLink`, an action was
+noted, the caller answered "yes" to `textLink.consent`, a keypad or PIN match still stands (or the
+call kept a number before a contact change), and no link was texted on this call yet; otherwise
+`{texted: false}` and nothing is sent. It goes to the number kept before a contact change, else the
+subject's number on file. "Receipt from BUSINESS for ACTIONS on your call: URL" / "Reçu de BUSINESS
+pour ACTIONS lors de votre appel : URL", where ACTIONS lists, in order, "a payment", "a change to
+your contact details", "an access request" / "un paiement", "une modification de vos coordonnées",
+"une demande d'accès". No amount, code or personal value. A retry after a failure sends with the
+same idempotency key; the ledger gets one `receipt.link_texted`.
+
+**Contact change notice** (purpose `contact_changed`). A call that noted a contact action owes a
+security notice, whatever the caller answered about receipts: it is not a receipt and has no
+setting. `endCall` sends it to the number kept before the change, before signing the receipt; if
+the text fails, `endCall` throws, and calling it again sends the notice (and the receipt) without
+ending the call again. "BUSINESS: the contact details on your account were changed during a call.
+If it was not you, contact us right away." / "BUSINESS : les coordonnées de votre compte ont été
+modifiées pendant un appel. Si ce n'était pas vous, communiquez avec nous sans tarder.", with
+"Security notice" / "Avis de sécurité" in place of BUSINESS when Trace has no `businessName`. It
+never says which detail changed or to what. The ledger gets one `contact.notice_sent`.

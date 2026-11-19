@@ -7,7 +7,7 @@
 import type { JsonValue } from "./canonical.ts";
 import { EngineError } from "./errors.ts";
 import type { FlowStep, ModuleRegistry, StepContext } from "./module.ts";
-import { validatePolicy, type VerificationPolicy } from "./policy.ts";
+import { scopeClass, validatePolicy, type VerificationPolicy } from "./policy.ts";
 import { isIntegerIn, isObject, unknownKeys } from "./shape.ts";
 
 export const FLOW_CONFIG_VERSION = 1;
@@ -156,6 +156,10 @@ export function validateConfig(config: unknown, registry: ModuleRegistry): strin
         if (min === undefined) problems.push(`${stepAt} (${type}): needs the scope ${scope}, which the policy does not list`);
         else if (min > level) problems.push(`${stepAt} (${type}): needs the scope ${scope} at level ${min}, but the flow has verified to level ${level} at this point`);
         else if (granted !== null && !granted.includes(scope)) problems.push(`${stepAt} (${type}): needs the scope ${scope}, which the last verification step does not grant`);
+        // A contact change always texts a security notice to the number on file (PRV-10).
+        if (scopeClass(scope, policy.scopeClasses, registry.scopeClasses()) === "contact" && !registry.adapters.has("messages")) {
+          problems.push(`${stepAt} (${type}): changes contact details, so it needs the messages adapter for the security notice, which the engine does not have`);
+        }
       }
       const reached = owner.stepLevel?.(step as FlowStep) ?? null;
       if (reached !== null) {

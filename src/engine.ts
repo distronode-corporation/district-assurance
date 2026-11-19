@@ -19,7 +19,7 @@ import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
 import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
 import { hmacSha256Hex } from "./core/hash.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
-import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
+import { scopeClass, type AssuranceLevel, type VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
 import type { AdapterName, CallDraft, CallRecord, EngineAdapters, EngineRuntime, FlowStatus, Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
@@ -374,11 +374,16 @@ export class Engine {
     return trace.recordConsent(this.#rt, callId, input);
   }
 
-  /** Ends the call. A running flow is abandoned. Returns the signed receipt when the call gets one, else null. */
+  /**
+   * Ends the call. A running flow is abandoned. Returns the signed receipt when the call gets one,
+   * else null. A call that changed contact details first texts its security notice to the number on
+   * file before the change; if that text fails, `endCall` again sends it, without ending again.
+   */
   async endCall(callId: string): Promise<SignedReceipt | null> {
-    // A call that ended without its receipt (the signer failed) gets it now, without ending again.
+    // A call that ended without its receipt (the signer failed) or its notice gets it now, without ending again.
     const before = await this.#read(callId);
-    const pending = before.state.phase === "ended" && trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null;
+    const receiptPending = trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null;
+    const pending = before.state.phase === "ended" && (receiptPending || trace.noticeDue(before));
     const record = pending ? before : await this.#update(callId, (draft) => {
       // The built-in modules' guards run even after a module was removed, as their receipt parts do.
       const guards = [...this.#receiptModules, ...this.registry.list().filter((m) => !this.#receiptModules.includes(m))];
@@ -396,6 +401,7 @@ export class Engine {
       draft.emit("call.ended", "system", {});
       return structuredClone(draft.record);
     });
+    await trace.sendContactNotice(this.#rt, record);
     if (!trace.wantsReceipt(this.#rt, record)) return null;
     const head = await trace.endedHead(this.#rt, record, () => this.#adapters.ledger.head());
     const parts: Pick<ReceiptBody, "verification" | "records" | "payments"> = { verification: { level: 0, methods: [] }, records: [], payments: [] };
@@ -405,6 +411,15 @@ export class Engine {
       if (module.receiptPart !== undefined && slice !== undefined) Object.assign(parts, module.receiptPart(slice, record.state));
     }
     return trace.issueReceipt(this.#rt, record, head, parts);
+  }
+
+  /**
+   * Texts the link to an ended call's receipt (`url`: the host's capability link, SRV-3) to the
+   * number on file, when the flow's `trace.receipt` step has `textLink`, a money, contact or access
+   * step completed, the caller consented and a keypad or PIN factor matched. At most once per call.
+   */
+  textReceiptLink(callId: string, url: string): Promise<{ texted: boolean }> {
+    return trace.textReceiptLink(this.#rt, callId, url, (record) => this.#numberOnFile(record));
   }
 
   async receipt(callId: string): Promise<SignedReceipt | null> {
@@ -590,6 +605,11 @@ export class Engine {
         return;
       }
       draft.emit("flow.step_completed", "code", detail);
+      // A money, contact or access step is what a receipt text names, and a contact one owes a notice.
+      // Such a step follows a level 2 verification, which a keypad or PIN match always unlocked:
+      // matchedSubject fails closed if that ever did not hold.
+      const action = this.#actionClass(owner!, step.type);
+      if (action !== null) trace.noteAction(record, action, badge.matchedSubject(record).phoneOnFile);
       flow.index++;
       const next = flow.steps[flow.index];
       if (next === undefined) {
@@ -600,6 +620,24 @@ export class Engine {
       const nextOwner = this.registry.stepOwner(next.type);
       flow.mark = nextOwner === undefined ? null : nextOwner.enterStep(next, record.modules[nextOwner.manifest.name]!);
     }
+  }
+
+  /** The class of the scope a step needs when it is money, contact or access, else null. */
+  #actionClass(owner: AssuranceModule, type: string): trace.ActionClass | null {
+    const scope = owner.manifest.scopes.needs[type];
+    if (scope === undefined) return null;
+    const cls = scopeClass(scope, this.#config.policy.scopeClasses, this.registry.scopeClasses());
+    return cls === "none" || cls === null ? null : cls;
+  }
+
+  /**
+   * The number texts may go to: the matched subject's number on file, as Badge read it when
+   * verification started, or null when no keypad or PIN match stands (a later verification started
+   * from nothing). Only asked about a call whose flow completed a scoped step, so Badge's part exists.
+   */
+  #numberOnFile(record: CallRecord): string | null {
+    const s = record.modules[badge.BADGE] as unknown as badge.BadgeSlice;
+    return s.knowledgeMatched ? s.subject!.phoneOnFile : null;
   }
 
   /**

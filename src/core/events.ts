@@ -27,6 +27,8 @@ export const ENGINE_EVENTS = [
   "consent.recorded",
   "call.ended",
   "receipt.issued",
+  "receipt.link_texted",
+  "contact.notice_sent",
   "module.event",
 ] as const;
 
