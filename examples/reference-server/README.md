@@ -55,11 +55,45 @@ How the page is kept small and safe:
 - The server keeps the newest 20 runs. Like the rest of this server it is a local demo, not hardened
   for production.
 
+## security.txt
+
+`createReferenceServer({ ..., securityTxt })` serves `GET /.well-known/security.txt` (RFC 9116)
+as `text/plain; charset=utf-8`, built from the host's own settings:
+
+```ts
+createReferenceServer({
+  engine,
+  clock,
+  stripeSecrets,
+  securityTxt: {
+    contact: ["mailto:security@example.test", "https://example.test/report"], // one or more
+    expires: new Date("2027-06-30T00:00:00Z"), // exactly one
+    policy: "https://example.test/disclosure", // optional
+    canonical: "https://example.test/.well-known/security.txt", // optional
+  },
+  warn: (message) => log.warn(message), // optional, default console.warn
+});
+```
+
+- Without `securityTxt` there is no such route (`404`). There is no default: a security.txt speaks
+  only for the domain it is served from, so it is never this project's address. Reports about this
+  code go through [SECURITY.md](../../SECURITY.md).
+- A contact is a `mailto:`, `tel:` or `https:` URI; `policy` and `canonical` are `https:` URLs.
+  Each must be one line of printable ASCII, so a value cannot add a field of its own.
+- The settings are checked when the server is created, on its clock. An `expires` that is not in
+  the future, or more than a year ahead (the RFC's advice), is refused with an error, so the server
+  does not start. One within 30 days starts with a warning through `warn`. A server still running
+  when `expires` passes stops serving the file.
+- RFC 9116 requires HTTPS. This server speaks plain HTTP, so the host's TLS front end serves the
+  file to the world. Signing it (an OpenPGP cleartext signature, which the RFC recommends) is the
+  host's too: this server serves the file unsigned, and a host that signs it serves its signed
+  copy from the front end instead.
+
 ## Files
 
 | File | |
 |---|---|
-| `src/app.ts` | `createReferenceServer({ engine, stripeSecrets, clock })`: the routes |
+| `src/app.ts` | `createReferenceServer({ engine, stripeSecrets, clock })`: the routes, and the security.txt checks |
 | `src/script.ts` | the scripted calls, one step at a time, and the demo's records and engines |
 | `src/demo.ts` | `npm run demo`: every step in a row; `runDemo(false)` is also run by the test suite |
 | `src/demo-runs.ts` | the UI's runs: one step per request, and the run's state, ledger and chain check |

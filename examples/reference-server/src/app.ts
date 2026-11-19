@@ -1,7 +1,8 @@
 // The reference server: a small node:http server around one Engine. It receives the Stripe
 // webhooks that finish a photo ID check and a payment, serves receipts and the receipt key set,
-// and answers 501 on the carrier webhooks that are not built yet. With `ui`, it also serves the
-// demo's browser UI and the routes that run the scripted demo one step at a time. Not hardened
+// and answers 501 on the carrier webhooks that are not built yet. With `securityTxt`, it serves the
+// host's own `/.well-known/security.txt` (RFC 9116). With `ui`, it also serves the demo's browser
+// UI and the routes that run the scripted demo one step at a time. Not hardened
 // for production; ROADMAP.md, "Reference server", lists what that takes.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
@@ -19,10 +20,77 @@ export interface ReferenceServerOptions {
   maxBodyBytes?: number;
   /** The demo's runs: serves the browser UI and the `/demo/*` routes. Off when absent. */
   ui?: DemoRuns;
+  /** The host's own security.txt. No route when absent: there is no default. */
+  securityTxt?: SecurityTxtSettings;
+  /** Where start-up warnings go. Default `console.warn`. */
+  warn?: (message: string) => void;
+}
+
+/**
+ * The host's security.txt (RFC 9116). A security.txt speaks only for the domain it is served
+ * from, so these are the host's own contacts and policy, never this project's.
+ */
+export interface SecurityTxtSettings {
+  /** One or more ways to reach the host's security team: `mailto:`, `tel:` or `https:` URIs. */
+  contact: readonly string[];
+  /** When the file stops being valid: after the server starts, and at most a year later. */
+  expires: Date;
+  /** The host's disclosure policy, an `https:` URL. */
+  policy?: string;
+  /** Where the host publishes this file, an `https:` URL. */
+  canonical?: string;
 }
 
 type Json = Record<string, unknown>;
-type Answer = [number, Json] | StaticFile;
+/** A plain text answer: the security.txt. */
+type TextAnswer = { text: string };
+type Answer = [number, Json] | StaticFile | TextAnswer;
+
+/** On the security.txt answer: plain text, never sniffed as anything else, never framed. */
+const TEXT_HEADERS = {
+  "content-type": "text/plain; charset=utf-8",
+  "x-content-type-options": "nosniff",
+  "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** A URI of an allowed scheme, on one line of printable ASCII, so it can never add a field of its own. */
+function checkUri(field: string, value: string, schemes: readonly string[]): void {
+  let scheme = "";
+  try {
+    scheme = new URL(value).protocol;
+  } catch {
+    // Not a URI: refused below.
+  }
+  if (!/^[\x21-\x7e]+$/.test(value) || !schemes.includes(scheme)) {
+    throw new Error(`securityTxt: ${field} must be a ${schemes.join(" or ")} URI on one line`);
+  }
+}
+
+/**
+ * The security.txt body, checked once when the server is created. Settings that cannot make a
+ * valid file are refused, so a server never starts with an expired or a far-future file (RFC 9116
+ * advises at most a year); one that expires within 30 days starts with a warning.
+ */
+export function securityTxt(settings: SecurityTxtSettings, now: Date, warn: (message: string) => void): string {
+  if (settings.contact.length === 0) throw new Error("securityTxt: at least one contact is required");
+  for (const contact of settings.contact) checkUri("contact", contact, ["mailto:", "tel:", "https:"]);
+  if (settings.policy !== undefined) checkUri("policy", settings.policy, ["https:"]);
+  if (settings.canonical !== undefined) checkUri("canonical", settings.canonical, ["https:"]);
+  const expires = settings.expires.getTime();
+  const yearAhead = new Date(now);
+  yearAhead.setUTCFullYear(yearAhead.getUTCFullYear() + 1);
+  if (Number.isNaN(expires) || expires <= now.getTime()) throw new Error("securityTxt: expires must be in the future");
+  if (expires > yearAhead.getTime()) throw new Error("securityTxt: expires must be at most a year ahead");
+  const stamp = settings.expires.toISOString().replace(/\.\d{3}Z$/, "Z");
+  if (expires - now.getTime() <= 30 * DAY_MS) warn(`security.txt expires at ${stamp}: renew it before then`);
+  const lines = settings.contact.map((c) => `Contact: ${c}`);
+  lines.push(`Expires: ${stamp}`);
+  if (settings.policy !== undefined) lines.push(`Policy: ${settings.policy}`);
+  if (settings.canonical !== undefined) lines.push(`Canonical: ${settings.canonical}`);
+  return lines.join("\n") + "\n";
+}
 
 /** On every JSON answer: never sniffed as anything else, never framed, never cached. */
 const JSON_HEADERS = {
@@ -54,6 +122,9 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   const processed = new Set<string>();
   const maxBody = options.maxBodyBytes ?? 64 * 1024;
   const files = options.ui === undefined ? new Map<string, StaticFile>() : loadStaticFiles();
+  const security = options.securityTxt;
+  const securityFile =
+    security === undefined ? null : { text: securityTxt(security, options.clock.now(), options.warn ?? console.warn), expires: security.expires.getTime() };
 
   async function stripeWebhook(req: IncomingMessage, route: "identity" | "payments"): Promise<[number, Json]> {
     const payload = await readBody(req, maxBody);
@@ -128,6 +199,11 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       expect("GET");
       return [200, { keys: options.engine.receiptKeys() }];
     }
+    // The host's own file only, and none once it has expired while the server kept running.
+    if (path === "/.well-known/security.txt" && securityFile !== null && options.clock.now().getTime() < securityFile.expires) {
+      expect("GET");
+      return { text: securityFile.text };
+    }
     if (path === "/webhooks/stripe/identity" || path === "/webhooks/stripe/payments") {
       expect("POST");
       return stripeWebhook(req, path.endsWith("identity") ? "identity" : "payments");
@@ -159,6 +235,11 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
         if (Array.isArray(answer)) {
           res.writeHead(answer[0], JSON_HEADERS);
           res.end(JSON.stringify(answer[1]));
+          return;
+        }
+        if ("text" in answer) {
+          res.writeHead(200, TEXT_HEADERS);
+          res.end(answer.text);
           return;
         }
         res.writeHead(200, { ...UI_HEADERS, "content-type": answer.contentType });

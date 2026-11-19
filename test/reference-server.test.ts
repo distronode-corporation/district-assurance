@@ -3,11 +3,11 @@ import { strict as assert } from "node:assert";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 
-import { createReferenceServer } from "../examples/reference-server/src/app.ts";
+import { createReferenceServer, securityTxt, type ReferenceServerOptions, type SecurityTxtSettings } from "../examples/reference-server/src/app.ts";
 import { runDemo } from "../examples/reference-server/src/demo.ts";
 import { StripeCheckoutLinks, StripeIdentityProvider } from "../examples/reference-server/src/stripe-adapters.ts";
 import { NotImplementedError, signStripePayload, type Engine } from "../src/index.ts";
-import { createTestEngine, type TestEngine } from "../src/testing/index.ts";
+import { FixedClock, createTestEngine, type TestEngine } from "../src/testing/index.ts";
 
 const SECRET = "whsec_test_not_a_secret";
 
@@ -87,6 +87,111 @@ describe("reference server", () => {
     const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/receipts/c1`);
     assert.deepEqual([res.status, await res.json()], [500, { error: "internal" }]);
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+});
+
+describe("reference server security.txt", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  // The fixed clock starts at 2026-01-01T00:00:00Z; every date here is relative to it.
+  const settings = (clock: FixedClock, days: number, extra: Partial<SecurityTxtSettings> = {}): SecurityTxtSettings => ({
+    contact: ["mailto:security@example.test", "https://example.test/report"],
+    expires: new Date(clock.now().getTime() + days * DAY),
+    ...extra,
+  });
+  const start = async (options: Partial<ReferenceServerOptions> & { clock: FixedClock }) => {
+    const server = createReferenceServer({ engine: createTestEngine().engine, stripeSecrets: { identity: [], payments: [] }, warn: () => {}, ...options });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    return {
+      get: (init?: RequestInit) => fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/.well-known/security.txt`, init),
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    };
+  };
+
+  it("serves the host's file as plain text, with every field it was given", async () => {
+    const clock = new FixedClock();
+    const s = await start({ clock, securityTxt: settings(clock, 200, { policy: "https://example.test/disclosure", canonical: "https://example.test/.well-known/security.txt" }) });
+    const res = await s.get();
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("content-type"), "text/plain; charset=utf-8");
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(
+      await res.text(),
+      [
+        "Contact: mailto:security@example.test",
+        "Contact: https://example.test/report",
+        "Expires: 2026-07-20T00:00:00Z",
+        "Policy: https://example.test/disclosure",
+        "Canonical: https://example.test/.well-known/security.txt",
+        "",
+      ].join("\n"),
+    );
+    assert.equal((await s.get({ method: "POST" })).status, 405);
+    await s.close();
+  });
+
+  it("serves only Contact and Expires when nothing else is set", async () => {
+    const clock = new FixedClock();
+    const s = await start({ clock, securityTxt: { contact: ["tel:+1-555-0100"], expires: new Date("2026-06-01T12:30:00.000Z") } });
+    assert.equal(await (await s.get()).text(), "Contact: tel:+1-555-0100\nExpires: 2026-06-01T12:30:00Z\n");
+    await s.close();
+  });
+
+  it("has no route without settings, and never a default address", async () => {
+    const s = await start({ clock: new FixedClock() });
+    const res = await s.get();
+    assert.deepEqual([res.status, await res.json()], [404, { error: "not_found" }]);
+    await s.close();
+  });
+
+  it("stops serving the file once it expires while the server runs", async () => {
+    const clock = new FixedClock();
+    const s = await start({ clock, securityTxt: settings(clock, 100) });
+    clock.advance(100 * DAY - 1);
+    assert.equal((await s.get()).status, 200);
+    clock.advance(1);
+    assert.equal((await s.get()).status, 404);
+    await s.close();
+  });
+
+  it("refuses at start an Expires in the past, now, or more than a year ahead", () => {
+    const clock = new FixedClock();
+    const make = (securityTxt: SecurityTxtSettings) => () => createReferenceServer({ engine: createTestEngine().engine, stripeSecrets: { identity: [], payments: [] }, clock, securityTxt, warn: () => {} });
+    assert.throws(make(settings(clock, -1)), /expires must be in the future/);
+    assert.throws(make(settings(clock, 0)), /expires must be in the future/);
+    assert.throws(make({ contact: ["mailto:a@example.test"], expires: new Date("not a date") }), /expires must be in the future/);
+    assert.throws(make({ contact: ["mailto:a@example.test"], expires: new Date("2027-01-01T00:00:00.001Z") }), /at most a year ahead/);
+    assert.doesNotThrow(make({ contact: ["mailto:a@example.test"], expires: new Date("2027-01-01T00:00:00.000Z") }), "exactly a year ahead is allowed");
+  });
+
+  it("refuses at start a missing contact and values that are not one-line URIs of an allowed scheme", () => {
+    const clock = new FixedClock();
+    const make = (extra: Partial<SecurityTxtSettings>) => () => securityTxt(settings(clock, 200, extra), clock.now(), () => {});
+    assert.throws(make({ contact: [] }), /at least one contact/);
+    assert.throws(make({ contact: ["security@example.test"] }), /contact must be a mailto: or tel: or https: URI/);
+    assert.throws(make({ contact: ["http://example.test/report"] }), /contact must be/);
+    assert.throws(make({ contact: ["https://example.test/\nPolicy: https://evil.test/"] }), /contact must be/, "a line break would add a field");
+    assert.throws(make({ contact: ["mailto:a b@example.test"] }), /contact must be/);
+    assert.throws(make({ policy: "mailto:a@example.test" }), /policy must be a https: URI/);
+    assert.throws(make({ canonical: "http://example.test/.well-known/security.txt" }), /canonical must be a https: URI/);
+  });
+
+  it("warns at start when the file expires within 30 days, and not before", () => {
+    const clock = new FixedClock();
+    const warnings: string[] = [];
+    const warn = (m: string) => warnings.push(m);
+    securityTxt(settings(clock, 31), clock.now(), warn);
+    assert.deepEqual(warnings, []);
+    securityTxt(settings(clock, 30), clock.now(), warn);
+    assert.deepEqual(warnings, ["security.txt expires at 2026-01-31T00:00:00Z: renew it before then"]);
+    createReferenceServer({ engine: createTestEngine().engine, stripeSecrets: { identity: [], payments: [] }, clock, securityTxt: settings(clock, 1), warn });
+    assert.equal(warnings.length, 2, "the server warns through its warn option");
+  });
+
+  it("warns through console.warn by default", (t) => {
+    const clock = new FixedClock();
+    const spy = t.mock.method(console, "warn", () => {});
+    createReferenceServer({ engine: createTestEngine().engine, stripeSecrets: { identity: [], payments: [] }, clock, securityTxt: settings(clock, 7) });
+    assert.deepEqual(spy.mock.calls.map((c) => c.arguments), [["security.txt expires at 2026-01-08T00:00:00Z: renew it before then"]]);
   });
 });
 

@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- SRV-9: the reference server serves the host's own `/.well-known/security.txt` (RFC 9116) from its
+  `securityTxt` settings, refusing at start an `Expires` in the past or over a year ahead and
+  warning within 30 days; SECURITY.md adds the scope and a thanks list.
 
 ### Changed
 

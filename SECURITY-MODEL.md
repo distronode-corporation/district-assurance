@@ -159,5 +159,9 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
   model.
 - The person path: a caller who fails or cannot use a keypad reaches someone who can help.
 - Disclosure that an automated assistant answers and that the call is transcribed.
+- A security.txt (RFC 9116) for its own domain: its own contacts and policy, served over HTTPS by
+  its TLS front end, signed if it wants (an OpenPGP cleartext signature), and renewed before it
+  expires. The reference server can serve one from the host's settings; it never serves this
+  project's address.
 - Deciding who may switch these modules on (business verification), so the line cannot be used to
   run a phishing operation.
