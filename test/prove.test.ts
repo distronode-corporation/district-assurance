@@ -174,8 +174,8 @@ class EditedLedger implements AuditLedger {
     return this.edit.head === undefined ? head : this.edit.head(head);
   }
 
-  async list(fromSeq?: number): Promise<AuditEntry[]> {
-    const entries = await this.inner.list(fromSeq);
+  async list(fromSeq?: number, limit?: number): Promise<AuditEntry[]> {
+    const entries = await this.inner.list(fromSeq, limit);
     return this.edit.list === undefined ? entries : this.edit.list(entries);
   }
 }
@@ -191,6 +191,22 @@ async function collect(lines: AsyncIterable<string>): Promise<string> {
   for await (const line of lines) out += line;
   return out;
 }
+
+describe("ledger pages", () => {
+  it("lists at most `limit` entries from `fromSeq`, in order", async () => {
+    const ledger = await ledgerOf(5);
+    const seqs = async (from?: number, limit?: number) => (await ledger.list(from, limit)).map((e) => e.seq);
+    assert.deepEqual(await seqs(), [1, 2, 3, 4, 5]);
+    assert.deepEqual(await seqs(1, 1), [1], "one");
+    assert.deepEqual(await seqs(1, 5), [1, 2, 3, 4, 5], "exactly all");
+    assert.deepEqual(await seqs(2, 2), [2, 3], "after plus limit");
+    assert.deepEqual(await seqs(4, 10), [4, 5], "a limit larger than the rest");
+    assert.deepEqual(await seqs(6, 3), [], "past the head");
+    for (const limit of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await assert.rejects(ledger.list(1, limit), /limit must be an integer of 1 or more/, String(limit));
+    }
+  });
+});
 
 describe("ledger export", () => {
   const clock = new FixedClock("2026-11-18T12:00:00.000Z");
@@ -383,6 +399,23 @@ describe("ledger export", () => {
     const wrongHead = new EditedLedger(ledger, { head: (h) => ({ ...h, hash: "ab".repeat(32) }) });
     await assert.rejects(run(wrongHead, { fromSeq: 1 }), refused());
     await assert.rejects(run(wrongHead, { fromSeq: 1, limit: 1 }), refused(), "even on a page short of the head");
+  });
+
+  it("reads one page of exactly the run's entries, and cuts an adapter that hands back more", async () => {
+    const inner = await ledgerOf(50);
+    const asked: Array<[number | undefined, number | undefined]> = [];
+    const paged: AuditLedger = {
+      append: (i) => inner.append(i),
+      head: () => inner.head(),
+      list: async (fromSeq, limit) => {
+        asked.push([fromSeq, limit]);
+        return inner.list(fromSeq);
+      },
+    };
+    const check = verifyLedgerExport(await run(paged, { fromSeq: 11, limit: 5 }), keys);
+    assert.equal(check.ok && check.entries.map((e) => e.seq).join(","), "11,12,13,14,15");
+    assert.deepEqual(asked.at(-1), [11, 5], "the run's page, no more");
+    assert.equal(asked.every(([, limit]) => limit !== undefined), true, "never the whole ledger");
   });
 
   it("refuses a run read short of, or past a rewrite of, its end", async () => {

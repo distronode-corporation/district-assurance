@@ -31,6 +31,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `AuditLedger.list(fromSeq?, limit?)` takes a page size, and a ledger adapter must honour it
+  (breaking for adapter authors): `MemoryAuditLedger` does, and `exportLedger` reads each run as
+  one page instead of the rest of the ledger.
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

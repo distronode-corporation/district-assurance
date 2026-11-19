@@ -297,7 +297,10 @@ Entry: `{seq, prevHash, eventId?, callId, actor, event, at, detail, hash}`. `seq
 `prevHash` is 64 zeros; `hash` is SHA-256 over the canonical JSON of every other field.
 `verifyChain(entries, from?)` reports the first entry whose `seq`, `prevHash` or `hash` is wrong.
 `chainEntry` refuses a detail in which any string (other than a 64-character hex digest) contains
-a card number.
+a card number. An `AuditLedger` lists `list(fromSeq?, limit?)`: the entries with `seq` at or after
+`fromSeq`, in order, at most `limit` (an integer of 1 or more) when it is given, read as one page,
+so a large ledger is walked page by page; `MemoryAuditLedger` throws a TypeError for any other
+`limit`.
 
 ### Export
 
@@ -331,7 +334,8 @@ valid trailer.
 
 A run starts at `fromSeq` (1 or more, at most the head plus one) or right after `cursor`
 (`<seq>.<hash>` of a previous trailer's `through`), never both, and stops at the head read when the
-export starts, or after `limit` entries. The run is complete when `through` equals `head`; otherwise
+export starts, or after `limit` entries; it asks the ledger for that one page only
+(`list(from + 1, count)`). The run is complete when `through` equals `head`; otherwise
 the next run takes `cursor`. Refused with `invalid_input`: neither or both of `fromSeq` and
 `cursor`, a `fromSeq` or `limit` that is not an integer of 1 or more, a `fromSeq` past the head, an
 empty `ledgerId`, a cursor that is malformed or past the head. Refused with `precondition_failed`,

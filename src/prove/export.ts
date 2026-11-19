@@ -90,7 +90,7 @@ function isPositiveInteger(n: unknown): n is number {
 /** The chain point at `seq` as the ledger holds it, or null when the ledger does not hold it. */
 async function pointAt(ledger: AuditLedger, seq: number): Promise<ChainPoint | null> {
   if (seq === 0) return { seq: 0, hash: GENESIS_HASH };
-  const [entry] = await ledger.list(seq);
+  const [entry] = await ledger.list(seq, 1);
   return entry?.seq === seq ? { seq, hash: entry.hash } : null;
 }
 
@@ -130,7 +130,8 @@ export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<st
   if ((await pointAt(input.ledger, head.seq))?.hash !== head.hash) throw new EngineError("precondition_failed", "exportLedger: the ledger head does not match its last entry");
   const from = await startPoint(input, head);
   const last = Math.min(head.seq, from.seq + (input.limit ?? Number.MAX_SAFE_INTEGER));
-  const entries = (await input.ledger.list(from.seq + 1)).filter((e) => e.seq <= last);
+  // One page of exactly the run's entries; an adapter that hands back more is cut to the run.
+  const entries = last === from.seq ? [] : (await input.ledger.list(from.seq + 1, last - from.seq)).filter((e) => e.seq <= last);
   const check = verifyChain(entries, from);
   if (!check.ok) throw new EngineError("precondition_failed", `exportLedger: the ledger chain does not verify at seq ${check.seq}`);
   // A verified prefix is not enough: the run must reach the end it was meant to, and at the head

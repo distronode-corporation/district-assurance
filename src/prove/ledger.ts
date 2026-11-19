@@ -85,7 +85,8 @@ export class MemoryAuditLedger implements AuditLedger {
     return { seq: last?.seq ?? 0, hash: last?.hash ?? GENESIS_HASH };
   }
 
-  async list(fromSeq = 1): Promise<AuditEntry[]> {
-    return structuredClone(this.#entries.filter((e) => e.seq >= fromSeq));
+  async list(fromSeq = 1, limit?: number): Promise<AuditEntry[]> {
+    if (limit !== undefined && !(Number.isSafeInteger(limit) && limit >= 1)) throw new TypeError("MemoryAuditLedger.list: limit must be an integer of 1 or more");
+    return structuredClone(this.#entries.filter((e) => e.seq >= fromSeq).slice(0, limit));
   }
 }
