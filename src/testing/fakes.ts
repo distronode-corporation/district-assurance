@@ -119,6 +119,8 @@ export class FakePaymentLinks implements PaymentLinks {
 export class MemoryRecordStore implements RecordStore {
   readonly #subjects = new Map<string, SubjectRecord>();
   readonly #records = new Map<string, IntakeRecord>();
+  /** Ids of deleted records: a late write of one stores nothing. */
+  readonly #deleted = new Set<string>();
 
   putSubject(workspaceId: string, subject: SubjectRecord): void {
     this.#subjects.set(`${workspaceId}/${subject.subjectKey}`, structuredClone(subject));
@@ -130,7 +132,9 @@ export class MemoryRecordStore implements RecordStore {
   }
 
   async putIntakeRecord(record: IntakeRecord): Promise<void> {
-    this.#records.set(`${record.workspaceId}/${record.recordId}`, structuredClone(record));
+    const key = `${record.workspaceId}/${record.recordId}`;
+    if (this.#deleted.has(key)) return;
+    this.#records.set(key, structuredClone(record));
   }
 
   async getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null> {
@@ -143,7 +147,10 @@ export class MemoryRecordStore implements RecordStore {
   }
 
   async deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void> {
-    for (const recordId of recordIds) this.#records.delete(`${workspaceId}/${recordId}`);
+    for (const recordId of recordIds) {
+      this.#records.delete(`${workspaceId}/${recordId}`);
+      this.#deleted.add(`${workspaceId}/${recordId}`);
+    }
   }
 
   async deletePinDigest(workspaceId: string, subjectKey: string): Promise<void> {

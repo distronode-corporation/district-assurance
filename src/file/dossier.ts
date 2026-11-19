@@ -193,6 +193,7 @@ export async function confirmIntake(
   // A rejected write may still have been stored, so the reservation is kept and any retry writes
   // this same record again (RecordStore.putIntakeRecord is idempotent by recordId). Two processes
   // confirming at once write the same record; the first to commit files it, the other finds it filed.
+  // A write that lands after the record was erased stores nothing (RecordStore.deleteIntakeRecords).
   await rt.adapter("records").putIntakeRecord(record);
   await rt.update(callId, (draft) => {
     const s = draft.slice<DossierSlice>(DOSSIER);
@@ -221,7 +222,10 @@ export async function abandonIntake(rt: EngineRuntime, callId: string): Promise<
 /**
  * Drops a call's own copy of records being erased: the last confirmed record, which the call keeps
  * so a retried confirmation gets it back. The digests in `records` stay, as on the receipt.
- * Refused while one of them is being filed, since finishing the filing would store it again. Runs
+ * Refused while one of them is being filed, since finishing the filing would store it again. A
+ * second confirmation of the same record whose write is still in flight once the filing finished
+ * finds no filing here: the RecordStore stores nothing for a deleted record id, so that write
+ * cannot bring the values back. Runs
  * whether or not Dossier is on now: the call filed the record when it was.
  */
 export async function forgetRecords(rt: EngineRuntime, callId: string, recordIds: readonly string[]): Promise<void> {

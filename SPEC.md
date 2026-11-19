@@ -280,7 +280,8 @@ answer on file, a phone number, a link or card data.
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
-| `subject.erased` | `recordIds`, `pinDigest` (whether one was deleted); `callId` null, actor `member` (section 17) |
+| `subject.erased` | `recordIds`, `pinDigest` (whether one is deleted): the erasure's plan; `callId` null, actor `member` (section 17) |
+| `subject.erasure_completed` | `erasureSeq` (the `subject.erased` entry it completes); `callId` null, actor `member` (section 17) |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
 A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
@@ -413,7 +414,10 @@ in a given case is the business's to decide.
 The `RecordStore` lists a subject's intake records (`listIntakeRecords(workspaceId, subjectKey)`),
 deletes records by id (`deleteIntakeRecords(workspaceId, recordIds)`) and removes a subject's PIN
 digest, keeping the rest of the subject record (`deletePinDigest(workspaceId, subjectKey)`); the
-deletes are idempotent. A record filed under no subject is never listed.
+deletes are idempotent. A record filed under no subject is never listed. The store remembers each
+deleted record id (the id alone) and a later `putIntakeRecord` of it stores nothing, so a
+confirmation whose write was still in flight when the subject was erased cannot bring the values
+back.
 
 `exportSubject({workspaceId, subjectKey, kept?})` needs the `signer` adapter and returns:
 
@@ -423,7 +427,7 @@ deletes are idempotent. A record filed under no subject is never listed.
     "v": 1, "type": "subject_export", "exportId": "...", "workspaceId": "...", "subjectKey": "...", "issuedAt": "...",
     "intakeRecords": [{ "recordId": "...", "subjectKey": "...", "values": {}, "...": "..." }],
     "pinDigestOnFile": true,
-    "consents": [{ "consentId": "...", "callId": "...", "purpose": "...", "answer": "yes", "...": "..." }],
+    "consents": [{ "consentId": "...", "callId": "...", "subjectKey": "<64 hex>", "purpose": "...", "answer": "yes", "...": "..." }],
     "calls": ["..."],
     "ledgerEntries": [{ "seq": 12, "hash": "...", "event": "intake.confirmed", "callId": "..." }],
     "receipts": [{ "receiptId": "...", "callId": "..." }],
@@ -438,7 +442,9 @@ deletes are idempotent. A record filed under no subject is never listed.
 - `intakeRecords` are the subject's, values included; `pinDigestOnFile` says whether a digest is
   on file, never the digest.
 - `calls` are the calls those records name. `consents` and `receipts` are the ones those call
-  records hold (a call record that is gone is skipped). Consents join from PRV-3's `ConsentStore`
+  records hold (a call record that is gone is skipped). A consent carries the `subjectKey` Badge
+  matched on the call when it was recorded (or null), and only those recorded under this subject
+  are listed: a call can match another subject later, and their consents are not this subject's. Consents join from PRV-3's `ConsentStore`
   once it exists.
 - `ledgerEntries` are this workspace's entries (by the workspace in their `eventId`) whose
   `detail.recordId`, `detail.consentId` or `detail.receiptId` names one of the above: ids only.
@@ -453,12 +459,19 @@ deletes are idempotent. A record filed under no subject is never listed.
   `canonicalJson(body)`, which starts with `{`) and a receipt never as an export.
   `verifySubjectExport(exported, keys)` checks it as `verifyReceipt` checks a receipt.
 
-`eraseSubject({workspaceId, subjectKey})` lists the subject's records and whether a PIN digest is
-on file. With neither, it does nothing and returns `{erased: false}`. Otherwise it drops each named
-call record's copy of the last confirmed record (refused with `precondition_failed` while one of
-the subject's records is still being filed on a call; a call record that is gone is skipped),
-appends `subject.erased` with an event id keyed on what is deleted, then deletes the records and
-the PIN digest. A retry after a failed delete finds the same entry and finishes. It never changes
+`eraseSubject({workspaceId, subjectKey})` reads the ledger once. Each erasure of a subject is
+numbered from 0, and its event ids are keyed (HMAC under the knowledge key) on the subject and that
+number. If the subject's last erasure has a `subject.erased` entry but no
+`subject.erasure_completed`, a delete failed part way: the erase carries out that entry's plan (the
+same record ids, the PIN digest if the plan says so) and appends the completion, under the same
+entry, whatever was already deleted. It then lists the subject's records and whether a PIN digest
+is on file. With neither, it does nothing more and returns `{erased: false}` (or the finished
+erasure). Otherwise it drops each named call record's copy of the last confirmed record (refused
+with `precondition_failed` while one of the subject's records is still being filed on a call; a
+call record that is gone is skipped), appends `subject.erased` under the next number, deletes the
+records and the PIN digest, then appends `subject.erasure_completed`. A later erasure (for example
+of a PIN digest the host put back) gets an entry of its own; two erasures at once append one plan,
+and both carry it out. It never changes
 or removes a ledger entry or a receipt, so `verifyChain` and every receipt still verify. The
 listener is not told (the entry names no call). Attempt counts live per call in the call record;
 counters per subject across calls are VER-1's, and the erase resets them once they exist.

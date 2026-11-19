@@ -151,11 +151,15 @@ Quebec's private-sector law as amended by Law 25). **Controls:** `exportSubject`
 are host calls the business makes with a subject key; they take no call id and no flow step names
 them, so nothing a caller or the model says reaches them. An intake record carries the subject the
 call matched by keypad or PIN, never a subject only claimed, so one caller cannot file records into
-another person's export. The export says whether a PIN digest is on file and never carries the
+another person's export. A consent likewise carries the subject matched when it was recorded, and
+an export lists only that subject's consents, so a call that later matches another subject never
+discloses that person's consents in the first one's export (tested). The export says whether a PIN digest is on file and never carries the
 digest; it is signed with the receipt key under its own domain (the signed bytes name the document
 type), so an export never verifies as a receipt and a receipt never as an export (tested). The
 erase deletes the subject's records, the call's copy of their values and the PIN digest through the
-stores, appends `subject.erased` (record ids and whether a PIN digest went; no subject key), and
+stores, appends `subject.erased` (record ids and whether a PIN digest goes; no subject key) and
+`subject.erasure_completed`, and a deleted record id is never stored again, so a confirmation still
+writing when the erase ran cannot bring the values back (tested). It
 never changes a ledger entry or a receipt, so the chain and every signature still verify (tested).
 
 **What stays, plainly:** the ledger entries and receipts keep each record's SHA-256 digest, as

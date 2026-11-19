@@ -122,11 +122,16 @@ export const traceModule: AssuranceModule = {
 
 // ---- runtime -------------------------------------------------------------------------------
 
-/** Records a consent: the wording read (fingerprinted, from the settings) and the caller's answer. */
+/**
+ * Records a consent: the wording read (fingerprinted, from the settings) and the caller's answer.
+ * `subjectOf` names the subject the call matched (or null), which the consent is recorded under:
+ * the engine passes it, so Trace never reads Badge's part of the call itself.
+ */
 export async function recordConsent(
   rt: EngineRuntime,
   callId: string,
   input: { purpose: string; answer: "yes" | "no"; channel?: ConsentRecord["channel"] },
+  subjectOf: (record: CallRecord) => string | null,
 ): Promise<ConsentRecord> {
   return rt.update(callId, (draft) => {
     const wording = draft.slice<TraceSlice>(TRACE).wordings.find((w) => w.purpose === input.purpose);
@@ -137,6 +142,7 @@ export async function recordConsent(
     const record: ConsentRecord = {
       consentId: rt.ids.next("cns"),
       callId,
+      subjectKey: subjectOf(draft.record),
       purpose: wording.purpose,
       wordingVersion: wording.version,
       wordingDigest: wordingDigest(wording),

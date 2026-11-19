@@ -373,7 +373,7 @@ export class Engine {
   // ---- Trace (prove) -----------------------------------------------------------------------
 
   recordConsent(callId: string, input: { purpose: string; answer: "yes" | "no"; channel?: ConsentRecord["channel"] }): Promise<ConsentRecord> {
-    return trace.recordConsent(this.#rt, callId, input);
+    return trace.recordConsent(this.#rt, callId, input, matchedSubjectKey);
   }
 
   /** Ends the call. A running flow is abandoned. Returns the signed receipt when the call gets one, else null. */
@@ -652,7 +652,7 @@ export class Engine {
   }
 }
 
-/** The subject Badge matched on a call (a keypad or PIN match), or null: what an intake record is filed under. */
+/** The subject Badge matched on a call (a keypad or PIN match), or null: what an intake record or a consent is filed under. */
 function matchedSubjectKey(record: CallRecord): string | null {
   const slice = record.modules[badge.BADGE] as unknown as badge.BadgeSlice | undefined;
   // A keypad or PIN factor passes only against a subject on file, so a match always has one.

@@ -39,7 +39,7 @@ export interface SubjectExportBody {
   intakeRecords: IntakeRecord[];
   /** Whether a PIN digest is on file. Never the digest. */
   pinDigestOnFile: boolean;
-  /** The consents recorded on the calls below. */
+  /** The consents recorded under the subject on the calls below. */
   consents: ConsentRecord[];
   /** The calls the intake records name. */
   calls: string[];
@@ -112,7 +112,7 @@ const HELD_BY_HOST: readonly KeptItem[] = [
 
 const LIMITS: readonly string[] = [
   "A record filed on a call with no matched subject (no keypad or PIN match before it was confirmed) is filed under no subject: this export cannot find it, and an erase cannot delete it.",
-  "Consents are found only on the calls listed here, until PRV-3's ConsentStore.",
+  "Consents are found only on the calls listed here, until PRV-3's ConsentStore, and only those recorded once the call matched this subject: a consent recorded before any match, or under another subject, is not listed.",
   "Attempts are counted per call, in the call record, until VER-1's counters across calls; there is no counter kept per subject to export or erase.",
 ];
 
@@ -126,10 +126,10 @@ export function subjectExportPayload(body: SubjectExportBody): Uint8Array {
  * `kid`, a wrong algorithm, a malformed signature or any change to the body. Never throws on bad input.
  */
 export function verifySubjectExport(exported: SignedSubjectExport, keys: ReadonlyArray<JsonWebKey & { kid?: string }>): boolean {
-  if (exported.alg !== "ES256") return false;
-  const jwk = keys.find((k) => k.kid === exported.kid);
-  if (jwk === undefined) return false;
   try {
+    if (exported.alg !== "ES256") return false;
+    const jwk = keys.find((k) => k.kid === exported.kid);
+    if (jwk === undefined) return false;
     const key = createPublicKey({ key: jwk, format: "jwk" });
     const signature = Buffer.from(exported.signature, "base64url");
     if (signature.length !== 64) return false;
@@ -197,7 +197,8 @@ export async function exportSubject(rt: EngineRuntime, input: SubjectRequest & {
     const call: CallRecord | null = await unlessGone(rt.read(callId));
     if (call === null) continue;
     const trace = call.modules[TRACE] as unknown as TraceSlice;
-    consents.push(...trace.consents);
+    // Only the consents recorded under this subject: a call can match another subject later.
+    consents.push(...trace.consents.filter((c) => c.subjectKey === input.subjectKey));
     if (trace.receipt !== null) receipts.push({ receiptId: trace.receipt.body.receiptId, callId });
   }
   // A ledger can be shared by several workspaces: an entry counts only when its event id (a JSON
@@ -229,11 +230,39 @@ export async function exportSubject(rt: EngineRuntime, input: SubjectRequest & {
 }
 
 /**
+ * The event id of a subject's `n`th erasure (from 0) or of its completion. Keyed, so it names no
+ * subject to anyone without the knowledge key.
+ */
+function erasureEventId(rt: EngineRuntime, subjectKey: string, n: number, event: "subject.erased" | "subject.erasure_completed"): string {
+  return JSON.stringify([rt.workspaceId, null, event, rt.hmac(`${event}:${subjectKey}:${n}`)]);
+}
+
+/** Carries out the plan an erasure entry holds, then appends its completion. Every step is idempotent. */
+async function carryOut(rt: EngineRuntime, records: RecordStore, subjectKey: string, n: number, entry: AuditEntry): Promise<ErasureResult> {
+  const recordIds = entry.detail.recordIds as string[];
+  const pinDigest = entry.detail.pinDigest as boolean;
+  await records.deleteIntakeRecords(rt.workspaceId, recordIds);
+  if (pinDigest) await records.deletePinDigest(rt.workspaceId, subjectKey);
+  await rt.adapter("ledger").append({
+    eventId: erasureEventId(rt, subjectKey, n, "subject.erasure_completed"),
+    callId: null,
+    actor: "member",
+    event: "subject.erasure_completed",
+    at: rt.now(),
+    detail: { erasureSeq: entry.seq },
+  });
+  return { erased: true, recordIds, pinDigest, entry };
+}
+
+/**
  * Deletes what the engine stored about one subject: their intake records (and the copy a call
- * keeps of one), and their PIN digest. The `subject.erased` entry is appended first, under an event
- * id derived from what is deleted, so a retry after a failed delete appends nothing twice and
- * finishes the work. With nothing on file, it does nothing. `forget` drops a call's copy of the
- * records; the engine passes Dossier's.
+ * keeps of one), and their PIN digest. The `subject.erased` entry is appended first and holds the
+ * plan (the record ids, and whether a PIN digest goes); `subject.erasure_completed` follows once
+ * every delete is done. Each erasure of a subject is numbered, and its event ids are keyed on the
+ * subject and that number: a retry after a failed delete finds the unfinished plan, carries it out
+ * and appends nothing twice, while a later erasure (say of a PIN the host put back) gets an entry of
+ * its own. With nothing on file and nothing unfinished, it does nothing. `forget` drops a call's
+ * copy of the records; the engine passes Dossier's. Reads the whole ledger once.
  */
 export async function eraseSubject(
   rt: EngineRuntime,
@@ -241,22 +270,30 @@ export async function eraseSubject(
   forget: (callId: string, recordIds: readonly string[]) => Promise<void>,
 ): Promise<ErasureResult> {
   const records = checkRequest(rt, input);
+  const ledger = rt.adapter("ledger");
+  const appended = new Map((await ledger.list()).map((e) => [e.eventId, e]));
+  let n = 0;
+  while (appended.has(erasureEventId(rt, input.subjectKey, n, "subject.erased"))) n++;
+  // The last erasure, unfinished: carry out its plan before looking for anything filed since.
+  let finished: ErasureResult | null = null;
+  if (n > 0 && !appended.has(erasureEventId(rt, input.subjectKey, n - 1, "subject.erasure_completed"))) {
+    finished = await carryOut(rt, records, input.subjectKey, n - 1, appended.get(erasureEventId(rt, input.subjectKey, n - 1, "subject.erased"))!);
+  }
   const found = await records.listIntakeRecords(rt.workspaceId, input.subjectKey);
   const pinDigest = (await records.getSubject(rt.workspaceId, input.subjectKey))?.pinDigest !== undefined;
   const recordIds = found.map((r) => r.recordId);
-  if (recordIds.length === 0 && !pinDigest) return { erased: false, recordIds, pinDigest, entry: null };
+  if (recordIds.length === 0 && !pinDigest) return finished ?? { erased: false, recordIds, pinDigest, entry: null };
   for (const callId of callsOf(found)) await unlessGone(forget(callId, recordIds));
-  // Keyed, so the event id names no subject to anyone without the knowledge key.
-  const erasure = rt.hmac(`erasure:${input.subjectKey}:${JSON.stringify(recordIds)}:${String(pinDigest)}`);
-  const entry = await rt.adapter("ledger").append({
-    eventId: JSON.stringify([rt.workspaceId, null, "subject.erased", erasure]),
+  // Two erasures at once append the same id: the first plan appended is the one both carry out.
+  const entry = await ledger.append({
+    eventId: erasureEventId(rt, input.subjectKey, n, "subject.erased"),
     callId: null,
     actor: "member",
     event: "subject.erased",
     at: rt.now(),
     detail: { recordIds, pinDigest },
   });
-  await records.deleteIntakeRecords(rt.workspaceId, recordIds);
-  await records.deletePinDigest(rt.workspaceId, input.subjectKey);
-  return { erased: true, recordIds, pinDigest, entry };
+  const fresh = await carryOut(rt, records, input.subjectKey, n, entry);
+  if (finished === null) return fresh;
+  return { erased: true, recordIds: [...finished.recordIds, ...fresh.recordIds], pinDigest: finished.pinDigest || fresh.pinDigest, entry: fresh.entry };
 }

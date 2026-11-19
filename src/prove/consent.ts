@@ -13,6 +13,11 @@ export interface ConsentWording {
 export interface ConsentRecord {
   consentId: string;
   callId: string;
+  /**
+   * The subject Badge matched on the call (a keypad or PIN match) when the consent was recorded, or
+   * null when none had. A subject's export lists only the consents recorded under its key.
+   */
+  subjectKey: string | null;
   purpose: string;
   wordingVersion: string;
   wordingDigest: string;

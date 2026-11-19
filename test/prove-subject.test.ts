@@ -10,7 +10,8 @@ import { receiptPayload, verifyReceipt, type SignedReceipt } from "../src/prove/
 import { SUBJECT_EXPORT_DOMAIN, subjectExportPayload, verifySubjectExport, type SignedSubjectExport } from "../src/prove/subject.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, type TestEngine } from "../src/testing/index.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
-import { ACCOUNT, rejects, setup, testConfig, verifiedCall, wording } from "./helpers.ts";
+import { testSubject } from "../src/testing/fakes.ts";
+import { ACCOUNT, DOB, rejects, setup, testConfig, verifiedCall, wording } from "./helpers.ts";
 
 const SUBJECT = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const request = { workspaceId: "ws_test", subjectKey: SUBJECT };
@@ -116,6 +117,30 @@ describe("exportSubject", () => {
     assert.equal(verifySubjectExport({ ...exported, kid: "nope" }, keys), false);
     assert.equal(verifySubjectExport({ ...exported, signature: "AAAA" }, keys), false);
     assert.equal(verifySubjectExport(exported, [{ kid: exported.kid, kty: "nope" }]), false);
+    for (const bad of [null, undefined, "x", 1]) assert.equal(verifySubjectExport(bad as never, keys), false, String(bad));
+    assert.equal(verifySubjectExport(exported, null as never), false);
+  });
+
+  it("lists only the consents recorded under the subject, not one recorded after the call matched another", async () => {
+    const t = setup();
+    const other = "87654321";
+    t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: other, phoneOnFile: "+15555550199", knowledge: { dob: DOB } }));
+    const callId = await verifiedCall(t);
+    await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    // The same call, no flow: another subject is verified and consents.
+    await t.engine.beginVerification(callId, { accountNumber: other });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    const theirs = await t.engine.recordConsent(callId, { purpose: "texts", answer: "no" });
+    assert.equal(theirs.subjectKey, subjectKeyFor(TEST_KNOWLEDGE_KEY, other));
+
+    const body = (await t.engine.exportSubject(request)).body;
+    assert.deepEqual(body.calls, [callId]);
+    assert.deepEqual(body.consents.map((c) => [c.subjectKey, c.answer]), [[SUBJECT, "yes"]]);
+    assert.equal(JSON.stringify(body).includes(theirs.consentId), false, "nothing of theirs");
+    assert.ok(body.limits.some((l) => /under another subject/.test(l)));
   });
 
   it("answers with nothing for a subject with nothing on file, and skips a call record that is gone", async () => {
@@ -204,7 +229,92 @@ describe("eraseSubject", () => {
     const entries = (await t.ledger.list()).length;
     const retried = await t.engine.eraseSubject(request);
     assert.equal(retried.entry!.seq, entries, "the same entry");
-    assert.equal((await t.ledger.list()).length, entries);
+    assert.deepEqual((await t.ledger.list()).slice(entries).map((e) => e.event), ["subject.erasure_completed"], "only the completion is appended");
+    assert.deepEqual(await t.records.listIntakeRecords("ws_test", SUBJECT), []);
+    assert.equal((await t.engine.eraseSubject(request)).erased, false);
+  });
+
+  it("finishes the same erasure after the records went and the PIN digest delete failed", async () => {
+    const t = setup();
+    const { record } = await filedCall(t);
+    const removePin = t.records.deletePinDigest.bind(t.records);
+    t.records.deletePinDigest = async () => {
+      throw new Error("database down");
+    };
+    await assert.rejects(t.engine.eraseSubject(request), /database down/);
+    assert.equal(await t.records.getIntakeRecord("ws_test", record.recordId), null, "the records went");
+    t.records.deletePinDigest = removePin;
+    const first = (await t.ledger.list()).find((e) => e.event === "subject.erased")!;
+    const retried = await t.engine.eraseSubject(request);
+    assert.deepEqual([retried.entry, retried.recordIds, retried.pinDigest], [first, [record.recordId], true], "the original entry and plan");
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "subject.erased").length, 1);
+    assert.equal((await t.records.getSubject("ws_test", SUBJECT))!.pinDigest, undefined);
+  });
+
+  it("finishes an unfinished erasure, then erases what was filed since, in one call", async () => {
+    const t = setup();
+    const subject = (await t.records.getSubject("ws_test", SUBJECT))!;
+    const first = await filedCall(t);
+    await t.records.deletePinDigest("ws_test", SUBJECT);
+    const remove = t.records.deleteIntakeRecords.bind(t.records);
+    t.records.deleteIntakeRecords = async () => {
+      throw new Error("database down");
+    };
+    await assert.rejects(t.engine.eraseSubject(request), /database down/);
+    t.records.deleteIntakeRecords = remove;
+    // Since then: the host put the PIN back, and another record was filed.
+    t.records.putSubject("ws_test", subject);
+    const second = await filedCall(t, "broken window");
+    const result = await t.engine.eraseSubject(request);
+    assert.deepEqual([result.recordIds, result.pinDigest], [[first.record.recordId, second.record.recordId], true]);
+    assert.deepEqual(result.entry!.detail, { recordIds: [second.record.recordId], pinDigest: true });
+    const plans = (await t.ledger.list()).filter((e) => e.event === "subject.erased");
+    assert.deepEqual(plans[0]!.detail, { recordIds: [first.record.recordId], pinDigest: false });
+    assert.deepEqual((await t.ledger.list()).filter((e) => e.event.startsWith("subject.")).map((e) => e.event), [
+      "subject.erased",
+      "subject.erasure_completed",
+      "subject.erased",
+      "subject.erasure_completed",
+    ]);
+    assert.deepEqual(await t.records.listIntakeRecords("ws_test", SUBJECT), []);
+  });
+
+  it("gives a later erasure of a PIN the host put back an entry of its own", async () => {
+    const t = setup();
+    const subject = (await t.records.getSubject("ws_test", SUBJECT))!;
+    const first = await t.engine.eraseSubject(request);
+    t.records.putSubject("ws_test", subject);
+    const second = await t.engine.eraseSubject(request);
+    assert.deepEqual([second.erased, second.recordIds, second.pinDigest], [true, [], true]);
+    assert.notEqual(second.entry!.seq, first.entry!.seq, "a new entry");
+    assert.notEqual(second.entry!.eventId, first.entry!.eventId);
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "subject.erased").length, 2);
+    assert.equal(verifyChain(await t.ledger.list()).ok, true);
+  });
+
+  it("is not undone by a confirmation of the same record still writing when it ran", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    // Two confirmations of one reservation: the first's write is held until after the erase.
+    const put = t.records.putIntakeRecord.bind(t.records);
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let writes = 0;
+    t.records.putIntakeRecord = async (record) => {
+      writes++;
+      if (writes === 1) await held;
+      await put(record);
+    };
+    const slow = t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    while (writes === 0) await new Promise((resolve) => setImmediate(resolve));
+    const fast = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    assert.equal(writes, 2);
+    assert.deepEqual((await t.engine.eraseSubject(request)).recordIds, [fast.recordId]);
+    release();
+    assert.deepEqual(await slow, fast);
+    assert.equal(await t.records.getIntakeRecord("ws_test", fast.recordId), null, "the late write stored nothing");
     assert.deepEqual(await t.records.listIntakeRecords("ws_test", SUBJECT), []);
   });
 

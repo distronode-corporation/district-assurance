@@ -29,6 +29,7 @@ export const ENGINE_EVENTS = [
   "receipt.issued",
   "module.event",
   "subject.erased",
+  "subject.erasure_completed",
 ] as const;
 
 export type EngineEventName = (typeof ENGINE_EVENTS)[number];

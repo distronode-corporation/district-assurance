@@ -29,7 +29,10 @@ All notable changes to this project are documented here. The format follows
   `subjectKey`, `RecordStore` gains `listIntakeRecords`, `deleteIntakeRecords` and
   `deletePinDigest`, `Engine.exportSubject` returns a signed export (its own domain, never a
   receipt; `verifySubjectExport`), and `Engine.eraseSubject` deletes the records and the PIN digest
-  and appends `subject.erased`, leaving the ledger and receipts whole (ADR-21).
+  and appends `subject.erased`, leaving the ledger and receipts whole (ADR-21). A consent carries
+  the matched `subjectKey` and an export lists only that subject's consents; a deleted record id
+  is never stored again; each erasure gets its own entry, closed by `subject.erasure_completed`,
+  and a retry after a partial delete finishes the same one.
 
 ### Changed
 
