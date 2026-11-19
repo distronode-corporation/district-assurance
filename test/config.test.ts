@@ -248,7 +248,6 @@ describe("validateConfig: modules", () => {
         "modules.dossier.settings: forms[2] (Bad Id): field sin names a card or a Social Insurance Number, which intake never collects",
         "modules.dossier.settings: forms[2]: formId must be lower-case letters, digits, hyphens or underscores",
         "modules.dossier.settings: forms[2] (Bad Id): field issue has an unknown type",
-        "modules.dossier.settings: forms[2] (Bad Id): field sin is sensitive, and encrypted fields are not built yet (FIL-2)",
         "modules.dossier.settings: forms[3] (b): the form has no fields",
         "modules.dossier.settings: two forms have the same formId",
       ],
@@ -354,8 +353,16 @@ describe("validateConfig: modules", () => {
       at0("field c2: showIf goes round in a cycle: c2 > c3 > c1 > c2"),
       at0("field c3: showIf goes round in a cycle: c3 > c1 > c2 > c3"),
       at0("field self: showIf goes round in a cycle: self > self"),
-      at0("field secret is sensitive, and encrypted fields are not built yet (FIL-2)"),
     ]);
+  });
+
+  it("needs the fieldCipher adapter once a form has a sensitive field (FIL-2)", () => {
+    const sin = { key: "sin", label: { en: "SIN", fr: "NAS" }, type: "text", required: true, sensitive: true };
+    const sensitive = config((c) => c.modules.dossier.settings.forms[0].fields.push(sin));
+    assert.deepEqual(validateConfig(sensitive, registry()), ["modules.dossier: needs the fieldCipher adapter, which the engine does not have"]);
+    assert.deepEqual(validateConfig(sensitive, registry([...ALL_ADAPTERS, "fieldCipher"])), []);
+    const marked = config((c) => c.modules.dossier.settings.forms[0].fields.push({ ...sin, sensitive: false }));
+    assert.deepEqual(validateConfig(marked, registry()), [], "sensitive: false needs no cipher");
   });
 
   it("checks paylink settings", () => {

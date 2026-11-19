@@ -113,7 +113,7 @@ factor the config in force names (in the policy or Badge's `factors`).
 | Built-in | Steps | Needs | Adapters |
 |---|---|---|---|
 | `badge` | `badge.verify` | | `records`; `counters` with any factor the caller enters (`keypad_knowledge`, `pin`, plug-ins); `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `messages`, `codes` with `text_code`; `dialer`, `counters` with `callback`; `pinVerifier` with `pin` in verifier mode; `duressNotifier` with `pin.duress` |
-| `dossier` | `dossier.collect` | `intake.file` | `records` |
+| `dossier` | `dossier.collect` | `intake.file` | `records`; `fieldCipher` once a form has a sensitive field |
 | `paylink` | `paylink.request` | `payment.request` | `payments`, `messages`; `amounts` for a step with `amountRef` |
 | `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
 | `gate` | `gate.grant` | `entry.open` | `access` (door controllers by name), `accessSigner` |
@@ -725,8 +725,8 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 | `gate.grant` | `target`, a target id in Gate's settings; optional `lifetimeSeconds` (10 to 900, default 60) |
 | `step-up.issue` | `site`, a site id in step-up's settings; optional `lifetimeSeconds` (120 to 300, default 120) |
 
-Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
-until FIL-2, field rules as section 13 lists); Paylink `{maxAmountMinor?, mode?, connectedAccountId?, linkLifeMinutes?, paymentMethods?}`
+Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique; a sensitive field
+needs the `fieldCipher` adapter; field rules as section 13 lists); Paylink `{maxAmountMinor?, mode?, connectedAccountId?, linkLifeMinutes?, paymentMethods?}`
 (`maxAmountMinor` 1 to 1,000,000; `mode` default `platform`, and `connect` needs
 `connectedAccountId`, 1 to 255 letters, digits, `-` or `_`; a `connectedAccountId` needs an
 explicit `mode`, so a business account never quietly defaults to the platform's; the other two are the defaults for steps
@@ -822,6 +822,7 @@ answer on file, a phone number, a link or card data.
 | `intake.started` | `formId`, `version` |
 | `intake.confirmed` | `recordId`, `formId`, `digest`, `confirmedBy` |
 | `intake.abandoned` | none |
+| `record.filing_failed` | `recordId`, `formId`, `fields` (the form's sensitive field names), `reason` (`cipher_error` or `no_ciphertext`) |
 | `redaction.applied` | `kinds` (counts per kind) |
 | `payment.amount_read_back` | `amountMinor`, `currency`, `amountSource`, `digest` (never the `amountRef`) |
 | `payment.amount_confirmed` | `digest`, `confirmedBy` |
@@ -1027,8 +1028,10 @@ with it. A saved key set therefore preserves historical verification only; it sa
 key's current status. When current trust matters, verify against the key set URL, or refresh the
 saved copy from it first.
 
-Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
-`SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`, or `text: {en, fr, es}` for a
+Record digests are `SHA-256(canonicalJson({formId, version, values}))` over the values the caller
+confirmed, where each sensitive value is replaced by
+`HMAC-SHA256(knowledgeKey, canonicalJson(["intake", recordId, field, value]))`, hex (section 13);
+wording digests are `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`, or `text: {en, fr, es}` for a
 wording with a Spanish text, so a wording without one keeps the digest it had before Spanish.
 
 **Receipt links.** A call id is not a secret, so a receipt is shared by a capability link.
@@ -1063,9 +1066,41 @@ bounds how many links it issues and how long it keeps them (a durable store with
 Forms live in Dossier's settings: a `formId` (lower case, digits, `-`, `_`), a `version` and
 fields with snake_case unique keys, a known type and an English and a French label, plus an
 optional Spanish one (`label: {en, fr, es?}`; `es` non-empty when given, no other key).
-`validateConfig` refuses fields marked `sensitive` until field encryption exists (FIL-2).
-`setIntakeField` refuses (`invalid_input`) a value with a lone surrogate, which speech-to-text or a
-model can produce and a record's digest cannot hash. `startIntake(callId, formId)` names the form,
+A field marked `sensitive` is stored encrypted: `validateConfig` refuses a form with one unless
+the engine has the `fieldCipher` adapter (`modules.dossier: needs the fieldCipher adapter, which
+the engine does not have`). `confirmIntake` computes the digest (section 12) when it reserves the
+record, then, on every attempt to store it, asks `FieldCipher.encrypt(text, {workspaceId,
+recordId, field})` for each sensitive value given (a number or a yes/no as JSON writes it) and
+stores and returns the record with the ciphertext in its place; the engine never decrypts. The
+digest does not depend on the ciphertext, so it is the same when a retry encrypts again. An
+engine without a cipher (another process on the same SessionStore) refuses to file such a record
+(`precondition_failed`) and leaves it reserved for an engine that has one. A cipher that throws
+(`cipher_error`) or answers with an empty string, a non-string or the value itself
+(`no_ciphertext`) never holds the call open: the reserved filing is released as failed, the draft
+is dropped with its values (phase back to `open`, nothing kept in the clear), the ledger gets
+`record.filing_failed {recordId, formId, fields, reason}` (the form's sensitive field names and the
+reason code, never a value), and `confirmIntake` throws `precondition_failed` with the reason code;
+the cipher's own error is never passed on. Nothing was stored, since the cipher runs before the
+record store, so `endCall` can go ahead and the host collects the record again if it wants it. If
+another process sealed and filed the same record meanwhile, that record is returned instead. A
+process that sealed the record claims the filing before it writes it (`writers`, each write by its
+own token, by the same compare-and-set as every write): while any claim is live, a process whose
+cipher fails releases nothing and logs nothing, and `confirmIntake` throws `conflict` ("another
+process is writing this record; confirm again for its outcome"), so a retry returns the winner's
+record. A write whose write fails gives up only its own claim; a claim older than two minutes
+(`WRITE_CLAIM_MS`) is taken as a writer that died. A release first marks the filing `releasing`
+(no write claims or files it from then on), then deletes the record by id
+(`RecordStore.deleteIntakeRecords`, which also makes a later write of that id store nothing), then
+drops the draft and logs `record.filing_failed`: so a write the store kept before failing, or one
+that outlived its claim, never leaves a stored record behind a released filing, and a writer that
+finds the filing released files nothing and throws the same `precondition_failed`. A release
+whose delete failed is carried on by the next confirmation, with the reason it began with. Until the
+record is filed, abandoned or the call ends (`endCall` drops an open draft, before `call.ended`
+and the receipt's ledger head, writing no event), the draft in the call record holds sensitive
+values in the clear; afterwards the call record keeps only the encrypted record.
+`setIntakeField` refuses (`invalid_input`) a value that is not a string, and refuses a value with a
+lone surrogate, which speech-to-text or a model can produce and a record's digest cannot hash, as
+`not_text`. `startIntake(callId, formId)` names the form,
 and the draft keeps the form as it was then, so a
 
 Field rules (FIL-4), each checked by `validateConfig`, which reports every bad one:

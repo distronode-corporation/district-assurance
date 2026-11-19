@@ -55,6 +55,17 @@ export interface LocalisedText {
 }
 
 /**
+ * Encrypts a sensitive intake value before the record is stored, with the host's key (for example
+ * a KMS data key). The engine never decrypts: the host reads its records with its own key. The
+ * context names the value's place, so a host can bind it as additional authenticated data and a
+ * ciphertext moved to another record or field fails to decrypt. An answer may differ on every call
+ * (a fresh nonce); the record's digest does not depend on it.
+ */
+export interface FieldCipher {
+  encrypt(plain: string, context: { workspaceId: string; recordId: string; field: string }): Promise<string>;
+}
+
+/**
  * Everything the engine can be given. Only `ledger` is always required (the ledger is always on);
  * `sessions` defaults to a `MemorySessionStore`. Each module says which of the others it needs, and
  * `validateConfig` refuses a config whose modules need an adapter the engine lacks.
@@ -87,6 +98,8 @@ export interface EngineAdapters {
   notifier?: Notifier;
   /** Told of a duress PIN entry (VER-12). Needed while Badge's `pin.duress` is set. */
   duressNotifier?: DuressNotifier;
+  /** Needed by Dossier once a form has a sensitive field. */
+  fieldCipher?: FieldCipher;
 }
 
 export type AdapterName = keyof EngineAdapters;

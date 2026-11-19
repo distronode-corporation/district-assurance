@@ -948,6 +948,11 @@ export class Engine {
       // Likewise a payment link being texted: the call ends once its text is recorded, so no text
       // goes out after the call ended.
       paylink.assertNoSendInFlight(this.#rt, draft.record);
+      // The engine, not a module hook, drops Dossier's open draft, so its sensitive values never
+      // outlive the call in the clear. It runs before call.ended and before the receipt's ledger
+      // head is taken, and writes no event and no outcome.
+      const files = draft.record.modules[dossier.DOSSIER];
+      if (files !== undefined) draft.record.modules[dossier.DOSSIER] = dossier.withoutOpenDraft(files);
       draft.apply({ type: "call_ended", at: this.#now() });
       const flow = draft.record.flow;
       if (flow !== null && flow.status === "running") {

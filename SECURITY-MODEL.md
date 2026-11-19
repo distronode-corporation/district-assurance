@@ -673,7 +673,16 @@ and expiry or revocation of a link, which are not built.
 
 **Controls:** reference values are HMACs under a per-workspace key, because a plain hash of a date
 of birth is reversed by trying every date; the caller's entries are never stored. Sensitive intake
-fields are refused by `validateConfig` until field encryption exists (FIL-2). PINs on file are
+fields are encrypted by the host's `FieldCipher` before the record reaches the `RecordStore`, and
+a config with one is refused without a cipher; an engine without one refuses to file such a
+record (tested). The record's digest, which receipts and the ledger carry, covers a sensitive
+value only as an HMAC under the knowledge key, so a receipt cannot be used to test guesses at a
+short value such as a policy number (tested, ADR-27). A cipher that throws, or answers with nothing or with
+the value itself, is refused and never holds a call open: the filing is released as failed, the
+draft and its values are dropped, `record.filing_failed` names only the fields and a reason code,
+and the cipher's own error, which may quote the value, is never passed on (tested). Left open: while a draft is open or being filed, its sensitive values
+sit in the clear in the call record, so a durable `SessionStore` holds them until the record is
+filed or abandoned, or the call ends, which drops an open draft (tested). PINs on file are
 HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode). A texted code
 is kept only as an HMAC bound to its call, and a calling number only as an HMAC.
 
@@ -738,6 +747,9 @@ the key set URL or refreshes the copy.
 - Refunding a late payment (one flagged `late` in the ledger) when the business does not want it.
 - Rotating receipt keys (publish the next key, then switch, then retire), keeping retired public
   keys as long as their receipts matter, and removing a key that leaked.
+- A `FieldCipher` with authenticated encryption under a key the host keeps in a key store, binding
+  the context (workspace, record, field) so a ciphertext moved elsewhere fails to decrypt; and
+  protecting a durable `SessionStore` as it would the records, since an open draft is in the clear.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
   guarantees: they must pass `sessionStoreContract`, `recordStoreContract` and
   `auditLedgerContract` from `district-assurance/testing`, as the memory adapters do (tested); one

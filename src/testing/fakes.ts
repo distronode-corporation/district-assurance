@@ -29,7 +29,7 @@ import type {
 } from "../core/adapters.ts";
 import type { Clock, IdGenerator } from "../core/clock.ts";
 import type { CarrierSignalReport } from "../core/policy.ts";
-import type { Locale } from "../core/runtime.ts";
+import type { FieldCipher, Locale } from "../core/runtime.ts";
 import type { AccessController, SignedAccessGrant, UnlockResult } from "../gate/access.ts";
 import { keyPairSigner } from "../prove/receipt.ts";
 import { duressDigest } from "../verify/factors.ts";
@@ -215,32 +215,48 @@ export class FakeAccessController implements AccessController {
   }
 }
 
+/** A map key for an id within a workspace that no two pairs share, whatever either holds ("/" included). */
+function scoped(workspaceId: string, id: string): string {
+  return JSON.stringify([workspaceId, id]);
+}
+
 /** Keys are JSON tuples, so no pair of workspace and id can collide with another (`"a/b", "c"` is not `"a", "b/c"`). */
 export class MemoryRecordStore implements RecordStore {
   readonly #subjects = new Map<string, SubjectRecord>();
   readonly #records = new Map<string, IntakeRecord>();
+  /** Ids of deleted records: a late write of one stores nothing. */
+  readonly #deleted = new Set<string>();
 
   putSubject(workspaceId: string, subject: SubjectRecord): void {
-    this.#subjects.set(JSON.stringify([workspaceId, subject.subjectKey]), structuredClone(subject));
+    this.#subjects.set(scoped(workspaceId, subject.subjectKey), structuredClone(subject));
   }
 
   async getSubject(workspaceId: string, subjectKey: string): Promise<SubjectRecord | null> {
-    const subject = this.#subjects.get(JSON.stringify([workspaceId, subjectKey]));
+    const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
     return subject === undefined ? null : structuredClone(subject);
   }
 
   async putIntakeRecord(record: IntakeRecord): Promise<void> {
-    this.#records.set(JSON.stringify([record.workspaceId, record.recordId]), structuredClone(record));
+    const key = scoped(record.workspaceId, record.recordId);
+    if (this.#deleted.has(key)) return;
+    this.#records.set(key, structuredClone(record));
   }
 
   async getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null> {
-    const record = this.#records.get(JSON.stringify([workspaceId, recordId]));
+    const record = this.#records.get(scoped(workspaceId, recordId));
     return record === undefined ? null : structuredClone(record);
+  }
+
+  async deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void> {
+    for (const recordId of recordIds) {
+      this.#records.delete(scoped(workspaceId, recordId));
+      this.#deleted.add(scoped(workspaceId, recordId));
+    }
   }
 
   async putPinDigest(workspaceId: string, subjectKey: string, digest: string | null, enrolmentId?: string): Promise<boolean> {
     // No await: one atomic step.
-    const subject = this.#subjects.get(JSON.stringify([workspaceId, subjectKey]));
+    const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
     if (subject === undefined) return false;
     if (digest === null) {
       delete subject.pinDigest;
@@ -256,7 +272,7 @@ export class MemoryRecordStore implements RecordStore {
 
   async putDuressDigest(workspaceId: string, subjectKey: string, digest: string | null, ifPinDigest?: string): Promise<boolean> {
     // No await: one atomic step.
-    const subject = this.#subjects.get(JSON.stringify([workspaceId, subjectKey]));
+    const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
     if (subject === undefined) return false;
     if (digest === null) delete subject.duressDigest;
     else if (subject.pinDigest !== ifPinDigest) return false;
@@ -376,6 +392,23 @@ export class FakeNotifier implements Notifier {
 /** A JSON tuple, so no two keys share an id whatever their parts contain. */
 function counterId(key: AttemptCounterKey): string {
   return JSON.stringify([key.workspaceId, key.factor, key.scope, key.key]);
+}
+
+/**
+ * A field cipher that does not encrypt: it wraps the value in base64url with a counter, so every
+ * answer differs, like a real cipher with a fresh nonce, and `decrypt` reads it back. Tests only.
+ */
+export class FakeFieldCipher implements FieldCipher {
+  readonly encrypted: Array<{ workspaceId: string; recordId: string; field: string }> = [];
+
+  async encrypt(plain: string, context: { workspaceId: string; recordId: string; field: string }): Promise<string> {
+    this.encrypted.push({ ...context });
+    return `fake-cipher:${this.encrypted.length}:${Buffer.from(plain, "utf8").toString("base64url")}`;
+  }
+
+  decrypt(ciphertext: string): string {
+    return Buffer.from(ciphertext.split(":")[2]!, "base64url").toString("utf8");
+  }
 }
 
 /** A subject record built from plain values, hashed the way the engine compares them. */
