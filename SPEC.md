@@ -553,7 +553,9 @@ check.
 ```
 
 `verifyAccessGrant(grant, keys, {workspaceId, audience, now, clockSkewSeconds?})` returns `{ok:
-true, body}` or `{ok: false, reason}`: `malformed` (not this shape), `signature` (unknown `kid`,
+true, body}` or `{ok: false, reason}`: `invalid_options` (a `clockSkewSeconds` that is not a
+finite, non-negative number: refused, so the not-before check never turns off), `malformed` (not
+this shape), `signature` (unknown `kid`,
 another algorithm, any change), `workspace` (issued by another workspace, or no `workspaceId`
 given: it is required, so workspaces sharing a key and a controller name never open each other's
 doors), `audience`, `not_yet_valid` (with `clockSkewSeconds` of allowance, default 30, for a

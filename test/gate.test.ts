@@ -676,6 +676,15 @@ describe("access grants: the verifier and replay", () => {
     assert.deepEqual(check(grant, new Date("2025-12-31T23:59:59.000Z"), { clockSkewSeconds: 0 }), { ok: false, reason: "not_yet_valid" });
   });
 
+  it("refuses a clock skew that is not a finite, non-negative number, so the not-before check never turns off", async () => {
+    const early = await sign({ issuedAt: "2026-01-01T00:10:00.000Z", expiresAt: "2026-01-01T00:11:00.000Z" });
+    for (const bad of [Number.NaN, Infinity, -Infinity, -1, -0.001, "30", null]) {
+      assert.deepEqual(check(early, now, { clockSkewSeconds: bad as never }), { ok: false, reason: "invalid_options" }, String(bad));
+    }
+    assert.deepEqual(check(early, now, { clockSkewSeconds: 0 }), { ok: false, reason: "not_yet_valid" }, "zero is a valid skew");
+    assert.deepEqual(check(early, now), { ok: false, reason: "not_yet_valid" }, "and the default holds the check");
+  });
+
   it("refuses a grant another workspace issued, even on a shared key and controller name (review R1)", async () => {
     const other = await sign({ workspaceId: "ws_other_tenant" });
     assert.equal(check(await sign()).ok, true);

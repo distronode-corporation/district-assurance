@@ -20,7 +20,7 @@ export type { AccessController, UnlockResult } from "../core/adapters.ts";
 
 export type AccessGrantCheck =
   | { ok: true; body: AccessGrantBody }
-  | { ok: false; reason: "malformed" | "signature" | "workspace" | "audience" | "not_yet_valid" | "expired" | "lifetime" };
+  | { ok: false; reason: "invalid_options" | "malformed" | "signature" | "workspace" | "audience" | "not_yet_valid" | "expired" | "lifetime" };
 
 /** The longest an access grant may live, in seconds: 15 minutes. */
 export const MAX_ACCESS_GRANT_SECONDS = 900;
@@ -64,7 +64,11 @@ export function verifyAccessGrant(
   const body = g.body;
   if (typeof expect.workspaceId !== "string" || expect.workspaceId === "" || body.workspaceId !== expect.workspaceId) return { ok: false, reason: "workspace" };
   if (body.audience !== expect.audience) return { ok: false, reason: "audience" };
-  const skew = (expect.clockSkewSeconds ?? 30) * 1000;
+  const seconds: unknown = expect.clockSkewSeconds === undefined ? 30 : expect.clockSkewSeconds;
+  // A skew that is not a finite, non-negative number would turn the not-before check off (NaN) or
+  // accept anything (Infinity): refused, so the check fails closed.
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return { ok: false, reason: "invalid_options" };
+  const skew = seconds * 1000;
   const now = expect.now.getTime();
   const issued = Date.parse(body.issuedAt);
   const expires = Date.parse(body.expiresAt);
