@@ -266,8 +266,8 @@ export class GateModule implements AssuranceModule {
   /** Settles the reservation as failed and returns why, when the grant may no longer be sent; null when it may. */
   async #stillAuthorized(engine: GateHost, callId: string, grantId: string, digest: string, kid: string): Promise<string | null> {
     // Set by each attempt of the write; the attempt that was saved is the last one to run.
-    let lapsed: string | null = "it was settled meanwhile";
-    await outcome(engine, callId, grantId, (s, call) => {
+    let lapsed: string | null = null;
+    const after = (await outcome(engine, callId, grantId, (s, call) => {
       const slice = s as unknown as GateSlice;
       const record = slice.grants.find((g) => g.grantId === grantId)!;
       // The reservation is open, and Gate closes it whenever it settles a grant: this grant is still reserved.
@@ -281,8 +281,11 @@ export class GateModule implements AssuranceModule {
         call.emit("access.failed", { grantId, digest, kid, reason: lapsed === "it expired" ? "expired" : "not_authorized" });
       }
       return slice as unknown as JsonValue;
-    });
-    return lapsed;
+    })) as unknown as GateSlice;
+    // Decided by what was stored, not by an attempt that may have been discarded: a grant another
+    // process settled meanwhile (its reservation closed, so the write was refused) is never sent.
+    const stored = after.grants.find((g) => g.grantId === grantId)!;
+    return stored.status === "reserved" ? null : (lapsed ?? "it was settled meanwhile");
   }
 }
 

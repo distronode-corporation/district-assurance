@@ -32,6 +32,8 @@ export interface PaymentRequest {
   expiresAt: string | null;
   /** What the provider was asked for when the link was created; the engine's deadline never passes it. */
   providerExpiresAt: string;
+  /** When a process last claimed the text of this link (a short lease), so another never expires it mid-send. */
+  sendingSince: string | null;
 }
 
 /** Whose account takes the money, per flow step. */

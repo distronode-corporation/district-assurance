@@ -299,7 +299,7 @@ answer on file, a phone number, a link or card data.
 | `intake.abandoned` | none |
 | `redaction.applied` | `kinds` (counts per kind) |
 | `payment.link_sent` | `paymentId`, `linkId`, `amountMinor`, `currency`, `amountSource`, `mode`, `expiresAt` |
-| `payment.link_expired` | `paymentId`, `provider` (`expired` or `not_open`): the engine's deadline came |
+| `payment.link_expired` | `paymentId`, `provider` (`expired`, `not_open` or `not_created`), and `reason` (`not_sent_in_time`, `not_created_in_time`) when it was never texted: the engine's deadline came |
 | `payment.outcome_ignored` | `paymentId`, `reason` (`account`): an outcome from another account |
 | `payment.settled` | `paymentId`, `status` |
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
@@ -407,10 +407,16 @@ disputes are not handled by the engine (SECURITY-MODEL.md, open questions).
 **Link life.** A link lives `linkLifeMinutes` (step, else settings, else 15; 5 to 60) from the
 moment it was texted, but never past what the provider was asked for: `expiresAt`. The provider is
 asked for twice the link life from the request (so a text resumed late still gets its full life),
-held within what the payments adapter declares (`capabilities.minLinkMinutes` and
-`maxLinkMinutes`; Stripe Checkout: 30 minutes to 24 hours). A link is never texted with less than
-5 minutes of that left: the request is expired instead (at the provider first, `payment.link_expired`
-with reason `not_sent_in_time`), and `requestPayment` throws `precondition_failed`. `expirePaymentLinks(callId)`, which the host
+and at least the payments adapter's `capabilities.minLinkMinutes` plus 5 minutes (so the create
+that follows is never under the minimum), at most its `maxLinkMinutes` (Stripe Checkout: 30
+minutes to 24 hours). A request whose link is not known to exist and has less than the provider's
+minimum left is expired before any create (`payment.link_expired`, provider `not_created`). A link
+is never texted with less than 5 minutes of the provider's life left: it is expired at the provider
+(`payment.link_expired`, reason `not_sent_in_time`) and the request settles `expired` when the
+provider confirms, or waits for its webhook when the provider says `not_open`. Either way
+`requestPayment` throws `precondition_failed`. A process about to text a link holds a 60 second
+lease on it, so a concurrent resume refuses (`precondition_failed`) rather than expiring a link
+being sent; once the lease lapses, it may. `expirePaymentLinks(callId)`, which the host
 calls at `expiresAt` or later, asks the provider to expire each texted link still open past its
 deadline (`expireLink`): on `expired` the request settles `expired` (and its flow step fails); on
 `not_open` it is left for the provider's webhook, which may still say paid. A link that was never

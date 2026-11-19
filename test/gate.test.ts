@@ -479,6 +479,57 @@ describe("gate: grants", () => {
     assert.deepEqual(await t.engine.moduleReservations(c2, "gate"), [], "and its reservation is closed");
   });
 
+  it("never sends a grant another process settled while this one's write was being retried", async () => {
+    const t = gateSetup();
+    const callId = await verified(t, null);
+    const real = t.engine;
+    let raced = false;
+    // A host whose pre-send write loses its first compare-and-set to another process, which
+    // settles this grant meanwhile: the retry is refused, and the discarded attempt said "send".
+    const racing: GateHost = {
+      workspaceId: real.workspaceId,
+      updateModule: (c, n, fn) => real.updateModule(c, n, fn),
+      moduleState: (c, n) => real.moduleState(c, n),
+      recordModuleOutcome: async (c, n, r, fn) => {
+        if (!raced) {
+          raced = true;
+          fn(await real.moduleState(c, n), { authorized: () => true, now: t.clock.now().toISOString(), emit: () => undefined, release: () => undefined } as never);
+          await real.recordModuleOutcome(c, n, r, (s, call) => {
+            (s as unknown as GateSlice).grants.find((g) => g.grantId === r)!.status = "unknown";
+            call.release();
+            return s;
+          });
+        }
+        return real.recordModuleOutcome(c, n, r, fn);
+      },
+    };
+    await assert.rejects(t.gate.grantAccess(racing, callId, { target: "front-door" }), rejects("scope_denied", /settled meanwhile/));
+    assert.equal(t.door.received.length, 0, "the door was never asked");
+  });
+
+  it("keeps reservations for a module named constructor (own properties only)", async () => {
+    const t = setup();
+    const constructorModule = {
+      manifest: { name: "constructor", version: "1", summary: "x", provides: { factors: [], steps: [], outcomes: [] }, scopes: { grants: [], needs: {} }, adapters: [] },
+      validateSettings: () => [],
+      requiredAdapters: () => [],
+      validateStep: () => [],
+      initCall: () => ({}),
+      enterStep: () => null,
+      stepStatus: () => "pending" as const,
+    };
+    // Not a reserved name (only core, engine, flow and module are), and an inherited property of every object.
+    t.engine.use(constructorModule);
+    t.engine.configure(testConfig((c) => ((c.modules as Record<string, unknown>)["constructor"] = {})));
+    const { callId } = await t.engine.startCall();
+    assert.deepEqual(await t.engine.moduleReservations(callId, "constructor"), []);
+    await assert.rejects(t.engine.recordModuleOutcome(callId, "constructor", "r1", (s) => s), rejects("precondition_failed"));
+    await t.engine.updateModule(callId, "constructor", (s, call) => (call.reserve("r1"), s));
+    assert.deepEqual(await t.engine.moduleReservations(callId, "constructor"), ["r1"]);
+    await t.engine.recordModuleOutcome(callId, "constructor", "r1", (s, call) => (call.release(), s));
+    assert.deepEqual(await t.engine.moduleReservations(callId, "constructor"), []);
+  });
+
   it("opens reservations only in updateModule and closes them only in recordModuleOutcome", async () => {
     const t = gateSetup();
     const callId = await verified(t, null);

@@ -125,6 +125,9 @@ function termsFor(settings: PaylinkSettings, step: PaylinkRequestStep | null): P
   };
 }
 
+/** How long a process that is texting a link holds it against a concurrent expiry. */
+const SEND_LEASE_MS = 60_000;
+
 const CONNECT_NEEDS_ACCOUNT = "connect mode needs connectedAccountId in the paylink settings";
 
 function isCapabilities(value: unknown): value is PaymentLinkCapabilities {
@@ -147,7 +150,8 @@ function adapterErrors(caps: PaymentLinkCapabilities, mode: PaymentMode, lifeMin
  * declares (Stripe Checkout: 30 minutes to 24 hours), so the provider never refuses the time.
  */
 function providerExpiry(requestedAt: string, lifeMinutes: number, caps: PaymentLinkCapabilities): string {
-  const minutes = Math.min(Math.max(2 * lifeMinutes, caps.minLinkMinutes), caps.maxLinkMinutes);
+  // A margin over the provider's minimum, so the create that follows the reservation is never under it.
+  const minutes = Math.min(Math.max(2 * lifeMinutes, caps.minLinkMinutes + MIN_LINK_LIFE_MINUTES), caps.maxLinkMinutes);
   return deadline(requestedAt, minutes);
 }
 
@@ -295,11 +299,24 @@ export async function requestPayment(
       ...terms,
       expiresAt: null,
       providerExpiresAt: providerExpiry(requestedAt, terms.linkLifeMinutes, rt.adapter("payments").capabilities),
+      sendingSince: null,
     };
     draft.slice<PaylinkSlice>(PAYLINK).payments.push(request);
     return { request, ...where };
   });
   const { request } = reserved;
+  // A link not known to exist yet must be created with at least the provider's shortest life left,
+  // or the provider refuses it, every retry included. Too late for that: the request is expired
+  // (it was never texted, so nobody holds its link) and a new one may follow.
+  const caps = rt.adapter("payments").capabilities;
+  if (request.linkId === "" && Date.parse(request.providerExpiresAt) - rt.clock.now().getTime() < caps.minLinkMinutes * 60_000) {
+    await rt.update(callId, (draft) => {
+      if (find(draft, request.paymentId).status !== "open") return;
+      draft.emit("payment.link_expired", "code", { paymentId: request.paymentId, provider: "not_created", reason: "not_created_in_time" });
+      settle(rt, draft, request.paymentId, "expired");
+    });
+    throw new EngineError("precondition_failed", "the payment link could not be created in time and the request was expired; request a new payment");
+  }
   const link = await rt.adapter("payments").createLink({
     callId,
     paymentId: request.paymentId,
@@ -315,10 +332,20 @@ export async function requestPayment(
   });
   // A text that goes out this late would carry a link with less than the shortest life left, or
   // one already dead: the request is expired instead (at the provider too), and never sent.
+  // The process that will text it holds a short lease, so a concurrent resume never expires the
+  // link while it is being sent; once the lease lapses (that sender stopped), it may.
   const tooLate = await rt.update(callId, (draft) => {
     const pending = find(draft, request.paymentId);
     pending.linkId = link.linkId;
-    return pending.textedAt === null && Date.parse(request.providerExpiresAt) - rt.clock.now().getTime() < MIN_LINK_LIFE_MINUTES * 60_000;
+    if (pending.textedAt !== null) return false;
+    const now = rt.clock.now().getTime();
+    const leased = pending.sendingSince !== null && now - Date.parse(pending.sendingSince) < SEND_LEASE_MS;
+    if (Date.parse(request.providerExpiresAt) - now >= MIN_LINK_LIFE_MINUTES * 60_000) {
+      pending.sendingSince = rt.now();
+      return false;
+    }
+    if (leased) throw new EngineError("precondition_failed", "another process is texting this payment link");
+    return true;
   });
   await rt.bindRef(`payment:${link.linkId}`, callId);
   if (tooLate) {
@@ -331,7 +358,8 @@ export async function requestPayment(
     await rt.update(callId, (draft) => {
       if (find(draft, request.paymentId).status !== "open") return;
       draft.emit("payment.link_expired", "code", { paymentId: request.paymentId, provider: answer.state, reason: "not_sent_in_time" });
-      settle(rt, draft, request.paymentId, "expired");
+      // Only an expiry the provider confirms settles it; a link no longer open waits for its webhook.
+      if (answer.state === "expired") settle(rt, draft, request.paymentId, "expired");
     });
     throw new EngineError("precondition_failed", "the payment link could not be texted in time and was expired; request a new payment");
   }

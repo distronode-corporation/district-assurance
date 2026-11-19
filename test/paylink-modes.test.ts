@@ -115,7 +115,7 @@ describe("paylink modes: running", () => {
     const result = await t.engine.requestPayment(callId);
     assert.deepEqual(result, { paymentId: "pay_1", status: "open", expiresAt: "2026-01-01T00:16:00.000Z" });
     assert.deepEqual(t.payments.created, [
-      { paymentId: "pay_1", amountMinor: 5000, currency: "cad", mode: "platform", paymentMethods: ["card", "apple_pay", "google_pay", "link"], expiresAt: "2026-01-01T00:31:00.000Z", linkId: "cs_fake_1" },
+      { paymentId: "pay_1", amountMinor: 5000, currency: "cad", mode: "platform", paymentMethods: ["card", "apple_pay", "google_pay", "link"], expiresAt: "2026-01-01T00:36:00.000Z", linkId: "cs_fake_1" },
     ]);
     const sent = (await t.ledger.list()).find((e) => e.event === "payment.link_sent")!;
     assert.deepEqual(sent.detail, { paymentId: "pay_1", linkId: "cs_fake_1", amountMinor: 5000, currency: "cad", amountSource: "price_list", mode: "platform", expiresAt: "2026-01-01T00:16:00.000Z" });
@@ -139,7 +139,7 @@ describe("paylink modes: running", () => {
       mode: "connect",
       connectedAccountId: ACCT,
       paymentMethods: ["card"],
-      expiresAt: "2026-01-01T00:30:00.000Z",
+      expiresAt: "2026-01-01T00:35:00.000Z",
       linkId: "cs_fake_1",
     });
     assert.deepEqual(JSON.parse(keys[0]!), ["ws_test", callId, "pay_1", "link", "connect"], "the mode is part of the key");
@@ -273,7 +273,7 @@ describe("paylink: the engine's own deadline", () => {
       throw new Error("carrier down");
     };
     await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
-    assert.equal(t.payments.created[0]!.expiresAt, "2026-01-01T00:30:00.000Z", "twice the life, from the request");
+    assert.equal(t.payments.created[0]!.expiresAt, "2026-01-01T00:35:00.000Z", "the provider's 30 minutes plus a 5 minute margin, over twice the life");
     t.clock.advance(14 * 60_000);
     t.messages.sendText = send;
     assert.equal((await t.engine.requestPayment(callId, request)).expiresAt, "2026-01-01T00:29:00.000Z", "15 minutes after the text");
@@ -287,7 +287,7 @@ describe("paylink: the engine's own deadline", () => {
     await assert.rejects(late.engine.requestPayment(lateCall, request), /carrier down/);
     late.clock.advance(7 * 60_000);
     late.messages.sendText = lateSend;
-    assert.equal(late.payments.created[0]!.expiresAt, "2026-01-01T00:30:00.000Z", "never under the adapter's 30 minutes (review R8)");
+    assert.equal(late.payments.created[0]!.expiresAt, "2026-01-01T00:35:00.000Z", "never under the adapter's 30 minutes (review R8), with a margin");
     assert.equal((await late.engine.requestPayment(lateCall, request)).expiresAt, "2026-01-01T00:12:00.000Z", "5 minutes after the text");
   });
 
@@ -351,7 +351,7 @@ describe("paylink: the engine's own deadline", () => {
     const t = setup({ config: testConfig((c) => (c.modules.paylink = { settings: { linkLifeMinutes: 5 } })) });
     const callId = await verifiedCall(t);
     const { expiresAt } = await t.engine.requestPayment(callId, request);
-    assert.equal(t.payments.created[0]!.expiresAt, "2026-01-01T00:30:00.000Z", "Stripe Checkout's 30 minutes, not 10");
+    assert.equal(t.payments.created[0]!.expiresAt, "2026-01-01T00:35:00.000Z", "Stripe Checkout's 30 minutes plus a margin, not 10");
     assert.equal(expiresAt, "2026-01-01T00:05:00.000Z", "the engine still closes it at 5");
     const shortPayments = new FakePaymentLinks({ minLinkMinutes: 0, maxLinkMinutes: 20 });
     const short = setup({ adapters: { payments: shortPayments } });
@@ -389,6 +389,120 @@ describe("paylink: the engine's own deadline", () => {
       validateConfig(withFlow({ ...pay, mode: "cash" }), new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer"], capabilities: { payments: platformOnly }, modules: builtInModules() })),
       ["flows.deposit.steps[1] (paylink.request): mode must be connect or platform"],
     );
+  });
+
+  it("expires a request too old to create its link, never asking the provider for less than its minimum", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const create = t.payments.createLink.bind(t.payments);
+    t.payments.createLink = async () => {
+      throw new Error("provider timed out");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /provider timed out/);
+    t.payments.createLink = create;
+    // Asked for 00:35; at 00:05:01 less than the provider's 30 minutes is left.
+    t.clock.advance(5 * 60_000 + 1000);
+    await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /could not be created in time/));
+    assert.equal(t.payments.created.length, 0, "the provider was never asked for a time it refuses");
+    const expired = (await t.ledger.list()).find((e) => e.event === "payment.link_expired")!;
+    assert.deepEqual(expired.detail, { paymentId: "pay_1", provider: "not_created", reason: "not_created_in_time" });
+    assert.equal((await t.engine.state(callId)).phase, "open", "settled: a new request may follow");
+    assert.equal((await t.engine.requestPayment(callId, request)).status, "open");
+  });
+
+  it("leaves a link the provider no longer has open for its webhook, when it was too late to text", async () => {
+    const payments = new FakePaymentLinks({ minLinkMinutes: 0 });
+    const t = setup({ adapters: { payments }, config: testConfig((c) => (c.modules.paylink = { settings: { linkLifeMinutes: 5 } })) });
+    const callId = await verifiedCall(t);
+    const send = t.messages.sendText.bind(t.messages);
+    t.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
+    payments.settle("cs_fake_1");
+    t.clock.advance(12 * 60_000);
+    t.messages.sendText = send;
+    await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed"));
+    assert.equal((await t.ledger.list()).find((e) => e.event === "payment.link_expired")!.detail.provider, "not_open");
+    assert.equal((await t.engine.state(callId)).phase, "paying", "not settled: the provider's webhook will");
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" }), { applied: true, callId, status: "paid" });
+  });
+
+  it("never expires a link another process is texting under its lease", async () => {
+    const payments = new FakePaymentLinks({ minLinkMinutes: 0 });
+    const t = setup({ adapters: { payments }, config: testConfig((c) => (c.modules.paylink = { settings: { linkLifeMinutes: 5 } })) });
+    const callId = await verifiedCall(t);
+    const send = t.messages.sendText.bind(t.messages);
+    t.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
+    // Resume A claims the text at 00:04:30 (5.5 of 10 minutes left). B comes 40 seconds later, with
+    // under 5 minutes left: without the lease it would expire the link A is sending.
+    t.clock.advance(270_000);
+    let resumeB: Promise<unknown> | null = null;
+    t.messages.sendText = async (input) => {
+      t.clock.advance(40_000);
+      resumeB = t.engine.requestPayment(callId, request);
+      await assert.rejects(resumeB, rejects("precondition_failed", /another process is texting/));
+      return send(input);
+    };
+    assert.equal((await t.engine.requestPayment(callId, request)).status, "open", "A delivered it");
+    assert.ok(resumeB !== null);
+    assert.equal(payments.expired.length, 0, "B never expired the link A was sending");
+    // A sender that stopped: once its lease lapses, the next resume may expire the link.
+    const u = setup({ adapters: { payments: new FakePaymentLinks({ minLinkMinutes: 0 }) }, config: testConfig((c) => (c.modules.paylink = { settings: { linkLifeMinutes: 5 } })) });
+    const c2 = await verifiedCall(u);
+    u.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(u.engine.requestPayment(c2, request), /carrier down/);
+    u.clock.advance(4 * 60_000);
+    await assert.rejects(u.engine.requestPayment(c2, request), /carrier down/, "claimed at 00:04, then stopped");
+    u.clock.advance(2 * 60_000);
+    await assert.rejects(u.engine.requestPayment(c2, request), rejects("precondition_failed", /could not be texted in time/));
+  });
+
+  it("settles a too-old request once when two resumes find it at the same time", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const create = t.payments.createLink.bind(t.payments);
+    t.payments.createLink = async () => {
+      throw new Error("provider timed out");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /provider timed out/);
+    t.payments.createLink = create;
+    t.clock.advance(5 * 60_000 + 1000);
+    const both = await Promise.allSettled([t.engine.requestPayment(callId, request), t.engine.requestPayment(callId, request)]);
+    assert.deepEqual(both.map((r) => r.status), ["rejected", "rejected"]);
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "payment.link_expired").length, 1, "settled once");
+  });
+
+  it("does not text again a link another resume texted while this one was creating it", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const send = t.messages.sendText.bind(t.messages);
+    t.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
+    t.messages.sendText = send;
+    const create = t.payments.createLink.bind(t.payments);
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let creates = 0;
+    t.payments.createLink = async (input) => {
+      creates++;
+      if (creates === 1) await held;
+      return create(input);
+    };
+    const b = t.engine.requestPayment(callId, request);
+    await new Promise((resolve) => setImmediate(resolve));
+    const a = await t.engine.requestPayment(callId, request);
+    release();
+    assert.deepEqual(await b, a, "the same delivery, recorded once");
+    assert.equal(t.messages.sent.filter((m) => m.purpose === "payment_link").length, 2, "the text is idempotent by key; sent twice to the fake, once to a real carrier");
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "payment.link_sent").length, 1);
   });
 
   it("refuses on a call that started with paylink off", async () => {
