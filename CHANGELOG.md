@@ -25,6 +25,7 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Spoken answers (VER-3): `normaliseSpokenAnswer` reads Canadian postal codes, US ZIP codes and short references spoken in English or French, exactly or `unusable`, and the `spoken_knowledge` factor compares them like keypad fields under the policy's new `spoken` fields.
 
 ### Changed
 

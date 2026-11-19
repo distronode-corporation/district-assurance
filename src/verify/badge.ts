@@ -29,6 +29,7 @@ import {
   checkFactorPlugin,
   judgeKeypad,
   judgePin,
+  judgeSpoken,
   type BadgeSettings,
   type FactorEntry,
   type FactorPlugin,
@@ -272,6 +273,8 @@ function allowFactor(rt: EngineRuntime, record: CallRecord, kind: string): void 
 function maxAttempts(rt: EngineRuntime, module: BadgeModule, kind: string): number {
   if (kind === "keypad_knowledge") return rt.policy.maxKeypadAttemptsPerCall;
   if (kind === "pin") return rt.settings<BadgeSettings>(BADGE).pin!.maxAttemptsPerCall;
+  // A policy without spoken fields gives no attempts, so a spoken answer is never judged against nothing.
+  if (kind === "spoken_knowledge") return rt.policy.spoken?.maxAttemptsPerCall ?? 0;
   return module.plugin(kind)!.maxAttemptsPerCall;
 }
 
@@ -327,16 +330,18 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     const used = s.attempts[kind] ?? 0;
     if (used >= max) return null;
     s.attempts[kind] = used + 1;
-    return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch };
+    return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch, locale: draft.record.locale };
   });
   if (reserved === null) return { matched: false, locked: true };
-  const input = { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey, subject: reserved.subject, entry, hmac: (d: string) => rt.hmac(d) };
+  const input = { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey, subject: reserved.subject, entry, hmac: (d: string) => rt.hmac(d), locale: reserved.locale };
   const passed =
     kind === "keypad_knowledge"
       ? await judgeKeypad(rt.policy, input)
       : kind === "pin"
         ? await judgePin(rt, rt.settings<BadgeSettings>(BADGE).pin as PinSettings, input)
-        : (await plugin!.judge(input)) === true;
+        : kind === "spoken_knowledge"
+          ? await judgeSpoken(rt.policy.spoken!, input)
+          : (await plugin!.judge(input)) === true;
   await rt.update(callId, (draft) => {
     assertSameVerification(draft.slice<BadgeSlice>(BADGE), reserved.epoch);
     const factor = { kind, passed, at: rt.now() };

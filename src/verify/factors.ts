@@ -4,12 +4,13 @@
 // with `badgeModule({ factors: [...] })`.
 import type { SubjectRecord } from "../core/adapters.ts";
 import { hexDigestsEqual } from "../core/hash.ts";
-import { FACTOR_KINDS, FORBIDDEN_FACTOR_KINDS, type VerificationPolicy } from "../core/policy.ts";
+import { FACTOR_KINDS, FORBIDDEN_FACTOR_KINDS, type SpokenPolicy, type VerificationPolicy } from "../core/policy.ts";
 import { isIntegerIn } from "../core/shape.ts";
-import type { AdapterName, EngineRuntime } from "../core/runtime.ts";
+import type { AdapterName, EngineRuntime, Locale } from "../core/runtime.ts";
 import { isKeypadEntry, judgeKeypadWith } from "./knowledge.ts";
+import { normaliseSpokenAnswer } from "./spoken.ts";
 
-/** What the caller entered: one string (a PIN), or one value per field (keypad knowledge). */
+/** What the caller entered: one string (a PIN), or one value per field (keypad knowledge, spoken transcripts). */
 export type FactorEntry = string | Readonly<Record<string, string>>;
 
 export interface FactorJudgeInput {
@@ -22,6 +23,8 @@ export interface FactorJudgeInput {
   entry: FactorEntry;
   /** HMAC-SHA256 under the workspace's knowledge key, hex. */
   hmac(data: string): string;
+  /** The call's language, which decides how a spoken answer is read. */
+  locale: Locale;
 }
 
 /** A factor the caller enters and code judges. The engine counts each attempt before judging it. */
@@ -65,10 +68,13 @@ export const BUILT_IN_FACTORS: Readonly<Record<(typeof FACTOR_KINDS)[number], { 
   carrier_identity_match: { entered: false, adapters: ["carrier"] },
   photo_id: { entered: false, adapters: ["identity", "messages"] },
   text_code: { entered: false, adapters: ["messages"], planned: "VER-2" },
-  spoken_knowledge: { entered: true, adapters: [], planned: "VER-3" },
+  spoken_knowledge: { entered: true, adapters: [] },
 };
 
-/** Factors whose match lets the engine text the number on file (a link only goes out after one). */
+/**
+ * Factors whose match lets the engine text the number on file (a link only goes out after one). A
+ * spoken answer does not: speech-to-text hears it, and a postal code is known to more people.
+ */
 export const KNOWLEDGE_FACTORS: readonly string[] = ["keypad_knowledge", "pin"];
 
 const PLUGIN_KIND = /^[a-z][a-z0-9_]{2,31}$/;
@@ -104,4 +110,22 @@ export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: 
 export async function judgeKeypad(policy: VerificationPolicy, input: FactorJudgeInput): Promise<boolean> {
   const entries = typeof input.entry === "string" ? {} : input.entry;
   return judgeKeypadWith(input.hmac, input.subject, policy.keypadFields, entries);
+}
+
+/**
+ * The spoken knowledge factor's judge: every spoken field at once, one answer. Each transcript is
+ * normalised exactly (spoken.ts) and compared like a keypad field, as the keyed digest of
+ * `field:<name>:<value>` in constant time; an unusable answer does the same work and fails.
+ */
+export async function judgeSpoken(spoken: SpokenPolicy, input: FactorJudgeInput): Promise<boolean> {
+  const entries = typeof input.entry === "string" ? {} : input.entry;
+  const fields = Object.entries(spoken.fields);
+  let ok = input.subject !== null && fields.length > 0;
+  for (const [field, format] of fields) {
+    const answer = normaliseSpokenAnswer({ field: format, transcript: entries[field] ?? "", locale: input.locale });
+    const value = answer.status === "normalised" ? answer.value : "";
+    const match = hexDigestsEqual(input.hmac(`field:${field}:${value}`), input.subject?.knowledge[field] ?? "");
+    ok = ok && match && answer.status === "normalised";
+  }
+  return ok;
 }

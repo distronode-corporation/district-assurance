@@ -4,6 +4,7 @@
 // from them here, and a scope is allowed only when the level reaches the scope's minimum. Caller
 // ID is not a factor kind at all, so no policy can count it, and no factor plug-in may take a name
 // that means it (FORBIDDEN_FACTOR_KINDS).
+import { isIntegerIn, isObject, unknownKeys } from "./shape.ts";
 
 export type AssuranceLevel = 0 | 1 | 2 | 3;
 
@@ -73,6 +74,19 @@ export interface VerificationPolicy {
    * slip under the floor by its name. A class here can make a scope stricter, never looser.
    */
   scopeClasses?: Record<string, ScopeClass>;
+  /** The spoken fields judged together as one spoken_knowledge factor. Without them, spoken answers are never judged. */
+  spoken?: SpokenPolicy;
+}
+
+/** The formats a spoken answer is normalised to (src/verify/spoken.ts). */
+export const SPOKEN_FORMATS = ["ca_postal_code", "us_zip_code", "reference"] as const;
+export type SpokenFormat = (typeof SPOKEN_FORMATS)[number];
+
+export interface SpokenPolicy {
+  /** Field name to its format, for example `{ "postal_code": "ca_postal_code" }`. Never a keypad field too. */
+  fields: Record<string, SpokenFormat>;
+  /** Spoken attempts allowed per call before the line stops judging, 1 to 5. */
+  maxAttemptsPerCall: number;
 }
 
 /**
@@ -163,7 +177,7 @@ export function validatePolicy(
     if (seen.has(r.level)) errors.push(`level ${r.level} is defined twice`);
     seen.add(r.level);
     if (sets.length === 0) errors.push(`level ${r.level} has no factor sets`);
-    for (const set of sets) errors.push(...checkFactorSet(r.level, set, knownFactors));
+    for (const set of sets) errors.push(...checkFactorSet(r.level, set, knownFactors, p.spoken !== undefined));
   }
   const classes = p.scopeClasses;
   const classesOk = classes === undefined || (typeof classes === "object" && classes !== null && !Array.isArray(classes));
@@ -199,12 +213,30 @@ export function validatePolicy(
   if (!Number.isInteger(attempts) || (attempts as number) < 1 || (attempts as number) > MAX_KEYPAD_ATTEMPTS) {
     errors.push(`maxKeypadAttemptsPerCall must be an integer from 1 to ${MAX_KEYPAD_ATTEMPTS}`);
   }
+  if (p.spoken !== undefined) errors.push(...spokenErrors(p.spoken, Array.isArray(p.keypadFields) ? p.keypadFields : []));
   if (typeof p.simSwapWindowHours !== "number" || !(p.simSwapWindowHours > 0)) errors.push("simSwapWindowHours must be a positive number");
   if (typeof p.trustTextCodeWithoutCarrierCheck !== "boolean") errors.push("trustTextCodeWithoutCarrierCheck must be true or false");
   return errors;
 }
 
-function checkFactorSet(level: number, set: string[], knownFactors: readonly string[]): string[] {
+/** The spoken fields, each with a known format and none a keypad field too, and the attempt limit. */
+function spokenErrors(spoken: unknown, keypadFields: readonly unknown[]): string[] {
+  if (!isObject(spoken)) return ["spoken must be { fields, maxAttemptsPerCall }"];
+  const errors = unknownKeys(spoken, ["fields", "maxAttemptsPerCall"]).map((k) => `spoken.${k} is not a spoken setting`);
+  const formats = SPOKEN_FORMATS.join(", ");
+  if (!isObject(spoken.fields) || Object.keys(spoken.fields).length === 0) {
+    errors.push(`spoken.fields must map at least one field name to a format (${formats})`);
+  } else {
+    for (const [field, format] of Object.entries(spoken.fields)) {
+      if (!(SPOKEN_FORMATS as readonly unknown[]).includes(format)) errors.push(`spoken.fields.${field} must be one of ${formats}`);
+      if (keypadFields.includes(field)) errors.push(`spoken.fields.${field} is also a keypad field`);
+    }
+  }
+  if (!isIntegerIn(spoken.maxAttemptsPerCall, 1, 5)) errors.push("spoken.maxAttemptsPerCall must be an integer from 1 to 5");
+  return errors;
+}
+
+function checkFactorSet(level: number, set: string[], knownFactors: readonly string[], hasSpoken: boolean): string[] {
   const errors: string[] = [];
   const label = `level ${level} set [${set.join(", ")}]`;
   if (set.length === 0) return [`level ${level} has an empty factor set`];
@@ -217,6 +249,9 @@ function checkFactorSet(level: number, set: string[], knownFactors: readonly str
     errors.push(`${label}: level 2 and above need a factor that is not something the caller knows (${NON_KNOWLEDGE_FACTORS.join(", ")})`);
   }
   if (set.length === 1 && set[0] === "text_code") errors.push(`${label}: a texted code is never a factor on its own`);
+  // A spoken answer counts on its own only at level 1: above it, the rules before this one need a
+  // second factor, and one that is not something the caller knows.
+  if (set.includes("spoken_knowledge") && !hasSpoken) errors.push(`${label}: spoken_knowledge needs the policy's spoken fields`);
   if (level === 3 && !set.includes("photo_id")) errors.push(`${label}: level 3 needs photo_id`);
   return errors;
 }

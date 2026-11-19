@@ -39,14 +39,16 @@ Trying account numbers to learn which exist, or learning which factor failed. **
 keypad fields are judged together and give one answer; an unknown account, a wrong value and a
 non-keypad entry give the same result and the same ledger detail (tested), and the same holds for
 the PIN: an unknown subject, a subject with no PIN and a malformed entry do the same keyed-hash work
-and answer the same (tested); every field is compared even after a mismatch; nothing reads back a value on file; links go out only after a match, so a
+and answer the same (tested), and for spoken answers: an unknown subject, a wrong answer and an
+unusable transcript give the same result and the same ledger detail (tested); every field is compared even after a mismatch; nothing reads back a value on file; links go out only after a match, so a
 text never confirms an account. Planned: per-subject and per-number counters across calls (VER-1).
 
 ### Guessing
 
 **Controls:** a per-call limit on judged attempts for every factor the caller enters (keypad
-knowledge, the PIN at 1 to 5, plug-ins at 1 to 5), after which the line stops judging, even the
-right answer (tested). Each attempt is counted in its own write before it is judged, so a crash, a
+knowledge, the PIN at 1 to 5, spoken answers at 1 to 5, plug-ins at 1 to 5), after which the line
+stops judging, even the right answer (tested). An unusable spoken answer is still an attempt
+(tested). Each attempt is counted in its own write before it is judged, so a crash, a
 failing PIN verifier or a second process never gives a free try (tested, two engines on one
 store). PINs are at least 4 digits, and keypad attempts are capped at 5 per call like the PIN's.
 **Hard gate:** durable lockout across calls (VER-1) must be merged before any host runs the
@@ -54,6 +56,19 @@ owner-command flow, or any PIN factor, on a live line. Without it, a 4-digit PIN
 per call falls within about 3,300 calls, half that on average. In `verifier` mode the host's PIN
 store is asked for every attempt, with a stand-in for a malformed entry, so timing does not tell
 them apart.
+
+### Spoken answers
+
+A postal code or a reference said aloud is heard by speech-to-text, can reach the model and the
+transcript, and is known to more people than a keypad value. Misrecognition must never turn into a
+pass. **Controls:** `normaliseSpokenAnswer` is exact: a fixed vocabulary per language, a fixed
+format per field, and anything else is `unusable`, never a near match (a corpus of English and
+French transcripts, misrecognitions included, is tested). The value is compared like a keypad
+field, as a keyed digest in constant time, and never stored or logged. A spoken answer counts on
+its own only at level 1; above it, the policy needs another factor that is not knowledge
+(tested). A spoken match does not unlock texts to the number on file (tested). A policy without
+spoken fields never judges one (tested). Left to the host: passing the caller's answer from its
+speech pipeline in a code path, never through the model, and keeping it out of stored transcripts.
 
 ### SIM swap and port-out
 

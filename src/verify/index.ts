@@ -3,3 +3,4 @@ export { BADGE, BadgeModule, badgeModule, type BadgeSlice, type BadgeVerifyStep,
 export * from "./factors.ts";
 export * from "./knowledge.ts";
 export * from "./later.ts";
+export * from "./spoken.ts";

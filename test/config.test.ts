@@ -167,7 +167,6 @@ describe("validateConfig: modules", () => {
       "modules.badge.settings: factors has duplicates",
       "modules.badge.settings: factor caller_id is not installed",
       "modules.badge.settings: factor text_code is not built yet (VER-2)",
-      "modules.badge.settings: factor spoken_knowledge is not built yet (VER-3)",
       "modules.badge.settings: pin settings are required when the pin factor is on",
       "modules.badge.settings: grantTtlSeconds must be an integer from 1 to 3600",
     ]);
