@@ -99,8 +99,9 @@ table does not list, a missing value and a value the host cannot read all map to
 | Twilio `StirVerstat`: `TN-Validation-Passed-A`, `-B`, `-C` | `A`, `B`, `C` |
 | Twilio `StirVerstat`: `TN-Validation-Failed-A`, `-B`, `-C`, `TN-Validation-Failed` | `failed` |
 | Twilio `StirVerstat`: `No-TN-Validation`, or no `StirVerstat` | `none` |
-| Telnyx SIP `verstat=TN-Validation-Passed`, with the attestation level from Telnyx's call record (`A`, `B` or `C`) | `A`, `B`, `C` |
-| Telnyx SIP `verstat=TN-Validation-Passed` with no level known | `none` |
+| Telnyx SIP `verstat=TN-Validation-Passed` | `A` |
+| Telnyx SIP `verstat=TN-Validation-Passed-B` | `B` |
+| Telnyx SIP `verstat=TN-Validation-Passed-C` | `C` |
 | Telnyx SIP `verstat=TN-Validation-Failed` | `failed` |
 | Telnyx SIP `verstat=No-TN-Validation`, or no `verstat` | `none` |
 

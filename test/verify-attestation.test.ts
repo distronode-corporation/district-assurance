@@ -95,6 +95,8 @@ describe("Caller ID attestation", () => {
     await assert.rejects(t.engine.startCall({ callId: "c1", attestation: "failed" }), rejects("invalid_input", /exists/));
     await assert.rejects(t.engine.startCall({ callId: "c2", attestation: "D" as Attestation }), rejects("invalid_input", /attestation must be A, B, C, failed or none/));
     await assert.rejects(t.engine.state("c2"), rejects("unknown_call"));
+    await assert.rejects(t.engine.startCall({ callId: "c3", attestation: null as unknown as Attestation }), rejects("invalid_input", /attestation must be A, B, C, failed or none/));
+    await assert.rejects(t.engine.state("c3"), rejects("unknown_call"));
     const started = (await t.ledger.list()).filter((e) => e.event === "call.started");
     assert.deepEqual(started.map((e) => e.detail.attestation), ["A"]);
     const receipt = (await t.engine.endCall("c1"))!;

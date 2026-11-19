@@ -175,7 +175,7 @@ export class Engine {
    * cap the call's level under the policy's `attestationCaps`, never raise it.
    */
   async startCall(input: { callId?: string; locale?: Locale; flow?: string; attestation?: Attestation } = {}): Promise<SessionState> {
-    const attestation = input.attestation ?? "none";
+    const attestation = input.attestation === undefined ? "none" : input.attestation;
     if (!(ATTESTATIONS as readonly unknown[]).includes(attestation)) throw new EngineError("invalid_input", "attestation must be A, B, C, failed or none");
     const callId = input.callId ?? this.#ids.next("call");
     const modules: Record<string, JsonValue> = {};
