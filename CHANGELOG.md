@@ -26,8 +26,9 @@ All notable changes to this project are documented here. The format follows
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
 - SRV-9: the reference server serves the host's own `/.well-known/security.txt` (RFC 9116) from its
-  `securityTxt` settings, refusing at start an `Expires` in the past or over a year ahead and
-  warning within 30 days; SECURITY.md adds the scope and a thanks list.
+  `securityTxt` settings, refusing at start an `Expires` in the past or over a year ahead, or this
+  project's own reporting address, and warning within 30 days (also once when a running server
+  gets there, and once at expiry); SECURITY.md adds the scope and a thanks list.
 
 ### Changed
 

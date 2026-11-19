@@ -54,6 +54,13 @@ const TEXT_HEADERS = {
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const WARN_MS = 30 * DAY_MS;
+
+/**
+ * This project's own reporting addresses (SECURITY.md). A host that copies one into its settings
+ * would send reports about its deployment to this project, so they are refused.
+ */
+const PROJECT_ADDRESSES: readonly RegExp[] = [/opensource@distronode\.com/i, /github\.com\/distronode-corporation\/district-assurance(?![\w.-])/i];
 
 /**
  * A URI of an allowed scheme, on one line of printable ASCII, so it can never add a field of its
@@ -70,6 +77,18 @@ function checkUri(field: string, value: string, schemes: readonly string[]): voi
   const malformedWeb = scheme === "https:" && !/^https:\/\/[^/]/i.test(value);
   if (!/^[\x21-\x7e]+$/.test(value) || !schemes.includes(scheme) || malformedWeb) {
     throw new Error(`securityTxt: ${field} must be a ${schemes.join(" or ")} URI on one line`);
+  }
+  if (PROJECT_ADDRESSES.some((p) => p.test(decodeURIComponentSafe(value)))) {
+    throw new Error(`securityTxt: ${field} is this project's address; a security.txt names the host's own contacts`);
+  }
+}
+
+/** The value with percent escapes decoded where they decode, so an escaped `@` is still seen. */
+function decodeURIComponentSafe(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
   }
 }
 
@@ -91,12 +110,16 @@ export function securityTxt(settings: SecurityTxtSettings, now: Date, warn: (mes
   // Whole seconds drop the `.000`; any other milliseconds stay, so the file never advertises an
   // expiry earlier than the one the route enforces.
   const stamp = settings.expires.toISOString().replace(/\.000Z$/, "Z");
-  if (expires - now.getTime() <= 30 * DAY_MS) warn(`security.txt expires at ${stamp}: renew it before then`);
+  if (expires - now.getTime() <= WARN_MS) warn(expiryWarning(settings.expires));
   const lines = settings.contact.map((c) => `Contact: ${c}`);
   lines.push(`Expires: ${stamp}`);
   if (settings.policy !== undefined) lines.push(`Policy: ${settings.policy}`);
   if (settings.canonical !== undefined) lines.push(`Canonical: ${settings.canonical}`);
   return lines.join("\n") + "\n";
+}
+
+function expiryWarning(expires: Date): string {
+  return `security.txt expires at ${expires.toISOString().replace(/\.000Z$/, "Z")}: renew it before then`;
 }
 
 /** On every JSON answer: never sniffed as anything else, never framed, never cached. */
@@ -130,8 +153,26 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   const maxBody = options.maxBodyBytes ?? 64 * 1024;
   const files = options.ui === undefined ? new Map<string, StaticFile>() : loadStaticFiles();
   const security = options.securityTxt;
-  const securityFile =
-    security === undefined ? null : { text: securityTxt(security, options.clock.now(), options.warn ?? console.warn), expires: security.expires.getTime() };
+  const warn = options.warn ?? console.warn;
+  const startedAt = options.clock.now();
+  const securityFile = security === undefined ? null : { text: securityTxt(security, startedAt, warn), expires: security.expires.getTime() };
+  // A server that runs into the last 30 days, or past the expiry, says so once each, on the first
+  // request for the file after it happens: the start-up check alone would never see it.
+  let warnedSoon = securityFile !== null && securityFile.expires - startedAt.getTime() <= WARN_MS;
+  let warnedExpired = false;
+  const securityRequested = (now: number): boolean => {
+    const file = securityFile!;
+    if (now >= file.expires) {
+      if (!warnedExpired) warn(`security.txt expired at ${security!.expires.toISOString()}: it is no longer served; renew it`);
+      warnedExpired = true;
+      return false;
+    }
+    if (!warnedSoon && file.expires - now <= WARN_MS) {
+      warn(expiryWarning(security!.expires));
+      warnedSoon = true;
+    }
+    return true;
+  };
 
   async function stripeWebhook(req: IncomingMessage, route: "identity" | "payments"): Promise<[number, Json]> {
     const payload = await readBody(req, maxBody);
@@ -207,7 +248,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       return [200, { keys: options.engine.receiptKeys() }];
     }
     // The host's own file only, and none once it has expired while the server kept running.
-    if (path === "/.well-known/security.txt" && securityFile !== null && options.clock.now().getTime() < securityFile.expires) {
+    if (path === "/.well-known/security.txt" && securityFile !== null && securityRequested(options.clock.now().getTime())) {
       expect("GET");
       return { text: securityFile.text };
     }

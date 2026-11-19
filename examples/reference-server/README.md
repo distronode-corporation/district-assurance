@@ -76,14 +76,16 @@ createReferenceServer({
 ```
 
 - Without `securityTxt` there is no such route (`404`). There is no default: a security.txt speaks
-  only for the domain it is served from, so it is never this project's address. Reports about this
-  code go through [SECURITY.md](../../SECURITY.md).
+  only for the domain it is served from, so it is never this project's address, and settings that
+  name this project's own reporting address (its email or its GitHub repository) are refused at
+  start. Reports about this code go through [SECURITY.md](../../SECURITY.md).
 - A contact is a `mailto:`, `tel:` or `https:` URI; `policy` and `canonical` are `https:` URLs.
   Each must be one line of printable ASCII, so a value cannot add a field of its own.
 - The settings are checked when the server is created, on its clock. An `expires` that is not in
   the future, or more than a year ahead (the RFC's advice), is refused with an error, so the server
-  does not start. One within 30 days starts with a warning through `warn`. A server still running
-  when `expires` passes stops serving the file.
+  does not start. One within 30 days starts with a warning through `warn`. A server that runs into
+  the last 30 days warns once, on the first request for the file after that, and one still running
+  when `expires` passes stops serving the file and warns once more.
 - RFC 9116 requires HTTPS. This server speaks plain HTTP, so the host's TLS front end serves the
   file to the world. Signing it (an OpenPGP cleartext signature, which the RFC recommends) is the
   host's too: this server serves the file unsigned, and a host that signs it serves its signed

@@ -200,6 +200,37 @@ describe("reference server security.txt", () => {
     assert.equal(warnings.length, 2, "the server warns through its warn option");
   });
 
+  it("refuses this project's own reporting address, however it is written", () => {
+    const clock = new FixedClock();
+    const make = (extra: Partial<SecurityTxtSettings>) => () => securityTxt(settings(clock, 200, extra), clock.now(), () => {});
+    for (const contact of [
+      "mailto:opensource@distronode.com",
+      "mailto:OpenSource@Distronode.com?subject=report",
+      "mailto:opensource%40distronode.com",
+      "https://github.com/distronode-corporation/district-assurance/security/advisories/new",
+    ]) {
+      assert.throws(make({ contact: [contact] }), /contact is this project's address/, contact);
+    }
+    assert.throws(make({ policy: "https://github.com/distronode-corporation/district-assurance/blob/main/SECURITY.md" }), /policy is this project's address/);
+    assert.doesNotThrow(make({ contact: ["https://github.com/distronode-corporation/district-assurance-host/security"] }), "a host's own repository is fine");
+    assert.doesNotThrow(make({ contact: ["mailto:a%ZZ@example.test"] }), "a value that does not decode is checked as written");
+  });
+
+  it("warns once when a running server reaches the last 30 days, and once when the file expires", async (t) => {
+    const clock = new FixedClock();
+    const warnings: string[] = [];
+    const s = await start({ clock, securityTxt: settings(clock, 60), warn: (m) => warnings.push(m) });
+    t.after(() => s.close());
+    assert.equal((await s.get()).status, 200);
+    assert.deepEqual(warnings, [], "60 days out: no warning");
+    clock.advance(30 * DAY);
+    for (let i = 0; i < 2; i++) assert.equal((await s.get()).status, 200);
+    assert.deepEqual(warnings, ["security.txt expires at 2026-03-02T00:00:00Z: renew it before then"]);
+    clock.advance(30 * DAY);
+    for (let i = 0; i < 2; i++) assert.equal((await s.get()).status, 404);
+    assert.deepEqual(warnings.slice(1), ["security.txt expired at 2026-03-02T00:00:00.000Z: it is no longer served; renew it"]);
+  });
+
   it("warns through console.warn by default", (t) => {
     const clock = new FixedClock();
     const spy = t.mock.method(console, "warn", () => {});
