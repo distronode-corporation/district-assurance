@@ -20,7 +20,7 @@ import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
 import { ATTESTATIONS, capCallLevel, scopeClass, scopesForLevel, type AssuranceLevel, type Attestation, type ScopeClass, type VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
-import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
+import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallDraft, type CallRecord, type EngineAdapters, type FlowCharge, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
 import * as dossier from "./file/dossier.ts";
@@ -39,7 +39,7 @@ import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
 import * as callback from "./verify/callback.ts";
 import type { CallbackOutcome } from "./verify/callback.ts";
-import { FLOW_START, claimNotice, counterKeys, flowStartLimited, isCallingNumber, lockoutOf, recordFlowStarts, unlockCounter } from "./verify/counters.ts";
+import { FLOW_START, claimNotice, counterKeys, flowStartLimited, hourStart, isCallingNumber, lockoutOf, recordFlowStarts, unlockCounter } from "./verify/counters.ts";
 import { pinTag, type BadgeSettings, type FactorEntry, type FactorPlugin, type PinOutcome } from "./verify/factors.ts";
 import { clearsSoFar, duressFlagKey, flagDuress } from "./verify/duress-flag.ts";
 import { knowledgeHmac, type KnowledgeHmac, type KnowledgeKey } from "./verify/knowledge.ts";
@@ -73,7 +73,9 @@ const UNCOUNTED: FlowStart = { over: null, counted: null, recorded: null };
  */
 type WriteOutcome = { write: "none" | "saved" | "unknown" };
 
-const counterId = (key: AttemptCounterKey): string => `${key.scope}:${key.key}`;
+const counterId = (key: { scope: string; key: string }): string => `${key.scope}:${key.key}`;
+
+const sameCharge = (a: FlowCharge, b: FlowCharge): boolean => a.scope === b.scope && a.key === b.key && a.at === b.at;
 
 export interface EngineOptions {
   workspaceId: string;
@@ -167,6 +169,8 @@ export class Engine {
   readonly #notifyTimeoutMs: number;
   /** Badge as installed now: a new build replaces it when a factor is added (`useFactor`, `use`). */
   #badge: badge.BadgeModule;
+  /** The registry's replace for a built-in module, which only this engine holds (`#swapBadge`). */
+  #replaceBuiltIn!: (module: AssuranceModule) => void;
   readonly #rt: EngineRuntime;
   /** Duress alerts this engine is sending now, by id, with when it started: one send at a time, retried after a while. */
   readonly #sending = new Map<string, number>();
@@ -236,7 +240,13 @@ export class Engine {
           : (value as { capabilities?: unknown }).capabilities;
     }
     this.#receiptModules = builtInModules(this.#badge);
-    this.registry = new ModuleRegistry({ adapters: present, capabilities, reserved: BUILT_IN_MODULES, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
+    this.registry = new ModuleRegistry({
+      adapters: present,
+      capabilities,
+      reserved: BUILT_IN_MODULES,
+      modules: [...this.#receiptModules, ...(options.modules ?? [])],
+      grantReplace: (replace) => (this.#replaceBuiltIn = replace),
+    });
     // This engine's own build of Badge, running the judges the outside modules given here supply.
     // A Badge shared by several engines never gains a factor through one of them.
     this.#swapBadge(this.#badge.withOutsideFactors(this.registry.factorPlugins()));
@@ -306,7 +316,7 @@ export class Engine {
 
   /** Puts a new build of Badge in place of the old, in the registry (when Badge is installed) and for the runtime. */
   #swapBadge(next: badge.BadgeModule): void {
-    if (this.registry.get(badge.BADGE) === this.#badge) this.registry.replace(next);
+    if (this.registry.get(badge.BADGE) === this.#badge) this.#replaceBuiltIn(next);
     this.#receiptModules = this.#receiptModules.map((m) => (m === this.#badge ? next : m));
     this.#badge = next;
   }
@@ -394,11 +404,18 @@ export class Engine {
       if ((await this.#sessions.get(this.workspaceId, callId)) !== null) return null;
       start = await this.#countFlowStart(record, flow.name, { steps: flow.steps });
     }
-    const draft = this.#draft(record, events);
-    if (flow !== null) this.#attachFlow(draft, flow.name, { steps: flow.steps }, flow.revision, start);
-    then(draft);
-    this.#advance(draft);
-    record.outbox = await Promise.all(events.map((event, i) => this.#outboxEntry(callId, 1, i, event)));
+    try {
+      const draft = this.#draft(record, events);
+      // Checked again for real: a module can be turned off while the start was being counted.
+      if (flow !== null) this.#attachFlow(draft, flow.name, { steps: flow.steps }, flow.revision, start);
+      then(draft);
+      this.#advance(draft);
+      record.outbox = await Promise.all(events.map((event, i) => this.#outboxEntry(callId, 1, i, event)));
+    } catch (error) {
+      // Nothing was written: the start is given back.
+      await this.#uncount(start);
+      throw error;
+    }
     let created: boolean;
     try {
       created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
@@ -638,25 +655,66 @@ export class Engine {
     await badge.beginVerification(this.#rt, callId, input);
     // Once verification names a subject (or brings a number), a flow with an hourly limit is
     // counted on that counter too, once per call; over the limit, the flow fails and the host gets
-    // the same `rate_limited` as a refused start.
-    const record = await this.#read(callId);
-    const flow = record.flow;
-    // A flow started before `counted` existed (undefined) was never counted: it stays as it was. [] is a new limited flow.
-    if (flow === null || flow.counted === null || flow.counted === undefined) return;
-    const keys = counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice).filter((key) => !flow.counted!.includes(counterId(key)));
-    if (keys.length === 0) return;
-    const { over } = await this.#countStarts(keys);
+    // the same `rate_limited` as a refused start. Each counter is reserved on the call (in `counted`,
+    // and in `charging` until charged) in one write before it is charged, so of two overlapping
+    // calls only the one whose write took it charges it.
+    const at = this.#clock.now().toISOString();
+    const owed = await this.#update(callId, (draft) => {
+      const flow = draft.record.flow;
+      // A flow started before `counted` existed (undefined) was never counted: it stays as it was. [] is a new limited flow.
+      if (flow === null || flow.counted === null || flow.counted === undefined) return [];
+      const counted = flow.counted;
+      const fresh: FlowCharge[] = counterKeys(this.workspaceId, FLOW_START, draft.record.modules[badge.BADGE] as unknown as badge.BadgeSlice)
+        .filter((key) => !counted.includes(counterId(key)))
+        .map((key) => ({ scope: key.scope, key: key.key, at }));
+      // A charge that threw is resumed here, once: taking it back off `failed` claims it.
+      const resumed = (flow.charging ?? []).filter((charge) => charge.failed === true);
+      for (const charge of resumed) delete charge.failed;
+      counted.push(...fresh.map(counterId));
+      if (fresh.length > 0) flow.charging = [...(flow.charging ?? []), ...fresh];
+      return [...resumed, ...fresh];
+    });
+    if (owed.length === 0) return;
+    let over: AttemptCounterKey["scope"] | null;
+    try {
+      over = await this.#chargeLate(owed);
+    } catch (error) {
+      // Left owed, marked for the next beginVerification to charge again. A charge that recorded and
+      // then lost its reply is charged twice: an entry at its time could be another call's, so the safe side.
+      await this.#update(callId, (draft) => {
+        for (const charge of draft.record.flow!.charging!) if (owed.some((o) => sameCharge(o, charge))) charge.failed = true;
+      });
+      throw error;
+    }
     await this.#update(callId, (draft) => {
       const current = draft.record.flow!;
-      if (over === null) {
-        current.counted!.push(...keys.map(counterId));
-        return;
-      }
+      const left = current.charging!.filter((charge) => !owed.some((o) => sameCharge(o, charge)));
+      if (left.length > 0) current.charging = left;
+      else delete current.charging;
+      if (over === null) return;
       // Fails closed, whatever another process did to the flow meanwhile.
       current.status = "failed";
       draft.emit("flow.rate_limited", "code", { flow: current.name, scope: over });
     });
     if (over !== null) throw new RateLimitedError(callId);
+  }
+
+  /**
+   * Charges late flow counters reserved on a call, each at its reserved time: refused, and none
+   * charged, when one is at its limit.
+   */
+  async #chargeLate(owed: readonly FlowCharge[]): Promise<AttemptCounterKey["scope"] | null> {
+    const limits = lockoutOf(this.#rt.settings<BadgeSettings>(badge.BADGE).lockout).flowStartsPerHour;
+    const counters = this.#adapters.counters!;
+    const keyOf = (charge: FlowCharge): AttemptCounterKey => ({ workspaceId: this.workspaceId, factor: FLOW_START, scope: charge.scope, key: charge.key });
+    const limited = await flowStartLimited(counters, limits, owed.map(keyOf), this.#clock.now());
+    if (limited !== null) return limited;
+    let over: AttemptCounterKey["scope"] | null = null;
+    for (const charge of owed) {
+      const starts = await counters.recordFailure(keyOf(charge), charge.at, hourStart(new Date(charge.at)));
+      if (over === null && starts.length > limits[charge.scope]) over = charge.scope;
+    }
+    return over;
   }
 
   /** Judges every keypad field at once. The answer is the same for an unknown account and a wrong value. */

@@ -271,12 +271,26 @@ export class ModuleRegistry {
   /** The judges each module supplied, as they were checked when it was installed. */
   readonly #judges = new Map<string, readonly FactorPlugin[]>();
 
-  constructor(options: { adapters?: Iterable<string>; capabilities?: Readonly<Record<string, unknown>>; modules?: readonly AssuranceModule[]; reserved?: readonly string[] } = {}) {
+  /**
+   * `grantReplace`, when given, receives the one function that can replace a reserved module (the
+   * engine's own new build of Badge): `replace` refuses those names, so a host holding the registry
+   * can never put a module of its own in a built-in's place.
+   */
+  constructor(
+    options: {
+      adapters?: Iterable<string>;
+      capabilities?: Readonly<Record<string, unknown>>;
+      modules?: readonly AssuranceModule[];
+      reserved?: readonly string[];
+      grantReplace?: (replace: (module: AssuranceModule) => void) => void;
+    } = {},
+  ) {
     this.adapters = new Set(options.adapters ?? []);
     this.capabilities = structuredClone(options.capabilities ?? {});
     this.#reserved = new Set(options.reserved ?? []);
     for (const module of options.modules ?? []) this.use(module);
     this.#sealed = true;
+    options.grantReplace?.((module) => this.#replace(module));
   }
 
   /** Installs a module. Refuses a bad or clashing manifest, or bad factor judges, with every problem. */
@@ -293,6 +307,11 @@ export class ModuleRegistry {
    * factor), checked against the other modules as a new one would be. It keeps its place in the order.
    */
   replace(module: AssuranceModule): void {
+    if (this.#reserved.has(module.manifest.name)) throw new EngineError("invalid_input", `${module.manifest.name} is a built-in module: only its engine replaces it`);
+    this.#replace(module);
+  }
+
+  #replace(module: AssuranceModule): void {
     const name = module.manifest.name;
     const current = this.#modules.get(name);
     if (current === undefined) throw new EngineError("invalid_input", `no module named ${name} is installed`);
@@ -309,7 +328,8 @@ export class ModuleRegistry {
     const judges = given === undefined ? undefined : Array.from(given, snapshotFactorPlugin);
     const errors = [...checkManifest(module.manifest, others), ...judgeListErrors(module.manifest, judges)];
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
-    return judges ?? [];
+    // Frozen: the list judgesOf hands out is the one Badge's rebuilds and removal read.
+    return Object.freeze(judges ?? []);
   }
 
   /** Uninstalls a module. The ledger's module cannot be removed. */
