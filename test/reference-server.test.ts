@@ -139,12 +139,11 @@ describe("example door relay", () => {
 describe("demo and Stripe adapters", () => {
   it("runs the owner-command, deposit (both modes) and entry flows end to end", async () => {
     const result = await runDemo(false);
-    assert.equal(result.ownerAuthorized, true);
+    assert.equal(result.checksOk, true);
     assert.equal(result.receipt.body.payments[0]!.mode, "platform");
     assert.equal(result.connectReceipt.body.payments[0]!.mode, "connect");
     assert.equal(result.connectReceipt.body.payments[0]!.status, "paid");
     assert.deepEqual(result.doorOpened, ["door-1"], "opened once, the replay and the changed grant refused");
-    assert.equal(result.replayRefused, true);
     assert.equal(result.ownerReceipt, null, "owner-command has no receipt step");
     assert.equal(result.tamperedFails, true);
     assert.equal(result.chainOk, true);

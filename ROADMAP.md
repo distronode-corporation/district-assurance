@@ -98,6 +98,7 @@ roadmap are done here.
 | Ledger always on | `src/prove/trace.ts`, `src/core/config.ts` | Trace cannot be turned off or removed, an engine without a ledger is refused (`test/config.test.ts`, `test/engine.test.ts`) |
 | Outside modules | `Engine.use`, `Engine.updateModule` | an outside step in a flow, its ledger events, guards (`test/flows.test.ts`) |
 | Demo | `examples/reference-server/src/demo.ts`, `flows.ts` | `owner-command` on two engines sharing one store, then `deposit` end to end (`test/reference-server.test.ts`, `npm run demo`) |
+| Demo UI | `examples/reference-server/src/script.ts`, `demo-runs.ts`, `static.ts`, `public/` | every demo flow step by step over a real socket, the file allow-list, traversal refused, CSP and host checks, the page's receipt and ledger checks against the engine's (`test/reference-ui.test.ts`) |
 
 ## Milestones and issues
 

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>District Assurance demo</title>
+    <link rel="stylesheet" href="/style.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to the demo</a>
+    <header class="masthead">
+      <h1>District Assurance demo</h1>
+      <p>
+        A scripted call on the reference server, one step at a time. Pre-alpha: fake adapters, a
+        made-up caller, and nothing leaves this machine.
+      </p>
+    </header>
+
+    <main id="main">
+      <section class="card" aria-labelledby="pick-heading">
+        <h2 id="pick-heading">1. Pick a flow</h2>
+        <form id="pick" novalidate>
+          <fieldset>
+            <legend>Flow</legend>
+            <div id="flows" class="choices">
+              <p class="muted" id="flows-loading">Loading the flows...</p>
+            </div>
+          </fieldset>
+          <button type="submit" id="start">Start a run</button>
+        </form>
+      </section>
+
+      <section class="card" id="run" aria-labelledby="run-heading" hidden>
+        <h2 id="run-heading" tabindex="-1">2. Run it, step by step</h2>
+        <p id="run-summary"></p>
+        <ol id="steps" class="steps"></ol>
+        <div class="actions">
+          <button type="button" id="next">Run the next step</button>
+          <button type="button" id="rest" class="secondary">Run the remaining steps</button>
+        </div>
+      </section>
+
+      <p id="announce" class="announce" role="status" aria-live="polite" aria-atomic="true"></p>
+
+      <div class="panels" id="panels" hidden>
+        <section class="card" aria-labelledby="state-heading">
+          <h2 id="state-heading">Session state</h2>
+          <dl id="state" class="facts"></dl>
+          <details>
+            <summary>The session state as JSON</summary>
+            <pre id="state-json" tabindex="0"></pre>
+          </details>
+        </section>
+
+        <section class="card" aria-labelledby="ledger-heading">
+          <h2 id="ledger-heading">Ledger entries</h2>
+          <p id="chain"></p>
+          <div class="table-wrap" role="region" aria-labelledby="ledger-heading" tabindex="0">
+            <table>
+              <caption>This call's entries in the hash-chained audit ledger, oldest first. Each hash is recomputed by this page.</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Seq</th>
+                  <th scope="col">Event</th>
+                  <th scope="col">Actor</th>
+                  <th scope="col">Detail</th>
+                  <th scope="col">Hash</th>
+                  <th scope="col">Recomputed</th>
+                </tr>
+              </thead>
+              <tbody id="ledger"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="receipt-heading">
+          <h2 id="receipt-heading" tabindex="-1">Signed receipt</h2>
+          <p id="receipt-status">The receipt is signed when the call ends.</p>
+          <button type="button" id="receipt-retry" class="secondary" hidden>Fetch and check the receipt again</button>
+          <div id="receipt-check" class="verdict" hidden></div>
+          <button type="button" id="tamper" class="secondary" hidden>Change one character and check again</button>
+          <p id="tamper-result" class="verdict" hidden></p>
+          <details id="receipt-details" open hidden>
+            <summary>The receipt as JSON</summary>
+            <pre id="receipt-json" tabindex="0"></pre>
+          </details>
+        </section>
+      </div>
+    </main>
+
+    <footer class="foot">
+      <p>
+        The code is <code>examples/reference-server/</code> in district-assurance. The page checks
+        the receipt itself, with Web Crypto, against <code>/.well-known/receipt-keys.json</code>.
+      </p>
+    </footer>
+  </body>
+</html>
