@@ -3,7 +3,6 @@
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import type { AuditEntry } from "../src/core/adapters.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
@@ -47,13 +46,16 @@ describe("hostile #56: parseStripeEvent and Object.prototype", () => {
 });
 
 describe("hostile #56: the harness's settings", () => {
-  const harness = fileURLToPath(new URL("./fuzz/harness.ts", import.meta.url));
+  // A file URL, not a path: import() of "D:\\..." on Windows reads "d:" as a URL scheme and fails,
+  // so every refusal below would pass for the wrong reason and a good setting would fail.
+  const harness = new URL("./fuzz/harness.ts", import.meta.url).href;
   const load = (env: Record<string, string>) => spawnSync(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(harness)})`], { env: { ...process.env, ...env }, encoding: "utf8" });
 
   it("F4: refuses a budget or seed that is not an integer, however it is written", () => {
     for (const [name, value] of [["DA_FUZZ_MS", "1e3"], ["DA_FUZZ_MS", "-1"], ["DA_FUZZ_MS", " 5"], ["DA_FUZZ_MS", "0x10"], ["DA_FUZZ_MS", "60000; rm -rf /"], ["DA_FUZZ_SEED", "1.5"], ["DA_FUZZ_SEED", "9".repeat(20)]]) {
       const r = load({ [name!]: value! });
       assert.notEqual(r.status, 0, `${name}=${value}`);
+      assert.match(r.stderr, new RegExp(`${name} must be an integer`), `${name}=${value}: refused by the harness itself`);
     }
     assert.equal(load({ DA_FUZZ_MS: "0", DA_FUZZ_SEED: "-7" }).status, 0);
   });
