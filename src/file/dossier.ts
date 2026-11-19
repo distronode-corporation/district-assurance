@@ -174,6 +174,9 @@ export async function intakeReadBack(rt: EngineRuntime, callId: string): Promise
  */
 export async function confirmIntake(rt: EngineRuntime, callId: string, input: { confirmedBy: "voice" | "keypad"; readBack: string }): Promise<IntakeRecord> {
   rt.settings(DOSSIER);
+  // Read once: the read-back digest compared and the channel filed are the values the host passed
+  // at the call, not what a getter or a change to the object answers while the update waits.
+  const { confirmedBy, readBack } = input;
   const reserved = await rt.update(callId, (draft): { record: IntakeRecord; filed: boolean } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     const intake = s.intake;
@@ -182,7 +185,7 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
     if (intake === null && s.confirmed !== null) return { record: s.confirmed, filed: true };
     if (intake === null) throw new EngineError("invalid_transition", "no intake is open on this call");
     const heard = buildReadBack(intake.form, intake.values, draft.record.locale).digest;
-    if (typeof input.readBack !== "string" || !hexDigestsEqual(input.readBack, heard)) {
+    if (typeof readBack !== "string" || !hexDigestsEqual(readBack, heard)) {
       throw new EngineError("precondition_failed", "the draft changed since the caller heard its read-back; read it back again");
     }
     if (intake.filing !== null) return { record: intake.filing, filed: false };
@@ -199,7 +202,7 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
       formVersion: intake.form.version,
       values,
       digest: intakeDigest(intake.form, values),
-      confirmedBy: input.confirmedBy,
+      confirmedBy,
       confirmedAt: rt.now(),
     };
     intake.filing = built;

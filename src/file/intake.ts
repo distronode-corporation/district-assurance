@@ -47,7 +47,7 @@ export type NormaliseResult =
   | { ok: true; value: FieldValue }
   | {
       ok: false;
-      reason: "empty" | "too_long" | "not_a_number" | "not_a_date" | "not_yes_or_no" | "card_number" | "below_min" | "above_max" | "no_match";
+      reason: "empty" | "too_long" | "not_a_number" | "not_a_date" | "not_yes_or_no" | "card_number" | "below_min" | "above_max" | "no_match" | "not_text";
     };
 
 const FIELD_KEY = /^[a-z][a-z0-9_]{0,63}$/;
@@ -242,6 +242,8 @@ export function normaliseFieldValue(field: IntakeField, raw: string): NormaliseR
   if (value === "") return { ok: false, reason: "empty" };
   switch (field.type) {
     case "text":
+      // A lone surrogate is not Unicode text: no record, digest or read-back can hold it faithfully.
+      if (!value.isWellFormed()) return { ok: false, reason: "not_text" };
       if (findCardNumbers(value).length > 0) return { ok: false, reason: "card_number" };
       if (value.length > (field.maxLength ?? DEFAULT_MAX_LENGTH)) return { ok: false, reason: "too_long" };
       if (field.pattern !== undefined && !new RegExp(`^(?:${field.pattern})$`, "u").test(value)) return { ok: false, reason: "no_match" };
@@ -300,7 +302,8 @@ export function shownValues(form: IntakeForm, values: Readonly<Record<string, Fi
 
 /** Required fields that are shown and have no value, in form order. */
 export function missingRequired(form: IntakeForm, values: Readonly<Record<string, FieldValue>>): string[] {
-  return form.fields.filter((f) => f.required && !(f.key in values) && isShown(form, values, f)).map((f) => f.key);
+  // Own keys only: `in` would count a field named like an Object.prototype member (`constructor`) as given.
+  return form.fields.filter((f) => f.required && !Object.hasOwn(values, f.key) && isShown(form, values, f)).map((f) => f.key);
 }
 
 /**
