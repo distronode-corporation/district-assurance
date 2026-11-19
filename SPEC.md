@@ -299,12 +299,16 @@ Entry: `{seq, prevHash, eventId?, callId, actor, event, at, detail, hash}`. `seq
 `prevHash` is 64 zeros; `hash` is SHA-256 over the canonical JSON of every other field.
 `verifyChain(entries, from?)` reports the first entry whose `seq`, `prevHash` or `hash` is wrong.
 `chainEntry` refuses a detail in which any string (other than a 64-character hex digest) contains
-a card number.
+a card number. An `AuditLedger` lists `list(fromSeq?, limit?)`: the entries with `seq` at or after
+`fromSeq`, in order, at most `limit` (an integer of 1 or more) when it is given, read as one page,
+so a large ledger is walked page by page; `MemoryAuditLedger` throws a TypeError for any other
+`limit`.
 
 `auditLedgerContract(factory)` in `district-assurance/testing` is the suite a ledger must pass:
 it starts at seq 0 and the genesis hash, appends one seq at a time with each entry exactly as
 `chainEntry` builds it, `list(fromSeq)` returns entries in order as a slice that continues the
-chain, entries are copied in and out and never change once appended, an `eventId` is appended
+chain, `list(fromSeq, limit)` returns at most `limit` of them as one page and refuses a `limit`
+that is not an integer of 1 or more, entries are copied in and out and never change once appended, an `eventId` is appended
 once (a second append, concurrent or not, returns the first entry, and eventIds that differ only
 in a lone surrogate are distinct), a detail carrying a card number
 is refused with nothing stored, and concurrent appends stay one valid chain.

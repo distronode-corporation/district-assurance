@@ -33,6 +33,9 @@ All notable changes to this project are documented here. The format follows
   the memory adapters pass; `MemoryRecordStore` now keys by JSON tuples, so two workspace and id
   pairs can no longer share a key. The session, ledger and record contracts keep keys that differ
   only in a lone UTF-16 surrogate apart, which a store encoding keys as UTF-8 would collapse.
+  `AuditLedger.list(fromSeq?, limit?)` reads one page of at most `limit` entries, and the ledger
+  contract checks it: a ledger that ignores `limit`, or takes one that is not an integer of 1 or
+  more, now fails `auditLedgerContract`.
 
 ### Changed
 
