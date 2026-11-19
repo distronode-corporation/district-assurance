@@ -5,9 +5,12 @@
 // 1. Check the device: `POST /devices/get`. Unless Seam says it can unlock remotely and does not
 //    report it offline, the unlock is refused. Nothing has been sent to the lock yet, so any failure
 //    here (an error, no answer) is also "refused": the door certainly did not act.
-// 2. Unlock: `POST /locks/unlock_door`, once. Seam documents no idempotency key for it, so it is
-//    never retried. A 4xx is "refused"; anything else without a readable action attempt (5xx, a
-//    timeout, a dropped connection, a redirect) throws, which Gate records as "unknown".
+// 2. Unlock: `POST /locks/unlock_door`, once, and only while the grant has at least the request
+//    timeout left, so the unlock reaches Seam before the grant expires (the pre-check can be slow);
+//    with less left, it is "refused" (`grant_expiring`) and nothing is sent. Sent once: Seam
+//    documents no idempotency key for it, so it is never retried. A 4xx is "refused"; anything
+//    else without a readable action attempt (5xx, a timeout, a dropped connection, a redirect)
+//    throws, which Gate records as "unknown".
 // 3. Confirm: `POST /action_attempts/get` until the attempt leaves "pending" or the confirmation
 //    window ends. Reading an attempt is not an unlock, so it may be asked more than once. "success"
 //    is delivered and confirmed; an attempt still pending, or one that cannot be read, is delivered
@@ -15,6 +18,7 @@
 //    lock that timed out may still have moved.
 //
 // The API key goes only in the authorization header, never into a result, an error or the ledger.
+import { systemClock, type Clock } from "../core/clock.ts";
 import type { AccessController, UnlockResult } from "./access.ts";
 
 export interface SeamAccessControllerOptions {
@@ -30,6 +34,8 @@ export interface SeamAccessControllerOptions {
   pollIntervalMs?: number;
   /** Default: the global `fetch`. */
   fetch?: typeof fetch;
+  /** Read for the grant's expiry. Default: the system clock. */
+  clock?: Clock;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
@@ -73,6 +79,7 @@ export function seamAccessController(options: SeamAccessControllerOptions): Acce
   const pollIntervalMs = intIn(options.pollIntervalMs ?? 1000, 10, 5000, "pollIntervalMs");
   const polls = Math.ceil(confirmWithinMs / pollIntervalMs);
   const send = options.fetch ?? fetch;
+  const clock = options.clock ?? systemClock;
   const authorization = `Bearer ${options.apiKey}`;
   const path = base.pathname.replace(/\/+$/, "");
 
@@ -125,6 +132,8 @@ export function seamAccessController(options: SeamAccessControllerOptions): Acce
       const deviceId = input.target;
       const refused = await cannotUnlock(deviceId);
       if (refused !== null) return { outcome: "refused", reason: refused };
+      // The grant's expiry is strict: an unlock that might reach Seam after it is never sent.
+      if (Date.parse(input.grant.body.expiresAt) - clock.now().getTime() < timeoutMs) return { outcome: "refused", reason: "grant_expiring" };
 
       // Step 2: once, never retried.
       const response = await post("/locks/unlock_door", { device_id: deviceId });

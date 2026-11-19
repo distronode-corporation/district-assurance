@@ -7,9 +7,8 @@ import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 
 import type { SignedAccessGrant } from "../src/gate/access.ts";
-import { gateModule, type GateSlice } from "../src/gate/gate.ts";
 import { seamAccessController, type SeamAccessControllerOptions } from "../src/gate/seam.ts";
-import { generateTestSigner } from "../src/testing/index.ts";
+import { FixedClock, generateTestSigner } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, setup, testConfig } from "./helpers.ts";
 
 /** Not a secret: a made-up key in Seam's format. */
@@ -132,7 +131,9 @@ describe("seamAccessController", () => {
       reply(res, Object.hasOwn(route[1], id) ? route[1][id] : undefined, fallback);
     });
   });
-  const seam = (options: Partial<SeamAccessControllerOptions> = {}) => seamAccessController({ apiKey: API_KEY, baseUrl: base, pollIntervalMs: 10, confirmWithinMs: 100, timeoutMs: 200, ...options });
+  // The grant above is issued at the fixed clock's start and lives a minute.
+  const clock = new FixedClock();
+  const seam = (options: Partial<SeamAccessControllerOptions> = {}) => seamAccessController({ apiKey: API_KEY, baseUrl: base, pollIntervalMs: 10, confirmWithinMs: 100, timeoutMs: 200, clock, ...options });
   const unlocks = (target: string) => seen.filter((s) => s.path === "/locks/unlock_door" && s.body.device_id === target).length;
   const polls = (attemptId: string) => seen.filter((s) => s.path === "/action_attempts/get" && s.body.action_attempt_id === attemptId).length;
 
@@ -252,6 +253,7 @@ describe("seamAccessController", () => {
     const controller = seamAccessController({
       apiKey: API_KEY,
       baseUrl: "https://seam.example.test/v1/",
+      clock,
       fetch: async (url, init) => {
         calls.push(String(url));
         const body = JSON.parse(String(init?.body)) as Record<string, string>;
@@ -263,10 +265,20 @@ describe("seamAccessController", () => {
     assert.deepEqual(calls, ["https://seam.example.test/v1/devices/get", "https://seam.example.test/v1/locks/unlock_door"]);
   });
 
+  it("never sends an unlock that might reach Seam after the grant expired, and defaults to the system clock", async () => {
+    const late = new FixedClock(new Date(Date.parse(grant.body.expiresAt) - 199));
+    const before = unlocks("dev-ok");
+    assert.deepEqual(await seam({ clock: late }).unlock(input("dev-ok")), { outcome: "refused", reason: "grant_expiring" });
+    assert.equal(unlocks("dev-ok"), before, "nothing was sent to the lock");
+    const justInTime = new FixedClock(new Date(Date.parse(grant.body.expiresAt) - 200));
+    assert.equal((await seam({ clock: justInTime }).unlock(input("dev-ok"))).outcome, "delivered");
+    // The system clock is long past this grant's expiry.
+    assert.deepEqual(await seamAccessController({ apiKey: API_KEY, baseUrl: base, timeoutMs: 200 }).unlock(input("dev-ok")), { outcome: "refused", reason: "grant_expiring" });
+  });
+
   it("works as Gate's controller: delivered and confirmed, refused, and a lost answer recorded as unknown", async () => {
-    const gate = gateModule({ signer: generateTestSigner("gate-key-1"), controllers: { lobby: seam({ timeoutMs: 100 }) } });
     const t = setup({
-      modules: [gate],
+      adapters: { access: { lobby: seam({ timeoutMs: 100 }) }, accessSigner: generateTestSigner("gate-key-1") },
       config: testConfig((c) => {
         c.policy.scopes["entry.open"] = 2;
         c.modules.gate = {
@@ -287,14 +299,13 @@ describe("seamAccessController", () => {
     await t.engine.checkCarrier(callId);
     assert.equal((await t.engine.finishVerification(callId)).level, 2);
 
-    assert.deepEqual(await gate.grantAccess(t.engine, callId, { target: "front-door" }), { grantId: "acc_1", status: "delivered", confirmed: true });
-    assert.deepEqual(await gate.grantAccess(t.engine, callId, { target: "garage" }), { grantId: "acc_2", status: "refused", confirmed: false });
+    assert.deepEqual(await t.engine.grantAccess(callId, { target: "front-door" }), { grantId: "acc_1", status: "delivered", confirmed: true });
+    assert.deepEqual(await t.engine.grantAccess(callId, { target: "garage" }), { grantId: "acc_2", status: "refused", confirmed: false });
     const before = unlocks("dev-unlock-down");
-    assert.deepEqual(await gate.grantAccess(t.engine, callId, { target: "side-door" }), { grantId: "acc_3", status: "unknown", confirmed: false });
+    assert.deepEqual(await t.engine.grantAccess(callId, { target: "side-door" }), { grantId: "acc_3", status: "unknown", confirmed: false });
     assert.equal(unlocks("dev-unlock-down"), before + 1, "a lost answer is never retried");
 
-    const slice = (await t.engine.moduleState(callId, "gate")) as unknown as GateSlice;
-    assert.deepEqual(slice.grants.map((g) => [g.status, g.providerRef]), [["delivered", "aa-ok"], ["refused", null], ["unknown", null]]);
+    assert.deepEqual((await t.engine.accessGrants(callId)).map((g) => [g.status, g.providerRef]), [["delivered", "aa-ok"], ["refused", null], ["unknown", null]]);
     const ledger = JSON.stringify(await t.ledger.list());
     assert.ok(ledger.includes("device_offline"));
     assert.ok(!ledger.includes(API_KEY), "the key never reaches the ledger");
