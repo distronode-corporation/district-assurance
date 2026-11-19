@@ -10,7 +10,7 @@
 // engine shares, under kinds no factor kind can be (factor kinds are snake_case).
 import type { AttemptCounterKey, AttemptCounters } from "../core/adapters.ts";
 import { hmacSha256Hex } from "../core/hash.ts";
-import { lockState, type Lock, type Lockout } from "./counters.ts";
+import { DEFAULT_LOCKOUT, lockState, type Lock, type Lockout } from "./counters.ts";
 
 /** The flag's counter kind: one entry while the subject is under duress. */
 export const DURESS_FLAG = "duress.flag";
@@ -51,6 +51,22 @@ export function duressClearedData(subjectKey: string): string {
 /** The hidden counter of one factor kind's failures on a subject, which a duress entry never resets. */
 export function hiddenCounterKey(workspaceId: string, kind: string, subjectKey: string): AttemptCounterKey {
   return { workspaceId, factor: `duress.hidden.${kind}`, scope: "subject", key: subjectKey };
+}
+
+/** The writes a hidden cleanup makes, whichever pass it follows: the most failures a window holds before its hard lock. */
+const HIDDEN_CLEANUP_WRITES = DEFAULT_LOCKOUT.lockAfterFailures;
+
+/**
+ * After a pass whose hidden failure was recorded at `at`: a pass not under duress takes off the
+ * hidden failures up to it (the latest first, a hard lock's worth), never a later one; a duress
+ * entry takes off only its own. Either way one read and the same number of writes, the rest taking
+ * off nothing (no failure is recorded at the epoch), so the round trips never tell a duress pass
+ * from another. Not safe to run twice: the caller claims it first.
+ */
+export async function forgetHidden(counters: AttemptCounters, key: AttemptCounterKey, at: string, duress: boolean): Promise<void> {
+  const failures = await counters.get(key, FOREVER);
+  const own = duress ? [at] : failures.filter((f) => Date.parse(f) <= Date.parse(at)).slice(-HIDDEN_CLEANUP_WRITES);
+  for (let i = 0; i < HIDDEN_CLEANUP_WRITES; i++) await counters.removeFailure(key, own[i] ?? FOREVER);
 }
 
 export async function isUnderDuress(counters: AttemptCounters, key: AttemptCounterKey): Promise<boolean> {

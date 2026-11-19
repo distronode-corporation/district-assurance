@@ -467,7 +467,7 @@ when there is a number.
   with the pass, on the call, so a write that fails after the pass was saved (its ledger entry)
   still gets it, in the same `submitKeypad` or `submitPin` or before the call's next factor; a pass
   refused before it was saved owes none. The subject's part is safe to run again. The rest (the
-  pass's own failure off the number, and the hidden counter's reset or, after a duress entry, its
+  pass's own failure off the number, and the hidden counter's cleanup or, after a duress entry, its
   own failure) is claimed on the call in one more write before it runs, so it runs at most once: a
   replay never takes off another failure of the same millisecond. A claim that is not saved runs
   none of it, which stays owed; a removal that fails after its claim is not run again, and that
@@ -656,7 +656,8 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   flag is set again only while that count is unchanged. A failure to set it leaves the alert owed. A duress entry resets the visible
   counters as a pass does, so it looks like one; every entered factor's failures on the subject are
   also counted in a hidden counter (kind `duress.hidden.<kind>`) that only a pass not under duress
-  resets (a duress entry takes off only its own failure), and that counter's hard lock (not its
+  clears, of the failures up to it (a later one, by another call, stays; a duress entry takes off
+  only its own failure; either takes one read and the same writes), and that counter's hard lock (not its
   waits) refuses like any lock. So a caller who knows the duress PIN gets no more guesses at the
   real PIN than one who does not. `clearDuress(subjectKey, memberId)` is a host-privileged call,
   like `resetPin`: the business's own tools, never a caller's request, once it knows the subject is

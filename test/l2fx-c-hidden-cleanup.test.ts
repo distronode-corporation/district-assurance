@@ -93,15 +93,15 @@ describe("T8: hidden-counter cleanup is owed with a saved pass", () => {
     assert.deepEqual(await t.counters.get(hidden, LONG_AGO), [], "run before the next factor");
   });
 
-  it("a claimed cleanup whose hidden reset fails is not run again (at most once, fail closed)", async () => {
+  it("a claimed cleanup whose hidden removal fails is not run again (at most once, fail closed)", async () => {
     let fail = true;
     class Flaky extends MemoryAttemptCounters {
-      override async reset(key: AttemptCounterKey): Promise<void> {
+      override async removeFailure(key: AttemptCounterKey, at: string): Promise<void> {
         if (fail && key.factor.startsWith("duress.hidden.")) {
           fail = false;
           throw new Error("counters down");
         }
-        return super.reset(key);
+        return super.removeFailure(key, at);
       }
     }
     const counters = new Flaky();

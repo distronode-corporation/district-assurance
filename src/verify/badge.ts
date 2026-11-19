@@ -40,7 +40,7 @@ import {
   type PinSettings,
 } from "./factors.ts";
 import { counterKeys, currentLock, isCallingNumber, lockoutOf, lockoutSettingsErrors, forgetPass, recordFailures, removeOwnOnNumbers, type Lock } from "./counters.ts";
-import { clearsSoFar, duressClearedData, duressFlagKey, flagDuress, hiddenCounterKey, hiddenHardLock, hiddenWindowStart, isUnderDuress, recordClear } from "./duress-flag.ts";
+import { clearsSoFar, duressClearedData, duressFlagKey, flagDuress, forgetHidden, hiddenCounterKey, hiddenHardLock, hiddenWindowStart, isUnderDuress, recordClear } from "./duress-flag.ts";
 import { isKeypadEntry } from "./knowledge.ts";
 import type { TextCodeState } from "./text-code.ts";
 
@@ -785,11 +785,9 @@ async function settleForget(rt: EngineRuntime, callId: string, id: number): Prom
     };
     if (!(await claimOnCall(rt, callId, take, (s) => owedOn(s)?.claimed === true))) return;
     await removeOwnOnNumbers(counters, keys, new Date(at));
-    // The hidden counter forgets only on a pass that is not under duress; a duress entry takes off its
-    // own failure, as a pass does, and keeps the rest. One write either way, so the round trips never
-    // tell a duress pass from another.
-    if (hidden?.duress === true) await counters.removeFailure(hidden.key, at);
-    else if (hidden !== undefined) await counters.reset(hidden.key);
+    // The hidden counter forgets up to the pass only on a pass that is not under duress; a duress
+    // entry takes off its own failure, as a pass does, and keeps the rest (forgetHidden).
+    if (hidden !== undefined) await forgetHidden(counters, hidden.key, at, hidden.duress);
   }
   await rt
     .update(callId, (draft) => {
