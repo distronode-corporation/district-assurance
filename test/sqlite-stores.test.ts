@@ -111,7 +111,7 @@ describe("SQLite stores", () => {
     const replace = "INSERT OR REPLACE INTO audit_entries (seq, event_id, hash, entry) VALUES (?, ?, ?, '{}')";
     assert.throws(() => other.prepare(replace).run(1, null, "0".repeat(64)), /append-only/, "no replacing a seq");
     await stores.ledger.append({ ...entry(2), eventId: "e2" });
-    assert.throws(() => other.prepare(replace).run(3, "e2", "0".repeat(64)), /append-only/, "no replacing an eventId");
+    assert.throws(() => other.prepare(replace).run(3, JSON.stringify("e2"), "0".repeat(64)), /append-only/, "no replacing an eventId, bound as the store binds it");
     assert.equal((await stores.ledger.list()).length, 2);
     assert.equal(verifyChain(await stores.ledger.list()).ok, true);
     other.close();
@@ -129,6 +129,29 @@ describe("SQLite stores", () => {
     assert.deepEqual(verifyChain(stored), { ok: true, head: await a.ledger.head() });
     a.close();
     b.close();
+  });
+
+  it("keep ids apart that differ only in a lone surrogate, as the memory stores do", async () => {
+    // node:sqlite binds text as UTF-8, where every lone surrogate becomes U+FFFD.
+    const path = newFile();
+    const stores = openStores(path);
+    stores.records.putSubject("ws\uD800", { subjectKey: "s", phoneOnFile: "+15555550101", knowledge: {} });
+    stores.records.putSubject("ws\uDC00", { subjectKey: "s", phoneOnFile: "+15555550102", knowledge: {} });
+    stores.records.putSubject("w", { subjectKey: "k\uD800", phoneOnFile: "+15555550103", knowledge: {} });
+    assert.equal((await stores.records.getSubject("ws\uD800", "s"))!.phoneOnFile, "+15555550101", "never another workspace's number on file");
+    assert.equal((await stores.records.getSubject("ws\uDC00", "s"))!.phoneOnFile, "+15555550102");
+    assert.equal(await stores.records.getSubject("w", "k\uDBFF"), null);
+    await stores.records.putIntakeRecord({ ...record("r\uD800"), workspaceId: "w" });
+    assert.equal(await stores.records.getIntakeRecord("w", "r\uDBFF"), null, "a record never filed");
+    assert.deepEqual(await stores.records.getIntakeRecord("w", "r\uD800"), record("r\uD800"));
+    const first = await stores.ledger.append({ ...entry(1), eventId: "e\uD800" });
+    const second = await stores.ledger.append({ ...entry(2), eventId: "e\uDBFF" });
+    assert.notDeepEqual(second, first, "another eventId is another entry");
+    assert.deepEqual(await stores.ledger.append({ ...entry(3), eventId: "e\uD800" }), first);
+    stores.close();
+    const reopened = openStores(path);
+    assert.deepEqual((await reopened.ledger.list()).map((e) => e.eventId), ["e\uD800", "e\uDBFF"]);
+    reopened.close();
   });
 
   it("keep the first filing of a record id, and replace a subject the host puts again", async () => {

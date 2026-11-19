@@ -34,6 +34,13 @@ export function openSqliteDatabase(path: string): DatabaseSync {
   return db;
 }
 
+/**
+ * A key as it is bound in SQL: its JSON string. node:sqlite binds text as UTF-8, which turns every
+ * lone surrogate into U+FFFD, so two ids that differ only there would share a row; JSON escapes
+ * them (`\ud800`) instead, and keeps every id apart, as the memory stores do.
+ */
+const key = (id: string): string => JSON.stringify(id);
+
 /** Runs `body` in a write transaction: committed if it returns, rolled back if it throws. */
 function writeTransaction<T>(db: DatabaseSync, body: () => T): T {
   db.exec("BEGIN IMMEDIATE");
@@ -79,7 +86,7 @@ export class SqliteAuditLedger implements AuditLedger {
   async append(input: AuditInput): Promise<AuditEntry> {
     return writeTransaction(this.#db, () => {
       if (input.eventId !== undefined) {
-        const seen = this.#db.prepare("SELECT entry FROM audit_entries WHERE event_id = ?").get(input.eventId);
+        const seen = this.#db.prepare("SELECT entry FROM audit_entries WHERE event_id = ?").get(key(input.eventId));
         if (seen !== undefined) return JSON.parse(seen.entry as string) as AuditEntry;
       }
       const head = this.#head();
@@ -87,7 +94,7 @@ export class SqliteAuditLedger implements AuditLedger {
       const entry = chainEntry(input, head.seq + 1, head.hash);
       this.#db
         .prepare("INSERT INTO audit_entries (seq, event_id, hash, entry) VALUES (?, ?, ?, ?)")
-        .run(entry.seq, entry.eventId ?? null, entry.hash, JSON.stringify(entry));
+        .run(entry.seq, entry.eventId === undefined ? null : key(entry.eventId), entry.hash, JSON.stringify(entry));
       return entry;
     });
   }
@@ -110,8 +117,8 @@ export class SqliteAuditLedger implements AuditLedger {
 }
 
 /**
- * Subjects and intake records in two tables, keyed by (workspace, id) as two columns, so no pair
- * can collide with another. Records are JSON, copied in and out by construction. An intake record
+ * Subjects and intake records in two tables, keyed by (workspace, id) as two columns, each bound as
+ * its JSON string, so no pair can collide with another. Records are JSON, copied in and out by construction. An intake record
  * is filed once per (workspace, recordId): a retry of the same record changes nothing, and the
  * first filing stands.
  */
@@ -140,22 +147,22 @@ export class SqliteRecordStore implements RecordStore {
   putSubject(workspaceId: string, subject: SubjectRecord): void {
     this.#db
       .prepare("INSERT INTO subjects (workspace_id, subject_key, subject) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET subject = excluded.subject")
-      .run(workspaceId, subject.subjectKey, JSON.stringify(subject));
+      .run(key(workspaceId), key(subject.subjectKey), JSON.stringify(subject));
   }
 
   async getSubject(workspaceId: string, subjectKey: string): Promise<SubjectRecord | null> {
-    const row = this.#db.prepare("SELECT subject FROM subjects WHERE workspace_id = ? AND subject_key = ?").get(workspaceId, subjectKey);
+    const row = this.#db.prepare("SELECT subject FROM subjects WHERE workspace_id = ? AND subject_key = ?").get(key(workspaceId), key(subjectKey));
     return row === undefined ? null : (JSON.parse(row.subject as string) as SubjectRecord);
   }
 
   async putIntakeRecord(record: IntakeRecord): Promise<void> {
     this.#db
       .prepare("INSERT INTO intake_records (workspace_id, record_id, record) VALUES (?, ?, ?) ON CONFLICT DO NOTHING")
-      .run(record.workspaceId, record.recordId, JSON.stringify(record));
+      .run(key(record.workspaceId), key(record.recordId), JSON.stringify(record));
   }
 
   async getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null> {
-    const row = this.#db.prepare("SELECT record FROM intake_records WHERE workspace_id = ? AND record_id = ?").get(workspaceId, recordId);
+    const row = this.#db.prepare("SELECT record FROM intake_records WHERE workspace_id = ? AND record_id = ?").get(key(workspaceId), key(recordId));
     return row === undefined ? null : (JSON.parse(row.record as string) as IntakeRecord);
   }
 }
