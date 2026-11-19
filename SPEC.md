@@ -601,11 +601,13 @@ when it did not act, optionally `{"error": "<code>"}` (`signature`, `workspace`,
 the door, so it is `unknown`. Anything else, including no answer, is `unknown` too. A relay checks the grant with `verifyAccessGrant` against
 `engine.accessKeys()`, its own workspace and its own audience, and refuses a grant id it has seen.
 
-**The Seam adapter** (`seamAccessController({apiKey, baseUrl?, timeoutMs?, confirmWithinMs?,
-pollIntervalMs?, fetch?, clock?})`), named in the engine's `access` adapter like any controller:
-the target's `ref` is the Seam `device_id`. `baseUrl` defaults to
-`https://connect.getseam.com` (HTTPS only, or HTTP to the loopback address; no credentials in the
-URL); `timeoutMs` is per request, 100 to 30,000 (default 5,000); `confirmWithinMs` 0 to 30,000
+**The Seam adapter** (`seamAccessController({apiKey, baseUrl?, allowLoopbackForTests?, timeoutMs?,
+confirmWithinMs?, pollIntervalMs?, fetch?, clock?})`), named in the engine's `access` adapter like
+any controller: the target's `ref` is the Seam `device_id`. `baseUrl` defaults to
+`https://connect.getseam.com`, and its host must be one of `SEAM_HOSTS` (`connect.getseam.com`),
+over HTTPS on the default port, with no credentials, query or fragment: the API key goes nowhere
+else. The loopback address, over HTTP or HTTPS, is accepted only with `allowLoopbackForTests: true`,
+which is for tests and never for production; `timeoutMs` is per request, 100 to 30,000 (default 5,000); `confirmWithinMs` 0 to 30,000
 (default 10,000) and `pollIntervalMs` 10 to 5,000 (default 1,000). Every request is a `POST` with
 `authorization: Bearer <apiKey>` and a JSON body, redirects not followed. No idempotency key is
 sent: Seam documents none on unlock.

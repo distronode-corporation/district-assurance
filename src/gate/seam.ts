@@ -24,8 +24,13 @@ import type { AccessController, UnlockResult } from "./access.ts";
 export interface SeamAccessControllerOptions {
   /** A Seam API key (workspace scoped). Sent only as a bearer token. */
   apiKey: string;
-  /** Default `https://connect.getseam.com`. HTTPS, or HTTP only to the loopback address (tests). */
+  /**
+   * Default `https://connect.getseam.com`, the only host allowed (`SEAM_HOSTS`), over HTTPS on the
+   * default port. The loopback address, over HTTP or HTTPS, only with `allowLoopbackForTests`.
+   */
   baseUrl?: string;
+  /** Test only: lets `baseUrl` be the loopback address (a local fake of Seam). Never in production. */
+  allowLoopbackForTests?: boolean;
   /** How long to wait for each of Seam's answers, 100 to 30,000 ms. Default 5,000. */
   timeoutMs?: number;
   /** How long to ask Seam whether the lock confirmed, 0 to 30,000 ms. Default 10,000. 0 never asks. */
@@ -39,6 +44,9 @@ export interface SeamAccessControllerOptions {
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/** The hosts the API key may be sent to. */
+export const SEAM_HOSTS: readonly string[] = Object.freeze(["connect.getseam.com"]);
 const SHORT_CODE = /^[a-z][a-z0-9_]{0,31}$/;
 
 function intIn(value: number, min: number, max: number, name: string): number {
@@ -76,10 +84,15 @@ function actionAttempt(answer: unknown): { id: string; status: AttemptStatus; by
 export function seamAccessController(options: SeamAccessControllerOptions): AccessController {
   if (typeof options.apiKey !== "string" || options.apiKey.trim() === "") throw new TypeError("seamAccessController needs an API key");
   const base = new URL(options.baseUrl ?? "https://connect.getseam.com");
-  if (base.protocol !== "https:" && !(base.protocol === "http:" && LOOPBACK.has(base.hostname))) {
-    throw new TypeError("seamAccessController needs an https base URL (http only to the loopback address)");
+  // The key goes wherever the base URL points, so only Seam's own host, or the loopback address
+  // when a test says so, is accepted: a mistyped or injected host never receives it.
+  const loopback = options.allowLoopbackForTests === true && LOOPBACK.has(base.hostname) && (base.protocol === "http:" || base.protocol === "https:");
+  if (!loopback && !(base.protocol === "https:" && SEAM_HOSTS.includes(base.hostname) && base.port === "")) {
+    throw new TypeError(`seamAccessController needs an https base URL on ${SEAM_HOSTS.join(", ")} (the loopback address only with allowLoopbackForTests)`);
   }
-  if (base.username !== "" || base.password !== "") throw new TypeError("seamAccessController base URLs carry no credentials");
+  if (base.username !== "" || base.password !== "" || base.search !== "" || base.hash !== "") {
+    throw new TypeError("seamAccessController base URLs carry no credentials, query or fragment");
+  }
   const timeoutMs = intIn(options.timeoutMs ?? 5000, 100, 30_000, "timeoutMs");
   const confirmWithinMs = intIn(options.confirmWithinMs ?? 10_000, 0, 30_000, "confirmWithinMs");
   const pollIntervalMs = intIn(options.pollIntervalMs ?? 1000, 10, 5000, "pollIntervalMs");

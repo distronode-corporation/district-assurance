@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 
 import type { SignedAccessGrant } from "../src/gate/access.ts";
-import { seamAccessController, type SeamAccessControllerOptions } from "../src/gate/seam.ts";
+import { SEAM_HOSTS, seamAccessController, type SeamAccessControllerOptions } from "../src/gate/seam.ts";
 import { FixedClock, generateTestSigner } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, setup, testConfig } from "./helpers.ts";
 
@@ -136,7 +136,7 @@ describe("seamAccessController", () => {
   });
   // The grant above is issued at the fixed clock's start and lives a minute.
   const clock = new FixedClock();
-  const seam = (options: Partial<SeamAccessControllerOptions> = {}) => seamAccessController({ apiKey: API_KEY, baseUrl: base, pollIntervalMs: 10, confirmWithinMs: 100, timeoutMs: 200, clock, ...options });
+  const seam = (options: Partial<SeamAccessControllerOptions> = {}) => seamAccessController({ apiKey: API_KEY, baseUrl: base, allowLoopbackForTests: true, pollIntervalMs: 10, confirmWithinMs: 100, timeoutMs: 200, clock, ...options });
   const unlocks = (target: string) => seen.filter((s) => s.path === "/locks/unlock_door" && s.body.device_id === target).length;
   const polls = (attemptId: string) => seen.filter((s) => s.path === "/action_attempts/get" && s.body.action_attempt_id === attemptId).length;
 
@@ -154,15 +154,36 @@ describe("seamAccessController", () => {
     assert.throws(() => seamAccessController({ apiKey: 7 as never }), /needs an API key/);
     assert.throws(() => seamAccessController({ apiKey: API_KEY, baseUrl: "http://seam.example.test" }), /https base URL/);
     assert.throws(() => seamAccessController({ apiKey: API_KEY, baseUrl: "ftp://127.0.0.1" }), /https base URL/);
-    assert.throws(() => seamAccessController({ apiKey: API_KEY, baseUrl: "https://u:p@seam.example.test" }), /no credentials/);
+    assert.throws(() => seamAccessController({ apiKey: API_KEY, baseUrl: "https://u:p@connect.getseam.com" }), /no credentials/);
     assert.throws(() => seamAccessController({ apiKey: API_KEY, timeoutMs: 99 }), /timeoutMs must be an integer from 100 to 30000/);
     assert.throws(() => seamAccessController({ apiKey: API_KEY, timeoutMs: 1.5 }), /timeoutMs/);
     assert.throws(() => seamAccessController({ apiKey: API_KEY, confirmWithinMs: 30_001 }), /confirmWithinMs must be an integer from 0 to 30000/);
     assert.throws(() => seamAccessController({ apiKey: API_KEY, pollIntervalMs: 9 }), /pollIntervalMs must be an integer from 10 to 5000/);
     assert.ok(seamAccessController({ apiKey: API_KEY }));
-    for (const baseUrl of ["https://seam.example.test/v1/", "http://localhost:1", "http://[::1]:1"]) assert.ok(seamAccessController({ apiKey: API_KEY, baseUrl }));
+    for (const baseUrl of ["https://connect.getseam.com/v1/", "https://connect.getseam.com"]) assert.ok(seamAccessController({ apiKey: API_KEY, baseUrl }));
+    for (const baseUrl of ["http://localhost:1", "http://[::1]:1", "https://127.0.0.1:1"]) assert.ok(seamAccessController({ apiKey: API_KEY, baseUrl, allowLoopbackForTests: true }));
     // The key never appears in what the constructor throws.
     assert.throws(() => seamAccessController({ apiKey: API_KEY, timeoutMs: 0 }), (e: unknown) => e instanceof TypeError && !e.message.includes(API_KEY));
+  });
+
+  it("sends the key only to Seam's own host, or the loopback address with the test-only override (//host review)", () => {
+    const refused = [
+      "https://seam.example.test",
+      "https://connect.getseam.com.evil.example",
+      "https://evilconnect.getseam.com",
+      "https://connect.getseam.com:8443",
+      "http://connect.getseam.com",
+      "https://connect.getseam.com/?x=1",
+      "https://connect.getseam.com/#x",
+      "http://127.0.0.1:1",
+      "https://localhost",
+    ];
+    for (const baseUrl of refused) {
+      assert.throws(() => seamAccessController({ apiKey: API_KEY, baseUrl }), (e: unknown) => e instanceof TypeError && !e.message.includes(API_KEY), baseUrl);
+    }
+    assert.throws(() => seamAccessController({ apiKey: API_KEY, baseUrl: "https://connect.getseam.com/?x=1" }), /no credentials, query or fragment/);
+    assert.throws(() => seamAccessController({ apiKey: API_KEY, baseUrl: "https://seam.example.test", allowLoopbackForTests: true }), /connect\.getseam\.com/, "the override is for the loopback address only");
+    assert.deepEqual([...SEAM_HOSTS], ["connect.getseam.com"]);
   });
 
   it("checks the device, unlocks once, and is confirmed only when Seam reports success", async () => {
@@ -198,6 +219,7 @@ describe("seamAccessController", () => {
     const controller = seamAccessController({
       apiKey: API_KEY,
       baseUrl: "http://127.0.0.1//collector.example",
+      allowLoopbackForTests: true,
       clock,
       fetch: async (url, init) => {
         urls.push(String(url));
@@ -250,7 +272,7 @@ describe("seamAccessController", () => {
       assert.deepEqual(await seam({ timeoutMs: 100 }).unlock(input(target)), { outcome: "refused", reason }, target);
       assert.equal(unlocks(target), 0, target);
     }
-    const lost = seamAccessController({ apiKey: API_KEY, baseUrl: `${base}/nowhere` });
+    const lost = seamAccessController({ apiKey: API_KEY, baseUrl: `${base}/nowhere`, allowLoopbackForTests: true });
     assert.deepEqual(await lost.unlock(input("dev-ok")), { outcome: "refused", reason: "http_404" });
   });
 
@@ -285,7 +307,7 @@ describe("seamAccessController", () => {
     const calls: string[] = [];
     const controller = seamAccessController({
       apiKey: API_KEY,
-      baseUrl: "https://seam.example.test/v1/",
+      baseUrl: "https://connect.getseam.com/v1/",
       clock,
       fetch: async (url, init) => {
         calls.push(String(url));
@@ -295,7 +317,7 @@ describe("seamAccessController", () => {
       },
     });
     assert.deepEqual(await controller.unlock(input("dev-1")), { outcome: "delivered", providerRef: "aa-1", confirmed: true });
-    assert.deepEqual(calls, ["https://seam.example.test/v1/devices/get", "https://seam.example.test/v1/locks/unlock_door"]);
+    assert.deepEqual(calls, ["https://connect.getseam.com/v1/devices/get", "https://connect.getseam.com/v1/locks/unlock_door"]);
   });
 
   it("never sends an unlock that might reach Seam after the grant expired, and defaults to the system clock", async () => {
@@ -306,7 +328,7 @@ describe("seamAccessController", () => {
     const justInTime = new FixedClock(new Date(Date.parse(grant.body.expiresAt) - 200));
     assert.equal((await seam({ clock: justInTime }).unlock(input("dev-ok"))).outcome, "delivered");
     // The system clock is long past this grant's expiry.
-    assert.deepEqual(await seamAccessController({ apiKey: API_KEY, baseUrl: base, timeoutMs: 200 }).unlock(input("dev-ok")), { outcome: "refused", reason: "grant_expiring" });
+    assert.deepEqual(await seamAccessController({ apiKey: API_KEY, baseUrl: base, allowLoopbackForTests: true, timeoutMs: 200 }).unlock(input("dev-ok")), { outcome: "refused", reason: "grant_expiring" });
   });
 
   it("works as Gate's controller: delivered and confirmed, refused, and a lost answer recorded as unknown", async () => {
