@@ -472,7 +472,7 @@ export interface UploadLinkRecord {
   /** The confirmed intake record the document is attached to. */
   recordId: string;
   /** The language of the upload page. */
-  locale: "en" | "fr";
+  locale: Locale;
   allowedTypes: DocumentType[];
   maxBytes: number;
   /** ISO 8601. */

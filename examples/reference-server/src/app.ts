@@ -348,12 +348,13 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     uploads: NonNullable<ReferenceServerOptions["uploads"]>,
     token: string,
     method: string,
-    lang: "en" | "fr" | undefined,
+    lang: PageLocale | undefined,
   ): Promise<Page> {
     const context = { workspaceId: options.engine.workspaceId, documents: uploads.documents, clock: options.clock };
     const link = await openUploadLink(token, context);
     if (link === null) return uploadPage(410, lang ?? "en", "link_not_usable", null);
-    const locale = lang ?? link.locale;
+    // The upload page is in English and French: a Spanish link (#122) gets the English page.
+    const locale: PageLocale = lang ?? (Object.hasOwn(PAGE_TEXT, link.locale) ? (link.locale as PageLocale) : "en");
     if (method === "GET") return uploadPage(200, locale, null, link);
     let body: Buffer;
     try {

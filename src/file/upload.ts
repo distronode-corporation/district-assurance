@@ -9,6 +9,7 @@ import type { DocumentRecord, DocumentScanner, DocumentStore, DocumentType, Reco
 import type { Clock, IdGenerator } from "../core/clock.ts";
 import { EngineError } from "../core/errors.ts";
 import { sha256Hex } from "../core/hash.ts";
+import { SUPPORTED_LOCALES, isSupportedLocale, type Locale } from "../core/runtime.ts";
 
 export const DOCUMENT_TYPES: readonly DocumentType[] = ["image/jpeg", "image/png", "application/pdf"];
 export const UPLOAD_LINK_TTL_SECONDS = 1800;
@@ -36,7 +37,7 @@ export interface UploadLinkInput {
   /** A confirmed intake record of this call. */
   recordId: string;
   /** The upload page's language. Default `en`. */
-  locale?: "en" | "fr";
+  locale?: Locale;
   /** Default every type in `DOCUMENT_TYPES`. */
   allowedTypes?: readonly DocumentType[];
   /** 1 to `UPLOAD_MAX_BYTES_LIMIT`. Default `DEFAULT_UPLOAD_MAX_BYTES`. */
@@ -53,7 +54,7 @@ export interface UploadLink {
 
 /** What the upload page needs to know about a usable link. */
 export interface OpenUploadLink {
-  locale: "en" | "fr";
+  locale: Locale;
   allowedTypes: DocumentType[];
   maxBytes: number;
   expiresAt: string;
@@ -87,7 +88,7 @@ export async function createUploadLink(input: UploadLinkInput, context: UploadCo
   // Strings only: a record store keyed by text finds a record for ["rec_1"] too, and the link would
   // then be bound to an array.
   if (typeof callId !== "string" || typeof recordId !== "string" || callId === "" || recordId === "") problems.push("callId and recordId are required");
-  if (locale !== "en" && locale !== "fr") problems.push("locale is en or fr");
+  if (!isSupportedLocale(locale)) problems.push(`locale is one of ${SUPPORTED_LOCALES.join(", ")}`);
   if (allowedTypes.length === 0 || !allowedTypes.every(isDocumentType) || new Set(allowedTypes).size !== allowedTypes.length) {
     problems.push(`allowedTypes is a non-empty list of distinct types from ${DOCUMENT_TYPES.join(", ")}`);
   }

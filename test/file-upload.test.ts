@@ -107,7 +107,7 @@ describe("createUploadLink", () => {
     const w = world();
     await assert.rejects(w.link({ callId: "" }), rejects("invalid_input", /callId and recordId are required/));
     await assert.rejects(w.link({ recordId: "" }), rejects("invalid_input", /callId and recordId are required/));
-    await assert.rejects(w.link({ locale: "de" as "en" }), rejects("invalid_input", /locale is en or fr/));
+    await assert.rejects(w.link({ locale: "de" as "en" }), rejects("invalid_input", /locale is one of en, fr, es/));
     for (const allowedTypes of [[], ["image/gif"], ["image/png", "image/png"]]) {
       await assert.rejects(w.link({ allowedTypes: allowedTypes as never }), rejects("invalid_input", /allowedTypes is a non-empty list/));
     }
