@@ -73,3 +73,9 @@ jobs:
       - run: npm run build
       # The scripted call, end to end, on fake adapters and a loopback server.
       - run: npm run demo
+      # The audit pack (SRV-8): every test and the coverage gate again, the contract suites on
+      # their own, a CycloneDX SBOM and the documents, in .tmp/audit-pack with SHA256SUMS. It fails
+      # when any of them does. Built once, on Linux and the latest Node 24.
+      - name: Audit pack
+        if: matrix.os == 'ubuntu-24.04' && matrix.node == 24
+        run: node scripts/audit-pack.mjs

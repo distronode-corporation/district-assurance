@@ -25,6 +25,10 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- STRIDE tables in SECURITY-MODEL.md, one per module and adapter, each row naming its control and
+  the test that proves it or its open issue, checked by `test/security-model.test.ts`; and an
+  audit pack (`node scripts/audit-pack.mjs`, built in CI) with the test, coverage and contract
+  suite reports, an SBOM and the documents (SRV-8).
 
 ### Changed
 
