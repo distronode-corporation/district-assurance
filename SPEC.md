@@ -409,8 +409,9 @@ the currency's own decimals.
 
 Two `Engine` methods the business calls from its own code, for one person's access or deletion
 request. They take no call id and are no flow step, so nothing on a call reaches them. Both take
-`{workspaceId, subjectKey}`: the engine's own workspace and a 64 lower-case hex subject key, else
-`invalid_input`; both need the `records` adapter, else `precondition_failed`. What the law requires
+`{workspaceId, subjectKey}`: the engine's own workspace and a 64 lower-case hex subject key (a
+string: an array or other object holding the key is refused), each read once, else `invalid_input`
+(also for a request that is not an object); both need the `records` adapter, else `precondition_failed`. What the law requires
 in a given case is the business's to decide.
 
 The `RecordStore` lists a subject's intake records (`listIntakeRecords(workspaceId, subjectKey)`),

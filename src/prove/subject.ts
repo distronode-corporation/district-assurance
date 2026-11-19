@@ -144,9 +144,20 @@ export function verifySubjectExport(exported: SignedSubjectExport, keys: Readonl
   }
 }
 
-function checkRequest(rt: EngineRuntime, input: SubjectRequest): RecordStore {
+/** The request's fields, each read once. Not an object is invalid_input, never a TypeError. */
+function readRequest(input: unknown): { workspaceId: unknown; subjectKey: unknown; kept: unknown } {
+  if (!isObject(input)) throw new EngineError("invalid_input", "a subject request is an object: { workspaceId, subjectKey }");
+  const { workspaceId, subjectKey, kept } = input;
+  return { workspaceId, subjectKey, kept };
+}
+
+function checkRequest(rt: EngineRuntime, input: { workspaceId: unknown; subjectKey: unknown }): RecordStore {
   if (input.workspaceId !== rt.workspaceId) throw new EngineError("invalid_input", "the request names another workspace");
-  if (!/^[0-9a-f]{64}$/.test(input.subjectKey)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
+  // A string only: a regex test coerces, so an array of the key would pass and then miss the
+  // subject's records (found by equality) while finding its PIN digest (found by the key's text).
+  if (typeof input.subjectKey !== "string" || !/^[0-9a-f]{64}$/.test(input.subjectKey)) {
+    throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
+  }
   const records: RecordStore | undefined = rt.adapter("records");
   if (records === undefined) throw new EngineError("precondition_failed", "subject requests need the records adapter");
   return records;
@@ -190,8 +201,9 @@ function callsOf(records: readonly IntakeRecord[]): string[] {
  */
 export async function exportSubject(rt: EngineRuntime, input: SubjectRequest & { kept?: KeptItem[] }): Promise<SignedSubjectExport> {
   // Read once: the subject key checked is the one whose data is gathered and named in the export.
-  const { workspaceId, subjectKey, kept } = input;
-  const records = checkRequest(rt, { workspaceId, subjectKey });
+  const { workspaceId, subjectKey: key, kept } = readRequest(input);
+  const records = checkRequest(rt, { workspaceId, subjectKey: key });
+  const subjectKey = key as string;
   const hostKept = checkKept(kept);
   const signer: ReceiptSigner | undefined = rt.adapter("signer");
   if (signer === undefined) throw new EngineError("precondition_failed", "an export is signed, and the engine has no signer adapter");
@@ -277,8 +289,9 @@ export async function eraseSubject(
   forget: (callId: string, recordIds: readonly string[]) => Promise<void>,
 ): Promise<ErasureResult> {
   // Read once: the subject key checked is the one erased and named in the ledger.
-  const { workspaceId, subjectKey } = input;
-  const records = checkRequest(rt, { workspaceId, subjectKey });
+  const { workspaceId, subjectKey: key } = readRequest(input);
+  const records = checkRequest(rt, { workspaceId, subjectKey: key });
+  const subjectKey = key as string;
   const ledger = rt.adapter("ledger");
   const appended = new Map((await ledger.list()).map((e) => [e.eventId, e]));
   let n = 0;
