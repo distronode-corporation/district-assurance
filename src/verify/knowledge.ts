@@ -102,9 +102,11 @@ export async function judgeKeypadWith(
   fields: readonly string[],
   entries: Readonly<Record<string, string>>,
 ): Promise<boolean> {
-  const candidates = keypadCandidates(fields, entries);
+  // Read once: a field the caller adds while the hashes are pending is neither hashed nor compared.
+  const asked = [...fields];
+  const candidates = keypadCandidates(asked, entries);
   // Every field is hashed before any is compared; one that fails fails the whole judgement.
-  return keypadMatches(subject, fields, candidates, await Promise.all(candidates.map((c) => knowledgeHmac(hmac)(c.data))));
+  return keypadMatches(subject, asked, candidates, await Promise.all(candidates.map((c) => knowledgeHmac(hmac)(c.data))));
 }
 
 /** What each field's entry is hashed as: a malformed entry as an empty one, which never matches. */

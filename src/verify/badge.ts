@@ -98,10 +98,11 @@ export interface BadgeSlice {
   /** The texted code this call holds: null before any send, and after a taint or a change of subject. */
   textCode: TextCodeState | null;
   /**
-   * A texted code's send whose ledger entry is not written yet (VER-2): the call does not end until
-   * it is, or until `until` passes, so no send's entry follows the receipt. Absent otherwise.
+   * The texted code sends whose ledger entries are not written yet (VER-2), one hold per send: the
+   * call does not end while any is held, each until its own entry is written or its `until` passes,
+   * so no send's entry follows the receipt. Absent until the first send.
    */
-  textSend?: { sendId: string; until: string };
+  textSends?: Array<{ sendId: string; until: string }>;
   /** How many verifications finished on this call, and the last one's level and counted methods. */
   finished: number;
   lastLevel: AssuranceLevel;
@@ -159,6 +160,12 @@ export interface CallbackState {
   at: string | null;
   /** On a passed callback call: its failure is still to be forgotten. A replayed outcome retries that. */
   forgetPending: boolean;
+  /** On the callback call: the number the dial goes to, kept in the write that claims the dial, and the one the carrier check asks about. */
+  to?: string;
+  /** On the callback call: how often the number on file changed between tries of the dial. Each number gets its own idempotency key. */
+  redials?: number;
+  /** On the callback call: ISO 8601, when a dial resumed a day or more after `at` was counted toward the daily limit again. */
+  countedAt?: string;
 }
 
 export interface KeypadResult {
@@ -358,8 +365,8 @@ export class BadgeModule implements AssuranceModule {
   }
 
   blocksEnd(s: JsonValue, now: Date): string | null {
-    const send = (s as unknown as BadgeSlice).textSend;
-    return send !== undefined && now.getTime() < Date.parse(send.until) ? "a texted code is still being sent; end the call once it is sent" : null;
+    const held = ((s as unknown as BadgeSlice).textSends ?? []).some((send) => now.getTime() < Date.parse(send.until));
+    return held ? "a texted code is still being sent; end the call once it is sent" : null;
   }
 
   stepStatus(step: FlowStep, view: StepView): StepStatus {
@@ -769,8 +776,11 @@ export async function checkCarrier(rt: EngineRuntime, callId: string): Promise<{
   if (!canApply(before.state, { type: "factor_recorded", factor: { kind: "carrier_identity_match", passed: false, at: rt.now() } })) {
     throw new EngineError("invalid_transition", `the carrier is checked while verifying, not while ${before.state.phase}`);
   }
-  const epoch = (before.modules[BADGE] as unknown as BadgeSlice).epoch;
-  const report = await rt.adapter("carrier").check({ phoneNumber: subject.phoneOnFile });
+  const { epoch, callback } = before.modules[BADGE] as unknown as BadgeSlice;
+  // On a callback call, the line the dial rang, which the business may have changed since the
+  // subject was copied: never another line's evidence beside possession of this one.
+  if (callback.status === "dialing") throw new EngineError("precondition_failed", "the carrier is checked on a callback call once it is dialed");
+  const report = await rt.adapter("carrier").check({ phoneNumber: callback.to ?? subject.phoneOnFile });
   const trusted = textCodeTrusted(rt.policy, report);
   await rt.update(callId, (draft) => {
     allowFactor(rt, draft.record, "carrier_identity_match");
