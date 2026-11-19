@@ -112,6 +112,19 @@ export function sessionStoreContract(factory: () => SessionStore | Promise<Sessi
         assert.deepEqual(await pending("w2"), ["c4"]);
       },
     ],
+    [
+      "lists the pending calls listed least recently first, so the same few never hold back the rest",
+      async (store) => {
+        if (store.pendingCalls === undefined) return;
+        for (const id of ["c1", "c2", "c3"]) await store.create("w", id, { n: 1 }, { ledgerPending: true });
+        // Calls that stay pending (their flush keeps failing) must not be the only ones listed.
+        const seen = new Set<string>();
+        for (let run = 0; run < 3; run++) for (const id of await store.pendingCalls("w", 1)) seen.add(id);
+        assert.deepEqual([...seen].sort(), ["c1", "c2", "c3"], "three runs of one reach all three calls");
+        const twos = [await store.pendingCalls("w", 2), await store.pendingCalls("w", 2)].flat();
+        assert.deepEqual([...new Set(twos)].sort(), ["c1", "c2", "c3"], "two runs of two reach all three calls");
+      },
+    ],
   ];
   return cases.map(([name, body]) => ({ name, run: async () => body(await factory()) }));
 }

@@ -67,7 +67,9 @@ The record lives in a `SessionStore`:
   without a hint leaves the mark as it was. A store lists the calls listed least recently first:
   the in-memory store rotates the list (listed calls go to the back), so a call that keeps failing
   cannot starve the others, and a durable store that always listed the same first `limit` would
-  let up to `limit` failing calls hold back every other one. The contract does not check the order.
+  let up to `limit` failing calls hold back every other one. The contract checks that repeated small
+  reads reach every pending call: three reads of one, and two reads of two, each reach all three of
+  three pending calls.
 
 Every engine step reads the record, applies one pure change, and writes it with compare-and-set.
 On `{ok: false}` the step starts again from a fresh read, up to 5 attempts (`MAX_WRITE_ATTEMPTS`),

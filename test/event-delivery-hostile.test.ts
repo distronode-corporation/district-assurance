@@ -9,6 +9,7 @@ import type { JsonValue } from "../src/core/canonical.ts";
 import type { DeliveredEvent } from "../src/core/events.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
+import { sessionStoreContract } from "../src/testing/index.ts";
 import { rejects, setup } from "./helpers.ts";
 
 class SwitchedLedger extends MemoryAuditLedger {
@@ -185,5 +186,19 @@ describe("hostile #97: hostile input and tenants", () => {
     await assert.rejects(t.engine.startCall({ callId: "c1" }), /ledger down/);
     ledger.down = false;
     assert.deepEqual(await t.engine.flushPending(), { flushed: ["c1"], failed: ["c_gone"] });
+  });
+});
+
+describe("hostile #97: the session store contract", () => {
+  it("A9: catches a store that always lists the same first `limit` pending calls (no rotation)", async () => {
+    class NoRotation extends MemorySessionStore {
+      // The same order every time (sorted ids): the first `limit` marked calls, never rotated.
+      override async pendingCalls(w: string, limit: number): Promise<string[]> {
+        return (await super.pendingCalls(w, Number.MAX_SAFE_INTEGER)).sort().slice(0, limit);
+      }
+    }
+    const failed: string[] = [];
+    for (const c of sessionStoreContract(() => new NoRotation())) await c.run().catch(() => failed.push(c.name));
+    assert.deepEqual(failed, ["lists the pending calls listed least recently first, so the same few never hold back the rest"]);
   });
 });
