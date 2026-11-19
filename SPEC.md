@@ -420,7 +420,14 @@ digest, keeping the rest of the subject record (`deletePinDigest(workspaceId, su
 deletes are idempotent. A record filed under no subject is never listed. The store remembers each
 deleted record id (the id alone) and a later `putIntakeRecord` of it stores nothing, so a
 confirmation whose write was still in flight when the subject was erased cannot bring the values
-back.
+back. It also counts each subject's erasures (`markSubjectErased`, `subjectErasures`; the subject key
+alone): `confirmIntake` reads the count before it reserves a record and passes it to
+`putIntakeRecord(record, erasuresSeen)`, which stores nothing once the subject was erased more
+times than that, so a filing reserved before an erasure the listing missed stays out too. The
+confirmation then reads the record back: when the store kept nothing, the call files nothing
+either, drops the draft and its values (`intake.abandoned`), and the confirmation fails with
+`precondition_failed`. A call whose subject changed between that read and the reservation is
+refused with `conflict`, to be confirmed again.
 
 `exportSubject({workspaceId, subjectKey, kept?})` needs the `signer` adapter and returns:
 
@@ -469,7 +476,8 @@ number. If the subject's last erasure has a `subject.erased` entry but no
 `subject.erasure_completed`, a delete failed part way: the erase carries out that entry's plan (the
 same record ids, the PIN digest if the plan says so) and appends the completion, under the same
 entry, whatever was already deleted. It then lists the subject's records and whether a PIN digest
-is on file. With neither, it does nothing more and returns `{erased: false}` (or the finished
+is on file, after counting the erasure (`markSubjectErased`, first, so a filing reserved before it
+is guarded whether or not the listing sees it). With neither, it does nothing more and returns `{erased: false}` (or the finished
 erasure). Otherwise it drops each named call record's copy of the last confirmed record (refused
 with `precondition_failed` while one of the subject's records is still being filed on a call; a
 call record that is gone is skipped), appends `subject.erased` under the next number, deletes the

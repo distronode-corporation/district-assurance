@@ -8,7 +8,7 @@ import { defaultConfig } from "../src/modules.ts";
 import { verifyChain } from "../src/prove/ledger.ts";
 import { receiptPayload, verifyReceipt, type SignedReceipt } from "../src/prove/receipt.ts";
 import { SUBJECT_EXPORT_DOMAIN, subjectExportPayload, verifySubjectExport, type SignedSubjectExport } from "../src/prove/subject.ts";
-import { TEST_KNOWLEDGE_KEY, createTestEngine, type TestEngine } from "../src/testing/index.ts";
+import { TEST_KNOWLEDGE_KEY, createTestEngine, recordStoreErasureContract, type TestEngine } from "../src/testing/index.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { MemoryRecordStore, testSubject } from "../src/testing/fakes.ts";
 import { ACCOUNT, DOB, PIN, rejects, setup, testConfig, verifiedCall, wording } from "./helpers.ts";
@@ -388,5 +388,95 @@ describe("MemoryRecordStore keys", () => {
     const subject = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: "+15550100", knowledge: { dob: DOB } });
     store.putSubject("north/desk", subject);
     assert.equal(await store.getSubject("north", `desk/${subject.subjectKey}`), null);
+  });
+});
+
+describe("MemoryRecordStore passes the RecordStore erasure contract", () => {
+  for (const c of recordStoreErasureContract(() => new MemoryRecordStore())) it(c.name, c.run);
+});
+
+describe("eraseSubject and a filing reserved before it", () => {
+  it("keeps a record reserved before the erasure out of the store, and the call files nothing", async () => {
+    // The CodeRabbit sequence on #105: S has a PIN digest and no records; a confirmation reserves R,
+    // the erasure finds nothing to list and completes, then R's write lands.
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const put = t.records.putIntakeRecord.bind(t.records);
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let writing = false;
+    t.records.putIntakeRecord = async (record, seen) => {
+      writing = true;
+      await held;
+      return put(record, seen);
+    };
+    const confirming = t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    while (!writing) await new Promise((resolve) => setImmediate(resolve));
+    const erased = await t.engine.eraseSubject(request);
+    assert.deepEqual([erased.erased, erased.recordIds, erased.pinDigest], [true, [], true]);
+    release();
+    await assert.rejects(confirming, rejects("precondition_failed", /erased while this record was filed/));
+    assert.deepEqual(await t.records.listIntakeRecords("ws_test", SUBJECT), []);
+    assert.equal(await t.records.getIntakeRecord("ws_test", "rec_1"), null);
+    const slice = (await callRecord(t, callId)).modules.dossier as unknown as DossierSlice;
+    assert.deepEqual([slice.intake, slice.records], [null, []], "the draft with the values is dropped too");
+    assert.equal((await t.ledger.list()).some((e) => e.event === "intake.confirmed"), false);
+    assert.notEqual(await t.engine.endCall(callId), undefined);
+    assert.equal((await t.engine.state(callId)).phase, "ended");
+  });
+
+  it("files a record reserved after an erasure as usual", async () => {
+    const t = setup();
+    await t.engine.eraseSubject(request);
+    const { record } = await filedCall(t);
+    assert.deepEqual((await t.records.listIntakeRecords("ws_test", SUBJECT)).map((r) => r.recordId), [record.recordId]);
+  });
+
+  it("refuses a confirmation whose call changed subject while it was confirmed", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const read = t.sessions.get.bind(t.sessions);
+    let first = true;
+    t.sessions.get = async (w, id) => {
+      const got = await read(w, id);
+      if (!first || got === null) return got;
+      first = false;
+      // The first read sees the call with no subject matched; the reservation then sees S.
+      const copy = structuredClone(got) as { version: number; record: { modules: { badge: { knowledgeMatched: boolean } } } };
+      copy.record.modules.badge.knowledgeMatched = false;
+      return copy as never;
+    };
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("conflict", /subject changed/));
+    t.sessions.get = read;
+    assert.equal((await t.engine.confirmIntake(callId, { confirmedBy: "voice" })).subjectKey, SUBJECT);
+  });
+
+  it("drops nothing a second confirmation already dropped", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const put = t.records.putIntakeRecord.bind(t.records);
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let writes = 0;
+    t.records.putIntakeRecord = async (record, seen) => {
+      writes++;
+      await held;
+      return put(record, seen);
+    };
+    const one = t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    while (writes === 0) await new Promise((resolve) => setImmediate(resolve));
+    const two = t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    while (writes === 1) await new Promise((resolve) => setImmediate(resolve));
+    await t.engine.eraseSubject(request);
+    release();
+    const results = await Promise.allSettled([one, two]);
+    assert.ok(results.every((r) => r.status === "rejected" && rejects("precondition_failed")(r.reason)));
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "intake.abandoned").length, 1, "dropped once");
   });
 });

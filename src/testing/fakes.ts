@@ -126,6 +126,8 @@ export class MemoryRecordStore implements RecordStore {
   readonly #records = new Map<string, IntakeRecord>();
   /** Ids of deleted records: a late write of one stores nothing. */
   readonly #deleted = new Set<string>();
+  /** Erasures counted per subject: a write reserved before the latest stores nothing. */
+  readonly #erasures = new Map<string, number>();
 
   putSubject(workspaceId: string, subject: SubjectRecord): void {
     this.#subjects.set(scoped(workspaceId, subject.subjectKey), structuredClone(subject));
@@ -136,9 +138,10 @@ export class MemoryRecordStore implements RecordStore {
     return subject === undefined ? null : structuredClone(subject);
   }
 
-  async putIntakeRecord(record: IntakeRecord): Promise<void> {
+  async putIntakeRecord(record: IntakeRecord, erasuresSeen?: number): Promise<void> {
     const key = scoped(record.workspaceId, record.recordId);
     if (this.#deleted.has(key)) return;
+    if (erasuresSeen !== undefined && record.subjectKey !== null && (await this.subjectErasures(record.workspaceId, record.subjectKey)) > erasuresSeen) return;
     this.#records.set(key, structuredClone(record));
   }
 
@@ -156,6 +159,15 @@ export class MemoryRecordStore implements RecordStore {
       this.#records.delete(scoped(workspaceId, recordId));
       this.#deleted.add(scoped(workspaceId, recordId));
     }
+  }
+
+  async markSubjectErased(workspaceId: string, subjectKey: string): Promise<void> {
+    const key = scoped(workspaceId, subjectKey);
+    this.#erasures.set(key, (this.#erasures.get(key) ?? 0) + 1);
+  }
+
+  async subjectErasures(workspaceId: string, subjectKey: string): Promise<number> {
+    return this.#erasures.get(scoped(workspaceId, subjectKey)) ?? 0;
   }
 
   async deletePinDigest(workspaceId: string, subjectKey: string): Promise<void> {

@@ -65,6 +65,7 @@ describe("entry points", () => {
       "TEST_KNOWLEDGE_KEY",
       "FakePinVerifier",
       "sessionStoreContract",
+      "recordStoreErasureContract",
     ]) {
       assert.ok(name in testing, name);
     }

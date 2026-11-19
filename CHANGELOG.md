@@ -26,8 +26,9 @@ All notable changes to this project are documented here. The format follows
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
 - Access and deletion requests for one subject (PRV-7): intake records carry the matched
-  `subjectKey`, `RecordStore` gains `listIntakeRecords`, `deleteIntakeRecords` and
-  `deletePinDigest`, `Engine.exportSubject` returns a signed export (its own domain, never a
+  `subjectKey`, `RecordStore` gains `listIntakeRecords`, `deleteIntakeRecords`,
+  `deletePinDigest`, `markSubjectErased` and `subjectErasures` (with `recordStoreErasureContract` in
+  `district-assurance/testing`), and `putIntakeRecord` an optional `erasuresSeen`, `Engine.exportSubject` returns a signed export (its own domain, never a
   receipt; `verifySubjectExport`), and `Engine.eraseSubject` deletes the records and the PIN digest
   and appends `subject.erased`, leaving the ledger and receipts whole (ADR-21). A consent carries
   the matched `subjectKey` and an export lists only that subject's consents; a deleted record id

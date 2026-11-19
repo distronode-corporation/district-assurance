@@ -118,10 +118,12 @@ export interface RecordStore {
   getSubject(workspaceId: string, subjectKey: string): Promise<SubjectRecord | null>;
   /**
    * Idempotent by `recordId`: the engine retries a write whose outcome it could not see, with the
-   * same record. Stores nothing for a `recordId` that `deleteIntakeRecords` deleted: a confirmation
-   * still in flight when its subject was erased must not bring the values back.
+   * same record. Stores nothing for a `recordId` that `deleteIntakeRecords` deleted, nor, given
+   * `erasuresSeen` (what `subjectErasures` answered before the record was reserved), when its
+   * subject has been marked erased more times than that since: a confirmation still in flight when
+   * its subject was erased must not bring the values back, whether or not the erasure saw it.
    */
-  putIntakeRecord(record: IntakeRecord): Promise<void>;
+  putIntakeRecord(record: IntakeRecord, erasuresSeen?: number): Promise<void>;
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
   /** The intake records filed under a subject key. Records filed under null are never listed. */
   listIntakeRecords(workspaceId: string, subjectKey: string): Promise<IntakeRecord[]>;
@@ -130,6 +132,13 @@ export interface RecordStore {
    * `putIntakeRecord` of it stores nothing. Idempotent: an id already gone is skipped.
    */
   deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void>;
+  /**
+   * Counts one erasure of a subject, atomically (the subject key alone is kept, no value). Every
+   * `eraseSubject` marks it before it looks for the subject's records.
+   */
+  markSubjectErased(workspaceId: string, subjectKey: string): Promise<void>;
+  /** How many times a subject was marked erased: 0 for one never erased. */
+  subjectErasures(workspaceId: string, subjectKey: string): Promise<number>;
   /** Removes the subject's `pinDigest` and keeps the rest of the subject record, which is the host's. Idempotent. */
   deletePinDigest(workspaceId: string, subjectKey: string): Promise<void>;
 }

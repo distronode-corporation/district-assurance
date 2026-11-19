@@ -25,7 +25,13 @@ export interface DossierSlice {
   /** The forms in force when the call started: a config change never strands a collect step. */
   forms: IntakeForm[];
   /** The open draft, with the form as it was when the intake started, and the record being filed (if any). */
-  intake: { form: IntakeForm; values: Record<string, FieldValue>; filing: IntakeRecord | null } | null;
+  intake: {
+    form: IntakeForm;
+    values: Record<string, FieldValue>;
+    filing: IntakeRecord | null;
+    /** The subject's erasure count read before `filing` was reserved (RecordStore.subjectErasures). Absent on calls saved before PRV-7. */
+    erasuresSeen?: number;
+  } | null;
   records: Array<{ recordId: string; formId: string; digest: string }>;
   /** The record the last confirmation filed, until another intake starts: a retried confirmation gets it back. */
   confirmed: IntakeRecord | null;
@@ -162,14 +168,18 @@ export async function confirmIntake(
   subjectOf: (record: CallRecord) => string | null,
 ): Promise<IntakeRecord> {
   rt.settings(DOSSIER);
-  const reserved = await rt.update(callId, (draft): { record: IntakeRecord; filed: boolean } => {
+  const records = rt.adapter("records");
+  // Read before reserving: an erasure counted after this read keeps the record out of the store.
+  const readKey = subjectOf(await rt.read(callId));
+  const seen = readKey === null ? 0 : await records.subjectErasures(rt.workspaceId, readKey);
+  const reserved = await rt.update(callId, (draft): { record: IntakeRecord; filed: boolean; erasuresSeen: number | undefined } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     const intake = s.intake;
     // Filed already (a retry after the last write's ledger entry failed): this write appends that
     // entry, and the same record comes back.
-    if (intake === null && s.confirmed !== null) return { record: s.confirmed, filed: true };
+    if (intake === null && s.confirmed !== null) return { record: s.confirmed, filed: true, erasuresSeen: undefined };
     if (intake === null) throw new EngineError("invalid_transition", "no intake is open on this call");
-    if (intake.filing !== null) return { record: intake.filing, filed: false };
+    if (intake.filing !== null) return { record: intake.filing, filed: false, erasuresSeen: intake.erasuresSeen };
     if (!rt.authorized(draft.record, "intake.file")) throw new EngineError("scope_denied", "the grant does not cover intake.file");
     const missing = missingRequired(intake.form, intake.values);
     if (missing.length > 0) throw new EngineError("invalid_input", `required fields missing: ${missing.join(", ")}`);
@@ -185,8 +195,11 @@ export async function confirmIntake(
       confirmedBy: input.confirmedBy,
       confirmedAt: rt.now(),
     };
+    // The count read above is for the subject matched then; a subject changed since is read again.
+    if (built.subjectKey !== readKey) throw new EngineError("conflict", "the call's subject changed while the record was confirmed; confirm it again");
     intake.filing = built;
-    return { record: built, filed: false };
+    intake.erasuresSeen = seen;
+    return { record: built, filed: false, erasuresSeen: seen };
   });
   const { record } = reserved;
   if (reserved.filed) return record;
@@ -194,16 +207,29 @@ export async function confirmIntake(
   // this same record again (RecordStore.putIntakeRecord is idempotent by recordId). Two processes
   // confirming at once write the same record; the first to commit files it, the other finds it filed.
   // A write that lands after the record was erased stores nothing (RecordStore.deleteIntakeRecords).
-  await rt.adapter("records").putIntakeRecord(record);
-  await rt.update(callId, (draft) => {
+  // The subject erased since the count was read: the store keeps nothing (RecordStore.markSubjectErased).
+  await records.putIntakeRecord(record, reserved.erasuresSeen);
+  const stored = (await records.getIntakeRecord(record.workspaceId, record.recordId)) !== null;
+  const dropped = await rt.update(callId, (draft) => {
     const s = draft.slice<DossierSlice>(DOSSIER);
-    if (s.records.some((r) => r.recordId === record.recordId)) return;
+    if (s.records.some((r) => r.recordId === record.recordId)) return false;
+    // The store kept nothing: the call files nothing either, and drops the draft that holds the values.
+    if (!stored) {
+      if (s.intake?.filing?.recordId === record.recordId) {
+        draft.apply({ type: "intake_abandoned" });
+        s.intake = null;
+        draft.emit("intake.abandoned", "code", {});
+      }
+      return true;
+    }
     draft.apply({ type: "intake_confirmed", recordId: record.recordId });
     s.intake = null;
     s.confirmed = record;
     s.records.push({ recordId: record.recordId, formId: record.formId, digest: record.digest });
     draft.emit("intake.confirmed", "caller", { recordId: record.recordId, formId: record.formId, digest: record.digest, confirmedBy: record.confirmedBy });
+    return false;
   });
+  if (dropped) throw new EngineError("precondition_failed", "the subject was erased while this record was filed; nothing was filed");
   return record;
 }
 

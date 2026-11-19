@@ -301,6 +301,9 @@ export async function eraseSubject(
   if (n > 0 && !appended.has(erasureEventId(rt, subjectKey, n - 1, "subject.erasure_completed"))) {
     finished = await carryOut(rt, records, subjectKey, n - 1, appended.get(erasureEventId(rt, subjectKey, n - 1, "subject.erased"))!);
   }
+  // Counted before the listing: a filing reserved before now and written after it stores nothing,
+  // whether or not this listing sees it, so no record the plan misses can bring values back.
+  await records.markSubjectErased(rt.workspaceId, subjectKey);
   const found = await records.listIntakeRecords(rt.workspaceId, subjectKey);
   const pinDigest = (await records.getSubject(rt.workspaceId, subjectKey))?.pinDigest !== undefined;
   const recordIds = found.map((r) => r.recordId);
