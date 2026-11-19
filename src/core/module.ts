@@ -268,13 +268,16 @@ export class ModuleRegistry {
   /** Names only the constructor may install (an engine's built-in modules): refused later, even after a removal. */
   readonly #reserved: ReadonlySet<string>;
   #sealed = false;
+  /** An engine's registry (`grantReplace` given): that engine's Badge runs the factor judges listed here. */
+  readonly #engineOwned: boolean;
   /** The judges each module supplied, as they were checked when it was installed. */
   readonly #judges = new Map<string, readonly FactorPlugin[]>();
 
   /**
    * `grantReplace`, when given, receives the one function that can replace a reserved module (the
    * engine's own new build of Badge): `replace` refuses those names, so a host holding the registry
-   * can never put a module of its own in a built-in's place.
+   * can never put a module of its own in a built-in's place. Such a registry is an engine's, and
+   * `replace` there also refuses a module that supplies factors, whose judges that engine's Badge runs.
    */
   constructor(
     options: {
@@ -288,6 +291,7 @@ export class ModuleRegistry {
     this.adapters = new Set(options.adapters ?? []);
     this.capabilities = structuredClone(options.capabilities ?? {});
     this.#reserved = new Set(options.reserved ?? []);
+    this.#engineOwned = options.grantReplace !== undefined;
     for (const module of options.modules ?? []) this.use(module);
     this.#sealed = true;
     options.grantReplace?.((module) => this.#replace(module));
@@ -305,9 +309,15 @@ export class ModuleRegistry {
   /**
    * Swaps an installed module for a new build of it under the same name (Badge with one more
    * factor), checked against the other modules as a new one would be. It keeps its place in the order.
+   * On an engine's registry a module that supplies factors, before or after, is not replaced here:
+   * the engine's Badge would keep running the old judges. Remove it and install the new build instead.
    */
   replace(module: AssuranceModule): void {
-    if (this.#reserved.has(module.manifest.name)) throw new EngineError("invalid_input", `${module.manifest.name} is a built-in module: only its engine replaces it`);
+    const name = module.manifest.name;
+    if (this.#reserved.has(name)) throw new EngineError("invalid_input", `${name} is a built-in module: only its engine replaces it`);
+    if (this.#engineOwned && [module, this.#modules.get(name)].some((m) => m !== undefined && m.manifest.provides.factors.length > 0)) {
+      throw new EngineError("invalid_input", `${name} supplies factors: on an engine, remove it and use the new build`);
+    }
     this.#replace(module);
   }
 
