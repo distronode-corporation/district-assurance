@@ -167,6 +167,8 @@ export class Engine {
   readonly #notifyTimeoutMs: number;
   /** Badge as installed now: a new build replaces it when a factor is added (`useFactor`, `use`). */
   #badge: badge.BadgeModule;
+  /** The registry's replace for a built-in module, which only this engine holds (`#swapBadge`). */
+  #replaceBuiltIn!: (module: AssuranceModule) => void;
   readonly #rt: EngineRuntime;
   /** Duress alerts this engine is sending now, by id, with when it started: one send at a time, retried after a while. */
   readonly #sending = new Map<string, number>();
@@ -236,7 +238,13 @@ export class Engine {
           : (value as { capabilities?: unknown }).capabilities;
     }
     this.#receiptModules = builtInModules(this.#badge);
-    this.registry = new ModuleRegistry({ adapters: present, capabilities, reserved: BUILT_IN_MODULES, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
+    this.registry = new ModuleRegistry({
+      adapters: present,
+      capabilities,
+      reserved: BUILT_IN_MODULES,
+      modules: [...this.#receiptModules, ...(options.modules ?? [])],
+      grantReplace: (replace) => (this.#replaceBuiltIn = replace),
+    });
     // This engine's own build of Badge, running the judges the outside modules given here supply.
     // A Badge shared by several engines never gains a factor through one of them.
     this.#swapBadge(this.#badge.withOutsideFactors(this.registry.factorPlugins()));
@@ -306,7 +314,7 @@ export class Engine {
 
   /** Puts a new build of Badge in place of the old, in the registry (when Badge is installed) and for the runtime. */
   #swapBadge(next: badge.BadgeModule): void {
-    if (this.registry.get(badge.BADGE) === this.#badge) this.registry.replace(next);
+    if (this.registry.get(badge.BADGE) === this.#badge) this.#replaceBuiltIn(next);
     this.#receiptModules = this.#receiptModules.map((m) => (m === this.#badge ? next : m));
     this.#badge = next;
   }

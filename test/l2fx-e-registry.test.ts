@@ -3,7 +3,8 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import type { AssuranceModule, FactorPlugin } from "../src/core/module.ts";
+import { ModuleRegistry, type AssuranceModule, type FactorPlugin } from "../src/core/module.ts";
+import { builtInModules } from "../src/modules.ts";
 import { rejects, setup, testConfig } from "./helpers.ts";
 
 const token = (): FactorPlugin => ({ kind: "hardware_token", summary: "a code from a token", maxAttemptsPerCall: 2, adapters: [], judge: async () => false });
@@ -67,17 +68,17 @@ describe("l2fx-e T1: removal checks the judges the registry installed", () => {
 
 describe("l2fx-e: replace keeps alwaysOn", () => {
   it("refuses a same-name build of the ledger module without alwaysOn, so it can never be removed after", () => {
-    const t = setup();
-    const trace = t.engine.registry.get("trace")!;
+    const registry = new ModuleRegistry({ modules: builtInModules() });
+    const trace = registry.get("trace")!;
     const { alwaysOn: _dropped, ...manifest } = trace.manifest;
-    assert.throws(() => t.engine.registry.replace({ ...trace, manifest }), rejects("invalid_input", /alwaysOn/));
-    assert.throws(() => t.engine.registry.remove("trace"), rejects("precondition_failed"));
+    assert.throws(() => registry.replace({ ...trace, manifest }), rejects("invalid_input", /alwaysOn/));
+    assert.throws(() => registry.remove("trace"), rejects("precondition_failed"));
   });
 
   it("refuses a build that would make another module hold the ledger", () => {
-    const t = setup();
-    const badge = t.engine.registry.get("badge")!;
-    assert.throws(() => t.engine.registry.replace({ ...badge, manifest: { ...badge.manifest, alwaysOn: true } }), rejects("invalid_input"));
+    const registry = new ModuleRegistry({ modules: builtInModules() });
+    const badge = registry.get("badge")!;
+    assert.throws(() => registry.replace({ ...badge, manifest: { ...badge.manifest, alwaysOn: true } }), rejects("invalid_input", /alwaysOn/));
   });
 
   it("keeps Badge's place in the order when it is swapped", () => {
@@ -88,5 +89,45 @@ describe("l2fx-e: replace keeps alwaysOn", () => {
       t.engine.registry.list().map((m) => m.manifest.name),
       before,
     );
+  });
+});
+
+describe("l2fx-e U0: only the engine replaces a built-in module", () => {
+  it("refuses a host's replacement of Badge (or any built-in) through the public registry", () => {
+    const t = setup();
+    const current = t.engine.registry.get("badge")!;
+    for (const name of ["badge", "trace", "gate"]) {
+      const module = t.engine.registry.get(name)!;
+      assert.throws(() => t.engine.registry.replace({ ...module }), rejects("invalid_input", /built-in/), name);
+    }
+    assert.equal(t.engine.registry.get("badge"), current);
+  });
+
+  it("still swaps Badge for the engine, in the registry and for factor submission alike", async () => {
+    const t = setup();
+    t.engine.useFactor({ ...token(), judge: async (input) => input.entry === "246810" });
+    t.engine.configure(tokenConfig());
+    assert.ok(t.engine.registry.factorKinds().includes("hardware_token"));
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: "12345678" });
+    assert.deepEqual(await t.engine.submitFactor(callId, "hardware_token", "246810"), { matched: true, locked: false });
+  });
+
+  it("lets the engine's own registry be built without that power", () => {
+    const registry = new ModuleRegistry({ modules: builtInModules(), reserved: ["badge"] });
+    assert.throws(() => registry.replace(registry.get("badge")!), rejects("invalid_input", /built-in/));
+  });
+});
+
+describe("l2fx-e U1: the installed judges cannot be changed from outside", () => {
+  it("hands out a list a host cannot empty, so removal and Badge's rebuild still see the judge", () => {
+    const t = setup();
+    t.engine.use(tokenModule([token()]));
+    t.engine.configure(tokenConfig());
+    const judges = t.engine.registry.judgesOf("token-check") as FactorPlugin[];
+    assert.throws(() => judges.splice(0));
+    assert.equal(t.engine.registry.judgesOf("token-check").length, 1);
+    assert.throws(() => t.engine.remove("token-check"), rejects("precondition_failed", /supplies the factor hardware_token/));
+    assert.equal(t.engine.registry.factorPlugins().length, 1);
   });
 });
