@@ -633,6 +633,18 @@ A durable ledger must pass `auditLedgerContract`: append-only, one valid chain u
 appends, each `eventId` once, copies in and out, and card data refused (tested on
 `MemoryAuditLedger`).
 
+### Reading someone else's receipt
+
+Call ids are not secrets, and a receipt says how a caller was verified, what they filed and paid.
+**Controls:** the reference server serves a receipt only at `/r/<token>`, where the token is 256
+random bits issued for that call; it keeps only the token's SHA-256, so its store never holds a
+working link (the demo UI's in-memory run state does hold its own run's token, to show the
+link; a host would send it and drop it); an unknown, malformed or not yet usable token gives the same `404`; there is no
+route by call id (tested). The page carries no script, is never cached or indexed, and sends no
+Referer, so the token does not leak to another site (tested). Left to the host: sending the link
+only to the number on file, rate limits on `/r/` (SRV-2), a durable store for the hashes (SRV-4),
+and expiry or revocation of a link, which are not built.
+
 ### Breach of stored data
 
 **Controls:** reference values are HMACs under a per-workspace key, because a plain hash of a date

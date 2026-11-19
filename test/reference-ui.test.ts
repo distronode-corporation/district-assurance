@@ -57,6 +57,7 @@ async function serve(ui = true): Promise<Served> {
     engine: world.engine,
     clock: world.t.clock,
     stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET], connect: [DEMO_CONNECT_SECRET] },
+    receiptLinks: world.receiptLinks,
     ...(ui ? { ui: new DemoRuns(world) } : {}),
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -180,7 +181,7 @@ describe("reference UI: static files", () => {
 
   it("with the UI on, refuses a foreign Host on every route, the webhooks, receipts and key set included", async () => {
     const host = `evil.example:${s.port}`;
-    for (const path of ["/.well-known/receipt-keys.json", "/receipts/call_1", "/healthz", "/webhooks/twilio", "/nope"]) {
+    for (const path of ["/.well-known/receipt-keys.json", `/r/${"A".repeat(43)}`, "/healthz", "/webhooks/twilio", "/nope"]) {
       const res = await raw(s.port, path, { host });
       assert.deepEqual([res.status, JSON.parse(res.body)], [403, { error: "host_not_allowed" }], path);
     }
@@ -273,7 +274,10 @@ describe("reference UI: demo routes", () => {
     assert.deepEqual(again.results, last.results);
 
     const check = (await import(new URL("receipt-check.js", PUBLIC).href)) as ReceiptCheckModule;
-    const receipt = (await (await fetch(`${s.base}/receipts/${last.callId}`)).json()) as SignedReceipt;
+    assert.match(last.receiptLink!, /^\/r\/[A-Za-z0-9_-]{43}$/);
+    assert.equal(last.receiptLink!.includes(last.callId!), false, "the link does not name the call");
+    const receipt = (await (await fetch(`${s.base}${last.receiptLink}.json`)).json()) as SignedReceipt;
+    assert.equal(receipt.body.callId, last.callId);
     const { keys } = (await (await fetch(`${s.base}/.well-known/receipt-keys.json`)).json()) as { keys: unknown[] };
     assert.deepEqual(await check.checkReceipt(receipt, keys), { ok: true, reason: "valid" });
     assert.deepEqual(await check.checkReceipt(check.tamperedCopy(receipt), keys), { ok: false, reason: "signature_mismatch" });
@@ -286,7 +290,8 @@ describe("reference UI: demo routes", () => {
     for (let i = 0; i < SCRIPTS["owner-command"].length; i++) last = (await (await next(view.runId)).json()) as RunView;
     assert.deepEqual(last.results.map((r) => r.ok), [true, true, true, true, true, true]);
     assert.equal(last.done, true);
-    assert.equal((await fetch(`${s.base}/receipts/${last.callId}`)).status, 404);
+    assert.equal(last.receiptLink, null);
+    assert.equal((await fetch(`${s.base}/receipts/${last.callId}`)).status, 404, "no receipt by call id");
   });
 
   it("runs two entry calls that reach the door together: both wait for the relay, and each checks its own door (review of #50)", async () => {
@@ -615,7 +620,7 @@ describe("reference UI: the demo world's adapters and clock (review of #50)", ()
   it("builds the demo world on the wrapped adapter, so a link the real one creates is recorded", async () => {
     const real = new RealLinks();
     const world = createDemoWorld({ payments: real as unknown as PaymentLinks });
-    const call = { callId: (await world.engine.startCall({ locale: "fr", flow: "deposit-connect" })).callId, linkId: "", receipt: null };
+    const call = { callId: (await world.engine.startCall({ locale: "fr", flow: "deposit-connect" })).callId, linkId: "", receipt: null, receiptToken: null };
     assert.ok((await verifyToLevel2(world, call, "payment.request")).ok);
     await confirmAmount(world.engine, call.callId);
     const payment = await world.engine.requestPayment(call.callId);
@@ -641,7 +646,7 @@ describe("reference UI: the demo world's adapters and clock (review of #50)", ()
     // The same world, but the record of which grants opened a door is lost: a door did open (for the
     // first run), yet none for this run's grant, so the step must not pass.
     const blind: DemoWorld = { ...world, openedFor: new Set<string>() };
-    const call = { callId: "", linkId: "", receipt: null };
+    const call = { callId: "", linkId: "", receipt: null, receiptToken: null };
     const steps = SCRIPTS.entry;
     for (const step of steps.slice(0, 2)) assert.ok((await step.run(blind, call)).ok);
     const door = await steps[2]!.run(blind, call);
@@ -685,7 +690,7 @@ describe("reference UI: the demo world's adapters and clock (review of #50)", ()
     // engine judges the wait on this clock too, so it reads the mocked Date that tick() moves.
     mock.timers.enable({ apis: ["setTimeout", "Date"], now: fixed.now().getTime() });
     const world = createDemoWorld({ clock: { now: () => new Date() } });
-    const call = { callId: "", linkId: "", receipt: null };
+    const call = { callId: "", linkId: "", receipt: null, receiptToken: null };
     const steps = SCRIPTS["owner-command"];
     for (const step of steps.slice(0, 2)) assert.ok((await step.run(world, call)).ok);
     try {

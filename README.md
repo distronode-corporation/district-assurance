@@ -170,7 +170,7 @@ state machine, the config, the events and the formats.
 | `POST /webhooks/stripe/payments` | Stripe Checkout outcomes on the platform's account, signature checked first, each event applied once |
 | `POST /webhooks/stripe/connect` | Stripe Checkout outcomes from connected accounts (connect mode), with their own signing secret |
 | `POST /webhooks/twilio`, `/telnyx` | `501` until carrier signature checks are built |
-| `GET /receipts/:callId` | a call's signed receipt (demo only: real receipt links need capability tokens) |
+| `GET /r/:token` | a receipt page in English and French, with its signature check, by a capability token the host issued (`/r/:token.json`: the signed receipt) |
 | `GET /.well-known/receipt-keys.json` | the public key set for receipts |
 | `GET /healthz` | liveness |
 

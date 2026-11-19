@@ -34,6 +34,8 @@ export interface RunView extends FlowView {
   ledger: AuditEntry[];
   /** The whole ledger's hash chain (every run's calls share one ledger). */
   chain: { ok: boolean; entries: number };
+  /** The receipt's capability link (`/r/<token>`), once the call ended with a receipt. */
+  receiptLink: string | null;
 }
 
 export type RunAnswer = { ok: true; view: RunView } | { ok: false; status: 404 | 409; error: "not_found" | "busy" | "done" };
@@ -74,7 +76,7 @@ export class DemoRuns {
   }
 
   async start(flow: string): Promise<RunView> {
-    const run: Run = { runId: `run_${randomUUID()}`, flow, call: { callId: "", linkId: "", receipt: null }, results: [], busy: false, failed: false, turn: Promise.resolve() };
+    const run: Run = { runId: `run_${randomUUID()}`, flow, call: { callId: "", linkId: "", receipt: null, receiptToken: null }, results: [], busy: false, failed: false, turn: Promise.resolve() };
     this.#runs.set(run.runId, run);
     for (const old of this.#runs.keys()) {
       if (this.#runs.size <= this.#max) break;
@@ -142,6 +144,7 @@ export class DemoRuns {
       position: callId === null ? null : await engine.flowPosition(callId),
       ledger: callId === null ? [] : all.filter((entry) => entry.callId === callId),
       chain: { ok: chain.ok, entries: all.length },
+      receiptLink: run.call.receiptToken === null ? null : `/r/${run.call.receiptToken}`,
     };
   }
 

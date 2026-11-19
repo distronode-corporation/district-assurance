@@ -21,6 +21,7 @@ const server = createReferenceServer({
   clock: world.t.clock,
   stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET], connect: [DEMO_CONNECT_SECRET] },
   ui: new DemoRuns(world),
+  receiptLinks: world.receiptLinks,
 });
 server.listen(port, "127.0.0.1", () => {
   world.base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

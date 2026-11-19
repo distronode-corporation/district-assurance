@@ -1025,6 +1025,23 @@ Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording 
 `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`, or `text: {en, fr, es}` for a
 wording with a Spanish text, so a wording without one keeps the digest it had before Spanish.
 
+**Receipt links.** A call id is not a secret, so a receipt is shared by a capability link.
+`newReceiptLinkToken()` returns a `token` (32 random bytes, base64url, 43 characters) and its
+`hash`, `SHA-256("receipt-link:" + token)` in hex; the host sends the token once and stores only
+the hash with the call id. `receiptLinkTokenHash(token)` gives the hash to look up, or null for a
+string that is not a token. The reference server keeps the hashes in `ReceiptLinks` and serves:
+
+| Route | |
+|---|---|
+| `GET /r/:token` | an HTML page, in English or French (`?lang=en` or `?lang=fr`, else the browser's first `Accept-Language`, else English): the signature check against the server's key set, the verification level and methods, records, payments, consents and the ledger head |
+| `GET /r/:token.json` | the signed receipt |
+
+An unknown token, a malformed one and a call without a receipt yet all answer the same `404`. The
+page has no script, style or form, every value is escaped, and it is sent with `no-store`,
+`Referrer-Policy: no-referrer` and `noindex`. There is no route by call id. `ReceiptLinks` keeps
+every link it issues, in memory, for the life of the process, with no limit and no expiry: the host
+bounds how many links it issues and how long it keeps them (a durable store with expiry in its place).
+
 ## 13. Intake values
 
 | Type | Accepted | Stored as |

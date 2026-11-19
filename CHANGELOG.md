@@ -155,6 +155,9 @@ All notable changes to this project are documented here. The format follows
   another field holds a value), `min` and `max` for numbers and dates, and a bounded `pattern` for
   text; `validateConfig` refuses unknown field settings, `showIf` cycles, and fields that name a card or a SIN.
 - Spanish (FIL-6): an `es` locale for read-backs (US numbers and dates), identity and payment texts (amounts as `es-US`), optional Spanish form labels and consent wordings (a wording without one keeps its digest), Spanish digit words in card redaction, no Spanish spoken answers (a yes/no field takes no `sí`, and a Spanish call confirms its read-back on the keypad, until a reviewed Spanish vocabulary exists), a call in `es` refused when its flow needs a form or wording without Spanish, `startCall` refusing an unknown locale, and a parity test over every code-built string.
+- Receipt links by capability token (SRV-3): `newReceiptLinkToken` and `receiptLinkTokenHash`; the
+  reference server keeps only token hashes and serves `GET /r/:token`, a receipt page in English
+  and French with its signature check, and `/r/:token.json`. `GET /receipts/:callId` is removed.
 
 ### Changed
 
