@@ -121,46 +121,50 @@ export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: 
     const pending = [...(s.pinPending ?? [])];
     const used = s.pinEnrolments ?? 0;
     // Past the limit, a try may only finish an enrolment this call already stored: it is not counted.
-    if (used >= settings.maxAttemptsPerCall) return pending.length === 0 ? null : { subjectKey: s.subjectKey!, pending, overLimit: true };
+    if (used >= settings.maxAttemptsPerCall) return pending.length === 0 ? null : { subjectKey: s.subjectKey!, pending, overLimit: true, enrolmentId: null };
     s.pinEnrolments = used + 1;
-    return { subjectKey: s.subjectKey!, pending, overLimit: false };
+    // This try's own id: the call and its try number, so no other call or try shares it.
+    return { subjectKey: s.subjectKey!, pending, overLimit: false, enrolmentId: `${callId}:${used + 1}` };
   });
   if (reserved === null) return { enrolled: false, reason: "locked" };
   const records = rt.adapter("records");
   const subject = await records.getSubject(rt.workspaceId, reserved.subjectKey);
   if (subject === null) throw new EngineError("precondition_failed", "the verified subject is not on file");
   const digest = rt.hmac(`pin:${reserved.subjectKey}:${input.pin}`);
-  const ours = (p: { subjectKey: string; digest: string }) => p.subjectKey === reserved.subjectKey && hexDigestsEqual(p.digest, digest);
-  // A PIN on file is refused, unless it is one this call stored and has not yet recorded (the
-  // session write after the store's write failed): the same PIN again finishes that enrolment.
-  const resuming = subject.pinDigest !== undefined && hexDigestsEqual(subject.pinDigest, digest) && reserved.pending.some(ours);
+  // A PIN on file is refused, unless the store says this call's own try stored it (by its id, kept
+  // with the digest) and the call has not recorded it yet: the session write after the store's
+  // write failed, and the same PIN again finishes that enrolment. Another call's enrolment of the
+  // same PIN, or one after a reset, never passes for this call's.
+  const stored = subject.pinDigest !== undefined && hexDigestsEqual(subject.pinDigest, digest) ? subject.pinEnrolmentId : undefined;
+  const resuming = stored !== undefined && reserved.pending.some((p) => p.enrolmentId === stored && p.subjectKey === reserved.subjectKey);
   if (reserved.overLimit && !resuming) return { enrolled: false, reason: "locked" };
   if (subject.pinDigest !== undefined && !resuming) throw new EngineError("precondition_failed", "a PIN is on file; only the business can reset it");
   const problem = pinEnrolmentProblem(settings, (d) => rt.hmac(d), subject, input.pin, input.confirm);
   if (problem !== null) return { enrolled: false, reason: problem };
+  let enrolmentId = stored!;
   if (!resuming) {
+    enrolmentId = reserved.enrolmentId!;
     // Recorded before the store's write, so a retry can finish an enrolment whose last write failed.
     // Each try adds its own entry, so two tries at once on this call never overwrite each other's.
     await rt.update(callId, (draft) => {
       const s = draft.slice<BadgeSlice>(BADGE);
-      s.pinPending = [...(s.pinPending ?? []), { subjectKey: reserved.subjectKey, digest }];
+      s.pinPending = [...(s.pinPending ?? []), { subjectKey: reserved.subjectKey, digest, enrolmentId }];
     });
     // Stored only if the subject still has no PIN: of two enrolments at once, one wins and the
-    // other is refused without replacing the winner's PIN, and takes its own entry back, so a
-    // retry of it can never pass for the winner's enrolment.
-    if (!(await records.putPinDigest(rt.workspaceId, reserved.subjectKey, digest))) {
+    // other is refused without replacing the winner's PIN, and takes its own entry back.
+    if (!(await records.putPinDigest(rt.workspaceId, reserved.subjectKey, digest, enrolmentId))) {
       await rt.update(callId, (draft) => {
         const s = draft.slice<BadgeSlice>(BADGE);
-        const i = s.pinPending!.findIndex(ours);
-        if (i !== -1) s.pinPending!.splice(i, 1);
+        s.pinPending = s.pinPending!.filter((p) => p.enrolmentId !== enrolmentId);
       });
       throw new EngineError("precondition_failed", "a PIN is on file; only the business can reset it");
     }
   }
   await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
-    // Once per enrolment: a retry, or another try of the same PIN, may already have recorded it.
-    const left = s.pinPending!.filter((p) => !ours(p));
+    // Once per enrolment, in the write that checks it: only the entry of the try that stored the PIN
+    // records it, and a retry that ran meanwhile may already have.
+    const left = s.pinPending!.filter((p) => p.enrolmentId !== enrolmentId);
     if (left.length === s.pinPending!.length) return;
     s.pinPending = left;
     draft.emit("pin.enrolled", "caller", {});

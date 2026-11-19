@@ -57,6 +57,11 @@ export interface SubjectRecord {
   pinDigest?: string;
   /** The HMAC of the subject's duress PIN (`duressDigest`), set only by the business (VER-12). */
   duressDigest?: string;
+  /**
+   * Which enrolment stored `pinDigest` (VER-6): written with it by `putPinDigest`, so a call
+   * finishing an enrolment whose last write failed can tell its own from another's. Opaque.
+   */
+  pinEnrolmentId?: string;
 }
 
 /**
@@ -142,13 +147,13 @@ export interface RecordStore {
   putIntakeRecord(record: IntakeRecord): Promise<void>;
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
   /**
-   * Stores a subject's PIN digest (`pinDigest`), or removes it with null (a reset by the business).
-   * Never given the PIN itself. A digest is stored only if the subject has none, as one atomic step
-   * (of two enrolments at once, one wins and the other replaces nothing); the answer says whether it
-   * was stored. Null always removes and answers true. A subject the store does not have is left
-   * alone, and the answer is false.
+   * Stores a subject's PIN digest (`pinDigest`) with the id of the enrolment that chose it
+   * (`pinEnrolmentId`), or removes both with null (a reset by the business). Never given the PIN
+   * itself. A digest is stored only if the subject has none, as one atomic step (of two enrolments at
+   * once, one wins and the other replaces nothing); the answer says whether it was stored. Null always
+   * removes and answers true. A subject the store does not have is left alone, and the answer is false.
    */
-  putPinDigest(workspaceId: string, subjectKey: string, digest: string | null): Promise<boolean>;
+  putPinDigest(workspaceId: string, subjectKey: string, digest: string | null, enrolmentId?: string): Promise<boolean>;
   /**
    * Stores a subject's duress PIN digest (`duressDigest`), replacing any (the business changes it),
    * only if the subject's PIN digest is still `ifPinDigest`, in one atomic step, so a PIN reset and

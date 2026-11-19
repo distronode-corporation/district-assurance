@@ -60,7 +60,7 @@ export interface BadgeSlice {
    * The PIN digests this call's tries are storing and have not yet recorded as enrolled
    * (`pin.enrolled`), one entry per try. Never the digits. At most `maxAttemptsPerCall` entries.
    */
-  pinPending?: Array<{ subjectKey: string; digest: string }>;
+  pinPending?: Array<{ subjectKey: string; digest: string; enrolmentId: string }>;
   /**
    * Set once a duress PIN passed on this call (VER-12), and never cleared: the scopes refused on
    * top of money, contact and access, as Badge's settings named them then. The only place the
