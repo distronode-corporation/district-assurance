@@ -10,7 +10,7 @@
 // throws NotImplementedError. SPEC.md describes the flow.
 import type { JsonWebKey } from "node:crypto";
 
-import type { IntakeRecord, SessionStore } from "./core/adapters.ts";
+import type { AttemptCounterKey, IntakeRecord, SessionStore } from "./core/adapters.ts";
 import type { JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
@@ -34,6 +34,7 @@ import { detailCarriesCardNumber } from "./prove/ledger.ts";
 import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
 import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
+import { claimNotice, unlockCounter } from "./verify/counters.ts";
 import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
@@ -85,7 +86,24 @@ interface QueuedEvent {
   actor: Actor;
   at: string;
   detail: { [key: string]: JsonValue };
+  /** On `verification.locked`: the counter that locked, for the lock notice. Never in the ledger. */
+  counter?: AttemptCounterKey;
 }
+
+/** A member of the business lifting one lock early: the counter a lock notice named, and who did it. */
+export interface UnlockInput {
+  workspaceId: string;
+  /** The factor kind the notice named. */
+  factor: string;
+  scope: AttemptCounterKey["scope"];
+  /** The notice's key: the subject key or the keyed hash of the calling number. */
+  key: string;
+  /** The host's id for the member, written in the ledger. 1 to 128 of letters, digits, `.`, `_`, `:`, `@`, `-`. */
+  memberId: string;
+}
+
+const MEMBER_ID = /^[A-Za-z0-9._:@-]{1,128}$/;
+const COUNTER_KEY = /^[0-9a-f]{64}$/;
 
 export class Engine {
   readonly workspaceId: string;
@@ -343,6 +361,31 @@ export class Engine {
     return badge.finishVerification(this.#rt, callId);
   }
 
+  /**
+   * Lifts one lock early, for a member of the business who knows the caller is real (INT-7): the
+   * counter a lock notice named, and nothing else. A host call from the business's own tools: it
+   * takes no call, so nothing on a call reaches it. It grants nothing: the caller still verifies
+   * from nothing. The ledger entry `verification.unlocked` names the member, and is written before
+   * the counter is cleared, so no unlock goes unrecorded.
+   */
+  async unlock(input: UnlockInput): Promise<void> {
+    const errors: string[] = [];
+    if (input.workspaceId !== this.workspaceId) errors.push("workspaceId is not this engine's workspace");
+    if (!this.#badge.manifest.provides.factors.includes(input.factor)) errors.push("factor is not an installed factor kind");
+    if (input.scope !== "subject" && input.scope !== "number") errors.push("scope must be subject or number");
+    if (!COUNTER_KEY.test(input.key)) errors.push("key must be 64 lower-case hex characters");
+    if (!MEMBER_ID.test(input.memberId)) errors.push("memberId must be 1 to 128 of letters, digits, '.', '_', ':', '@', '-'");
+    if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+    const counters = this.#adapters.counters;
+    if (counters === undefined) throw new EngineError("precondition_failed", "the engine has no counters adapter, so nothing is locked");
+    const detail = { kind: input.factor, scope: input.scope, memberId: input.memberId };
+    if (detailCarriesCardNumber(detail)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
+    // An id the ledger appends once, in its own space: a call's ids are 4-tuples, this is a 3-tuple.
+    const eventId = JSON.stringify([this.workspaceId, null, this.#ids.next("unlock")]);
+    await this.#adapters.ledger.append({ eventId, callId: null, actor: "member", event: "verification.unlocked", at: this.#now(), detail });
+    await unlockCounter(counters, { workspaceId: this.workspaceId, factor: input.factor, scope: input.scope, key: input.key });
+  }
+
   // ---- Dossier (file) ----------------------------------------------------------------------
 
   startIntake(callId: string, formId: string): Promise<void> {
@@ -570,7 +613,9 @@ export class Engine {
         // to be appended later, and a caller changing its object afterwards changes nothing.
         const copy = structuredClone(detail);
         if (detailCarriesCardNumber(copy)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
-        events.push({ name, actor, at: this.#now(), detail: copy });
+        const event: QueuedEvent = { name, actor, at: this.#now(), detail: copy };
+        if (name === "verification.locked") event.counter = this.#lockedCounter(record, copy);
+        events.push(event);
       },
       step: () => currentStep(record),
     };
@@ -621,8 +666,40 @@ export class Engine {
       } catch {
         // Ignored by design: the ledger is the record.
       }
+      if (queued.counter !== undefined) await this.#notifyLock(queued.counter, queued.detail);
     }
     await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue);
+  }
+
+  /**
+   * The counter a `verification.locked` entry is about, read from the call as the entry is saved,
+   * so the notice names the subject or number of that verification. Badge writes the entry only
+   * for a counter it counted, so the key for its scope is set.
+   */
+  #lockedCounter(record: CallRecord, detail: { [key: string]: JsonValue }): AttemptCounterKey {
+    const s = record.modules[badge.BADGE] as unknown as badge.BadgeSlice;
+    const scope = detail.scope as AttemptCounterKey["scope"];
+    return { workspaceId: this.workspaceId, factor: detail.kind as string, scope, key: (scope === "subject" ? s.subjectKey : s.numberKey)! };
+  }
+
+  /**
+   * Tells the host's notifier of a lock whose ledger entry was just appended: once per lock and
+   * capped per workspace (`claimNotice`). Best effort, like the listener: the notifier is not
+   * awaited, and nothing it or the bookkeeping does, thrown or rejected, stops the call or the ledger.
+   */
+  async #notifyLock(counter: AttemptCounterKey, detail: { [key: string]: JsonValue }): Promise<void> {
+    const notifier = this.#adapters.notifier;
+    if (notifier === undefined) return;
+    try {
+      const until = detail.until as string;
+      const claim = await claimNotice(this.#adapters.counters!, counter, until, this.#clock.now());
+      if (claim === null) return;
+      const notice = { ...counter, hard: detail.hard as boolean, until, capped: claim.capped };
+      // An async wrapper turns a notifier that throws at once into a rejection, caught like the rest.
+      void (async () => notifier.lockout(notice))().catch(() => undefined);
+    } catch {
+      // Ignored by design: the ledger is the record.
+    }
   }
 
   /** A ledger event id, unique across workspaces sharing one ledger: a JSON tuple, so no two ids collide. */

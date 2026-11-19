@@ -73,7 +73,7 @@ export interface PinVerifier {
  */
 export interface AttemptCounterKey {
   workspaceId: string;
-  /** The factor kind, for example `pin`. */
+  /** The factor kind, for example `pin`. The engine also keeps its lock notices under `notice:` kinds, which no factor kind can be (INT-7). */
   factor: string;
   scope: "subject" | "number";
   /** The subject key, or the keyed hash of the calling number. 64 lower-case hex characters. */
@@ -97,6 +97,30 @@ export interface AttemptCounters {
   recordFailure(key: AttemptCounterKey, at: string, since: string): Promise<string[]>;
   /** Forgets every failure for the key: after a pass, or when the business lifts a lock. */
   reset(key: AttemptCounterKey): Promise<void>;
+}
+
+/**
+ * A lock, as the business is told of it: the counter that locked (what `Engine.unlock` takes to
+ * lift it), the factor kind and when it ends. The key is the subject key or the keyed hash of the
+ * calling number: never an account number, a phone number or anything the caller keyed.
+ */
+export interface LockNotice extends AttemptCounterKey {
+  /** True for the lock after too many failures in the window; false for a wait after a failure. */
+  hard: boolean;
+  /** ISO 8601. */
+  until: string;
+  /** True on the workspace's last notice for the hour: locks after it are in the ledger only. */
+  capped: boolean;
+}
+
+/**
+ * Tells the business that someone is locked out (INT-7), for example by email or a dashboard.
+ * Told after the `verification.locked` entry is written, once per lock and at most 20 times an
+ * hour per workspace, best effort: a notifier that fails or hangs never
+ * blocks the call or the ledger, and the ledger stays the record.
+ */
+export interface Notifier {
+  lockout(notice: LockNotice): Promise<void>;
 }
 
 /** A stored call session and its version. The version goes up by one on every write. */

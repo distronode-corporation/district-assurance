@@ -2,11 +2,13 @@
 // change it (one compare-and-set write per change), the adapters and the clock. This is internal
 // to the package; outside modules use `Engine.updateModule` and `Engine.moduleState` instead.
 import type {
+  AttemptCounterKey,
   AttemptCounters,
   AuditLedger,
   CarrierSignals,
   IdentityProvider,
   MessageSender,
+  Notifier,
   PaymentLinks,
   PinVerifier,
   ReceiptSigner,
@@ -39,6 +41,8 @@ export interface EngineAdapters {
   pinVerifier?: PinVerifier;
   /** Failures across calls, shared by every engine of the workspace. Badge needs it when a factor the caller enters is on. */
   counters?: AttemptCounters;
+  /** Told of each lock, so the business knows someone is locked out (INT-7). Optional, best effort. */
+  notifier?: Notifier;
 }
 
 export type AdapterName = keyof EngineAdapters;
@@ -66,7 +70,15 @@ export interface CallRecord {
   /** Each module's own part, by module name. */
   modules: Record<string, JsonValue>;
   /** Ledger entries saved with a change and not yet known to be appended. */
-  outbox: Array<{ eventId: string; name: EngineEventName; actor: Actor; at: string; detail: { [key: string]: JsonValue } }>;
+  outbox: Array<{
+    eventId: string;
+    name: EngineEventName;
+    actor: Actor;
+    at: string;
+    detail: { [key: string]: JsonValue };
+    /** On a `verification.locked` entry, the counter that locked, for the lock notice (INT-7). Never in the ledger. */
+    counter?: AttemptCounterKey;
+  }>;
 }
 
 /** A call being changed inside one compare-and-set attempt. Everything here is synchronous and pure. */

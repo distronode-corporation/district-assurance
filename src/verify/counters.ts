@@ -10,6 +10,8 @@
 // window, so a pass on the caller's own account never clears what the line ran up against others.
 // Subjects are counted by subject key whether or not they exist, so a lock never says which
 // accounts are real. The calling number is counted as a keyed hash, never as the number.
+//
+// The business is told of each lock and may lift one early (INT-7): see "lock notices" below.
 import type { AttemptCounterKey, AttemptCounters } from "../core/adapters.ts";
 import { hmacSha256Hex } from "../core/hash.ts";
 import { isDenseArray, isIntegerIn, isObject, unknownKeys } from "../core/shape.ts";
@@ -173,4 +175,45 @@ export async function forgetPass(counters: AttemptCounters, lockout: Lockout, ke
     await counters.reset(key);
     for (const [i, time] of failures.entries()) if (i !== own) await counters.recordFailure(key, time, since);
   }
+}
+
+// ---- lock notices (INT-7) -------------------------------------------------------------------
+//
+// The business is told of a lock once, however many attempts it refuses and on however many
+// engines, and a workspace gets at most NOTICES_PER_HOUR notices, so an attack locking subject after
+// subject cannot flood the owner. Both are kept in the AttemptCounters store every engine shares,
+// under `notice:` kinds no factor kind can be (kinds are snake_case), so they hold across processes
+// and use its one atomic step.
+
+/** Lock notices a workspace gets per hour, at most. Later locks in the hour are in the ledger only. */
+export const NOTICES_PER_HOUR = 20;
+
+/** Where a counter's notices are kept: its own key, under the `notice:` kind of its factor. */
+export function noticeKey(key: AttemptCounterKey): AttemptCounterKey {
+  return { ...key, factor: `notice:${key.factor}` };
+}
+
+/** Where a workspace's notices of the last hour are counted. */
+function workspaceNoticeKey(workspaceId: string): AttemptCounterKey {
+  return { workspaceId, factor: "notice:*", scope: "subject", key: "0".repeat(64) };
+}
+
+/**
+ * Whether a lock gets a notice: null when one went out for it already (or for a later lock of the
+ * same counter), or when the workspace had its notices for the hour. A lock is its counter and its
+ * end, so its notice counter records the end: of two engines refusing the same lock, one notifies.
+ * `capped` is true on the hour's last notice.
+ */
+export async function claimNotice(counters: AttemptCounters, key: AttemptCounterKey, until: string, now: Date): Promise<{ capped: boolean } | null> {
+  const seen = await counters.recordFailure(noticeKey(key), until, until);
+  if (seen.length > 1) return null;
+  const hourAgo = new Date(now.getTime() - 3_600_000 + 1).toISOString();
+  const sent = (await counters.recordFailure(workspaceNoticeKey(key.workspaceId), now.toISOString(), hourAgo)).length;
+  return sent > NOTICES_PER_HOUR ? null : { capped: sent === NOTICES_PER_HOUR };
+}
+
+/** Lifts one lock: forgets the counter's failures and its notices, so a later lock is told again. */
+export async function unlockCounter(counters: AttemptCounters, key: AttemptCounterKey): Promise<void> {
+  await counters.reset(key);
+  await counters.reset(noticeKey(key));
 }

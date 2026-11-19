@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Lockout alerts (INT-7): a `Notifier` adapter (`FakeNotifier`) told of each lock's counter, factor kind and end after its ledger entry, once per lock and at most 20 an hour per workspace, best effort; `engine.unlock({ workspaceId, factor, scope, key, memberId })` clears one counter and writes `verification.unlocked`.
 - Lockouts across calls (VER-1): an `AttemptCounters` adapter (`MemoryAttemptCounters`,
   `attemptCountersContract`) counts failures of every entered factor per subject and per calling
   number (`beginVerification({ callingNumber })`, kept as a keyed hash), before judging; a wait of

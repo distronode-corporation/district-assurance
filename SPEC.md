@@ -213,7 +213,27 @@ when there is a number.
   up against others. A failure stands, and
   one that starts a hard lock returns `locked: true` and writes `verification.locked`. A judge or
   verifier that throws leaves its failure counted.
-- Lifting a lock early is the host's: `AttemptCounters.reset` with the keys (`counterKeys`).
+- **Lock notices (INT-7).** With a `notifier` adapter, after a `verification.locked` entry is
+  appended (by the step's write, or later by `flushLedger`), the engine calls
+  `Notifier.lockout({workspaceId, factor, scope, key, hard, until, capped})`: the counter that
+  locked (`key` is the subject key, or the number's keyed hash), the factor kind, and when the lock
+  ends; never a value, an account number or a phone number. The call's write reads the key from
+  Badge's part of the call as the entry is saved, and keeps it beside the entry in the outbox, never
+  in the ledger. A lock is told once, on whichever engine refuses it first: its counter's
+  `notice:<kind>` counter in the `AttemptCounters` store records the lock's end, and a lock ending
+  no later than one already told is not told again. A workspace gets at most 20 notices an hour
+  (`NOTICES_PER_HOUR`, counted under `notice:*`); the 20th has `capped: true`, and later locks in
+  the hour are in the ledger only. Best effort, like the listener: the notifier is not awaited,
+  and a notifier or a notice count that throws, rejects or hangs never fails the call or the ledger.
+- **Unlock (INT-7).** `unlock({workspaceId, factor, scope, key, memberId})`, a host call for a
+  member of the business, takes no call, so nothing on a call reaches it. It refuses
+  (`invalid_input`) another workspace, a factor kind that is not installed, a scope other than
+  `subject` or `number`, a key that is not 64 lower-case hex, and a `memberId` that is not 1 to 128
+  of letters, digits, `.`, `_`, `:`, `@`, `-` or that carries a card number; an engine without
+  `counters` refuses with `precondition_failed`. It appends `verification.unlocked` (call id null,
+  actor `member`; the listener, which hears of calls, is not told), then clears that one counter and its notices, and nothing else: the other scope,
+  other factor kinds and other subjects stay locked. It grants nothing: no call changes, and the
+  caller verifies from no factors like anyone else.
 
 ## 7. FlowConfig
 
@@ -305,6 +325,7 @@ answer on file, a phone number, a link or card data.
 | `verification.factor` | `kind`, `passed` (and `status` for photo ID) |
 | `verification.carrier_checked` | `checked`, `textCodeTrusted`, `identityMatch` |
 | `verification.locked` | `kind`, `scope` (`subject` or `number`), `hard`, `until`: never the subject key, the number or its hash |
+| `verification.unlocked` | `kind`, `scope`, `memberId`; call id null, actor `member`: never the key (section 6) |
 | `identity.link_sent` | none |
 | `verification.finished` | `level`, `methods`, `discounted` |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt` |
