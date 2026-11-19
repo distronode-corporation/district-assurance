@@ -11,6 +11,7 @@ import type {
   PaymentLinks,
   PinVerifier,
   ReceiptSigner,
+  RecordDelivery,
   RecordStore,
   SubjectRecord,
 } from "../core/adapters.ts";
@@ -136,6 +137,26 @@ export class MemoryRecordStore implements RecordStore {
   async getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null> {
     const record = this.#records.get(`${workspaceId}/${recordId}`);
     return record === undefined ? null : structuredClone(record);
+  }
+}
+
+/**
+ * Answers record deliveries from a script: each queued answer is used once, a status or `"no_answer"`
+ * (the post rejects, as a refused connection or a timeout would), then 200 for every post after.
+ */
+export class FakeRecordDelivery implements RecordDelivery {
+  readonly posts: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
+  readonly #script: Array<number | "no_answer">;
+
+  constructor(script: Array<number | "no_answer"> = []) {
+    this.#script = [...script];
+  }
+
+  async post(input: { url: string; headers: Record<string, string>; body: string }): Promise<{ status: number }> {
+    this.posts.push(structuredClone(input));
+    const next = this.#script.shift() ?? 200;
+    if (next === "no_answer") throw new Error("no answer");
+    return { status: next };
   }
 }
 

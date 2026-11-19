@@ -1,11 +1,19 @@
 // The reference server: a small node:http server around one Engine. It receives the Stripe
 // webhooks that finish a photo ID check and a payment, serves receipts and the receipt key set,
-// and answers 501 on the carrier webhooks that are not built yet. With `ui`, it also serves the
+// runs a sample receiver for signed record deliveries, and answers 501 on the carrier webhooks that are not built yet. With `ui`, it also serves the
 // demo's browser UI and the routes that run the scripted demo one step at a time. Not hardened
 // for production; ROADMAP.md, "Reference server", lists what that takes.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
-import { EngineError, parseStripeEvent, verifyStripeSignature, type Clock, type Engine } from "../../../src/index.ts";
+import {
+  DELIVERY_SIGNATURE_HEADER,
+  EngineError,
+  parseStripeEvent,
+  verifyStripeSignature,
+  type Clock,
+  type Engine,
+  type RecordDeliveryBody,
+} from "../../../src/index.ts";
 import type { DemoRuns, RunAnswer } from "./demo-runs.ts";
 import { isDemoFlow } from "./script.ts";
 import { UI_HEADERS, loadStaticFiles, type StaticFile } from "./static.ts";
@@ -15,6 +23,11 @@ export interface ReferenceServerOptions {
   /** Signing secrets per Stripe endpoint. Empty means the endpoint refuses everything. */
   stripeSecrets: { identity: readonly string[]; payments: readonly string[] };
   clock: Clock;
+  /**
+   * The sample receiver of record deliveries (`POST /webhooks/records`): the signing secrets it
+   * accepts, and what it does with a record. Without secrets it refuses everything.
+   */
+  records?: { secrets: readonly string[]; onRecord?: (delivery: RecordDeliveryBody) => void };
   /** Default 64 KiB. */
   maxBodyBytes?: number;
   /** The demo's runs: serves the browser UI and the `/demo/*` routes. Off when absent. */
@@ -52,6 +65,7 @@ class HttpError extends Error {
 
 export function createReferenceServer(options: ReferenceServerOptions): Server {
   const processed = new Set<string>();
+  const receivedRecords = new Set<string>();
   const maxBody = options.maxBodyBytes ?? 64 * 1024;
   const files = options.ui === undefined ? new Map<string, StaticFile>() : loadStaticFiles();
 
@@ -73,6 +87,30 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     if (route === "payments" && event.kind === "payment") applied = (await options.engine.applyPaymentOutcome(event.outcome)).applied;
     processed.add(event.eventId);
     return [200, { received: true, applied }];
+  }
+
+  /**
+   * A sample receiver for `deliverRecord`, as a business's own system would run it: the signature
+   * first (the same scheme as Stripe's, so the same check), then the body, then each idempotency
+   * key once. The key is read from the signed body, not from the unsigned header. A duplicate
+   * answers 200, so the sender stops retrying.
+   */
+  async function recordWebhook(req: IncomingMessage): Promise<[number, Json]> {
+    const payload = await readBody(req, maxBody);
+    const header = req.headers[DELIVERY_SIGNATURE_HEADER];
+    const check = verifyStripeSignature({
+      payload,
+      header: Array.isArray(header) ? header[0] : header,
+      secrets: options.records?.secrets ?? [],
+      now: options.clock.now(),
+    });
+    if (!check.ok) return [400, { error: "signature", reason: check.reason }];
+    const delivery = parseRecordDelivery(payload);
+    if (delivery === null) return [400, { error: "malformed_delivery" }];
+    if (receivedRecords.has(delivery.idempotencyKey)) return [200, { received: true, duplicate: true }];
+    receivedRecords.add(delivery.idempotencyKey);
+    options.records?.onRecord?.(delivery);
+    return [200, { received: true, recordId: delivery.record.recordId }];
   }
 
   async function demoRoute(req: IncomingMessage, runs: DemoRuns, path: string, method: string): Promise<Answer> {
@@ -132,6 +170,10 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       expect("POST");
       return stripeWebhook(req, path.endsWith("identity") ? "identity" : "payments");
     }
+    if (path === "/webhooks/records") {
+      expect("POST");
+      return recordWebhook(req);
+    }
     const carrier = /^\/webhooks\/(twilio|telnyx)$/.exec(path);
     if (carrier !== null) {
       expect("POST");
@@ -171,6 +213,21 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
 function parseUrl(target: string): URL {
   if (!target.startsWith("/")) throw new HttpError(400, "bad_request");
   return new URL(`http://x${target}`);
+}
+
+/** A verified delivery body, or null when it is not one. */
+function parseRecordDelivery(payload: string): RecordDeliveryBody | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(payload);
+  } catch {
+    return null;
+  }
+  if (typeof body !== "object" || body === null) return null;
+  const { v, type, idempotencyKey, record } = body as Record<string, unknown>;
+  if (v !== 1 || type !== "record.confirmed" || typeof idempotencyKey !== "string") return null;
+  if (typeof record !== "object" || record === null || typeof (record as { recordId?: unknown }).recordId !== "string") return null;
+  return body as RecordDeliveryBody;
 }
 
 function readBody(req: IncomingMessage, max: number): Promise<string> {

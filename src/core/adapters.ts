@@ -115,6 +115,16 @@ export interface RecordStore {
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
 }
 
+/**
+ * Posts a signed record delivery to a business's endpoint (for example with `fetch`, with a
+ * timeout). One request per call, no retries of its own: `deliverRecord` signs, retries and
+ * records each attempt. Resolves with the HTTP status of any answer, and rejects only when no
+ * answer came (a refused connection, a timeout).
+ */
+export interface RecordDelivery {
+  post(input: { url: string; headers: Record<string, string>; body: string }): Promise<{ status: number }>;
+}
+
 export interface AuditInput {
   /** The engine's id for this entry. A ledger appends an id once: a second append returns the first entry. */
   eventId?: string;

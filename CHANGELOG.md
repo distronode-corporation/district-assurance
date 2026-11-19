@@ -25,6 +25,11 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Record delivery (FIL-3): `deliverRecord` posts a confirmed record through a `RecordDelivery`
+  adapter, signed in the `t=,v1=` HMAC scheme used for Stripe, retried with capped exponential
+  backoff under one idempotency key per record and destination, with a `delivery.attempted` ledger
+  entry per attempt and no payload in it; `FakeRecordDelivery` in `district-assurance/testing`;
+  a sample receiver on the reference server at `POST /webhooks/records`.
 
 ### Changed
 

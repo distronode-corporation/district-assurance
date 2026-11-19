@@ -75,6 +75,9 @@ allow-list, before texted codes ship (VER-2).
 Replayed webhooks, reused links, replayed tones. **Controls:** Stripe signatures are checked with a
 300-second window and constant-time comparison (tested); the reference server applies each event
 id once; the engine applies each identity session and each payment settlement once (tested).
+Record deliveries are signed in the same scheme, each attempt with its own time, and carry one
+idempotency key per record and destination inside the signed body; the reference server's sample
+receiver checks the signature first and applies each key once (tested).
 Identity links are single-use by the provider. Left to the host: whether keypad tones arrive as
 out-of-band events or as in-band audio on each carrier bridge, since in-band tones can be replayed
 acoustically and can reach speech-to-text.
@@ -142,7 +145,11 @@ appended by event id, once each; a ledger that fails leaves them pending, and th
 **Controls:** reference values are HMACs under a per-workspace key, because a plain hash of a date
 of birth is reversed by trying every date; the caller's entries are never stored. Sensitive intake
 fields are refused by `validateConfig` until field encryption exists (FIL-2). PINs on file are
-HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode).
+HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode). A delivered
+record goes only to a destination in the host's configuration, over `https:` (or `http:` to a
+loopback host) and never to a URL with credentials in it; its `delivery.attempted` ledger entries
+carry the record id, the destination's id, the attempt, the outcome and the status, never a field
+value, the URL or the secret (tested).
 
 ## Left to the host
 
@@ -155,6 +162,10 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
   the line it was called on). That choice is not a factor: the PIN or other factors still decide.
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.
 - Who may edit a workspace's FlowConfig, and keeping its revisions.
+- Record delivery: keeping each destination's signing secret in a key store, a `RecordDelivery`
+  adapter with a timeout that does not follow redirects, calling `deliverRecord` again (from a
+  durable queue) for a record that was not delivered, and a receiver that checks the signature and
+  applies each idempotency key once.
 - Outside modules: their code runs inside the engine's writes and is part of the host's security
   model.
 - The person path: a caller who fails or cannot use a keypad reaches someone who can help.

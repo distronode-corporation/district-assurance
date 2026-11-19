@@ -273,6 +273,7 @@ answer on file, a phone number, a link or card data.
 | `intake.started` | `formId`, `version` |
 | `intake.confirmed` | `recordId`, `formId`, `digest`, `confirmedBy` |
 | `intake.abandoned` | none |
+| `delivery.attempted` | `recordId`, `destination` (the destination's id), `attempt`, `outcome` (`delivered`, `retry`, `failed`), `status` (HTTP, or null for no answer); actor `system` |
 | `redaction.applied` | `kinds` (counts per kind) |
 | `payment.link_sent` | `paymentId`, `linkId`, `amountMinor`, `currency`, `amountSource` |
 | `payment.settled` | `paymentId`, `status` |
@@ -398,3 +399,31 @@ subject's number on file. Identity link: "Your one-time identity check link: URL
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
 the currency's own decimals.
+
+## 17. Record delivery
+
+`deliverRecord({ workspaceId, recordId, destination, records, delivery, ledger, clock, sleep?,
+retry? })` posts a confirmed record, read from the `RecordStore`, to one destination through the
+host's `RecordDelivery` adapter, which makes one HTTP request per call and never retries itself.
+It is a library call the host makes after `confirmIntake` (for example from a job queue), not a
+flow step. A destination is `{ destinationId, url, secret }` from the host's own configuration:
+the id is lower case, digits, `-` and `_` (it goes in the ledger, the URL never does), the URL is
+`https:`, or `http:` on `localhost`, `127.0.0.1` or `[::1]`, without credentials, and the secret
+has at least 16 characters.
+
+The body is the canonical JSON of `{ v: 1, type: "record.confirmed", idempotencyKey,
+destinationId, record }`, the same bytes on every attempt. The idempotency key is
+`SHA-256(JSON.stringify([workspaceId, "delivery", recordId, destinationId]))` in hex: one key per
+record and destination, the same however often the record is delivered. Headers:
+`content-type: application/json`, `idempotency-key`, and `district-signature:
+t=<unix seconds>,v1=<HMAC-SHA256(secret, t + "." + body)>`, the scheme of section 15, so
+`verifyStripeSignature` checks it; each attempt is signed with its own time. A receiver checks the
+signature, then reads the key from the signed body and applies it once.
+
+Retries: a 2xx delivers; no answer (the adapter rejects), 408, 429 or 5xx waits
+`min(maxDelayMs, baseDelayMs * 2^(attempt - 1))` and tries again, up to `maxAttempts`; any other
+status fails at once. Defaults: 5 attempts, 1 second, 60 seconds; allowed: 1 to 10 attempts, a
+base from 0 to 600,000 ms and a cap from the base to 3,600,000 ms. Each attempt appends one
+`delivery.attempted` entry on the record's call, after the post. `deliverRecord` returns
+`{ delivered, attempts, status, idempotencyKey }`; it throws `invalid_input` for a bad destination
+or retry setting or an unknown record, before posting, and passes a ledger failure through.
