@@ -120,7 +120,7 @@ export interface BadgeSlice {
    * call to `submitFactor` or the call's next. Absent when nothing is owed.
    */
   forgetOwed?: { keys: AttemptCounterKey[]; at: string };
-  /** The callback this call asked for, or the one it is (callback.ts). */
+  /** The callback this call asked for, or the one it is (callback.ts). Absent on calls saved before: read it with `callbackOf`. */
   callback: CallbackState;
   /** Untrusted content seen on this call so far (onUntrusted counts it), so an entry judged across one is known. Absent on calls saved before. */
   taints?: number;
@@ -340,7 +340,7 @@ export class BadgeModule implements AssuranceModule {
       lastLevel: 0,
       lastMethods: [],
       lastJudgedBy: null,
-      callback: { status: "none", callId: null, ref: null, keys: [], lock: null, subjectKey: null, subject: null, epoch: null, at: null, forgetPending: false },
+      callback: noCallback(),
       taints: 0,
     };
     return initial as unknown as JsonValue;
@@ -369,7 +369,7 @@ export class BadgeModule implements AssuranceModule {
     // one) is void: it never grants a level. The next beginVerification moves it on again, so a new
     // verification counts as usual.
     const badge = s as unknown as BadgeSlice;
-    return { ...badge, epoch: badge.epoch + 1, knowledgeMatched: false, identitySessions: [], identityLink: voided(badge.identityLink), textCode: null, callback: voidedCallback(badge.callback), voidedEpoch: badge.epoch + 1, taints: (badge.taints ?? 0) + 1 } as unknown as JsonValue;
+    return { ...badge, epoch: badge.epoch + 1, knowledgeMatched: false, identitySessions: [], identityLink: voided(badge.identityLink), textCode: null, callback: voidedCallback(callbackOf(badge)), voidedEpoch: badge.epoch + 1, taints: (badge.taints ?? 0) + 1 } as unknown as JsonValue;
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
@@ -392,6 +392,16 @@ export class BadgeModule implements AssuranceModule {
 /** A link not yet delivered can no longer count: it is void. One delivered stays delivered (and stops any other). */
 function voided(link: BadgeSlice["identityLink"]): BadgeSlice["identityLink"] {
   return link === "reserved" || link === "sent" ? "void" : link;
+}
+
+/** The callback state of a call that asked for none. */
+function noCallback(): CallbackState {
+  return { status: "none", callId: null, ref: null, keys: [], lock: null, subjectKey: null, subject: null, epoch: null, at: null, forgetPending: false };
+}
+
+/** A call's callback state. A slice stored before `callback` existed has none: it reads as a call that asked for none. */
+export function callbackOf(s: BadgeSlice): CallbackState {
+  return (s as { callback?: CallbackState }).callback ?? noCallback();
 }
 
 /** A callback whose outcome has not arrived, or whose request is still being decided, can no longer count: it is void. */
@@ -504,7 +514,7 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
       // Another subject: nothing collected for the previous one can count for this one.
       s.identitySessions = [];
       s.identityLink = voided(s.identityLink);
-      s.callback = voidedCallback(s.callback);
+      s.callback = voidedCallback(callbackOf(s));
       s.textCode = null;
     }
     if (draft.record.state.factors.length === 0) {
