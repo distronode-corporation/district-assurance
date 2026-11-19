@@ -145,7 +145,13 @@ describe("#124 slot 1: the ledger never shows a duress entry", () => {
     await tick();
     await t.engine.finishVerification(callId);
     await t.engine.endCall(callId);
-    const ids = (await t.ledger.list()).filter((e) => e.callId === callId).map((e) => e.eventId);
+    const entries = (await t.ledger.list()).filter((e) => e.callId === callId);
+    // The ledger drops an append whose id it holds, so a reused id shows as a missing event.
+    assert.deepEqual(
+      entries.map((e) => e.event),
+      ["call.started", "verification.started", "verification.factor", "verification.factor", "verification.finished", "grant.issued", "call.ended", "receipt.issued"],
+    );
+    const ids = entries.map((e) => e.eventId);
     assert.equal(new Set(ids).size, ids.length);
   });
 
@@ -154,13 +160,19 @@ describe("#124 slot 1: the ledger never shows a duress entry", () => {
     const callId = await call(t);
     const stored = (await t.sessions.get("ws_test", callId))!;
     const { ledgerWrites: _dropped, ...before } = stored.record as { ledgerWrites?: number };
+    const write = (id: string | undefined) => (JSON.parse(id!) as number[])[3]!;
+    const used = (await t.ledger.list()).filter((e) => e.callId === callId).map((e) => write(e.eventId));
     assert.equal((await t.sessions.compareAndSet("ws_test", callId, stored.version, before as JsonValue)).ok, true);
     await t.engine.submitPin(callId, PIN);
     await t.engine.endCall(callId);
-    const ids = (await t.ledger.list()).filter((e) => e.callId === callId).map((e) => e.eventId);
+    const entries = (await t.ledger.list()).filter((e) => e.callId === callId);
+    // The ledger drops an append whose id it holds, so a reused id shows as a missing event.
+    assert.deepEqual(entries.map((e) => e.event), ["call.started", "verification.started", "verification.factor", "call.ended", "receipt.issued"]);
+    const ids = entries.map((e) => e.eventId);
     assert.equal(new Set(ids).size, ids.length);
-    const writes = ids.map((id) => (JSON.parse(id!) as number[])[3]!);
+    const writes = ids.map(write);
     assert.deepEqual(writes, [...writes].sort((a, b) => a - b), "ids only go up");
+    assert.ok(writes[used.length]! > Math.max(...used), `the first write after the resume (${writes[used.length]}) is above every one it used (${used.join(",")})`);
   });
 });
 
@@ -266,6 +278,7 @@ describe("#124 slot 1: the alert outbox", () => {
     await t.engine.submitPin(callId, DURESS);
     await t.engine.finishVerification(callId);
     const receipt = await t.engine.endCall(callId);
+    assert.ok(receipt !== null && typeof receipt === "object", "the call issues a receipt");
     await tick();
     n.down = false;
     assert.deepEqual(await t.engine.sweepAlerts(), { sent: [callId], failed: [] });
