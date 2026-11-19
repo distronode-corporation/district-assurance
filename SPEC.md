@@ -166,9 +166,12 @@ It checks every part in one pass: a malformed part is reported and the others ar
 The default policy: level 1 is keypad knowledge; level 2 is keypad plus a trusted texted code, or
 keypad plus carrier identity match, or a PIN plus a texted code; level 3 is keypad plus photo ID.
 Scopes: `status.read` 1, `intake.file` 1, `payment.request` 2, `contact.update` 3, `payout.update`
-3. Two keypad attempts per call. A texted code or a callback counts only when the carrier answered
-and reported no SIM change or port in the last 72 hours (`simSwapWindowHours`; without an answer,
-only when `trustTextCodeWithoutCarrierCheck` is true); otherwise `verification.finished` lists it
+3. Two keypad attempts per call. With a carrier answer, a texted code or a callback counts only
+when the answer covered SIM changes (`simSwapChecked`) and reported no SIM change in the last 72
+hours (`simSwapWindowHours`), and no port in them when it reports ports; a report without a port
+age (`lastPortHoursAgo: null`, which Twilio always gives) is not checked for ports, so a port-out
+with no SIM change it detects can still count. Without a carrier answer, it counts only when the
+policy allows it (`trustTextCodeWithoutCarrierCheck`). Otherwise `verification.finished` lists it
 in `discounted`. The default policy has no `callback` set: a host that turns the factor on adds
 one, for example `[pin, callback]` at level 2.
 
@@ -192,6 +195,28 @@ scope in the duress `refuseScopes`.
 Links and callbacks go only to the subject's number on file, and only after a `keypad_knowledge`
 or `pin` factor passed since verification last started from nothing. A plug-in's pass does not
 unlock texts or callbacks.
+
+**Carrier signals.** `checkCarrier` asks the `CarrierSignals` adapter about the number on file
+and gets a `CarrierSignalReport`: `checked`, `simSwapChecked`, `lastSimSwapHoursAgo`,
+`lastPortHoursAgo` (null when none is known) and `identityMatch` (`match`, `no_match`,
+`unavailable`). `simSwapChecked` is true only when the carrier was asked about SIM changes and
+answered; `textCodeTrusted` never trusts a texted code on a report without it (anything but `true`,
+so an adapter that leaves it out fails closed), whatever `trustTextCodeWithoutCarrierCheck` says,
+since that covers no answer at all. VER-2 keeps this rule as one of its acceptance criteria. An
+`identityMatch` other than `unavailable` records the `carrier_identity_match` factor. The reference
+server's adapters (`examples/reference-server/src/carrier-adapters.ts`, VER-4) map Twilio Lookup v2
+(SIM Swap, and Identity Match by `summary_score`, 80 by default) and Telnyx Number Lookup (porting
+status and date; `simSwapChecked: false`, identity match `unavailable`). They round hours down and read a change without
+a usable time as 0 hours ago (a Telnyx port date from the last moment that date ends anywhere,
+noon UTC the next day); a Twilio answer of no
+SIM change within its `swapped_period` window gives that window as a lower bound, and the window is
+never read as the age of a change. A `baseUrl` override must be https (plain http only on
+loopback), and `timeoutMs` a whole number from 1 to 60000; anything else throws when the adapter
+is built. Any failure gives
+`checked: false` with nothing known, and they never throw: a number that is not E.164, a country
+outside the adapter's allow-list, a timeout (3 seconds by default), a network or HTTP error, a
+feature the account is not approved for, or an answer they cannot read. A Twilio report is
+`checked` only when every field asked for answered.
 
 **Texted codes** (`text_code`, needs the `messages` and `codes` adapters).
 `sendTextCode(callId)` needs the factor on (and listed by the current `badge.verify` step), a

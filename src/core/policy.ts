@@ -47,7 +47,14 @@ export interface FactorResult {
 export interface CarrierSignalReport {
   /** False when the carrier could not answer (no coverage, no approval, an error). */
   checked: boolean;
-  /** Hours since the last SIM change, or null when none is known. */
+  /**
+   * True only when the carrier was asked about SIM changes and answered. A carrier that cannot
+   * report them (Telnyx Number Lookup, for example) answers false, and a texted code never counts
+   * on its report: there `lastSimSwapHoursAgo` is null because nothing was asked, not because none
+   * is known.
+   */
+  simSwapChecked: boolean;
+  /** Hours since the last SIM change, or null when none is known (or, without `simSwapChecked`, not asked). */
   lastSimSwapHoursAgo: number | null;
   /** Hours since the number was last ported, or null when none is known. */
   lastPortHoursAgo: number | null;
@@ -351,10 +358,13 @@ export function scopeFloor(scope: string): AssuranceLevel {
 /**
  * Whether possession of the number on file (a texted code, a callback) can be trusted, given what
  * the carrier said about that number: not after a SIM change or a port inside the window, and not
- * without an answer unless the policy says so.
+ * without an answer unless the policy says so. An answer that did not cover SIM changes never
+ * trusts one, whatever the policy says about having no answer at all; checked with `!== true`, so
+ * an adapter that leaves the field out fails closed.
  */
 export function textCodeTrusted(policy: VerificationPolicy, report: CarrierSignalReport | null): boolean {
   if (report === null || !report.checked) return policy.trustTextCodeWithoutCarrierCheck;
+  if (report.simSwapChecked !== true) return false;
   const recent = (hours: number | null) => hours !== null && hours <= policy.simSwapWindowHours;
   return !recent(report.lastSimSwapHoursAgo) && !recent(report.lastPortHoursAgo);
 }

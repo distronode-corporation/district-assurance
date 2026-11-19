@@ -79,14 +79,14 @@ export class FakeIdentityProvider implements IdentityProvider {
   }
 }
 
-/** Answers every check with the same report, unless one is set per number. */
+/** Answers every check with the same report, unless one is set per number: by default a carrier that answered about SIM changes and saw none. */
 export class FakeCarrierSignals implements CarrierSignals {
   readonly checked: string[] = [];
   readonly #byNumber = new Map<string, CarrierSignalReport>();
   #fallback: CarrierSignalReport;
 
   constructor(fallback: Partial<CarrierSignalReport> = {}) {
-    this.#fallback = { checked: true, lastSimSwapHoursAgo: null, lastPortHoursAgo: null, identityMatch: "unavailable", ...fallback };
+    this.#fallback = { checked: true, simSwapChecked: true, lastSimSwapHoursAgo: null, lastPortHoursAgo: null, identityMatch: "unavailable", ...fallback };
   }
 
   set(phoneNumber: string, report: Partial<CarrierSignalReport>): void {

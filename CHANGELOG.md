@@ -124,6 +124,16 @@ All notable changes to this project are documented here. The format follows
 - A stand-alone receipt verifier (PRV-2): `scripts/verify-receipt.mjs`, with no dependencies, checks
   a receipt against a key set file or URL and prints valid or invalid; SPEC.md has a worked example.
 - Duress PIN (VER-12), off by default (`pin.duress`): the business enrols it with `enrolDuressPin`, stored through the new `RecordStore.putDuressDigest`; a duress entry passes like the PIN to the caller while `authorize` refuses money, contact, access and `refuseScopes`, and the new `DuressNotifier` adapter is told of every duress entry from an alert owed in the call record until it answers (`deliverDuressAlerts` and `sweepAlerts` are the host's sweeps); a duress entry flags its subject until `clearDuress` (a host-privileged call; a `duress.cleared` ledger entry with an opaque member id and a keyed digest of the subject, never the subject key), the flag holds when the duress PIN is turned off and is set again on the alert's delivery unless the subject was cleared since, a flagged subject's passes alert once a call, and its failures stay counted in a hidden counter, which a PIN reset clears; every PIN ledger entry carries a keyed `tag` that `readPinTag` reads, and ledger event ids are numbered by the call's writes that queue entries (not the store version), so an alert's acknowledgement leaves no gap; `sweepAlerts` reports a call it cannot read as failed and goes on; a duress PIN entry whose own write fails still flags its subject; `clearDuress` clears the hidden counters of every installed factor.
+- Carrier signal adapters for the reference server (VER-4): Twilio Lookup (SIM Swap, Identity
+  Match) and Telnyx Number Lookup (porting status and date, the carrier), credentials from the
+  environment, failing closed with `checked: false`; tested against a local fake server.
+
+### Changed
+
+- Breaking: `CarrierSignalReport` has a required `simSwapChecked`, true only when the carrier was
+  asked about SIM changes and answered, and `textCodeTrusted` never trusts a texted code on a
+  report without it, whatever the policy says (VER-4). The Telnyx adapter answers false; every
+  `CarrierSignals` adapter has to set it.
 
 ### Changed
 
