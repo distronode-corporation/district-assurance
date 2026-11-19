@@ -14,9 +14,27 @@ import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, testConfig } from "./helpers.ts";
 import { auditLedgerContract, recordStoreContract } from "./prv5-contracts.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "da-sqlite-"));
-after(() => rmSync(dir, { recursive: true, force: true }));
+// Every connection opened on a file is closed before the directory is removed (Windows refuses to
+// remove an open file), including those of a test that failed before its own close.
+const opened: { close(): void }[] = [];
+const track = <T extends { close(): void }>(connection: T): T => {
+  opened.push(connection);
+  return connection;
+};
+after(() => {
+  for (const connection of opened) {
+    try {
+      connection.close();
+    } catch {
+      // Already closed by its own test.
+    }
+  }
+  rmSync(dir, { recursive: true, force: true });
+});
 let files = 0;
 const newFile = () => join(dir, `stores-${++files}.db`);
+const openStores = (path: string) => track(openSqliteStores(path));
+const openDatabase = (path: string) => track(openSqliteDatabase(path));
 
 const record = (recordId: string, issue = "leaking tap"): IntakeRecord => ({
   recordId,
@@ -37,7 +55,7 @@ describe("SqliteAuditLedger passes the AuditLedger contract", () => {
 });
 
 describe("SqliteAuditLedger on a file passes the AuditLedger contract", () => {
-  for (const c of auditLedgerContract(() => openSqliteStores(newFile()).ledger)) it(c.name, c.run);
+  for (const c of auditLedgerContract(() => openStores(newFile()).ledger)) it(c.name, c.run);
 });
 
 describe("SqliteRecordStore passes the RecordStore contract", () => {
@@ -53,7 +71,7 @@ describe("SqliteRecordStore passes the RecordStore contract", () => {
 describe("SQLite stores", () => {
   it("keep the ledger, subjects and records across a restart, and the chain goes on", async () => {
     const path = newFile();
-    const first = openSqliteStores(path);
+    const first = openStores(path);
     first.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB }, pin: PIN }));
     const t = createTestEngine({ config: testConfig(), adapters: { records: first.records, ledger: first.ledger } });
     const { callId } = await t.engine.startCall({ locale: "en" });
@@ -65,7 +83,7 @@ describe("SQLite stores", () => {
     assert.ok(before.length > 3);
     first.close();
 
-    const second = openSqliteStores(path);
+    const second = openStores(path);
     assert.deepEqual(await second.ledger.list(), before);
     assert.deepEqual(verifyChain(before), { ok: true, head: await second.ledger.head() });
     assert.deepEqual(await second.records.getIntakeRecord("w", "rec_1"), record("rec_1"));
@@ -85,11 +103,16 @@ describe("SQLite stores", () => {
 
   it("refuse any change or removal of a ledger entry, from any connection", async () => {
     const path = newFile();
-    const stores = openSqliteStores(path);
+    const stores = openStores(path);
     await stores.ledger.append(entry(1));
-    const other = openSqliteDatabase(path);
+    const other = openDatabase(path);
     assert.throws(() => other.exec(`UPDATE audit_entries SET entry = '{}'`), /append-only/);
     assert.throws(() => other.exec("DELETE FROM audit_entries"), /append-only/);
+    const replace = "INSERT OR REPLACE INTO audit_entries (seq, event_id, hash, entry) VALUES (?, ?, ?, '{}')";
+    assert.throws(() => other.prepare(replace).run(1, null, "0".repeat(64)), /append-only/, "no replacing a seq");
+    await stores.ledger.append({ ...entry(2), eventId: "e2" });
+    assert.throws(() => other.prepare(replace).run(3, "e2", "0".repeat(64)), /append-only/, "no replacing an eventId");
+    assert.equal((await stores.ledger.list()).length, 2);
     assert.equal(verifyChain(await stores.ledger.list()).ok, true);
     other.close();
     stores.close();
@@ -97,8 +120,8 @@ describe("SQLite stores", () => {
 
   it("keep one chain when two connections append to one file", async () => {
     const path = newFile();
-    const a = openSqliteStores(path);
-    const b = openSqliteStores(path);
+    const a = openStores(path);
+    const b = openStores(path);
     const appended = await Promise.all(Array.from({ length: 10 }, (_, i) => (i % 2 === 0 ? a : b).ledger.append({ ...entry(i), eventId: `e${i % 5}` })));
     assert.deepEqual(new Set(appended.map((e) => e.seq)), new Set([1, 2, 3, 4, 5]), "each eventId once, across connections");
     const stored = await b.ledger.list();
@@ -118,9 +141,14 @@ describe("SQLite stores", () => {
     assert.equal((await records.getSubject("w", "s"))!.phoneOnFile, "+15555550199");
   });
 
+  it("refuse a file: URI, whose file would not get the owner-only mode", () => {
+    assert.throws(() => openSqliteDatabase(`file:${newFile()}`), /not a file: URI/);
+    assert.throws(() => openSqliteStores(`FILE:${newFile()}?mode=rwc`), /not a file: URI/);
+  });
+
   it("create the database file readable and writable by its owner only", { skip: process.platform === "win32" }, () => {
     const path = newFile();
-    openSqliteDatabase(path).close();
+    openDatabase(path).close();
     assert.equal(statSync(path).mode & 0o777, 0o600);
   });
 });

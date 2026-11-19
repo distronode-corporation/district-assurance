@@ -23,9 +23,11 @@ export const SQLITE_BUSY_TIMEOUT_MS = 5_000;
 /**
  * Opens (and creates, readable and writable by its owner only) a database file, in WAL mode so
  * readers do not wait for a writer. `":memory:"` opens a database that lives as long as the
- * connection.
+ * connection. A `file:` URI is refused: SQLite would open the file the URI names, not the path
+ * whose mode was set, so the database could be created readable by others.
  */
 export function openSqliteDatabase(path: string): DatabaseSync {
+  if (/^file:/i.test(path)) throw new Error("openSqliteDatabase takes a filesystem path, not a file: URI");
   if (path !== ":memory:") closeSync(openSync(path, "a", 0o600));
   const db = new DatabaseSync(path, { timeout: SQLITE_BUSY_TIMEOUT_MS });
   db.exec("PRAGMA journal_mode = WAL");
@@ -47,7 +49,8 @@ function writeTransaction<T>(db: DatabaseSync, body: () => T): T {
 
 /**
  * The audit ledger in a table. Each row holds an entry exactly as `chainEntry` built it, as JSON,
- * so it reads back with the same hash. Triggers refuse any UPDATE or DELETE, so the table is
+ * so it reads back with the same hash. Triggers refuse any UPDATE or DELETE, and any INSERT whose
+ * `seq` or `eventId` is already stored (so INSERT OR REPLACE cannot swap an entry), so the table is
  * append-only for every connection, not only this class. `eventId` is UNIQUE: an id is appended
  * once, and a second append returns the first entry.
  */
@@ -66,6 +69,9 @@ export class SqliteAuditLedger implements AuditLedger {
       CREATE TRIGGER IF NOT EXISTS audit_entries_no_update BEFORE UPDATE ON audit_entries
         BEGIN SELECT RAISE(ABORT, 'the audit ledger is append-only'); END;
       CREATE TRIGGER IF NOT EXISTS audit_entries_no_delete BEFORE DELETE ON audit_entries
+        BEGIN SELECT RAISE(ABORT, 'the audit ledger is append-only'); END;
+      CREATE TRIGGER IF NOT EXISTS audit_entries_no_replace BEFORE INSERT ON audit_entries
+        WHEN EXISTS (SELECT 1 FROM audit_entries WHERE seq = NEW.seq OR (NEW.event_id IS NOT NULL AND event_id = NEW.event_id))
         BEGIN SELECT RAISE(ABORT, 'the audit ledger is append-only'); END;
     `);
   }

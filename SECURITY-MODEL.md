@@ -137,7 +137,8 @@ A step's ledger entries are saved with the step itself (an outbox in the call re
 appended by event id, once each; a ledger that fails leaves them pending, and the next write or
 `flushLedger` appends them, so no saved step is ever missing from the ledger for good (tested).
 The reference server's optional SQLite ledger (SRV-4) adds triggers that refuse any UPDATE or
-DELETE of an entry from any connection, and takes the database's write lock for each append, so
+DELETE of an entry, and any INSERT (such as INSERT OR REPLACE) over a stored `seq` or `eventId`,
+from any connection, and takes the database's write lock for each append, so
 two processes on one file keep one chain (tested). Someone who can write the file itself can still
 rewrite it; the hash chain and signed receipts are what detect that.
 
@@ -149,7 +150,8 @@ fields are refused by `validateConfig` until field encryption exists (FIL-2). PI
 HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode).
 The reference server's optional SQLite stores (SRV-4) keep subjects (HMACs and the number on
 file), confirmed intake values and the ledger in one file, unencrypted, created readable and
-writable by its owner only (tested). Protecting that file, its backups and the disk under it is
+writable by its owner only (tested); a `file:` URI, which would open a file other than the one
+given that mode, is refused (tested). Protecting that file, its backups and the disk under it is
 left to the host.
 
 ## Left to the host
