@@ -102,6 +102,7 @@ describe("file: intake forms", () => {
     assert.deepEqual(normaliseFieldValue({ key: "t", label: { en: "t", fr: "t" }, type: "text", required: false }, "x".repeat(501)), { ok: false, reason: "too_long" });
     assert.deepEqual(normaliseFieldValue(field("issue"), "4242424242424242"), { ok: false, reason: "card_number" });
     assert.deepEqual(normaliseFieldValue(field("issue"), "   "), { ok: false, reason: "empty" });
+    assert.deepEqual(normaliseFieldValue(field("issue"), "leak \ud800"), { ok: false, reason: "not_text" });
     assert.deepEqual(normaliseFieldValue(field("units"), "-2.5"), { ok: true, value: -2.5 });
     assert.deepEqual(normaliseFieldValue(field("units"), "two"), { ok: false, reason: "not_a_number" });
     assert.deepEqual(normaliseFieldValue(field("since"), "2026-09-01"), { ok: true, value: "2026-09-01" });

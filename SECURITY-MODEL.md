@@ -161,7 +161,9 @@ against `node:crypto` (tested). An HMAC function does not stop a process that ca
 computing digests, so who may call the key store remains the host's control. A receipt key that
 leaked is removed from the key set, not retired, so the receipts it signed stop verifying; a
 receipt carries no proof of when its key was retired, so retiring a key does not limit what a
-thief can sign with it.
+thief can sign with it. A key set saved to a file does not see that removal: verifying against a
+saved copy keeps accepting the leaked key, so a holder who needs current trust verifies against
+the key set URL or refreshes the copy.
 
 ## Left to the host
 

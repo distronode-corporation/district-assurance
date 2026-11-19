@@ -4,6 +4,7 @@ import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
 import type { JsonWebKey } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,6 +36,8 @@ describe("stand-alone receipt verifier (PRV-2)", () => {
   let keysFile = "";
   let base = "";
   let close: () => Promise<void>;
+  let padded = "";
+  let closePadded: () => Promise<void>;
   const file = (name: string, value: unknown): string => {
     const path = join(dir, name);
     writeFileSync(path, typeof value === "string" ? value : JSON.stringify(value));
@@ -54,9 +57,18 @@ describe("stand-alone receipt verifier (PRV-2)", () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     close = () => new Promise((resolve) => server.close(() => resolve()));
+    // A valid key set padded with multi-byte characters past 1 MiB of UTF-8.
+    const big = createServer((_req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ keys, padding: "é".repeat(600_000) }));
+    });
+    await new Promise<void>((resolve) => big.listen(0, "127.0.0.1", resolve));
+    padded = `http://127.0.0.1:${(big.address() as AddressInfo).port}`;
+    closePadded = () => new Promise((resolve) => big.close(() => resolve()));
   });
   after(async () => {
     await close();
+    await closePadded();
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -87,6 +99,7 @@ describe("stand-alone receipt verifier (PRV-2)", () => {
       [{ ...receipt, kid: 1 }, "invalid: not a receipt\n"],
       [{ body: null }, "invalid: not a receipt\n"],
       [[], "invalid: not a receipt\n"],
+      [{ ...receipt, body: { ...receipt.body, callId: "\ud800" } }, "invalid: a body that is not canonical JSON (a lone surrogate)\n"],
     ];
     const receiptFile = file("receipt.json", receipt);
     const otherKey = { ...generateTestSigner("k1").publicJwk() };
@@ -120,6 +133,8 @@ describe("stand-alone receipt verifier (PRV-2)", () => {
       [[receiptFile, "https://"], /is not a URL/],
       [[receiptFile, `${base}/nope`], /answered 404/],
       [[receiptFile, "http://127.0.0.1:1/keys.json"], /cannot fetch the key set/],
+      // 600,000 characters but 1.2 MB: the limit is on bytes, not string length.
+      [[receiptFile, `${padded}/keys.json`], /the key set is larger than 1 MiB/],
     ];
     await Promise.all(
       failures.map(async ([args, message]) => {

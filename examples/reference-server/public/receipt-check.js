@@ -3,7 +3,17 @@
 // suite against receipts the engine signed (test/reference-ui.test.ts).
 //
 // canonicalJson mirrors src/core/canonical.ts (RFC 8785 for the values the engine produces): keys
-// sorted by UTF-16 code units, no whitespace, strings and numbers as JSON.stringify writes them.
+// sorted by UTF-16 code units, no whitespace, strings and numbers as JSON.stringify writes them,
+// and a string or key holding a lone surrogate refused (RFC 8785, section 3.2.2.2).
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function jsonString(value) {
+  if (!value.isWellFormed()) throw new TypeError("canonicalJson: lone surrogate");
+  return JSON.stringify(value);
+}
 
 /**
  * @param {unknown} value
@@ -15,7 +25,7 @@ export function canonicalJson(value) {
     case "boolean":
       return value ? "true" : "false";
     case "string":
-      return JSON.stringify(value);
+      return jsonString(value);
     case "number":
       if (!Number.isFinite(value)) throw new TypeError("canonicalJson: non-finite number");
       return JSON.stringify(value);
@@ -23,7 +33,7 @@ export function canonicalJson(value) {
       if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
       return `{${Object.keys(value)
         .sort()
-        .map((key) => `${JSON.stringify(key)}:${canonicalJson(/** @type {Record<string, unknown>} */ (value)[key])}`)
+        .map((key) => `${jsonString(key)}:${canonicalJson(/** @type {Record<string, unknown>} */ (value)[key])}`)
         .join(",")}}`;
     default:
       throw new TypeError(`canonicalJson: unsupported ${typeof value}`);
@@ -56,7 +66,7 @@ export async function sha256Hex(text) {
  *
  * @param {{ body: unknown, alg: string, kid: string, signature: string }} receipt
  * @param {ReadonlyArray<{ kid?: string, kty?: string, crv?: string, x?: string, y?: string }>} keys
- * @returns {Promise<{ ok: boolean, reason: "valid" | "wrong_alg" | "unknown_kid" | "bad_key" | "malformed_signature" | "signature_mismatch" }>}
+ * @returns {Promise<{ ok: boolean, reason: "valid" | "wrong_alg" | "unknown_kid" | "bad_key" | "malformed_signature" | "malformed_body" | "signature_mismatch" }>}
  */
 export async function checkReceipt(receipt, keys) {
   if (receipt.alg !== "ES256") return { ok: false, reason: "wrong_alg" };
@@ -75,7 +85,13 @@ export async function checkReceipt(receipt, keys) {
   } catch {
     return { ok: false, reason: "bad_key" };
   }
-  const payload = new TextEncoder().encode(canonicalJson(receipt.body));
+  let payload;
+  try {
+    payload = new TextEncoder().encode(canonicalJson(receipt.body));
+  } catch {
+    // The engine signs only what canonicalJson accepts, so no key signed this body.
+    return { ok: false, reason: "malformed_body" };
+  }
   const ok = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, signature, payload);
   return ok ? { ok: true, reason: "valid" } : { ok: false, reason: "signature_mismatch" };
 }
@@ -88,7 +104,13 @@ export async function checkReceipt(receipt, keys) {
  */
 export async function entryHashMatches(entry) {
   const { hash, ...rest } = entry;
-  return (await sha256Hex(canonicalJson(rest))) === hash;
+  let text;
+  try {
+    text = canonicalJson(rest);
+  } catch {
+    return false;
+  }
+  return (await sha256Hex(text)) === hash;
 }
 
 /**

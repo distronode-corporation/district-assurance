@@ -310,7 +310,10 @@ a card number.
 
 Object keys sorted by UTF-16 code units, no whitespace, strings and numbers as ECMAScript
 `JSON.stringify` writes them. Refused: `undefined`, functions, symbols, bigints, non-finite
-numbers, sparse array holes, and objects whose prototype is not `Object.prototype` or `null`.
+numbers, sparse array holes, objects whose prototype is not `Object.prototype` or `null`, and
+strings or property names holding a lone surrogate (RFC 8785, section 3.2.2.2); a valid surrogate
+pair is kept. The stand-alone verifier and the reference page refuse the same values, so a receipt
+body holding a lone surrogate is invalid (the engine cannot have signed it).
 
 ## 12. Receipts
 
@@ -405,7 +408,12 @@ $ echo $?
 ```
 
 The key set can be fetched once and kept: since retired keys stay in it, a copy taken after a
-receipt was issued verifies that receipt for as long as its key is not removed.
+receipt was issued verifies that receipt for as long as its key is not removed. A saved copy does
+not receive revocations: if a key is later removed from the published key set (because it was
+compromised), the saved `keys.json` still holds it and the verifier still accepts signatures made
+with it. A saved key set therefore preserves historical verification only; it says nothing about a
+key's current status. When current trust matters, verify against the key set URL, or refresh the
+saved copy from it first.
 
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
 `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
@@ -414,7 +422,7 @@ Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording 
 
 | Type | Accepted | Stored as |
 |---|---|---|
-| `text` | trimmed, non-empty, at most `maxLength` (500), and no card number | string |
+| `text` | trimmed, non-empty, well-formed Unicode (no lone surrogate), at most `maxLength` (500), and no card number | string |
 | `number` | `-?\d+(\.\d+)?` | number |
 | `date` | `YYYY-MM-DD` naming a real day | string |
 | `yes_no` | `yes`, `y`, `oui` / `no`, `n`, `non`, any case | boolean |

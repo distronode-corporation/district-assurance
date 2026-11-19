@@ -4,7 +4,8 @@
 // produces: object keys sorted by UTF-16 code units, no whitespace, strings and numbers
 // serialised as ECMAScript's JSON.stringify does. Anything JSON cannot carry faithfully is
 // refused instead of being dropped or coerced: undefined, functions, symbols, bigints,
-// non-finite numbers, and objects that are not plain (a Date, a Map, a class instance).
+// non-finite numbers, objects that are not plain (a Date, a Map, a class instance), and
+// strings or keys holding a lone surrogate (RFC 8785, section 3.2.2.2: not valid Unicode).
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -18,7 +19,7 @@ function serialise(value: unknown, path: string): string {
     case "boolean":
       return value ? "true" : "false";
     case "string":
-      return JSON.stringify(value);
+      return serialiseString(value, path);
     case "number":
       if (!Number.isFinite(value)) throw new TypeError(`canonicalJson: non-finite number at ${path}`);
       return JSON.stringify(value);
@@ -46,6 +47,12 @@ function serialiseObject(value: object, path: string): string {
   const record = value as Record<string, unknown>;
   // Default sort compares UTF-16 code units, which is what RFC 8785 asks for.
   const keys = Object.keys(record).sort();
-  const parts = keys.map((key) => `${JSON.stringify(key)}:${serialise(record[key], `${path}.${key}`)}`);
+  const parts = keys.map((key) => `${serialiseString(key, `${path}.${key}`)}:${serialise(record[key], `${path}.${key}`)}`);
   return `{${parts.join(",")}}`;
+}
+
+function serialiseString(value: string, path: string): string {
+  // JSON.stringify would write a lone surrogate as an escape; RFC 8785 refuses it.
+  if (!value.isWellFormed()) throw new TypeError(`canonicalJson: lone surrogate at ${path}`);
+  return JSON.stringify(value);
 }

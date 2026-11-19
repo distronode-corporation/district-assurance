@@ -36,6 +36,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `canonicalJson` refuses a string or property name holding a lone surrogate (RFC 8785, section
+  3.2.2.2), as do the stand-alone verifier and the demo page; an intake text value holding one is
+  refused as `not_text`.
+
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

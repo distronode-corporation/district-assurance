@@ -426,6 +426,9 @@ describe("reference UI: the page's checks (receipt-check.js, no DOM)", () => {
     assert.throws(() => check.canonicalJson({ n: Number.NaN }), TypeError);
     assert.throws(() => check.canonicalJson(undefined), TypeError);
     assert.throws(() => check.canonicalJson(() => 1), TypeError);
+    assert.throws(() => check.canonicalJson({ a: "\ud800" }), TypeError);
+    assert.throws(() => check.canonicalJson({ "\udc00": 1 }), TypeError);
+    assert.throws(() => canonicalJson({ a: "\ud800" }), TypeError);
   });
 
   it("accepts the engine's receipt, as verifyReceipt does, and rejects every kind of change", async () => {
@@ -452,12 +455,17 @@ describe("reference UI: the page's checks (receipt-check.js, no DOM)", () => {
     assert.deepEqual(await check.checkReceipt(receipt, [{ ...keys[0], x: "AAAA" }]), { ok: false, reason: "bad_key" });
     const other = createDemoWorld().engine.receiptKeys()[0] as Record<string, unknown>;
     assert.deepEqual(await check.checkReceipt(receipt, [{ ...other, kid: receipt.kid }]), { ok: false, reason: "signature_mismatch" });
+    const lone = structuredClone(receipt);
+    lone.body.callId = "\ud800";
+    assert.equal(verifyReceipt(lone, keys), false);
+    assert.deepEqual(await check.checkReceipt(lone, keys), { ok: false, reason: "malformed_body" });
   });
 
   it("recomputes every ledger entry's hash, and notices a change", async () => {
     for (const entry of entries) assert.equal(await check.entryHashMatches(entry), true);
     const changed = { ...entries[0]!, actor: "caller" };
     assert.equal(await check.entryHashMatches(changed), false);
+    assert.equal(await check.entryHashMatches({ ...entries[0]!, actor: "\ud800" }), false);
   });
 
   it("has small helpers that behave", async () => {

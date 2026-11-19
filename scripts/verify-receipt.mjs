@@ -17,9 +17,16 @@ const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
 class Usage extends Error {}
 
+/** A JSON string, refusing a lone surrogate as RFC 8785 (section 3.2.2.2) does. */
+function jsonString(value) {
+  if (!value.isWellFormed()) throw new TypeError("lone surrogate");
+  return JSON.stringify(value);
+}
+
 /** RFC 8785 canonical JSON for plain JSON values: sorted keys, no whitespace, JSON.stringify scalars. */
 function canonicalJson(value) {
-  if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "string") return jsonString(value);
+  if (value === null || typeof value === "boolean") return JSON.stringify(value);
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new TypeError("not JSON");
     return JSON.stringify(value);
@@ -27,7 +34,7 @@ function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
   if (typeof value === "object") {
     const keys = Object.keys(value).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+    return `{${keys.map((key) => `${jsonString(key)}:${canonicalJson(value[key])}`).join(",")}}`;
   }
   throw new TypeError("not JSON");
 }
@@ -49,7 +56,13 @@ function check(receipt, keys) {
   }
   // Strict base64url: 64 bytes are exactly 86 characters, without padding.
   if (!/^[A-Za-z0-9_-]{85}[AQgw]$/.test(receipt.signature)) return "a malformed signature";
-  const payload = new TextEncoder().encode(canonicalJson(receipt.body));
+  let payload;
+  try {
+    payload = new TextEncoder().encode(canonicalJson(receipt.body));
+  } catch {
+    // The engine signs only what canonicalJson accepts, so no key signed this body.
+    return "a body that is not canonical JSON (a lone surrogate)";
+  }
   const signature = Buffer.from(receipt.signature, "base64url");
   return verify("sha256", payload, { key, dsaEncoding: "ieee-p1363" }, signature) ? null : "the signature does not match the body";
 }
@@ -91,9 +104,21 @@ async function fetchKeySet(source) {
     throw new Usage(`cannot fetch the key set from ${url.href}`);
   }
   if (!response.ok) throw new Usage(`the key set URL answered ${response.status}`);
-  const text = await response.text();
-  if (text.length > MAX_BYTES) throw new Usage("the key set is larger than 1 MiB");
-  return text;
+  // Counted in UTF-8 bytes while reading (not string length), so an oversized answer is never held
+  // in full; leaving the loop early cancels the rest of the body.
+  const chunks = [];
+  let total = 0;
+  try {
+    for await (const chunk of response.body ?? []) {
+      total += chunk.byteLength;
+      if (total > MAX_BYTES) throw new Usage("the key set is larger than 1 MiB");
+      chunks.push(chunk);
+    }
+  } catch (error) {
+    if (error instanceof Usage) throw error;
+    throw new Usage(`cannot fetch the key set from ${url.href}`);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 async function main(args) {

@@ -12,6 +12,7 @@ const REASONS = {
   unknown_kid: "signed by a key that is not in the key set",
   bad_key: "the key in the key set does not load",
   malformed_signature: "the signature is not 64 bytes of base64url",
+  malformed_body: "the body is not canonical JSON (a lone surrogate)",
   signature_mismatch: "the signature does not match the body",
 };
 
