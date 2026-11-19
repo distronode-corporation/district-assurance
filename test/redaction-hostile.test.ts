@@ -3,7 +3,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import { LiveCardNumberDetector } from "../src/core/live-detector.ts";
-import { REDACTION_MARKERS, applyFindings, findCardNumbers } from "../src/core/redaction.ts";
+import { REDACTION_MARKERS, applyFindings, digitRuns, findCardNumbers } from "../src/core/redaction.ts";
 
 const PAN = "4111111111111111";
 const redacted = (text: string) => applyFindings(text, findCardNumbers(text));
@@ -94,5 +94,40 @@ describe("hostile #89: more separators, and decimal digits in any script", () =>
   it("reads mixed scripts in one number", () => {
     const mixed = `${scripts.fullwidth!(PAN.slice(0, 4))} ${PAN.slice(4, 8)} ${scripts["Arabic-Indic"]!(PAN.slice(8))}`;
     assert.equal(redacted(mixed), MARKER);
+  });
+});
+
+describe("hostile #89: Spanish numbers, read as people say them", () => {
+  const runs = (text: string) => digitRuns(text).map((run) => run.map((p) => p.digits).join(""));
+  it("reads Spanish cardinals like the English and French ones", () => {
+    const cases: Array<[string, string]> = [
+      ["cero uno dos tres cuatro cinco seis siete ocho nueve", "0123456789"],
+      ["cuarenta y uno", "41"],
+      ["noventa y nueve", "99"],
+      ["veinte", "20"],
+      ["veintiuno", "21"],
+      ["veintidós", "22"],
+      ["diez once doce quince", "10111215"],
+      ["dieciséis diecinueve", "1619"],
+      ["cien", "100"],
+      ["ciento once", "111"],
+      ["doscientos cuarenta y uno", "241"],
+      ["quinientos", "500"],
+      ["mil", "1000"],
+      ["cuatro mil ciento once", "4111"],
+      ["dos mil veinte", "2020"],
+      ["una", "1"],
+    ];
+    for (const [text, digits] of cases) assert.deepEqual(runs(text), [digits], text);
+  });
+
+  it("redacts and interrupts a card number read in Spanish pairs or groups", () => {
+    const pairs = "cuarenta y uno once, once once, once once, once once";
+    assert.equal(redacted(`es ${pairs} gracias`), `es ${MARKER} gracias`);
+    const groups = "cuatro mil ciento once, mil ciento once, mil ciento once, mil ciento once";
+    assert.equal(redacted(groups), MARKER);
+    const live = new LiveCardNumberDetector();
+    live.push("cuarenta y");
+    assert.equal(live.push("uno once once once").interrupt, true, "a y at a chunk's end still joins the run");
   });
 });

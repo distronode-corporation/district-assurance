@@ -402,7 +402,7 @@ the currency's own decimals.
 ## 17. Card numbers in transcripts
 
 **Runs of digits.** `digitRuns(text)` reads a text into runs of digits. A run is numerals and spoken
-numbers in English or French with only separators between them: spaces, any dash (hyphen, en and
+numbers in English, French or Spanish with only separators between them: spaces, any dash (hyphen, en and
 em dashes, the non-breaking hyphen), the minus sign, dots, commas, slashes, underscores, middle
 dots, and the characters a reader never sees (zero-width spaces and joiners, soft hyphens, bidi
 controls, combining marks: `SEPARATOR_CLASS`). A numeral is any run of Unicode decimal digits
@@ -418,6 +418,7 @@ is a number reaching storage. Spoken numbers are read as people say them:
 | teens: `twelve`, `dix-sept` | `12`, `17` |
 | `double` and `triple` before one digit: `double four`, `triple 0` | `44`, `000` |
 | scales: `four hundred and two`, `forty two hundred`, `cent deux`, `deux mille vingt` | `402`, `4200`, `102`, `2020` |
+| Spanish: `cero`, `cuarenta y uno`, `veintidós`, `dieciséis`, `ciento once`, `doscientos`, `cuatro mil ciento once` | `0`, `41`, `22`, `16`, `111`, `200`, `4111` |
 
 Words are compared in Unicode NFC, lower case, with their combining marks, so `zéro` written
 decomposed (`e` and U+0301) is still a number word. Units do not combine (`four two` is 4 then 2). `quatre-vingts` and `deux cents` end a number,

@@ -1,7 +1,7 @@
 // Redaction of transcripts and any other text before it is stored or sent on.
 //
 // The first detector is card numbers (PANs): 13 to 19 digits that pass the Luhn check, written as
-// digits or spoken in English or French (digit by digit, as numbers such as "forty two" or
+// digits or spoken in English, French or Spanish (digit by digit, as numbers such as "forty two" or
 // "quarante-deux", or with "double" and "triple"), in any script's decimal digits, with separators
 // between groups: spaces, dashes, dots, commas, slashes, underscores, middle dots and invisible
 // characters (SEPARATOR_CLASS). The same reading of spoken numbers feeds the live detector (live-detector.ts). A match
@@ -64,20 +64,38 @@ const NUMBER_WORDS: ReadonlyMap<string, NumberWord> = new Map([
     ["seven", 7], ["eight", 8], ["nine", 9],
     ["zéro", 0], ["un", 1], ["une", 1], ["deux", 2], ["trois", 3], ["quatre", 4], ["cinq", 5], ["sept", 7],
     ["huit", 8], ["neuf", 9],
+    // Spanish ("un" is shared with French).
+    ["cero", 0], ["uno", 1], ["una", 1], ["dos", 2], ["tres", 3], ["cuatro", 4], ["cinco", 5], ["seis", 6],
+    ["siete", 7], ["ocho", 8], ["nueve", 9],
   ]),
   ...words("teen", [
     ["ten", 10], ["eleven", 11], ["twelve", 12], ["thirteen", 13], ["fourteen", 14], ["fifteen", 15],
     ["sixteen", 16], ["seventeen", 17], ["eighteen", 18], ["nineteen", 19],
     ["dix", 10], ["onze", 11], ["douze", 12], ["treize", 13], ["quatorze", 14], ["quinze", 15], ["seize", 16],
+    // Spanish: 10 to 19, and 21 to 29, which Spanish writes as one word ("veintiuno"), with or without accents.
+    ["diez", 10], ["once", 11], ["doce", 12], ["trece", 13], ["catorce", 14], ["quince", 15],
+    ["dieciséis", 16], ["dieciseis", 16], ["diecisiete", 17], ["dieciocho", 18], ["diecinueve", 19],
+    ["veintiuno", 21], ["veintiún", 21], ["veintiun", 21], ["veintiuna", 21], ["veintidós", 22], ["veintidos", 22],
+    ["veintitrés", 23], ["veintitres", 23], ["veinticuatro", 24], ["veinticinco", 25], ["veintiséis", 26],
+    ["veintiseis", 26], ["veintisiete", 27], ["veintiocho", 28], ["veintinueve", 29],
   ]),
   ...words("tens", [
     ["twenty", 20], ["thirty", 30], ["forty", 40], ["fifty", 50], ["sixty", 60], ["seventy", 70],
     ["eighty", 80], ["ninety", 90],
+    ["veinte", 20], ["treinta", 30], ["cuarenta", 40], ["cincuenta", 50], ["sesenta", 60], ["setenta", 70],
+    ["ochenta", 80], ["noventa", 90],
     ["vingt", 20], ["vingts", 20], ["trente", 30], ["quarante", 40], ["cinquante", 50], ["soixante", 60],
     ["septante", 70], ["huitante", 80], ["octante", 80], ["nonante", 90],
   ]),
-  ...words("hundred", [["hundred", 100], ["cent", 100], ["cents", 100]]),
-  ...words("thousand", [["thousand", 1000], ["mille", 1000]]),
+  // Spanish writes its hundreds as one word each ("doscientos" is 200), read like "hundred" with its count.
+  ...words("hundred", [
+    ["hundred", 100], ["cent", 100], ["cents", 100],
+    ["cien", 100], ["ciento", 100], ["doscientos", 200], ["doscientas", 200], ["trescientos", 300], ["trescientas", 300],
+    ["cuatrocientos", 400], ["cuatrocientas", 400], ["quinientos", 500], ["quinientas", 500], ["seiscientos", 600],
+    ["seiscientas", 600], ["setecientos", 700], ["setecientas", 700], ["ochocientos", 800], ["ochocientas", 800],
+    ["novecientos", 900], ["novecientas", 900],
+  ]),
+  ...words("thousand", [["thousand", 1000], ["mille", 1000], ["mil", 1000]]),
   ...words("repeat", [["double", 2], ["triple", 3]]),
 ]);
 
@@ -165,7 +183,7 @@ function numberWord(lx: readonly Lexeme[], i: number, first: boolean): NumberWor
   return l !== undefined && (first || l.joined) ? NUMBER_WORDS.get(l.word) : undefined;
 }
 
-/** Whether `word` ("and", "et") is at `i`, joined to the word before it. */
+/** Whether `word` ("and", "et", "y") is at `i`, joined to the word before it. */
 function connector(lx: readonly Lexeme[], i: number, word: string): boolean {
   const l = lx[i];
   return l !== undefined && l.joined && l.word === word;
@@ -209,6 +227,11 @@ function below100(lx: readonly Lexeme[], i: number, first: boolean): Parsed | un
   if (connector(lx, i + 1, "et")) {
     const after = numberWord(lx, i + 2, false);
     if (after?.value === 1 || after?.value === 11) return { value: w.value + after.value, next: i + 3 };
+  }
+  // Spanish: tens, "y", a unit ("cuarenta y uno").
+  if (connector(lx, i + 1, "y")) {
+    const unit = unitAfter(lx, i + 2);
+    if (unit !== undefined) return { value: w.value + unit.value, next: unit.next };
   }
   const rest = (lx[i]!.word === "soixante" ? teen(lx, i + 1, false) : undefined) ?? unitAfter(lx, i + 1);
   return rest === undefined ? { value: w.value, next: i + 1 } : { value: w.value + rest.value, next: rest.next };
@@ -260,8 +283,8 @@ function part(lx: readonly Lexeme[], i: number): { digits: string; next: number 
 }
 
 /**
- * Runs of digits in a text: numerals and spoken numbers in English or French, with only spaces,
- * hyphens, dots or commas between them. Spoken numbers are read as people say them: "forty two" is
+ * Runs of digits in a text: numerals and spoken numbers in English, French or Spanish, with only
+ * separators between them (SEPARATOR_CLASS). Spoken numbers are read as people say them: "forty two" is
  * 42, "quatre-vingt-dix" is 90, "double four" is 44, "forty two hundred" is 4200, and "four two"
  * is 4 then 2. Any other word ends a run.
  */

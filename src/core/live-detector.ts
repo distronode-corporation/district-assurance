@@ -3,7 +3,7 @@
 // Redaction (redaction.ts) finds whole card numbers once a text is complete. This detector is fed
 // a call's transcript a chunk at a time and says to interrupt as soon as a run of digits reaches a
 // threshold (8 by default), before the caller has read a whole number. A run is read the same way
-// redaction reads it: numerals and spoken numbers in English or French ("forty two",
+// redaction reads it: numerals and spoken numbers in English, French or Spanish ("forty two",
 // "quarante-deux", "double four"), with only separators between them (redaction.ts, SEPARATOR_CLASS). There is
 // no Luhn check: a partial number cannot pass one. A phone number read aloud also interrupts;
 // over-interrupting is accepted.
@@ -32,8 +32,8 @@ export interface LiveDetection {
 }
 
 // After the last run, these may still continue it: separators, then at most one word that only
-// makes sense before more digits ("and" or "et" inside a number, "double", "triple").
-const PENDING = new RegExp(`^${SEPARATOR_CLASS}*(?:(?:and|et|double|triple)${SEPARATOR_CLASS}*)?$`, "iu");
+// makes sense before more digits ("and", "et" or "y" inside a number, "double", "triple").
+const PENDING = new RegExp(`^${SEPARATOR_CLASS}*(?:(?:and|et|y|double|triple)${SEPARATOR_CLASS}*)?$`, "iu");
 const PENDING_WORD = new RegExp(`(?<!\\p{L})(?:double|triple)${SEPARATOR_CLASS}*$`, "iu");
 // Separators at the end of what is kept: dropped, since the next chunk is joined with a space,
 // so empty or separator-only chunks never grow the kept text.
