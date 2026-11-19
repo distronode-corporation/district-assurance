@@ -244,10 +244,15 @@ export class BadgeModule implements AssuranceModule {
     return this.#plugins.get(kind) ?? this.#outside.get(kind);
   }
 
+  /** Every factor kind Badge judges, on or off: its own, the host's plug-ins and the outside modules' judges. */
+  installedFactors(): string[] {
+    return [...this.manifest.provides.factors, ...this.#outside.keys()];
+  }
+
   validateSettings(settings: unknown): string[] {
     if (!isObject(settings)) return ["must be an object with the factors that are on"];
     const errors = unknownKeys(settings, SETTINGS_KEYS).map((k) => `${k} is not a badge setting`);
-    const known = [...this.manifest.provides.factors, ...this.#outside.keys()];
+    const known = this.installedFactors();
     if (!isStringArray(settings.factors) || settings.factors.length === 0) {
       errors.push("factors must list at least one factor");
     } else {
@@ -745,9 +750,9 @@ export async function clearDuress(rt: EngineRuntime, module: BadgeModule, subjec
   // Counted before the flag goes, so an alert of an earlier entry, delivered later, never sets it again.
   await recordClear(counters, rt.workspaceId, subjectKey, rt.clock.now());
   await counters.reset(duressFlagKey(rt.workspaceId, subjectKey));
-  // Every installed factor's hidden counter, not only those on now: a factor turned off while the
-  // subject is cleared keeps no hidden lock to hold when it is turned on again.
-  for (const kind of module.manifest.provides.factors) await counters.reset(hiddenCounterKey(rt.workspaceId, kind, subjectKey));
+  // Every installed factor's hidden counter, outside modules' included, not only those on now: a
+  // factor turned off while the subject is cleared keeps no hidden lock to hold when it is turned on again.
+  for (const kind of module.installedFactors()) await counters.reset(hiddenCounterKey(rt.workspaceId, kind, subjectKey));
 }
 
 /** Asks the carrier about the number on file, never the calling number. Only after a keypad or PIN match. */
