@@ -423,6 +423,16 @@ describe("lone surrogates and other values the ledger cannot hash (PRV-2 review)
     assert.equal(entries.some((e) => e.event === "module.event"), false);
   });
 
+  it("taints a call whose label carries a card number, with the number removed from the label", async () => {
+    const t = setup({ config: flowConfig() });
+    const { callId } = await t.engine.startCall();
+    await t.engine.markUntrusted(callId, "crm note 4111111111111111");
+    assert.equal((await t.engine.state(callId)).tainted, true);
+    const tainted = (await t.ledger.list()).find((e) => e.event === "session.tainted")!;
+    assert.deepEqual(tainted.detail, { source: "crm note [card number removed]" });
+    assert.equal(JSON.stringify(await t.engine.state(callId)).includes("4111111111111111"), false, "nor kept on the call");
+  });
+
   it("refuses a config holding a lone surrogate anywhere, at save time", () => {
     const problems = validateConfig(
       flowConfig((c) => ((c.modules.trace!.settings as { wordings: { text: { en: string } }[] }).wordings[0]!.text.en = "May we text you? \uDC00")),

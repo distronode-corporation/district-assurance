@@ -325,7 +325,7 @@ pair is kept. The stand-alone verifier and the reference page refuse the same va
 body holding a lone surrogate is invalid (the engine cannot have signed it). So that no call is
 ever left with a ledger entry it cannot append, a step whose ledger detail canonical JSON refuses
 is refused with `invalid_input` before it is saved; `markUntrusted` replaces a lone surrogate in
-its label with U+FFFD, so the taint always lands; and `validateConfig` refuses a config holding a
+its label with U+FFFD and a card number with `[card number removed]`, so the taint always lands; and `validateConfig` refuses a config holding a
 lone surrogate in any string or key.
 
 ## 12. Receipts

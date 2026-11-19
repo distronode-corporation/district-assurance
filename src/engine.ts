@@ -660,11 +660,17 @@ export function createEngine(options: EngineOptions): Engine {
   return new Engine(options);
 }
 
-/** markUntrusted's label as Unicode text; a value that will not turn into a string is labelled "unlabelled". */
+/**
+ * markUntrusted's label as Unicode text with any card number removed (the ledger refuses detail
+ * that carries one, and the taint must land); a value that will not turn into a string is labelled
+ * "unlabelled".
+ */
 function untrustedLabel(source: unknown): string {
+  let text: string;
   try {
-    return String(source).toWellFormed();
+    text = String(source).toWellFormed();
   } catch {
     return "unlabelled";
   }
+  return cardNumberRedactor.redact(text).text;
 }

@@ -475,6 +475,17 @@ describe("reference UI: the page's checks (receipt-check.js, no DOM)", () => {
     }
     assert.deepEqual(await check.checkReceipt(receipt, keys.map((k) => ({ ...(k as object), retiredAt: "June" }))), { ok: false, reason: "bad_key" });
     assert.deepEqual(await check.checkReceipt({ ...receipt, body: { ...receipt.body, issuedAt: "today" } }, retired), { ok: false, reason: "retired_key_after" });
+    // The issue time checked against the retirement is the one in the bytes whose signature is
+    // verified: neither a body swapped after the first read nor an issuedAt getter that changes passes.
+    const after = keys.map((k) => ({ ...(k as object), retired: true, retiredAt: receipt.body.issuedAt }));
+    const early = { ...receipt.body, issuedAt: new Date(issued - 60_000).toISOString() };
+    let bodyReads = 0;
+    const swapped = { alg: receipt.alg, kid: receipt.kid, signature: receipt.signature, get body() { return bodyReads++ === 0 ? early : receipt.body; } };
+    assert.equal((await check.checkReceipt(swapped, after)).ok, false);
+    let timeReads = 0;
+    const shifting = { ...receipt.body } as Record<string, unknown>;
+    Object.defineProperty(shifting, "issuedAt", { enumerable: true, get: () => (timeReads++ === 0 ? early.issuedAt : receipt.body.issuedAt) });
+    assert.equal((await check.checkReceipt({ ...receipt, body: shifting }, after)).ok, false);
   });
 
   it("recomputes every ledger entry's hash, and notices a change", async () => {

@@ -98,10 +98,13 @@ function checkOnce(receipt: SignedReceipt, keys: ReadonlyArray<JsonWebKey & { ki
   const jwk = keys.find((k: unknown) => typeof k === "object" && k !== null && (k as { kid?: unknown }).kid === kid);
   if (jwk === undefined) return { valid: false };
   const retired: unknown = jwk.retiredAt;
+  // The body is serialized once: the issue time checked below is read from those bytes, and those
+  // bytes are what the signature is verified over, so no getter can answer two different times.
+  const text = canonicalJson(body);
   let retiredAt: string | null = null;
   if (retired !== undefined) {
     if (!isUtcTime(retired)) return { valid: false };
-    const issuedAt: unknown = body.issuedAt;
+    const issuedAt: unknown = (JSON.parse(text) as { issuedAt?: unknown }).issuedAt;
     if (!isUtcTime(issuedAt) || Date.parse(issuedAt) >= Date.parse(retired)) return { valid: false };
     retiredAt = retired;
   }
@@ -109,7 +112,7 @@ function checkOnce(receipt: SignedReceipt, keys: ReadonlyArray<JsonWebKey & { ki
     const key = createPublicKey({ key: jwk, format: "jwk" });
     const signature = Buffer.from(sig, "base64url");
     if (signature.length !== 64) return { valid: false };
-    return verify("sha256", receiptPayload(body), { key, dsaEncoding: "ieee-p1363" }, signature) ? { valid: true, retiredAt } : { valid: false };
+    return verify("sha256", new TextEncoder().encode(text), { key, dsaEncoding: "ieee-p1363" }, signature) ? { valid: true, retiredAt } : { valid: false };
   } catch {
     return { valid: false };
   }

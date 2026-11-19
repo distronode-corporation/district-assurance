@@ -30,4 +30,15 @@ describe("receipts: checkReceipt reads the receipt once", () => {
     };
     assert.deepEqual(checkReceipt(forged as never, keys), { valid: false });
   });
+
+  it("checks the issue time in the bytes it verifies: a body whose issuedAt getter changes is never valid", async () => {
+    const k1 = generateTestSigner("k1");
+    const late = createTestEngine({ clock: new FixedClock("2026-07-01T00:00:00.000Z"), adapters: { signer: k1 } });
+    const signed = (await late.engine.endCall((await late.engine.startCall()).callId))!;
+    const keys = [{ ...k1.publicJwk(), retiredAt: RETIRED_AT }];
+    let reads = 0;
+    const body = { ...signed.body } as Record<string, unknown>;
+    Object.defineProperty(body, "issuedAt", { enumerable: true, get: () => (reads++ === 0 ? "2026-01-01T00:00:00.000Z" : signed.body.issuedAt) });
+    assert.deepEqual(checkReceipt({ ...signed, body } as never, keys), { valid: false });
+  });
 });

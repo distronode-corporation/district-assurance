@@ -72,21 +72,33 @@ export async function sha256Hex(text) {
  * @returns {Promise<{ ok: boolean, reason: "valid" | "valid_retired_key" | "wrong_alg" | "unknown_kid" | "bad_key" | "retired_key_after" | "malformed_signature" | "malformed_body" | "signature_mismatch", retiredAt?: string }>}
  */
 export async function checkReceipt(receipt, keys) {
-  if (receipt.alg !== "ES256") return { ok: false, reason: "wrong_alg" };
-  const jwk = keys.find((k) => k.kid === receipt.kid);
+  // Read once, and the body serialized once: the issue time checked against a retirement is read
+  // from the bytes whose signature is verified, so neither a body swapped while the key is
+  // imported nor an issuedAt getter that changes can pass a later receipt as an earlier one.
+  const { alg, kid, body, signature: sig } = receipt;
+  /** @type {string | null} */
+  let text = null;
+  try {
+    text = canonicalJson(body);
+  } catch {
+    // Judged below, after the signature and the key, as a malformed body.
+  }
+  const snapshot = text === null ? body : JSON.parse(text);
+  if (alg !== "ES256") return { ok: false, reason: "wrong_alg" };
+  const jwk = keys.find((k) => k.kid === kid);
   if (jwk === undefined) return { ok: false, reason: "unknown_kid" };
   /** @type {string | null} */
   let retiredAt = null;
   if (/** @type {{ retiredAt?: unknown }} */ (jwk).retiredAt !== undefined) {
     const at = /** @type {{ retiredAt?: unknown }} */ (jwk).retiredAt;
     if (!isUtcTime(at)) return { ok: false, reason: "bad_key" };
-    const body = /** @type {{ issuedAt?: unknown }} */ (receipt.body);
-    if (!isUtcTime(body?.issuedAt) || Date.parse(body.issuedAt) >= Date.parse(at)) return { ok: false, reason: "retired_key_after" };
+    const issuedAt = /** @type {{ issuedAt?: unknown } | null | undefined} */ (snapshot)?.issuedAt;
+    if (!isUtcTime(issuedAt) || Date.parse(issuedAt) >= Date.parse(at)) return { ok: false, reason: "retired_key_after" };
     retiredAt = at;
   }
   let signature;
   try {
-    signature = base64urlToBytes(receipt.signature);
+    signature = base64urlToBytes(sig);
   } catch {
     return { ok: false, reason: "malformed_signature" };
   }
@@ -97,13 +109,9 @@ export async function checkReceipt(receipt, keys) {
   } catch {
     return { ok: false, reason: "bad_key" };
   }
-  let payload;
-  try {
-    payload = new TextEncoder().encode(canonicalJson(receipt.body));
-  } catch {
-    // The engine signs only what canonicalJson accepts, so no key signed this body.
-    return { ok: false, reason: "malformed_body" };
-  }
+  // The engine signs only what canonicalJson accepts, so no key signed a body it refused.
+  if (text === null) return { ok: false, reason: "malformed_body" };
+  const payload = new TextEncoder().encode(text);
   const ok = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, signature, payload);
   if (!ok) return { ok: false, reason: "signature_mismatch" };
   return retiredAt === null ? { ok: true, reason: "valid" } : { ok: true, reason: "valid_retired_key", retiredAt };
