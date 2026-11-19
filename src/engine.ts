@@ -96,6 +96,12 @@ export interface EngineOptions {
   /** Default: card numbers. */
   redactor?: Redactor;
   onEvent?: EventListener;
+  /**
+   * How long one `DuressNotifier.notify` may take, in milliseconds: a whole number from 100 to 30000
+   * (the 30 s after which an unanswered alert may be sent again). Default 30000. A notify that has not
+   * settled by then counts as failed: its alert stays owed, and a late answer changes nothing.
+   */
+  notifyTimeoutMs?: number;
 }
 
 export interface FlowPosition {
@@ -166,6 +172,7 @@ export class Engine {
   readonly #ids: IdGenerator;
   readonly #redactor: Redactor;
   readonly #onEvent: EventListener | undefined;
+  readonly #notifyTimeoutMs: number;
   /** Badge as installed now: a new build replaces it when a factor is added (`useFactor`, `use`). */
   #badge: badge.BadgeModule;
   readonly #rt: EngineRuntime;
@@ -211,6 +218,8 @@ export class Engine {
       });
       if (missing.length > 0) errors.push(`the counters adapter is missing ${missing.join(", ")}`);
     }
+    const notifyTimeoutMs = options.notifyTimeoutMs ?? 30_000;
+    if (!Number.isInteger(notifyTimeoutMs) || notifyTimeoutMs < 100 || notifyTimeoutMs > 30_000) errors.push("notifyTimeoutMs must be an integer from 100 to 30000");
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     this.workspaceId = options.workspaceId;
     this.#hmac = knowledgeHmac(options.knowledgeKey);
@@ -220,6 +229,7 @@ export class Engine {
     this.#ids = options.ids ?? randomIds;
     this.#redactor = options.redactor ?? cardNumberRedactor;
     this.#onEvent = options.onEvent;
+    this.#notifyTimeoutMs = notifyTimeoutMs;
     this.#badge = options.badge ?? badge.badgeModule();
     const present = Object.entries(this.#adapters).filter(([, value]) => value !== undefined).map(([name]) => name);
     // What each adapter declares it can do, so a config it cannot serve is refused when saved.
@@ -1647,7 +1657,7 @@ export class Engine {
         if ((await clearsSoFar(counters, this.workspaceId, alert.subjectKey)) === alert.clears) {
           await flagDuress(counters, duressFlagKey(this.workspaceId, alert.subjectKey), new Date(alert.at));
         }
-        await notifier.notify({ alertId: alert.alertId, workspaceId: this.workspaceId, subjectKey: alert.subjectKey, callId, at: alert.at });
+        await this.#withinNotifyTimeout(notifier.notify({ alertId: alert.alertId, workspaceId: this.workspaceId, subjectKey: alert.subjectKey, callId, at: alert.at }));
         await this.#acknowledgeDuressAlert(callId, alert.alertId);
         delivered++;
       } catch {
@@ -1657,6 +1667,23 @@ export class Engine {
       }
     }
     return delivered;
+  }
+
+  /**
+   * The notify's answer, or a rejection once `notifyTimeoutMs` passes first. The race handles the
+   * notify's own late rejection, and a late resolve is no longer awaited, so it acknowledges nothing.
+   */
+  async #withinNotifyTimeout(sent: Promise<void>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<never>((_, reject) => {
+      // Unref'd: a wait for a notifier never keeps the host's process alive on its own.
+      timer = setTimeout(() => reject(new Error("the duress notifier did not answer in time")), this.#notifyTimeoutMs).unref();
+    });
+    try {
+      await Promise.race([sent, late]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** Takes a delivered alert off the call record, in its own compare-and-set write, with no ledger entry. */

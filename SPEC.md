@@ -213,7 +213,9 @@ one, for example `[pin, callback]` at level 2.
 **Caller ID attestation.** `startCall({attestation})` records, once, the STIR/SHAKEN result the
 host's carrier reported for the call: `A`, `B` or `C` only when the receiving carrier's check of
 the signature passed, `failed` when it failed, and `none` (the default) when there was no signature
-or no result. Any other value is refused (`invalid_input`), and nothing changes it later. It is
+or no result. Any other value is refused (`invalid_input`), and nothing changes it later. A Twilio `StirVerstat` of `TN-Validation-Passed-{A,B,C}-Diverted` or
+`-Passthrough` maps to `none`, because Twilio did not verify the original signer's attestation
+end to end (its `-Failed-` forms map to `failed`). The attestation is
 never a factor, never counts toward a factor set and never appears in `methods`. The policy's
 optional `attestationCaps` gives, per value, the highest level a call with it can reach (for
 example `{"C": 2, "none": 2, "failed": 1}`): `finishVerification` takes the lower of the level the
@@ -558,9 +560,16 @@ when there is a number.
   since every entry records its own failure before it is judged, and only a pass takes it back. If
   the first passes, its pass takes off the subject's failures up to the pass and the second may enter again at once;
   if it fails, both failures stand and the second waits the longer wait for two.
-- The cleanup a pass owes (`forgetPass`) is saved with the pass, on the call, so a write that
-  fails after the pass was saved (its ledger entry) still gets it, in the same `submitKeypad` or
-  `submitPin` or before the call's next factor; a pass refused before it was saved owes none.
+- The cleanup a pass owes (`forgetPass`, and with the duress PIN on its hidden counter) is saved
+  with the pass, on the call, so a write that fails after the pass was saved (its ledger entry)
+  still gets it, in the same `submitKeypad` or `submitPin` or before the call's next factor; a pass
+  refused before it was saved owes none. The subject's part is safe to run again. The rest (the
+  pass's own failure off the number, and the hidden counter's reset or, after a duress entry, its
+  own failure) is claimed on the call in one more write before it runs, so it runs at most once: a
+  replay never takes off another failure of the same millisecond. A claim that is not saved runs
+  none of it, which stays owed; a removal that fails after its claim is not run again, and that
+  failure stays until it leaves the window (fail closed). A flagged pass and an unflagged one make
+  the same store round trips.
 - **Lock notices (INT-7).** With a `notifier` adapter, after a `verification.locked` entry is
   appended (by the step's write, or later by `flushLedger`), the engine calls
   `Notifier.lockout({workspaceId, factor, scope, key, hard, until, capped})`: the counter that
@@ -616,9 +625,11 @@ the `dialer` (`CallbackDialer`) and `counters` adapters when it is on.
   in `AttemptCounters` under the key `callback.placed`, recorded before the dial, so of two
   requests racing for the last one only one is placed). Otherwise it is placed, and a failure is
   recorded on the `callback` counters before the line is dialed; a pass forgets the subject's
-  failures and this callback's own on the number (section 6). A pass whose counters could not be
-  updated keeps that work pending, and a repeated outcome retries it without recording `callback`
-  again.
+  failures up to it and this callback's own on the number (section 6). A pass whose counters could
+  not be updated keeps that work pending, and a repeated outcome retries it without recording
+  `callback` again: the subject's part every time, and the removal off the number at most once,
+  claimed on the callback call first as for any pass (section 6), so a retry never takes off
+  another failure of the same millisecond.
 - The reservation keeps the subject, the verification and the time it is counted at. If
   verification restarts (another subject included) before the request is decided, it is refused,
   and nothing reserved for one subject is ever placed for another. A request that failed before
@@ -770,9 +781,13 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   through the optional `SessionStore.listCallsOwingAlerts(workspaceId)` (the calls whose record has
   `owesAlerts: true`; `precondition_failed` without it) and answers `{sent, failed}`: the calls that
   owe nothing now, and those that still owe one or could not be read (a listed call the store cannot
-  read, or no longer holds, is reported and the sweep goes on); one engine sends an alert once at a time, again after 30
-  seconds without an answer. So `notify` may see an `alertId` more than once. A notifier that throws,
-  rejects or never answers changes nothing on the call; it must not block.
+  read, or no longer holds, is reported and the sweep goes on); the sweep starts every listed call's
+  sends at once. Each `notify` gets at most `notifyTimeoutMs` milliseconds (an engine option, a whole number from 100 to
+  30000, default 30000; anything else is `invalid_input` when the engine is made): one not settled by then
+  counts as failed for that write, delivery or sweep (the call is in `failed`), its alert stays owed for
+  the next, and its late answer, resolve or reject, records nothing. One engine sends an alert once at a
+  time, again after 30 seconds without an answer. So `notify` may see an `alertId` more than once. A
+  notifier that throws, rejects or never answers changes nothing on the call; it must not block.
 - The ledger tag: every `verification.factor` entry with `kind: "pin"` carries `tag` =
   `HMAC-SHA256(knowledgeKey, JSON.stringify(["pin.tag", eventId, outcome]))`, outcome `fail`,
   `pass` or `duress`, whether or not the duress PIN is on. `readPinTag(entry)` on the engine (and
