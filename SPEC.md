@@ -347,7 +347,9 @@ string that is not a token. The reference server keeps the hashes in `ReceiptLin
 
 An unknown token, a malformed one and a call without a receipt yet all answer the same `404`. The
 page has no script, style or form, every value is escaped, and it is sent with `no-store`,
-`Referrer-Policy: no-referrer` and `noindex`. There is no route by call id.
+`Referrer-Policy: no-referrer` and `noindex`. There is no route by call id. `ReceiptLinks` keeps
+every link it issues, in memory, for the life of the process, with no limit and no expiry: the host
+bounds how many links it issues and how long it keeps them (a durable store with expiry in its place).
 
 ## 13. Intake values
 
