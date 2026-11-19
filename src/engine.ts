@@ -1467,7 +1467,9 @@ export class Engine {
     if (this.#delivering.has(callId)) return false;
     this.#delivering.add(callId);
     try {
-      await trace.sendContactNotice(this.#rt, callId);
+      // Bounded like a duress notify: a messages adapter that never answers neither stalls the
+      // sweep nor keeps this engine from trying again (same idempotency key per notice).
+      await this.#withinNotifyTimeout(trace.sendContactNotice(this.#rt, callId), "the messages adapter did not answer in time");
       return true;
     } finally {
       this.#delivering.delete(callId);
@@ -1673,11 +1675,11 @@ export class Engine {
    * The notify's answer, or a rejection once `notifyTimeoutMs` passes first. The race handles the
    * notify's own late rejection, and a late resolve is no longer awaited, so it acknowledges nothing.
    */
-  async #withinNotifyTimeout(sent: Promise<void>): Promise<void> {
+  async #withinNotifyTimeout(sent: Promise<void>, what = "the duress notifier did not answer in time"): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const late = new Promise<never>((_, reject) => {
       // Unref'd: a wait for a notifier never keeps the host's process alive on its own.
-      timer = setTimeout(() => reject(new Error("the duress notifier did not answer in time")), this.#notifyTimeoutMs).unref();
+      timer = setTimeout(() => reject(new Error(what)), this.#notifyTimeoutMs).unref();
     });
     try {
       await Promise.race([sent, late]);

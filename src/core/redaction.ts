@@ -642,10 +642,13 @@ export function findBankNumbers(text: string, languages: readonly NumberLanguage
     const first = run[0]!;
     const last = run[run.length - 1]!;
     // A marker an earlier redactor left (composeRedactors) is not words: the bank word before it still counts.
-    const words = MARKER_TEXTS.reduce((gap, marker) => gap.replaceAll(marker, " "), text.slice(from, first.start)).match(WORD) ?? [];
+    const gap = text.slice(from, first.start);
+    const words = MARKER_TEXTS.reduce((g, marker) => g.replaceAll(marker, " "), gap).match(WORD) ?? [];
     from = last.end;
     const digits = run.reduce((n, t) => n + t.digits.length, 0);
-    if (digits >= 3 && words.slice(-4).some(isBankWord)) {
+    // Digits right after a marker are the rest of the run it replaced part of: any count goes.
+    const rest = MARKER_TEXTS.some((marker) => gap.trimEnd().endsWith(marker));
+    if ((digits >= 3 || rest) && words.slice(-4).some(isBankWord)) {
       findings.push({ kind: "bank_account", start: first.start, end: last.end });
     }
   }

@@ -270,6 +270,12 @@ describe("L3 review: composed redactors", () => {
     const { text } = redactor.redact("account number 4111 1111 1111 1111 12345678");
     assert.equal(text.includes("12345678"), false, text);
   });
+
+  it("removes a short suffix of the run too, which the bank stage alone would count with the card digits", () => {
+    const { text } = composeRedactors(cardNumberRedactor, bankAccountRedactor).redact("account number 4111 1111 1111 1111 12 thanks");
+    assert.equal(/\d/.test(text), false, text);
+    assert.equal(composeRedactors(cardNumberRedactor, bankAccountRedactor).redact("card 4111 1111 1111 1111 12").text.includes("12"), true, "no bank word, no bank number");
+  });
 });
 
 describe("L3 review: deliverRecord", () => {
@@ -390,6 +396,16 @@ function traceConfig(duress = false): FlowConfig {
           { type: "trace.receipt", textLink: { consent: "receipt_texts" } },
         ],
       },
+      // The caller is asked twice (a yes, then a change of mind).
+      twice: {
+        steps: [
+          { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["payment.request"] },
+          { type: "paylink.request", amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" },
+          { type: "trace.consent", purpose: "receipt_texts", require: "answer" },
+          { type: "trace.consent", purpose: "receipt_texts", require: "answer" },
+          { type: "trace.receipt", textLink: { consent: "receipt_texts" } },
+        ],
+      },
     };
   });
 }
@@ -410,6 +426,31 @@ describe("L3 review: sweepAlerts", () => {
     };
     assert.deepEqual(await restarted.engine.sweepAlerts(), { sent: [], failed: [callId] }, "the notice is still owed");
     assert.equal(notifier.told.length, 1, "the duress alert went");
+  });
+});
+
+describe("L3 review: sweepAlerts with a messages adapter that never answers", () => {
+  it("returns within the notify timeout, and the next sweep sends the duress alert and tries the notice again under its key", async () => {
+    const t = setup({ config: traceConfig(true), adapters: { duressNotifier: { notify: () => new Promise<void>(() => undefined) } } });
+    assert.deepEqual(await t.engine.enrolDuressPin(SUBJECT, DURESS), { enrolled: true });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitPin(callId, DURESS);
+    await patchStored(t, callId, (r) => ((r.modules.trace!.texts as { notices: unknown[] }).notices = [{ subjectKey: SUBJECT, to: PHONE_ON_FILE, sent: false }]));
+    let down = true;
+    const notifier = new FakeDuressNotifier();
+    const restarted = createTestEngine({
+      config: traceConfig(true),
+      notifyTimeoutMs: 100,
+      adapters: { duressNotifier: { notify: async (a) => (down ? Promise.reject(new Error("down")) : notifier.notify(a)) }, sessions: t.sessions, records: t.records, ledger: t.ledger },
+    });
+    const keys: string[] = [];
+    restarted.messages.sendText = (input) => (keys.push(input.idempotencyKey), new Promise(() => undefined));
+    assert.deepEqual(await restarted.engine.sweepAlerts(), { sent: [], failed: [callId] });
+    down = false;
+    assert.deepEqual(await restarted.engine.sweepAlerts(), { sent: [], failed: [callId] }, "the notice is still owed");
+    assert.equal(notifier.told.length, 1, "the duress alert went on the next sweep");
+    assert.deepEqual([keys.length, new Set(keys).size], [2, 1], "tried again, under the same key");
   });
 });
 
@@ -470,6 +511,28 @@ describe("L3 review: textReceiptLink after a revocation", () => {
       throw new Error("store down");
     };
     await assert.rejects(t.engine.textReceiptLink(callId, LINK), /store down/);
+    assert.equal(links(t).length, 0);
+  });
+
+  it("sends nothing when a later answer for the purpose was still being stored when the call ended", async () => {
+    const store = new MemoryConsentStore();
+    const t = setup({ config: traceConfig(), adapters: { consents: store } });
+    t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+    const { callId } = await t.engine.startCall({ flow: "twice" });
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.checkCarrier(callId);
+    await t.engine.finishVerification(callId);
+    await confirmAmount(t.engine, callId);
+    await t.engine.requestPayment(callId);
+    await t.engine.applyPaymentOutcome({ kind: "completed", linkId: t.payments.created.at(-1)!.linkId, paymentStatus: "paid" });
+    await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "yes" });
+    store.putConsent = async () => {
+      throw new Error("store down");
+    };
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "no" }), /store down/);
+    assert.notEqual(await t.engine.endCall(callId), null);
+    assert.deepEqual(await t.engine.textReceiptLink(callId, LINK), { texted: false });
     assert.equal(links(t).length, 0);
   });
 

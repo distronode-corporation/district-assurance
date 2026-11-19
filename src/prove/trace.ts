@@ -515,7 +515,9 @@ export async function textReceiptLink(
   const texts = slice.texts;
   const consent = step?.textLink?.consent;
   // Answers are appended: a later "no" withdraws an earlier "yes".
-  const consented = slice.consents.findLast((c) => c.purpose === consent)?.answer === "yes";
+  // An answer still being stored when the call ended (not_recorded) may be a later "no": any one
+  // for the purpose sends nothing (fail closed).
+  const consented = slice.consents.findLast((c) => c.purpose === consent)?.answer === "yes" && !consentsOf(slice).unrecorded.some((c) => c.purpose === consent);
   if (consent === undefined || texts.receiptLink === "sent" || texts.actions.length === 0 || !consented) return { texted: false };
   // A revocation is kept in the ConsentStore, not on the call: the yes is read back from the store
   // first, and one revoked, or not found there, sends nothing. A read that fails sends nothing too.
