@@ -1,0 +1,300 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:district-assurance:flow-config:v1",
+  "title": "District Assurance FlowConfig, version 1",
+  "description": "The shape of a workspace's FlowConfig (SPEC.md, section 7), for editors and tools. validateConfig stays the authority: it also checks the rules this schema cannot see (installed modules and factors, adapters, scope floors, planned work, forms and wordings a step names, the order of steps). Every config validateConfig accepts with the built-in modules passes this schema; a config that passes it can still be refused.",
+  "type": "object",
+  "required": ["version", "revision", "policy", "modules", "flows"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "revision": {
+      "description": "The host's own label for this revision, written to the ledger with every call.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,64}$"
+    },
+    "policy": { "$ref": "#/$defs/policy" },
+    "modules": {
+      "description": "Module name to its switch and settings. An installed module not listed is off; trace is always on.",
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/moduleName" },
+      "properties": {
+        "badge": { "$ref": "#/$defs/badgeModule" },
+        "dossier": { "$ref": "#/$defs/dossierModule" },
+        "paylink": { "$ref": "#/$defs/paylinkModule" },
+        "trace": { "$ref": "#/$defs/traceModule" }
+      },
+      "additionalProperties": { "$ref": "#/$defs/moduleConfig" }
+    },
+    "flows": {
+      "description": "Flow name to its steps.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+      "additionalProperties": { "$ref": "#/$defs/flow" }
+    }
+  },
+  "$defs": {
+    "nonBlank": { "type": "string", "pattern": "\\S" },
+    "bilingual": {
+      "type": "object",
+      "required": ["en", "fr"],
+      "properties": {
+        "en": { "$ref": "#/$defs/nonBlank" },
+        "fr": { "$ref": "#/$defs/nonBlank" }
+      }
+    },
+    "policy": {
+      "description": "Levels, scopes and their floors (SPEC.md, section 4).",
+      "type": "object",
+      "required": ["version", "levels", "scopes", "keypadFields", "maxKeypadAttemptsPerCall", "simSwapWindowHours", "trustTextCodeWithoutCarrierCheck"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "levels": { "type": "array", "items": { "$ref": "#/$defs/levelRule" } },
+        "scopes": {
+          "description": "Scope name to its minimum level.",
+          "type": "object",
+          "additionalProperties": { "enum": [0, 1, 2, 3] }
+        },
+        "scopeClasses": {
+          "description": "The class of a scope whose name does not imply one. A class can make a scope stricter, never looser.",
+          "type": "object",
+          "additionalProperties": { "enum": ["money", "contact", "access", "none"] }
+        },
+        "keypadFields": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "maxKeypadAttemptsPerCall": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "simSwapWindowHours": { "type": "number", "exclusiveMinimum": 0 },
+        "trustTextCodeWithoutCarrierCheck": { "type": "boolean" }
+      }
+    },
+    "levelRule": {
+      "description": "A level is reached when every factor in one of its sets has passed.",
+      "type": "object",
+      "required": ["level", "anyOf"],
+      "properties": {
+        "level": { "enum": [1, 2, 3] },
+        "anyOf": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/factorSet" }
+        }
+      }
+    },
+    "factorSet": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+    "moduleName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,31}$",
+      "not": { "enum": ["core", "engine", "flow", "module"] }
+    },
+    "moduleConfig": {
+      "description": "An outside module: its settings are checked by its own validator.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "settings": true
+      }
+    },
+    "switchedOff": {
+      "description": "A module switched off: its settings are not checked.",
+      "required": ["enabled"],
+      "properties": { "enabled": { "const": false } }
+    },
+    "badgeModule": {
+      "$ref": "#/$defs/moduleConfig",
+      "if": { "$ref": "#/$defs/switchedOff" },
+      "else": {
+        "required": ["settings"],
+        "properties": { "settings": { "$ref": "#/$defs/badgeSettings" } }
+      }
+    },
+    "badgeSettings": {
+      "type": "object",
+      "required": ["factors"],
+      "additionalProperties": false,
+      "properties": {
+        "factors": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "grantTtlSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "pin": true
+      },
+      "if": { "properties": { "factors": { "contains": { "const": "pin" } } } },
+      "then": {
+        "required": ["pin"],
+        "properties": { "pin": { "$ref": "#/$defs/pinSettings" } }
+      }
+    },
+    "pinSettings": {
+      "description": "Required when the pin factor is on (SPEC.md, section 6). maxDigits is at least minDigits.",
+      "type": "object",
+      "required": ["mode", "minDigits", "maxDigits", "maxAttemptsPerCall"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "enum": ["keyed_hash", "verifier"] },
+        "minDigits": { "type": "integer", "minimum": 4, "maximum": 12 },
+        "maxDigits": { "type": "integer", "minimum": 4, "maximum": 12 },
+        "maxAttemptsPerCall": { "type": "integer", "minimum": 1, "maximum": 5 }
+      }
+    },
+    "dossierModule": {
+      "$ref": "#/$defs/moduleConfig",
+      "if": { "$ref": "#/$defs/switchedOff" },
+      "else": {
+        "required": ["settings"],
+        "properties": { "settings": { "$ref": "#/$defs/dossierSettings" } }
+      }
+    },
+    "dossierSettings": {
+      "description": "Form ids are unique.",
+      "type": "object",
+      "required": ["forms"],
+      "additionalProperties": false,
+      "properties": {
+        "forms": { "type": "array", "items": { "$ref": "#/$defs/form" } }
+      }
+    },
+    "form": {
+      "description": "Field keys are unique within a form.",
+      "type": "object",
+      "required": ["formId", "version", "fields"],
+      "properties": {
+        "formId": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+        "version": { "type": "string" },
+        "fields": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/field" } }
+      }
+    },
+    "field": {
+      "type": "object",
+      "required": ["key", "label", "type"],
+      "properties": {
+        "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "label": { "$ref": "#/$defs/bilingual" },
+        "type": { "enum": ["text", "number", "date", "yes_no"] },
+        "required": { "description": "Whether the caller must give a value. validateConfig does not check this field yet." },
+        "maxLength": { "description": "Text fields only; default 500. validateConfig does not check this field yet." },
+        "sensitive": {
+          "description": "Encrypted fields are planned (FIL-2): a sensitive field is refused until then.",
+          "not": { "const": true }
+        }
+      }
+    },
+    "paylinkModule": {
+      "$ref": "#/$defs/moduleConfig",
+      "if": { "$ref": "#/$defs/switchedOff" },
+      "else": {
+        "properties": { "settings": { "$ref": "#/$defs/paylinkSettings" } }
+      }
+    },
+    "paylinkSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxAmountMinor": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "traceModule": {
+      "description": "Trace holds the audit ledger and is always on.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "const": true },
+        "settings": { "$ref": "#/$defs/traceSettings" }
+      }
+    },
+    "traceSettings": {
+      "description": "Wording purposes are unique.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "receipts": { "type": "boolean" },
+        "wordings": { "type": "array", "items": { "$ref": "#/$defs/wording" } }
+      }
+    },
+    "wording": {
+      "type": "object",
+      "required": ["purpose", "version", "text"],
+      "properties": {
+        "purpose": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "version": { "type": "string", "minLength": 1 },
+        "text": { "$ref": "#/$defs/bilingual" }
+      }
+    },
+    "flow": {
+      "type": "object",
+      "required": ["steps"],
+      "additionalProperties": false,
+      "properties": {
+        "summary": { "type": "string" },
+        "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/step" } }
+      }
+    },
+    "step": {
+      "description": "A step's type is <module>.<snake_case name>. The built-in steps are described here; an outside module's step is checked by its own validator.",
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,31}\\.[a-z][a-z0-9_]{0,31}$" }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "badge.verify" } } }, "then": { "$ref": "#/$defs/badgeVerifyStep" } },
+        { "if": { "properties": { "type": { "const": "dossier.collect" } } }, "then": { "$ref": "#/$defs/dossierCollectStep" } },
+        { "if": { "properties": { "type": { "const": "paylink.request" } } }, "then": { "$ref": "#/$defs/paylinkRequestStep" } },
+        { "if": { "properties": { "type": { "const": "trace.consent" } } }, "then": { "$ref": "#/$defs/traceConsentStep" } },
+        { "if": { "properties": { "type": { "const": "trace.receipt" } } }, "then": { "$ref": "#/$defs/traceReceiptStep" } }
+      ]
+    },
+    "badgeVerifyStep": {
+      "description": "Verify to level with these factors, each on in Badge's settings. scopes narrows the grant.",
+      "required": ["level", "factors"],
+      "additionalProperties": false,
+      "properties": {
+        "type": true,
+        "level": { "enum": [1, 2, 3] },
+        "factors": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "scopes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
+    "dossierCollectStep": {
+      "description": "Collect a form named in Dossier's settings.",
+      "required": ["form"],
+      "additionalProperties": false,
+      "properties": {
+        "type": true,
+        "form": { "type": "string" }
+      }
+    },
+    "paylinkRequestStep": {
+      "description": "Text a payment link for this amount (SPEC.md, section 14). At most Paylink's maxAmountMinor.",
+      "required": ["amountMinor", "currency", "description", "amountSource"],
+      "additionalProperties": false,
+      "properties": {
+        "type": true,
+        "amountMinor": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "currency": { "type": "string", "pattern": "^[a-z]{3}$" },
+        "description": {
+          "description": "1 to 200 characters once trimmed.",
+          "type": "string",
+          "pattern": "^\\s*\\S(?:[\\s\\S]{0,198}\\S)?\\s*$"
+        },
+        "amountSource": { "enum": ["intake_record", "business_endpoint", "price_list"] },
+        "mode": {
+          "description": "Whose account takes the money. Planned (PAY-7): refused by validateConfig until then.",
+          "enum": ["connect", "platform"]
+        }
+      }
+    },
+    "traceConsentStep": {
+      "description": "Ask for consent with a wording named in Trace's settings.",
+      "required": ["purpose"],
+      "additionalProperties": false,
+      "properties": {
+        "type": true,
+        "purpose": { "type": "string" },
+        "require": { "enum": ["yes", "answer"] }
+      }
+    },
+    "traceReceiptStep": {
+      "description": "Sign the call's receipt. Needs the signer adapter.",
+      "additionalProperties": false,
+      "properties": { "type": true }
+    }
+  }
+}

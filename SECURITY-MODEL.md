@@ -103,6 +103,8 @@ Someone who can edit a workspace's FlowConfig. **Controls:** the engine refuses 
 problem, Trace (the ledger) cannot be turned off, the floors cannot be lowered, planned factors
 and payment modes cannot be turned on, and every call's ledger entries carry the config revision
 it ran under. Who may edit a config, and how its history is kept, is the host's (left to the host).
+The JSON Schema for FlowConfig is a convenience for editors, not a control: a config that passes it
+can still be refused, and only `validateConfig` decides (SPEC.md, section 7).
 
 ### Races across processes
 

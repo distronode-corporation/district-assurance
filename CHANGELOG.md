@@ -25,6 +25,8 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- A JSON Schema (2020-12) for FlowConfig version 1, `schema/flow-config.v1.json`, published with the
+  package; tested against the TypeScript types and never stricter than `validateConfig` (MOD-2).
 
 ### Changed
 

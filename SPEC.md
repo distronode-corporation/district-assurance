@@ -218,6 +218,18 @@ until FIL-2); Paylink `{maxAmountMinor?}` (1 to 1,000,000); Trace `{receipts?, w
 (`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr}}`, purposes
 unique).
 
+**JSON Schema.** `schema/flow-config.v1.json` (JSON Schema 2020-12, published with the package as
+`district-assurance/schema/flow-config.v1.json`) describes the shape of version 1 for editors and
+tools: the fields of each object, their types, ranges and patterns, the built-in modules' settings
+(checked only while the module is on) and the built-in steps. An outside module's settings and
+steps are open. The schema is never stricter than `validateConfig`: every config `validateConfig`
+accepts with the built-in modules passes the schema. It cannot see the rules that need the registry, the
+adapters or another part of the document (installed modules and factors, floors, planned factors
+and modes, the form or wording a step names, unique ids, step order), so a config that passes it
+can still be refused; `validateConfig` stays the authority. `test/config-schema.test.ts` checks it
+against the TypeScript types (at type-check time) and against `validateConfig` (a corpus of good
+and bad configs, and a seeded sweep of near-miss configs).
+
 ## 8. Flow execution
 
 `startCall({flow})` or `startFlow(callId, name)`, on an open call that has not run a flow, copies

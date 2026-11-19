@@ -29,10 +29,12 @@
       "types": "./dist/testing/index.d.ts",
       "default": "./dist/testing/index.js"
     },
+    "./schema/flow-config.v1.json": "./schema/flow-config.v1.json",
     "./package.json": "./package.json"
   },
   "files": [
     "dist/",
+    "schema/",
     "README.md",
     "SECURITY-MODEL.md",
     "SECURITY.md",
