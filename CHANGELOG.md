@@ -32,7 +32,10 @@ All notable changes to this project are documented here. The format follows
   `verification.factor_error`; the attempt stays counted.
 - Receipt key sets and rotation (PRV-1): `receiptKeyRing` holds several signers with one active and
   publishes retired public keys, `engine.receiptKeys()` and the reference server's key set route
-  serve the whole history, so a receipt signed before a rotation still verifies.
+  serve the whole history, so a receipt signed before a rotation still verifies. A retired key is
+  published with `retired: true` and its `retiredAt`; `checkReceipt`, the stand-alone verifier and
+  the demo page call such a receipt "valid, signed with a retired key (retired <time>)", and a
+  receipt the retired key signed at or after its retirement invalid.
 - A stand-alone receipt verifier (PRV-2): `scripts/verify-receipt.mjs`, with no dependencies, checks
   a receipt against a key set file or URL and prints valid or invalid; SPEC.md has a worked example.
 

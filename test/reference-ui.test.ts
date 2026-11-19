@@ -11,11 +11,12 @@ import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { DemoRuns, type RunView } from "../examples/reference-server/src/demo-runs.ts";
 import { DEMO_SECRET, SCRIPTS, createDemoWorld, isDemoFlow, type DemoWorld } from "../examples/reference-server/src/script.ts";
 import { STATIC_FILES, UI_CSP } from "../examples/reference-server/src/static.ts";
-import { EngineError, canonicalJson, signStripePayload, verifyReceipt, type AuditEntry, type SignedReceipt } from "../src/index.ts";
+import { EngineError, canonicalJson, checkReceipt, signStripePayload, verifyReceipt, type AuditEntry, type SignedReceipt } from "../src/index.ts";
 
 interface CheckResult {
   ok: boolean;
   reason: string;
+  retiredAt?: string;
 }
 interface ReceiptCheckModule {
   canonicalJson(value: unknown): string;
@@ -459,6 +460,21 @@ describe("reference UI: the page's checks (receipt-check.js, no DOM)", () => {
     lone.body.callId = "\ud800";
     assert.equal(verifyReceipt(lone, keys), false);
     assert.deepEqual(await check.checkReceipt(lone, keys), { ok: false, reason: "malformed_body" });
+  });
+
+  it("says a receipt its key signed before retiring is valid under a retired key, and refuses one signed after, as checkReceipt does", async () => {
+    const issued = Date.parse(receipt.body.issuedAt);
+    const retiredAt = new Date(issued + 1000).toISOString();
+    const retired = keys.map((k) => ({ ...(k as object), retired: true, retiredAt }));
+    assert.deepEqual(await check.checkReceipt(receipt, retired), { ok: true, reason: "valid_retired_key", retiredAt });
+    assert.deepEqual(checkReceipt(receipt, retired), { valid: true, retiredAt }, "the engine agrees");
+    for (const at of [receipt.body.issuedAt, new Date(issued - 1000).toISOString()]) {
+      const before = keys.map((k) => ({ ...(k as object), retired: true, retiredAt: at }));
+      assert.deepEqual(await check.checkReceipt(receipt, before), { ok: false, reason: "retired_key_after" }, at);
+      assert.deepEqual(checkReceipt(receipt, before), { valid: false });
+    }
+    assert.deepEqual(await check.checkReceipt(receipt, keys.map((k) => ({ ...(k as object), retiredAt: "June" }))), { ok: false, reason: "bad_key" });
+    assert.deepEqual(await check.checkReceipt({ ...receipt, body: { ...receipt.body, issuedAt: "today" } }, retired), { ok: false, reason: "retired_key_after" });
   });
 
   it("recomputes every ledger entry's hash, and notices a change", async () => {

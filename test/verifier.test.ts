@@ -13,8 +13,10 @@ import { fileURLToPath } from "node:url";
 
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { receiptKeyRing, type SignedReceipt } from "../src/index.ts";
-import { createTestEngine, generateTestSigner } from "../src/testing/index.ts";
+import { FixedClock, createTestEngine, generateTestSigner } from "../src/testing/index.ts";
 
+/** When k1 stopped signing: after the test clock's receipts (2026-01-01), so they predate it. */
+const RETIRED_AT = "2026-06-01T00:00:00.000Z";
 const SCRIPT = fileURLToPath(new URL("../scripts/verify-receipt.mjs", import.meta.url));
 
 function run(args: string[], stdin = ""): Promise<{ code: number | null; stdout: string; stderr: string }> {
@@ -32,6 +34,8 @@ function run(args: string[], stdin = ""): Promise<{ code: number | null; stdout:
 describe("stand-alone receipt verifier (PRV-2)", () => {
   let dir = "";
   let receipt: SignedReceipt;
+  let fresh: SignedReceipt;
+  let late: SignedReceipt;
   let keys: JsonWebKey[] = [];
   let keysFile = "";
   let base = "";
@@ -50,9 +54,13 @@ describe("stand-alone receipt verifier (PRV-2)", () => {
     const k1 = generateTestSigner("k1");
     const earlier = createTestEngine({ adapters: { signer: k1 } });
     receipt = (await earlier.engine.endCall((await earlier.engine.startCall()).callId))!;
-    const later = createTestEngine({ adapters: { signer: receiptKeyRing({ signers: [generateTestSigner("k2")], active: "k2", retired: [k1.publicJwk()] }) } });
+    const later = createTestEngine({ adapters: { signer: receiptKeyRing({ signers: [generateTestSigner("k2")], active: "k2", retired: [{ ...k1.publicJwk(), retiredAt: RETIRED_AT }] }) } });
     keys = later.engine.receiptKeys();
     keysFile = file("keys.json", { keys });
+    fresh = (await later.engine.endCall((await later.engine.startCall()).callId))!;
+    // k1 signing again after its retirement: a key that leaked, or a host that kept using it.
+    const leaked = createTestEngine({ adapters: { signer: k1 }, clock: new FixedClock("2026-07-01T00:00:00.000Z") });
+    late = (await leaked.engine.endCall((await leaked.engine.startCall()).callId))!;
     const server = createReferenceServer({ engine: later.engine, stripeSecrets: { identity: [], payments: [] }, clock: later.clock });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -73,16 +81,22 @@ describe("stand-alone receipt verifier (PRV-2)", () => {
   });
 
   it("prints valid for a receipt and its key set, from a file, standard input or the key set URL", async () => {
+    const VALID = `valid, signed with a retired key (retired ${RETIRED_AT})\n`;
     const receiptFile = file("receipt.json", receipt);
-    assert.deepEqual(await run([receiptFile, keysFile]), { code: 0, stdout: "valid\n", stderr: "" });
-    assert.deepEqual(await run(["-", keysFile], JSON.stringify(receipt)), { code: 0, stdout: "valid\n", stderr: "" });
-    assert.deepEqual(await run([receiptFile, `${base}/.well-known/receipt-keys.json`]), { code: 0, stdout: "valid\n", stderr: "" });
+    assert.deepEqual(await run([receiptFile, keysFile]), { code: 0, stdout: VALID, stderr: "" });
+    assert.deepEqual(await run(["-", keysFile], JSON.stringify(receipt)), { code: 0, stdout: VALID, stderr: "" });
+    assert.deepEqual(await run([receiptFile, `${base}/.well-known/receipt-keys.json`]), { code: 0, stdout: VALID, stderr: "" });
     // Key order and whitespace do not matter: the signature is over the canonical JSON.
     const reordered = file("reordered.json", `{"signature":"${receipt.signature}","kid":"k1","alg":"ES256",\n "body": ${JSON.stringify(receipt.body, null, 2)}}`);
-    assert.equal((await run([reordered, keysFile])).stdout, "valid\n");
+    assert.equal((await run([reordered, keysFile])).stdout, VALID);
     // A bare list of keys works as well as a JWK set; an empty one verifies nothing.
-    assert.equal((await run([reordered, file("bare-keys.json", keys)])).stdout, "valid\n");
+    assert.equal((await run([reordered, file("bare-keys.json", keys)])).stdout, VALID);
     assert.deepEqual(await run([reordered, file("no-keys.json", [])]), { code: 1, stdout: 'invalid: no key with kid "k1" in the key set\n', stderr: "" });
+    // The active key's receipt is plainly valid; one the retired key signed after its retirement is not.
+    assert.deepEqual(await run([file("fresh.json", fresh), keysFile]), { code: 0, stdout: "valid\n", stderr: "" });
+    assert.deepEqual(await run([file("late.json", late), keysFile]), { code: 1, stdout: `invalid: signed with a key retired at ${RETIRED_AT}, at or after its retirement\n`, stderr: "" });
+    const badTime = keys.map((k) => (k.kid === "k1" ? { ...k, retiredAt: "June" } : k));
+    assert.equal((await run([receiptFile, file("bad-time.json", badTime)])).stdout, "invalid: the key's retiredAt is not an ISO 8601 UTC time\n");
   });
 
   it("prints invalid, and exits 1, for a tampered receipt or one the key set cannot verify", async () => {

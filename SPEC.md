@@ -366,12 +366,21 @@ nothing after them. `publicJwk()` returns the public key published in the key se
 
 `receiptKeyRing({ signers, active, retired? })` is a `ReceiptSigner` that holds several signers
 and signs with the one whose `keyId` is `active`; a receipt's `kid` names the key that signed it.
-`retired` are public JWKs, each with its `kid`, of keys that signed earlier receipts and sign no
-more; their private keys are not needed. `keySet()` lists the active key first, then the other
-signers' keys, then the retired ones, each as `{kty: "EC", crv: "P-256", x, y, kid, alg: "ES256",
-use: "sig"}` and nothing else. The ring throws a TypeError, when the host builds it, for an active
-kid no signer has, a key without a kid, two keys with one kid, a signer whose public key names
-another kid, a key with a private part (`d`), or a key that is not a P-256 public key.
+`retired` are public JWKs, each with its `kid` and its `retiredAt` (an ISO 8601 UTC time, as
+`toISOString` writes it), of keys that signed earlier receipts and sign no more; their private
+keys are not needed. `keySet()` lists the active key first, then the other signers' keys, then the
+retired ones, each as `{kty: "EC", crv: "P-256", x, y, kid, alg: "ES256", use: "sig"}`, a retired
+one also with `retired: true` and its `retiredAt`, and nothing else. The ring throws a TypeError,
+when the host builds it, for an active kid no signer has, a key without a kid, two keys with one
+kid, a signer whose public key names another kid, a key with a private part (`d`), a key that is
+not a P-256 public key, or a retired key without an ISO 8601 UTC `retiredAt`.
+
+A key with `retiredAt` verifies only a receipt whose `issuedAt` is before it. `checkReceipt(receipt,
+keys)` answers `{valid: true, retiredAt: null}` under a key that is not retired, `{valid: true,
+retiredAt}` under a retired key for a receipt issued before its retirement (shown as "valid,
+signed with a retired key (retired <retiredAt>)"), and `{valid: false}` otherwise, including a
+receipt the retired key signed at or after `retiredAt` and a `retiredAt` or `issuedAt` that is
+not an ISO 8601 UTC time. `verifyReceipt` is its `valid`.
 
 `engine.receiptKeys()` returns a key ring's whole `keySet()`, a single signer's one key, or `[]`
 without a signer. The reference server serves it at `GET /.well-known/receipt-keys.json` as
@@ -380,7 +389,8 @@ without a signer. The reference server serves it at `GET /.well-known/receipt-ke
 1. Add the new signer to every process's ring, still with the old `active`, so the new key is
    published before it signs anything.
 2. Make the new key `active` in every process.
-3. Move the old key's public JWK to `retired`. Its private key can then be destroyed.
+3. Move the old key's public JWK to `retired`, with `retiredAt` the time the new key took over. Its
+   private key can then be destroyed.
 
 A retired key stays in the key set for as long as receipts it signed must verify. A key that
 leaked is removed, not retired: every receipt it signed then fails to verify, as it should, since
@@ -400,7 +410,8 @@ node scripts/verify-receipt.mjs <receipt.json | -> <keys.json | https://host/.we
 | Exit | Output | When |
 |---|---|---|
 | 0 | `valid` | the key named by `kid` verifies the signature over `canonicalJson(body)` |
-| 1 | `invalid: <reason>` | `body.v` is not 1, `alg` is not `ES256`, no key has the `kid`, the key is not a public P-256 key, the signature is not 86 base64url characters (64 bytes), or it does not match the body |
+| 0 | `valid, signed with a retired key (retired <retiredAt>)` | the same, under a retired key, for a receipt issued before its retirement |
+| 1 | `invalid: <reason>` | `body.v` is not 1, `alg` is not `ES256`, no key has the `kid`, the key is not a public P-256 key, the key is retired and the receipt was issued at or after its `retiredAt` (or either time is not ISO 8601 UTC), the signature is not 86 base64url characters (64 bytes), or it does not match the body |
 | 2 | a message on standard error | it could not check: wrong arguments, an unreadable or non-JSON file, a key set that is not `{"keys": [...]}` or a list, more than 1 MiB, or a URL it may not or cannot fetch |
 
 A key set URL must be `https`, or `http` on `127.0.0.1`, `localhost` or `[::1]`, because a key set

@@ -5,8 +5,9 @@
 //
 //   node verify-receipt.mjs <receipt.json | -> <keys.json | https://host/.well-known/receipt-keys.json>
 //
-// Prints `valid` and exits 0, or `invalid: <reason>` and exits 1. Exits 2 when it cannot run the
-// check at all (a missing argument, an unreadable file, a key set it cannot fetch). A key set URL
+// Prints `valid`, or `valid, signed with a retired key (retired <time>)` for a receipt issued
+// before its key was retired, and exits 0; or `invalid: <reason>` and exits 1 (a receipt signed by
+// a retired key at or after its retirement is invalid). Exits 2 when it cannot run the check at all (a missing argument, an unreadable file, a key set it cannot fetch). A key set URL
 // must be https, or http on this machine (127.0.0.1, localhost, [::1]): a key set fetched in the
 // clear could be swapped for one that makes a forged receipt look valid.
 import { createPublicKey, verify } from "node:crypto";
@@ -39,8 +40,18 @@ function canonicalJson(value) {
   throw new TypeError("not JSON");
 }
 
-/** The reason a receipt fails against the keys, or null when it verifies. */
-function check(receipt, keys) {
+/** An ISO 8601 UTC time as the engine writes it. */
+function isUtcTime(value) {
+  if (typeof value !== "string") return false;
+  const ms = Date.parse(value);
+  return !Number.isNaN(ms) && new Date(ms).toISOString() === value;
+}
+
+/**
+ * The reason a receipt fails against the keys, or null when it verifies. A retired key (one with
+ * `retiredAt`) verifies only a receipt issued before its retirement; `retired` receives when.
+ */
+function check(receipt, keys, retired = { at: null }) {
   if (receipt === null || typeof receipt !== "object" || receipt.body === null || typeof receipt.body !== "object") return "not a receipt";
   if (receipt.body.v !== 1) return "an unknown receipt version";
   if (receipt.alg !== "ES256") return "an algorithm other than ES256";
@@ -48,6 +59,13 @@ function check(receipt, keys) {
   const jwk = keys.find((k) => k !== null && typeof k === "object" && k.kid === receipt.kid);
   if (jwk === undefined) return `no key with kid ${JSON.stringify(receipt.kid)} in the key set`;
   if (jwk.kty !== "EC" || jwk.crv !== "P-256" || jwk.d !== undefined) return "the key is not a public P-256 key";
+  if (jwk.retiredAt !== undefined) {
+    if (!isUtcTime(jwk.retiredAt)) return "the key's retiredAt is not an ISO 8601 UTC time";
+    if (!isUtcTime(receipt.body.issuedAt) || Date.parse(receipt.body.issuedAt) >= Date.parse(jwk.retiredAt)) {
+      return `signed with a key retired at ${jwk.retiredAt}, at or after its retirement`;
+    }
+    retired.at = jwk.retiredAt;
+  }
   let key;
   try {
     key = createPublicKey({ key: { kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y }, format: "jwk" });
@@ -136,13 +154,16 @@ async function main(args) {
   // A JWK set (`{"keys": [...]}`, what the reference server serves) or a bare list of keys.
   const keys = Array.isArray(keySet) ? keySet : keySet?.keys;
   if (!Array.isArray(keys)) throw new Usage('the key set must be {"keys": [...]} or a list of keys');
-  return check(receipt, keys);
+  const retired = { at: null };
+  const reason = check(receipt, keys, retired);
+  return { reason, retiredAt: retired.at };
 }
 
 if (import.meta.main) {
   try {
-    const reason = await main(process.argv.slice(2));
-    process.stdout.write(reason === null ? "valid\n" : `invalid: ${reason}\n`);
+    const { reason, retiredAt } = await main(process.argv.slice(2));
+    const valid = retiredAt === null ? "valid\n" : `valid, signed with a retired key (retired ${retiredAt})\n`;
+    process.stdout.write(reason === null ? valid : `invalid: ${reason}\n`);
     process.exitCode = reason === null ? 0 : 1;
   } catch (error) {
     process.stderr.write(`verify-receipt: ${error instanceof Usage ? error.message : "unexpected error"}\n`);

@@ -66,12 +66,24 @@ export async function sha256Hex(text) {
  *
  * @param {{ body: unknown, alg: string, kid: string, signature: string }} receipt
  * @param {ReadonlyArray<{ kid?: string, kty?: string, crv?: string, x?: string, y?: string }>} keys
- * @returns {Promise<{ ok: boolean, reason: "valid" | "wrong_alg" | "unknown_kid" | "bad_key" | "malformed_signature" | "malformed_body" | "signature_mismatch" }>}
+ * A key with `retiredAt` verifies only a receipt issued before it was retired: such a receipt is
+ * `valid_retired_key`, with the time, and one issued at or after it is `retired_key_after`.
+ *
+ * @returns {Promise<{ ok: boolean, reason: "valid" | "valid_retired_key" | "wrong_alg" | "unknown_kid" | "bad_key" | "retired_key_after" | "malformed_signature" | "malformed_body" | "signature_mismatch", retiredAt?: string }>}
  */
 export async function checkReceipt(receipt, keys) {
   if (receipt.alg !== "ES256") return { ok: false, reason: "wrong_alg" };
   const jwk = keys.find((k) => k.kid === receipt.kid);
   if (jwk === undefined) return { ok: false, reason: "unknown_kid" };
+  /** @type {string | null} */
+  let retiredAt = null;
+  if (/** @type {{ retiredAt?: unknown }} */ (jwk).retiredAt !== undefined) {
+    const at = /** @type {{ retiredAt?: unknown }} */ (jwk).retiredAt;
+    if (!isUtcTime(at)) return { ok: false, reason: "bad_key" };
+    const body = /** @type {{ issuedAt?: unknown }} */ (receipt.body);
+    if (!isUtcTime(body?.issuedAt) || Date.parse(body.issuedAt) >= Date.parse(at)) return { ok: false, reason: "retired_key_after" };
+    retiredAt = at;
+  }
   let signature;
   try {
     signature = base64urlToBytes(receipt.signature);
@@ -93,7 +105,20 @@ export async function checkReceipt(receipt, keys) {
     return { ok: false, reason: "malformed_body" };
   }
   const ok = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, signature, payload);
-  return ok ? { ok: true, reason: "valid" } : { ok: false, reason: "signature_mismatch" };
+  if (!ok) return { ok: false, reason: "signature_mismatch" };
+  return retiredAt === null ? { ok: true, reason: "valid" } : { ok: true, reason: "valid_retired_key", retiredAt };
+}
+
+/**
+ * An ISO 8601 UTC time as the engine writes it.
+ *
+ * @param {unknown} value
+ * @returns {value is string}
+ */
+function isUtcTime(value) {
+  if (typeof value !== "string") return false;
+  const ms = Date.parse(value);
+  return !Number.isNaN(ms) && new Date(ms).toISOString() === value;
 }
 
 /**

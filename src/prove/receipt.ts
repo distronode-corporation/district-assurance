@@ -58,17 +58,46 @@ export async function signReceipt(signer: ReceiptSigner, body: ReceiptBody): Pro
  * signature or any change to the body. Never throws on bad input.
  */
 export function verifyReceipt(receipt: SignedReceipt, keys: ReadonlyArray<JsonWebKey & { kid?: string }>): boolean {
-  if (receipt.alg !== "ES256") return false;
+  return checkReceipt(receipt, keys).valid;
+}
+
+/**
+ * A receipt's check: valid or not and, when valid, whether the key that signed it has since been
+ * retired (`retiredAt`, else null), so a page can say "valid, signed with a retired key".
+ */
+export type ReceiptCheck = { valid: true; retiredAt: string | null } | { valid: false; retiredAt?: undefined };
+
+/**
+ * Checks a receipt against a key set, as `verifyReceipt` does, and says whether the key that
+ * signed it is retired. A retired key (one with `retiredAt`) verifies only receipts issued
+ * before its retirement: one whose `issuedAt` is at or after `retiredAt` is invalid, as is any
+ * receipt under a retired key whose `retiredAt` is not an ISO 8601 UTC time.
+ */
+export function checkReceipt(receipt: SignedReceipt, keys: ReadonlyArray<JsonWebKey & { kid?: string; retiredAt?: unknown }>): ReceiptCheck {
+  if (receipt.alg !== "ES256") return { valid: false };
   const jwk = keys.find((k) => k.kid === receipt.kid);
-  if (jwk === undefined) return false;
+  if (jwk === undefined) return { valid: false };
+  let retiredAt: string | null = null;
+  if (jwk.retiredAt !== undefined) {
+    if (!isUtcTime(jwk.retiredAt)) return { valid: false };
+    if (!isUtcTime(receipt.body.issuedAt) || Date.parse(receipt.body.issuedAt) >= Date.parse(jwk.retiredAt)) return { valid: false };
+    retiredAt = jwk.retiredAt;
+  }
   try {
     const key = createPublicKey({ key: jwk, format: "jwk" });
     const signature = Buffer.from(receipt.signature, "base64url");
-    if (signature.length !== 64) return false;
-    return verify("sha256", receiptPayload(receipt.body), { key, dsaEncoding: "ieee-p1363" }, signature);
+    if (signature.length !== 64) return { valid: false };
+    return verify("sha256", receiptPayload(receipt.body), { key, dsaEncoding: "ieee-p1363" }, signature) ? { valid: true, retiredAt } : { valid: false };
   } catch {
-    return false;
+    return { valid: false };
   }
+}
+
+/** An ISO 8601 UTC time as the engine writes it (`toISOString`). */
+function isUtcTime(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const ms = Date.parse(value);
+  return !Number.isNaN(ms) && new Date(ms).toISOString() === value;
 }
 
 /**
@@ -131,15 +160,23 @@ export interface ReceiptKeyRingOptions {
   signers: readonly ReceiptSigner[];
   /** The `keyId` of the signer that signs new receipts. */
   active: string;
-  /** The public keys, each with its `kid`, that signed earlier receipts and sign no more. Their private keys are not needed. */
-  retired?: readonly JsonWebKey[];
+  /**
+   * The public keys, each with its `kid` and its `retiredAt` (an ISO 8601 UTC time), that signed
+   * earlier receipts and sign no more. Their private keys are not needed. A receipt under one
+   * verifies only when it was issued before `retiredAt`.
+   */
+  retired?: readonly RetiredReceiptKey[];
 }
+
+/** A retired receipt key: its public JWK, its `kid` and when it stopped signing. */
+export type RetiredReceiptKey = JsonWebKey & { kid?: string; retiredAt: string };
 
 /**
  * Builds a key ring. Strict: an active kid no signer has, a key without a kid, two keys with one
  * kid, a signer whose public key names another kid, a key with a private part, or a key that is
- * not a P-256 public key throws a TypeError, so a bad key set is refused when the host builds it.
- * Published keys carry only their public members, `kid`, `alg` and `use`.
+ * not a P-256 public key, or a retired key without an ISO 8601 UTC `retiredAt`, throws a
+ * TypeError, so a bad key set is refused when the host builds it. Published keys carry only their
+ * public members, `kid`, `alg` and `use`, and a retired key also `retired: true` and `retiredAt`.
  */
 export function receiptKeyRing(options: ReceiptKeyRingOptions): ReceiptKeyRing {
   const active = options.signers.find((s) => s.keyId === options.active);
@@ -151,7 +188,11 @@ export function receiptKeyRing(options: ReceiptKeyRingOptions): ReceiptKeyRing {
     keys.push(publishedKey(jwk, kid));
   };
   for (const signer of [active, ...options.signers.filter((s) => s !== active)]) add(signer.publicJwk(), signer.keyId);
-  for (const jwk of options.retired ?? []) add(jwk, jwk.kid);
+  for (const jwk of options.retired ?? []) {
+    add(jwk, jwk.kid);
+    if (!isUtcTime(jwk.retiredAt)) throw new TypeError(`receiptKeyRing: the retired key ${String(jwk.kid)} needs a retiredAt, an ISO 8601 UTC time`);
+    keys[keys.length - 1] = { ...keys.at(-1)!, retired: true, retiredAt: jwk.retiredAt } as JsonWebKey;
+  }
   const own = keys[0]!;
   return {
     keyId: active.keyId,

@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { generateKeyPairSync, sign, verify } from "node:crypto";
+import { generateKeyPairSync, sign, verify, type JsonWebKey } from "node:crypto";
 import { describe, it } from "node:test";
 
 import type { AuditInput, ReceiptSigner } from "../src/core/adapters.ts";
@@ -7,6 +7,7 @@ import { EngineError } from "../src/core/errors.ts";
 import { wordingDigest } from "../src/prove/consent.ts";
 import { GENESIS_HASH, MemoryAuditLedger, chainEntry, detailCarriesCardNumber, hashEntry, verifyChain } from "../src/prove/ledger.ts";
 import {
+  checkReceipt,
   derToP1363,
   keyPairSigner,
   receiptDigest,
@@ -21,6 +22,8 @@ import {
 import { generateTestSigner } from "../src/testing/fakes.ts";
 import { createTestEngine } from "../src/testing/index.ts";
 
+/** When k1 stopped signing: after the test clock's receipts (2026-01-01), so they predate it. */
+const RETIRED_AT = "2026-06-01T00:00:00.000Z";
 const at = "2026-01-01T00:00:00.000Z";
 const input = (event: AuditInput["event"], detail: AuditInput["detail"] = {}): AuditInput => ({ callId: "c1", actor: "code", event, at, detail });
 
@@ -230,7 +233,7 @@ describe("receipt key rings and rotation (PRV-1)", () => {
     const old = (await before.engine.endCall((await before.engine.startCall()).callId))!;
     assert.equal(old.kid, "k1");
     // After: k2 signs, and k1 is retired: only its public key is kept, its private key is gone.
-    const after = createTestEngine({ adapters: { signer: receiptKeyRing({ signers: [k2], active: "k2", retired: [k1.publicJwk()] }) } });
+    const after = createTestEngine({ adapters: { signer: receiptKeyRing({ signers: [k2], active: "k2", retired: [{ ...k1.publicJwk(), retiredAt: RETIRED_AT }] }) } });
     const fresh = (await after.engine.endCall((await after.engine.startCall()).callId))!;
     assert.equal(fresh.kid, "k2");
     const keys = after.engine.receiptKeys();
@@ -241,6 +244,33 @@ describe("receipt key rings and rotation (PRV-1)", () => {
     assert.equal(verifyReceipt(old, [keys[0]!]), false, "without the retired key the old receipt does not verify");
     const changed = { ...old, body: { ...old.body, endedAt: "2026-01-01T00:00:01.000Z" } };
     assert.equal(verifyReceipt(changed, keys), false);
+  });
+
+  it("marks a retired key in the key set, and says a receipt it signed before retiring is valid under a retired key", async () => {
+    const k1 = generateTestSigner("k1");
+    const k2 = generateTestSigner("k2");
+    const signedBy = (signer: ReceiptSigner, issuedAt: string) => signReceipt(signer, body({ issuedAt }));
+    const old = await signedBy(k1, "2026-01-01T00:00:00.000Z");
+    const keys = receiptKeyRing({ signers: [k2], active: "k2", retired: [{ ...k1.publicJwk(), retiredAt: RETIRED_AT }] }).keySet();
+    assert.deepEqual(keys.map((k) => [k.kid, (k as { retired?: boolean }).retired ?? false, (k as { retiredAt?: string }).retiredAt ?? null]), [
+      ["k2", false, null],
+      ["k1", true, RETIRED_AT],
+    ]);
+    assert.deepEqual(checkReceipt(old, keys), { valid: true, retiredAt: RETIRED_AT }, "valid, signed with a retired key");
+    assert.deepEqual(checkReceipt(await signedBy(k2, "2026-07-01T00:00:00.000Z"), keys), { valid: true, retiredAt: null }, "the active key");
+    // A receipt the retired key signed at or after its retirement (a key that leaked, a host that
+    // kept signing with it) is invalid, and so is one whose times cannot be compared.
+    for (const issuedAt of [RETIRED_AT, "2026-07-01T00:00:00.000Z"]) {
+      const late = await signedBy(k1, issuedAt);
+      assert.deepEqual(checkReceipt(late, keys), { valid: false }, issuedAt);
+      assert.equal(verifyReceipt(late, keys), false);
+      assert.equal(verifyReceipt(late, [k1.publicJwk()]), true, "the same signature under the key before it was retired");
+    }
+    for (const retiredAt of ["2026-06-01", "soon", 7]) {
+      assert.deepEqual(checkReceipt(old, [{ ...k1.publicJwk(), retiredAt } as JsonWebKey]), { valid: false }, String(retiredAt));
+    }
+    const odd = await signedBy(k1, "2026-01-01T00:00:00Z");
+    assert.deepEqual(checkReceipt(odd, keys), { valid: false }, "an issuedAt that is not the engine's own form is not compared");
   });
 
   it("signs with the active key, publishes copies, and leaves a single signer's key set alone", async () => {
@@ -266,6 +296,8 @@ describe("receipt key rings and rotation (PRV-1)", () => {
     for (const [name, options, message] of [
       ["no active signer", { signers: [k1], active: "k2" }, /no signer has the active kid k2/],
       ["a retired key without a kid", { signers: [k1], active: "k1", retired: [{ kty, crv, x, y }] }, /every key needs a kid/],
+      ["a retired key without a retiredAt", { signers: [k1], active: "k1", retired: [{ kty, crv, x, y, kid: "old" }] }, /old needs a retiredAt/],
+      ["a retiredAt that is not UTC", { signers: [k1], active: "k1", retired: [{ kty, crv, x, y, kid: "old", retiredAt: "2026-06-01T00:00:00+02:00" }] }, /old needs a retiredAt/],
       ["an empty kid", { signers: [k1], active: "k1", retired: [{ kty, crv, x, y, kid: "" }] }, /every key needs a kid/],
       ["a retired key with the active kid", { signers: [k1], active: "k1", retired: [k1.publicJwk()] }, /two keys have the kid k1/],
       ["two signers with one kid", { signers: [k1, generateTestSigner("k1")], active: "k1" }, /two keys have the kid k1/],

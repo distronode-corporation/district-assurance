@@ -10,6 +10,8 @@ import { StripeCheckoutLinks, StripeIdentityProvider } from "../examples/referen
 import { NotImplementedError, receiptKeyRing, signStripePayload, verifyReceipt, type Engine } from "../src/index.ts";
 import { createTestEngine, generateTestSigner, type TestEngine } from "../src/testing/index.ts";
 
+/** When k1 stopped signing: after the test clock's receipts (2026-01-01), so they predate it. */
+const RETIRED_AT = "2026-06-01T00:00:00.000Z";
 const SECRET = "whsec_test_not_a_secret";
 
 describe("reference server", () => {
@@ -94,7 +96,7 @@ describe("reference server", () => {
     const k1 = generateTestSigner("k1");
     const earlier = createTestEngine({ adapters: { signer: k1 } });
     const old = (await earlier.engine.endCall((await earlier.engine.startCall()).callId))!;
-    const later = createTestEngine({ adapters: { signer: receiptKeyRing({ signers: [generateTestSigner("k2")], active: "k2", retired: [k1.publicJwk()] }) } });
+    const later = createTestEngine({ adapters: { signer: receiptKeyRing({ signers: [generateTestSigner("k2")], active: "k2", retired: [{ ...k1.publicJwk(), retiredAt: RETIRED_AT }] }) } });
     const server = createReferenceServer({ engine: later.engine, stripeSecrets: { identity: [], payments: [] }, clock: later.clock });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const { keys } = (await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/.well-known/receipt-keys.json`)).json()) as { keys: JsonWebKey[] };

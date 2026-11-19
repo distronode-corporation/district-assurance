@@ -157,13 +157,15 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 asynchronous HMAC function that calls the host's key management service; the engine, the built-in
 factors and plug-ins all hash through that one function, an answer that is not a 64-character
 lower-case hex digest is refused without being quoted, and a key store that rejects fails closed:
-no factor, the attempt counted, nothing it was asked written to the ledger (tested). The receipt key stays behind `ReceiptSigner`; a signer that returns anything but
-a 64-byte P1363 signature is refused, and `derToP1363` converts a key store's DER answer, checked
+no factor, the attempt counted, nothing it was asked written to the ledger (tested). The receipt
+key stays behind `ReceiptSigner`; a signer that returns anything but a 64-byte P1363 signature is
+refused, and `derToP1363` converts a key store's DER answer, checked
 against `node:crypto` (tested). An HMAC function does not stop a process that can call it from
 computing digests, so who may call the key store remains the host's control. A receipt key that
-leaked is removed from the key set, not retired, so the receipts it signed stop verifying; a
-receipt carries no proof of when its key was retired, so retiring a key does not limit what a
-thief can sign with it. A key set saved to a file does not see that removal: verifying against a
+leaked is removed from the key set, not retired, so the receipts it signed stop verifying. A
+retired key is published with its `retiredAt`, and a receipt it says it issued at or after that
+time is invalid (tested), but `issuedAt` is written by whoever holds the key, so retiring a key
+does not limit what a thief can sign with it. A key set saved to a file does not see that removal: verifying against a
 saved copy keeps accepting the leaked key, so a holder who needs current trust verifies against
 the key set URL or refreshes the copy.
 
