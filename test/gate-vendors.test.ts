@@ -228,6 +228,18 @@ describe("vendorAccessController", () => {
     });
   });
 
+  it("keeps every request on the configured host, even with a base path that starts with //", async () => {
+    const calls: string[] = [];
+    const record: typeof fetch = async (url) => {
+      calls.push(String(url));
+      return String(url).endsWith("/token") ? new Response(JSON.stringify({ token: TOKEN }), { status: 200 }) : new Response(null, { status: 200 });
+    };
+    await vendorAccessController({ vendor: "kisi", apiKey: API_KEY, baseUrl: "http://127.0.0.1//collector.example", fetch: record, clock }).unlock(kisiInput);
+    await vendorAccessController({ vendor: "verkada", apiKey: API_KEY, baseUrl: "http://127.0.0.1//collector.example/", fetch: record, clock }).unlock(verkadaInput);
+    assert.deepEqual(calls.map((u) => new URL(u).host), ["127.0.0.1", "127.0.0.1", "127.0.0.1"]);
+    assert.deepEqual(calls.map((u) => new URL(u).pathname), [`//collector.example/locks/${KISI_LOCK}/unlock`, "//collector.example/token", "//collector.example/access/v1/door/admin_unlock"]);
+  });
+
   it("sends nothing for a grant with less than its timeout left, and defaults to the system clock", async () => {
     const late = new FixedClock(new Date(Date.parse(kisiInput.grant.body.expiresAt) - 4_999));
     const before = seen.length;

@@ -8,9 +8,10 @@
 // nothing otherwise.
 //
 // The grant's expiry is strict, and the engine lets a call end once a grant at its door expired:
-// so nothing is sent for a grant with less than `timeoutMs` left, since the whole unlock (Verkada's
-// token included) must reach the vendor before the grant expires. That is "refused"
-// (`grant_expiring`).
+// so nothing is sent for a grant with less than `timeoutMs` left, the client's own bound on the
+// whole unlock (Verkada's token included). That is "refused" (`grant_expiring`). It bounds when
+// the request is sent and how long the client waits, not the network: neither vendor's request
+// carries a deadline, so a request delayed in transit could still arrive after the grant expired.
 //
 // The same rule as the relay: one unlock request per grant, never retried, no redirects followed.
 // A 2xx answer is "delivered" (never confirmed: neither vendor reports in its answer that the door
@@ -70,7 +71,13 @@ export function vendorAccessController(options: VendorAccessOptions): AccessCont
   if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30_000) throw new TypeError("timeoutMs must be an integer from 100 to 30000");
   const send = options.fetch ?? fetch;
   const clock = options.clock ?? systemClock;
-  const at = (path: string) => new URL(`${base.pathname.replace(/\/$/, "")}${path}`, base);
+  // The path is set on a copy of the validated base, never resolved against it: a base path that
+  // starts with `//` would otherwise be read as another host, and the key sent there.
+  const at = (path: string) => {
+    const url = new URL(base.href);
+    url.pathname = `${base.pathname.replace(/\/+$/, "")}${path}`;
+    return url;
+  };
   const apiKey = options.apiKey;
 
   /** The single unlock request, whose answer is mapped the relay's way. */

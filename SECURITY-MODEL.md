@@ -158,8 +158,10 @@ holds each grant's digest and outcome, never the grant.
 **Direct vendor adapters** (Kisi, Verkada) are weaker on one point: the vendor cannot check the
 signed grant, so the vendor's API key opens the door on its own, and whoever holds it can open
 every door it reaches. The adapter sends nothing for a target its grant does not name or that is
-not the vendor's id format, nor for a grant with less than its timeout left (so the unlock never
-reaches the vendor after the grant expired, when the call may already have ended), keeps the API
+not the vendor's id format, nor for a grant with less than its timeout left (so the client never
+sends, or waits on, an unlock past the grant's expiry; a request delayed in the network could
+still arrive later, since neither vendor's request carries a deadline), keeps every request on
+the configured host (a base path starting with `//` cannot redirect the key, tested), keeps the API
 key out of errors, sends the unlock once (never retried, no redirects; a lost answer is
 `unknown`), and passes on only the HTTP status of a refusal, never the vendor's text (tested
 against a local fake server). Verkada's short-lived token is fetched for each unlock and never

@@ -589,8 +589,10 @@ id (digits) or a Verkada door id (a UUID). `unlock` first checks that the grant'
 target it was asked to open and has that form; otherwise it answers `refused` with
 `target_mismatch` or `bad_target` and sends nothing. It also sends nothing, answering `refused`
 with `grant_expiring`, for a grant with less than `timeoutMs` left by `clock` (the system clock by
-default): the whole unlock must reach the vendor before the grant expires, since the expiry is
-strict and the call may end then. Kisi: one `POST <baseUrl>/locks/<lock
+default), the client's own bound on the whole unlock, since the expiry is strict and the call
+may end then. This bounds when the request is sent, not the network: neither vendor's request
+carries a deadline, so one delayed in transit could still arrive after the grant expired. Each
+request's path is set on a copy of `baseUrl`, so its host is always `baseUrl`'s. Kisi: one `POST <baseUrl>/locks/<lock
 id>/unlock` with `Authorization: KISI-LOGIN <apiKey>` and the body `{}`. Verkada: `POST
 <baseUrl>/token` with `x-api-key: <apiKey>`; a token call that does not answer 200 with a
 `token` string answers `refused` with `token_unavailable` and the unlock is not sent; then one
