@@ -70,6 +70,12 @@ export interface BadgeSlice {
    */
   pinPending?: Array<{ subjectKey: string; digest: string; enrolmentId: string }>;
   /**
+   * The last enrolment this call recorded (`pin.enrolled`). While that entry is still waiting in
+   * the call's outbox (the ledger failed after the write), the same PIN again finishes as this
+   * enrolment, with no second entry. Never the digits. Absent until the first.
+   */
+  pinEnrolled?: { subjectKey: string; enrolmentId: string };
+  /**
    * Set once a duress PIN passed on this call (VER-12), and never cleared: the scopes refused on
    * top of money, contact and access, as Badge's settings named them then. The only place the
    * duress state is kept. Absent on every other call.
@@ -174,6 +180,12 @@ export interface CallbackState {
   redials?: number;
   /** On the callback call: ISO 8601, when a dial resumed a day or more after `at` was counted toward the daily limit again. */
   countedAt?: string;
+  /**
+   * On the callback call: ISO 8601, the claim of the one try that counts a resumed dial toward the
+   * daily limit, at that time. Another try within the day counts nothing: it dials once that count
+   * is in the store, and otherwise leaves the dial to the try that claimed it.
+   */
+  admitting?: string;
 }
 
 export interface KeypadResult {

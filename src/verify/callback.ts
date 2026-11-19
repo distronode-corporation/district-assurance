@@ -164,17 +164,29 @@ function placedKey(rt: EngineRuntime, subjectKey: string): AttemptCounterKey {
 /**
  * When a dial counts toward the daily limit: when it was last counted, while that is within the
  * day. A placed callback whose dial is resumed later is counted again now, or refused (null) when
- * the subject is at the limit, so a resumed dial never rings past it.
+ * the subject is at the limit, so a resumed dial never rings past it. Only the try whose claim is
+ * saved on the call (`admitting`) counts it: another try at once counts nothing, and dials with
+ * that count once it is in the store, or leaves the dial to the claiming try (undefined).
  */
-async function countDial(rt: EngineRuntime, callback: CallbackState): Promise<string | null> {
+async function countDial(rt: EngineRuntime, callId: string, callback: CallbackState): Promise<string | null | undefined> {
   const counted = callback.countedAt ?? callback.at!;
   const now = rt.clock.now();
-  if (now.getTime() - Date.parse(counted) < DAY_MS) return counted;
+  const today = (at: string | undefined): at is string => at !== undefined && now.getTime() - Date.parse(at) < DAY_MS;
+  if (today(counted)) return counted;
   const counters = rt.adapter("counters");
   const placed = placedKey(rt, callback.subjectKey!);
   const since = new Date(now.getTime() - DAY_MS + 1).toISOString();
-  if ((await counters.get(placed, since)).length >= MAX_CALLBACKS_PER_DAY) return null;
   const at = now.toISOString();
+  const take = (s: BadgeSlice): boolean => {
+    if (s.callback.status !== "dialing" || today(s.callback.admitting)) return false;
+    s.callback = { ...s.callback, admitting: at };
+    return true;
+  };
+  if (!(await claimOnCall(rt, callId, take, (s) => s.callback.admitting === at))) {
+    const other = callbackOf((await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice).admitting;
+    return today(other) && recordedAt(await counters.get(placed, since), other) !== null ? other : undefined;
+  }
+  if ((await counters.get(placed, since)).length >= MAX_CALLBACKS_PER_DAY) return null;
   // Another request got in first: the list this one returned is over the limit.
   return (await counters.recordFailure(placed, at, since)).length > MAX_CALLBACKS_PER_DAY ? null : at;
 }
@@ -221,11 +233,14 @@ export async function dialCallback(rt: EngineRuntime, callId: string): Promise<v
   if (s.callback.status === "dialing") {
     const onFile = await rt.adapter("records").getSubject(rt.workspaceId, s.subjectKey!);
     const to = onFile?.phoneOnFile ?? "";
-    const countedAt = isCallingNumber(to) ? await countDial(rt, s.callback) : null;
+    const countedAt = isCallingNumber(to) ? await countDial(rt, callId, s.callback) : null;
+    // Another try is counting this resumed dial: it dials.
+    if (countedAt === undefined) return;
     const claimed = await rt.update(callId, (draft) => {
       const callback = draft.slice<BadgeSlice>(BADGE).callback;
-      // Voided while the store was read (untrusted content): never dialed, nothing recorded.
-      if (callback.status !== "dialing") return null;
+      // Voided while the store was read (untrusted content), or the callback call ended meanwhile
+      // (its receipt is its last entry): never dialed, nothing recorded.
+      if (callback.status !== "dialing" || draft.record.state.phase === "ended") return null;
       // No number on file now, or a resumed dial past the daily limit: refused, without ringing.
       if (countedAt === null) {
         callback.status = "failed";

@@ -1290,13 +1290,16 @@ export class Engine {
 
   /**
    * The counter a `verification.locked` entry is about, read from the call as the entry is saved,
-   * so the notice names the subject or number of that verification. Badge writes the entry only
-   * for a counter it counted, so the key for its scope is set.
+   * so the notice names the subject or number of that verification (for a callback, the counter
+   * its request reserved). Badge writes the entry only for a counter it counted, so the key is set.
    */
   #lockedCounter(record: CallRecord, detail: { [key: string]: JsonValue }): AttemptCounterKey {
     const s = record.modules[badge.BADGE] as unknown as badge.BadgeSlice;
     const scope = detail.scope as AttemptCounterKey["scope"];
-    return { workspaceId: this.workspaceId, factor: detail.kind as string, scope, key: (scope === "subject" ? s.subjectKey : s.numberKey)! };
+    // A callback's lock is on the counters reserved from the call that asked: a callback call keeps
+    // no calling number of its own, so its number lock is named by the key the request counted.
+    const reserved = detail.kind === callback.CALLBACK ? s.callback.keys.find((k) => k.scope === scope) : undefined;
+    return reserved ?? { workspaceId: this.workspaceId, factor: detail.kind as string, scope, key: (scope === "subject" ? s.subjectKey : s.numberKey)! };
   }
 
   /**
