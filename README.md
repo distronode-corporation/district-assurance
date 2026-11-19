@@ -170,6 +170,39 @@ No call handling, speech, carrier routing or hosting: those belong to the host. 
 biometrics. No recording. No storage beyond the in-memory reference adapters. No configuration UI.
 No regulated identity proofing: it checks a caller against the organisation's own records.
 
+## Checking a release
+
+Nothing is published yet (the package is private until a release is decided). From the first
+release on, every version is built and published by `.github/workflows/release.yml` from its tag,
+and you can check two things before you trust it.
+
+Where it came from: npm provenance, signed through Sigstore and logged in its public transparency
+log, ties the tarball to the commit and the workflow run that built it, and the registry signs the
+tarball too. In a project that has installed it:
+
+```sh
+npm install district-assurance
+npm audit signatures   # registry signatures and provenance of everything installed
+```
+
+What is in it: a CycloneDX SBOM of the published package (development tools left out), with a
+Sigstore-signed attestation whose subject is the tarball itself. Fetch the registry's tarball and
+check the attestation against this repository, the release workflow and the tag:
+
+```sh
+npm pack district-assurance@X.Y.Z
+gh attestation verify district-assurance-X.Y.Z.tgz \
+  --repo distronode-corporation/district-assurance \
+  --signer-workflow distronode-corporation/district-assurance/.github/workflows/release.yml \
+  --source-ref refs/tags/vX.Y.Z \
+  --predicate-type https://cyclonedx.org/bom
+```
+
+Add `--format json --jq '.[].verificationResult.statement.predicate'` to print the SBOM that was
+signed. The tag's GitHub release has the same tarball (with its SHA-256), the SBOM and the
+attestation's Sigstore bundle; `--bundle district-assurance-X.Y.Z.tgz.sbom.sigstore.json` checks
+against that bundle instead of looking the attestation up.
+
 ## Documents
 
 [ARCHITECTURE.md](ARCHITECTURE.md), [SPEC.md](SPEC.md), [SECURITY-MODEL.md](SECURITY-MODEL.md),

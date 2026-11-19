@@ -160,7 +160,11 @@ byte-identical across two builds and a third on a fresh runner, holds only `dist
 documents, and passes an unpack-and-import smoke test before it is published (`release.yml`).
 There is no npm token: trusted publishing uses the publish job's short-lived OIDC token, the only
 job granted `id-token: write`, and npm provenance ties the tarball to the commit and workflow
-that built it.
+that built it. The same job writes a CycloneDX SBOM of the published package, refuses it if it
+names any runtime dependency, and signs an SBOM attestation for the tarball through Sigstore
+before publishing; a separate job with `contents: write` and no OIDC token attaches the tarball,
+the SBOM and the attestation's bundle to the tag's GitHub release. `npm audit signatures` and
+`gh attestation verify` check them (README.md, "Checking a release").
 
 ## Left to the host
 

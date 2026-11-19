@@ -29,6 +29,9 @@ All notable changes to this project are documented here. The format follows
   reproducible pack, a file list check and an exports smoke test as a dry run. Only a manual run
   on the tag with `publish` ticked, upstream and after an environment approval, publishes with npm
   provenance by trusted publishing. The package stays private (ADR-12).
+- Signed releases (SRV-6): each release has a CycloneDX SBOM of the published package with a
+  Sigstore-signed attestation, attached to the tag's GitHub release; README.md shows how to check a
+  release with `npm audit signatures` and `gh attestation verify`.
 
 ### Changed
 
