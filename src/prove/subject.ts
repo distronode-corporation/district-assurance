@@ -93,7 +93,7 @@ const ENGINE_KEPT: readonly KeptItem[] = [
   {
     what: "call records",
     reason:
-      "Each call record in the SessionStore keeps the record digests (as the receipt does), the call's consents and Badge's working copy of the matched subject (keyed digests and the number on file) until the host's session retention removes it. The erase drops the copy of a record's values a call keeps.",
+      "Each call record in the SessionStore keeps the record digests (as the receipt does), the call's consents and Badge's working copy of the matched subject (the keyed digests of the values on file and the number on file, never the PIN digest) until the host's session retention removes it. The erase drops the copy of a record's values a call keeps.",
   },
   {
     what: "consents",

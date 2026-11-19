@@ -163,7 +163,9 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
 - `keyed_hash` mode: the stored digest is `pinDigest(knowledgeKey, subjectKey, pin)` =
   `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`, in `SubjectRecord.pinDigest`. The
   entry is hashed the same way and compared in constant time; an unknown subject, a subject without
-  a digest and a malformed entry do the same work and give the same answer.
+  a digest and a malformed entry do the same work and give the same answer. The digest is read from
+  the `RecordStore` on every attempt, and the call record's copy of the subject never holds it, so
+  a digest erased (section 17) or changed since verification began counts at once.
 - `verifier` mode: the host's `PinVerifier.verify({workspaceId, subjectKey, pin})` decides; the
   PIN is passed once and kept nowhere. It is asked for every attempt: for a malformed entry or an
   account a keypad cannot produce, with a stand-in (`minDigits` zeros, an HMAC subject key) whose

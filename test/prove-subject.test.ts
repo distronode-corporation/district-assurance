@@ -11,7 +11,7 @@ import { SUBJECT_EXPORT_DOMAIN, subjectExportPayload, verifySubjectExport, type 
 import { TEST_KNOWLEDGE_KEY, createTestEngine, type TestEngine } from "../src/testing/index.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { testSubject } from "../src/testing/fakes.ts";
-import { ACCOUNT, DOB, rejects, setup, testConfig, verifiedCall, wording } from "./helpers.ts";
+import { ACCOUNT, DOB, PIN, rejects, setup, testConfig, verifiedCall, wording } from "./helpers.ts";
 
 const SUBJECT = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const request = { workspaceId: "ws_test", subjectKey: SUBJECT };
@@ -355,6 +355,16 @@ describe("eraseSubject", () => {
     t.records.putIntakeRecord = put;
     await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
     assert.deepEqual((await t.engine.eraseSubject(request)).recordIds, ["rec_2"]);
+  });
+
+  it("an erased PIN no longer verifies on a call already verifying, and no call record keeps a copy of it", async () => {
+    const t = setup();
+    const digest = (await t.records.getSubject("ws_test", SUBJECT))!.pinDigest!;
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { subjectKey: SUBJECT });
+    assert.equal(JSON.stringify(await callRecord(t, callId)).includes(digest), false, "the call record holds no PIN digest");
+    await t.engine.eraseSubject(request);
+    assert.deepEqual(await t.engine.submitPin(callId, PIN), { matched: false, locked: false }, "the erased PIN does not pass");
   });
 
   it("deleting a PIN digest of an unknown subject does nothing", async () => {
