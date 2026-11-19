@@ -2,12 +2,14 @@
 export {
   BADGE,
   BadgeModule,
+  DEFAULT_KEYPAD_IDLE_SECONDS,
   badgeModule,
   type BadgeSlice,
   type BadgeVerifyStep,
   type BeginVerificationInput,
   type CallbackState,
   type KeypadResult,
+  type KeypadTiming,
   type OutcomeResult,
   type VerificationResult,
 } from "./badge.ts";

@@ -20,7 +20,7 @@ import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
 import { ATTESTATIONS, capCallLevel, raiseMinimum, scopeClass, scopesForLevel, stepAmount, type AssuranceLevel, type Attestation, type ScopeClass, type StepUpAmount, type VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, interruptLine, type RedactionFinding, type Redactor } from "./core/redaction.ts";
-import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
+import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallAccess, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
 import * as dossier from "./file/dossier.ts";
@@ -49,7 +49,7 @@ import * as textCode from "./verify/text-code.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
 export { SUPPORTED_LOCALES, isSupportedLocale } from "./core/runtime.ts";
-export type { EngineAdapters, Locale } from "./core/runtime.ts";
+export type { CallAccess, EngineAdapters, Locale } from "./core/runtime.ts";
 export type { KeypadResult, OutcomeResult, VerificationResult } from "./verify/badge.ts";
 export type { DuressEnrolmentResult, PinEnrolmentResult } from "./verify/pin.ts";
 
@@ -319,7 +319,7 @@ export class Engine {
    * attestation the host's carrier reported (default `none`), set once here: it can only cap the
    * call's level under the policy's `attestationCaps`, never raise it.
    */
-  async startCall(input: { callId?: string; locale?: Locale; flow?: string; callingNumber?: string; attestation?: Attestation } = {}): Promise<SessionState> {
+  async startCall(input: { callId?: string; locale?: Locale; flow?: string; callingNumber?: string; attestation?: Attestation; access?: CallAccess } = {}): Promise<SessionState> {
     // Each read once: a getter read again (the flow, after an await) could change a value after it was checked or counted.
     const {
       callId: givenId,
@@ -327,7 +327,10 @@ export class Engine {
       flow,
       callingNumber,
       attestation: givenAttestation,
-    }: { callId?: unknown; locale?: unknown; flow?: unknown; callingNumber?: unknown; attestation?: unknown } = input;
+      access,
+    }: { callId?: unknown; locale?: unknown; flow?: unknown; callingNumber?: unknown; attestation?: unknown; access?: unknown } = input;
+    // A relay or TTY mark (VER-11) lengthens keypad timeouts only, and stays out of the ledger.
+    if (access !== undefined && access !== "relay" && access !== "tty") throw new EngineError("invalid_input", "access must be relay or tty");
     // Everything the host gives here enters the ledger as it is, not through emit's checks: checked
     // now, before anything is saved, so no call's ledger can be blocked by a value it cannot hash.
     if (givenId !== undefined && (typeof givenId !== "string" || givenId === "" || givenId.length > 200 || hasLoneSurrogate(givenId))) {
@@ -342,7 +345,7 @@ export class Engine {
     const numberKey = await this.#numberKey(callingNumber as string | undefined);
     const flowName = flow as string | undefined;
     const attached = flowName === undefined ? null : { name: flowName, steps: this.#flowDefinition(flowName).steps, revision: this.#config.revision };
-    const start = await this.#create(callId, (locale as Locale | undefined) ?? "en", this.#config.revision, attached, () => undefined, { numberKey, countStart: true, attestation: attestation as Attestation });
+    const start = await this.#create(callId, (locale as Locale | undefined) ?? "en", this.#config.revision, attached, () => undefined, { numberKey, countStart: true, attestation: attestation as Attestation, ...(access === undefined ? {} : { access: access as CallAccess }) });
     if (start === null) throw new EngineError("invalid_input", "a call with that id exists");
     // With the call's id: the call is open, its flow failed, and the host ends it.
     if (start.over !== null) throw new RateLimitedError(callId);
@@ -362,7 +365,7 @@ export class Engine {
     revision: string,
     flow: { name: string; steps: FlowStep[]; revision: string } | null,
     then: (draft: CallDraft) => void,
-    options: { numberKey?: string | null; countStart?: boolean; attestation?: Attestation; attestationExempt?: true } = {},
+    options: { numberKey?: string | null; countStart?: boolean; attestation?: Attestation; attestationExempt?: true; access?: CallAccess } = {},
   ): Promise<FlowStart | null> {
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
@@ -376,6 +379,7 @@ export class Engine {
       revision,
       attestation: options.attestation ?? "none",
       ...(options.attestationExempt === true ? { attestationExempt: true as const } : {}),
+      ...(options.access === undefined ? {} : { access: options.access }),
       flow: null,
       modules,
       outbox: [],
@@ -676,6 +680,14 @@ export class Engine {
   /** Judges an entry for any factor the caller enters, a host's plug-in included. */
   submitFactor(callId: string, kind: string, entry: FactorEntry): Promise<badge.KeypadResult> {
     return badge.submitFactor(this.#rt, this.#badge, callId, kind, entry);
+  }
+
+  /**
+   * The call's keypad timeouts, for a `KeypadCollector` (VER-11): longer on a call marked relay or
+   * TTY, and the limit to which the host may lengthen them when the caller asks to slow down.
+   */
+  keypadTiming(callId: string): Promise<badge.KeypadTiming> {
+    return badge.keypadTiming(this.#rt, callId);
   }
 
   checkCarrier(callId: string): Promise<{ textCodeTrusted: boolean }> {

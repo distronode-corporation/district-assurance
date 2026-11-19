@@ -3,6 +3,10 @@
 // that buffer, written once: pure (no timers, no I/O; time comes from the injected clock), with a
 // maximum length and an idle timeout, and with nothing in it that prints a digit. The digits leave
 // only through the one callback given at construction, once per entry, after the buffer is wiped.
+//
+// VER-11 adds two things on top: request keys (`*` or `A` to `D`) that hand the host a `repeat` or
+// `slower` request instead of digits, and an idle timeout a call may lengthen up to a limit
+// (`Engine.keypadTiming` gives both from Badge's `accessibility` settings).
 import { type Clock, systemClock } from "./clock.ts";
 import { EngineError } from "./errors.ts";
 import { isIntegerIn, isObject, unknownKeys } from "./shape.ts";
@@ -12,11 +16,25 @@ export const MAX_KEYPAD_DIGITS = 32;
 /** Longest idle timeout a collector may be set to, ten minutes. */
 export const MAX_KEYPAD_IDLE_MS = 600_000;
 
+/** What a caller can ask for on the keypad instead of entering digits (VER-11). Never an attempt. */
+export type KeypadRequest = "repeat" | "slower";
+
+/** The keys that can carry a request: `#` ends an entry and digits are digits. */
+export const KEYPAD_REQUEST_KEYS: readonly string[] = ["*", "A", "B", "C", "D"];
+
 export interface KeypadCollectorOptions<R> {
   /** Most digits an entry may have, 1 to 32. One more discards the entry. */
   maxDigits: number;
   /** Milliseconds, 1 to 600,000, after the last tone at which an unfinished entry is discarded. */
   idleTimeoutMs: number;
+  /** The longest `lengthenIdleTimeout` may make it, `idleTimeoutMs` to 600,000. Default: `idleTimeoutMs`, so it cannot grow. */
+  maxIdleTimeoutMs?: number;
+  /**
+   * Keys that hand the host a request instead of digits, for example `{ "*": "repeat" }` (VER-11):
+   * `*` or `A` to `D`. A request drops the unfinished entry; the host replays or slows its line.
+   * A `*` listed here is a request, no longer "start over".
+   */
+  requestKeys?: Readonly<Record<string, KeypadRequest>>;
   /** Given the digits of each entry ended by `#`, once. Its return value is handed back by `press`. */
   onDigits: (digits: string) => R;
   clock?: Clock;
@@ -35,6 +53,8 @@ export type KeypadPress<R> =
   | { status: "empty"; timedOut: boolean }
   /** `*`: the caller started over. */
   | { status: "cleared"; timedOut: boolean }
+  /** A request key (`requestKeys`): the entry is dropped and the host replays or slows its line. */
+  | { status: "request"; request: KeypadRequest; timedOut: boolean }
   /** A digit past `maxDigits`: the entry is discarded and never reaches the callback. */
   | { status: "overflow"; timedOut: boolean }
   /** Not `0` to `9`, `*` or `#` (for example `A` to `D`): the entry is discarded. */
@@ -43,7 +63,7 @@ export type KeypadPress<R> =
   | { status: "discarding"; timedOut: boolean };
 
 const DIGIT = /^[0-9]$/;
-const OPTION_KEYS: readonly string[] = ["maxDigits", "idleTimeoutMs", "onDigits", "clock"];
+const OPTION_KEYS: readonly string[] = ["maxDigits", "idleTimeoutMs", "maxIdleTimeoutMs", "requestKeys", "onDigits", "clock"];
 
 /**
  * Buffers keypad tones until `#`. Feed it every tone of the sensitive window (`press`), call
@@ -55,7 +75,9 @@ const OPTION_KEYS: readonly string[] = ["maxDigits", "idleTimeoutMs", "onDigits"
  */
 export class KeypadCollector<R = void> {
   readonly #maxDigits: number;
-  readonly #idleTimeoutMs: number;
+  readonly #maxIdleTimeoutMs: number;
+  readonly #requests: ReadonlyMap<string, KeypadRequest>;
+  #idleTimeoutMs: number;
   readonly #onDigits: (digits: string) => R;
   readonly #clock: Clock;
   #digits = "";
@@ -73,19 +95,56 @@ export class KeypadCollector<R = void> {
     if (!isIntegerIn(options.idleTimeoutMs, 1, MAX_KEYPAD_IDLE_MS)) {
       throw new EngineError("invalid_input", `idleTimeoutMs must be an integer from 1 to ${MAX_KEYPAD_IDLE_MS}`);
     }
+    const max = options.maxIdleTimeoutMs ?? options.idleTimeoutMs;
+    if (!isIntegerIn(max, options.idleTimeoutMs, MAX_KEYPAD_IDLE_MS)) {
+      throw new EngineError("invalid_input", `maxIdleTimeoutMs must be an integer from idleTimeoutMs to ${MAX_KEYPAD_IDLE_MS}`);
+    }
+    const requests = new Map<string, KeypadRequest>();
+    if (options.requestKeys !== undefined) {
+      if (!isObject(options.requestKeys)) throw new EngineError("invalid_input", "requestKeys must map keys to repeat or slower");
+      for (const [key, request] of Object.entries(options.requestKeys)) {
+        if (!KEYPAD_REQUEST_KEYS.includes(key)) throw new EngineError("invalid_input", `request key ${JSON.stringify(key)} must be one of ${KEYPAD_REQUEST_KEYS.join(", ")}`);
+        if (request !== "repeat" && request !== "slower") throw new EngineError("invalid_input", `the request on ${key} must be repeat or slower`);
+        requests.set(key, request);
+      }
+    }
     if (typeof options.onDigits !== "function") throw new EngineError("invalid_input", "onDigits must be a function");
     if (options.clock !== undefined && !(isObject(options.clock) && typeof options.clock.now === "function")) {
       throw new EngineError("invalid_input", "clock must be an object with a now function");
     }
     this.#maxDigits = options.maxDigits;
     this.#idleTimeoutMs = options.idleTimeoutMs;
+    this.#maxIdleTimeoutMs = max;
+    this.#requests = requests;
     this.#onDigits = options.onDigits;
     this.#clock = options.clock ?? systemClock;
+  }
+
+  /** The idle timeout in force now. */
+  get idleTimeoutMs(): number {
+    return this.#idleTimeoutMs;
+  }
+
+  /**
+   * Lengthens the idle timeout by `ms`, up to `maxIdleTimeoutMs`, for the rest of the call, and
+   * returns the new timeout (VER-11: a caller who asked to slow down). It never touches the buffer
+   * or any attempt.
+   */
+  lengthenIdleTimeout(ms: number): number {
+    if (!isIntegerIn(ms, 1, MAX_KEYPAD_IDLE_MS)) throw new EngineError("invalid_input", `the timeout is lengthened by a whole number of milliseconds from 1 to ${MAX_KEYPAD_IDLE_MS}`);
+    this.#idleTimeoutMs = Math.min(this.#idleTimeoutMs + ms, this.#maxIdleTimeoutMs);
+    return this.#idleTimeoutMs;
   }
 
   /** Takes one tone. An unfinished entry that went idle is discarded first. */
   press(tone: string): KeypadPress<R> {
     const timedOut = this.expire();
+    // A Map, so a tone such as "constructor" is never a request.
+    const request = this.#requests.get(tone);
+    if (request !== undefined) {
+      this.clear();
+      return { status: "request", request, timedOut };
+    }
     if (tone === "#") {
       this.#discarding = false;
       if (this.#digits === "") return { status: "empty", timedOut };

@@ -5,11 +5,12 @@
 // plug-in types and their checks live in the core (core/module.ts), where the registry uses them.
 import { hexDigestsEqual, hmacSha256Hex } from "../core/hash.ts";
 import type { FactorJudgeInput } from "../core/module.ts";
-import { FACTOR_KINDS, type SpokenPolicy, type VerificationPolicy } from "../core/policy.ts";
+import { FACTOR_KINDS, type SpokenFormat, type SpokenPolicy, type VerificationPolicy } from "../core/policy.ts";
+import { isObject } from "../core/shape.ts";
 import type { AdapterName, EngineRuntime } from "../core/runtime.ts";
 import type { LockoutSettings } from "./counters.ts";
 import { isKeypadEntry, judgeKeypadWith } from "./knowledge.ts";
-import { normaliseSpokenAnswer } from "./spoken.ts";
+import { normaliseSpokenAnswer, normaliseSpokenKeypadEntry } from "./spoken.ts";
 
 export { checkFactorPlugin, snapshotFactorPlugin, type FactorEntry, type FactorJudgeInput, type FactorPlugin } from "../core/module.ts";
 
@@ -61,6 +62,20 @@ export interface BadgeSettings {
   pin?: PinSettings;
   /** Waits and locks across calls for the factors the caller enters (counters.ts). Default: the floors. */
   lockout?: LockoutSettings;
+  /** The accessible path (VER-11): keypad fields said instead of keyed, and keypad timeouts. */
+  accessibility?: AccessibilitySettings;
+}
+
+export interface AccessibilitySettings {
+  /**
+   * Keypad fields a caller may say instead of key. They are judged in the spoken_knowledge factor,
+   * with the policy's spoken fields, and each spoken try also uses a keypad_knowledge attempt. Never the PIN.
+   */
+  spokenKeypadFields?: string[];
+  /** The keypad idle timeout a call starts with, 5 to 60 seconds. Default 10. */
+  keypadIdleSeconds?: number;
+  /** The longest a call's idle timeout may be lengthened to, `keypadIdleSeconds` to 300. A relay or TTY call starts at it. Default: `keypadIdleSeconds`. */
+  maxKeypadIdleSeconds?: number;
 }
 
 /** How each built-in factor reaches the engine. Planned factors cannot be turned on yet. */
@@ -132,12 +147,16 @@ export async function judgeKeypad(policy: VerificationPolicy, input: FactorJudge
  * normalised exactly (spoken.ts) and compared like a keypad field, as the keyed digest of
  * `field:<name>:<value>` in constant time; an unusable answer does the same work and fails.
  */
-export async function judgeSpoken(spoken: SpokenPolicy, input: FactorJudgeInput): Promise<boolean> {
-  const entries = typeof input.entry === "string" ? {} : input.entry;
-  const fields = Object.entries(spoken.fields);
+export async function judgeSpoken(spoken: SpokenPolicy, input: FactorJudgeInput, keypadFields: readonly string[] = []): Promise<boolean> {
+  // Anything but a set of answers (a string, null, a number from a host's bug) answers nothing.
+  const entries: Readonly<Record<string, unknown>> = isObject(input.entry) ? input.entry : {};
+  // Keypad fields said instead of keyed (VER-11) are read as 1 to 32 digits, every value a keypad field can hold.
+  const fields: Array<readonly [string, SpokenFormat | null]> = [...Object.entries(spoken.fields), ...keypadFields.map((f) => [f, null] as const)];
   let ok = input.subject !== null && fields.length > 0;
   for (const [field, format] of fields) {
-    const answer = normaliseSpokenAnswer({ field: format, transcript: entries[field] ?? "", locale: input.locale });
+    // Not coerced: a non-string transcript is unusable (normalise checks it), never read as its digits.
+    const transcript = (Object.hasOwn(entries, field) ? entries[field] : "") as string;
+    const answer = format === null ? normaliseSpokenKeypadEntry({ transcript, locale: input.locale }) : normaliseSpokenAnswer({ field: format, transcript, locale: input.locale });
     const value = answer.status === "normalised" ? answer.value : "";
     const match = hexDigestsEqual(await input.hmac(`field:${field}:${value}`), input.subject?.knowledge[field] ?? "");
     ok = ok && match && answer.status === "normalised";

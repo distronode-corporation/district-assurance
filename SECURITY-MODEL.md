@@ -212,6 +212,21 @@ any scope without a grant, but a payment that never happens is still visible. Th
 effort; who it alerts, and how fast, is the host's. Anything the host sends after the call (PRV-10)
 must follow the same rule as on a normal call, or it gives the duress away.
 
+### The accessible path
+
+Callers who cannot use a keypad, or need more time, must be able to verify without the bar being
+lowered for anyone, and a mark that says a caller uses a relay or a TTY can reveal a disability.
+**Controls:** a keypad field said instead of keyed (Badge's `spokenKeypadFields`) is judged in
+the `spoken_knowledge` factor, so it reaches only what the policy gives a spoken answer, under the
+spoken attempt limit, and never unlocks texts; without spoken fields in the policy it is never
+judged (tested). It also uses a keypad attempt, so saying a field never adds guesses at it: the
+keypad and the voice share one budget per call (tested). The PIN is never taken by speech: the
+setting refuses it and a spoken entry carrying one is refused before it is counted (tested). A
+keypad `repeat` or `slower` request hands the host no digits, so it never uses, adds or gives back
+an attempt (tested). A call marked relay or TTY gets a longer keypad timeout, up to Badge's limit,
+and nothing else: the same steps, factors, attempt limits and level, the same ledger entries and
+the same receipt, with no trace of the mark (tested).
+
 ### SIM swap and port-out
 
 An attacker who took over the number on file receives the texted code or link. **Controls:** a
@@ -884,6 +899,13 @@ Consents stay in their call records until PRV-3's `ConsentStore`; counters acros
   engine counts and limits their attempts, but whether a judge answers the same way for an unknown
   subject and a wrong entry is the judge's.
 - The person path: a caller who fails or cannot use a keypad reaches someone who can help.
+- Relay and TTY callers: a flow they use offers a factor set they can complete at the step's
+  level (a spoken answer alone reaches level 1 at most, and the carrier check and texted links
+  still need a keypad or PIN match), or the host takes the call to the person path. Marking the
+  call (`startCall({access})`) only from what the host knows of the call path, never from the
+  model, and keeping the mark out of its own logs and transcripts.
+- Spoken requests to repeat or slow down: the host replays its fixed line, and they never reach
+  the engine.
 - Disclosure that an automated assistant answers and that the call is transcribed.
 - Deciding who may switch these modules on (business verification), so the line cannot be used to
   run a phishing operation.

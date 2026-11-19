@@ -396,6 +396,48 @@ transcript per field in the policy's `spoken.fields`: `submitFactor(callId, "spo
   the policy, every submission is `locked` and nothing is judged. A host can call
   `normaliseSpokenAnswer` itself first to ask again before an attempt is used.
 - A spoken match does not unlock texts to the number on file (section 4).
+- A spoken entry with a `pin` field is refused (`invalid_input`) before it is counted or judged:
+  a PIN is only ever keyed.
+
+## 5a. The accessible path
+
+Badge's optional `accessibility` settings (VER-11): `{spokenKeypadFields?, keypadIdleSeconds?,
+maxKeypadIdleSeconds?}`.
+
+- `spokenKeypadFields`: keypad fields a caller may say instead of key. At least one, no
+  duplicates, never `pin`, and only with the `spoken_knowledge` factor on; a `badge.verify` step
+  that lists `spoken_knowledge` refuses a field that is not one of the policy's `keypadFields`.
+  These fields join the policy's spoken fields in the `spoken_knowledge` factor: one answer gives
+  all of them, judged together as in section 5. A keypad field is read with the same exact rules
+  (`normaliseSpokenKeypadEntry({transcript, locale})`, English and French; Spanish is refused
+  until a reviewed vocabulary exists), and the result must be 1 to 32 digits. It is compared as
+  `HMAC-SHA256(knowledgeKey, "field:" + field + ":" + value)`. The factor recorded is
+  `spoken_knowledge`, never `keypad_knowledge`: it reaches only what the policy's sets give
+  `spoken_knowledge`, under `spoken.maxAttemptsPerCall`. Each such answer is also a guess at the
+  keypad fields, so it uses a `keypad_knowledge` attempt too (`maxKeypadAttemptsPerCall`): the
+  keypad and the voice share one budget per call, and a spoken answer is refused, even the right
+  one, once either limit is used up. The cross-call counters (section 5, VER-1) count it under
+  `spoken_knowledge`.
+- `keypadIdleSeconds` (5 to 60, default 10) is a call's keypad idle timeout;
+  `maxKeypadIdleSeconds` (`keypadIdleSeconds` to 300, default `keypadIdleSeconds`) is the most it
+  may be lengthened to. `keypadTiming(callId)` returns `{idleTimeoutMs, maxIdleTimeoutMs}` for
+  the call: the idle timeout, or the maximum on a call marked relay or TTY.
+- `startCall({access: "relay" | "tty"})` marks the call (read once, with the rest of the input).
+  The mark is kept in the call record (`access`) and does one thing: the longer timeout above.
+  Every step, factor, attempt limit and level is the same as on any call, and the mark is never in
+  an event, the ledger, the session state or the receipt. Any other value is refused
+  (`invalid_input`).
+
+**The keypad collector** (`KeypadCollector`, `src/core/keypad.ts`, INT-1) takes the timing as it
+comes: `new KeypadCollector({ maxDigits, ...await engine.keypadTiming(callId), onDigits, clock })`.
+VER-11 adds two options. `maxIdleTimeoutMs` (`idleTimeoutMs` to 600,000, default
+`idleTimeoutMs`) is the most `lengthenIdleTimeout(ms)` may make the idle timeout, for the rest of
+the call; `idleTimeoutMs` reads the timeout in force. `requestKeys` maps `*` or `A` to `D` to
+`repeat` or `slower`: such a key drops the unfinished entry (an overlong or rejected one too) and
+`press` returns `{status: "request", request}` instead of digits. A `*` listed there is a request,
+no longer "start over"; a key not listed keeps INT-1's meaning. A request is never an attempt:
+nothing reaches the engine, so no attempt is used, added or given back, and the host replays its
+fixed line (slower for `slower`). A caller who asks aloud to repeat or slow down is the host's too.
 
 ## 6. PIN
 

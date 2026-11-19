@@ -109,6 +109,9 @@ export interface EngineAdapters {
 
 export type AdapterName = keyof EngineAdapters;
 
+/** A call the host marked at its start: a relay service, or a TTY (VER-11). */
+export type CallAccess = "relay" | "tty";
+
 export type FlowStatus = "running" | "completed" | "failed" | "abandoned";
 
 /** Where a call is in its flow. The steps are copied in when the flow starts, so a config change never moves a call. */
@@ -143,6 +146,11 @@ export interface CallRecord {
   flow: FlowCursor | null;
   /** Each module's own part, by module name. */
   modules: Record<string, JsonValue>;
+  /**
+   * Set when the host marked the call as relay or TTY at its start (VER-11). It lengthens keypad
+   * timeouts and nothing else, and it is never written to the ledger or a receipt: it can reveal a disability.
+   */
+  access?: CallAccess;
   /** Signals the host's code raised on the call, for step-up rules (VER-13). Raised, never cleared. Absent on a call saved before them. */
   signals?: string[];
   /** Step-up rules already written to the ledger for this call, by name. Absent on a call saved before them. */

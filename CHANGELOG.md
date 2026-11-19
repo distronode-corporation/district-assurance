@@ -22,6 +22,12 @@ All notable changes to this project are documented here. The format follows
   `lockout` setting as defaults and floors; a `verification.locked` event. Badge needs `counters`
   when a factor the caller enters is on. A pass takes its own failure off the calling number with
   `AttemptCounters.removeFailure`, one atomic step. `recordSubjectFailure` is gone.
+- The accessible verification path (VER-11): keypad fields said instead of keyed through
+  `spoken_knowledge` (never the PIN; read as 1 to 32 digits with `normaliseSpokenKeypadEntry`;
+  each spoken try also uses a keypad attempt), `repeat` and `slower` request keys and a lengthened
+  idle timeout on INT-1's `KeypadCollector` (`requestKeys`, `maxIdleTimeoutMs`,
+  `lengthenIdleTimeout`; `Engine.keypadTiming`), and relay or TTY calls
+  (`startCall({access})`) with longer timeouts and no other change.
 - Risk-based step-up rules (VER-13): the policy's `stepUp` raises a scope's minimum on the amount, the
   time of day in its `timeZone`, or a signal the host raises with `raiseSignal`; `authorize(callId,
   scope, amount?)` and every step's own check (`requireScope`) use the raised minimum, a flow step it

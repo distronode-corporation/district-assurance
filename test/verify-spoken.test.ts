@@ -10,7 +10,7 @@ import type { Locale } from "../src/core/runtime.ts";
 import { TEST_KNOWLEDGE_KEY, testSubject } from "../src/testing/index.ts";
 import { judgeSpoken } from "../src/verify/factors.ts";
 import { knowledgeDigest } from "../src/verify/knowledge.ts";
-import { MAX_SPOKEN_TRANSCRIPT, normaliseSpokenAnswer } from "../src/verify/spoken.ts";
+import { MAX_SPOKEN_TRANSCRIPT, normaliseSpokenAnswer, normaliseSpokenKeypadEntry } from "../src/verify/spoken.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig } from "./helpers.ts";
 
 type Case = [locale: Locale, field: SpokenFormat, transcript: string, expected: string | "unusable"];
@@ -109,6 +109,19 @@ describe("normaliseSpokenAnswer", () => {
   it("throws on a field format or a locale it does not know, which is a host's bug", () => {
     assert.throws(() => normaliseSpokenAnswer({ field: "postal" as SpokenFormat, transcript: "K1A 0B1", locale: "en" }), rejects("invalid_input", /ca_postal_code, us_zip_code, reference/));
     assert.throws(() => normaliseSpokenAnswer({ field: "ca_postal_code", transcript: "K1A 0B1", locale: "de" as Locale }), rejects("invalid_input", /en or fr/));
+  });
+});
+
+describe("normaliseSpokenKeypadEntry", () => {
+  it("reads 1 to 32 digits, every value a keypad field can hold, and nothing else", () => {
+    assert.deepEqual(normaliseSpokenKeypadEntry({ transcript: "seven", locale: "en" }), { status: "normalised", value: "7" });
+    assert.deepEqual(normaliseSpokenKeypadEntry({ transcript: "un deux 3", locale: "fr" }), { status: "normalised", value: "123" });
+    assert.deepEqual(normaliseSpokenKeypadEntry({ transcript: "1".repeat(32), locale: "en" }), { status: "normalised", value: "1".repeat(32) });
+    assert.deepEqual(normaliseSpokenKeypadEntry({ transcript: "1".repeat(33), locale: "en" }), { status: "unusable" });
+    assert.deepEqual(normaliseSpokenKeypadEntry({ transcript: "one oh two", locale: "en" }), { status: "unusable" }, "oh is a letter");
+    assert.deepEqual(normaliseSpokenKeypadEntry({ transcript: "", locale: "en" }), { status: "unusable" });
+    // Spanish is refused until a reviewed vocabulary exists (decision 6), like any locale without one.
+    for (const locale of ["de", "es"] as Locale[]) assert.throws(() => normaliseSpokenKeypadEntry({ transcript: "1", locale }), rejects("invalid_input", /en or fr/), locale);
   });
 });
 
