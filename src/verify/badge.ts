@@ -116,19 +116,46 @@ export interface BadgeSlice {
    */
   voidedEpoch?: number;
   /**
-   * An accepted pass whose counters are not yet cleaned up (`forgetPass`): saved with the pass, so a
-   * write that fails after the pass was saved (its ledger entry) still gets the cleanup, in the same
-   * call to `submitFactor` or the call's next. Absent when nothing is owed. `hidden` is the duress
-   * PIN's hidden counter (VER-12), when it is on: a pass not under duress resets it, a duress entry
-   * takes off only its own failure. Absent on a pass saved before it was kept here. `claimed` is set
-   * on the call before the removals that are not safe to run twice (the number's own failure, the
-   * hidden counter's) run, so a replay skips them.
+   * The accepted passes whose counters are not yet cleaned up (`forgetPass`), one each, so two
+   * factors passing at once on one call each get theirs. Absent when nothing is owed.
    */
-  forgetOwed?: { keys: AttemptCounterKey[]; at: string; hidden?: { key: AttemptCounterKey; duress: boolean }; claimed?: true };
+  forgetsOwed?: OwedCleanup[];
+  /** The last id an owed cleanup was given on this call. Absent until the first. */
+  forgetSeq?: number;
+  /** The one owed cleanup a call saved before they were kept one per pass: read with `owedCleanups`. */
+  forgetOwed?: Omit<OwedCleanup, "id">;
   /** The callback this call asked for, or the one it is (callback.ts). Absent on calls saved before: read it with `callbackOf`. */
   callback: CallbackState;
   /** Untrusted content seen on this call so far (onUntrusted counts it), so an entry judged across one is known. Absent on calls saved before. */
   taints?: number;
+}
+
+/**
+ * An accepted pass whose counters are not yet cleaned up (`forgetPass`): saved with the pass, so a
+ * write that fails after the pass was saved (its ledger entry) still gets the cleanup, in the same
+ * call to `submitFactor` or the call's next. `id` is unique on the call (`forgetSeq`; 0 for one
+ * saved before ids). `hidden` is the duress PIN's hidden counter (VER-12), when it is on; absent on
+ * a pass saved before it was kept here. `claimed` is set on the call before the removals that are
+ * not safe to run twice (the number's own failure, the hidden counter's) run, so a replay skips them.
+ */
+export interface OwedCleanup {
+  id: number;
+  keys: AttemptCounterKey[];
+  at: string;
+  hidden?: { key: AttemptCounterKey; duress: boolean };
+  claimed?: true;
+}
+
+/** The cleanups a call owes, the one saved before they were kept one per pass included (id 0). */
+function owedCleanups(s: BadgeSlice): OwedCleanup[] {
+  return [...(s.forgetOwed === undefined ? [] : [{ ...s.forgetOwed, id: 0 }]), ...(s.forgetsOwed ?? [])];
+}
+
+/** Keeps the call's owed cleanups as `list`, in one place, the field saved before ids gone. */
+function keepOwed(s: BadgeSlice, list: OwedCleanup[]): void {
+  delete s.forgetOwed;
+  if (list.length === 0) delete s.forgetsOwed;
+  else s.forgetsOwed = list;
 }
 
 /** Which policy and which FlowConfig revision judged a verification. */
@@ -585,7 +612,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   if (current === undefined) throw new EngineError("module_disabled", `${BADGE} was off when this call started`);
   const counters = rt.adapter("counters");
   // A pass this call saved earlier whose cleanup did not run (its write failed after saving it).
-  if (current.forgetOwed !== undefined) await settleForget(rt, callId, current.forgetOwed.at);
+  for (const owed of owedCleanups(current)) await settleForget(rt, callId, owed.id);
   const lockout = lockoutOf(rt.settings<BadgeSettings>(BADGE).lockout);
   const keys = counterKeys(rt.workspaceId, kind, current);
   const settings = rt.settings<BadgeSettings>(BADGE);
@@ -666,8 +693,11 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   const hard = passed ? null : (recorded.hard ?? (hiddenAfter === null ? null : hiddenHardLock(lockout, hiddenAfter, at)));
   let stale: EngineError | null = null;
   let failed: { error: unknown } | null = null;
+  // The id the pass's cleanup was saved under, from the write's last run.
+  let owedId = -1;
   try {
     stale = await rt.update(callId, (draft) => {
+      owedId = -1;
       const s = draft.slice<BadgeSlice>(BADGE);
       const now = rt.now();
       const factor = { kind, passed, at: now };
@@ -701,8 +731,11 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
       if (passed && KNOWLEDGE_FACTORS.includes(kind)) s.knowledgeMatched = true;
       // The cleanup is owed with the pass, in the same write: never for a pass that was not saved.
       if (passed) {
-        s.forgetOwed = { keys: structuredClone(keys), at: at.toISOString() };
-        if (hidden !== null) s.forgetOwed.hidden = { key: structuredClone(hidden), duress: outcome === "duress" };
+        owedId = (s.forgetSeq ?? 0) + 1;
+        s.forgetSeq = owedId;
+        const owed: OwedCleanup = { id: owedId, keys: structuredClone(keys), at: at.toISOString() };
+        if (hidden !== null) owed.hidden = { key: structuredClone(hidden), duress: outcome === "duress" };
+        keepOwed(s, [...owedCleanups(s), owed]);
       }
       draft.emit("verification.factor", "code", { kind, passed }, kind === "pin" ? outcome : undefined);
       if (hard !== null) draft.emit("verification.locked", "code", { kind, scope: hard.scope, hard: true, until: hard.until });
@@ -720,33 +753,37 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   // Only once the result is saved: a write that failed after saving it (the ledger) still owes the
   // cleanup, a pass refused before saving owes none. The number keeps its failures but this
   // attempt's own: they may be against other accounts, so a pass on this one must not clear them.
-  if (passed) await settleForget(rt, callId, at.toISOString());
+  if (passed) await settleForget(rt, callId, owedId);
   if (failed !== null) throw failed.error;
   return { matched: passed, locked: !passed && (reserved.last || hard !== null) };
 }
 
 /**
- * Runs the counters cleanup a saved pass owes, if the call still owes the one made at `at`, then
+ * Runs the counters cleanup a saved pass owes, if the call still owes the one with `id`, then
  * takes it off the call; a failure to take it off leaves it owed for the call's next factor. The
  * subject's part is safe to run again. The rest is not (a removal by time can take another
  * failure of the same millisecond, a reset a later failure), so it is claimed on the call first
  * and runs at most once: a claim that is not saved runs none of it, and one that is saved and
  * then fails leaves those failures until they leave the window (fail closed).
  */
-async function settleForget(rt: EngineRuntime, callId: string, at: string): Promise<void> {
-  const owed = (await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice;
-  if (owed.forgetOwed?.at !== at) return;
+async function settleForget(rt: EngineRuntime, callId: string, id: number): Promise<void> {
+  const owedOn = (s: BadgeSlice): OwedCleanup | undefined => owedCleanups(s).find((o) => o.id === id);
+  const owed = owedOn((await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice);
+  if (owed === undefined) return;
   const counters = rt.adapter("counters");
-  const { keys, hidden } = owed.forgetOwed;
+  const { keys, hidden, at } = owed;
   await forgetPass(counters, keys, new Date(at));
-  if (owed.forgetOwed.claimed !== true) {
+  if (owed.claimed !== true) {
     // Not claimed (or claimed by another run first): this run leaves the rest to the run that holds it, or the next.
     const take = (s: BadgeSlice): boolean => {
-      if (s.forgetOwed?.at !== at || s.forgetOwed.claimed === true) return false;
-      s.forgetOwed.claimed = true;
+      const list = owedCleanups(s);
+      const mine = list.find((o) => o.id === id);
+      if (mine === undefined || mine.claimed === true) return false;
+      mine.claimed = true;
+      keepOwed(s, list);
       return true;
     };
-    if (!(await claimOnCall(rt, callId, take, (s) => s.forgetOwed?.at === at && s.forgetOwed.claimed === true))) return;
+    if (!(await claimOnCall(rt, callId, take, (s) => owedOn(s)?.claimed === true))) return;
     await removeOwnOnNumbers(counters, keys, new Date(at));
     // The hidden counter forgets only on a pass that is not under duress; a duress entry takes off its
     // own failure, as a pass does, and keeps the rest. One write either way, so the round trips never
@@ -757,7 +794,7 @@ async function settleForget(rt: EngineRuntime, callId: string, at: string): Prom
   await rt
     .update(callId, (draft) => {
       const s = draft.slice<BadgeSlice>(BADGE);
-      if (s.forgetOwed?.at === at) delete s.forgetOwed;
+      keepOwed(s, owedCleanups(s).filter((o) => o.id !== id));
     })
     .catch(() => undefined);
 }

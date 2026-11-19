@@ -80,7 +80,7 @@ describe("T8: hidden-counter cleanup is owed with a saved pass", () => {
     const cas = t.sessions.compareAndSet.bind(t.sessions);
     let lose = true;
     t.sessions.compareAndSet = async (workspaceId, id, version, record) => {
-      const owed = (record as unknown as { modules: { badge: { forgetOwed?: { claimed?: true } } } }).modules.badge.forgetOwed;
+      const owed = (record as unknown as { modules: { badge: { forgetsOwed?: Array<{ claimed?: true }> } } }).modules.badge.forgetsOwed?.[0];
       if (lose && owed?.claimed === true) {
         lose = false;
         throw new Error("store blip");
@@ -113,6 +113,6 @@ describe("T8: hidden-counter cleanup is owed with a saved pass", () => {
     await assert.rejects(t.engine.submitPin(callId, PIN), /counters down/);
     await t.engine.submitKeypad(callId, { dob: DOB });
     assert.equal((await counters.get(hidden, LONG_AGO)).length, 2, "still counted until the window passes");
-    assert.equal(((await t.sessions.get("ws_test", callId))!.record as { modules: { badge: { forgetOwed?: unknown } } }).modules.badge.forgetOwed, undefined, "and no longer owed");
+    assert.equal(((await t.sessions.get("ws_test", callId))!.record as { modules: { badge: { forgetsOwed?: unknown } } }).modules.badge.forgetsOwed, undefined, "and no longer owed");
   });
 });
