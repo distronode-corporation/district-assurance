@@ -6,13 +6,13 @@
 //    report it offline, the unlock is refused. Nothing has been sent to the lock yet, so any failure
 //    here (an error, no answer) is also "refused": the door certainly did not act.
 // 2. Unlock: `POST /locks/unlock_door`, once, and only while the grant has at least the request
-//    timeout left, so the unlock reaches Seam before the grant expires (the pre-check can be slow);
-//    with less left, it is "refused" (`grant_expiring`) and nothing is sent. Sent once: Seam
+//    timeout left (the pre-check can be slow): that bounds when it is sent and how long the client
+//    waits, not the network, nor when Seam's attempt completes. With less left, it is "refused" (`grant_expiring`) and nothing is sent. Sent once: Seam
 //    documents no idempotency key for it, so it is never retried. A 4xx is "refused"; anything
 //    else without a readable action attempt (5xx, a timeout, a dropped connection, a redirect)
 //    throws, which Gate records as "unknown".
 // 3. Confirm: `POST /action_attempts/get` until the attempt leaves "pending" or the confirmation
-//    window ends. Reading an attempt is not an unlock, so it may be asked more than once. "success"
+//    window (elapsed time) ends. Confirmed only when Seam says the device confirmed it. Reading an attempt is not an unlock, so it may be asked more than once. "success"
 //    is delivered and confirmed; an attempt still pending, or one that cannot be read, is delivered
 //    and unconfirmed (Seam took the request); "error" throws, so Gate records "unknown", because a
 //    lock that timed out may still have moved.
@@ -56,14 +56,20 @@ function refusal(status: number, answer: unknown): string {
   return typeof type === "string" && SHORT_CODE.test(type) ? type : `http_${status}`;
 }
 
-/** A Seam action attempt as far as Gate needs it, or null when the answer does not carry one. */
-function actionAttempt(answer: unknown): { id: string; status: "pending" | "success" | "error" } | null {
+type AttemptStatus = "pending" | "success" | "error";
+
+/**
+ * A Seam action attempt as far as Gate needs it, or null when the answer does not carry one.
+ * `byDevice` is Seam's `result.was_confirmed_by_device`: a `success` alone means Seam sent the
+ * command, not that the lock confirmed it moved.
+ */
+function actionAttempt(answer: unknown): { id: string; status: AttemptStatus; byDevice: boolean } | null {
   const attempt = record(record(answer).action_attempt);
   const id = attempt.action_attempt_id;
   const status = attempt.status;
   if (typeof id !== "string" || id === "" || id.length > 200) return null;
   if (status !== "pending" && status !== "success" && status !== "error") return null;
-  return { id, status };
+  return { id, status, byDevice: record(attempt.result).was_confirmed_by_device === true };
 }
 
 /** The Seam adapter (GAT-5): SPEC.md, section 17. */
@@ -77,19 +83,24 @@ export function seamAccessController(options: SeamAccessControllerOptions): Acce
   const timeoutMs = intIn(options.timeoutMs ?? 5000, 100, 30_000, "timeoutMs");
   const confirmWithinMs = intIn(options.confirmWithinMs ?? 10_000, 0, 30_000, "confirmWithinMs");
   const pollIntervalMs = intIn(options.pollIntervalMs ?? 1000, 10, 5000, "pollIntervalMs");
-  const polls = Math.ceil(confirmWithinMs / pollIntervalMs);
   const send = options.fetch ?? fetch;
   const clock = options.clock ?? systemClock;
   const authorization = `Bearer ${options.apiKey}`;
   const path = base.pathname.replace(/\/+$/, "");
 
-  function post(route: string, body: Record<string, string>): Promise<Response> {
-    return send(new URL(`${path}${route}`, base), {
+  /**
+   * One request. The path is set on a copy of the validated base, never resolved against it: a
+   * base path that starts with `//` would otherwise be read as another host, and the key sent there.
+   */
+  function post(route: string, body: Record<string, string>, waitMs = timeoutMs): Promise<Response> {
+    const url = new URL(base.href);
+    url.pathname = `${path}${route}`;
+    return send(url, {
       method: "POST",
       headers: { authorization, "content-type": "application/json" },
       body: JSON.stringify(body),
       redirect: "error",
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: AbortSignal.timeout(waitMs),
     });
   }
 
@@ -110,21 +121,30 @@ export function seamAccessController(options: SeamAccessControllerOptions): Acce
     }
   }
 
-  /** Step 3. The attempt's status once it left "pending", or "pending" when it did not in time or could not be read. */
-  async function settle(attemptId: string): Promise<"pending" | "success" | "error"> {
-    for (let i = 0; i < polls; i++) {
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  /**
+   * Step 4. The attempt once it left "pending", or a pending one when it did not in time or could
+   * not be read. The whole wait is held to `confirmWithinMs` of elapsed time (a monotonic clock):
+   * each pause and each request is cut to what is left.
+   */
+  async function settle(attemptId: string): Promise<{ status: AttemptStatus; byDevice: boolean }> {
+    const pending = { status: "pending" as const, byDevice: false };
+    const deadline = performance.now() + confirmWithinMs;
+    const left = () => deadline - performance.now();
+    for (;;) {
+      const remaining = left();
+      if (remaining <= 0) return pending;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, remaining)));
       try {
-        const response = await post("/action_attempts/get", { action_attempt_id: attemptId });
-        if (response.status < 200 || response.status >= 300) return "pending";
+        // At least 1 ms: a request whose window just ran out times out at once, and reads as pending.
+        const response = await post("/action_attempts/get", { action_attempt_id: attemptId }, Math.max(1, Math.min(timeoutMs, Math.floor(left()))));
+        if (response.status < 200 || response.status >= 300) return pending;
         const attempt = actionAttempt(await response.json());
-        if (attempt === null || attempt.id !== attemptId) return "pending";
-        if (attempt.status !== "pending") return attempt.status;
+        if (attempt === null || attempt.id !== attemptId) return pending;
+        if (attempt.status !== "pending") return attempt;
       } catch {
-        return "pending";
+        return pending;
       }
     }
-    return "pending";
   }
 
   return {
@@ -132,7 +152,7 @@ export function seamAccessController(options: SeamAccessControllerOptions): Acce
       const deviceId = input.target;
       const refused = await cannotUnlock(deviceId);
       if (refused !== null) return { outcome: "refused", reason: refused };
-      // The grant's expiry is strict: an unlock that might reach Seam after it is never sent.
+      // The grant's expiry is strict: an unlock is never sent with less than its timeout left.
       if (Date.parse(input.grant.body.expiresAt) - clock.now().getTime() < timeoutMs) return { outcome: "refused", reason: "grant_expiring" };
 
       // Step 2: once, never retried.
@@ -143,9 +163,10 @@ export function seamAccessController(options: SeamAccessControllerOptions): Acce
       const attempt = actionAttempt(answer);
       if (attempt === null) throw new Error("Seam answered the unlock without a readable action attempt");
 
-      const status = attempt.status === "pending" ? await settle(attempt.id) : attempt.status;
-      if (status === "error") throw new Error("Seam reported that the unlock attempt failed");
-      return { outcome: "delivered", providerRef: attempt.id, confirmed: status === "success" };
+      const settled = attempt.status === "pending" ? await settle(attempt.id) : attempt;
+      if (settled.status === "error") throw new Error("Seam reported that the unlock attempt failed");
+      // Confirmed only when Seam reports that the device itself confirmed the unlock.
+      return { outcome: "delivered", providerRef: attempt.id, confirmed: settled.status === "success" && settled.byDevice };
     },
   };
 }

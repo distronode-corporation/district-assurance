@@ -597,17 +597,21 @@ sent: Seam documents none on unlock.
    (`device_not_found`, ...) or `http_<status>`, and `seam_unavailable` on a 5xx or no answer.
    Nothing was sent to the lock.
 2. Unless the grant has at least `timeoutMs` left by `clock` (the system clock by default), the
-   result is `refused` (`grant_expiring`) and nothing is sent: an unlock that might reach Seam
-   after the grant expired is never sent, since the expiry is strict and the call may end then.
+   result is `refused` (`grant_expiring`) and nothing is sent, since the expiry is strict and the
+   call may end then. This bounds when the unlock is sent and how long the client waits for it,
+   not the network, and Seam's own attempt may still complete later.
    Otherwise `POST /locks/unlock_door {device_id}`, once, never retried. A 4xx is `refused` (Seam's error
    type when it is a short code, otherwise `http_<status>`); a 5xx, a timeout, a dropped connection,
    a redirect, or a 2xx without an action attempt (`action_attempt_id` 1 to 200 characters, `status`
    `pending`, `success` or `error`) throws, which Gate records as `unknown`.
-4. While the attempt is `pending`: `POST /action_attempts/get {action_attempt_id}` every
-   `pollIntervalMs`, at most `confirmWithinMs / pollIntervalMs` times (rounded up). `success` is
-   `delivered` with `confirmed: true`; `error` throws (`unknown`: a lock that timed out may still
-   have moved); still `pending`, or an answer that cannot be read, is `delivered` with
-   `confirmed: false`. `providerRef` is the action attempt id.
+4. While the attempt is `pending`: `POST /action_attempts/get {action_attempt_id}` after each
+   pause of `pollIntervalMs`, the whole wait held to `confirmWithinMs` of elapsed time (each pause
+   and each request is cut to what is left; 0 never asks). `success` is `delivered`, `confirmed:
+   true` only when Seam reports `result.was_confirmed_by_device: true` (a `success` alone means
+   Seam sent the command, not that the lock moved); `error` throws (`unknown`: a lock that timed
+   out may still have moved); still `pending`, or an answer that cannot be read, is `delivered`
+   with `confirmed: false`. `providerRef` is the action attempt id. Each request's path is set on
+   a copy of `baseUrl`, so its host is always `baseUrl`'s.
 
 A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);
 revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS

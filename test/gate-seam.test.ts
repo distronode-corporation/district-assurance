@@ -49,7 +49,7 @@ const device = (id: string, extra: Record<string, unknown> = {}) => ({
 });
 const attempt = (id: string, status: string, extra: Record<string, unknown> = {}) => ({
   ok: true,
-  action_attempt: { action_attempt_id: id, action_type: "UNLOCK_DOOR", status, result: status === "success" ? {} : null, error: null, ...extra },
+  action_attempt: { action_attempt_id: id, action_type: "UNLOCK_DOOR", status, result: status === "success" ? { was_confirmed_by_device: true } : null, error: null, ...extra },
 });
 const seamError = (type: string, message: string) => ({ ok: false, error: { type, message, request_id: "req_1" } });
 
@@ -71,6 +71,8 @@ const DEVICES: Record<string, Answer> = {
 const UNLOCKS: Record<string, Answer> = {
   "dev-ok": [200, attempt("aa-ok", "pending")],
   "dev-instant": [200, attempt("aa-instant", "success")],
+  "dev-unconfirmed": [200, attempt("aa-unconfirmed", "success", { result: { was_confirmed_by_device: false } })],
+  "dev-unconfirmed-later": [200, attempt("aa-unconfirmed-later", "pending")],
   "dev-stuck": [200, attempt("aa-stuck", "pending")],
   "dev-fails": [200, attempt("aa-fails", "pending")],
   "dev-fails-at-once": [200, attempt("aa-fails-at-once", "error", { error: { type: "lock_timeout", message: "The lock did not answer" } })],
@@ -93,6 +95,7 @@ const UNLOCKS: Record<string, Answer> = {
 /** What Seam answers to `/action_attempts/get`, by attempt id. */
 const ATTEMPTS: Record<string, Answer> = {
   "aa-ok": [200, attempt("aa-ok", "success")],
+  "aa-unconfirmed-later": [200, attempt("aa-unconfirmed-later", "success", { result: {} })],
   "aa-stuck": [200, attempt("aa-stuck", "pending")],
   "aa-fails": [200, attempt("aa-fails", "error", { error: { type: "lock_timeout", message: "x" } })],
   "aa-poll-down": [500, seamError("internal_error", "x")],
@@ -184,6 +187,30 @@ describe("seamAccessController", () => {
     assert.equal(polls("aa-instant"), 0, "an attempt that already succeeded is not asked about");
   });
 
+  it("is confirmed only when Seam reports that the device confirmed it, at once or when asked", async () => {
+    assert.deepEqual(await seam().unlock(input("dev-unconfirmed")), { outcome: "delivered", providerRef: "aa-unconfirmed", confirmed: false });
+    assert.deepEqual(await seam().unlock(input("dev-unconfirmed-later")), { outcome: "delivered", providerRef: "aa-unconfirmed-later", confirmed: false });
+    assert.deepEqual(await seam().unlock(input("dev-instant")), { outcome: "delivered", providerRef: "aa-instant", confirmed: true });
+  });
+
+  it("keeps every request on the configured host, even with a base path that starts with //", async () => {
+    const urls: string[] = [];
+    const controller = seamAccessController({
+      apiKey: API_KEY,
+      baseUrl: "http://127.0.0.1//collector.example",
+      clock,
+      fetch: async (url, init) => {
+        urls.push(String(url));
+        const body = JSON.parse(String(init?.body)) as Record<string, string>;
+        const answer = String(url).endsWith("/devices/get") ? device(body.device_id!) : attempt("aa-1", "success");
+        return new Response(JSON.stringify(answer), { status: 200 });
+      },
+    });
+    assert.equal((await controller.unlock(input("dev-1"))).outcome, "delivered");
+    assert.deepEqual(urls.map((u) => new URL(u).host), ["127.0.0.1", "127.0.0.1"]);
+    assert.deepEqual(urls.map((u) => new URL(u).pathname), ["//collector.example/devices/get", "//collector.example/locks/unlock_door"]);
+  });
+
   it("is delivered but unconfirmed while the attempt is pending or cannot be read, and never unlocks twice", async () => {
     for (const [target, ref] of [
       ["dev-stuck", "aa-stuck"],
@@ -195,7 +222,13 @@ describe("seamAccessController", () => {
       assert.deepEqual(await seam({ timeoutMs: 100 }).unlock(input(target)), { outcome: "delivered", providerRef: ref, confirmed: false }, target);
       assert.equal(unlocks(target), 1, target);
     }
-    assert.equal(polls("aa-stuck"), 10, "asked for the whole confirmation window, then stopped");
+    const asked = polls("aa-stuck");
+    assert.ok(asked >= 1 && asked <= 10, `asked within the confirmation window, then stopped (${asked})`);
+    // The whole wait is held to confirmWithinMs of elapsed time, however slow Seam answers.
+    const started = performance.now();
+    assert.deepEqual(await seam({ timeoutMs: 5000, confirmWithinMs: 100 }).unlock(input("dev-poll-slow")), { outcome: "delivered", providerRef: "aa-poll-slow", confirmed: false });
+    const took = performance.now() - started;
+    assert.ok(took < 1000, `a hanging poll is cut to the window left, not the request timeout (${Math.round(took)} ms)`);
     assert.equal(polls("aa-poll-down"), 1, "a failed read ends the asking");
     assert.deepEqual(await seam({ confirmWithinMs: 0 }).unlock(input("dev-ok")), { outcome: "delivered", providerRef: "aa-ok", confirmed: false });
     assert.equal(polls("aa-ok"), 1, "a window of 0 never asks");
