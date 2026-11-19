@@ -78,6 +78,12 @@ function pinSettings(rt: EngineRuntime): PinSettings {
 export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: string; confirm: string }): Promise<PinEnrolmentResult> {
   const settings = pinSettings(rt);
   if (settings.mode === "verifier") throw new EngineError("precondition_failed", "in verifier mode the host's own PIN store enrols PINs");
+  // Each read once, as a string (anything else is an empty, malformed entry): a getter read again
+  // could store the digest of one value after the checks passed another (a date of birth, a run,
+  // two digits the PIN factor never accepts).
+  const given: { pin: unknown; confirm: unknown } = { pin: input.pin, confirm: input.confirm };
+  const pin = typeof given.pin === "string" ? given.pin : "";
+  const confirm = typeof given.confirm === "string" ? given.confirm : "";
   const reserved = await rt.update(callId, (draft) => {
     const record = draft.record;
     assertFlowNotEnded(record);
@@ -100,7 +106,7 @@ export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: 
   const records = rt.adapter("records");
   const subject = await records.getSubject(rt.workspaceId, reserved.subjectKey);
   if (subject === null) throw new EngineError("precondition_failed", "the verified subject is not on file");
-  const digest = rt.hmac(`pin:${reserved.subjectKey}:${input.pin}`);
+  const digest = rt.hmac(`pin:${reserved.subjectKey}:${pin}`);
   // A PIN on file is refused, unless the store says this call's own try stored it (by its id, kept
   // with the digest) and the call has not recorded it yet: the session write after the store's
   // write failed, and the same PIN again finishes that enrolment. Another call's enrolment of the
@@ -109,7 +115,7 @@ export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: 
   const resuming = stored !== undefined && reserved.pending.some((p) => p.enrolmentId === stored && p.subjectKey === reserved.subjectKey);
   if (reserved.overLimit && !resuming) return { enrolled: false, reason: "locked" };
   if (subject.pinDigest !== undefined && !resuming) throw new EngineError("precondition_failed", "a PIN is on file; only the business can reset it");
-  const problem = pinEnrolmentProblem(settings, (d) => rt.hmac(d), subject, input.pin, input.confirm);
+  const problem = pinEnrolmentProblem(settings, (d) => rt.hmac(d), subject, pin, confirm);
   if (problem !== null) return { enrolled: false, reason: problem };
   let enrolmentId = stored!;
   if (!resuming) {
@@ -151,7 +157,9 @@ export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: 
  */
 export async function resetPin(rt: EngineRuntime, subjectKey: string, counters: AttemptCounters | undefined): Promise<void> {
   const settings = pinSettings(rt);
-  if (!SUBJECT_KEY.test(subjectKey)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
+  // A string only: a regex test turns an array into its text, which a record store finds while the
+  // counters, keyed by the value, are left as they were.
+  if (typeof subjectKey !== "string" || !SUBJECT_KEY.test(subjectKey)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
   if (settings.mode === "keyed_hash") await rt.adapter("records").putPinDigest(rt.workspaceId, subjectKey, null);
   await counters?.reset({ workspaceId: rt.workspaceId, factor: "pin", scope: "subject", key: subjectKey });
   await rt.adapter("ledger").append({ callId: null, actor: "member", event: "pin.reset", at: rt.now(), detail: { subjectKey } });

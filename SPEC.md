@@ -176,7 +176,8 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
 - The photo ID link is reserved, created, enrolled and texted in turn; after a failure,
   `startPhotoId` resumes with the same idempotency keys, so a call never has two links. After `maxAttemptsPerCall`,
   `submitPin` returns `locked` without judging. Across calls: below.
-- Enrolment: `enrolPin(callId, {pin, confirm})` lets a caller choose a PIN, keyed twice. It needs
+- Enrolment: `enrolPin(callId, {pin, confirm})` lets a caller choose a PIN, keyed twice (each
+  read once; a value that is not a string is `malformed`). It needs
   the `pin` factor on in `keyed_hash` mode (in `verifier` mode the host's own store enrols, and
   `enrolPin` refuses with `precondition_failed`), a call with no running or ended flow
   (`precondition_failed`), an open call (`invalid_transition`) and an unexpired grant at level 2 or
@@ -203,7 +204,7 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   that records it (`{enrolled: true}`, one `pin.enrolled`), even past `maxAttemptsPerCall` (such a
   retry is not counted); any other PIN is refused as one on file, or `locked` past the limit.
 - Reset: `resetPin(subjectKey)` is a host call for the business's own staff tools, never on a
-  caller's request, and needs the `pin` factor on. In `keyed_hash` mode it removes the digest
+  caller's request, and needs the `pin` factor on (and a string subject key: `invalid_input` otherwise). In `keyed_hash` mode it removes the digest
   (`putPinDigest` with null), so the subject has no PIN until they enrol again at level 2; in
   `verifier` mode the host's store resets its own PIN. Either way it clears the subject's PIN
   failure counters when the engine has a `counters` adapter (VER-1), and appends `pin.reset` to the ledger with no call.
