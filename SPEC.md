@@ -217,7 +217,8 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
 until FIL-2); Paylink `{maxAmountMinor?}` (1 to 1,000,000); Trace `{receipts?, wordings?,
 businessName?}` (`receipts` default true; wordings `{purpose (snake_case), version, text: {en,
-fr}}`, purposes unique; `businessName` 1 to 64 characters on one line, kept by a call when it
+fr}}`, purposes unique; `businessName` 1 to 64 characters on one line, with no lone surrogate
+and no bidirectional embedding, override or isolate, kept by a call when it
 starts, like the wordings, so a flow with `textLink` cannot be attached to a call that kept none).
 
 ## 8. Flow execution
@@ -425,7 +426,8 @@ unless the call already kept that same subject with that same number; Badge's ke
 always stands then, since such a step follows a level 2 verification.
 
 **Receipt link** (purpose `receipt_link`). `textReceiptLink(callId, url)` texts the host's
-capability link to an ended call's receipt (section 12, an `https` URL of at most 512 characters,
+capability link to an ended call's receipt (section 12, an `https` URL of at most 512 characters
+with no whitespace and no lone surrogate,
 else `invalid_input`; a call not ended or without its receipt yet: `precondition_failed`). It
 returns `{texted: true}` only when the flow's `trace.receipt` step has `textLink`, an action was
 noted, the caller's latest answer to `textLink.consent` is "yes" (a later "no" withdraws an

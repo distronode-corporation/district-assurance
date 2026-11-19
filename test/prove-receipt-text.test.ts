@@ -215,8 +215,9 @@ describe("receipt link text", () => {
       c.flows = {};
     });
     const { callId } = await t.engine.startCall();
-    for (const bad of ["http://receipts.example.test/r/x", "https://a.example.test/ x", `https://a.example.test/${"x".repeat(512)}`, "not a url"]) {
-      await assert.rejects(t.engine.textReceiptLink(callId, bad), rejects("invalid_input"));
+    // A lone surrogate would reach the text as is (URL parsing would replace it, the body does not); null and numbers are not links.
+    for (const bad of ["http://receipts.example.test/r/x", "https://a.example.test/ x", `https://a.example.test/${"x".repeat(512)}`, "not a url", "https://a.example.test/r/\ud800", null, 7]) {
+      await assert.rejects(t.engine.textReceiptLink(callId, bad as never), rejects("invalid_input"));
     }
     await assert.rejects(t.engine.textReceiptLink(callId, LINK), rejects("precondition_failed", /once the call has ended/));
     await t.engine.endCall(callId);
@@ -426,7 +427,8 @@ describe("receipt text config", () => {
       }),
       ["modules.trace.settings: businessName must be 1 to 64 characters on one line"],
     );
-    for (const name of [3, "   ", "A\nB", "x".repeat(65)]) {
+    // A lone surrogate, or a bidirectional override that could make the text read as another business's.
+    for (const name of [3, "   ", "A\nB", "x".repeat(65), "Acme\ud800", "Acme \u202eknaB", "\u2066Acme\u2069"]) {
       assert.deepEqual(problems(t, (c) => (c.modules.trace = { settings: { businessName: name as never } })), ["modules.trace.settings: businessName must be 1 to 64 characters on one line"]);
     }
     const withoutTexts = (c: FlowConfig) => {

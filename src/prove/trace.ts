@@ -84,8 +84,12 @@ function wordingErrors(wording: unknown, index: number): string[] {
   return errors;
 }
 
-/** A business name: 1 to 64 characters, no control characters (so no line breaks). */
-const BUSINESS_NAME = /^[^\p{Cc}]{1,64}$/u;
+/**
+ * A business name: 1 to 64 characters, no control characters (so no line breaks), no lone
+ * surrogates, and no bidirectional embedding, override or isolate, which could make the text read
+ * as another business's name.
+ */
+const BUSINESS_NAME = /^[^\p{Cc}\p{Cs}\u202a-\u202e\u2066-\u2069]{1,64}$/u;
 
 function textLinkErrors(link: unknown, ctx: StepContext): string[] {
   if (!isObject(link) || typeof link.consent !== "string" || unknownKeys(link, ["consent"]).length > 0) return ["textLink must be { consent: <a wording purpose> }"];
@@ -377,8 +381,9 @@ export async function textReceiptLink(
   });
 }
 
-function isReceiptLink(url: string): boolean {
-  return url.length <= 512 && !/\s/.test(url) && URL.canParse(url) && new URL(url).protocol === "https:";
+function isReceiptLink(url: unknown): boolean {
+  // The body carries the link as given, so a lone surrogate (which URL parsing would replace) is refused.
+  return typeof url === "string" && url.isWellFormed() && url.length <= 512 && !/\s/.test(url) && URL.canParse(url) && new URL(url).protocol === "https:";
 }
 
 const ACTION_WORDS: Readonly<Record<Locale, Readonly<Record<ActionClass, string>>>> = {
