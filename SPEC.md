@@ -432,8 +432,8 @@ step follows a level 2 verification. Keeping one writes `contact.notice_owed` in
 
 **Receipt link** (purpose `receipt_link`). `textReceiptLink(callId, url)` texts the host's
 capability link to an ended call's receipt (section 12, an `https` URL of at most 512 characters
-with no whitespace and no lone surrogate,
-else `invalid_input`; a call not ended or without its receipt yet: `precondition_failed`). It
+with no whitespace, no control or format character (such as NEL, a zero-width space or a bidi
+override) and no lone surrogate, else `invalid_input`; a call not ended or without its receipt yet: `precondition_failed`). It
 returns `{texted: true}` only when the flow's `trace.receipt` step has `textLink`, an action was
 noted, the caller's latest answer to `textLink.consent` is "yes" (a later "no" withdraws an
 earlier "yes"), a keypad or PIN match still stands (or the call kept a number for Badge's current

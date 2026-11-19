@@ -454,7 +454,8 @@ export class Engine {
     for (const [callId, count] of owed) {
       if (count <= 0) continue;
       try {
-        // A call the host's session retention removed has nothing left to send from.
+        // A call the host's session retention removed cannot be read: it lands in failed, every
+        // sweep, so the host sees a notice it can no longer send (SPEC), never a silent drop.
         if (!trace.noticeDue(await this.#read(callId))) continue;
         if (await this.#deliverAlerts(callId)) result.sent.push(callId);
       } catch {

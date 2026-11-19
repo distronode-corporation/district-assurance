@@ -391,8 +391,11 @@ export async function textReceiptLink(
 }
 
 function isReceiptLink(url: unknown): boolean {
-  // The body carries the link as given, so a lone surrogate (which URL parsing would replace) is refused.
-  return typeof url === "string" && url.isWellFormed() && url.length <= 512 && !/\s/.test(url) && URL.canParse(url) && new URL(url).protocol === "https:";
+  // The body carries the link as given, so a lone surrogate (which URL parsing would replace) is
+  // refused, and so is any control or format character (NEL, NUL, a zero-width space, a bidi
+  // override or isolate), which URL parsing accepts but would put more than a link into the text
+  // or make it read as another.
+  return typeof url === "string" && url.isWellFormed() && url.length <= 512 && !/[\s\p{Cc}\p{Cf}]/u.test(url) && URL.canParse(url) && new URL(url).protocol === "https:";
 }
 
 const ACTION_WORDS: Readonly<Record<Locale, Readonly<Record<ActionClass, string>>>> = {
