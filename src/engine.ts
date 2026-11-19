@@ -42,6 +42,9 @@ export type { EngineAdapters, Locale } from "./core/runtime.ts";
 export type { KeypadResult, OutcomeResult, VerificationResult } from "./verify/badge.ts";
 
 
+/** What an `AttemptCounters` store must have, checked when the engine is built. */
+const COUNTER_METHODS = ["get", "recordFailure", "removeFailure", "reset"] as const;
+
 /** Writes per step before the engine gives up with `conflict`. */
 export const MAX_WRITE_ATTEMPTS = 5;
 
@@ -116,6 +119,13 @@ export class Engine {
     if (keyLength < 16) errors.push("knowledgeKey must be at least 16 bytes");
     if (options.workspaceId === "") errors.push("workspaceId is empty");
     if ((options.adapters as Partial<EngineAdapters>).ledger === undefined) errors.push("the ledger adapter is required: the ledger is always on");
+    // A store missing a method would fail only later, after a pass or a failure: refused now. A
+    // store written before removeFailure existed would leave a failure on the line after every pass.
+    const counters = options.adapters.counters as unknown as Record<string, unknown> | undefined;
+    if (counters !== undefined) {
+      const missing = COUNTER_METHODS.filter((name) => typeof counters[name] !== "function");
+      if (missing.length > 0) errors.push(`the counters adapter is missing ${missing.join(", ")}`);
+    }
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     this.workspaceId = options.workspaceId;
     this.#key = options.knowledgeKey;

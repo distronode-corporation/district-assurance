@@ -142,6 +142,16 @@ describe("lockState: the waits and the hard lock, on a fixed clock", () => {
   });
 });
 
+describe("the counters adapter's shape (iMac hostile pass on 607b324)", () => {
+  it("is checked when the engine is built: a store without removeFailure, written before it existed, is refused", () => {
+    const legacy = new MemoryAttemptCounters();
+    const store = { get: legacy.get.bind(legacy), recordFailure: legacy.recordFailure.bind(legacy), reset: legacy.reset.bind(legacy) };
+    assert.throws(() => setup({ adapters: { counters: store as unknown as AttemptCounters } }), (e: unknown) => e instanceof Error && /counters adapter is missing removeFailure/.test(e.message));
+    assert.throws(() => setup({ adapters: { counters: {} as unknown as AttemptCounters } }), /missing get, recordFailure, removeFailure, reset/);
+    assert.equal(setup({ adapters: { counters: new MemoryAttemptCounters() } }).counters instanceof MemoryAttemptCounters, true);
+  });
+});
+
 describe("lockouts across calls", () => {
   /** A new call verifying the test account, as a caller calling again. */
   async function call(t: TestEngine, input: { accountNumber?: string; callingNumber?: string } = {}): Promise<string> {
