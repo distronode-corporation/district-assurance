@@ -228,7 +228,8 @@ the `dialer` (`CallbackDialer`) and `counters` adapters when it is on.
   the flow's first step, a `badge.verify` step that lists `callback`; otherwise it is refused
   (`precondition_failed`, `invalid_transition`). One per call: a second request, or a request on a
   callback call, is refused (`precondition_failed`).
-- The request is decided in one write that reserves it (`requested`), then refused when no
+- The request is decided in one write that reserves it (`requested`), then refused when the call
+  is tainted (untrusted content entered it, before the request or while it was decided), when no
   `keypad_knowledge` or `pin` factor passed since verification last started from nothing, when the
   subject's `phoneOnFile` is not E.164 (no number on file), when a `callback` counter is locked
   (section 6 rules, under the subject key and the first call's calling number), or when the
@@ -244,8 +245,11 @@ the `dialer` (`CallbackDialer`) and `counters` adapters when it is on.
   and nothing reserved for one subject is ever placed for another. A request that failed before
   it was decided (`requested`) is decided by the next request on the call, as of its reserved
   time: a counter that already holds its failure at that time is not counted again.
-- Either way the call that asked is ended (`endCall`, a running flow abandoned) and
-  `requestCallback` returns nothing: a refused request looks and sounds the same as a placed one.
+- Either way the call that asked is ended (`endCall`, a running flow abandoned; two requests at
+  once end it once, and neither fails for it) and `requestCallback` returns nothing: a refused
+  request looks and sounds the same as a placed one, and so does a placed one whose dial failed
+  (the dialer's error is not passed on, so the answer never says whether a number is on file; the
+  callback stays unpassed and the next request resumes it).
   The first call never gains a level, a factor or a grant from the callback. Asked again, it gives
   the same answer, and a placed callback whose call or dial failed is resumed with the same ids and
   idempotency key.
@@ -254,6 +258,10 @@ the `dialer` (`CallbackDialer`) and `counters` adapters when it is on.
   verification on it for the subject the first call matched, with no factors; choosing the subject
   is not a factor. The dialer then rings the number on file (`dial({callId, to, locale,
   idempotencyKey})`), its reference is kept on the callback call and bound (`callback:<ref>`).
+  `to` is read from the `RecordStore` when it dials, and again on every retry, never from the copy
+  taken when verification began, so a number the business changed since is the one rung; with no
+  E.164 number on file then, the callback fails without ringing
+  (`verification.callback_finished` `refused`).
 - `applyCallbackOutcome({ref, answered, confirmed})` records `callback` on the callback call:
   passed only when the number on file answered and the person keyed the confirmation. Keys, not
   speech: voicemail or an answering machine is `answered` without `confirmed`, and fails. An

@@ -289,9 +289,9 @@ function voided(link: BadgeSlice["identityLink"]): BadgeSlice["identityLink"] {
   return link === "reserved" || link === "sent" ? "void" : link;
 }
 
-/** A callback whose outcome has not arrived can no longer count: it is void. */
+/** A callback whose outcome has not arrived, or whose request is still being decided, can no longer count: it is void. */
 function voidedCallback(callback: CallbackState): CallbackState {
-  return callback.status === "dialing" || callback.status === "dialed" ? { ...callback, status: "void" } : callback;
+  return callback.status === "requested" || callback.status === "dialing" || callback.status === "dialed" ? { ...callback, status: "void" } : callback;
 }
 
 /** Refuses to apply a result judged for an earlier verification of this call. */

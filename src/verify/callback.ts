@@ -63,7 +63,8 @@ export async function requestCallback(rt: EngineRuntime, callId: string): Promis
   const current = before.modules[BADGE] as unknown as BadgeSlice | undefined;
   if (current === undefined) throw new EngineError("module_disabled", `${BADGE} was off when this call started`);
   if (current.callback.status === "placed") return planOf(current.callback);
-  if (current.callback.status === "refused") return null;
+  // Refused, or voided (by a taint or a new subject) while it was decided: the same silent answer.
+  if (current.callback.status === "refused" || current.callback.status === "void") return null;
   const resume = current.callback.status === "requested";
   const reserved = resume
     ? current.callback
@@ -74,8 +75,9 @@ export async function requestCallback(rt: EngineRuntime, callId: string): Promis
         if (draft.record.flow !== null && draft.record.flow.index !== 0) throw new EngineError("precondition_failed", "a callback is asked for on the flow's first step");
         const s = draft.slice<BadgeSlice>(BADGE);
         if (s.callback.status !== "none") throw new EngineError("precondition_failed", "a callback was already asked for on this call");
-        // Only after a keypad or PIN match, and only to a number on file.
-        if (!s.knowledgeMatched || !isCallingNumber(s.subject!.phoneOnFile)) {
+        // Only after a keypad or PIN match, only to a number on file, and never on a call that
+        // untrusted content entered: the taint dropped what the call had matched.
+        if (draft.record.state.tainted || !s.knowledgeMatched || !isCallingNumber(s.subject!.phoneOnFile)) {
           s.callback = { ...s.callback, status: "refused" };
           draft.emit("verification.callback_finished", "code", { outcome: "refused" });
           return null;
@@ -96,6 +98,13 @@ export async function requestCallback(rt: EngineRuntime, callId: string): Promis
   const decided = await allowCallback(rt, reserved, resume);
   return rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
+    // Voided while it was decided (untrusted content, or verification restarted for another
+    // subject): refused, as any refusal is. What was counted stays counted.
+    if (s.callback.status === "void") {
+      s.callback = { ...s.callback, status: "refused", lock: null };
+      draft.emit("verification.callback_finished", "code", { outcome: "refused" });
+      return null;
+    }
     // Another try of this request decided it meanwhile: its answer stands.
     if (s.callback.status !== "requested") return s.callback.status === "placed" ? planOf(s.callback) : null;
     // Verification restarted, perhaps for another subject, while this was decided: what was
@@ -171,14 +180,28 @@ export function beginCallbackCall(draft: CallDraft, plan: CallbackPlan, requeste
 
 /**
  * Dials the number on file for a callback call, keeps the dialer's reference, then binds it to the
- * call. A retry dials again with the same idempotency key, so the line rings once.
+ * call. The number is read from the store each time it dials, a retry included, never from the copy
+ * taken when verification began: a number the business changed since (after a SIM swap, say) is
+ * the one rung, and with no number on file now the callback fails without ringing. A retry dials
+ * again with the same idempotency key, so the line rings once.
  */
 export async function dialCallback(rt: EngineRuntime, callId: string): Promise<void> {
   const record = await rt.read(callId);
   const s = record.modules[BADGE] as unknown as BadgeSlice;
   let ref = s.callback.ref;
   if (s.callback.status === "dialing") {
-    ({ ref } = await rt.adapter("dialer").dial({ callId, to: s.subject!.phoneOnFile, locale: record.locale, idempotencyKey: rt.idempotencyKey(callId, CALLBACK) }));
+    const onFile = await rt.adapter("records").getSubject(rt.workspaceId, s.subjectKey!);
+    const to = onFile?.phoneOnFile ?? "";
+    if (!isCallingNumber(to)) {
+      await rt.update(callId, (draft) => {
+        const callback = draft.slice<BadgeSlice>(BADGE).callback;
+        if (callback.status !== "dialing") return;
+        callback.status = "failed";
+        draft.emit("verification.callback_finished", "code", { outcome: "refused" });
+      });
+      return;
+    }
+    ({ ref } = await rt.adapter("dialer").dial({ callId, to, locale: record.locale, idempotencyKey: rt.idempotencyKey(callId, CALLBACK) }));
     const kept = await rt.update(callId, (draft) => {
       const callback = draft.slice<BadgeSlice>(BADGE).callback;
       if (callback.status !== "dialing") return false;

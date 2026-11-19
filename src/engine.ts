@@ -359,12 +359,25 @@ export class Engine {
   async requestCallback(callId: string): Promise<void> {
     const plan = await callback.requestCallback(this.#rt, callId);
     const first = await this.#read(callId);
-    if (first.state.phase !== "ended") await this.endCall(callId);
+    if (first.state.phase !== "ended") {
+      try {
+        await this.endCall(callId);
+      } catch (e) {
+        // Two requests at once both reach here: the one that ended the call second is not an error.
+        if (!(e instanceof EngineError && e.code === "invalid_transition" && (await this.#read(callId)).state.phase === "ended")) throw e;
+      }
+    }
     if (plan === null) return;
     const flow = first.flow === null ? null : { name: first.flow.name, steps: first.flow.steps, revision: first.flow.revision };
     // Already created when this resumes: then only the dial is retried.
     await this.#create(plan.callbackCallId, first.locale, first.revision, flow, (draft) => callback.beginCallbackCall(draft, plan, callId));
-    await callback.dialCallback(this.#rt, plan.callbackCallId);
+    try {
+      await callback.dialCallback(this.#rt, plan.callbackCallId);
+    } catch {
+      // A dial that failed answers as a refusal does, so the result never says whether the subject
+      // has a number on file. The callback stays dialing, never passed (fail closed); requesting
+      // again resumes it, and the dialer, the host's own adapter, reports its failure to the host.
+    }
   }
 
   /** The dialer's outcome for a callback. Unknown, late, repeated or voided outcomes are ignored. */

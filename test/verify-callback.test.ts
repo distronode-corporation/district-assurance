@@ -331,7 +331,8 @@ describe("callback: resuming after a failure", () => {
     };
     const t = world({ adapters: { dialer } });
     const first = await firstCall(t);
-    await assert.rejects(t.engine.requestCallback(first), /timeout/);
+    // A failed dial answers as a refusal does; asking again resumes it.
+    await t.engine.requestCallback(first);
     assert.equal((await t.engine.state(first)).phase, "ended", "the first call is never held");
     fail = false;
     await t.engine.requestCallback(first);
@@ -354,7 +355,7 @@ describe("callback: resuming after a failure", () => {
     const t = world({ adapters: { dialer } });
     engine = t.engine;
     const first = await firstCall(t);
-    await assert.rejects(t.engine.requestCallback(first), /down/);
+    await t.engine.requestCallback(first);
     await t.engine.markUntrusted("call_2", "crm_note");
     mode = "ok";
     await t.engine.requestCallback(first);

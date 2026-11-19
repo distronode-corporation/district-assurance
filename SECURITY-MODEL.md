@@ -88,10 +88,13 @@ gains a level, a factor or a grant from the callback (tested). The callback is i
 the subject the first call matched (not a factor), and `callback` is recorded there only when the
 dialer reports that the number on file answered and the person keyed the confirmation: keys, not
 speech, so voicemail or an answering machine never passes (tested). It is possession of the line
-only, so the callback call needs a PIN or keypad match too, under the policy. A request is
-refused without a keypad or PIN match or a number on file, and a refused request returns the same
-and ends the first call the same way as a placed one, so a caller cannot tell them apart; only the
-ledger says which (tested). Left to the host: call forwarding and someone else answering the line on file, which
+only, so the callback call needs a PIN or keypad match too, under the policy. The number rung is
+read from the store when it is dialed and on every retry, so a number the business changed (after
+a SIM swap is reported, say) is never bypassed by a copy taken earlier (tested). A request is
+refused without a keypad or PIN match or a number on file, or on a call untrusted content entered,
+and a refused request returns the same and ends the first call the same way as a placed one, as
+does a placed one whose dial failed, so neither a caller nor the code asking can tell them apart;
+only the ledger says which (tested). Left to the host: call forwarding and someone else answering the line on file, which
 the carrier rule does not see.
 
 ### Text flooding and SMS pumping
