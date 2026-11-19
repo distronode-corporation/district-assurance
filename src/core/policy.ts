@@ -384,8 +384,11 @@ function ruleHolds(policy: VerificationPolicy, rule: StepUpRule, facts: StepUpFa
  * with a number and a string.
  */
 export function amountOver(limits: Readonly<Record<string, number>>, amount: StepUpAmount | undefined): boolean {
-  if (!isObject(amount) || typeof amount.amountMinor !== "number" || typeof amount.currency !== "string" || !Object.hasOwn(limits, amount.currency)) return true;
-  return !(amount.amountMinor <= limits[amount.currency]!);
+  if (!isObject(amount)) return true;
+  // Read once: the amount and currency type-checked are the ones compared with the limit.
+  const { amountMinor, currency } = amount;
+  if (typeof amountMinor !== "number" || typeof currency !== "string" || !Object.hasOwn(limits, currency)) return true;
+  return !(amountMinor <= limits[currency]!);
 }
 
 /** Whether an instant falls in a daily window of local times, `from` included, `to` excluded, wrapping past midnight. */

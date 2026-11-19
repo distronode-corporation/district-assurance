@@ -368,3 +368,19 @@ describe("step-up on stored calls and ordinary denials", () => {
     await assert.rejects(t.engine.requestPayment(callId, payment(100)), rejects("scope_denied", /^the grant does not cover payment\.request$/));
   });
 });
+
+describe("step-up: the amount is read once", () => {
+  it("judges the amount it type-checked, never a smaller one swapped in after the check", async () => {
+    const t = stepUpSetup();
+    const callId = await level2Call(t);
+    let reads = 0;
+    const amount = {
+      currency: "cad",
+      get amountMinor() {
+        reads += 1;
+        return reads === 1 ? 90000 : 100;
+      },
+    };
+    assert.equal(await t.engine.authorize(callId, "payment.request", amount), false, "90,000 is over the 50,000 rule");
+  });
+});

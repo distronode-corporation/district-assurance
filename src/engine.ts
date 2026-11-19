@@ -260,7 +260,10 @@ export class Engine {
    * as over every amount rule). A rule that applies for the first time on the call is written to
    * the ledger by name, so this can write.
    */
-  async authorize(callId: string, scope: string, amount?: StepUpAmount): Promise<boolean> {
+  async authorize(callId: string, scope: string, given?: StepUpAmount): Promise<boolean> {
+    // Read once, before the wait: both checks judge the amount the host passed at the call, as a
+    // plain copy, so a getter or a change to the object meanwhile cannot answer each differently.
+    const amount = typeof given === "object" && given !== null ? { amountMinor: given.amountMinor, currency: given.currency } : given;
     const record = await this.#read(callId);
     const check = this.#cover(record, scope, amount);
     if (check.applied.every((name) => record.stepUps.includes(name))) return check.ok;
