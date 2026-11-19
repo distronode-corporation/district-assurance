@@ -54,14 +54,16 @@ describe("engines sharing one session store", () => {
       config: testConfig(),
       clock: t.clock,
       ids: t.ids,
-      adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments: t.payments, pinVerifier: t.pinVerifier, signer: generateTestSigner() },
+      adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments: t.payments, pinVerifier: t.pinVerifier, counters: t.counters, signer: generateTestSigner() },
     });
     const { callId } = await t.engine.startCall();
     await other.beginVerification(callId, { accountNumber: ACCOUNT });
     assert.equal((await t.engine.submitKeypad(callId, { dob: "1" })).matched, false);
+    t.clock.advance(5_000);
     assert.deepEqual(await other.submitKeypad(callId, { dob: "2" }), { matched: false, locked: true }, "the second engine sees the first attempt");
     assert.equal((await t.engine.state(callId)).factors.length, 2);
     const second = await other.startCall();
+    t.clock.advance(15_000);
     await t.engine.beginVerification(second.callId, { accountNumber: ACCOUNT });
     await other.submitKeypad(second.callId, { dob: DOB });
     await t.engine.startPhotoId(second.callId);
@@ -69,13 +71,14 @@ describe("engines sharing one session store", () => {
     assert.deepEqual(await other.applyIdentityOutcome({ sessionId, status: "verified" }), { applied: true, callId: second.callId }, "the reference lives in the store");
   });
 
-  it("gives two concurrent attempts on one call one counted attempt each, never more than the limit", async () => {
+  it("gives concurrent attempts on one call no more than the limit, and judges only one of them at once", async () => {
     const t = setup();
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     const results = await Promise.all([1, 2, 3].map((n) => t.engine.submitKeypad(callId, { dob: String(n) })));
-    assert.equal(results.filter((r) => r.locked).length >= 2, true);
-    assert.equal((await t.engine.state(callId)).factors.length, 2, "the policy allows two attempts per call");
+    assert.equal(results.filter((r) => r.locked).length, 2);
+    // The policy allows two attempts per call; the second is refused too, by the wait after the first failure.
+    assert.equal((await t.engine.state(callId)).factors.length, 1);
   });
 });
 

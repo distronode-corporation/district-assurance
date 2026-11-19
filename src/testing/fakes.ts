@@ -3,6 +3,8 @@
 import { generateKeyPairSync } from "node:crypto";
 
 import type {
+  AttemptCounterKey,
+  AttemptCounters,
   CarrierSignals,
   IdentityProvider,
   IntakeRecord,
@@ -155,6 +157,41 @@ export class FakePinVerifier implements PinVerifier {
     this.asked.push(input.subjectKey);
     return { matched: this.#pins.get(`${input.workspaceId}/${input.subjectKey}`) === input.pin };
   }
+}
+
+/**
+ * The reference `AttemptCounters`: failure times per key, in memory. Share one between engines
+ * to share lockouts, as a host shares one database table between processes.
+ */
+export class MemoryAttemptCounters implements AttemptCounters {
+  readonly #failures = new Map<string, number[]>();
+
+  async get(key: AttemptCounterKey, since: string): Promise<string[]> {
+    return this.#since(this.#failures.get(counterId(key)) ?? [], since);
+  }
+
+  async recordFailure(key: AttemptCounterKey, at: string, since: string): Promise<string[]> {
+    // No await between the read and the write: in one process, this is one atomic step.
+    const id = counterId(key);
+    const kept = (this.#failures.get(id) ?? []).filter((t) => t >= Date.parse(since));
+    kept.push(Date.parse(at));
+    this.#failures.set(id, kept);
+    return this.#since(kept, since);
+  }
+
+  async reset(key: AttemptCounterKey): Promise<void> {
+    this.#failures.delete(counterId(key));
+  }
+
+  #since(times: readonly number[], since: string): string[] {
+    const from = Date.parse(since);
+    return times.filter((t) => t >= from).map((t) => new Date(t).toISOString());
+  }
+}
+
+/** A JSON tuple, so no two keys share an id whatever their parts contain. */
+function counterId(key: AttemptCounterKey): string {
+  return JSON.stringify([key.workspaceId, key.factor, key.scope, key.key]);
 }
 
 /** A subject record built from plain values, hashed the way the engine compares them. */

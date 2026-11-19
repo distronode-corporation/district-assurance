@@ -300,8 +300,11 @@ export class Engine {
 
   // ---- Badge (verify) ----------------------------------------------------------------------
 
-  /** Starts (or restarts) verification, with the account number the caller keyed or a subject key the host's code chose. */
-  beginVerification(callId: string, input: { accountNumber: string } | { subjectKey: string }): Promise<void> {
+  /**
+   * Starts (or restarts) verification, with the account number the caller keyed or a subject key
+   * the host's code chose, and the calling number when it is not withheld (counted, never a factor).
+   */
+  beginVerification(callId: string, input: badge.BeginVerificationInput): Promise<void> {
     return badge.beginVerification(this.#rt, callId, input);
   }
 

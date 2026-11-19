@@ -10,14 +10,13 @@ import { revokeConsent } from "../src/prove/consent.ts";
 import { exportLedger } from "../src/prove/later.ts";
 import { gateModule } from "../src/gate/later.ts";
 import { createTestEngine } from "../src/testing/index.ts";
-import { checkTextCode, enrolPin, normaliseSpokenAnswer, recordSubjectFailure, sendTextCode } from "../src/verify/later.ts";
+import { checkTextCode, enrolPin, normaliseSpokenAnswer, sendTextCode } from "../src/verify/later.ts";
 import { verifyTelnyxSignature, verifyTwilioSignature } from "../src/webhooks/carrier.ts";
 
 const form = { formId: "f", version: "1", fields: [] };
 const hook = { url: "https://example.test/", headers: {}, body: "", now: new Date(0) };
 
 const STUBS: Array<[string, () => unknown]> = [
-  ["VER-1", () => recordSubjectFailure({ workspaceId: "w", subjectKey: "s" })],
   ["VER-2", () => sendTextCode({ callId: "c" })],
   ["VER-2", () => checkTextCode({ callId: "c", code: "1" })],
   ["VER-3", () => normaliseSpokenAnswer({ field: "postal", transcript: "", locale: "en" })],
