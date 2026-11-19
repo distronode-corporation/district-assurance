@@ -11,6 +11,7 @@ import { createHash, createPublicKey, verify, type KeyObject, type X509Certifica
 
 import type { AnchorProof, AuditEntry } from "../core/adapters.ts";
 import { canonicalJson } from "../core/canonical.ts";
+import { isObject } from "../core/shape.ts";
 import { verifyChain } from "./ledger.ts";
 
 // ---- the anchor payload -------------------------------------------------------------------------
@@ -359,7 +360,10 @@ export type AnchorCheck =
  * changed or rebuilt after it was anchored. Never throws.
  */
 export function verifyAnchor(anchored: AuditEntry, entries: readonly AuditEntry[], trust: AnchorTrust): AnchorCheck {
-  const { seq, proof } = anchored.detail;
+  // What a verifier is handed is not trusted: anything that is not an entry, a list or a trust is malformed.
+  const detail: unknown = isObject(anchored) ? anchored.detail : undefined;
+  if (!isObject(detail) || !Array.isArray(entries) || !isObject(trust) || !Array.isArray(trust.tsa)) return { ok: false, reason: "malformed" };
+  const { seq, proof } = detail;
   if (anchored.event !== "ledger.anchored" || !Number.isSafeInteger(seq) || (seq as number) < 1 || !isAnchorProof(proof)) {
     return { ok: false, reason: "malformed" };
   }

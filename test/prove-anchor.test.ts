@@ -13,7 +13,7 @@ import { ENGINE_EVENTS, type EngineEvent } from "../src/core/events.ts";
 import { ANCHOR_CONTEXT, anchorPayload, checkRekorEntry, checkTimestamp, isAnchorProof, readDer, verifyAnchor, type RekorLog } from "../src/prove/anchor.ts";
 import { GENESIS_HASH, chainEntry, verifyChain } from "../src/prove/ledger.ts";
 import { signReceipt, verifyReceipt, type ReceiptBody, type SignedReceipt } from "../src/prove/receipt.ts";
-import { FakeTimestampAuthority, generateTestSigner } from "../src/testing/fakes.ts";
+import { FakeTimestampAuthority, FixedClock, generateTestSigner } from "../src/testing/fakes.ts";
 import * as root from "../src/index.ts";
 import * as testing from "../src/testing/index.ts";
 import { createTestEngine } from "../src/testing/index.ts";
@@ -227,7 +227,7 @@ describe("verifyAnchor", () => {
     assert.deepEqual(verifyAnchor(entry, entries.slice(0, 2), { tsa: tsa.chain }), { ok: false, reason: "chain" });
     assert.deepEqual(verifyAnchor(entry, entries, { tsa: [] }), { ok: false, reason: "certificate" });
     // Another authority's chain: the signature is not its key's.
-    assert.deepEqual(verifyAnchor(entry, entries, { tsa: new FakeTimestampAuthority({ now: () => new Date() }).chain }), { ok: false, reason: "token" });
+    assert.deepEqual(verifyAnchor(entry, entries, { tsa: new FakeTimestampAuthority(new FixedClock()).chain }), { ok: false, reason: "token" });
   });
 
   it("refuses a malformed anchor entry", async () => {
@@ -240,6 +240,16 @@ describe("verifyAnchor", () => {
       { ...entry, detail: { seq: entry.detail.seq! } },
     ]) {
       assert.deepEqual(verifyAnchor(bad, entries, { tsa: tsa.chain }), { ok: false, reason: "malformed" });
+    }
+    // Never throws, whatever it is handed: no entry, no detail, no entries, no chain.
+    for (const [anchoredBad, entriesBad, trustBad] of [
+      [null, entries, { tsa: tsa.chain }],
+      [{ ...entry, detail: undefined }, entries, { tsa: tsa.chain }],
+      [entry, null, { tsa: tsa.chain }],
+      [entry, entries, {}],
+      [entry, entries, null],
+    ] as const) {
+      assert.equal(verifyAnchor(anchoredBad as never, entriesBad as never, trustBad as never).ok, false);
     }
   });
 });
@@ -339,7 +349,7 @@ describe("the time-stamp authority adapter, on a recorded answer", () => {
       { body: recordedTimestamp },
     ];
     for (const [i, answer] of answers.entries()) {
-      const chain = i === 3 ? new FakeTimestampAuthority({ now: () => new Date() }).chain : recordedChain;
+      const chain = i === 3 ? new FakeTimestampAuthority(new FixedClock()).chain : recordedChain;
       const anchor = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain, fetch: replay(answer).fetch });
       await assert.rejects(anchor.timestamp(payload), Error);
     }

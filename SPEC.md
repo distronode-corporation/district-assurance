@@ -319,7 +319,8 @@ told, best effort, with `callId` null.
 - `verifyAnchor(entry, entries, {tsa, rekor?})` checks offline and never throws. `entries` run from
   seq 1 to at least the covered seq; `tsa` is the authority's certificate chain as the host has it,
   signing certificate first (certificates in the token are ignored); `rekor` is the log's public
-  key (Ed25519 or ECDSA) and origin. In order: the entry's shape (`malformed`); the chain up to
+  key (Ed25519 or ECDSA) and origin. In order: the entry's shape, and an `entries` that is not a
+  list or a trust without a `tsa` list (`malformed`); the chain up to
   `seq` (`chain`); the token: one signer, signed content type TSTInfo, signed message digest of the
   TSTInfo, signature by the first certificate with RSA or ECDSA over SHA-256, 384 or 512 (`token`);
   the chain: the first certificate has the time-stamping extended key usage, each is issued and
