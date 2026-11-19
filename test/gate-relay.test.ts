@@ -1,5 +1,6 @@
 // The signed-webhook relay adapter (GAT-2), against a real HTTP server on the loopback address.
 import { strict as assert } from "node:assert";
+import { once } from "node:events";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
@@ -37,6 +38,7 @@ describe("webhookRelay", () => {
     ["/number", (res) => res.writeHead(200).end("5")],
     ["/long-ref", (res) => res.writeHead(200).end(JSON.stringify({ state: "requested", ref: "r".repeat(201) }))],
     ["/replay", (res) => res.writeHead(409).end(JSON.stringify({ error: "replay" }))],
+    ["/denied", (res) => res.writeHead(401).end(JSON.stringify({ error: "signature" }))],
     ["/missing", (res) => res.writeHead(404).end("no")],
     ["/odd-error", (res) => res.writeHead(400).end(JSON.stringify({ error: 7 }))],
     ["/null-error", (res) => res.writeHead(401).end("null")],
@@ -56,7 +58,10 @@ describe("webhookRelay", () => {
     });
   });
   before(async () => {
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    // Waits for the bind, and fails the setup if it cannot bind.
+    const listening = once(server, "listening");
+    server.listen(0, "127.0.0.1");
+    await listening;
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
   after(async () => {
@@ -77,6 +82,11 @@ describe("webhookRelay", () => {
     const result = await webhookRelay({ url: `${base}/confirmed` }).unlock(input);
     assert.deepEqual(result, { outcome: "delivered", providerRef: "relay-7", confirmed: true });
     const request = seen.at(-1)!;
+    // Written out by hand, not by the serialiser under test: keys sorted, no whitespace.
+    assert.equal(
+      request.body,
+      '{"alg":"ES256","body":{"action":"unlock","audience":"lobby","expiresAt":"2026-01-01T00:01:00.000Z","grantId":"acc_1","issuedAt":"2026-01-01T00:00:00.000Z","kind":"access","level":2,"scope":"entry.open","target":"door-1","v":1,"workspaceId":"w"},"kid":"k1","signature":"sig"}',
+    );
     assert.equal(request.body, canonicalJson(grant));
     assert.equal(request.headers["content-type"], "application/json");
     assert.equal(request.headers["idempotency-key"], input.idempotencyKey);
@@ -92,7 +102,9 @@ describe("webhookRelay", () => {
 
   it("treats a 4xx as refused, with the relay's error code or the status", async () => {
     const relay = (path: string) => webhookRelay({ url: `${base}${path}` }).unlock(input);
-    assert.deepEqual(await relay("/replay"), { outcome: "refused", reason: "replay" });
+    // A replay answer is not a refusal: an earlier request with this grant may have opened the door.
+    await assert.rejects(relay("/replay"), /409: the grant was already used/);
+    assert.deepEqual(await relay("/denied"), { outcome: "refused", reason: "signature" });
     assert.deepEqual(await relay("/missing"), { outcome: "refused", reason: "http_404" });
     assert.deepEqual(await relay("/odd-error"), { outcome: "refused", reason: "http_400" });
     assert.deepEqual(await relay("/null-error"), { outcome: "refused", reason: "http_401" });
