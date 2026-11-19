@@ -10,7 +10,7 @@ import { receiptPayload, verifyReceipt, type SignedReceipt } from "../src/prove/
 import { SUBJECT_EXPORT_DOMAIN, subjectExportPayload, verifySubjectExport, type SignedSubjectExport } from "../src/prove/subject.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, type TestEngine } from "../src/testing/index.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
-import { testSubject } from "../src/testing/fakes.ts";
+import { MemoryRecordStore, testSubject } from "../src/testing/fakes.ts";
 import { ACCOUNT, DOB, PIN, rejects, setup, testConfig, verifiedCall, wording } from "./helpers.ts";
 
 const SUBJECT = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
@@ -371,5 +371,22 @@ describe("eraseSubject", () => {
     const t = setup();
     await t.records.deletePinDigest("ws_test", "b".repeat(64));
     assert.equal(await t.records.getSubject("ws_test", "b".repeat(64)), null);
+  });
+});
+
+describe("MemoryRecordStore keys", () => {
+  it("keeps workspaces apart when an id holds a slash: deleting north's desk/r1 leaves north/desk's r1", async () => {
+    const store = new MemoryRecordStore();
+    const record = (workspaceId: string, recordId: string): IntakeRecord => ({
+      workspaceId, recordId, callId: "c1", subjectKey: "s1", formId: "f", formVersion: "1", values: {}, digest: "d", confirmedBy: "keypad", confirmedAt: "2026-01-01T00:00:00.000Z",
+    });
+    await store.putIntakeRecord(record("north/desk", "r1"));
+    await store.deleteIntakeRecords("north", ["desk/r1"]);
+    assert.notEqual(await store.getIntakeRecord("north/desk", "r1"), null);
+    await store.putIntakeRecord(record("north/desk", "r1"));
+    assert.equal((await store.listIntakeRecords("north/desk", "s1")).length, 1, "and no tombstone for it either");
+    const subject = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: "+15550100", knowledge: { dob: DOB } });
+    store.putSubject("north/desk", subject);
+    assert.equal(await store.getSubject("north", `desk/${subject.subjectKey}`), null);
   });
 });

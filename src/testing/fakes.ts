@@ -116,6 +116,11 @@ export class FakePaymentLinks implements PaymentLinks {
   }
 }
 
+/** A map key for an id within a workspace that no two pairs share, whatever either holds ("/" included). */
+function scoped(workspaceId: string, id: string): string {
+  return JSON.stringify([workspaceId, id]);
+}
+
 export class MemoryRecordStore implements RecordStore {
   readonly #subjects = new Map<string, SubjectRecord>();
   readonly #records = new Map<string, IntakeRecord>();
@@ -123,22 +128,22 @@ export class MemoryRecordStore implements RecordStore {
   readonly #deleted = new Set<string>();
 
   putSubject(workspaceId: string, subject: SubjectRecord): void {
-    this.#subjects.set(`${workspaceId}/${subject.subjectKey}`, structuredClone(subject));
+    this.#subjects.set(scoped(workspaceId, subject.subjectKey), structuredClone(subject));
   }
 
   async getSubject(workspaceId: string, subjectKey: string): Promise<SubjectRecord | null> {
-    const subject = this.#subjects.get(`${workspaceId}/${subjectKey}`);
+    const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
     return subject === undefined ? null : structuredClone(subject);
   }
 
   async putIntakeRecord(record: IntakeRecord): Promise<void> {
-    const key = `${record.workspaceId}/${record.recordId}`;
+    const key = scoped(record.workspaceId, record.recordId);
     if (this.#deleted.has(key)) return;
     this.#records.set(key, structuredClone(record));
   }
 
   async getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null> {
-    const record = this.#records.get(`${workspaceId}/${recordId}`);
+    const record = this.#records.get(scoped(workspaceId, recordId));
     return record === undefined ? null : structuredClone(record);
   }
 
@@ -148,13 +153,13 @@ export class MemoryRecordStore implements RecordStore {
 
   async deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void> {
     for (const recordId of recordIds) {
-      this.#records.delete(`${workspaceId}/${recordId}`);
-      this.#deleted.add(`${workspaceId}/${recordId}`);
+      this.#records.delete(scoped(workspaceId, recordId));
+      this.#deleted.add(scoped(workspaceId, recordId));
     }
   }
 
   async deletePinDigest(workspaceId: string, subjectKey: string): Promise<void> {
-    delete this.#subjects.get(`${workspaceId}/${subjectKey}`)?.pinDigest;
+    delete this.#subjects.get(scoped(workspaceId, subjectKey))?.pinDigest;
   }
 }
 
@@ -167,12 +172,12 @@ export class FakePinVerifier implements PinVerifier {
   readonly #pins = new Map<string, string>();
 
   set(workspaceId: string, subjectKey: string, pin: string): void {
-    this.#pins.set(`${workspaceId}/${subjectKey}`, pin);
+    this.#pins.set(scoped(workspaceId, subjectKey), pin);
   }
 
   async verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean }> {
     this.asked.push(input.subjectKey);
-    return { matched: this.#pins.get(`${input.workspaceId}/${input.subjectKey}`) === input.pin };
+    return { matched: this.#pins.get(scoped(input.workspaceId, input.subjectKey)) === input.pin };
   }
 }
 
