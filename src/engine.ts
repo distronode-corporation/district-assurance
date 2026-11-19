@@ -18,7 +18,7 @@ import { EngineError, RateLimitedError } from "./core/errors.ts";
 import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
 import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
-import { ATTESTATIONS, capCallLevel, scopeClass, scopesForLevel, type AssuranceLevel, type Attestation, type ScopeClass, type VerificationPolicy } from "./core/policy.ts";
+import { ATTESTATIONS, capCallLevel, raiseMinimum, scopeClass, scopesForLevel, stepAmount, type AssuranceLevel, type Attestation, type ScopeClass, type StepUpAmount, type VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, interruptLine, type RedactionFinding, type Redactor } from "./core/redaction.ts";
 import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
@@ -169,6 +169,8 @@ export class Engine {
   readonly #sendScheduled = new Map<string, string>();
   #receiptModules: readonly AssuranceModule[];
   #config: FlowConfig;
+  /** The draft of each record being changed, so a scope check inside a change can write its step-up rules to the ledger (VER-13). */
+  readonly #drafts = new WeakMap<CallRecord, CallDraft>();
 
   constructor(options: EngineOptions) {
     const errors: string[] = [];
@@ -471,9 +473,39 @@ export class Engine {
     return { ...result, interrupt: result.findings.length > 0, line: interruptLine(result.findings, locale) };
   }
 
-  /** Whether the call's grant covers a scope now. A scope the policy does not list is refused. */
-  async authorize(callId: string, scope: string): Promise<boolean> {
-    return this.#authorized(await this.#read(callId), scope);
+  /**
+   * Whether the call's grant covers a scope now. A scope the policy does not list is refused. The
+   * scope's minimum is raised by the policy's step-up rules that hold (VER-13): pass the amount a
+   * money scope is for (in a flow, the current step's amount is the default; an amount not known
+   * counts as over every amount rule). A rule that applies for the first time on the call is
+   * written to the ledger by name, so this can write.
+   */
+  async authorize(callId: string, scope: string, given?: StepUpAmount): Promise<boolean> {
+    // Read once, before the wait: both checks judge the amount the host passed at the call, as a
+    // plain copy, so a getter or a change to the object meanwhile cannot answer each differently.
+    // A null from the host is no amount (over every amount rule), never the internal "not asked yet".
+    const amount = typeof given === "object" && given !== null ? { amountMinor: given.amountMinor, currency: given.currency } : (given ?? undefined);
+    const record = await this.#read(callId);
+    const check = this.#cover(record, scope, amount);
+    if (check.applied.every((name) => (record.stepUps ?? []).includes(name))) return check.ok;
+    return this.#update(callId, (draft) => this.#authorized(draft.record, scope, amount));
+  }
+
+  /**
+   * Raises a named signal on the call (for example `fraud_suspected`), for the policy's step-up
+   * rules. The host's code raises it; a signal stays raised for the rest of the call. In a flow, a
+   * current step whose scope it raises above the call's verification fails, naming the rule.
+   */
+  async raiseSignal(callId: string, signal: string): Promise<void> {
+    if (!(this.#config.policy.stepUp ?? []).some((rule) => rule.signal === signal)) throw new EngineError("invalid_input", "no step-up rule uses that signal");
+    await this.#update(callId, (draft) => {
+      if (draft.record.state.phase === "ended") throw new EngineError("invalid_transition", "the call has ended");
+      const signals = (draft.record.signals ??= []);
+      if (signals.includes(signal)) return;
+      signals.push(signal);
+      draft.emit("signal.raised", "code", { signal });
+      this.#holdStep(draft);
+    });
   }
 
   // ---- flows -------------------------------------------------------------------------------
@@ -589,6 +621,7 @@ export class Engine {
       const mark = firstOwner.enterStep(first, record.modules[firstOwner.manifest.name]!);
       record.flow = { name, revision, steps, index: 0, mark, status: "running", counted: start.counted };
       draft.emit("flow.started", "code", { flow: name, revision, steps: steps.length });
+      this.#holdStep(draft);
     }
   }
 
@@ -1054,16 +1087,22 @@ export class Engine {
   async updateModule(callId: string, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): Promise<JsonValue> {
     this.#outsideModule(name);
     const module = this.registry.get(name)!;
-    return this.#update(callId, (draft) => {
+    const out = await this.#update(callId, (draft): { refused: EngineError } | { next: JsonValue } => {
       assertFlowNotEnded(draft.record);
       const step = draft.step();
       if (step !== null && !module.manifest.provides.steps.includes(step.type)) {
         throw new EngineError("precondition_failed", `the flow is on step ${step.type}, not a step of ${name}`);
       }
       const needs = step === null ? Object.values(module.manifest.scopes.needs) : [module.manifest.scopes.needs[step.type]].filter((n) => n !== undefined);
-      for (const scope of needs) if (!this.#authorized(draft.record, scope)) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
-      return this.#applyModule(draft, name, fn);
+      // Held at the minimum the step-up rules raise each scope to for the step's amount (VER-13).
+      for (const scope of needs) {
+        const refused = this.#requireScope(draft, scope, stepAmount(step));
+        if (refused !== null) return { refused };
+      }
+      return { next: this.#applyModule(draft, name, fn) };
     });
+    if ("refused" in out) throw out.refused;
+    return out.next;
   }
 
   #applyModule(draft: CallDraft, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): JsonValue {
@@ -1108,7 +1147,8 @@ export class Engine {
       read: (callId) => this.#read(callId),
       append: (entry) => this.#append(entry),
       flushLedger: (callId) => this.flushLedger(callId),
-      authorized: (record, scope) => this.#authorized(record, scope),
+      authorized: (record, scope, amount) => this.#authorized(record, scope, amount),
+      requireScope: (draft, scope, amount) => this.#requireScope(draft, scope, amount),
       bindRef: async (ref, callId) => {
         await this.#sessions.bindRef(this.workspaceId, ref, callId);
       },
@@ -1158,21 +1198,40 @@ export class Engine {
     return this.#clock.now().toISOString();
   }
 
-  #authorized(record: CallRecord, scope: string): boolean {
-    const min: AssuranceLevel | undefined = Object.hasOwn(this.#config.policy.scopes, scope) ? this.#config.policy.scopes[scope] : undefined;
-    if (min === undefined || record.state.phase === "ended") return false;
+  #authorized(record: CallRecord, scope: string, amount?: StepUpAmount | null): boolean {
+    return this.#cover(record, scope, amount).ok;
+  }
+
+  /**
+   * Whether the call's grant covers a scope now (`ok`), the step-up rules that raised its minimum
+   * (`applied`), and, when not covered, the rules the grant falls short of (`rules`; empty when
+   * the grant would not cover the scope anyway). Inside a change, a rule applied for the first time
+   * on the call is written to the ledger by name, never with the amount, the time or the signal.
+   * `amount` left out is the current step's; null skips amount rules (nothing is asked yet).
+   */
+  #cover(record: CallRecord, scope: string, amount: StepUpAmount | undefined | null = stepAmount(currentStep(record))): { ok: boolean; applied: string[]; rules: string[] } {
+    const policy = this.#config.policy;
+    const min: AssuranceLevel | undefined = Object.hasOwn(policy.scopes, scope) ? policy.scopes[scope] : undefined;
+    if (min === undefined || record.state.phase === "ended") return { ok: false, applied: [], rules: [] };
     // A duress call (VER-12) refuses money, contact and access, and the scopes Badge's settings named, as if ungranted.
-    if (badge.duressRefuses(record, scope, scopeClass(scope, this.#config.policy.scopeClasses, this.registry.scopeClasses()))) return false;
-    if (min === 0) return true;
+    if (badge.duressRefuses(record, scope, scopeClass(scope, policy.scopeClasses, this.registry.scopeClasses()))) return { ok: false, applied: [], rules: [] };
+    const now = this.#clock.now();
+    const raised = raiseMinimum(policy, scope, { amount, at: now, signals: record.signals ?? [] });
+    const draft = this.#drafts.get(record);
+    for (const rule of raised.rules) {
+      const ledgered = (record.stepUps ??= []);
+      if (draft === undefined || ledgered.includes(rule.name)) continue;
+      ledgered.push(rule.name);
+      draft.emit("policy.step_up", "code", { rule: rule.name, scope, level: rule.level });
+    }
+    const applied = raised.rules.map((rule) => rule.name);
+    if (raised.level === 0) return { ok: true, applied, rules: [] };
     const grant = record.state.grant;
-    // The grant's level is checked against today's minimum and today's attestation cap too, so a
-    // stricter config applies to grants already issued.
-    return (
-      grant !== null &&
-      grant.scopes.includes(scope) &&
-      capCallLevel(this.#config.policy, grant.level, record) >= min &&
-      this.#clock.now().getTime() < Date.parse(grant.expiresAt)
-    );
+    // The grant's level is checked against today's minimum, raised for this request, and today's
+    // attestation cap, so a stricter config or a step-up rule applies to grants already issued.
+    const reached = grant !== null && grant.scopes.includes(scope) && now.getTime() < Date.parse(grant.expiresAt) ? capCallLevel(policy, grant.level, record) : 0;
+    if (reached >= raised.level) return { ok: true, applied, rules: [] };
+    return { ok: false, applied, rules: reached < min ? [] : raised.rules.filter((rule) => rule.level > reached).map((rule) => rule.name) };
   }
 
   async #read(callId: string): Promise<CallRecord> {
@@ -1218,7 +1277,7 @@ export class Engine {
   }
 
   #draft(record: CallRecord, events: QueuedEvent[]): CallDraft {
-    return {
+    const draft: CallDraft = {
       record,
       slice: <T>(name: string): T => this.#slice(record.modules, name) as unknown as T,
       apply: (event) => {
@@ -1245,6 +1304,8 @@ export class Engine {
       },
       step: () => currentStep(record),
     };
+    this.#drafts.set(record, draft);
+    return draft;
   }
 
   /** Moves a running flow past every step that is now complete, and stops it on a failed one. */
@@ -1278,7 +1339,45 @@ export class Engine {
       }
       const nextOwner = this.registry.stepOwner(next.type);
       flow.mark = nextOwner === undefined ? null : nextOwner.enterStep(next, record.modules[nextOwner.manifest.name]!);
+      this.#holdStep(draft);
     }
+  }
+
+  /**
+   * Fails the running flow's current step when step-up rules raise the scope it needs above what
+   * the call's verification reached (VER-13). A flow cannot branch to ask for more (ADR-14), so it
+   * stops there, naming the rules. Checked when a step is entered and when a signal is raised; the
+   * step's own work checks again (`#requireScope`), for the time of day.
+   */
+  #holdStep(draft: CallDraft): void {
+    const step = draft.step();
+    if (step === null) return;
+    const scope = this.registry.stepOwner(step.type)?.manifest.scopes.needs[step.type];
+    if (scope === undefined) return;
+    const { rules } = this.#cover(draft.record, scope, stepAmount(step));
+    if (rules.length > 0) this.#failStep(draft, rules);
+  }
+
+  #failStep(draft: CallDraft, rules: string[]): void {
+    const flow = draft.record.flow!;
+    // Only a running flow has a current step to fail (both callers checked it is on one).
+    flow.status = "failed";
+    draft.emit("flow.failed", "code", { flow: flow.name, step: flow.index, type: flow.steps[flow.index]!.type, rules });
+  }
+
+  /** See `EngineRuntime.requireScope`. */
+  #requireScope(draft: CallDraft, scope: string, amount: StepUpAmount | undefined | null): EngineError | null {
+    const { ok, applied, rules } = this.#cover(draft.record, scope, amount);
+    if (ok) return null;
+    if (rules.length === 0) {
+      // A denial no rule affects throws at once. When a rule applies, the refusal is returned, so
+      // the change is saved and a rule applied for the first time stays on the ledger. The flow is
+      // not failed: without the rule the grant would not cover the scope either.
+      if (applied.length === 0) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
+      return new EngineError("scope_denied", `the grant does not cover ${scope}; the step-up rule(s) ${applied.join(", ")} also apply`);
+    }
+    if (currentStep(draft.record) !== null) this.#failStep(draft, rules);
+    return new EngineError("scope_denied", `the grant does not cover ${scope} at the level the step-up rule(s) ${rules.join(", ")} require`);
   }
 
   /** Calls whose alerts are being sent by this engine now, so sending (which writes) does not send again. */

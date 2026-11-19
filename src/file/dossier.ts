@@ -153,7 +153,7 @@ export function withoutOpenDraft(s: JsonValue): JsonValue {
 
 export async function startIntake(rt: EngineRuntime, callId: string, formId: string): Promise<void> {
   rt.settings(DOSSIER);
-  await rt.update(callId, (draft) => {
+  const refused = await rt.update(callId, (draft) => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     const chosen = s.forms.find((f) => f.formId === formId);
     if (chosen === undefined) throw new EngineError("invalid_input", `no form ${formId} in this call's dossier settings`);
@@ -161,12 +161,16 @@ export async function startIntake(rt: EngineRuntime, callId: string, formId: str
     if (step !== null && step.form !== formId) throw new EngineError("precondition_failed", `the flow step collects ${step.form}`);
     // Refused before the caller answers anything that could not be read back to them.
     if (!formSpeaks(chosen, draft.record.locale)) throw new EngineError("precondition_failed", `form ${formId} has no ${draft.record.locale} label for every field`);
-    if (!rt.authorized(draft.record, "intake.file")) throw new EngineError("scope_denied", "the grant does not cover intake.file");
+    // Returned, not thrown, when a step-up rule is why: the change keeps the rule on the ledger (VER-13).
+    const denied = rt.requireScope(draft, "intake.file", undefined);
+    if (denied !== null) return denied;
     draft.apply({ type: "intake_started" });
     s.intake = { form: structuredClone(chosen), values: {}, filing: null };
     s.confirmed = null;
     draft.emit("intake.started", "code", { formId, version: chosen.version });
+    return null;
   });
+  if (refused !== null) throw refused;
 }
 
 function openIntake(s: DossierSlice): NonNullable<DossierSlice["intake"]> {
@@ -297,7 +301,7 @@ export async function confirmIntake(
     const shown = shownValues(open.form, open.values);
     prepared = { recordId, shown: canonicalJson(shown), covered: await digestValues(rt, recordId, open.form, shown) };
   }
-  const reserved = await rt.update(callId, (draft): { record: IntakeRecord; form: IntakeForm | null; erasuresSeen: number | undefined } => {
+  const reserved = await rt.update(callId, (draft): { record: IntakeRecord; form: IntakeForm | null; erasuresSeen: number | undefined } | { refused: EngineError } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     const intake = s.intake;
     // Filed already (a retry after the last write's ledger entry failed): this write appends that
@@ -313,8 +317,11 @@ export async function confirmIntake(
     if (typeof readBack !== "string" || !hexDigestsEqual(readBack, heard)) {
       throw new EngineError("precondition_failed", "the draft changed since the caller heard its read-back; read it back again");
     }
+    // Checked again before a reserved filing resumes too: a step-up rule raised since the
+    // reservation holds it. A refused resume keeps the reservation; abandonIntake releases it.
+    const refused = rt.requireScope(draft, "intake.file", undefined);
+    if (refused !== null) return { refused };
     if (intake.filing !== null) return { record: intake.filing, form: intake.form, erasuresSeen: intake.erasuresSeen };
-    if (!rt.authorized(draft.record, "intake.file")) throw new EngineError("scope_denied", "the grant does not cover intake.file");
     const missing = missingRequired(intake.form, intake.values);
     if (missing.length > 0) throw new EngineError("invalid_input", `required fields missing: ${missing.join(", ")}`);
     // Only shown fields are filed: a value given before its showIf stopped holding stays out.
@@ -339,6 +346,7 @@ export async function confirmIntake(
     intake.erasuresSeen = seen;
     return { record: built, form: intake.form, erasuresSeen: seen };
   });
+  if ("refused" in reserved) throw reserved.refused;
   if (reserved.form === null) return reserved.record;
   // Encrypted on every attempt: a cipher may answer differently each time, and the digest does not
   // depend on it. A rejected write may still have been stored, so the reservation is kept and any
@@ -393,12 +401,15 @@ export async function confirmIntake(
     throw error;
   }
   const stored = (await records.getIntakeRecord(record.workspaceId, record.recordId)) !== null;
-  const filed = await rt.update(callId, (draft): "filed" | "released" | "erased" => {
+  const filed = await rt.update(callId, (draft): "filed" | "released" | "abandoned" | "erased" => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     if (s.records.some((r) => r.recordId === record.recordId)) return "filed";
     // Released meanwhile (this write's claim went stale): the record was deleted by id, and this
     // write stored nothing or was deleted, so nothing is filed.
-    if (s.intake?.filing?.recordId !== record.recordId || s.intake.releasing !== undefined) return "released";
+    // Abandoned while it was written (abandonIntake deleted the record by id, so the late write
+    // stored nothing), or released by a failing cipher in another process: nothing is filed.
+    if (s.intake?.filing?.recordId !== record.recordId) return "abandoned";
+    if (s.intake.releasing !== undefined) return "released";
     // The store kept nothing (the subject was erased): the call files nothing either, and drops
     // the draft that holds the values.
     if (!stored) {
@@ -415,6 +426,7 @@ export async function confirmIntake(
     return "filed";
   });
   if (filed === "released") throw new EngineError("precondition_failed", "the fieldCipher could not seal the record in another process; nothing was filed and the draft is gone");
+  if (filed === "abandoned") throw new EngineError("precondition_failed", "the filing was abandoned while it was written, or released by a failing fieldCipher; nothing was filed");
   if (filed === "erased") throw new EngineError("precondition_failed", "the subject was erased while this record was filed; nothing was filed");
   return record;
 }
@@ -465,11 +477,20 @@ async function releaseFailedFiling(
   });
 }
 
+/**
+ * Drops the draft. A reserved filing (one whose resume was refused, or whose write failed) is
+ * released too: its record, which the store may already hold, is deleted by id first, so a write
+ * still in flight stores nothing, and the call can end.
+ */
 export async function abandonIntake(rt: EngineRuntime, callId: string): Promise<void> {
   rt.settings(DOSSIER);
+  const reserved = ((await rt.read(callId)).modules[DOSSIER] as unknown as DossierSlice | undefined)?.intake?.filing ?? null;
+  if (reserved !== null) await rt.adapter("records").deleteIntakeRecords(rt.workspaceId, [reserved.recordId]);
   await rt.update(callId, (draft) => {
     const s = draft.slice<DossierSlice>(DOSSIER);
-    if (s.intake !== null) openIntake(s);
+    const filing = s.intake?.filing ?? null;
+    // A filing reserved since the read is not released here: its record was not deleted.
+    if (filing !== null && filing.recordId !== reserved?.recordId) throw new EngineError("precondition_failed", "the intake is being filed");
     draft.apply({ type: "intake_abandoned" });
     s.intake = null;
     s.confirmed = null;

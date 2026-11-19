@@ -62,6 +62,13 @@ started under, `attestation` its caller ID attestation (section 4, set once by `
 stored before it existed has none, and reads as `none` for caps and the receipt), `flow` the cursor of the
 flow it runs (or null), and `modules` each enabled module's own part, created by its `initCall`
 when the call starts. A module turned on after a call started has no part in it and is refused on
+`state` is the session above, `revision` the FlowConfig revision the call started under,
+`attestation` its caller ID attestation (section 4, set once by `startCall`; a call stored before
+it existed has none, and reads as `none` for caps and the receipt), `flow` the cursor of the
+flow it runs (or null), `modules` each enabled module's own part, created by its `initCall`
+when the call starts, and, once a step-up rule needs them, `signals` (the host signals raised on
+the call) and `stepUps` (the rules already ledgered; section 4; a call stored before them has
+neither, and reads as having none). A module turned on after a call started has no part in it and is refused on
 that call (`module_disabled`).
 
 The record lives in a `SessionStore`:
@@ -179,6 +186,7 @@ of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:
   `us_zip_code` or `reference`, none of them a keypad field, and `maxAttemptsPerCall` is 1 to 5.
   So a spoken answer counts on its own only at level 1; above it, the rules above need another
   factor, and one that is not knowledge.
+- a `timeZone` that is not an IANA time zone, and a malformed step-up rule (below);
 - a `textCodeCountryCodes` that is not a list of distinct E.164 country calling codes (1 to 6
   digits, no `+`), each starting with a country code ITU-T has assigned to a country or geographic
   area (`E164_COUNTRY_CODES`; `"4"` and `"42"` are refused, `"44"` and `"4420"` accepted; spare
@@ -224,6 +232,26 @@ on flow starts (`lockout`, section 6)
 and, when `pin` is on, the PIN settings (section 6).
 A factor that is off is refused at every entry point. A planned factor cannot be turned on.
 
+**Step-up rules** (`stepUp`, VER-13) raise one scope's minimum for one request. A rule is `{name,
+scope, level}` plus exactly one condition:
+
+- `amountOverMinor: {<currency>: <minor units>}`: the amount the request moves is over the
+  threshold for its currency. A currency the rule does not list, or an amount not known, counts as
+  over. Money scopes only. A payment's amount is the one read back (PAY-2): a read-back for an
+  `amountRef` is judged once the AmountSource answered.
+- `localTime: {from: "HH:MM", to: "HH:MM"}`: the time of day in the policy's `timeZone` (required
+  with such a rule) is in the window, `from` included and `to` excluded; when `from` is later than
+  `to` the window runs past midnight (`18:00` to `08:00` is after hours).
+- `signal: <name>`: the host's code raised that signal on the call with `raiseSignal(callId,
+  name)`. A signal no rule uses is refused; a raised signal is never cleared for the rest of the
+  call (not by a new verification, a new subject or a config change).
+
+`validatePolicy` refuses a rule whose name is not snake_case or is repeated, whose scope the policy
+does not list, whose level is outside 1 to 3 or not above the scope's minimum (rules only raise, so
+no rule brings a level below a floor), with no condition or more than one, or with a malformed
+condition. A scope's minimum for a request is the highest of its own and the levels of the rules
+that hold (`raiseMinimum`), and a duress call (VER-12) and an attestation cap still apply under it.
+
 A **grant** carries the level, the scopes at or below it (narrowed to the verify step's `scopes`
 when the step lists them), an expiry, and what judged it: `policyVersion` (the policy's `version`)
 and `configRevision` (the `revision` of the FlowConfig in force when the verification finished,
@@ -266,6 +294,21 @@ feature the account is not approved for, or an answer they cannot read. A Twilio
 **Texted codes** (`text_code`, needs the `messages` and `codes` adapters).
 `sendTextCode(callId)` needs the factor on (and listed by the current `badge.verify` step), a
 keypad or PIN match as above, and a call that is verifying. It sends only when, in order:
+`authorize(callId, scope, amount?)` is true only for a scope the policy lists, on a call that has
+not ended, whose minimum is 0 or whose grant includes it, has not expired, and has a level at or
+above the scope's minimum under the config in force now, raised by the step-up rules that hold now
+(section 4; `amount` is `{amountMinor, currency}`, in a flow by default the current step's). The
+steps' own checks (a payment, an intake, an outside module's step, Gate's door) use the same raised
+minimum, for the request's own amount, so a grant already issued is held to it. The first time a
+rule raises a minimum on a call, it is written to the ledger by name (`policy.step_up`), never with
+the amount, the time or the signal's cause; `authorize` writes then.
+
+Links go only to the subject's number on file, and only after a `keypad_knowledge` or `pin`
+factor passed since verification last started from nothing and since the session was last
+tainted: `markUntrusted` voids the match, so no text, carrier check or payment link goes out on it
+until a fresh verification matches again. A plug-in's pass does not unlock texts.
+
+## 5. Keypad knowledge
 
 1. the number on file starts with `+` and one of the policy's `textCodeCountryCodes` (a country
    calling code such as `1` or `33`, or a longer prefix such as `1204`); without the list, nowhere;
@@ -717,6 +760,10 @@ minimum and whose `scopes`, if listed, include it, that the engine has the `mess
 a step needs a contact-class scope (its security notice, section 16), and that no flow has more
 `step-up.issue` steps than step-up's `maxTokensPerCall` (each completes only on a token of its own, so such a flow could
 never finish; a module's optional `validateFlow` makes such whole-flow checks). Cross-checks against a module's settings or the
+minimum and whose `scopes`, if listed, include it, that a step whose amount is sure to trigger an
+amount rule on that scope (over the threshold, a currency the rule does not list, or no amount, as
+for an `amountRef`) comes after a `badge.verify` step that reaches the rule's level, and that the engine has the `messages` adapter
+when a step needs a contact-class scope (its security notice, section 16). Cross-checks against a module's settings or the
 policy are skipped when those did not validate (their own problems are reported). The engine
 refuses a config with any problem (`ConfigError`, code `invalid_input`, with `problems`).
 
@@ -789,7 +836,11 @@ it), a consent for another purpose. During a `badge.verify` step, only its facto
 the level. Once the flow has ended (completed, failed or abandoned), every step method is refused
 on that call, an identity outcome is ignored, and an outside module's `updateModule` is refused;
 grants the flow issued stand, and a payment link already sent can still settle. An outside
-module's step is held by the engine to the scope its manifest needs. A step whose module was
+module's step is held by the engine to the scope its manifest needs. A flow cannot branch to ask
+for more (ADR-14): a step whose scope step-up rules raise above the level the call's verification
+reached fails (`flow.failed` with `rules`, the rules' names). This is checked when the step is
+entered, when a signal is raised, and by the step's own work (`requestPayment`, `startIntake`,
+`confirmIntake`, `updateModule`), which then also throws `scope_denied` naming the rules. A step whose module was
 removed while the call ran fails. `endCall` abandons a running
 flow (`flow.abandoned`). `flowPosition(callId)` returns `{flow, revision, status, index, step}`.
 
@@ -803,7 +854,9 @@ answer on file, a phone number, a link or card data.
 |---|---|
 | `call.started` | `locale`, `revision`, `attestation` |
 | `flow.started` | `flow`, `revision`, `steps` (count) |
-| `flow.step_completed` / `flow.failed` | `flow`, `step` (index), `type` |
+| `flow.step_completed` / `flow.failed` | `flow`, `step` (index), `type`; `flow.failed` adds `rules` when step-up rules failed it |
+| `signal.raised` | `signal` (the name the policy's rule uses) |
+| `policy.step_up` | `rule`, `scope`, `level`: once per rule per call, the first time it raises a minimum |
 | `flow.completed` | `flow`, `steps` |
 | `flow.abandoned` | `flow`, `step` |
 | `flow.rate_limited` | `flow`, `scope` (`subject` or `number`): never the subject key, the number or its hash |
@@ -1180,7 +1233,12 @@ after its reservation (the store refused it, or the last write was lost) stays r
 resumes with the same record on the next `confirmIntake`, so `RecordStore.putIntakeRecord` must be
 idempotent by `recordId`; two confirmations at once file one record. A record carries the
 `subjectKey` Badge matched on the call when it was filed (a keypad or PIN match), or null when
-none had. A confirmation retried after its record was
+none had. A resume needs `intake.file`
+again, as a first confirmation does: refused (`scope_denied`), the filing stays reserved.
+`abandonIntake` releases a reserved filing: it deletes the record by id first
+(`RecordStore.deleteIntakeRecords`, which also makes a later write of that id store nothing), then
+drops the draft, so the call can end; a confirmation whose write was in flight then fails
+(`precondition_failed`) and files nothing. A confirmation retried after its record was
 filed (its ledger entry failed) returns the same record. `endCall` is refused while a record is
 being filed. Provider idempotency keys are JSON tuples of the workspace, the call and the
 operation, so workspaces sharing an adapter never share a key. A flow attached to a running call
@@ -1188,7 +1246,8 @@ is refused when a step needs a form or a wording the call did not keep.
 
 ## 14. Payments
 
-`requestPayment` needs `payment.request`, a confirmed amount read-back (below), a positive integer amount in minor units up to
+`requestPayment` needs `payment.request` at its minimum for the amount asked (step-up rules,
+section 4; the amount read back, or the request being resumed), a confirmed amount read-back (below), a positive integer amount in minor units up to
 Paylink's `maxAmountMinor` (at most 1,000,000), a lower-case ISO 4217 currency, a 1 to 200
 character description and an `amountSource` (`intake_record`, `business_endpoint` or
 `price_list`). In a flow they come from the `paylink.request` step and the host passes none;
@@ -1389,7 +1448,9 @@ recordIds})` returns `{amountMinor, currency}` or null. `source` is the step's `
   against the limit in force. A read-back for another subject than the one matched now is
   refused. A call with a link already out is refused as before (`invalid_transition`). A request
   still being sent resumes with no input, the same amount, or the same `amountRef` request it was
-  made for, without a new read-back. The mode, link life and payment methods still come from the
+  made for, without a new read-back. The scope is checked again right before the text, so a signal
+  raised or a window opened while the link was created means the link is not texted
+  (`scope_denied`; the link id is kept). The mode, link life and payment methods still come from the
   step and the settings when the link is reserved.
 
 ## 15. Stripe webhooks

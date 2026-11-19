@@ -23,6 +23,8 @@ export const ENGINE_EVENTS = [
   "verification.code_sent",
   "verification.code_refused",
   "grant.issued",
+  "signal.raised",
+  "policy.step_up",
   "pin.enrolled",
   "pin.reset",
   "duress.cleared",

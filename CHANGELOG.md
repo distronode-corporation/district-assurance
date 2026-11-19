@@ -22,6 +22,11 @@ All notable changes to this project are documented here. The format follows
   `lockout` setting as defaults and floors; a `verification.locked` event. Badge needs `counters`
   when a factor the caller enters is on. A pass takes its own failure off the calling number with
   `AttemptCounters.removeFailure`, one atomic step. `recordSubjectFailure` is gone.
+- Risk-based step-up rules (VER-13): the policy's `stepUp` raises a scope's minimum on the amount, the
+  time of day in its `timeZone`, or a signal the host raises with `raiseSignal`; `authorize(callId,
+  scope, amount?)` and every step's own check (`requireScope`) use the raised minimum, a flow step it
+  lifts fails naming the rule, and `policy.step_up` records the rule by name. The JSON Schema gains
+  `timeZone`, `stepUp` and `stepUpRule`.
 - Amounts from code, read back first (PAY-2): an `AmountSource` adapter (`amounts`, reference
   `PriceListAmounts`) resolves a `paylink.request` step's `amountRef`; `readBackPayment` builds the
   amount read-back in the call's locale (`AMOUNT_READBACK_TEXT`) and `confirmPaymentAmount` records
@@ -275,6 +280,9 @@ All notable changes to this project are documented here. The format follows
   redactor saw (PRV-6).
 - `applyFindings` takes findings in any order: it sorts them by position and merges overlapping
   ones before it applies them (PRV-6).
+- `abandonIntake` releases a reserved filing: it deletes the record by id first
+  (`RecordStore.deleteIntakeRecords`), so a later write of that id stores nothing, then drops the
+  draft. A reserved filing resumes only while `intake.file` is still granted (VER-13 with FIL-1).
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

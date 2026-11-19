@@ -26,7 +26,8 @@ import type { JsonValue } from "./canonical.ts";
 import type { Clock, IdGenerator } from "./clock.ts";
 import type { Actor, EngineEventName } from "./events.ts";
 import type { FlowStep } from "./module.ts";
-import type { Attestation, VerificationPolicy } from "./policy.ts";
+import type { Attestation, StepUpAmount, VerificationPolicy } from "./policy.ts";
+import type { EngineError } from "./errors.ts";
 import type { SessionEvent, SessionState } from "./session.ts";
 
 /**
@@ -142,6 +143,10 @@ export interface CallRecord {
   flow: FlowCursor | null;
   /** Each module's own part, by module name. */
   modules: Record<string, JsonValue>;
+  /** Signals the host's code raised on the call, for step-up rules (VER-13). Raised, never cleared. Absent on a call saved before them. */
+  signals?: string[];
+  /** Step-up rules already written to the ledger for this call, by name. Absent on a call saved before them. */
+  stepUps?: string[];
   /** Ledger entries saved with a change and not yet known to be appended. */
   outbox: Array<{
     eventId: string;
@@ -204,7 +209,21 @@ export interface EngineRuntime {
   /** Appends a call's pending ledger entries, in order. */
   flushLedger(callId: string): Promise<void>;
   /** Whether the call's grant covers a scope now. */
-  authorized(record: CallRecord, scope: string): boolean;
+  /**
+   * Whether the call's grant covers a scope now, at the minimum the policy's step-up rules raise it
+   * to for `amount` (VER-13; left out, the current step's amount; null, no amount asked yet, so
+   * amount rules are skipped). Inside a change, a rule applied for the first time is ledgered.
+   */
+  authorized(record: CallRecord, scope: string, amount?: StepUpAmount | null): boolean;
+  /**
+   * Holds a step's own work to a scope at the minimum the step-up rules raise it to for `amount`.
+   * Null when the grant covers it. When step-up rules are why it does not, the running flow fails
+   * naming them and the refusal is returned, to be thrown once the change is saved, so the ledger
+   * keeps both. A refusal the grant earns without any rule is returned too when a rule applies
+   * (naming it, so a first `policy.step_up` is kept; the flow is not failed); one no rule touches
+   * throws `scope_denied` at once.
+   */
+  requireScope(draft: CallDraft, scope: string, amount: StepUpAmount | undefined | null): EngineError | null;
   bindRef(ref: string, callId: string): Promise<void>;
   /** An idempotency key for a provider call, unique across workspaces and stable across retries. */
   idempotencyKey(callId: string, ...parts: string[]): string;

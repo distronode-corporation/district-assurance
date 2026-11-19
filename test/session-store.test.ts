@@ -114,7 +114,7 @@ describe("compare-and-set conflicts", () => {
     };
     const readBack = await heard(t, callId);
     await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack }), rejects("conflict"));
-    await assert.rejects(t.engine.abandonIntake(callId), rejects("precondition_failed"), "the draft stays reserved for its record");
+    await assert.rejects(t.engine.setIntakeField(callId, "issue", "changed"), rejects("precondition_failed"), "the draft stays reserved for its record");
     t.records.putIntakeRecord = put;
     const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack });
     assert.equal(record.recordId, "rec_1");

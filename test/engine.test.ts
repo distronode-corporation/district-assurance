@@ -699,7 +699,7 @@ describe("Engine file", () => {
     const put = t.records.putIntakeRecord.bind(t.records);
     let during: unknown[] = [];
     t.records.putIntakeRecord = async () => {
-      during = await Promise.allSettled([t.engine.setIntakeField(callId, "issue", "x"), t.engine.abandonIntake(callId)]);
+      during = await Promise.allSettled([t.engine.setIntakeField(callId, "issue", "x")]);
       throw new Error("database down");
     };
     await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), /database down/);
@@ -708,6 +708,80 @@ describe("Engine file", () => {
     await assert.rejects(t.engine.setIntakeField(callId, "issue", "changed"), rejects("precondition_failed"), "still reserved after the failed write");
     const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack: await heard(t, callId) });
     assert.deepEqual([record.recordId, record.values.issue, record.confirmedBy], ["rec_1", "leak", "voice"], "the same record, written again");
+  });
+
+  it("re-checks the grant before a reserved filing resumes; abandoning releases it and the call ends", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const put = t.records.putIntakeRecord.bind(t.records);
+    // The store holds the record, but the answer is lost: the filing stays reserved.
+    let written: IntakeRecord | null = null;
+    t.records.putIntakeRecord = async (record) => {
+      written = record;
+      await put(record);
+      throw new Error("answer lost");
+    };
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), /answer lost/);
+    t.records.putIntakeRecord = put;
+    t.clock.advance(15 * 60_000);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), rejects("scope_denied"), "the grant expired since the reservation");
+    assert.notEqual(await t.records.getIntakeRecord("ws_test", "rec_1"), null);
+    await t.engine.abandonIntake(callId);
+    assert.equal(await t.records.getIntakeRecord("ws_test", "rec_1"), null, "the record the store held is deleted");
+    await t.records.putIntakeRecord(written!);
+    assert.equal(await t.records.getIntakeRecord("ws_test", "rec_1"), null, "and a late write of it stores nothing");
+    await t.engine.endCall(callId);
+    assert.equal((await t.engine.state(callId)).phase, "ended");
+    assert.equal((await t.ledger.list()).some((e) => e.event === "intake.confirmed"), false);
+  });
+
+  it("abandoning while a filing is written deletes it first, so the write stores nothing and the confirmation fails", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const put = t.records.putIntakeRecord.bind(t.records);
+    t.records.putIntakeRecord = async (record) => {
+      await t.engine.abandonIntake(callId);
+      return put(record);
+    };
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), rejects("precondition_failed", /abandoned while it was written/));
+    assert.equal(await t.records.getIntakeRecord("ws_test", "rec_1"), null);
+    assert.deepEqual((await t.engine.state(callId)).recordIds, []);
+    await t.engine.endCall(callId);
+    assert.equal((await t.engine.state(callId)).phase, "ended");
+  });
+
+  it("refuses to abandon a filing reserved after it read the call, since that record was not deleted", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const del = t.records.deleteIntakeRecords.bind(t.records);
+    const put = t.records.putIntakeRecord.bind(t.records);
+    let confirming: Promise<unknown> | null = null;
+    t.records.putIntakeRecord = async () => {
+      throw new Error("database down");
+    };
+    // Nothing is reserved when abandon reads, so it deletes nothing; a confirmation reserves meanwhile.
+    t.records.deleteIntakeRecords = async (ws, ids) => del(ws, ids);
+    const readBack = await heard(t, callId);
+    const read = t.sessions.get.bind(t.sessions);
+    let reads = 0;
+    t.sessions.get = async (ws, id) => {
+      const got = await read(ws, id);
+      if (++reads === 1) {
+        confirming = t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack }).catch(() => undefined);
+        await confirming;
+      }
+      return got;
+    };
+    await assert.rejects(t.engine.abandonIntake(callId), rejects("precondition_failed", /being filed/));
+    t.sessions.get = read;
+    t.records.putIntakeRecord = put;
+    assert.equal((await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) })).recordId, "rec_1", "the reservation stands and resumes");
   });
 
   describe("sensitive fields", () => {
