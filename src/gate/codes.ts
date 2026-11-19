@@ -18,11 +18,11 @@
 // which checks it with `verifyAccessGrant` and `SeenGrants` as usual. The code is in the text and
 // nowhere else: not in the ledger, an event, an error or the store.
 //
-// Texts count against send limits shared with texted codes (VER-2), per subject: `TextSendLimits`
-// below is a stand-in until VER-2 lands, and the same limiter must be given to both.
+// Texts count against the send limits of texted codes (VER-2), per subject, in VER-2's `CodeStore`
+// (the engine's `codes` adapter once VER-2 lands): give both the same store, so they share a budget.
 import { randomInt } from "node:crypto";
 
-import type { MessagePurpose, MessageSender, ReceiptSigner } from "../core/adapters.ts";
+import type { CodeStore, MessageSender, ReceiptSigner } from "../core/adapters.ts";
 import { systemClock, type Clock } from "../core/clock.ts";
 import { EngineError } from "../core/errors.ts";
 import { hmacSha256Hex } from "../core/hash.ts";
@@ -91,37 +91,11 @@ export class MemoryAccessCodeStore implements AccessCodeStore {
 }
 
 /**
- * Send limits on texts to a subject's number on file, shared by every kind of texted code. A
- * stand-in for VER-2's limits: give the same limiter to texted codes once they are built.
+ * The send limits an access code counts against, per subject: VER-2's subject limits for texted
+ * codes (`TEXT_CODE_LIMITS.subject` in #79), so the two kinds of code share one budget in one
+ * `CodeStore`. A stand-in copy until VER-2 lands, when this becomes that constant.
  */
-export interface TextSendLimits {
-  /** Counts one text to the subject and returns true, or returns false and counts nothing when a limit is reached. */
-  acquire(input: { workspaceId: string; subjectKey: string; purpose: MessagePurpose; at: Date }): Promise<boolean>;
-}
-
-/** VER-2's per-subject limits, in memory: 5 texts per subject per 24 hours, 60 seconds apart. */
-export class MemoryTextSendLimits implements TextSendLimits {
-  readonly #sent = new Map<string, number[]>();
-  readonly #perDay: number;
-  readonly #gapMs: number;
-
-  constructor(options: { perSubjectPerDay?: number; minGapSeconds?: number } = {}) {
-    this.#perDay = options.perSubjectPerDay ?? 5;
-    this.#gapMs = (options.minGapSeconds ?? 60) * 1000;
-  }
-
-  async acquire(input: { workspaceId: string; subjectKey: string; purpose: MessagePurpose; at: Date }): Promise<boolean> {
-    const key = JSON.stringify([input.workspaceId, input.subjectKey]);
-    const at = input.at.getTime();
-    const recent = (this.#sent.get(key) ?? []).filter((t) => t > at - 86_400_000);
-    if (recent.length >= this.#perDay || recent.some((t) => t > at - this.#gapMs)) {
-      this.#sent.set(key, recent);
-      return false;
-    }
-    this.#sent.set(key, [...recent, at]);
-    return true;
-  }
-}
+export const ACCESS_CODE_SEND_LIMITS = { max: 5, windowSeconds: 86_400, minIntervalSeconds: 60 } as const;
 
 export interface AccessCodeOptions {
   /** The HMAC key for codes, at least 16 bytes. Its own key, not the knowledge key. */
@@ -131,8 +105,8 @@ export interface AccessCodeOptions {
   store: AccessCodeStore;
   /** Texts the code. The destination is always the number on file, from the engine. */
   messages: MessageSender;
-  /** Shared with texted codes (VER-2). */
-  limits: TextSendLimits;
+  /** VER-2's send limits store, the same instance the engine's texted codes count against. */
+  limits: CodeStore;
   /** Default: the system clock. */
   clock?: Clock;
   /** Default: `ACCESS_CODE_DIGITS` random digits from node:crypto. */
@@ -217,7 +191,8 @@ export class AccessCodes {
     if (pending === null) return { outcome: "refused", reason: "not_requested" };
     const to = await pending.engine.numberOnFile(pending.callId);
     const now = this.#clock.now();
-    if (!(await this.#options.limits.acquire({ workspaceId: body.workspaceId, subjectKey: to.subjectKey, purpose: "one_time_code", at: now }))) {
+    const counted = await this.#options.limits.take({ workspaceId: body.workspaceId, key: { scope: "subject", key: to.subjectKey }, at: now.toISOString(), ...ACCESS_CODE_SEND_LIMITS });
+    if (!counted) {
       return { outcome: "refused", reason: "send_limit" };
     }
     let code: string | null = null;

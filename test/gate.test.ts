@@ -15,18 +15,17 @@ import { gateModule } from "../src/gate/gate.ts";
 import { builtInModules } from "../src/modules.ts";
 import { keyPairSigner } from "../src/prove/receipt.ts";
 import { FakeAccessController, FakeMessageSender, FixedClock, generateTestSigner } from "../src/testing/index.ts";
-import type { MessageSender } from "../src/core/adapters.ts";
+import type { CodeStore, MessageSender } from "../src/core/adapters.ts";
 import {
   AccessCodes,
   MemoryAccessCodeStore,
-  MemoryTextSendLimits,
+  ACCESS_CODE_SEND_LIMITS,
   accessCodeDigest,
   accessCodes,
   type AccessCodeEntry,
   type AccessCodeStore,
-  type TextSendLimits,
 } from "../src/gate/codes.ts";
-import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject } from "../src/testing/index.ts";
+import { MemoryCodeStore, TEST_KNOWLEDGE_KEY, createTestEngine, testSubject } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig } from "./helpers.ts";
 
 const verify = { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["entry.open"] };
@@ -781,7 +780,7 @@ const keypadTarget = { id: "side-door", controller: "keypad", ref: "keypad-1" };
 const keypadDoor = { workspaceId: "ws_test", audience: "keypad", target: "keypad-1" };
 const TEXT = /^Your one-time door code: (\d{8})\. It works once, within (\d+) min\.$/;
 
-function codesSetup(options: { limits?: TextSendLimits; newCode?: () => string; messages?: MessageSender; store?: AccessCodeStore } = {}) {
+function codesSetup(options: { limits?: CodeStore; newCode?: () => string; messages?: MessageSender; store?: AccessCodeStore } = {}) {
   const clock = new FixedClock();
   const texts = new FakeMessageSender();
   const store = options.store ?? new MemoryAccessCodeStore();
@@ -791,7 +790,7 @@ function codesSetup(options: { limits?: TextSendLimits; newCode?: () => string; 
     signer: accessSigner,
     store,
     messages: options.messages ?? texts,
-    limits: options.limits ?? new MemoryTextSendLimits(),
+    limits: options.limits ?? new MemoryCodeStore(),
     clock,
     ...(options.newCode === undefined ? {} : { newCode: options.newCode }),
   });
@@ -908,34 +907,36 @@ describe("gate: one-time access codes", () => {
     assert.deepEqual(await t.codes.redeem({ ...keypadDoor, code }), { ok: false });
   });
 
-  it("counts against the send limits texted codes use, and a limited send texts nothing", async () => {
-    const limits = new MemoryTextSendLimits();
+  it("counts against VER-2's send limits in the same CodeStore texted codes use, and a limited send texts nothing", async () => {
+    const limits = new MemoryCodeStore();
     const t = codesSetup({ limits });
     const callId = await codeCall(t);
     const { subjectKey } = await t.engine.numberOnFile(callId);
-    // A texted code (VER-2) to the same subject a moment ago, through the same limiter.
-    assert.equal(await limits.acquire({ workspaceId: "ws_test", subjectKey, purpose: "one_time_code", at: t.clock.now() }), true);
+    // A texted code (VER-2) to the same subject a moment ago, counted the way VER-2 counts it, in the same store.
+    const subject = { scope: "subject", key: subjectKey } as const;
+    assert.equal(await limits.take({ workspaceId: "ws_test", key: subject, at: t.clock.now().toISOString(), ...ACCESS_CODE_SEND_LIMITS }), true);
     assert.deepEqual(await t.codes.issue(t.engine, callId), { grantId: "acc_1", status: "refused", confirmed: false });
     assert.equal(t.texts.sent.length, 0);
     const digest = (await codeGrants(t, callId))[0]!.digest!;
     assert.deepEqual((await codeEvents(t)).at(-1), ["access.refused", { grantId: "acc_1", digest, reason: "send_limit", kid: "gate-key-1" }]);
     t.clock.advance(60_000);
     assert.equal((await t.codes.issue(t.engine, callId)).status, "delivered");
+    // The access code counted too: a texted code right after it is refused.
+    assert.equal(await limits.take({ workspaceId: "ws_test", key: subject, at: t.clock.now().toISOString(), ...ACCESS_CODE_SEND_LIMITS }), false);
   });
 
-  it("limits each subject to 5 texts in 24 hours, 60 seconds apart", async () => {
-    const limits = new MemoryTextSendLimits();
-    const at = (s: number) => new Date(Date.parse("2026-01-01T00:00:00.000Z") + s * 1000);
-    const send = (subjectKey: string, s: number) => limits.acquire({ workspaceId: "ws_test", subjectKey, purpose: "one_time_code", at: at(s) });
+  it("uses VER-2's subject limits: 5 sends in 24 hours, 60 seconds apart, per workspace and key", async () => {
+    assert.deepEqual(ACCESS_CODE_SEND_LIMITS, { max: 5, windowSeconds: 86_400, minIntervalSeconds: 60 });
+    const limits = new MemoryCodeStore();
+    const at = (s: number) => new Date(Date.parse("2026-01-01T00:00:00.000Z") + s * 1000).toISOString();
+    const send = (key: string, s: number, scope: "subject" | "number" = "subject") => limits.take({ workspaceId: "ws_test", key: { scope, key }, at: at(s), ...ACCESS_CODE_SEND_LIMITS });
     assert.equal(await send("a", 0), true);
     assert.equal(await send("a", 59), false);
-    assert.equal(await send("b", 59), true, "per subject");
+    assert.equal(await send("b", 59), true, "per key");
+    assert.equal(await send("a", 59, "number"), true, "per scope");
     for (const s of [60, 120, 180, 240]) assert.equal(await send("a", s), true);
     assert.equal(await send("a", 300), false, "the sixth in a day");
     assert.equal(await send("a", 86_400), true, "a day after the first");
-    const loose = new MemoryTextSendLimits({ perSubjectPerDay: 1, minGapSeconds: 0 });
-    assert.equal(await loose.acquire({ workspaceId: "w", subjectKey: "a", purpose: "identity_link", at: at(0) }), true);
-    assert.equal(await loose.acquire({ workspaceId: "w", subjectKey: "a", purpose: "one_time_code", at: at(1) }), false, "shared across purposes");
   });
 
   it("revokes the code when its text fails, and records unknown when the revoke fails too", async () => {
@@ -976,7 +977,7 @@ describe("gate: one-time access codes", () => {
   });
 
   it("texts only for its own issue calls, each for its own call", async () => {
-    const t = codesSetup({ limits: new MemoryTextSendLimits({ minGapSeconds: 0 }) });
+    const t = codesSetup({ limits: { take: async () => true } });
     const callId = await codeCall(t);
     assert.deepEqual(await t.engine.grantAccess(callId), { grantId: "acc_1", status: "refused", confirmed: false });
     assert.equal((await codeEvents(t)).at(-1)![1].reason, "not_requested");
@@ -1024,7 +1025,7 @@ describe("gate: one-time access codes", () => {
     const open = await t.engine.startCall({});
     await assert.rejects(t.codes.issue(t.engine, open.callId, { target: "side-door" }), rejects("scope_denied"));
     assert.equal(t.texts.sent.length, 0);
-    const parts = { signer: generateTestSigner(), store: new MemoryAccessCodeStore(), messages: t.texts, limits: new MemoryTextSendLimits() };
+    const parts = { signer: generateTestSigner(), store: new MemoryAccessCodeStore(), messages: t.texts, limits: new MemoryCodeStore() };
     assert.throws(() => accessCodes({ key: "short", ...parts }), /at least 16 bytes/);
     assert.ok(accessCodes({ key: new Uint8Array(16), ...parts }) instanceof AccessCodes);
   });

@@ -70,10 +70,12 @@ selfie, which a stolen SIM alone does not pass. Contact and payout scopes defaul
 
 Repeated calls triggering texts to a real customer, or to premium numbers. **Controls:** texts go
 only to the number on file, only after a keypad match, and at most one photo ID link per call
-(tested). One-time access codes count against send limits per subject (5 texts in 24 hours, 60
-seconds apart by default) through a `TextSendLimits` that texted codes must share; a limited
-request texts nothing (tested). Planned: VER-2's full limits (per calling number, and a destination
-country allow-list), before texted codes ship; until then `TextSendLimits` is a stand-in.
+(tested). One-time access codes count against VER-2's per-subject send limit (5 texts in 24
+hours, 60 seconds apart) in VER-2's `CodeStore`, the one texted codes use, so the two share a
+budget; a limited request texts nothing (tested). Planned: VER-2's full limits (per calling
+number, and a destination country allow-list) with texted codes; until VER-2 lands, the store's
+interface here is a stand-in copy of its shape, and access codes do not yet apply the per-number
+limit or the allow-list.
 
 ### Replay
 

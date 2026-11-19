@@ -76,6 +76,29 @@ export interface PaymentLinkCapabilities {
   maxLinkMinutes: number;
 }
 
+/** What a texted code's send is counted against: one subject (its subject key) or one calling number (a keyed hash). */
+export interface CodeSendKey {
+  scope: "subject" | "number";
+  /** The subject key, or the keyed hash of the calling number. 64 lower-case hex characters, never a number. */
+  key: string;
+}
+
+/**
+ * The send limits for texted codes, across calls: every engine of a workspace shares one, as they
+ * share the SessionStore. It holds only when codes were sent, per subject and per calling number,
+ * never a code. `MemoryCodeStore` in `district-assurance/testing` is the reference. A stand-in
+ * copy of VER-2's interface (#79) for one-time access codes, until VER-2 lands with its contract
+ * suite.
+ */
+export interface CodeStore {
+  /**
+   * Counts one send against the key, atomically, only if the key had fewer than `max` sends in the
+   * `windowSeconds` up to `at` and none in the `minIntervalSeconds` up to `at`. True when it
+   * counted; false, and nothing counted, otherwise. Two concurrent calls never both count past a limit.
+   */
+  take(input: { workspaceId: string; key: CodeSendKey; at: string; max: number; windowSeconds: number; minIntervalSeconds: number }): Promise<boolean>;
+}
+
 /** Hosted payment pages (for example Stripe Checkout, on the business's account or the platform's). */
 export interface PaymentLinks {
   readonly capabilities: PaymentLinkCapabilities;

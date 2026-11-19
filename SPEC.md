@@ -604,8 +604,9 @@ a relay checks a redeemed grant against `engine.accessKeys()`. Its `controller` 
   2. The destination is `engine.numberOnFile(callId)`: the subject Badge matched by keypad or
      PIN, its number on file and the call's locale (`precondition_failed` before a match, which
      Gate records as `unknown`). Never the calling number.
-  3. `limits.acquire({workspaceId, subjectKey, purpose: "one_time_code", at})` counts the text;
-     false refuses it (`send_limit`) and nothing is texted.
+  3. `limits.take({workspaceId, key: {scope: "subject", key: subjectKey}, at, ...ACCESS_CODE_SEND_LIMITS})`
+     counts the text against VER-2's `CodeStore`; false refuses it (`send_limit`) and nothing is
+     texted.
   4. A code of 8 random digits is drawn and stored with `store.put` as an `AccessCodeEntry`:
      `{workspaceId, digest, grantId, callId, body}`, the digest being
      `HMAC-SHA256(key, JSON.stringify(["access-code", workspaceId, audience, target, code]))`
@@ -631,7 +632,10 @@ a relay checks a redeemed grant against `engine.accessKeys()`. Its `controller` 
 - `AccessCodeStore`: `put(entry, now)` (false when the digest is live), `take(workspaceId,
   digest)` (removes and returns, atomically: never one entry twice), `revoke(workspaceId,
   grantId)`. `MemoryAccessCodeStore` is the in-memory reference, dropping expired entries on `put`.
-- `TextSendLimits`: `acquire(...)` true counts one text, false counts nothing. A stand-in for
-  VER-2's send limits, to be given to texted codes too. `MemoryTextSendLimits({perSubjectPerDay?,
-  minGapSeconds?})`: per workspace and subject, across purposes, at most 5 texts in 24 hours and
-  60 seconds apart by default.
+- `limits` is VER-2's `CodeStore` (`take` counts one send atomically, or refuses and counts
+  nothing; `MemoryCodeStore` in `district-assurance/testing` is the reference), the same instance
+  the engine's texted codes count against, so both kinds of code share one budget per subject.
+  `ACCESS_CODE_SEND_LIMITS` is VER-2's subject limit: 5 sends in 24 hours, 60 seconds apart. Until
+  VER-2 (#79) lands, `CodeStore`, `CodeSendKey`, `MemoryCodeStore` and this constant are a stand-in
+  copy of its shape; VER-2's per-number limit and destination allow-list are not applied to access
+  codes yet.
