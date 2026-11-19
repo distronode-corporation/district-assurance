@@ -311,8 +311,8 @@ jobs:
           const [file, version] = process.argv.slice(2);
           const bom = JSON.parse(readFileSync(file, "utf8"));
           assert.equal(bom.bomFormat, "CycloneDX");
-          assert.equal(bom.metadata.component.name, "district-assurance");
-          assert.equal(bom.metadata.component.version, version);
+          // The purl, not `name`: npm sbom names the root component after the checkout's folder.
+          assert.equal(bom.metadata.component.purl, `pkg:npm/district-assurance@${version}`);
           assert.deepEqual(bom.components ?? [], [], "The published package has a runtime dependency.");
           console.log(`CycloneDX ${bom.specVersion} SBOM of district-assurance ${version}: no runtime dependency`);
           EOF
@@ -455,8 +455,8 @@ jobs:
           const [file, version] = process.argv.slice(2);
           const bom = JSON.parse(readFileSync(file, "utf8"));
           assert.equal(bom.bomFormat, "CycloneDX");
-          assert.equal(bom.metadata.component.name, "district-assurance");
-          assert.equal(bom.metadata.component.version, version);
+          // The purl, not `name`: npm sbom names the root component after the checkout's folder.
+          assert.equal(bom.metadata.component.purl, `pkg:npm/district-assurance@${version}`);
           assert.deepEqual(bom.components ?? [], [], "The published package has a runtime dependency.");
           console.log(`CycloneDX ${bom.specVersion} SBOM of district-assurance ${version}: no runtime dependency`);
           EOF
