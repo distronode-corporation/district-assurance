@@ -44,6 +44,15 @@ describe("audit ledger", () => {
     assert.deepEqual(verifyChain(relinked), { ok: false, seq: 3, reason: "prev_hash" });
   });
 
+  it("reports a stored entry changed into what canonical JSON refuses as a break, without throwing", async () => {
+    // Found by SRV-7's fuzzing (test/property/ledger.test.ts): one changed byte turned a number in
+    // stored JSON into 1e999, which parses as Infinity.
+    const ledger = new MemoryAuditLedger();
+    await ledger.append({ callId: "c1", actor: "code", event: "call.started", at: "2026-01-01T00:00:00.000Z", detail: { n: 1 } });
+    const line = JSON.stringify((await ledger.list())[0]).replace('"n":1', '"n":1e999');
+    assert.deepEqual(verifyChain([JSON.parse(line)]), { ok: false, seq: 1, reason: "hash" });
+  });
+
   it("stores copies, so a caller cannot rewrite history", async () => {
     const ledger = new MemoryAuditLedger();
     const detail = { n: 1 };
