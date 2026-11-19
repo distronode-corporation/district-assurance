@@ -138,3 +138,26 @@ All notable changes to this project are documented here. The format follows
 - `examples/reference-server`: a `node:http` server with Stripe webhook routes, receipt and key
   set routes, `501` carrier routes, and `npm run demo`.
 - Planned entry points that throw `NotImplementedError` with their ROADMAP.md issue ids.
+
+### Fixed
+
+- Integration review of the Gate and payments landing (L1):
+  - `accessKeys()` and `receiptKeys()` publish each key under its signer's `keyId`, as
+    `stepUpKeys()` does, so a signer whose JWK has no `kid` no longer makes its grants and
+    receipts unverifiable.
+  - `validateConfig` refuses a flow with more `gate.grant` steps than `maxGrantsPerCall`.
+  - Gate reads the call again right before the send, so a taint written after the reservation
+    check stops it; a controller answer of the wrong shape is recorded `unknown`
+    (`malformed_answer`), never `refused`.
+  - The Seam adapter refuses a grant signed for another device (`target_mismatch`); Seam, Kisi and
+    Verkada refuse an unreadable clock or expiry (`grant_expiring`).
+  - `exchangeStepUpToken` and `applyPaymentOutcome` snapshot their input before they wait.
+  - A spent access code stays held, spent, until its `access.code_spent` entry is appended, so a
+    failed append is made again on the next wrong guess (`AccessCodeStore.miss` marks entries
+    spent instead of removing them).
+  - The amount read-back's digest includes a read-back id, so a late yes to an identical earlier
+    read-back never confirms a new one.
+  - A resume never takes over a live send lease; a failed sender gives its lease back; a cancel
+    or call end claims the close before asking the provider, so a resume never texts that link.
+  - A dispute event older than the status recorded (by Stripe's event time, or by stage) never
+    replaces it, so a late inquiry snapshot cannot reopen `warning_closed`.

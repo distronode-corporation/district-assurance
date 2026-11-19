@@ -472,8 +472,10 @@ is never texted with less than 5 minutes of the provider's life left: it is expi
 provider confirms, or waits for its webhook when the provider says `not_open`. Either way
 `requestPayment` throws `precondition_failed`. A process about to text a link holds a 60 second
 lease on it, so a concurrent resume refuses (`precondition_failed`) rather than expiring a link
-being sent; once the lease lapses, it may, and a sender stalled past it then texts a link the
-provider has already closed (so it cannot be paid). A process whose request another process
+being sent, and never takes the lease over while it is live (the text may be going out); once the
+lease lapses, it may, and a sender stalled past it then texts a link the provider has already
+closed (so it cannot be paid). A sender whose text (or a write before it) fails gives its lease
+back at once, so the retry needs no wait; a release that fails leaves the lease to lapse. A process whose request another process
 settled while its create was slow never texts the link it got: it expires it at the provider and
 throws `precondition_failed`. The create guard keeps a minute over the provider's minimum for its
 latency; a create the provider still refuses leaves the request to the next resume, which expires
@@ -498,7 +500,11 @@ then answers, `requestPayment` expires that link at the provider, never texts it
 the end closed its request. While a process is texting a link (it holds the send lease, 60
 seconds), `cancelPaymentLink` and `endCall` are refused with `precondition_failed`, so a link is
 never closed under its own text and no text goes out after the call ended; once the text is
-recorded, or the lease lapses (that sender stopped), they go ahead. A sender checks and renews
+recorded, or the lease lapses (that sender stopped), they go ahead. A close of a link that exists
+is claimed in its first write, before the provider is asked (`closingSince` on the request): no
+sender texts that link from then on (it expires it at the provider and throws
+`precondition_failed`), and a close that fails at the provider stays claimed, so it can be tried
+again with no sender taking over meanwhile. A sender checks and renews
 its lease in a write right before the text, so one that stalled past its lease (binding the
 link's reference) never texts a request that was closed or a call that ended meanwhile: it expires
 the link at the provider and throws `precondition_failed`; one whose lease another sender took
@@ -588,7 +594,13 @@ delivered again (the reference server answers 503 and does not remember the even
 retries it within its own retry window). A connected account's dispute event is ignored
 (`payment.outcome_ignored`). A later paid outcome that names the payment intent of a payment
 already paid without one keeps it too. `won` and `lost` are
-final; an event that changes neither status nor amount is not written again.
+final; an event that changes neither status nor amount is not written again. Webhooks come in any
+order, so an event older than the status recorded never replaces it (a late `warning_needs_response`
+after `warning_closed` would block refunds again): by the provider's time (`occurredAt`, Stripe's
+event `created`) when both carry one and they differ, otherwise by the status's stage in a
+dispute's life (`warning_needs_response`, `warning_under_review`, `warning_closed`,
+`needs_response`, `under_review`, then `won` or `lost`). An `occurredAt` that is not a time is
+`invalid_input`.
 
 Refunds and disputes work after the flow and the call ended. They never change a payment's
 `status`, the flow, or the receipt already issued. `PaymentLinks.refund` is optional: refunds and
@@ -609,7 +621,9 @@ recordIds})` returns `{amountMinor, currency}` or null. `source` is the step's `
   digest, amountMinor, currency, description}`. `text` comes from `AMOUNT_READBACK_TEXT` in the
   call's locale: "The amount to pay is AMOUNT, for DESCRIPTION. Is that correct?" / "Le montant à
   payer est de AMOUNT, pour DESCRIPTION. Est-ce exact ?"; `digest` is `SHA-256(canonicalJson({amountMinor, currency,
-  description, locale, text}))`. The call keeps the read-back (one at a time; a new one replaces
+  description, locale, readBackId, text}))`, where `readBackId` is the engine's own id for this
+  read-back (from `ids`, prefix `amt`), so two identical read-backs (a second deposit of the same
+  amount) never share a digest and a late yes to the first never confirms the second. The call keeps the read-back (one at a time; a new one replaces
   it) until a link uses it. Untrusted content drops it. The read-back is for the subject matched
   when the amount was looked up: if another subject is matched by the time it is stored, it is
   refused (`precondition_failed`).
@@ -639,7 +653,9 @@ checked, since a NaN or an Infinity would let a replay of any age pass. `parseSt
 `checkout.session.{completed,async_payment_succeeded,async_payment_failed,expired}` (with the
 session's `payment_intent` when it is a string) and
 `charge.dispute.{created,updated,closed,funds_withdrawn,funds_reinstated}` (the dispute id, `charge`,
-`payment_intent` or null, `status`, `amount` and `currency`; never its evidence); other types
+`payment_intent` or null, `status`, `amount` and `currency`, and the event's `created` as
+`occurredAt`; never its evidence; a `created` that is present but not Unix seconds makes the
+body malformed); other types
 are reported as ignored, and a body that is not a well-formed event is `null`, including one whose
 `account` is present but not a string (never read as "no account"). The reference server
 applies dispute events from the platform's payments endpoint only.
@@ -687,7 +703,9 @@ Gate's settings: `targets`, at least one, each `{id, controller, ref}`: `id` low
 digits and `-` (unique), `controller` the name of one of the engine's `access` adapters that has an
 `unlock` function, own or from its class (checked when the engine is built and when a config is
 saved), `ref` the controller's own name for the
-door, 1 to 200 characters; `maxGrantsPerCall` 1 to 5, default 3. A call keeps the targets in force
+door, 1 to 200 characters; `maxGrantsPerCall` 1 to 5, default 3. A flow with more `gate.grant`
+steps than `maxGrantsPerCall` is refused when the config is saved: each step completes only on a
+grant of its own, so it could never finish. A call keeps the targets in force
 when it started; a flow attached later is refused when a step names a target the call did not keep.
 
 The engine owns every access grant (ADR-25): it reserves it, signs it, computes its digest, calls
@@ -725,12 +743,16 @@ receipt never verifies as an access grant. A host's module can never take a buil
    grant is settled `failed`, reason `not_sent`, and `precondition_failed` is thrown: nothing was
    sent, so it is never recorded as `unknown`): `unlock({grant, target, idempotencyKey})`, the key
    being `[workspaceId, callId, grantId, "unlock"]`. Never retried. Right before it, with nothing in
-   between, the call is checked once more against the config in force, so a config that raised
-   `entry.open`'s floor after step 4 settles the grant `failed` (`not_authorized`) and nothing is
-   sent. A config changed by another process is seen at its next write, not here.
+   between, the call is read again as it is now and checked against the config in force, so a
+   taint written after step 4, or a config that raised `entry.open`'s floor, settles the grant
+   `failed` (`not_authorized`) and nothing is sent. A taint that commits after that read lands
+   while the grant is on its way to the door. A config changed by another process is seen at its next write, not here.
 6. **Record the answer**, in the engine's write: `delivered` (with `confirmed` when the controller
    reported the door moved), `refused` (the controller certainly did not act; its reason as a short
-   code), or `unknown` (reason `answer_lost`) when the call threw or timed out. A grant settled
+   code), or `unknown` (reason `answer_lost`) when the call threw or timed out, and (reason
+   `malformed_answer`) when its answer is neither a delivery with a string `providerRef` and a
+   boolean `confirmed` nor a refusal with a string `reason`: such an answer does not say the door
+   stayed shut. A grant settled
    meanwhile stays as it is. `grantAccess` returns what the call holds. A failure to write the
    answer is thrown as it is; the grant then settles as stale (step 1). Every outcome entry carries
    `grantId`, `digest` and `kid`, never the grant or its signature. A fresh request after `unknown`
@@ -790,6 +812,8 @@ never has it published.
 Every key set the engine publishes (`receiptKeys()`, `accessKeys()`, `stepUpKeys()`) holds only
 the public members of each key (`kty`, `crv`, `x`, `y`, `kid`, `alg`, `use`), whatever its
 signer's `publicJwk` returns, so a signer that hands back its private `d` never has it published.
+Each key's `kid` is its signer's `keyId`, the one every signed document carries, whatever the JWK
+says: a JWK without a `kid` would otherwise leave every grant and receipt unverifiable.
 
 **The relay contract, version 1** (`webhookRelay({url, timeoutMs?})`): `POST <url>` with
 `content-type: application/json`, `idempotency-key: <the key above>` (as printable ASCII: any
@@ -813,6 +837,8 @@ which is for tests and never for production; `timeoutMs` is per request, 100 to 
 `authorization: Bearer <apiKey>` and a JSON body, redirects not followed. No idempotency key is
 sent: Seam documents none on unlock.
 
+0. Unless the grant's signed `target` is the device it is asked to open, the result is `refused`
+   (`target_mismatch`) and nothing is sent, not even the device check.
 1. `POST /devices/get {device_id}`. Unless the answer names the same device with
    `can_remotely_unlock: true` and not `properties.online: false`, the result is `refused`:
    `cannot_unlock_remotely`, `device_offline`, `device_unreadable`, Seam's error type on a 4xx
@@ -820,7 +846,7 @@ sent: Seam documents none on unlock.
    Nothing was sent to the lock.
 2. Unless the grant has at least `timeoutMs` left by `clock` (the system clock by default), the
    result is `refused` (`grant_expiring`) and nothing is sent, since the expiry is strict and the
-   call may end then. This bounds when the unlock is sent and how long the client waits for it,
+   call may end then. A clock or an expiry that cannot be read counts as no time left. This bounds when the unlock is sent and how long the client waits for it,
    not the network, and Seam's own attempt may still complete later.
    Otherwise `POST /locks/unlock_door {device_id}`, once, never retried. A 4xx is `refused` (Seam's error
    type when it is a short code, otherwise `http_<status>`); a 5xx, a timeout, a dropped connection,
@@ -899,11 +925,17 @@ engine's `accessSigner`, so a relay checks a redeemed grant against `engine.acce
   `expiresAt`. The door's relay checks the grant with `verifyAccessGrant` (audience `audience`)
   and `SeenGrants`, as for any grant.
 - `codes.revoke(workspaceId, grantId)` removes a grant's code; one already gone is success.
-- `AccessCodeStore`: `put(entry, now)` (false when the digest is live), `get(workspaceId,
-  digest)` (reads, leaving it), `take(workspaceId, digest, grantId?)` (removes and returns,
-  atomically: never one entry twice; with `grantId`, only that grant's entry), `revoke(workspaceId, grantId)`,
+- `AccessCodeStore`: `put(entry, now)` (false when the digest is live or spent), `get(workspaceId,
+  digest)` (reads, leaving it; null for a spent entry), `take(workspaceId, digest, grantId?)`
+  (removes and returns, atomically: never one entry twice; with `grantId`, only that grant's
+  entry; never a spent one), `revoke(workspaceId, grantId)` (a spent entry too),
   `miss(workspaceId, {audience, target}, limit, now)` (one wrong guess counted against every live
-  entry for that door, atomically, removing and returning those at `limit`). `MemoryAccessCodeStore` is the in-memory reference, dropping expired entries on `put`.
+  entry for that door, atomically, marking those at `limit` spent, and returning every spent entry
+  of the workspace still held). A spent code opens nothing; its entry stays as the pending record
+  of its `access.code_spent` ledger entry, and `codes` removes it (`revoke`) only once that entry
+  is appended (idempotent by its event id). An append that fails is made again on the next wrong
+  guess; every spent code is tried, and the first failure thrown. `MemoryAccessCodeStore` is the
+  in-memory reference, dropping expired entries (never a spent one) on `put`.
 - `limits` is VER-2's `CodeStore` (`take` counts one send atomically, or refuses and counts
   nothing; `MemoryCodeStore` in `district-assurance/testing` is the reference), the same instance
   the engine's texted codes count against, so both kinds of code share one budget per subject.
@@ -1036,7 +1068,7 @@ id (digits) or a Verkada door id (a UUID). `unlock` first checks that the grant'
 target it was asked to open and has that form; otherwise it answers `refused` with
 `target_mismatch` or `bad_target` and sends nothing. It also sends nothing, answering `refused`
 with `grant_expiring`, for a grant with less than `timeoutMs` left by `clock` (the system clock by
-default), the client's own bound on the whole unlock, since the expiry is strict and the call
+default, a reading or an expiry that cannot be read counting as no time left), the client's own bound on the whole unlock, since the expiry is strict and the call
 may end then. This bounds when the request is sent, not the network: neither vendor's request
 carries a deadline, so one delayed in transit could still arrive after the grant expired. Each
 request's path is set on a copy of `baseUrl`, so its host is always `baseUrl`'s. Kisi: one `POST <baseUrl>/locks/<lock
