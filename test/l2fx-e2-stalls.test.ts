@@ -65,4 +65,24 @@ describe("l2fx-e2: stalls stay local", () => {
     assert.equal(told[0]!.callId, callId);
   });
 
+  it("T6: a notice store that never answers does not hold up the call, its ledger entries or the outbox", async () => {
+    const counters = new StalledNoticeCounters();
+    const notifier = new FakeNotifier();
+    const config = testConfig((c) => ((c.modules.badge!.settings as { lockout?: unknown }).lockout = { lockAfterFailures: 1 }));
+    const t = setup({ config, adapters: { notifier, counters } });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    counters.stalled = true;
+    const answered = await Promise.race([t.engine.submitPin(callId, "0000"), tick(20).then(() => "stalled" as const)]);
+    assert.deepEqual(answered, { matched: false, locked: true });
+    assert.ok((await t.ledger.list()).some((e) => e.event === "verification.locked"));
+    assert.deepEqual(((await t.sessions.get("ws_test", callId))!.record as { outbox: unknown[] }).outbox, [], "the outbox cleared");
+    assert.equal(notifier.notices.length, 0, "no notice without its claim");
+    // The claim still comes before the notice: once the store answers, a lock is told once.
+    counters.stalled = false;
+    assert.deepEqual(await t.engine.submitPin(callId, "1111"), { matched: false, locked: true });
+    await tick();
+    assert.equal(notifier.notices.length, 1);
+  });
+
 });

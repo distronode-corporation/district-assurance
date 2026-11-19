@@ -1217,7 +1217,8 @@ export class Engine {
       } catch {
         // Ignored by design: the ledger is the record.
       }
-      if (queued.counter !== undefined) await this.#notifyLock(queued.counter, queued.detail);
+      // Not awaited: a notice store that stalls holds up neither the rest of the outbox nor the call. It never rejects.
+      if (queued.counter !== undefined) void this.#notifyLock(queued.counter, queued.detail);
     }
     await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue);
   }
@@ -1235,8 +1236,8 @@ export class Engine {
 
   /**
    * Tells the host's notifier of a lock whose ledger entry was just appended: once per lock and
-   * capped per workspace (`claimNotice`). Best effort, like the listener: the notifier is not
-   * awaited, and nothing it or the bookkeeping does, thrown or rejected, stops the call or the ledger.
+   * capped per workspace (`claimNotice`, before the notifier). Best effort, like the listener: neither
+   * it nor the notifier is awaited, and nothing either does, thrown or rejected, stops the call or the ledger.
    */
   async #notifyLock(counter: AttemptCounterKey, detail: { [key: string]: JsonValue }): Promise<void> {
     const notifier = this.#adapters.notifier;
