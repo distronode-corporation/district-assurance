@@ -1133,12 +1133,9 @@ export class Engine {
       markOwedAlerts(record);
       const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
       if (saved.ok) {
-        try {
-          await this.#flush(callId, version, record);
-        } finally {
-          // Saved, so owed duress alerts go out even if the ledger is down.
-          this.#sendDuressAlertsSoon(callId, record);
-        }
+        // Saved, so owed duress alerts go out before the ledger is tried: one down or stalled never holds them.
+        this.#sendDuressAlertsSoon(callId, record);
+        await this.#flush(callId, version, record);
         return result;
       }
     }
@@ -1283,11 +1280,8 @@ export class Engine {
     const stored = await this.#sessions.get(this.workspaceId, callId);
     if (stored === null) throw new EngineError("unknown_call", "no such call");
     const record = structuredClone(stored.record) as unknown as CallRecord;
-    try {
-      await this.#flush(callId, stored.version, record);
-    } finally {
-      this.#sendDuressAlertsSoon(callId, record);
-    }
+    this.#sendDuressAlertsSoon(callId, record);
+    await this.#flush(callId, stored.version, record);
   }
 
   /**
