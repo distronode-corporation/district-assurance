@@ -3,7 +3,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { ACCOUNT, setup } from "./helpers.ts";
+import { ACCOUNT, PIN, setup, testConfig } from "./helpers.ts";
 import type { TestEngine } from "../src/testing/index.ts";
 
 /** Takes the Badge slice's `callback` off a stored call, as a record saved before the field existed. */
@@ -33,5 +33,23 @@ describe("T7: a stored Badge slice without callback", () => {
     await dropCallback(t, callId);
     await t.engine.beginVerification(callId, { accountNumber: "99999990" });
     assert.equal((await callbackOf(t, callId))?.status, "none");
+  });
+});
+
+describe("T7: requestCallback on a stored Badge slice without callback", () => {
+  it("asks for the callback as on a new call, and rings the number on file", async () => {
+    const t = setup({
+      config: testConfig((c) => {
+        c.modules.badge = { settings: { factors: ["keypad_knowledge", "pin", "carrier_identity_match", "callback"], pin: { mode: "keyed_hash", minDigits: 4, maxDigits: 8, maxAttemptsPerCall: 3 } } };
+        c.policy.levels[1]!.anyOf.push(["pin", "callback"]);
+      }),
+    });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT, callingNumber: "+15555550199" });
+    assert.equal((await t.engine.submitPin(callId, PIN)).matched, true);
+    await dropCallback(t, callId);
+    assert.equal(await t.engine.requestCallback(callId), undefined);
+    assert.equal((await callbackOf(t, callId))?.status, "placed");
+    assert.equal(t.dialer.dialed.length, 1);
   });
 });

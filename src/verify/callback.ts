@@ -17,7 +17,7 @@ import type { AttemptCounterKey, SubjectRecord } from "../core/adapters.ts";
 import { EngineError } from "../core/errors.ts";
 import type { CallDraft, EngineRuntime } from "../core/runtime.ts";
 import { canApply } from "../core/session.ts";
-import { BADGE, allowFactor, type BadgeSlice, type CallbackState, type OutcomeResult } from "./badge.ts";
+import { BADGE, allowFactor, callbackOf, type BadgeSlice, type CallbackState, type OutcomeResult } from "./badge.ts";
 import { counterKeys, currentLock, forgetPass, isCallingNumber, lockoutOf, recordedAt, recordFailures, type Lock } from "./counters.ts";
 import type { BadgeSettings } from "./factors.ts";
 
@@ -62,18 +62,21 @@ export async function requestCallback(rt: EngineRuntime, callId: string): Promis
   const before = await rt.read(callId);
   const current = before.modules[BADGE] as unknown as BadgeSlice | undefined;
   if (current === undefined) throw new EngineError("module_disabled", `${BADGE} was off when this call started`);
-  if (current.callback.status === "placed") return planOf(current.callback);
+  // A call saved before callbacks existed has no callback yet: the empty state initCall writes.
+  const asked = callbackOf(current);
+  if (asked.status === "placed") return planOf(asked);
   // Refused, or voided (by a taint or a new subject) while it was decided: the same silent answer.
-  if (current.callback.status === "refused" || current.callback.status === "void") return null;
-  const resume = current.callback.status === "requested";
+  if (asked.status === "refused" || asked.status === "void") return null;
+  const resume = asked.status === "requested";
   const reserved = resume
-    ? current.callback
+    ? asked
     : await rt.update(callId, (draft) => {
         allowFactor(rt, draft.record, CALLBACK);
         draft.assertCan({ type: "factor_recorded", factor: { kind: CALLBACK, passed: false, at: rt.now() } });
         // The callback call runs the flow again from its first step, so that is where one is asked for.
         if (draft.record.flow !== null && draft.record.flow.index !== 0) throw new EngineError("precondition_failed", "a callback is asked for on the flow's first step");
         const s = draft.slice<BadgeSlice>(BADGE);
+        s.callback = callbackOf(s);
         if (s.callback.status !== "none") throw new EngineError("precondition_failed", "a callback was already asked for on this call");
         // Only after a keypad or PIN match, only to a number on file, and never on a call that
         // untrusted content entered: the taint dropped what the call had matched.

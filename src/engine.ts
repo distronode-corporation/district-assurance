@@ -776,7 +776,7 @@ export class Engine {
     const { workspaceId, factor, scope, key, memberId }: { [K in keyof UnlockInput]: unknown } = input;
     const errors: string[] = [];
     if (workspaceId !== this.workspaceId) errors.push("workspaceId is not this engine's workspace");
-    if (typeof factor !== "string" || !this.#badge.manifest.provides.factors.includes(factor)) errors.push("factor is not an installed factor kind");
+    if (typeof factor !== "string" || !this.#badge.installedFactors().includes(factor)) errors.push("factor is not an installed factor kind");
     if (scope !== "subject" && scope !== "number") errors.push("scope must be subject or number");
     // Strings only: a regex test turns an array or an object into a string, which would pass here,
     // be recorded, and then clear no counter.
