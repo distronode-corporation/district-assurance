@@ -6,19 +6,18 @@
 // Everything is made up: the accounts, the PIN, the date of birth and the phone numbers (555
 // numbers). The Stripe webhooks are signed here with a demo secret and posted to the reference
 // server over the loopback. Gate's door is an example relay on the loopback that checks each grant
-// with Gate's public key before it "opens" (it only records the door's name).
+// with the engine's access key before it "opens" (it only records the door's name).
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import {
   canonicalJson,
   createEngine,
-  gateModule,
   signStripePayload,
   subjectKeyFor,
   webhookRelay,
+  type AccessController,
   type Engine,
-  type GateModule,
   type SignedAccessGrant,
   type SignedReceipt,
 } from "../../../src/index.ts";
@@ -46,8 +45,8 @@ export interface DemoWorld {
   base: string;
   /** Signs a Stripe event with the demo secret (the Connect one on the Connect route) and posts it. */
   stripe(path: string, type: string, object: Record<string, unknown>, account?: string): Promise<Record<string, unknown>>;
-  /** Gate, installed on both engines, with one controller: the relay adapter, to the example door relay. */
-  gate: GateModule;
+  /** Gate's one door controller, the relay adapter to the example door relay, on both engines. */
+  lobby: AccessController;
   /** Every door the example relay opened, in order. */
   doorsOpened: string[];
   /** Each grant Gate sent, by grant id, so a step can try to replay it. */
@@ -64,18 +63,16 @@ export function createDemoWorld(): DemoWorld {
   let relay: Server | null = null;
   let url = "";
   // The relay adapter needs the relay's port, known once it listens: built per unlock.
-  const gate = gateModule({
-    signer: generateTestSigner("demo-gate-key-1"),
-    controllers: {
-      lobby: {
-        unlock: async (input) => {
-          sentGrants.set(input.grant.body.grantId, input.grant);
-          return webhookRelay({ url: await world.relayUrl() }).unlock(input);
-        },
-      },
+  // Gate's adapters: its own signing key, and one controller, the relay adapter, whose URL is known
+  // once the example relay listens (so it is built per unlock).
+  const accessSigner = generateTestSigner("demo-gate-key-1");
+  const lobby: AccessController = {
+    unlock: async (input) => {
+      sentGrants.set(input.grant.body.grantId, input.grant);
+      return webhookRelay({ url: await world.relayUrl() }).unlock(input);
     },
-  });
-  const t = createTestEngine({ config: demoConfig(), modules: [gate] });
+  };
+  const t = createTestEngine({ config: demoConfig(), adapters: { access: { lobby }, accessSigner } });
   t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: OWNER_ACCOUNT, phoneOnFile: "+15555550101", knowledge: {}, pin: OWNER_PIN }));
   t.records.putSubject(
     "ws_test",
@@ -86,10 +83,9 @@ export function createDemoWorld(): DemoWorld {
     workspaceId: "ws_test",
     knowledgeKey: TEST_KNOWLEDGE_KEY,
     config: demoConfig(),
-    modules: [gate],
     clock: t.clock,
     ids: t.ids,
-    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments: t.payments, signer: generateTestSigner() },
+    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments: t.payments, signer: generateTestSigner(), access: { lobby }, accessSigner },
   });
   let n = 0;
   const world: DemoWorld = {
@@ -97,7 +93,7 @@ export function createDemoWorld(): DemoWorld {
     engine: t.engine,
     other,
     base: "",
-    gate,
+    lobby,
     doorsOpened,
     sentGrants,
     async relayUrl() {
@@ -105,7 +101,7 @@ export function createDemoWorld(): DemoWorld {
         relay = createDoorRelay({
           workspaceId: "ws_test",
           audience: "lobby",
-          keys: gate.keys(),
+          keys: t.engine.accessKeys(),
           clock: t.clock,
           open: async (target) => {
             doorsOpened.push(target);
@@ -358,6 +354,17 @@ const depositConnect: ScriptStep[] = [
   },
 ];
 
+/** Posts a body to the door relay, within 5 seconds; an answer that is not JSON reads as an error. */
+async function postToRelay(w: DemoWorld, body: string): Promise<{ status: number; error: string }> {
+  try {
+    const res = await fetch(await w.relayUrl(), { method: "POST", body, signal: AbortSignal.timeout(5000) });
+    const answer = (await res.json().catch(() => null)) as { error?: unknown } | null;
+    return { status: res.status, error: typeof answer?.error === "string" ? answer.error : "no_answer" };
+  } catch {
+    return { status: 0, error: "unreachable" };
+  }
+}
+
 /** Verification to level 2 for entry.open, then a signed 30-second grant, checked by the door relay. */
 const entry: ScriptStep[] = [
   {
@@ -372,7 +379,7 @@ const entry: ScriptStep[] = [
     label: "gate: access grant delivered",
     async run(w, call) {
       const opened = w.doorsOpened.length;
-      const access = await w.gate.grantAccess(w.engine, call.callId);
+      const access = await w.engine.grantAccess(call.callId);
       call.grantId = access.grantId;
       return {
         detail: `${access.grantId}, ${access.status}, door moved: ${access.confirmed}, opened ${w.doorsOpened.slice(opened).join(", ")}`,
@@ -383,8 +390,8 @@ const entry: ScriptStep[] = [
   {
     label: "gate: same grant sent again",
     async run(w, call) {
-      const res = await fetch(await w.relayUrl(), { method: "POST", body: canonicalJson(w.sentGrants.get(call.grantId!)!) });
-      return { detail: `${res.status} ${((await res.json()) as { error: string }).error}`, ok: res.status === 409 };
+      const res = await postToRelay(w, canonicalJson(w.sentGrants.get(call.grantId!)!));
+      return { detail: `${res.status} ${res.error}`, ok: res.status === 409 };
     },
   },
   {
@@ -392,8 +399,8 @@ const entry: ScriptStep[] = [
     async run(w, call) {
       const forged = structuredClone(w.sentGrants.get(call.grantId!)!);
       forged.body.target = "door-2";
-      const res = await fetch(await w.relayUrl(), { method: "POST", body: canonicalJson(forged) });
-      return { detail: `${res.status} ${((await res.json()) as { error: string }).error}, the door stays shut`, ok: res.status === 401 };
+      const res = await postToRelay(w, canonicalJson(forged));
+      return { detail: `${res.status} ${res.error}, the door stays shut`, ok: res.status === 401 };
     },
   },
   {

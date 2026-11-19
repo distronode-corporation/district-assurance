@@ -8,7 +8,7 @@
 // read when another process wrote first, so several processes can run one call. Every step writes
 // to the ledger, every refusal is an EngineError with a stable code, and every planned step
 // throws NotImplementedError. SPEC.md describes the flow.
-import type { JsonWebKey } from "node:crypto";
+import { createPublicKey, type JsonWebKey } from "node:crypto";
 
 import type { IntakeRecord, SessionStore } from "./core/adapters.ts";
 import type { JsonValue } from "./core/canonical.ts";
@@ -25,6 +25,7 @@ import type { AdapterName, CallDraft, CallRecord, EngineAdapters, EngineRuntime,
 import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
 import * as dossier from "./file/dossier.ts";
+import * as gate from "./gate/gate.ts";
 import type { NormaliseResult } from "./file/intake.ts";
 import { BUILT_IN_MODULES, builtInModules, defaultConfig } from "./modules.ts";
 import * as paylink from "./pay/paylink.ts";
@@ -81,13 +82,6 @@ export interface ModuleCallView {
   now: string;
   /** A new id from the engine's id source, `prefix_...`. A retried attempt draws a new one. */
   newId(prefix: string): string;
-  /**
-   * `updateModule` only: opens a reservation (work whose outcome comes later, such as an unlock),
-   * the one thing `recordModuleOutcome` may later settle. Ids are the module's own.
-   */
-  reserve(ref: string): void;
-  /** `recordModuleOutcome` only: closes the reservation being settled, once its outcome is written. */
-  release(): void;
   authorized(scope: string): boolean;
   /** A ledger entry `module.event` with `{ module, event, detail }`. Never put a value the caller keyed in it. */
   emit(event: string, detail: { [key: string]: JsonValue }): void;
@@ -121,6 +115,10 @@ export class Engine {
     if (keyLength < 16) errors.push("knowledgeKey must be at least 16 bytes");
     if (options.workspaceId === "") errors.push("workspaceId is empty");
     if ((options.adapters as Partial<EngineAdapters>).ledger === undefined) errors.push("the ledger adapter is required: the ledger is always on");
+    errors.push(...distinctSigners(options.adapters));
+    for (const module of options.modules ?? []) {
+      if ((BUILT_IN_MODULES as readonly string[]).includes(module.manifest.name)) errors.push(`${module.manifest.name} is the name of a built-in module`);
+    }
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     this.workspaceId = options.workspaceId;
     this.#key = options.knowledgeKey;
@@ -134,9 +132,16 @@ export class Engine {
     const present = Object.entries(this.#adapters).filter(([, value]) => value !== undefined).map(([name]) => name);
     // What each adapter declares it can do, so a config it cannot serve is refused when saved.
     const capabilities: Record<string, unknown> = {};
+    // Every adapter the engine has gets an entry, undefined when it declares nothing, so the
+    // validator can tell "declared nothing" (refused where capabilities are required) from "unknown".
     for (const [name, value] of Object.entries(this.#adapters)) {
-      const declared = (value as { capabilities?: unknown } | undefined)?.capabilities;
-      if (declared !== undefined) capabilities[name] = declared;
+      if (value === undefined) continue;
+      // The access adapter is a map of controllers: what it declares is the names of those it can use
+      // (an `unlock` function, own or from a class), so a target naming anything else is refused at save.
+      capabilities[name] =
+        name === "access"
+          ? { controllers: Object.entries(value as Record<string, { unlock?: unknown } | undefined>).filter(([, c]) => typeof c?.unlock === "function").map(([n]) => n) }
+          : (value as { capabilities?: unknown }).capabilities;
     }
     this.#receiptModules = builtInModules(this.#badge);
     this.registry = new ModuleRegistry({ adapters: present, capabilities, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
@@ -162,6 +167,11 @@ export class Engine {
 
   /** Installs an outside module. It stays off until a config turns it on. */
   use(module: AssuranceModule): this {
+    // A built-in module's name stays the engine's, even after the module was removed: a host's
+    // module can never stand in for Gate's grants or Paylink's payments.
+    if ((BUILT_IN_MODULES as readonly string[]).includes(module.manifest.name)) {
+      throw new EngineError("invalid_input", `${module.manifest.name} is the name of a built-in module`);
+    }
     this.registry.use(module);
     return this;
   }
@@ -393,6 +403,24 @@ export class Engine {
     return paylink.applyPaymentOutcome(this.#rt, outcome);
   }
 
+  // ---- Gate (entry) ------------------------------------------------------------------------
+
+  /** Issues an access grant and sends it to its door controller, once (SPEC.md, section 17). */
+  grantAccess(callId: string, input?: { target: string; lifetimeSeconds?: number }): Promise<gate.AccessResult> {
+    return gate.grantAccess(this.#rt, callId, input);
+  }
+
+  /** A call's access grants, as the engine recorded them. Never the signed grants themselves. */
+  async accessGrants(callId: string): Promise<gate.AccessRecord[]> {
+    const slice = (await this.#read(callId)).modules[gate.GATE] as unknown as gate.GateSlice | undefined;
+    return slice === undefined ? [] : structuredClone(slice.grants);
+  }
+
+  /** The key set door relays verify access grants with (empty without an access signer). */
+  accessKeys(): JsonWebKey[] {
+    return this.#adapters.accessSigner === undefined ? [] : [this.#adapters.accessSigner.publicJwk()];
+  }
+
   // ---- Trace (prove) -----------------------------------------------------------------------
 
   recordConsent(callId: string, input: { purpose: string; answer: "yes" | "no"; channel?: ConsentRecord["channel"] }): Promise<ConsentRecord> {
@@ -412,6 +440,9 @@ export class Engine {
         const reason = slice === undefined ? null : (module.blocksEnd?.(slice) ?? null);
         if (reason !== null) throw new EngineError("precondition_failed", `the call cannot end yet: ${reason}`);
       }
+      // A grant still at its door when the call ends is settled now, as unknown, before the receipt's
+      // ledger head is taken: no access outcome can ever follow the receipt.
+      gate.settleInFlight(this.#rt, draft, "call_ended");
       draft.apply({ type: "call_ended", at: this.#now() });
       const flow = draft.record.flow;
       if (flow !== null && flow.status === "running") {
@@ -452,71 +483,33 @@ export class Engine {
 
   /**
    * Changes an outside module's part of a call, in one compare-and-set write (retried on conflict,
-   * so `fn` must be pure). A running flow moves on when the module's step completes.
+   * so `fn` must be pure). A running flow moves on when the module's step completes. The engine
+   * holds every call to the module's scopes, so a module that forgets to ask `authorized` still
+   * fails closed: in a flow, the scope its current step needs; outside a flow, every scope its
+   * manifest names. Built-in modules (Gate's grants included) are never reachable here.
    */
   async updateModule(callId: string, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): Promise<JsonValue> {
     this.#outsideModule(name);
     const module = this.registry.get(name)!;
     return this.#update(callId, (draft) => {
-      // An outside module does only its current step's work, and the engine itself holds that step
-      // to the scope its manifest needs: a module that forgets to ask `authorized` still fails closed.
       assertFlowNotEnded(draft.record);
       const step = draft.step();
-      if (step !== null) {
-        if (!module.manifest.provides.steps.includes(step.type)) throw new EngineError("precondition_failed", `the flow is on step ${step.type}, not a step of ${name}`);
-        const scope = module.manifest.scopes.needs[step.type];
-        if (scope !== undefined && !this.#authorized(draft.record, scope)) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
+      if (step !== null && !module.manifest.provides.steps.includes(step.type)) {
+        throw new EngineError("precondition_failed", `the flow is on step ${step.type}, not a step of ${name}`);
       }
-      return this.#applyModule(draft, name, fn, { reserve: true, settling: null });
+      const needs = step === null ? Object.values(module.manifest.scopes.needs) : [module.manifest.scopes.needs[step.type]].filter((n) => n !== undefined);
+      for (const scope of needs) if (!this.#authorized(draft.record, scope)) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
+      return this.#applyModule(draft, name, fn);
     });
   }
 
-  /**
-   * Records the outcome of work an outside module started, and reserved, in `updateModule` (a
-   * provider's answer), in one compare-and-set write. It is refused unless `reservation` is open
-   * for this module on this call, so it can settle work that was authorized when it started, never
-   * start any. Unlike `updateModule` it is not held to the step's scope and runs after the flow or
-   * the call ended, because that result must still be written: Gate records an unlock's answer this
-   * way even if the caller's grant expired while the door answered. `call.release()` closes the
-   * reservation.
-   */
-  async recordModuleOutcome(callId: string, name: string, reservation: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): Promise<JsonValue> {
-    if ((BUILT_IN_MODULES as readonly string[]).includes(name)) throw new EngineError("precondition_failed", `${name} is built in; use its own methods`);
-    if (this.registry.get(name) === undefined) throw new EngineError("module_disabled", `no module named ${name} is installed`);
-    return this.#update(callId, (draft) => {
-      if (!openReservations(draft.record, name).includes(reservation)) {
-        throw new EngineError("precondition_failed", `${name} has no open reservation ${reservation} on this call; an outcome settles only work updateModule reserved`);
-      }
-      return this.#applyModule(draft, name, fn, { reserve: false, settling: reservation });
-    });
-  }
-
-  /** Every open reservation an outside module has on a call. */
-  async moduleReservations(callId: string, name: string): Promise<string[]> {
-    this.#outsideModule(name);
-    return [...openReservations(await this.#read(callId), name)];
-  }
-
-  #applyModule(draft: CallDraft, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue, mode: { reserve: boolean; settling: string | null }): JsonValue {
+  #applyModule(draft: CallDraft, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): JsonValue {
     const step = draft.step();
-    const open = (draft.record.reservations ??= {});
     const view: ModuleCallView = {
       state: snapshot(draft.record.state),
       step: step === null ? null : structuredClone(step),
       now: this.#now(),
       newId: (prefix) => this.#ids.next(prefix),
-      reserve: (ref) => {
-        if (!mode.reserve) throw new EngineError("precondition_failed", "only updateModule opens a reservation");
-        if (typeof ref !== "string" || ref === "") throw new EngineError("invalid_input", "a reservation is a non-empty string");
-        open[name] = [...new Set([...openReservations(draft.record, name), ref])];
-      },
-      release: () => {
-        if (mode.settling === null) throw new EngineError("precondition_failed", "only recordModuleOutcome closes a reservation");
-        // recordModuleOutcome checked that the reservation being settled is open, so the list exists.
-        const left = open[name]!.filter((r) => r !== mode.settling);
-        if (left.length > 0) open[name] = left;
-        else delete open[name];
-      },
       authorized: (scope) => this.#authorized(draft.record, scope),
       emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
     };
@@ -710,10 +703,26 @@ export class Engine {
   }
 }
 
-/** A module's open reservations on a call. Own properties only: a module may be named `constructor`. */
-function openReservations(record: CallRecord, name: string): string[] {
-  const all = record.reservations;
-  return all !== undefined && Object.hasOwn(all, name) ? all[name]! : [];
+/**
+ * The access signer must be its own key, never the receipt signer's: a receipt must never verify as
+ * an access grant, nor the reverse. Refused by key id and by public key.
+ */
+function distinctSigners(adapters: EngineAdapters): string[] {
+  const { signer, accessSigner } = adapters;
+  if (signer === undefined || accessSigner === undefined) return [];
+  if (signer.keyId === accessSigner.keyId) return ["accessSigner must have its own key id, not the receipt signer's"];
+  // Compared as key material, not text: one key can be written with or without padding, in either
+  // base64 alphabet. A key that does not import is left for its signer to fail on.
+  const der = (jwk: JsonWebKey) => {
+    try {
+      return createPublicKey({ key: jwk, format: "jwk" }).export({ type: "spki", format: "der" });
+    } catch {
+      return null;
+    }
+  };
+  const a = der(signer.publicJwk());
+  const b = der(accessSigner.publicJwk());
+  return a !== null && b !== null && a.equals(b) ? ["accessSigner must be its own key, not the receipt signer's"] : [];
 }
 
 export function createEngine(options: EngineOptions): Engine {

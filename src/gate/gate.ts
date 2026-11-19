@@ -1,27 +1,29 @@
 // Gate (entry): the outcome after verification. A verified call gets a signed, time-limited access
-// grant (ES256 over canonical JSON, `access.ts`), delivered to a door controller through an
-// `AccessController` adapter. It refuses without a valid verification grant covering `entry.open`,
-// an access scope whose floor is level 2, and every grant and its outcome go to the ledger.
+// grant (ES256 over canonical JSON, `access.ts`), delivered to a door controller. It refuses without
+// a valid verification grant covering `entry.open`, an access scope whose floor is level 2, and
+// every grant and its outcome go to the ledger.
 //
-// Gate ships in this package but is installed like an outside module (`engine.use(gate)`) and
-// runs through `Engine.updateModule`, so the engine itself holds its step to `entry.open`: Gate
-// asks too, and a mistake in either still fails closed. The controller's answer is recorded with
-// `Engine.recordModuleOutcome`, which still writes if the grant expired while the door answered.
+// Gate is a built-in module, like Paylink: its runtime runs inside the engine, on the engine's own
+// writes, and no module code can reach its part of a call (`updateModule` refuses built-in
+// modules). The door controllers (`access`) and the grant signer (`accessSigner`) are engine
+// adapters. So the engine itself reserves each grant, signs it, computes its digest from the frozen
+// grant, calls the controller once, and records the controller's actual answer: nothing else can
+// write a grant's outcome (ADR-25).
 //
 // An unlock is never retried. It is reserved in one write (one in flight per call), signed, sent
-// once, and its answer committed. A lost answer is recorded as "unknown", and opening again needs
-// a fresh request: a new grant, within the per-call limit.
-import type { JsonWebKey } from "node:crypto";
-
-import type { ReceiptSigner } from "../core/adapters.ts";
+// once, and its answer committed. A lost answer is "unknown", and opening again needs a fresh
+// request: a new grant, within the per-call limit. Ending the call settles a grant still in flight
+// as unknown, before the receipt's ledger head is taken, so no outcome ever follows the receipt.
+import type { AccessController, AccessGrantBody, SignedAccessGrant, UnlockResult } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
+import { stepOfType } from "../core/flow.ts";
 import type { AssuranceModule, FlowStep, ModuleManifest, StepContext, StepStatus, StepView } from "../core/module.ts";
 import type { AssuranceLevel } from "../core/policy.ts";
+import type { CallDraft, EngineRuntime } from "../core/runtime.ts";
 import { isDenseArray, isIntegerIn, isObject, unknownKeys } from "../core/shape.ts";
-import type { Engine, ModuleCallView } from "../engine.ts";
 import { signDocument } from "../prove/receipt.ts";
-import { accessGrantDigest, MAX_ACCESS_GRANT_SECONDS, type AccessController, type AccessGrantBody, type SignedAccessGrant, type UnlockResult } from "./access.ts";
+import { accessGrantDigest, MAX_ACCESS_GRANT_SECONDS } from "./access.ts";
 
 export const GATE = "gate";
 
@@ -34,7 +36,6 @@ export const DEFAULT_GRANTS_PER_CALL = 3;
 export const MAX_GRANTS_PER_CALL = 5;
 
 const TARGET_ID = /^[a-z][a-z0-9-]{0,63}$/;
-const CONTROLLER_NAME = /^[a-z][a-z0-9-]{0,63}$/;
 
 /** A door, as config names it: Gate's id for it, the controller that works it, and that controller's ref. */
 export interface GateTarget {
@@ -58,7 +59,7 @@ export interface GateGrantStep extends FlowStep {
 
 export type AccessStatus = "reserved" | "delivered" | "refused" | "unknown" | "failed";
 
-/** One access grant on a call, as Gate keeps it. Never the signature itself. */
+/** One access grant on a call, as the engine keeps it. Never the signature itself. */
 export interface AccessRecord {
   grantId: string;
   target: string;
@@ -70,7 +71,7 @@ export interface AccessRecord {
   status: AccessStatus;
   confirmed: boolean;
   providerRef: string | null;
-  /** The grant's digest and key id, written just before it is sent. */
+  /** The digest of the signed grant (computed by the engine) and its key id, written just before it is sent. */
   digest: string | null;
   kid: string | null;
 }
@@ -84,52 +85,26 @@ export interface GateSlice {
 
 export interface AccessResult {
   grantId: string;
-  /** `delivered`: the controller took it. `refused`: it certainly did not act. `unknown`: the answer was lost; do not assume either. */
+  /** `delivered`: the controller took it. `refused`: it certainly did not act. `unknown`: the answer was lost, or the call ended first; do not assume either. */
   status: "delivered" | "refused" | "unknown";
   /** The controller reported that the door moved. */
   confirmed: boolean;
 }
 
-export interface GateOptions {
-  /** Signs access grants. Use its own key (its own `kid`), not the receipt key. */
-  signer: ReceiptSigner;
-  /** Controller name to adapter. Targets in the settings name one of these. */
-  controllers: Readonly<Record<string, AccessController>>;
+/** What the access adapter declares to the validator: the names of its controllers. */
+export interface AccessCapabilities {
+  controllers: string[];
 }
 
-/** What Gate needs of an engine. */
-export type GateHost = Pick<Engine, "updateModule" | "recordModuleOutcome" | "moduleState" | "workspaceId">;
-
-/** Gate: install with `engine.use(gate)` (or `modules: [gate]`), then turn it on in the config. */
-export function gateModule(options: GateOptions): GateModule {
-  return new GateModule(options);
-}
-
-export class GateModule implements AssuranceModule {
-  readonly manifest: ModuleManifest = {
+export const gateModule: AssuranceModule = {
+  manifest: {
     name: GATE,
-    version: "1",
+    version: "2",
     summary: "Turn a verified call into a signed, time-limited access grant for a door controller.",
     provides: { factors: [], steps: ["gate.grant"], outcomes: ["access_grant"] },
     scopes: { grants: [], needs: { "gate.grant": ENTRY_SCOPE }, classes: { [ENTRY_SCOPE]: "access" } },
-    adapters: [],
-  };
-  readonly #signer: ReceiptSigner;
-  readonly #controllers: ReadonlyMap<string, AccessController>;
-
-  constructor(options: GateOptions) {
-    const names = Object.keys(options.controllers);
-    const bad = names.filter((n) => !CONTROLLER_NAME.test(n));
-    if (bad.length > 0) throw new EngineError("invalid_input", `controller names are lower-case letters, digits and hyphens: ${bad.join(", ")}`);
-    if (names.length === 0) throw new EngineError("invalid_input", "gate needs at least one controller");
-    this.#signer = options.signer;
-    this.#controllers = new Map(Object.entries(options.controllers));
-  }
-
-  /** The public key set access sides verify grants with. */
-  keys(): JsonWebKey[] {
-    return [this.#signer.publicJwk()];
-  }
+    adapters: ["access", "accessSigner"],
+  } satisfies ModuleManifest,
 
   validateSettings(settings: unknown): string[] {
     if (!isObject(settings)) return ["must be an object with the targets"];
@@ -149,18 +124,24 @@ export class GateModule implements AssuranceModule {
       ids.push(target.id);
       errors.push(...unknownKeys(target, ["id", "controller", "ref"]).map((k) => `${at}.${k} is not a target field`));
       if (typeof target.id !== "string" || !TARGET_ID.test(target.id)) errors.push(`${at}.id must be lower-case letters, digits and hyphens, at most 64`);
-      if (typeof target.controller !== "string" || !this.#controllers.has(target.controller)) {
-        errors.push(`${at}.controller must name a controller this gate was given (${[...this.#controllers.keys()].join(", ")})`);
-      }
+      if (typeof target.controller !== "string" || target.controller === "") errors.push(`${at}.controller must name a controller`);
       if (typeof target.ref !== "string" || target.ref.trim() === "" || target.ref.length > 200) errors.push(`${at}.ref must be 1 to 200 characters`);
     });
     if (new Set(ids).size !== ids.length) errors.push("two targets have the same id");
     return errors;
-  }
+  },
 
   requiredAdapters(): string[] {
-    return [];
-  }
+    return ["access", "accessSigner"];
+  },
+
+  checkAdapters(settings: unknown, capabilities: Readonly<Record<string, unknown>>): string[] {
+    const declared = capabilities.access as AccessCapabilities | undefined;
+    if (declared === undefined) return [];
+    return (settings as GateSettings).targets
+      .filter((t) => !declared.controllers.includes(t.controller))
+      .map((t) => `target ${t.id} names the controller ${t.controller}, which the access adapter does not have (it has: ${declared.controllers.join(", ") || "none"})`);
+  },
 
   validateStep(step: FlowStep, ctx: StepContext): string[] {
     const errors = unknownKeys(step, ["type", "target", "lifetimeSeconds"]).map((k) => `${k} is not a field of this step`);
@@ -171,21 +152,21 @@ export class GateModule implements AssuranceModule {
     const settings = ctx.settings as GateSettings | null;
     if (settings !== null && !settings.targets.some((t) => t.id === step.target)) errors.push(`no target ${step.target} in the gate settings`);
     return errors;
-  }
+  },
 
   initCall(settings: unknown): JsonValue {
     const s = settings as GateSettings;
     const slice: GateSlice = { targets: structuredClone(s.targets), maxGrantsPerCall: s.maxGrantsPerCall ?? DEFAULT_GRANTS_PER_CALL, grants: [] };
     return slice as unknown as JsonValue;
-  }
+  },
 
   enterStep(_step: FlowStep, s: JsonValue): JsonValue {
     return (s as unknown as GateSlice).grants.length;
-  }
+  },
 
   cannotRunStep(step: FlowStep, s: JsonValue): string | null {
     return (s as unknown as GateSlice).targets.some((t) => t.id === step.target) ? null : `the call has no target ${String(step.target)}`;
-  }
+  },
 
   stepStatus(_step: FlowStep, view: StepView): StepStatus {
     const slice = view.slice as unknown as GateSlice;
@@ -194,127 +175,160 @@ export class GateModule implements AssuranceModule {
     // Every grant the call may have is used and none is in flight: the door was never opened by this step.
     const inFlight = mine.some((g) => g.status === "reserved");
     return !inFlight && slice.grants.length >= slice.maxGrantsPerCall ? "failed" : "pending";
-  }
+  },
+};
 
-  /**
-   * Issues an access grant for a target and sends it to its controller, once. In a flow the step
-   * names the target and its lifetime (pass no input); outside one the host's code passes them.
-   * Returns the outcome; an `unknown` one is never retried here.
-   */
-  async grantAccess(engine: GateHost, callId: string, input?: { target: string; lifetimeSeconds?: number }): Promise<AccessResult> {
-    await settleStale(engine, callId);
-    const reserved = (await engine.updateModule(callId, GATE, (s, call) => reserve(s as unknown as GateSlice, call, input) as unknown as JsonValue)) as unknown as GateSlice;
-    const record = reserved.grants.at(-1)!;
-    const body: AccessGrantBody = {
-      v: 1,
-      kind: "access",
-      grantId: record.grantId,
-      workspaceId: engine.workspaceId,
-      audience: record.controller,
-      target: record.ref,
-      action: "unlock",
-      scope: ENTRY_SCOPE,
-      level: record.level,
-      issuedAt: record.issuedAt,
-      expiresAt: record.expiresAt,
-    };
-    let grant: SignedAccessGrant;
-    try {
-      grant = await signDocument(this.#signer, body);
-    } catch (error) {
-      // Nothing was sent: the grant failed, and a new request may follow.
-      await commit(engine, callId, record.grantId, { status: "failed", confirmed: false, providerRef: null }, "access.failed", {});
-      throw error;
-    }
-    const digest = accessGrantDigest(body);
-    // Signing can take a while (a KMS): the call may have been tainted, or the grant expired, since
-    // the reservation. Checked once more right before the door is asked; nothing is sent if not.
-    const lapsed = await this.#stillAuthorized(engine, callId, record.grantId, digest, grant.kid);
-    if (lapsed !== null) throw new EngineError("scope_denied", `the access grant was not sent: ${lapsed}`);
-    let answer: UnlockResult | null;
-    try {
-      answer = await this.#controllers.get(record.controller)!.unlock({
-        grant,
-        target: record.ref,
-        idempotencyKey: JSON.stringify([engine.workspaceId, callId, record.grantId, "unlock"]),
-      });
-    } catch {
-      // The answer was lost (a timeout, a dropped connection, a controller error). The door may or
-      // may not have moved: record that, and never send this grant again.
-      answer = null;
-    }
-    // Only the controller's call decides the outcome. A failure to write it afterwards is thrown
-    // as it is; the reservation then settles as unknown once its grant expires.
-    const stored =
-      answer === null
-        ? await commit(engine, callId, record.grantId, { status: "unknown", confirmed: false, providerRef: null }, "access.unknown", { digest, kid: grant.kid })
-        : answer.outcome === "delivered"
-          ? await commit(engine, callId, record.grantId, { status: "delivered", confirmed: answer.confirmed, providerRef: answer.providerRef }, "access.delivered", {
-              digest,
-              confirmed: answer.confirmed,
-              kid: grant.kid,
-            })
-          : await commit(engine, callId, record.grantId, { status: "refused", confirmed: false, providerRef: null }, "access.refused", {
-              digest,
-              reason: reasonCode(answer.reason),
-              kid: grant.kid,
-            });
-    // What the call holds, which another process may have settled first (as unknown), not only what the door said.
-    return { grantId: record.grantId, status: stored.status as AccessResult["status"], confirmed: stored.confirmed };
-  }
+// ---- runtime -------------------------------------------------------------------------------
 
-  /** Settles the reservation as failed and returns why, when the grant may no longer be sent; null when it may. */
-  async #stillAuthorized(engine: GateHost, callId: string, grantId: string, digest: string, kid: string): Promise<string | null> {
-    // Set by each attempt of the write; the attempt that was saved is the last one to run.
-    let lapsed: string | null = null;
-    const after = (await outcome(engine, callId, grantId, (s, call) => {
-      const slice = s as unknown as GateSlice;
-      const record = slice.grants.find((g) => g.grantId === grantId)!;
-      // The reservation is open, and Gate closes it whenever it settles a grant: this grant is still reserved.
-      lapsed = !call.authorized(ENTRY_SCOPE) ? "the call is no longer authorized" : Date.parse(record.expiresAt) <= Date.parse(call.now) ? "it expired" : null;
-      // Written before the send, so a reservation that never gets its answer still names its grant.
-      record.digest = digest;
-      record.kid = kid;
-      if (lapsed !== null) {
-        record.status = "failed";
-        call.release();
-        call.emit("access.failed", { grantId, digest, kid, reason: lapsed === "it expired" ? "expired" : "not_authorized" });
-      }
-      return slice as unknown as JsonValue;
-    })) as unknown as GateSlice;
-    // Decided by what was stored, not by an attempt that may have been discarded: a grant another
-    // process settled meanwhile (its reservation closed, so the write was refused) is never sent.
-    const stored = after.grants.find((g) => g.grantId === grantId)!;
-    return stored.status === "reserved" ? null : (lapsed ?? "it was settled meanwhile");
+function gateSlice(draft: CallDraft): GateSlice {
+  return draft.slice<GateSlice>(GATE);
+}
+
+/**
+ * Settles, inside a write of the engine's, every grant still reserved past its expiry as unknown
+ * (the process that sent it stopped before recording the answer). With `all`, every grant still
+ * in flight, whatever its expiry: the call is ending.
+ */
+export function settleInFlight(rt: EngineRuntime, draft: CallDraft, reason: "no_answer_recorded" | "call_ended"): void {
+  const slice = draft.record.modules[GATE] as unknown as GateSlice | undefined;
+  if (slice === undefined) return;
+  const now = Date.parse(rt.now());
+  for (const g of slice.grants) {
+    const expired = Date.parse(g.expiresAt) <= now;
+    // A grant that was signed and may still be acted on: at its door now (reserved), or sent with
+    // its answer lost (unknown, which the controller may still be working on). The call ends once
+    // its answer is recorded or it expires (after which a relay refuses it), never while it can
+    // still open a door: so no door acts on a grant after the receipt. Stale grants are expired.
+    const live = (g.status === "reserved" || g.status === "unknown") && g.digest !== null && !expired;
+    if (reason === "call_ended" && live) {
+      throw new EngineError("precondition_failed", "an access grant may still be acted on at its door; end the call once it answers or expires");
+    }
+    if (g.status !== "reserved") continue;
+    if (reason === "call_ended" || expired) {
+      g.status = "unknown";
+      draft.emit("access.unknown", "system", { grantId: g.grantId, ...(g.digest === null ? {} : { digest: g.digest, kid: g.kid! }), reason: expired ? "no_answer_recorded" : reason });
+    }
   }
 }
 
-/** The one write that reserves a grant: checked against the call, the step and the limits. */
-function reserve(slice: GateSlice, call: ModuleCallView, input: { target: string; lifetimeSeconds?: number } | undefined): GateSlice {
-  if (!call.authorized(ENTRY_SCOPE)) throw new EngineError("scope_denied", `the grant does not cover ${ENTRY_SCOPE}`);
-  const step = call.step as GateGrantStep | null;
+/**
+ * Issues an access grant for a target and sends it to its controller, once. In a flow the step
+ * names the target and its lifetime (pass no input); outside one the host's code passes them.
+ * Returns the outcome the call holds; an `unknown` one is never retried here.
+ */
+export async function grantAccess(rt: EngineRuntime, callId: string, input?: { target: string; lifetimeSeconds?: number }): Promise<AccessResult> {
+  rt.settings(GATE);
+  // A stale reservation is settled in a write of its own, so the settlement holds even when the
+  // request that follows is refused (at the grant limit, the step then fails instead of waiting).
+  const before = (await rt.read(callId)).modules[GATE] as unknown as GateSlice | undefined;
+  const now = Date.parse(rt.now());
+  if (before?.grants.some((g) => g.status === "reserved" && Date.parse(g.expiresAt) <= now) === true) {
+    await rt.update(callId, (draft) => settleInFlight(rt, draft, "no_answer_recorded"));
+  }
+  const record = await rt.update(callId, (draft) => reserve(rt, draft, input));
+  const body: AccessGrantBody = {
+    v: 1,
+    kind: "access",
+    grantId: record.grantId,
+    workspaceId: rt.workspaceId,
+    audience: record.controller,
+    target: record.ref,
+    action: "unlock",
+    scope: ENTRY_SCOPE,
+    level: record.level,
+    issuedAt: record.issuedAt,
+    expiresAt: record.expiresAt,
+  };
+  let grant: SignedAccessGrant;
+  try {
+    grant = await signDocument(rt.adapter("accessSigner"), body);
+  } catch (error) {
+    // Nothing was sent: the grant failed, and a new request may follow.
+    await rt.update(callId, (draft) => {
+      const g = find(draft, record.grantId);
+      if (g.status !== "reserved") return;
+      g.status = "failed";
+      draft.emit("access.failed", "code", { grantId: g.grantId, reason: "not_signed" });
+    });
+    throw error;
+  }
+  // The engine computes the digest from the frozen grant it signed; it is never taken from elsewhere.
+  const digest = accessGrantDigest(body);
+  // Signing can take a while (a KMS): checked again, in a write, right before the door is asked,
+  // and the controller looked up in it: a grant that cannot be sent is failed, never unknown.
+  const checked = await rt.update(callId, (draft): { controller: AccessController } | EngineError => {
+    const g = find(draft, record.grantId);
+    if (g.status !== "reserved") return new EngineError("scope_denied", "the access grant was not sent: it was settled meanwhile");
+    const controller = controllerOf(rt, g.controller);
+    const why = !rt.authorized(draft.record, ENTRY_SCOPE) ? "not_authorized" : Date.parse(g.expiresAt) <= Date.parse(rt.now()) ? "expired" : controller === null ? "not_sent" : null;
+    g.digest = digest;
+    g.kid = grant.kid;
+    if (why === null) return { controller: controller! };
+    g.status = "failed";
+    draft.emit("access.failed", "code", { grantId: g.grantId, digest, kid: grant.kid, reason: why });
+    return why === "not_sent"
+      ? new EngineError("precondition_failed", `the access grant was not sent: the engine has no access controller named ${g.controller}`)
+      : new EngineError("scope_denied", `the access grant was not sent: ${why === "expired" ? "it expired" : "the call is no longer authorized"}`);
+  });
+  if (checked instanceof EngineError) throw checked;
+  const { controller } = checked;
+  let answer: UnlockResult | null;
+  try {
+    answer = await controller.unlock({ grant, target: record.ref, idempotencyKey: rt.idempotencyKey(callId, record.grantId, "unlock") });
+  } catch {
+    // The answer was lost (a timeout, a dropped connection, a controller error). The door may or
+    // may not have moved: record that, and never send this grant again.
+    answer = null;
+  }
+  return rt.update(callId, (draft) => {
+    const g = find(draft, record.grantId);
+    // Settled meanwhile (the call ended, or another process found it stale): it stays as it is.
+    if (g.status === "reserved") {
+      if (answer === null) {
+        g.status = "unknown";
+        draft.emit("access.unknown", "code", { grantId: g.grantId, digest, kid: grant.kid, reason: "answer_lost" });
+      } else if (answer.outcome === "delivered") {
+        Object.assign(g, { status: "delivered", confirmed: answer.confirmed, providerRef: answer.providerRef });
+        draft.emit("access.delivered", "code", { grantId: g.grantId, digest, kid: grant.kid, confirmed: answer.confirmed });
+      } else {
+        g.status = "refused";
+        draft.emit("access.refused", "code", { grantId: g.grantId, digest, kid: grant.kid, reason: reasonCode(answer.reason) });
+      }
+    }
+    return { grantId: g.grantId, status: g.status as AccessResult["status"], confirmed: g.confirmed };
+  });
+}
+
+/** The one write that reserves a grant: checked against the call, the step, the scope and the limits. */
+function reserve(rt: EngineRuntime, draft: CallDraft, input: { target: string; lifetimeSeconds?: number } | undefined): AccessRecord {
+  const step = stepOfType<GateGrantStep>(draft.record, "gate.grant");
+  // The scope is checked on every request, in a flow and outside one.
+  if (!rt.authorized(draft.record, ENTRY_SCOPE)) throw new EngineError("scope_denied", `the grant does not cover ${ENTRY_SCOPE}`);
   if (step !== null && input !== undefined) throw new EngineError("invalid_input", "the flow step names the target; pass no input");
+  if (input !== undefined && (!isObject(input) || typeof input.target !== "string")) throw new EngineError("invalid_input", "the input is { target, lifetimeSeconds? }");
   const wanted = step ?? input;
   if (wanted === undefined) throw new EngineError("invalid_input", "outside a flow, the target is required");
+  const slice = gateSlice(draft);
   const target = slice.targets.find((t) => t.id === wanted.target);
   if (target === undefined) throw new EngineError("invalid_input", `no target ${wanted.target} on this call`);
+  if (controllerOf(rt, target.controller) === null) throw new EngineError("precondition_failed", `the engine has no access controller named ${target.controller}`);
   const lifetime = wanted.lifetimeSeconds ?? DEFAULT_ACCESS_SECONDS;
   if (!isIntegerIn(lifetime, MIN_ACCESS_SECONDS, MAX_ACCESS_GRANT_SECONDS)) {
     throw new EngineError("invalid_input", `lifetimeSeconds must be an integer from ${MIN_ACCESS_SECONDS} to ${MAX_ACCESS_GRANT_SECONDS}`);
   }
-  const now = Date.parse(call.now);
   if (slice.grants.some((g) => g.status === "reserved")) throw new EngineError("precondition_failed", "an access grant is being delivered on this call");
   if (slice.grants.length >= slice.maxGrantsPerCall) throw new EngineError("precondition_failed", "this call has used every access grant it may have");
   // `entry.open` is an access scope, never below level 2, so an authorized call holds a grant.
-  const verification = call.state.grant!;
+  const verification = draft.record.state.grant!;
+  const now = rt.now();
   const record: AccessRecord = {
-    grantId: call.newId("acc"),
+    grantId: rt.ids.next("acc"),
     target: target.id,
     controller: target.controller,
     ref: target.ref,
     level: verification.level,
-    issuedAt: call.now,
-    expiresAt: new Date(Math.min(now + lifetime * 1000, Date.parse(verification.expiresAt))).toISOString(),
+    issuedAt: now,
+    expiresAt: new Date(Math.min(Date.parse(now) + lifetime * 1000, Date.parse(verification.expiresAt))).toISOString(),
     status: "reserved",
     confirmed: false,
     providerRef: null,
@@ -322,9 +336,7 @@ function reserve(slice: GateSlice, call: ModuleCallView, input: { target: string
     kid: null,
   };
   slice.grants.push(record);
-  // The only thing an outcome write may settle later: this grant, by its id.
-  call.reserve(record.grantId);
-  call.emit("access.issued", {
+  draft.emit("access.issued", "code", {
     grantId: record.grantId,
     target: record.target,
     controller: record.controller,
@@ -333,72 +345,18 @@ function reserve(slice: GateSlice, call: ModuleCallView, input: { target: string
     verificationGrantId: verification.grantId,
     expiresAt: record.expiresAt,
   });
-  return slice;
+  return structuredClone(record);
 }
 
-/**
- * Settles, in its own write, every reservation whose grant expired with no answer recorded (the
- * process stopped while the door answered) as unknown. Its own write, so it holds even when the
- * request that follows is refused: at the grant limit, the step then fails instead of waiting.
- */
-async function settleStale(engine: GateHost, callId: string): Promise<void> {
-  const before = (await engine.moduleState(callId, GATE)) as unknown as GateSlice;
-  // One write per stale reservation, each settling only the grant it reserved.
-  for (const stale of before.grants.filter((g) => g.status === "reserved")) {
-    await outcome(engine, callId, stale.grantId, (s, call) => {
-      const slice = s as unknown as GateSlice;
-      const g = slice.grants.find((r) => r.grantId === stale.grantId)!;
-      if (g.status === "reserved" && Date.parse(g.expiresAt) <= Date.parse(call.now)) {
-        g.status = "unknown";
-        call.release();
-        call.emit("access.unknown", {
-          grantId: g.grantId,
-          ...(g.digest === null ? {} : { digest: g.digest }),
-          ...(g.kid === null ? {} : { kid: g.kid }),
-          reason: "no_answer_recorded",
-        });
-      }
-      return slice as unknown as JsonValue;
-    });
-  }
+/** The access controller by name: own properties only, and only an object with an unlock function. */
+function controllerOf(rt: EngineRuntime, name: string): AccessController | null {
+  const all = rt.adapter("access");
+  const found = Object.hasOwn(all, name) ? all[name] : undefined;
+  return typeof found?.unlock === "function" ? found : null;
 }
 
-/**
- * An outcome write for one grant. If another process settled that grant first (and so closed its
- * reservation), the write is refused; the call's part is read back instead, unchanged.
- */
-async function outcome(engine: GateHost, callId: string, grantId: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): Promise<JsonValue> {
-  try {
-    return await engine.recordModuleOutcome(callId, GATE, grantId, fn);
-  } catch (error) {
-    const now = (await engine.moduleState(callId, GATE)) as unknown as GateSlice;
-    if (error instanceof EngineError && error.code === "precondition_failed" && now.grants.some((g) => g.grantId === grantId && g.status !== "reserved")) {
-      return now as unknown as JsonValue;
-    }
-    throw error;
-  }
-}
-
-async function commit(
-  engine: GateHost,
-  callId: string,
-  grantId: string,
-  result: Pick<AccessRecord, "status" | "confirmed" | "providerRef">,
-  event: string,
-  detail: { [key: string]: JsonValue },
-): Promise<AccessRecord> {
-  const after = (await outcome(engine, callId, grantId, (s, call) => {
-    const slice = s as unknown as GateSlice;
-    const record = slice.grants.find((g) => g.grantId === grantId)!;
-    // Only a reservation takes an outcome: one settled as unknown meanwhile stays unknown.
-    if (record.status === "reserved") {
-      Object.assign(record, result);
-      call.release();
-      call.emit(event, { grantId, ...detail });
-    }
-    return slice as unknown as JsonValue;
-  })) as unknown as GateSlice;
-  return after.grants.find((g) => g.grantId === grantId)!;
+function find(draft: CallDraft, grantId: string): AccessRecord {
+  return gateSlice(draft).grants.find((g) => g.grantId === grantId)!;
 }
 
 /** A controller's refusal reason as a short code for the ledger; anything else becomes "refused". */

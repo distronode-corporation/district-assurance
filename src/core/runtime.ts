@@ -2,6 +2,7 @@
 // change it (one compare-and-set write per change), the adapters and the clock. This is internal
 // to the package; outside modules use `Engine.updateModule` and `Engine.moduleState` instead.
 import type {
+  AccessController,
   AuditLedger,
   CarrierSignals,
   IdentityProvider,
@@ -36,6 +37,10 @@ export interface EngineAdapters {
   payments?: PaymentLinks;
   signer?: ReceiptSigner;
   pinVerifier?: PinVerifier;
+  /** Gate's door controllers, by name. Targets in Gate's settings name one of these. */
+  access?: Readonly<Record<string, AccessController>>;
+  /** Signs Gate's access grants. Its own key (its own `kid`), not the receipt key. */
+  accessSigner?: ReceiptSigner;
 }
 
 export type AdapterName = keyof EngineAdapters;
@@ -62,11 +67,6 @@ export interface CallRecord {
   flow: FlowCursor | null;
   /** Each module's own part, by module name. */
   modules: Record<string, JsonValue>;
-  /**
-   * Outside modules' open reservations, by module name: work started in `updateModule` whose
-   * outcome may still be written with `recordModuleOutcome`. Absent on a record that has none.
-   */
-  reservations?: Record<string, string[]>;
   /** Ledger entries saved with a change and not yet known to be appended. */
   outbox: Array<{ eventId: string; name: EngineEventName; actor: Actor; at: string; detail: { [key: string]: JsonValue } }>;
 }
