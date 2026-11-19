@@ -24,7 +24,7 @@ import {
 import { verifyChain } from "../src/prove/ledger.ts";
 import { FakeRecordDelivery, type TestEngine } from "../src/testing/index.ts";
 import { verifyStripeSignature } from "../src/webhooks/stripe.ts";
-import { rejects, setup, verifiedCall } from "./helpers.ts";
+import { heard, rejects, setup, verifiedCall } from "./helpers.ts";
 
 const SECRET = "whsec_delivery_test_not_a_secret";
 const destination = { destinationId: "crm", url: "https://hooks.example.test/records", secret: SECRET };
@@ -34,7 +34,7 @@ async function confirmedRecord(t: TestEngine): Promise<string> {
   const callId = await verifiedCall(t);
   await t.engine.startIntake(callId, "repair");
   await t.engine.setIntakeField(callId, "issue", "Leaking tap in the kitchen");
-  return (await t.engine.confirmIntake(callId, { confirmedBy: "voice" })).recordId;
+  return (await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) })).recordId;
 }
 
 /** Inputs for `deliverRecord` on the test engine's adapters; `sleep` moves the fixed clock and notes each wait. */

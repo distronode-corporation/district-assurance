@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import type { RecordDelivery } from "../src/core/adapters.ts";
 import { deliverRecord, type DeliverRecordInput } from "../src/file/delivery.ts";
 import type { TestEngine } from "../src/testing/index.ts";
-import { PHONE_ON_FILE, setup, verifiedCall } from "./helpers.ts";
+import { PHONE_ON_FILE, heard, setup, verifiedCall } from "./helpers.ts";
 
 const destination = { destinationId: "crm", url: "https://hooks.example.test/records", secret: "whsec_delivery_test_not_a_secret" };
 
@@ -13,7 +13,7 @@ async function confirmedRecord(t: TestEngine): Promise<string> {
   const callId = await verifiedCall(t);
   await t.engine.startIntake(callId, "repair");
   await t.engine.setIntakeField(callId, "issue", "Leaking tap in the kitchen");
-  return (await t.engine.confirmIntake(callId, { confirmedBy: "voice" })).recordId;
+  return (await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) })).recordId;
 }
 
 function inputs(t: TestEngine, recordId: string, delivery: RecordDelivery): DeliverRecordInput {
