@@ -50,7 +50,8 @@ describe("#71 hostile: the subject a host names", () => {
     await t.engine.beginVerification(callId, input);
     t.clock.advance(900_000);
     await t.engine.submitPin(callId, "0000");
-    assert.equal((await t.counters.get(subjKey(), LONG_AGO)).length + (await t.counters.get({ ...subjKey(), key: "f".repeat(64) }, LONG_AGO)).length, 1, "one failure, on one subject");
+    assert.equal((await t.counters.get(subjKey(), LONG_AGO)).length, 1, "the failure is on the subject that was checked");
+    assert.equal((await t.counters.get({ ...subjKey(), key: "f".repeat(64) }, LONG_AGO)).length, 0, "never on the swapped one");
     assert.equal(reads, 1, "read once");
   });
 });
@@ -83,10 +84,13 @@ describe("#71 hostile: stores, clocks and tenants", () => {
     const t = setup({ config: testConfig((c) => ((c.modules.badge!.settings as { pin: { maxAttemptsPerCall: number } }).pin.maxAttemptsPerCall = 1)) });
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
-    const results = await Promise.allSettled([t.engine.submitPin(callId, "0000"), t.engine.submitPin(callId, PIN)]);
-    const passes = results.filter((r) => r.status === "fulfilled" && r.value.matched).length;
-    assert.ok(passes <= 1);
-    assert.ok((await t.engine.state(callId)).factors.length <= 1, "at most one entry judged");
+    const [wrong, right] = await Promise.all([t.engine.submitPin(callId, "0000"), t.engine.submitPin(callId, PIN)]);
+    const factors = (await t.engine.state(callId)).factors;
+    assert.equal(factors.length, 1, "exactly one entry judged");
+    // The judged entry answers as judged; the other is refused, the call's last attempt used.
+    const [judged, refused] = factors[0]!.passed ? [right, wrong] : [wrong, right];
+    assert.deepEqual(judged, { matched: factors[0]!.passed, locked: !factors[0]!.passed });
+    assert.deepEqual(refused, { matched: false, locked: true });
   });
 
   it("W6 lockout settings that are not plain numbers are refused, prototype keys included", () => {

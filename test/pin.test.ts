@@ -17,6 +17,13 @@ import { ACCOUNT, DOB, PIN, rejects, setup, testConfig, waitOut } from "./helper
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 
+/** Resolves with `p`, or rejects once `ms` pass, so a missed checkpoint fails the test instead of hanging it. */
+function within<T>(p: Promise<T>, label: string, ms = 2000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`${label}: not reached in ${ms} ms`)), ms)));
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
+}
+
 /** Real counters that also keep every reset they are asked for. */
 function resetRecorder(resets: unknown[]): MemoryAttemptCounters {
   return new (class extends MemoryAttemptCounters {
@@ -815,15 +822,24 @@ describe("PIN enrolment and reset (VER-6)", () => {
         if (calls === 1) {
           // The second try records its pending digest and waits at the store while the first one stores.
           other = t.engine.enrolPin(callId, { pin: second, confirm: second });
-          await atStore;
+          // Observed from the start: a second try that settles before the store fails here, not by hanging.
+          const early = other.then(
+            () => Promise.reject(new Error("the second try finished before it reached the store")),
+            (e: unknown) => Promise.reject(new Error(`the second try failed before it reached the store: ${String(e)}`)),
+          );
+          early.catch(() => undefined);
+          await within(Promise.race([atStore, early]), "the second try at the store");
         } else {
           reached();
           await new Promise<void>((resolve) => (release = resolve));
         }
         return put(workspaceId, subjectKey, digest, enrolmentId);
       };
-      assert.deepEqual(await t.engine.enrolPin(callId, { pin: CHOSEN, confirm: CHOSEN }), { enrolled: true });
-      release();
+      try {
+        assert.deepEqual(await t.engine.enrolPin(callId, { pin: CHOSEN, confirm: CHOSEN }), { enrolled: true });
+      } finally {
+        release();
+      }
       await assert.rejects(other, rejects("precondition_failed", /only the business/));
       assert.equal((await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest, pinDigest(TEST_KNOWLEDGE_KEY, NEW_SUBJECT, CHOSEN));
       assert.equal((await t.ledger.list()).filter((e) => e.event === "pin.enrolled").length, 1, "the stored PIN is in the ledger, once");

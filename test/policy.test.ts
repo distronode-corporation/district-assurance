@@ -256,7 +256,11 @@ describe("evaluateAssurance", () => {
   });
 
   it("does not count a callback the carrier signals discredit, like a texted code (VER-9)", () => {
-    const withCallback = policy({ levels: [...p.levels, { level: 2, anyOf: [["pin", "callback"]] }] });
+    // The callback pair joins the default level-2 rule: a second level-2 rule would not load.
+    const withCallback = policy({
+      levels: p.levels.map((rule) => (rule.level === 2 ? { ...rule, anyOf: [...rule.anyOf, ["pin", "callback"]] } : rule)),
+    });
+    assert.deepEqual(validatePolicy(withCallback), [], "a policy a host can load");
     assert.equal(evaluateAssurance(withCallback, pass("pin", "callback"), clean).level, 2);
     for (const report of [{ ...clean, lastSimSwapHoursAgo: 2 }, { ...clean, lastPortHoursAgo: 72 }, { ...clean, checked: false }, null]) {
       assert.deepEqual(evaluateAssurance(withCallback, pass("pin", "callback"), report), { level: 0, counted: ["pin"], discounted: [{ kind: "callback", reason: "carrier_signal" }] });

@@ -3,7 +3,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import type { PinVerifier } from "../src/core/adapters.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig, waitOut } from "./helpers.ts";
 
 /** A PIN verifier whose answer the test releases, so a taint can land while the PIN is judged. */
 function heldVerifier(pin: string) {
@@ -57,9 +57,14 @@ describe("hostile #86: a taint and the match", () => {
     const t = setup();
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
-    for (let i = 0; i < 2; i++) await t.engine.submitPin(callId, "0000");
+    // Each wrong guess is judged past the wait the one before started, so only the attempt limit locks.
+    for (let i = 0; i < 2; i++) {
+      assert.deepEqual(await t.engine.submitPin(callId, "0000"), { matched: false, locked: false });
+      waitOut(t);
+    }
     await t.engine.markUntrusted(callId, "crm_note");
-    await t.engine.submitPin(callId, "0000");
+    assert.deepEqual(await t.engine.submitPin(callId, "0000"), { matched: false, locked: true }, "the third attempt, as before the taint");
+    waitOut(t);
     assert.deepEqual(await t.engine.submitPin(callId, PIN), { matched: false, locked: true }, "the taint gives no new guesses");
   });
 
