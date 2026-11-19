@@ -12,8 +12,9 @@ import { ModuleRegistry } from "../src/core/module.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { stepUpAcr, stepUpModule, stepUpSubject } from "../src/gate/step-up.ts";
 import { builtInModules } from "../src/modules.ts";
-import { TEST_KNOWLEDGE_KEY, generateTestSigner } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig } from "./helpers.ts";
+import { verifyReceipt } from "../src/prove/receipt.ts";
+import { TEST_KNOWLEDGE_KEY, generateTestSigner, testSubject } from "../src/testing/index.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig } from "./helpers.ts";
 
 const verify = { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["entry.open"] };
 
@@ -492,6 +493,108 @@ describe("step-up: its own key", () => {
     assert.throws(() => setup({ adapters: { signer: shared, stepUpSigner: { ...shared, keyId: "other-id" } } }), /stepUpSigner must be its own key, not the receipt signer's/);
     assert.throws(() => setup({ adapters: { accessSigner: shared, stepUpSigner: { ...shared, keyId: "other-id" } } }), /stepUpSigner must be its own key, not the accessSigner's/);
     assert.ok(setup({ adapters: { stepUpSigner: generateTestSigner("own-1") } }).engine.stepUpKeys().keys[0]!.kid === "own-1");
+  });
+});
+
+// Hostile review of 8580ae6 (iMac): hanging up must never revive a token its call no longer vouches for.
+describe("step-up: the end of the call", () => {
+  const OTHER = "87654321";
+  async function verifyAs(t: ReturnType<typeof stepUpSetup>, callId: string, account: string) {
+    await t.engine.beginVerification(callId, { accountNumber: account });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.checkCarrier(callId);
+    return t.engine.finishVerification(callId);
+  }
+  function endSetup() {
+    const t = stepUpSetup({ patch: (c) => (c.modules["step-up"]!.settings = { issuer: ISSUER, sites: structuredClone(sites), maxTokensPerCall: 5 }) });
+    t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: OTHER, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB }, pin: PIN }));
+    return t;
+  }
+  async function issued(t: ReturnType<typeof endSetup>) {
+    const { callId } = await t.engine.startCall();
+    await verifyAs(t, callId, ACCOUNT);
+    const { token } = await t.engine.issueStepUpToken(callId, { nonce: NONCE, site: "portal" });
+    return { callId, token };
+  }
+  const refusedAtEnd = async (t: ReturnType<typeof endSetup>, callId: string, token: string) => {
+    await t.engine.endCall(callId);
+    assert.deepEqual(await t.engine.exchangeStepUpToken(token, portal), { ok: false, reason: "not_authorized" });
+    assert.deepEqual(await t.engine.exchangeStepUpToken(token, portal), { ok: false, reason: "not_authorized" }, "and stays refused");
+    const entries = await t.ledger.list();
+    const events = entries.map((e) => e.event);
+    assert.ok(events.indexOf("stepup.refused") < events.indexOf("call.ended"), "refused in the write that ended the call");
+    assert.ok(!events.includes("stepup.exchanged"));
+    assert.equal(events.at(-1), "receipt.issued", "nothing follows the receipt");
+    assert.deepEqual((await stepUpTokens(t, callId)).map((r) => [r.status, r.refusedAtEnd]), [["refused", "not_authorized"]]);
+  };
+
+  it("A: refuses a token whose call ended while a new verification was running", async () => {
+    const t = endSetup();
+    const { callId, token } = await issued(t);
+    await t.engine.beginVerification(callId, { accountNumber: OTHER });
+    await refusedAtEnd(t, callId, token);
+  });
+
+  it("B: refuses a token whose call verified again (its grant replaced), then ended", async () => {
+    const t = endSetup();
+    const { callId, token } = await issued(t);
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.finishVerification(callId);
+    assert.equal((await t.engine.state(callId)).grant!.grantId, "grant_2");
+    await refusedAtEnd(t, callId, token);
+  });
+
+  it("C: refuses subject A's token once the caller verified as another subject and hung up", async () => {
+    const t = endSetup();
+    const { callId, token } = await issued(t);
+    assert.equal((await verifyAs(t, callId, OTHER)).level, 2);
+    await refusedAtEnd(t, callId, token);
+    const other = { ...portal, subjectKey: hmacSha256Hex(TEST_KNOWLEDGE_KEY, `subject:${OTHER}`) };
+    assert.deepEqual(await t.engine.exchangeStepUpToken(token, other), { ok: false, reason: "not_authorized" }, "nor for the new subject");
+  });
+
+  it("refuses at the end a token whose call was tainted, and says so", async () => {
+    const t = endSetup();
+    const { callId, token } = await issued(t);
+    await t.engine.markUntrusted(callId, "crm_note");
+    assert.equal((await t.engine.state(callId)).grant, null, "a taint drops the grant");
+    await t.engine.endCall(callId);
+    assert.deepEqual(await t.engine.exchangeStepUpToken(token, portal), { ok: false, reason: "tainted" });
+    assert.deepEqual((await stepUpTokens(t, callId)).map((r) => [r.status, r.refusedAtEnd]), [["refused", "tainted"]]);
+  });
+
+  it("keeps a token for the grant the call still held as it ended, exchangeable once", async () => {
+    const t = endSetup();
+    const { callId, token } = await issued(t);
+    await t.engine.endCall(callId);
+    assert.equal((await t.engine.exchangeStepUpToken(token, portal)).ok, true);
+    assert.deepEqual(await t.engine.exchangeStepUpToken(token, portal), { ok: false, reason: "unknown" });
+  });
+
+  it("G: lists the call's tokens on the receipt as they stood at the end, still at version 1", async () => {
+    const t = endSetup();
+    const { callId } = await issued(t);
+    await assert.rejects(t.engine.issueStepUpToken(callId, { nonce: "1", site: "portal" }), rejects("invalid_input"));
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.equal(receipt.body.v, 1);
+    assert.deepEqual(receipt.body.stepUp, [{ tokenId: "stu_1", expiresAt: "2026-01-01T00:02:00.000Z", status: "issued" }]);
+    assert.ok(verifyReceipt(receipt, t.engine.receiptKeys()));
+    // A call that issued none carries no stepUp part at all.
+    const plain = await t.engine.startCall();
+    assert.ok(!("stepUp" in (await t.engine.endCall(plain.callId))!.body));
+  });
+
+  it("H: publishes only public key members, whatever a signer's publicJwk returns", () => {
+    const leaky = (kid: string) => {
+      const s = generateTestSigner(kid);
+      return { ...s, publicJwk: () => ({ ...s.publicJwk(), d: "SECRET", p: "x", k: "y" }) };
+    };
+    const t = setup({ adapters: { signer: leaky("r-1"), accessSigner: leaky("a-1"), stepUpSigner: leaky("s-1") } });
+    for (const key of [...t.engine.receiptKeys(), ...t.engine.accessKeys(), ...t.engine.stepUpKeys().keys]) {
+      assert.deepEqual(Object.keys(key).sort(), ["alg", "crv", "kid", "kty", "use", "x", "y"].filter((k) => k in key).sort());
+      assert.ok(!("d" in key) && !JSON.stringify(key).includes("SECRET"));
+    }
+    assert.deepEqual(t.engine.stepUpKeys().keys.map((k) => (k as { kid?: string }).kid), ["s-1"]);
   });
 });
 

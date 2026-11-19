@@ -76,6 +76,11 @@ export interface StepUpRecord {
   issuedAt: string;
   expiresAt: string;
   status: StepUpStatus;
+  /**
+   * Set when the call ended while this issued token was no longer its grant's (a new verification
+   * running, or the grant changed or dropped): the end refused it, and an exchange answers this.
+   */
+  refusedAtEnd?: "not_authorized" | "tainted";
   /** SHA-256 of the compact token and the key id, written once it is signed. */
   digest: string | null;
   kid: string | null;
@@ -202,6 +207,10 @@ export const stepUpModule: AssuranceModule = {
     return (s as unknown as StepUpSlice).sites.some((site) => site.id === step.site) ? null : `the call has no site ${String(step.site)}`;
   },
 
+  receiptPart(s: JsonValue): { [key: string]: JsonValue } {
+    return { stepUp: (s as unknown as StepUpSlice).tokens.map((t) => ({ tokenId: t.tokenId, expiresAt: t.expiresAt, status: t.status })) };
+  },
+
   stepStatus(_step: FlowStep, view: StepView): StepStatus {
     const slice = view.slice as unknown as StepUpSlice;
     const mine = slice.tokens.slice(view.mark as number);
@@ -225,16 +234,26 @@ function grantSubject(record: CallRecord): string | null {
 }
 
 /**
- * Settles, inside the write that ends a call, a token still being signed: it is failed, so it is
- * never handed out after the call ended. A token already issued stays exchangeable until it
- * expires (the web sign-in may finish just after the caller hangs up).
+ * Settles, inside the write that ends a call (before the call's grant is dropped), every token the
+ * end decides: one still being signed is failed, so it is never handed out after the call ended;
+ * one issued that is no longer its call's (a new verification running, or the call's grant changed
+ * or dropped since it was issued) is refused, so hanging up never revives it. Only a token issued
+ * for the grant the call still holds as it ends stays exchangeable, until it expires. The ended
+ * call has no grant, so this is the last moment its validity can be judged.
  */
 export function settleStepUpInFlight(draft: CallDraft): void {
   const slice = draft.record.modules[STEP_UP] as unknown as StepUpSlice | undefined;
+  const state = draft.record.state;
   for (const t of slice?.tokens ?? []) {
-    if (t.status !== "reserved") continue;
-    t.status = "failed";
-    draft.emit("stepup.failed", "system", { tokenId: t.tokenId, reason: "call_ended" });
+    if (t.status === "reserved") {
+      t.status = "failed";
+      draft.emit("stepup.failed", "system", { tokenId: t.tokenId, reason: "call_ended" });
+    } else if (t.status === "issued" && (state.tainted || state.phase === "verifying" || state.grant?.grantId !== t.verificationGrantId)) {
+      const reason = state.tainted ? "tainted" : "not_authorized";
+      t.status = "refused";
+      t.refusedAtEnd = reason;
+      draft.emit("stepup.refused", "system", { tokenId: t.tokenId, digest: t.digest!, reason });
+    }
   }
 }
 
@@ -331,8 +350,12 @@ export async function exchangeStepUpToken(rt: EngineRuntime, token: unknown, exp
     return await rt.update(claims.sid, (draft): StepUpExchange => {
       const slice = draft.record.modules[STEP_UP] as unknown as StepUpSlice | undefined;
       const record = slice?.tokens.find((t) => t.tokenId === claims.jti);
-      // Only the exact bytes this call issued, still waiting: anything else is refused without using the token up.
-      if (record === undefined || record.status !== "issued" || !hexDigestsEqual(record.digest!, digest)) return { ok: false, reason: "unknown" };
+      // Only the exact bytes this call issued: anything else is refused without using the token up.
+      if (record === undefined || record.digest === null || !hexDigestsEqual(record.digest, digest)) return { ok: false, reason: "unknown" };
+      // Refused by the end of its call: it says why, and nothing more is written.
+      if (record.refusedAtEnd !== undefined) return { ok: false, reason: record.refusedAtEnd };
+      // Not waiting any more (already exchanged or refused).
+      if (record.status !== "issued") return { ok: false, reason: "unknown" };
       const state = draft.record.state;
       const reason = state.tainted
         ? "tainted"

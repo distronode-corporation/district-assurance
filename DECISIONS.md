@@ -340,7 +340,10 @@ generic "held work" contract in the core (the engine calls an adapter the module
 its answer), designed once, not per module.
 **Amended (GAT-4):** web sign-in step-up is built in on the same terms: the engine reserves,
 signs and validates each step-up token and records its one exchange, under the `stepUpSigner`
-adapter (a key of its own, apart from the receipt and access signers). A token issued before the
-call ended stays exchangeable until it expires (at most 5 minutes), so its exchange entry may
-follow `receipt.issued`; a token still being signed when the call ends is failed.
+adapter (a key of its own, apart from the receipt and access signers). The write that ends a
+call fails a token still being signed and refuses every issued token its call no longer vouches
+for (tainted, a new verification running, or another grant). Whether a token issued for the grant
+the call still holds at its end stays exchangeable until it expires (at most 5 minutes), with its
+exchange entry then following `receipt.issued`, is a pending decision; the code does so for now,
+and the receipt lists the call's tokens.
 

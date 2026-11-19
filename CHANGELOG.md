@@ -13,7 +13,10 @@ All notable changes to this project are documented here. The format follows
   the verification grant, with an OpenID Connect `acr`. The engine issues it and records its one
   exchange itself (ADR-25): `Engine.issueStepUpToken`, `exchangeStepUpToken`, `stepUpTokens` and
   `stepUpKeys` (the JWKS); the `stepUpSigner` adapter, its own key; `stepup.*` ledger events.
-  Refused after the call is tainted or verified again.
+  Refused after the call is tainted or verified again, including when the call ends: the end
+  refuses every token its call no longer vouches for. Receipts list a call's tokens (`stepUp`,
+  optional, so receipts stay at `v: 1`).
+- Published key sets (`receiptKeys`, `accessKeys`, `stepUpKeys`) carry only public key members.
 - Gate, the fifth built-in module (GAT-1, ADR-25): signed, time-limited access grants (ES256 over
   canonical JSON, like receipts) after verification to `entry.open` (level 2 or more), delivered
   once through an `AccessController`. The engine owns every grant and outcome: it reserves, signs,

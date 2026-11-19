@@ -350,6 +350,7 @@ numbers, sparse array holes, and objects whose prototype is not `Object.prototyp
     "records":  [{ "recordId": "...", "formId": "...", "digest": "<sha256 hex>" }],
     "payments": [{ "paymentId": "...", "status": "paid", "amountMinor": 15000, "currency": "cad", "mode": "platform", "providerRef": "cs_..." }],
     "consents": [{ "purpose": "...", "wordingVersion": "1", "wordingDigest": "<sha256 hex>", "answer": "yes" }],
+    "stepUp":   [{ "tokenId": "stu_...", "expiresAt": "...", "status": "issued" }],
     "ledger":   { "seq": 17, "hash": "<sha256 hex>" }
   },
   "alg": "ES256",
@@ -363,7 +364,10 @@ or not the flow finished), or, for a call that ran no flow, when Trace's `receip
 false. `endCall` returns it, or null. `verification` comes from Badge, `records` from Dossier,
 `payments` from Paylink and `consents` from Trace; a module that is off contributes an empty
 part. `ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
-the ended call issues the receipt later with the same head, without ending the call again. `verifyReceipt(receipt, keys)` picks the key by `kid`
+the ended call issues the receipt later with the same head, without ending the call again.
+`stepUp` is step-up's part (section 18): each token the call was issued, `{tokenId, expiresAt,
+status}` as the end of the call left it. It is present only on a call that was issued one, so the
+format stays at `v: 1`. `verifyReceipt(receipt, keys)` picks the key by `kid`
 and returns false for any change, a wrong algorithm, a malformed signature or an unknown key.
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
 `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
@@ -576,7 +580,9 @@ the skew, because the engine ends a call only once every grant at a door has ans
 and `lifetime` (longer than 900 seconds, or ending before it starts). This assumes the engine's and
 the relay's clocks agree (NTP): a relay whose clock runs behind by some seconds accepts a grant for
 that much longer. `new SeenGrants()`: `accept(body, now)` is true once per grant id, and keeps the
-id until the grant expires, when the verifier refuses it anyway. `engine.accessKeys()` is the public key set.
+id until the grant expires, when the verifier refuses it anyway. `engine.accessKeys()` is the public key set. Every key set the engine
+publishes (`receiptKeys()`, `accessKeys()`, `stepUpKeys()`) holds only the public members of each
+key (`kty`, `crv`, `x`, `y`, `kid`, `alg`, `use`), whatever its signer's `publicJwk` returns.
 
 **The relay contract, version 1** (`webhookRelay({url, timeoutMs?})`): `POST <url>` with
 `content-type: application/json`, `idempotency-key: <the key above>` and the signed grant as
@@ -639,10 +645,16 @@ A token left `reserved` past its expiry (the process signing it stopped before i
 is failed (`stepup.failed`, reason `not_issued_in_time`) in a write of its own before the call's
 next request, so it never blocks that call for good; one still within its life keeps blocking.
 Ending the call fails a token still being signed (`stepup.failed`, reason `call_ended`), in the
-write that ends it, so none is handed out after the end. A token already `issued` stays
-exchangeable after the call ended, until it expires (at most 5 minutes), so a sign-in that
-finishes just after the caller hangs up still works; its `stepup.exchanged` or
-`stepup.refused` entry then follows the receipt, outside its ledger head.
+write that ends it, so none is handed out after the end. The same write judges every `issued`
+token for the last time, since the ended call holds no grant: one whose call is tainted, has a
+new verification running, or no longer holds the grant the token was issued for (verified again,
+for that subject or another, or the grant dropped) is refused (`stepup.refused`, reason
+`tainted` or `not_authorized`), and any later exchange of it answers that reason and writes
+nothing. Only a token issued for the grant the call still holds as it ends stays exchangeable
+after the end, until it expires (at most 5 minutes); its `stepup.exchanged` or `stepup.refused`
+entry then follows the receipt, outside its ledger head. Whether tokens stay exchangeable after
+the end at all is a pending decision. The receipt lists the call's tokens as the end left them
+(`stepUp`, section 12), so a reader can tie such a later entry to it.
 
 ```json
 {
@@ -671,8 +683,12 @@ for a bad token; a write that fails is thrown as it is.
 - Each of these uses the token up (`refused`, `stepup.refused` with `digest` and `reason`):
   `tainted` (the call was tainted since, at any time before the exchange); `not_authorized` (a
   new verification is running on the call, or the call has not ended and its verification grant
-  is no longer the token's: verified again, or dropped); `expired`; `mismatch` (another `audience`, a subject whose `stepUpSubject` is not the
-  token's `sub`, or another nonce, compared in constant time).
+  is no longer the token's: verified again, or dropped; or the end of the call refused it, above);
+  `expired`; `mismatch` (another `audience`, a subject whose `stepUpSubject` is not the
+  token's `sub`, or another nonce, compared in constant time). So anyone who holds the token can
+  use it up with a wrong nonce: a refusal is final by design (a guessed nonce never gets a second
+  try), at the cost of letting a token's holder deny that one sign-in, which then starts again
+  with a new nonce.
 - Otherwise `exchanged` (`stepup.exchanged`, with `digest` and `kid`), and the claims.
 
 The ledger never holds the token, its signature, the nonce or `sub`. The call record holds no

@@ -180,9 +180,17 @@ refused, on any process (tested). An exchange after the call was tainted, while 
 after expiry, or for another site, subject or nonce is refused and uses the token up; a forged or
 altered token is refused without using up the real one (tested). The ledger holds the token's
 digest and outcome, never the token, the nonce or the subject handle, and the call record keeps
-no nonce (tested). `sub` is a handle per site, so two sites cannot link one person (tested). A
-token issued before the call ended stays exchangeable until it expires (at most 5 minutes), and
-its exchange is written after the receipt, outside the receipt's ledger head (tested).
+no nonce (tested). `sub` is a handle per site, so two sites cannot link one person (tested).
+Hanging up never revives a token: the write that ends the call refuses every issued token whose
+call is tainted, has a new verification running or no longer holds the token's grant (verified
+again, as that subject or another), since the ended call holds no grant to judge it by later
+(tested). Only a token for the grant the call still holds as it ends stays exchangeable, until it
+expires (at most 5 minutes; whether it should is a pending decision), its exchange written after
+the receipt, outside its ledger head; the receipt lists the call's tokens as the end left them
+(tested). A refused exchange is final, so anyone holding a token can use it up with a wrong nonce
+and deny that one sign-in (it starts again with a new nonce); a guessed nonce never gets a second
+try (tested). Published key sets carry only public key members, whatever a signer returns
+(tested).
 Left to the host: exchanging every token through the engine (checking the JWS against the JWKS
 alone gives neither the single use nor the refusal after taint), handing the token only to the
 browser session that showed the nonce, a nonce of at least 6 digits that lives no longer than

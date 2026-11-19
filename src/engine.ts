@@ -419,7 +419,7 @@ export class Engine {
 
   /** The key set door relays verify access grants with (empty without an access signer). */
   accessKeys(): JsonWebKey[] {
-    return this.#adapters.accessSigner === undefined ? [] : [this.#adapters.accessSigner.publicJwk()];
+    return this.#adapters.accessSigner === undefined ? [] : [publicMembers(this.#adapters.accessSigner.publicJwk())];
   }
 
   // ---- Step-up (web sign-in) ---------------------------------------------------------------
@@ -442,7 +442,7 @@ export class Engine {
 
   /** The JWKS document for the step-up issuer's `/.well-known/jwks.json` (no keys without a step-up signer). */
   stepUpKeys(): { keys: JsonWebKey[] } {
-    return { keys: this.#adapters.stepUpSigner === undefined ? [] : [this.#adapters.stepUpSigner.publicJwk()] };
+    return { keys: this.#adapters.stepUpSigner === undefined ? [] : [publicMembers(this.#adapters.stepUpSigner.publicJwk())] };
   }
 
   // ---- Trace (prove) -----------------------------------------------------------------------
@@ -480,7 +480,7 @@ export class Engine {
     });
     if (!trace.wantsReceipt(this.#rt, record)) return null;
     const head = await trace.endedHead(this.#rt, record, () => this.#adapters.ledger.head());
-    const parts: Pick<ReceiptBody, "verification" | "records" | "payments"> = { verification: { level: 0, methods: [] }, records: [], payments: [] };
+    const parts: Pick<ReceiptBody, "verification" | "records" | "payments" | "stepUp"> = { verification: { level: 0, methods: [] }, records: [], payments: [] };
     // The built-in contributors, not the registry: a module removed after this call filed or paid still appears on its receipt.
     for (const module of this.#receiptModules) {
       const slice = record.modules[module.manifest.name];
@@ -496,7 +496,7 @@ export class Engine {
 
   /** The key set for verifying this engine's receipts (empty without a signer). */
   receiptKeys(): JsonWebKey[] {
-    return this.#adapters.signer === undefined ? [] : [this.#adapters.signer.publicJwk()];
+    return this.#adapters.signer === undefined ? [] : [publicMembers(this.#adapters.signer.publicJwk())];
   }
 
   // ---- outside modules ---------------------------------------------------------------------
@@ -760,6 +760,18 @@ function distinctSigners(adapters: EngineAdapters): string[] {
     }
   });
   return errors;
+}
+
+/**
+ * Only the public members of an EC key, whatever a signer's `publicJwk` returns: a signer that
+ * hands back its private `d` (or anything else) never has it published in a key set.
+ */
+function publicMembers(jwk: JsonWebKey & { kid?: string }): JsonWebKey {
+  const kept: Record<string, unknown> = {};
+  for (const name of ["kty", "crv", "x", "y", "kid", "alg", "use"] as const) {
+    if (jwk[name as keyof typeof jwk] !== undefined) kept[name] = jwk[name as keyof typeof jwk];
+  }
+  return kept as JsonWebKey;
 }
 
 export function createEngine(options: EngineOptions): Engine {
