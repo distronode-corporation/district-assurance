@@ -364,4 +364,21 @@ describe("ledger export", () => {
     await assert.rejects(run(wrongHead, { fromSeq: 1 }), refused());
     await assert.rejects(run(wrongHead, { fromSeq: 1, limit: 1 }), refused(), "even on a page short of the head");
   });
+
+  it("refuses a run read short of, or past a rewrite of, its end", async () => {
+    const ledger = await ledgerOf(3);
+    const refused = (e: unknown) => e instanceof EngineError && e.code === "precondition_failed" && e.message.endsWith("expected end");
+    // The head check reads list(3); the run is the next list call. Edit only that one.
+    const onRunRead = (edit: (es: AuditEntry[]) => AuditEntry[]) => {
+      let calls = 0;
+      return new EditedLedger(ledger, { list: (es) => (++calls === 2 ? edit(es) : es) });
+    };
+    await assert.rejects(run(onRunRead((es) => es.filter((e) => e.seq !== 3)), { fromSeq: 1 }), refused, "a verified prefix short of the head");
+    await assert.rejects(run(onRunRead((es) => es.filter((e) => e.seq !== 2)), { fromSeq: 1, limit: 2 }), refused, "a limited run short of its end");
+    const other = await (await ledgerOf(3, 10)).list();
+    await assert.rejects(run(onRunRead(() => other), { fromSeq: 1 }), refused, "a rewrite that ends on another hash at the head's seq");
+    // Valid limited and empty runs still pass.
+    assert.equal(verifyLedgerExport(await run(onRunRead((es) => es), { fromSeq: 1, limit: 2 }), keys).ok, true);
+    assert.equal(verifyLedgerExport(await run(ledger, { fromSeq: 4 }), keys).ok, true);
+  });
 });

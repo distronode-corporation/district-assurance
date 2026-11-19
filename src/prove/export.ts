@@ -133,6 +133,11 @@ export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<st
   const entries = (await input.ledger.list(from.seq + 1)).filter((e) => e.seq <= last);
   const check = verifyChain(entries, from);
   if (!check.ok) throw new EngineError("precondition_failed", `exportLedger: the ledger chain does not verify at seq ${check.seq}`);
+  // A verified prefix is not enough: the run must reach the end it was meant to, and at the head
+  // it must end on the head that is signed, so a short or rewritten read is never vouched for.
+  if (check.head.seq !== last || (last === head.seq && check.head.hash !== head.hash)) {
+    throw new EngineError("precondition_failed", "exportLedger: the ledger run does not reach its expected end");
+  }
 
   for (const entry of entries) yield `${canonicalJson(entry)}\n`;
 
