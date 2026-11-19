@@ -54,7 +54,6 @@ describe("the AuditLedger contract", () => {
       "copies in and out, so a caller cannot change what is stored",
       "appends an eventId once: a second append returns the first entry",
       "returns a copy for a replayed eventId too, so a caller cannot change what is stored",
-      "keeps eventIds that differ only in a lone UTF-16 surrogate apart",
       "stores one entry for concurrent appends of one eventId",
     ]);
   });
@@ -129,6 +128,13 @@ describe("the RecordStore contract", () => {
       async getIntakeRecord(workspaceId: string, recordId: string) {
         return structuredClone(this.#records.get(`${workspaceId}/${recordId}`) ?? null);
       }
+      // VER-6 (#74) and VER-12 (#124) writes; the PRV-5 contract does not exercise them yet.
+      async putPinDigest() {
+        return false;
+      }
+      async putDuressDigest() {
+        return false;
+      }
     }
     assert.deepEqual(await failing(recordStoreContract((subjects) => new Joined(subjects))), [
       "keeps workspaces apart, and never lets two workspace and id pairs share a key",
@@ -199,7 +205,7 @@ describe("the contracts catch a store that collapses keys differing only in a lo
         return super.append(input.eventId === undefined ? input : { ...input, eventId: utf8Key(input.eventId) });
       }
     }
-    assert.deepEqual(await failing(auditLedgerContract(() => new Collapsing())), ["keeps eventIds that differ only in a lone UTF-16 surrogate apart"]);
+    assert.deepEqual(await failing(auditLedgerContract(() => new Collapsing())), ["refuses an eventId holding a lone UTF-16 surrogate, and never stores it as another eventId"]);
   });
 
   it("RecordStore", async () => {

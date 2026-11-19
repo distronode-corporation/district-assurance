@@ -379,17 +379,16 @@ export function auditLedgerContract(factory: () => AuditLedger | Promise<AuditLe
       },
     ],
     [
-      "keeps eventIds that differ only in a lone UTF-16 surrogate apart",
+      "refuses an eventId holding a lone UTF-16 surrogate, and never stores it as another eventId",
       async (ledger) => {
-        const appended: AuditEntry[] = [];
-        for (const [i, eventId] of SURROGATE_KEYS.entries()) appended.push(await ledger.append(contractEntry(i + 1, { eventId })));
-        assert.deepEqual(
-          appended.map((e) => [e.seq, e.eventId]),
-          SURROGATE_KEYS.map((eventId, i) => [i + 1, eventId]),
-          "each appends, and keeps its eventId as given",
-        );
-        for (const [i, eventId] of SURROGATE_KEYS.entries()) assert.deepEqual(await ledger.append(contractEntry(9, { eventId })), appended[i], "and is appended once");
-        assert.deepEqual(await ledger.list(), appended);
+        // The ledger hashes every entry as canonical JSON (RFC 8785), which has no lone surrogate:
+        // such an eventId is refused, never repaired into a well-formed one that could collide.
+        for (const eventId of SURROGATE_KEYS.filter((key) => !key.isWellFormed())) {
+          await assert.rejects(ledger.append(contractEntry(1, { eventId })), JSON.stringify(eventId));
+        }
+        assert.deepEqual(await ledger.list(), [], "nothing stored");
+        const kept = await ledger.append(contractEntry(2, { eventId: "k\ufffd" }));
+        assert.deepEqual(await ledger.list(), [kept], "a well-formed eventId appends");
       },
     ],
     [

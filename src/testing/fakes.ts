@@ -240,7 +240,7 @@ export class MemoryRecordStore implements RecordStore {
 
   async putPinDigest(workspaceId: string, subjectKey: string, digest: string | null, enrolmentId?: string): Promise<boolean> {
     // No await: one atomic step.
-    const subject = this.#subjects.get(`${workspaceId}/${subjectKey}`);
+    const subject = this.#subjects.get(JSON.stringify([workspaceId, subjectKey]));
     if (subject === undefined) return false;
     if (digest === null) {
       delete subject.pinDigest;
@@ -256,7 +256,7 @@ export class MemoryRecordStore implements RecordStore {
 
   async putDuressDigest(workspaceId: string, subjectKey: string, digest: string | null, ifPinDigest?: string): Promise<boolean> {
     // No await: one atomic step.
-    const subject = this.#subjects.get(`${workspaceId}/${subjectKey}`);
+    const subject = this.#subjects.get(JSON.stringify([workspaceId, subjectKey]));
     if (subject === undefined) return false;
     if (digest === null) delete subject.duressDigest;
     else if (subject.pinDigest !== ifPinDigest) return false;
