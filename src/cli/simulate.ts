@@ -329,17 +329,33 @@ async function readJson(path: string): Promise<{ value: unknown } | { error: str
 }
 
 /**
+ * The characters a terminal acts on or that reorder or hide text, as code point ranges: C0, DEL
+ * and C1 controls (escape sequences, the 8-bit CSI U+009B), the Arabic letter mark, the zero-width
+ * characters and bidi marks (U+200B to U+200F), U+2028, U+2029 and the bidi embeddings and
+ * overrides (to U+202E), the invisible format characters and bidi isolates (U+2060 to U+206F), and
+ * U+FEFF. The same table as the receipt verifier's (scripts/verify-receipt.mjs); keep the two identical.
+ */
+const TERMINAL_UNSAFE_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x00, 0x1f],
+  [0x7f, 0x9f],
+  [0x61c, 0x61c],
+  [0x200b, 0x200f],
+  [0x2028, 0x202e],
+  [0x2060, 0x206f],
+  [0xfeff, 0xfeff],
+];
+
+/**
  * A line as the terminal may show it. A config or a script file is text from someone else: a
- * character the terminal acts on (C0 and C1 controls, so escape sequences) or one that reorders or
- * hides text (bidi controls and marks) is written as a `\u` escape, so a file can never move the
+ * character of TERMINAL_UNSAFE_RANGES (one the terminal acts on, or one that reorders or hides
+ * text) is written as a `\u` escape, so a file can never move the
  * cursor, set the title or make one result read as another.
  */
 export function terminalSafe(line: string): string {
   let safe = "";
   for (const c of line) {
     const n = c.codePointAt(0)!;
-    const unsafe = n <= 0x1f || (n >= 0x7f && n <= 0x9f) || n === 0x61c || n === 0x200e || n === 0x200f || (n >= 0x202a && n <= 0x202e) || (n >= 0x2066 && n <= 0x2069);
-    safe += unsafe ? `\\u${n.toString(16).padStart(4, "0")}` : c;
+    safe += TERMINAL_UNSAFE_RANGES.some(([lo, hi]) => n >= lo && n <= hi) ? `\\u${n.toString(16).padStart(4, "0")}` : c;
   }
   return safe;
 }

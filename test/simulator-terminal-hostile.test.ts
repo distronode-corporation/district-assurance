@@ -11,6 +11,18 @@ import type { AssuranceModule } from "../src/core/module.ts";
 import type { FlowConfig } from "../src/core/config.ts";
 import { testConfig } from "./helpers.ts";
 
+/**
+ * The shared terminal-escaping vectors (identical in test/receipt-rotation-hostile.test.ts on
+ * #75): C0, DEL, C1 (with the 8-bit CSI U+009B), the bidi controls and marks, the zero-width and
+ * invisible format characters, U+2028, U+2029 and U+FEFF. Every one must be escaped; TERMINAL_KEPT
+ * must come out as it is.
+ */
+const TERMINAL_UNSAFE_VECTORS = [
+  0x00, 0x07, 0x09, 0x0a, 0x1b, 0x1f, 0x7f, 0x80, 0x85, 0x9b, 0x9f, 0x61c, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x2028, 0x2029,
+  0x202a, 0x202e, 0x2060, 0x2064, 0x2066, 0x2069, 0x206f, 0xfeff,
+];
+const TERMINAL_KEPT = "R\u00e9paration 2 500,00 $ \u{1F527} \u00a0 \u200a ~";
+
 const dir = mkdtempSync(join(tmpdir(), "da-simulate-"));
 let files = 0;
 
@@ -102,11 +114,9 @@ describe("hostile #113: the simulator's terminal output", () => {
     }
   });
 
-  it("M6: terminalSafe escapes every control, C1 and bidi character, and keeps all other text", () => {
-    const unsafe = [0x00, 0x09, 0x1b, 0x1f, 0x7f, 0x85, 0x9b, 0x9f, 0x61c, 0x200e, 0x200f, 0x202a, 0x202e, 0x2066, 0x2069];
-    for (const n of unsafe) assert.equal(terminalSafe(`a${String.fromCharCode(n)}b`), `a\\u${n.toString(16).padStart(4, "0")}b`, n.toString(16));
-    const kept = "Réparation 2 500,00 $ \u{1F527} \u00a0 \u2028 ~";
-    assert.equal(terminalSafe(kept), kept);
+  it("M6: terminalSafe escapes every character of the shared terminal list, and keeps all other text (same vectors as #75's K8)", () => {
+    for (const n of TERMINAL_UNSAFE_VECTORS) assert.equal(terminalSafe(`a${String.fromCharCode(n)}b`), `a\\u${n.toString(16).padStart(4, "0")}b`, n.toString(16));
+    assert.equal(terminalSafe(TERMINAL_KEPT), TERMINAL_KEPT);
   });
 });
 
