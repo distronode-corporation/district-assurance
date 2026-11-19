@@ -312,8 +312,11 @@ while disputes are still recorded (tested). `refundPayment` is a host
 call made for the business: no grant reaches it and no flow step runs it, so neither the caller nor
 the model has a path to it; the host keeps it off every tool the model can call (left to the host).
 It refunds only a paid platform payment, never more in total than was paid, one refund in flight
-per payment, each with its own idempotency key; a refund whose answer was lost resumes with the
-same key, so the provider refunds once (tested). A refund is refused while a dispute is open or
+per payment, each with its own idempotency key, saved with the refund's intent before the provider
+is asked and made of the payment and the refund's sequence number; a refund whose answer was lost
+resumes with the same key, so the provider refunds once, and a host that names the sequence number
+gets a committed refund's saved result back when it lost the engine's answer, never a second
+refund (tested). A refund is refused while a dispute is open or
 after it was lost (tested). Dispute events come only through the signed payments webhook, are found
 by the payment intent bound when the payment was paid, and a connected account's is ignored and
 written down (tested). Refunds and disputes are ledger entries with amounts and statuses, never
@@ -358,20 +361,16 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 
 ## Open questions
 
-- **Refunds and disputes in platform mode.** In `platform` mode the platform is the merchant of
-  record, so a refund or a dispute lands on the platform's account, not the business's. Who
-  carries them, and on what terms, is a legal and payment provider question that is not decided.
-  The engine has no refund or dispute code in either mode; a host handles both at the provider.
 - **Seam in the door path.** The adapter is built (GAT-5), but putting a paid third party between
   the engine and a door in production still waits on its pricing and its handling of Canadian data
   being checked, and on one unlock proven by hand in Seam's sandbox.
 - **Who carries refunds and disputes in platform mode.** The engine now refunds platform payments
   and records their disputes (above), but who bears a lost dispute, and on what terms between the
   platform and the business, is a legal and payment provider question that is not decided.
-  Refund status changes after the provider's first answer (`charge.refund.updated`) are not
-  followed yet.
-- **Seam in the door path.** A paid third party between the engine and a door (GAT-5) waits on its
-  pricing and its handling of Canadian data being checked.
+  Refund status changes after the provider's first answer (`charge.refund.updated`,
+  `refund.updated`) are not followed yet: a `pending` refund counts as pending until a provider
+  update arrives, and the engine has no path for one, so a pending refund that later fails still
+  counts against the payment until the business refunds the rest by hand at the provider (#117).
 
 ## Left to the host
 

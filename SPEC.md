@@ -396,13 +396,10 @@ part. `verification.policyVersion` and `verification.configRevision` name the po
 FlowConfig revision that judged the call's last finished verification (whatever level it reached);
 both are absent when no verification finished on the call. They are optional, so the format stays
 at `v: 1`, and a reader that does not know them still checks the signature over the whole body.
-`ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
-part. `ledger` is the head after `call.ended` and the expiry of the call's open payment links
-(section 14), kept in the call record. If signing fails, `endCall` on
-the ended call issues the receipt later with the same head, without ending the call again. `verifyReceipt(receipt, keys)` picks the key by `kid`
-part. `ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
-the ended call issues the receipt later with the same head, without ending the call again.
-`stepUp` is step-up's part (section 18): each token record the call has, `{tokenId, expiresAt,
+`ledger` is the head after `call.ended`, the expiry of the call's open payment links (section 14)
+and the access code entries the end wrote (section 17), kept in the call record. If signing fails,
+`endCall` on the ended call issues the receipt later with the same head, without ending the call
+again. `stepUp` is step-up's part (section 18): each token record the call has, `{tokenId, expiresAt,
 status}` as the end of the call left it, `failed` ones included (a reservation whose signing failed
 is listed too, so the part's presence is no proof that a token became valid). It is present only
 on a call with at least one record, so the format stays at `v: 1`. `verifyReceipt(receipt, keys)` picks the key by `kid`
@@ -470,7 +467,15 @@ plus 5, or the config is refused. A link
 is never texted with less than 5 minutes of the provider's life left: it is expired at the provider
 (`payment.link_expired`, reason `not_sent_in_time`) and the request settles `expired` when the
 provider confirms, or waits for its webhook when the provider says `not_open`. Either way
-`requestPayment` throws `precondition_failed`. A process about to text a link holds a 60 second
+`requestPayment` throws `precondition_failed`: on `expired` it says to request a new payment, on
+`not_open` to wait for the provider's outcome (the payment is still open, so no new one can start).
+The life left is checked when the sender claims the text, after the link's reference is bound, and
+once more after the lease is renewed right before the text. A resume that finds the text already
+recorded by another sender (it finished while this one created the link) sends nothing and
+returns the delivery recorded. A request is also checked against this engine's payments adapter
+before its read-back is used: a mode the adapter does not take, or a link life longer than it
+keeps a link (a call saved by an engine with another adapter), is `invalid_input`, and the
+confirmed read-back stays for a request that fits. A process about to text a link holds a 60 second
 lease on it, so a concurrent resume refuses (`precondition_failed`) rather than expiring a link
 being sent, and never takes the lease over while it is live (the text may be going out); once the
 lease lapses, it may, and a sender stalled past it then texts a link the provider has already
@@ -500,11 +505,14 @@ then answers, `requestPayment` expires that link at the provider, never texts it
 the end closed its request. While a process is texting a link (it holds the send lease, 60
 seconds), `cancelPaymentLink` and `endCall` are refused with `precondition_failed`, so a link is
 never closed under its own text and no text goes out after the call ended; once the text is
-recorded, or the lease lapses (that sender stopped), they go ahead. A close of a link that exists
-is claimed in its first write, before the provider is asked (`closingSince` on the request): no
-sender texts that link from then on (it expires it at the provider and throws
-`precondition_failed`), and a close that fails at the provider stays claimed, so it can be tried
-again with no sender taking over meanwhile. A sender checks and renews
+recorded, or the lease lapses, they go ahead. A lapsed lease does not prove its sender stopped:
+one that renewed its lease and then stalled past it may still hand its text to the carrier after
+the close, and that text carries a link the provider has closed (it cannot be paid, and nothing is
+recorded for it). A host should expect such a late text and treat its link as dead. A close of a
+link that exists is claimed in its first write, before the provider is asked (`closingSince` on the
+request): no sender starts a text of that link from then on (it expires the link at the provider
+and throws `precondition_failed`), and a close that fails at the provider stays claimed, so it can
+be tried again with no sender taking over meanwhile. A sender checks and renews
 its lease in a write right before the text, so one that stalled past its lease (binding the
 link's reference) never texts a request that was closed or a call that ended meanwhile: it expires
 the link at the provider and throws `precondition_failed`; one whose lease another sender took
@@ -553,7 +561,7 @@ always recorded. A request the engine expired (its own deadline, a link too late
 with a slow create, a cancel or the end of the call) that the provider then reports paid becomes
 `paid`, and `payment.settled` carries `late: true`.
 
-**Refunds (platform mode).** `refundPayment({callId, paymentId, amountMinor?, reason})` is a host
+**Refunds (platform mode).** `refundPayment({callId, paymentId, amountMinor?, reason, sequence?})` is a host
 call made for the business (its back office or staff): no grant reaches it, no flow step runs it,
 and the model is never given it. It refunds a `paid` platform payment in full (the default: all
 that is left) or in part, with `reason` one of `requested_by_customer`, `duplicate`, `fraudulent`.
@@ -563,10 +571,19 @@ up to more than was paid (a refund the provider answered `failed` does not count
 payment with a dispute open or lost (the provider refuses those too), and an engine whose payments
 adapter has no `refund`; `module_disabled` on a call that started with Paylink off. A refund is
 reserved in one write (one in flight per payment; asking again while it is resumes it, and another
-amount is refused), sent with `PaymentLinks.refund({linkId, paymentIntentId?, mode: "platform",
-amountMinor, currency, reason, idempotencyKey})`, the key being `[workspaceId, callId, paymentId,
-"refund", refundId]`, and committed in another write with the provider's answer and
-`payment.refunded`. It returns `{refundId, status, amountMinor, refundedMinor}`. A refund still
+amount is refused), with its intent and idempotency key saved before the provider is asked, sent
+with `PaymentLinks.refund({linkId, paymentIntentId?, mode: "platform", amountMinor, currency,
+reason, idempotencyKey})`, and committed in another write with the provider's answer and
+`payment.refunded`. It returns `{refundId, status, amountMinor, refundedMinor}`. Each refund of a
+payment has a sequence number, 1 for its first and one more for each after (a failed one keeps
+its number), and its key is `[workspaceId, callId, paymentId, "refund", sequence]`. A host that
+passes `sequence` makes a retry safe after it lost the engine's answer: the same number again
+resumes that refund with its key while it is in flight, or gives its saved result back once it
+was committed, and never refunds again (another amount for it is `invalid_input`); the next
+number starts a new refund, any other number is `invalid_input`, and a new number while another
+refund is in flight is `precondition_failed`. Without `sequence`, a call is the next refund, or
+resumes the one in flight, so a host that retries without it after a committed refund asks for a
+second one. A refund still
 in flight is resumed with its own key before the dispute check, which is for new refunds: a refund
 the provider made whose answer was lost is learned even if a dispute opened since. An adapter
 answers a refund the provider refused as `failed` and throws only when the answer was lost: a
@@ -575,9 +592,11 @@ an adapter that throws for a refusal blocks the payment's refunds. An answer tha
 provider's three (`pending`, `succeeded`, `failed`, with a refund id) is treated the same way, as a
 lost answer (`precondition_failed`): nothing is recorded or ledgered, the refund stays in flight,
 and while an adapter keeps answering that way every later refund of the payment is blocked, since
-one is in flight at a time. A refund the provider made is learned once the adapter answers properly. A `pending` refund counts
-toward the total; its later outcome at the provider is not tracked yet (#117), so one that fails
-later still counts until the business refunds the rest by hand at the provider.
+one is in flight at a time. A refund the provider made is learned once the adapter answers
+properly. A `pending` refund counts as pending, toward the total, until a provider update for it
+arrives, and the engine has no path for those updates yet: the payments webhook does not apply
+Stripe's `charge.refund.updated` or `refund.updated` (#117). So a pending refund that later fails at
+the provider still counts, and the business refunds the rest by hand at the provider.
 
 A platform payment paid late (after the engine closed its link) keeps its payment intent too, so
 its disputes and refunds land like any other's.
@@ -654,11 +673,14 @@ checked, since a NaN or an Infinity would let a replay of any age pass. `parseSt
 session's `payment_intent` when it is a string) and
 `charge.dispute.{created,updated,closed,funds_withdrawn,funds_reinstated}` (the dispute id, `charge`,
 `payment_intent` or null, `status`, `amount` and `currency`, and the event's `created` as
-`occurredAt`; never its evidence; a `created` that is present but not Unix seconds makes the
-body malformed); other types
+`occurredAt`; never its evidence; a `created` that is present but not Unix seconds, or past what a
+JavaScript `Date` holds, makes the body malformed); other types
 are reported as ignored, and a body that is not a well-formed event is `null`, including one whose
 `account` is present but not a string (never read as "no account"). The reference server
-applies dispute events from the platform's payments endpoint only.
+applies dispute events from the platform's payments endpoint only. `applyPaymentOutcome` answers
+`{applied: false, unbound: true}` for a link no call holds yet (its reference may still be being
+bound when the provider's event arrives); the reference server answers 503 for it and does not
+remember the event, as for an unbound dispute, so Stripe delivers it again.
 
 The reference server's `StripeIdentityProvider` (an example, not part of the package) is an
 `IdentityProvider` that calls Stripe with `fetch`. `createDocumentCheck` sends one
@@ -746,7 +768,16 @@ receipt never verifies as an access grant. A host's module can never take a buil
    between, the call is read again as it is now and checked against the config in force, so a
    taint written after step 4, or a config that raised `entry.open`'s floor, settles the grant
    `failed` (`not_authorized`) and nothing is sent. A taint that commits after that read lands
-   while the grant is on its way to the door. A config changed by another process is seen at its next write, not here.
+   while the grant is on its way to the door: the taint's own write records `access.tainted`
+   `{grantId, digest, status, revocable}` for each grant of the call that may still be acted on
+   (signed, not expired, and `reserved`, `delivered` or `unknown`), and the engine then asks each
+   one's controller to withdraw it with its optional `revoke({grant, target, callId,
+   idempotencyKey})` (key `[workspaceId, callId, grantId, "revoke"]`), once, recording
+   `access.revoked` `{grantId, outcome: "revoked" | "failed"}`. A controller without `revoke` is
+   asked nothing and the grant runs to its expiry. A grant already delivered and acted on cannot be
+   pulled back: a door that opened stays opened, and `revoke` only stops what has not happened yet
+   (an access code not yet redeemed, a credential not yet used). A config changed by another
+   process is seen at its next write, not here.
 6. **Record the answer**, in the engine's write: `delivered` (with `confirmed` when the controller
    reported the door moved), `refused` (the controller certainly did not act; its reason as a short
    code), or `unknown` (reason `answer_lost`) when the call threw or timed out, and (reason
@@ -803,12 +834,10 @@ refused, so a grant accepted once is never accepted again, under any sequence of
 rollbacks. The forget point follows the relay's clock but never passes the latest expiry it has
 accepted, so a clock that jumped forward refuses no fresh grant beyond one grant lifetime (at most
 15 minutes) of grants it has really seen. It knows a grant by its id alone, so grant ids must be
-unique per workspace: the default generator is random (96 bits); a host's own `ids` that repeats
-across calls or processes makes a relay refuse a fresh grant as a replay. `engine.accessKeys()` is the public key set.
-It, and `engine.receiptKeys()`, publish only a key's public members (`kty`, `crv`, `x`, `y`, `kid`,
-`alg`, `use`), whatever a signer's `publicJwk` returns, so a signer that hands back its private `d`
-never has it published.
-15 minutes) of grants it has really seen. `engine.accessKeys()` is the public key set.
+unique across every workspace whose grants one `SeenGrants` instance checks (or each workspace
+gets a tracker of its own), and across calls and processes: the default generator is random (96
+bits); a host's own `ids` that repeats makes a relay refuse a fresh grant as a replay.
+`engine.accessKeys()` is the public key set.
 Every key set the engine publishes (`receiptKeys()`, `accessKeys()`, `stepUpKeys()`) holds only
 the public members of each key (`kty`, `crv`, `x`, `y`, `kid`, `alg`, `use`), whatever its
 signer's `publicJwk` returns, so a signer that hands back its private `d` never has it published.
@@ -861,9 +890,9 @@ sent: Seam documents none on unlock.
    with `confirmed: false`. `providerRef` is the action attempt id. Each request's path is set on
    a copy of `baseUrl`, so its host is always `baseUrl`'s.
 
-A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);
-revoking an issued code belongs to one-time codes, below. Planned: web sign-in step-up as an ES256 JWT against a JWKS
-(GAT-4), a Seam adapter (GAT-5), direct vendor adapters (GAT-6).
+A momentary unlock that opened its door has nothing to revoke (ADR-22). A controller that can
+withdraw a grant not yet acted on offers the optional `revoke`, which the engine calls only when a
+call is tainted (step 5); one-time codes have it, below.
 
 **One-time access codes** (`src/gate/codes.ts`), for a door whose controller cannot be called
 live: `accessCodes({key, signer, store, ledger, messages, limits, maxWrongGuesses?, clock?, newCode?})`.
@@ -877,8 +906,10 @@ engine's `accessSigner`, so a relay checks a redeemed grant against `engine.acce
 - `codes.issue(engine, callId, input?)` first draws its 3 candidate codes from `newCode`; any that
   is not exactly 8 digits (`ACCESS_CODE_DIGITS`) fails the issue with `invalid_input`, a host
   fault, before anything is reserved, counted, stored or texted. It then runs
-  `engine.grantAccess(callId, input)` with the same
-  input, steps and refusals, so the engine reserves the grant, holds it to `entry.open`, checks it
+  `engine.grantAccess(callId, input, {controller: codes.controller})` with the same
+  input, steps and refusals (and one more: a target whose controller is not `codes.controller` is
+  `invalid_input` before anything is reserved, so a code request never sets off a live door), so
+  the engine reserves the grant, holds it to `entry.open`, checks it
   again before it is sent, limits it per call, writes it to the ledger as above, never lets it
   outlive the verification grant, and records the controller's answer itself (ADR-25): the codes
   write no outcome. Where the controller would be asked, a code is texted instead:
@@ -891,14 +922,18 @@ engine's `accessSigner`, so a relay checks a redeemed grant against `engine.acce
      Gate records as `unknown`). Never the calling number.
   3. `limits.take({workspaceId, key: {scope: "subject", key: subjectKey}, at, ...ACCESS_CODE_SEND_LIMITS})`
      counts the text against VER-2's `CodeStore`; false refuses it (`send_limit`) and nothing is
-     texted.
+     texted, and a limiter that throws refuses it too (`send_limit_unavailable`): nothing was
+     stored or texted, so the door certainly gets nothing.
   4. A drawn code is stored with `store.put` as an `AccessCodeEntry`:
      `{workspaceId, digest, grantId, callId, body, misses: 0}`, the digest being
      `HMAC-SHA256(key, JSON.stringify(["access-code", workspaceId, audience, target, code]))`
      (`accessCodeDigest`) and `body` the grant's body, unsigned. A digest already live for that
      door draws a new code, up to 3 times, then the request is refused (`no_free_code`).
-  5. A grant that expired while the limiter or the store answered is not texted: its entry is
-     taken back and it is `refused` (`expired`). Otherwise the code is texted (`purpose:
+  5. A call no longer authorized for `entry.open` (a taint landed while the limiter or the store
+     answered) is not texted: its entry is taken back and it is `refused` (`not_authorized`); a
+     taint after this check finds the code stored, and the controller's `revoke` takes it out. A
+     grant that expired meanwhile is not texted either: its entry is taken back and it is
+     `refused` (`expired`). Otherwise the code is texted (`purpose:
      "one_time_code"`, idempotency key `[workspaceId, callId, grantId, "access_code"]`), and the
      minutes in the text count from then. `delivered`, with `confirmed: false` and the message id
      as `providerRef`, once sent. A text that throws may still have arrived, so the code is taken
@@ -919,22 +954,30 @@ engine's `accessSigner`, so a relay checks a redeemed grant against `engine.acce
   that matches no live code at that door (`audience` and `target`) is a wrong guess: it counts
   against every code live there (`store.miss`), and a code that reaches `maxWrongGuesses` is spent,
   removed, and recorded on its call as `access.code_spent` `{grantId, reason: "wrong_guesses",
-  guesses}`, never with the guess or the code. Signing
+  guesses}` (event id `[workspaceId, "access.code_spent", callId, grantId]`), never with the guess
+  or the code. Signing
   comes before the take, so a signer that throws leaves the code redeemable; a code taken, revoked
   or expired while it was signed is refused and its signature dropped. A code expires with its grant's
   `expiresAt`. The door's relay checks the grant with `verifyAccessGrant` (audience `audience`)
   and `SeenGrants`, as for any grant.
-- `codes.revoke(workspaceId, grantId)` removes a grant's code; one already gone is success.
+- `codes.revoke(workspaceId, grantId, callId?)` removes a grant's code (with `callId`, only that
+  call's: grant ids are unique within a call, not across calls); one already gone is success.
 - `AccessCodeStore`: `put(entry, now)` (false when the digest is live or spent), `get(workspaceId,
   digest)` (reads, leaving it; null for a spent entry), `take(workspaceId, digest, grantId?)`
   (removes and returns, atomically: never one entry twice; with `grantId`, only that grant's
-  entry; never a spent one), `revoke(workspaceId, grantId)` (a spent entry too),
+  entry; never a spent one), `revoke(workspaceId, grantId, callId?)` (a spent entry too; with
+  `callId` only that call's entry, which every store must honor), `spent(workspaceId, callId?)`
+  (every spent entry still held, of one call with `callId`),
   `miss(workspaceId, {audience, target}, limit, now)` (one wrong guess counted against every live
   entry for that door, atomically, marking those at `limit` spent, and returning every spent entry
   of the workspace still held). A spent code opens nothing; its entry stays as the pending record
   of its `access.code_spent` ledger entry, and `codes` removes it (`revoke`) only once that entry
-  is appended (idempotent by its event id). An append that fails is made again on the next wrong
-  guess; every spent code is tried, and the first failure thrown. `MemoryAccessCodeStore` is the
+  is appended (idempotent by its event id), and only that call's entry. An append that fails is
+  made again on the next wrong guess at that door, when the call ends (`endCall` calls the
+  controller's optional `flush({workspaceId, callId})` before it takes the receipt's head, and a
+  flush that fails never stops the end), and on `engine.sweepAccess()`, which the host runs on a
+  schedule and which flushes the whole workspace (`{failed}` names the controllers that could not);
+  every spent code is tried, and the first failure thrown. `MemoryAccessCodeStore` is the
   in-memory reference, dropping expired entries (never a spent one) on `put`.
 - `limits` is VER-2's `CodeStore` (`take` counts one send atomically, or refuses and counts
   nothing; `MemoryCodeStore` in `district-assurance/testing` is the reference), the same instance
@@ -943,8 +986,6 @@ engine's `accessSigner`, so a relay checks a redeemed grant against `engine.acce
   VER-2 (#79) lands, `CodeStore`, `CodeSendKey`, `MemoryCodeStore` and this constant are a stand-in
   copy of its shape; VER-2's per-number limit and destination allow-list are not applied to access
   codes yet.
-revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), a
-Seam adapter (GAT-5), direct vendor adapters (GAT-6). Web sign-in step-up is section 18.
 
 ## 18. Web sign-in step-up
 
@@ -1059,8 +1100,7 @@ step-up and starts again with a new nonce. A provider that only verifies the JWS
 JWKS (any JOSE library: ES256, `kid`, `iss`, `aud`, `exp`, `nonce`) gets authenticity but neither
 the single use nor the refusal after taint: those are the exchange's, so the exchange is
 required. There is no OpenID Provider in the engine (ADR-24).
-revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS
-(GAT-4), direct vendor adapters (GAT-6).
+
 **Direct vendor adapters** (`vendorAccessController({vendor, apiKey, baseUrl?, allowLoopbackForTests?, timeoutMs?, fetch?,
 clock?})`, `vendor` being `kisi` or `verkada`), named in the engine's `access` adapter like any
 controller: the controller's door ref is the vendor's own id, a Kisi lock
@@ -1088,6 +1128,5 @@ HTTPS on the default port, with no credentials, query or fragment: the key goes 
 loopback address, over HTTP or HTTPS, only with `allowLoopbackForTests: true`, for tests and never
 for production. `apiKey` is 1 to 500 printable characters with no spaces.
 
-A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);
-revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS
-(GAT-4), a Seam adapter (GAT-5).
+A momentary unlock that opened its door has nothing to revoke (ADR-22); see section 17, step 5,
+for a taint that lands while a grant is in flight.

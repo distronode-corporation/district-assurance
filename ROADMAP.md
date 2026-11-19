@@ -38,7 +38,7 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-25, says why.
 | M0 Skeleton | The engine, real core pieces, stubs, reference server, demo, CI | done |
 | M1 Modular core | Module registry, Badge, Dossier, Paylink and Trace as modules, factor plug-ins and the PIN factor, FlowConfig with `validateConfig` and flow execution, the shared SessionStore, the ledger always on | done |
 | M2 Owner command | What the first live use (`owner-command`) still needs. VER-1 (lockouts across calls) is a hard gate before it goes live in any host. Also: policy and config revision in receipts, the keypad collector, key store contracts, ledger and record store contracts, PIN enrolment | VER-1, VER-8, INT-1, INT-4, PRV-5, VER-6 |
-| M3 Gate and payment modes | Done: the Gate module with signed access grants, the signed-webhook relay, Paylink's `connect` and `platform` modes, link life and instant methods. Open: one-time codes, web step-up, Seam, direct vendor adapters | GAT-3 to GAT-6 |
+| M3 Gate and payment modes | Done: the Gate module with signed access grants, the signed-webhook relay, Paylink's `connect` and `platform` modes, link life and instant methods; built, acceptance open: one-time codes, web step-up, Seam, direct vendor adapters | GAT-3 to GAT-6 |
 | M4 Badge | Texted codes, spoken answers, carrier and Stripe Identity adapters, adversarial suite | VER-2 to VER-5, VER-7 |
 | M5 Dossier | Read-backs, encrypted fields, delivery, conditional fields, documents by text | FIL-1 to FIL-5 |
 | M6 Paylink | Stripe Checkout, amounts from code, cancel and expiry, live detector; saved cards and keypad capture gated | PAY-1 to PAY-6 |
@@ -203,7 +203,7 @@ The second pull request of the modular core built the first part (GAT-1, PAY-7, 
 | Link life and instant methods | `src/pay/paylink.ts`, `src/pay/payment.ts` | 5 to 60 minutes (default 15) from the text, expired by the engine at its deadline; only card, Apple Pay, Google Pay and Link (`test/paylink-modes.test.ts`) |
 | Demo | `examples/reference-server/src/demo.ts` | a deposit in each mode and a Gate unlock through the relay (`npm run demo`) |
 
-What is still open: one-time access codes, web sign-in step-up, the Seam adapter and direct vendor adapters. Grant revocation is dropped by design (ADR-22): a momentary unlock has nothing to revoke once sent; revoking a code is part of GAT-3.
+Built, with their acceptance still open: one-time access codes, web sign-in step-up, the Seam adapter and direct vendor adapters. A momentary unlock that opened its door has nothing to revoke (ADR-22); a controller that can withdraw a grant not yet acted on offers the optional `revoke`, which the engine calls when a call is tainted (SPEC.md section 17), and access codes have it.
 
 **Proven by:** Unit tests at 100%; each vendor adapter against a local fake HTTP server, and once by hand against the vendor's sandbox.
 
@@ -460,7 +460,7 @@ A link should not outlive its purpose. The engine already expires a link at its 
 
 *Acceptance*
 
-- `cancelPaymentLink` (the caller changed their mind) through `PaymentLinks.expireLink`; open links are expired when the call ends, and the receipt shows them as expired.
+- `cancelPaymentLink` (the caller changed their mind) through `PaymentLinks.cancel` when the adapter has it, else `PaymentLinks.expireLink`; open links are expired when the call ends, and the receipt shows them as expired.
 - A late `paid` after cancellation is still recorded as paid and flagged in the ledger: the engine already does this for any request it expired (`late: true`); keep it for cancellations.
 
 *Files:* `src/pay/later.ts`, `src/pay/paylink.ts`, `src/core/adapters.ts`, `src/engine.ts`  
