@@ -34,19 +34,20 @@ export interface TwilioSignatureInput {
 }
 
 export function verifyTwilioSignature(input: TwilioSignatureInput): TwilioSignatureCheck {
+  // Read once: the URL whose bodySHA256 is taken is the URL whose signature is checked.
+  const { url: signedUrl, payload, header } = input;
   const tokens = input.authTokens.filter((s) => s.length > 0);
   if (tokens.length === 0) return { ok: false, reason: "no_secret" };
-  if (input.header === null || input.header === undefined || input.header === "") return { ok: false, reason: "missing_header" };
-  const query = input.url.indexOf("?");
-  const bodyHash = query < 0 ? null : new URLSearchParams(input.url.slice(query + 1)).get("bodySHA256");
+  if (header === null || header === undefined || header === "") return { ok: false, reason: "missing_header" };
+  const query = signedUrl.indexOf("?");
+  const bodyHash = query < 0 ? null : new URLSearchParams(signedUrl.slice(query + 1)).get("bodySHA256");
   // With `bodySHA256` the URL alone is signed; otherwise the body's form parameters follow it.
-  const params = bodyHash === null ? sortedParams(input.payload) : "";
-  const header = input.header;
-  const matches = urlVariants(input.url).some((url) =>
+  const params = bodyHash === null ? sortedParams(payload) : "";
+  const matches = urlVariants(signedUrl).some((url) =>
     tokens.some((token) => stringsEqual(createHmac("sha1", token).update(url + params).digest("base64"), header)),
   );
   if (!matches) return { ok: false, reason: "no_matching_signature" };
-  if (bodyHash !== null && !stringsEqual(createHash("sha256").update(input.payload).digest("hex"), bodyHash.toLowerCase())) {
+  if (bodyHash !== null && !stringsEqual(createHash("sha256").update(payload).digest("hex"), bodyHash.toLowerCase())) {
     return { ok: false, reason: "body_hash_mismatch" };
   }
   return { ok: true };
