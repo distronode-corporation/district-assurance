@@ -556,10 +556,13 @@ check.
 true, body}` or `{ok: false, reason}`: `malformed` (not this shape), `signature` (unknown `kid`,
 another algorithm, any change), `workspace` (issued by another workspace, or no `workspaceId`
 given: it is required, so workspaces sharing a key and a controller name never open each other's
-doors), `audience`, `not_yet_valid` and `expired` (with 30 seconds of skew by default), and
-`lifetime` (longer than 900 seconds, or ending before it starts). `new SeenGrants({ clockSkewSeconds })` (default
-30, at least the verifier's): `accept(body, now)` is true once per grant id, and keeps the id until
-the verifier would refuse the grant as expired. `engine.accessKeys()` is the public key set.
+doors), `audience`, `not_yet_valid` (with `clockSkewSeconds` of allowance, default 30, for a
+grant issued a little ahead of the relay's clock), `expired` (strict: from `expiresAt` on, whatever
+the skew, because the engine ends a call only once every grant at a door has answered or expired),
+and `lifetime` (longer than 900 seconds, or ending before it starts). This assumes the engine's and
+the relay's clocks agree (NTP): a relay whose clock runs behind by some seconds accepts a grant for
+that much longer. `new SeenGrants()`: `accept(body, now)` is true once per grant id, and keeps the
+id until the grant expires, when the verifier refuses it anyway. `engine.accessKeys()` is the public key set.
 
 **The relay contract, version 1** (`webhookRelay({url, timeoutMs?})`): `POST <url>` with
 `content-type: application/json`, `idempotency-key: <the key above>` and the signed grant as

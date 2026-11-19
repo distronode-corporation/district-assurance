@@ -8,7 +8,7 @@
 // read when another process wrote first, so several processes can run one call. Every step writes
 // to the ledger, every refusal is an EngineError with a stable code, and every planned step
 // throws NotImplementedError. SPEC.md describes the flow.
-import type { JsonWebKey } from "node:crypto";
+import { createPublicKey, type JsonWebKey } from "node:crypto";
 
 import type { IntakeRecord, SessionStore } from "./core/adapters.ts";
 import type { JsonValue } from "./core/canonical.ts";
@@ -703,10 +703,19 @@ export class Engine {
 function distinctSigners(adapters: EngineAdapters): string[] {
   const { signer, accessSigner } = adapters;
   if (signer === undefined || accessSigner === undefined) return [];
-  const a = signer.publicJwk();
-  const b = accessSigner.publicJwk();
   if (signer.keyId === accessSigner.keyId) return ["accessSigner must have its own key id, not the receipt signer's"];
-  return a.x === b.x && a.y === b.y ? ["accessSigner must be its own key, not the receipt signer's"] : [];
+  // Compared as key material, not text: one key can be written with or without padding, in either
+  // base64 alphabet. A key that does not import is left for its signer to fail on.
+  const der = (jwk: JsonWebKey) => {
+    try {
+      return createPublicKey({ key: jwk, format: "jwk" }).export({ type: "spki", format: "der" });
+    } catch {
+      return null;
+    }
+  };
+  const a = der(signer.publicJwk());
+  const b = der(accessSigner.publicJwk());
+  return a !== null && b !== null && a.equals(b) ? ["accessSigner must be its own key, not the receipt signer's"] : [];
 }
 
 export function createEngine(options: EngineOptions): Engine {

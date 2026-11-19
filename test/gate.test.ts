@@ -544,6 +544,10 @@ describe("gate: the engine owns every outcome (ADR-25)", () => {
       { grantId: "acc_1", digest: accessGrantDigest(t.door.received[0]!.grant.body), kid: "gate-key-1", reason: "no_answer_recorded" },
     ]);
     assert.ok(receipt.body.ledger.seq >= (await t.ledger.list()).find((e) => e.event === "access.unknown")!.seq);
+    // The grant the door got is dead for any relay from the moment the receipt was issued (review round 6, E2).
+    const at = new Date(Date.parse(receipt.body.issuedAt) + 1);
+    assert.deepEqual(verifyAccessGrant(t.door.received[0]!.grant, t.engine.accessKeys(), { workspaceId: "ws_test", audience: "lobby", now: at }), { ok: false, reason: "expired" });
+    assert.deepEqual(verifyAccessGrant(t.door.received[0]!.grant, t.engine.accessKeys(), { workspaceId: "ws_test", audience: "lobby", now: at, clockSkewSeconds: 900 }), { ok: false, reason: "expired" }, "whatever skew the relay allows");
   });
 
   it("never carries a delivery for a refused grant under the receipt's head (review round 4, R5)", async () => {
@@ -605,6 +609,18 @@ describe("gate: the engine owns every outcome (ADR-25)", () => {
     const shared = generateTestSigner("shared-1");
     assert.throws(() => setup({ adapters: { signer: shared, accessSigner: shared } }), /accessSigner must have its own key id/);
     assert.throws(() => setup({ adapters: { signer: shared, accessSigner: { ...shared, keyId: "other-id" } } }), /accessSigner must be its own key/);
+    // The same key written differently: '=' padding, or the standard base64 alphabet (review round 6).
+    const jwk = shared.publicJwk();
+    const toStd = (v: string) => Buffer.from(v, "base64url").toString("base64");
+    for (const [label, x, y] of [
+      ["padded", `${jwk.x}=`, `${jwk.y}=`],
+      ["standard base64", toStd(jwk.x!), toStd(jwk.y!)],
+    ] as const) {
+      const disguised = { ...shared, keyId: `disguised-${label}`, publicJwk: () => ({ ...jwk, x, y }) };
+      assert.throws(() => setup({ adapters: { signer: shared, accessSigner: disguised } }), /accessSigner must be its own key/, label);
+    }
+    const broken = { ...generateTestSigner("broken-1"), publicJwk: () => ({ kty: "EC", crv: "P-256", x: "not-a-key", y: "nope" }) };
+    assert.doesNotThrow(() => setup({ adapters: { signer: shared, accessSigner: broken } }), "a key that does not import is not this check's to judge");
     assert.doesNotThrow(() => setup({ adapters: { signer: shared, accessSigner: generateTestSigner("access-1") } }));
     const noReceipts = testConfig((c) => (c.modules.trace = { settings: { receipts: false, wordings: [] } }));
     assert.doesNotThrow(() => setup({ config: noReceipts, adapters: { signer: undefined, accessSigner: shared } }), "no receipts: nothing to clash with");
@@ -649,14 +665,15 @@ describe("access grants: the verifier and replay", () => {
   };
   const check = (grant: unknown, at = now, extra: { clockSkewSeconds?: number } = {}) => verifyAccessGrant(grant, keys, { workspaceId: "w", audience: "lobby", now: at, ...extra });
 
-  it("accepts a good grant inside its window, allowing clock skew", async () => {
+  it("accepts a good grant inside its window, with clock skew on its start only and a strict expiry", async () => {
     const grant = await sign();
     assert.equal(check(grant).ok, true);
     assert.equal(check(grant, new Date("2025-12-31T23:59:31.000Z")).ok, true, "30 seconds early");
     assert.deepEqual(check(grant, new Date("2025-12-31T23:59:29.000Z")), { ok: false, reason: "not_yet_valid" });
-    assert.equal(check(grant, new Date("2026-01-01T00:01:29.000Z")).ok, true);
-    assert.deepEqual(check(grant, new Date("2026-01-01T00:01:30.000Z")), { ok: false, reason: "expired" });
-    assert.deepEqual(check(grant, new Date("2026-01-01T00:01:01.000Z"), { clockSkewSeconds: 0 }), { ok: false, reason: "expired" });
+    assert.equal(check(grant, new Date("2026-01-01T00:00:59.999Z")).ok, true);
+    assert.deepEqual(check(grant, new Date("2026-01-01T00:01:00.000Z")), { ok: false, reason: "expired" }, "never extended past the expiry");
+    assert.deepEqual(check(grant, new Date("2026-01-01T00:01:00.000Z"), { clockSkewSeconds: 120 }), { ok: false, reason: "expired" }, "whatever the skew");
+    assert.deepEqual(check(grant, new Date("2025-12-31T23:59:59.000Z"), { clockSkewSeconds: 0 }), { ok: false, reason: "not_yet_valid" });
   });
 
   it("refuses a grant another workspace issued, even on a shared key and controller name (review R1)", async () => {
@@ -689,18 +706,18 @@ describe("access grants: the verifier and replay", () => {
     assert.equal(seen.accept(first.body, now), false);
     const later = new Date("2026-01-01T00:02:01.000Z");
     assert.equal(seen.accept({ ...body, grantId: "acc_2", expiresAt: "2026-01-01T00:03:00.000Z" }, later), true, "and forgets the expired one");
-    assert.equal(seen.accept(first.body, later), true, "forgotten after expiry plus skew, when the verifier refuses it anyway");
+    assert.equal(seen.accept(first.body, later), true, "forgotten after its expiry, when the verifier refuses it anyway");
   });
 
-  it("keeps a grant id as long as a verifier with a wider skew still accepts the grant", async () => {
-    const seen = new SeenGrants({ clockSkewSeconds: 120 });
+  it("keeps a grant id for exactly as long as the verifier accepts the grant", async () => {
+    const seen = new SeenGrants();
     const grant = await sign();
     assert.equal(seen.accept(grant.body, now), true);
-    const late = new Date("2026-01-01T00:02:59.000Z");
-    assert.equal(check(grant, late, { clockSkewSeconds: 120 }).ok, true, "still valid to this verifier");
-    assert.equal(seen.accept(grant.body, late), false, "so still refused as a replay");
-    const gone = new Date("2026-01-01T00:03:00.000Z");
-    assert.equal(check(grant, gone, { clockSkewSeconds: 120 }).ok, false);
+    const last = new Date("2026-01-01T00:00:59.999Z");
+    assert.equal(check(grant, last).ok, true, "still valid");
+    assert.equal(seen.accept(grant.body, last), false, "so still refused as a replay");
+    const gone = new Date("2026-01-01T00:01:00.000Z");
+    assert.equal(check(grant, gone).ok, false, "and from its expiry the verifier refuses it");
   });
 
 });

@@ -155,8 +155,9 @@ is a fresh request with a new grant, up to `maxGrantsPerCall` (tested). The answ
 even if the caller's grant expired while the door answered (tested); one that arrives after the
 call ended is not (the grant was settled `unknown` at the end). The ledger
 holds each grant's digest and outcome, never the grant. Left to the host: a relay that keeps seen
-grant ids across restarts (or refuses every grant for 15 minutes plus twice the verifier's clock
-skew after one), and the door's own safety
+grant ids across restarts (or refuses every grant for 15 minutes plus the verifier's clock skew
+after one), a relay clock kept in sync with the engine's (a grant's expiry is strict, so a relay
+running behind accepts it that much longer), and the door's own safety
 (an unlock pulse, not a latch).
 
 ### Money on the wrong account
