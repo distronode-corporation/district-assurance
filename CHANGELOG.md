@@ -133,6 +133,10 @@ All notable changes to this project are documented here. The format follows
 - Badge factor plug-ins after the engine is built (MOD-3): `engine.useFactor(plugin)`, and outside
   modules that supply `factorPlugins` for the factors their manifest provides. The registry checks
   them for clashes and caller-ID names; they stay off until a config turns them on.
+- Caller ID attestation (VER-10): `startCall({ attestation })` records the call's STIR/SHAKEN
+  result (`A`, `B`, `C`, `failed`, default `none`) in `call.started` and the receipt (an optional
+  field, format version 1), and the policy's optional `attestationCaps` can only lower a level. A
+  callback call, which the engine dialled, is never capped.
 
 ### Changed
 

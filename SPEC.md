@@ -55,8 +55,10 @@ enforces it.
 
 ## 2. The call record and the SessionStore
 
-A call is one JSON record: `{v: 1, state, locale, revision, flow, modules}`, where `state` is the
-session above, `revision` the FlowConfig revision the call started under, `flow` the cursor of the
+A call is one JSON record: `{v: 1, state, locale, revision, attestation, flow, modules}`, where
+`state` is the session above, `revision` the FlowConfig revision the call started under,
+`attestation` its caller ID attestation (section 4, set once by `startCall`; a call stored before
+it existed has none, and reads as `none` for caps and the receipt), `flow` the cursor of the
 flow it runs (or null), and `modules` each enabled module's own part, created by its `initCall`
 when the call starts. A module turned on after a call started has no part in it and is refused on
 that call (`module_disabled`).
@@ -177,6 +179,8 @@ of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:
   and withdrawn codes are not in it). The global-service codes 800, 808, 870, 878, 881, 882, 883,
   888 and 979 (and the trial code 991) are always refused, and so is any longer prefix of one: no
   texted code goes to a global-service number.
+- `attestationCaps` that is not a map, names a value that is not an attestation, or holds a cap
+  outside 0 to 3.
 
 It checks every part in one pass: a malformed part is reported and the others are still checked.
 
@@ -191,6 +195,22 @@ with no SIM change it detects can still count. Without a carrier answer, it coun
 policy allows it (`trustTextCodeWithoutCarrierCheck`). Otherwise `verification.finished` lists it
 in `discounted`. The default policy has no `callback` set: a host that turns the factor on adds
 one, for example `[pin, callback]` at level 2.
+
+**Caller ID attestation.** `startCall({attestation})` records, once, the STIR/SHAKEN result the
+host's carrier reported for the call: `A`, `B` or `C` only when the receiving carrier's check of
+the signature passed, `failed` when it failed, and `none` (the default) when there was no signature
+or no result. Any other value is refused (`invalid_input`), and nothing changes it later. It is
+never a factor, never counts toward a factor set and never appears in `methods`. The policy's
+optional `attestationCaps` gives, per value, the highest level a call with it can reach (for
+example `{"C": 2, "none": 2, "failed": 1}`): `finishVerification` takes the lower of the level the
+factors reached and the cap, and issues the grant and its scopes at that level, and `authorize`
+applies today's cap to a grant already issued. A cap never raises a level. Without caps (the
+default) the attestation is recorded in `call.started` and the receipt and changes nothing. An
+attestation speaks to the calling number only, never to who is speaking; in Canada and the United
+States a genuine caller often has `C` or `none` (calls from abroad, and calls whose signature was
+lost on an older, non-IP network), so a cap is a business's choice (DECISIONS.md, ADR-26). A callback call is never capped: the engine dialled the
+number on file itself, so an attestation (`none` on the callback call) says nothing about it, and
+the callback factor already proves possession of that line.
 
 Badge's settings turn factors on (`factors`, at least one), set the grant lifetime
 (`grantTtlSeconds`, default 900, at most 3600), the lockouts across calls and the hourly limits
@@ -664,7 +684,7 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   "revision": "2026-11-18.1",
   "policy": { "version": "...", "levels": [], "scopes": {}, "keypadFields": [], "maxKeypadAttemptsPerCall": 2,
               "simSwapWindowHours": 72, "trustTextCodeWithoutCarrierCheck": false, "textCodeCountryCodes": ["1"],
-              "spoken": { "fields": { "postal_code": "ca_postal_code" }, "maxAttemptsPerCall": 2 } },
+              "attestationCaps": {}, "spoken": { "fields": { "postal_code": "ca_postal_code" }, "maxAttemptsPerCall": 2 } },
   "modules": { "<name>": { "enabled": true, "settings": {} } },
   "flows": { "<name>": { "summary": "...", "steps": [{ "type": "<module>.<step>" }] } }
 }
@@ -755,7 +775,7 @@ answer on file, a phone number, a link or card data.
 
 | Event | Detail |
 |---|---|
-| `call.started` | `locale`, `revision` |
+| `call.started` | `locale`, `revision`, `attestation` |
 | `flow.started` | `flow`, `revision`, `steps` (count) |
 | `flow.step_completed` / `flow.failed` | `flow`, `step` (index), `type` |
 | `flow.completed` | `flow`, `steps` |
@@ -772,7 +792,7 @@ answer on file, a phone number, a link or card data.
 | `identity.link_sent` | none |
 | `verification.code_sent` | none |
 | `verification.code_refused` | `reason`: `country`, `subject_limit`, `number_limit` or `send_failed` |
-| `verification.finished` | `level`, `methods`, `discounted`, `policyVersion`, `configRevision`; `voidedByTaint: true` when a taint landed in that verification |
+| `verification.finished` | `level` (after any attestation cap), `methods`, `discounted`, `capped` (true when a cap lowered the level), `policyVersion`, `configRevision`; `voidedByTaint: true` when a taint landed in that verification |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt`, `policyVersion`, `configRevision` |
 | `pin.enrolled` | none (never the digits, the digest or their length) |
 | `pin.reset` | `subjectKey`; actor `member`, `callId` null |
@@ -848,6 +868,7 @@ lone surrogate in any string or key.
     "startedAt": "...", "endedAt": "...", "issuedAt": "...",
     "verification": { "level": 3, "methods": ["keypad_knowledge", "photo_id"],
                       "policyVersion": "default-1", "configRevision": "2026-11-18.1" },
+    "attestation": "A",
     "records":  [{ "recordId": "...", "formId": "...", "digest": "<sha256 hex>" }],
     "payments": [{ "paymentId": "...", "status": "paid", "amountMinor": 15000, "currency": "cad", "mode": "platform", "providerRef": "cs_..." }],
     "consents": [{ "purpose": "...", "wordingVersion": "1", "wordingDigest": "<sha256 hex>", "answer": "yes" }],
@@ -868,9 +889,10 @@ part. `verification.policyVersion` and `verification.configRevision` name the po
 FlowConfig revision that judged the call's last finished verification (whatever level it reached);
 both are absent when no verification finished on the call. They are optional, so the format stays
 at `v: 1`, and a reader that does not know them still checks the signature over the whole body.
-`ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
-part. `ledger` is the head after `call.ended` and the expiry of the call's open payment links
-(section 14), kept in the call record. If signing fails, `endCall` on
+`attestation` is the caller ID attestation the call started with (section 4); it is optional in
+the format, so a receipt without it is still version 1, and the engine always writes it. `ledger`
+is the head after `call.ended` and the expiry of the call's open payment links (section 14), kept
+in the call record. If signing fails, `endCall` on
 the ended call issues the receipt later with the same head, without ending the call again. `verifyReceipt(receipt, keys)` picks the key by `kid`
 part. `ledger` is the head after `call.ended`, kept in the call record. If signing fails, `endCall` on
 the ended call issues the receipt later with the same head, without ending the call again.

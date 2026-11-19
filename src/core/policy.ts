@@ -94,6 +94,12 @@ export interface VerificationPolicy {
   scopeClasses?: Record<string, ScopeClass>;
   /** The spoken fields judged together as one spoken_knowledge factor. Without them, spoken answers are never judged. */
   spoken?: SpokenPolicy;
+  /**
+   * The highest level a call can reach, per caller ID attestation, for example
+   * `{ "C": 2, "none": 2, "failed": 1 }`. A cap only lowers a level. Default: no caps, so the
+   * attestation is recorded and changes nothing.
+   */
+  attestationCaps?: Partial<Record<Attestation, AssuranceLevel>>;
 }
 
 /** The formats a spoken answer is normalised to (src/verify/spoken.ts). */
@@ -106,6 +112,15 @@ export interface SpokenPolicy {
   /** Spoken attempts allowed per call before the line stops judging, 1 to 5. */
   maxAttemptsPerCall: number;
 }
+
+/**
+ * The caller ID attestation a call started with (STIR/SHAKEN), as the host's carrier reported it:
+ * `A`, `B` or `C` only when the receiving carrier's check of the signature passed, `failed` when it
+ * failed, `none` when there was no signature or no result. It speaks to the calling number only,
+ * never to who is speaking, so it is never a factor: it can only cap a level (`attestationCaps`).
+ */
+export const ATTESTATIONS = ["A", "B", "C", "failed", "none"] as const;
+export type Attestation = (typeof ATTESTATIONS)[number];
 
 /**
  * What a scope does, which sets its floor. Money movement, contact changes and access are never
@@ -287,6 +302,18 @@ export function validatePolicy(
       errors.push("textCodeCountryCodes has duplicates");
     }
   }
+  errors.push(...attestationCapErrors(p.attestationCaps));
+  return errors;
+}
+
+function attestationCapErrors(caps: unknown): string[] {
+  if (caps === undefined) return [];
+  if (typeof caps !== "object" || caps === null || Array.isArray(caps)) return ["attestationCaps must map A, B, C, failed or none to a level from 0 to 3"];
+  const errors: string[] = [];
+  for (const [attestation, cap] of Object.entries(caps)) {
+    if (!(ATTESTATIONS as readonly string[]).includes(attestation)) errors.push(`attestationCaps.${attestation} is not an attestation (A, B, C, failed or none)`);
+    if (!([0, 1, 2, 3] as unknown[]).includes(cap)) errors.push(`attestationCaps.${attestation} must be a level from 0 to 3`);
+  }
   return errors;
 }
 
@@ -397,6 +424,23 @@ export function evaluateAssurance(
     if (rule.level > level && rule.anyOf.some((set) => set.every((kind) => passed.has(kind)))) level = rule.level;
   }
   return { level, counted: [...passed].sort(), discounted };
+}
+
+/**
+ * A level under the policy's cap for the call's attestation: the lower of the two. A cap never
+ * raises a level, and with no cap for the attestation the level is unchanged.
+ */
+export function capLevel(policy: VerificationPolicy, level: AssuranceLevel, attestation: Attestation): AssuranceLevel {
+  const cap = policy.attestationCaps?.[attestation];
+  return cap !== undefined && cap < level ? cap : level;
+}
+
+/**
+ * A call's level under its attestation's cap. A call stored before VER-10 has no attestation and
+ * reads as none; a callback leg the engine dialled (`attestationExempt`) is never capped.
+ */
+export function capCallLevel(policy: VerificationPolicy, level: AssuranceLevel, call: { attestation?: Attestation; attestationExempt?: true }): AssuranceLevel {
+  return call.attestationExempt === true ? level : capLevel(policy, level, call.attestation ?? "none");
 }
 
 /** The scopes a level unlocks, sorted. Scopes at level 0 need no verification and are included. */

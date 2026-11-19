@@ -18,7 +18,7 @@ describe("a taint during an open verification", () => {
     assert.deepEqual([state.level, state.grant], [0, null]);
     assert.equal(await t.engine.authorize(callId, "intake.file"), false);
     const finished = (await t.ledger.list()).filter((e) => e.event === "verification.finished").at(-1)!;
-    assert.deepEqual(finished.detail, { level: 0, methods: [], discounted: [], policyVersion: "default-1", configRevision: "default", voidedByTaint: true });
+    assert.deepEqual(finished.detail, { level: 0, methods: [], discounted: [], capped: false, policyVersion: "default-1", configRevision: "default", voidedByTaint: true });
   });
 
   it("T2 a factor matched after the taint, in the same verification, does not count either", async () => {

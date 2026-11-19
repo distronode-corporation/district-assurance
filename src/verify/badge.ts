@@ -12,6 +12,7 @@ import { isStepLevel } from "../core/config.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
 import {
   FACTOR_KINDS,
+  capCallLevel,
   evaluateAssurance,
   scopesForLevel,
   textCodeTrusted,
@@ -843,33 +844,38 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
     const policy = rt.policy;
     const judgedBy: JudgedBy = { policyVersion: policy.version, configRevision: rt.revision };
     const result = evaluateAssurance(policy, factors, s.carrier);
-    const scopes = scopesForLevel(policy, result.level).filter((scope) => step?.scopes === undefined || step.scopes.includes(scope));
+    // The call's caller ID attestation can only lower the level the factors reached, never raise it.
+    // A call stored before VER-10 has no attestation, and reads as none; a callback call the engine
+    // dialled is never capped (decision 10).
+    const level = capCallLevel(policy, result.level, draft.record);
+    const scopes = scopesForLevel(policy, level).filter((scope) => step?.scopes === undefined || step.scopes.includes(scope));
     const issuedAt = rt.clock.now();
     const grant =
-      result.level === 0
+      level === 0
         ? null
         : {
             grantId: rt.ids.next("grant"),
-            level: result.level,
+            level,
             scopes,
             ...judgedBy,
             issuedAt: issuedAt.toISOString(),
             expiresAt: new Date(issuedAt.getTime() + ttlMs).toISOString(),
           };
-    draft.apply({ type: "verification_finished", level: result.level, grant });
+    draft.apply({ type: "verification_finished", level, grant });
     s.finished++;
-    s.lastLevel = result.level;
+    s.lastLevel = level;
     s.lastMethods = result.counted;
     s.lastJudgedBy = judgedBy;
     draft.emit("verification.finished", "code", {
-      level: result.level,
+      level,
       methods: result.counted,
       discounted: result.discounted.map((d) => d.kind),
+      capped: level < result.level,
       ...judgedBy,
       ...(voidedByTaint ? { voidedByTaint: true } : {}),
     });
     if (grant !== null) draft.emit("grant.issued", "code", { grantId: grant.grantId, level: grant.level, scopes, expiresAt: grant.expiresAt, ...judgedBy });
-    return { level: result.level, scopes: grant === null ? [] : scopes };
+    return { level, scopes: grant === null ? [] : scopes };
   });
 }
 

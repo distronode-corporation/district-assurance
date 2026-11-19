@@ -259,6 +259,19 @@ code or a callback counts without a port check: a port-out with no SIM change Tw
 seen (Sean, 2026-11-19). A host that needs ports checked for high levels uses a port-aware lookup
 (Telnyx's port date beside Twilio's SIM swap, for example) or requires another factor there.
 
+### Caller ID spoofing
+
+A caller presents the number on file as their caller ID. **Controls:** caller ID is never a
+factor, and no plug-in may take a name that means it. The STIR/SHAKEN attestation the host's
+carrier reports is recorded once when the call starts (`call.started`, the receipt) and can only
+lower a level, by the policy's `attestationCaps`: no value raises a level, stands in for a factor or
+appears in `methods`, and a cap applies to a grant already issued too (tested,
+`verify-attestation.test.ts`). By default there are no caps, because in Canada and the United
+States genuine callers often have `C` or no attestation (calls from abroad, signatures lost on an
+older, non-IP network), and an attestation speaks to the calling number only, never to who is
+speaking. Left to the host: mapping its carrier's value faithfully (the reference server README),
+and reporting `none` when it has no result.
+
 ### Text flooding and SMS pumping
 
 Repeated calls triggering texts to a real customer, or to premium numbers. **Controls:** texts go

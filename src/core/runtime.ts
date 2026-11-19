@@ -24,7 +24,7 @@ import type { JsonValue } from "./canonical.ts";
 import type { Clock, IdGenerator } from "./clock.ts";
 import type { Actor, EngineEventName } from "./events.ts";
 import type { FlowStep } from "./module.ts";
-import type { VerificationPolicy } from "./policy.ts";
+import type { Attestation, VerificationPolicy } from "./policy.ts";
 import type { SessionEvent, SessionState } from "./session.ts";
 
 /**
@@ -102,6 +102,13 @@ export interface CallRecord {
   locale: Locale;
   /** The config revision the call started under. */
   revision: string;
+  /**
+   * The caller ID attestation the call started with, set once by `startCall`. Never a factor.
+   * Absent on a call stored before VER-10, which reads as `none`.
+   */
+  attestation?: Attestation;
+  /** A callback call the engine dialled (VER-9): never capped by its attestation (decision 10). */
+  attestationExempt?: true;
   flow: FlowCursor | null;
   /** Each module's own part, by module name. */
   modules: Record<string, JsonValue>;

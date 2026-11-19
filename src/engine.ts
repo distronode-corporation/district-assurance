@@ -18,7 +18,7 @@ import { EngineError, RateLimitedError } from "./core/errors.ts";
 import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
 import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
-import { scopeClass, scopesForLevel, type AssuranceLevel, type ScopeClass, type VerificationPolicy } from "./core/policy.ts";
+import { ATTESTATIONS, capCallLevel, scopeClass, scopesForLevel, type AssuranceLevel, type Attestation, type ScopeClass, type VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
 import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
@@ -305,11 +305,19 @@ export class Engine {
    * Opens a call. With `flow`, the call runs that flow from its first step. `callingNumber` (E.164,
    * from the carrier, left out when withheld) keys the counters across calls and flows, never a factor.
    * A flow over its hourly limit is refused with `rate_limited`, and the call is still opened, with
-   * that flow failed: the host speaks its fixed line and ends it.
+   * that flow failed: the host speaks its fixed line and ends it. `attestation` is the caller ID
+   * attestation the host's carrier reported (default `none`), set once here: it can only cap the
+   * call's level under the policy's `attestationCaps`, never raise it.
    */
-  async startCall(input: { callId?: string; locale?: Locale; flow?: string; callingNumber?: string } = {}): Promise<SessionState> {
+  async startCall(input: { callId?: string; locale?: Locale; flow?: string; callingNumber?: string; attestation?: Attestation } = {}): Promise<SessionState> {
     // Each read once: a getter read again (the flow, after an await) could change a value after it was checked or counted.
-    const { callId: givenId, locale, flow, callingNumber }: { callId?: unknown; locale?: unknown; flow?: unknown; callingNumber?: unknown } = input;
+    const {
+      callId: givenId,
+      locale,
+      flow,
+      callingNumber,
+      attestation: givenAttestation,
+    }: { callId?: unknown; locale?: unknown; flow?: unknown; callingNumber?: unknown; attestation?: unknown } = input;
     // Everything the host gives here enters the ledger as it is, not through emit's checks: checked
     // now, before anything is saved, so no call's ledger can be blocked by a value it cannot hash.
     if (givenId !== undefined && (typeof givenId !== "string" || givenId === "" || givenId.length > 200 || hasLoneSurrogate(givenId))) {
@@ -317,11 +325,13 @@ export class Engine {
     }
     if (locale !== undefined && !isSupportedLocale(locale)) throw new EngineError("invalid_input", `locale must be one of ${SUPPORTED_LOCALES.join(", ")}`);
     if (flow !== undefined && typeof flow !== "string") throw new EngineError("invalid_input", "flow must name a flow");
+    const attestation = givenAttestation === undefined ? "none" : givenAttestation;
+    if (!(ATTESTATIONS as readonly unknown[]).includes(attestation)) throw new EngineError("invalid_input", "attestation must be A, B, C, failed or none");
     const callId = (givenId as string | undefined) ?? this.#ids.next("call");
     const numberKey = await this.#numberKey(callingNumber as string | undefined);
     const flowName = flow as string | undefined;
     const attached = flowName === undefined ? null : { name: flowName, steps: this.#flowDefinition(flowName).steps, revision: this.#config.revision };
-    const start = await this.#create(callId, (locale as Locale | undefined) ?? "en", this.#config.revision, attached, () => undefined, { numberKey, countStart: true });
+    const start = await this.#create(callId, (locale as Locale | undefined) ?? "en", this.#config.revision, attached, () => undefined, { numberKey, countStart: true, attestation: attestation as Attestation });
     if (start === null) throw new EngineError("invalid_input", "a call with that id exists");
     // With the call's id: the call is open, its flow failed, and the host ends it.
     if (start.over !== null) throw new RateLimitedError(callId);
@@ -333,6 +343,7 @@ export class Engine {
    * other process can change it in between. Null, and nothing written, when the id exists. With
    * `countStart`, a flow that needs a money, contact or access scope counts its start first (VER-15);
    * the answer says whether it was over a limit. A start a racing duplicate beat is taken back.
+   * `attestation` defaults to `none`; `attestationExempt` (a callback the engine dialled) is never capped by it.
    */
   async #create(
     callId: string,
@@ -340,7 +351,7 @@ export class Engine {
     revision: string,
     flow: { name: string; steps: FlowStep[]; revision: string } | null,
     then: (draft: CallDraft) => void,
-    options: { numberKey?: string | null; countStart?: boolean } = {},
+    options: { numberKey?: string | null; countStart?: boolean; attestation?: Attestation; attestationExempt?: true } = {},
   ): Promise<FlowStart | null> {
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
@@ -352,13 +363,15 @@ export class Engine {
       state: newSession(callId, this.workspaceId, this.#now()),
       locale,
       revision,
+      attestation: options.attestation ?? "none",
+      ...(options.attestationExempt === true ? { attestationExempt: true as const } : {}),
       flow: null,
       modules,
       outbox: [],
       ledgerWrites: 1,
     };
     this.#keepNumber(record, options.numberKey ?? null);
-    const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
+    const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision, attestation: record.attestation! } }];
     let start: FlowStart = UNCOUNTED;
     if (flow !== null && options.countStart === true) {
       // A duplicate id is refused before its start is counted.
@@ -676,7 +689,7 @@ export class Engine {
     if (plan === null) return;
     const flow = first.flow === null ? null : { name: first.flow.name, steps: first.flow.steps, revision: first.flow.revision };
     // Already created when this resumes: then only the dial is retried.
-    await this.#create(plan.callbackCallId, first.locale, first.revision, flow, (draft) => callback.beginCallbackCall(draft, plan, callId));
+    await this.#create(plan.callbackCallId, first.locale, first.revision, flow, (draft) => callback.beginCallbackCall(draft, plan, callId), { attestationExempt: true });
     try {
       await callback.dialCallback(this.#rt, plan.callbackCallId);
     } catch {
@@ -1083,8 +1096,14 @@ export class Engine {
     if (badge.duressRefuses(record, scope, scopeClass(scope, this.#config.policy.scopeClasses, this.registry.scopeClasses()))) return false;
     if (min === 0) return true;
     const grant = record.state.grant;
-    // The grant's level is checked against today's minimum too, so a stricter config applies to grants already issued.
-    return grant !== null && grant.scopes.includes(scope) && grant.level >= min && this.#clock.now().getTime() < Date.parse(grant.expiresAt);
+    // The grant's level is checked against today's minimum and today's attestation cap too, so a
+    // stricter config applies to grants already issued.
+    return (
+      grant !== null &&
+      grant.scopes.includes(scope) &&
+      capCallLevel(this.#config.policy, grant.level, record) >= min &&
+      this.#clock.now().getTime() < Date.parse(grant.expiresAt)
+    );
   }
 
   async #read(callId: string): Promise<CallRecord> {

@@ -484,3 +484,17 @@ describe("callback: a pass whose failure was not yet forgotten", () => {
     assert.equal(t.dialer.dialed.length, 2, "nothing stale blocks the next callback");
   });
 });
+
+describe("callback: caller ID attestation caps (VER-10, decision 10)", () => {
+  it("never caps the callback call, which the engine dialled", async () => {
+    const t = setup({ config: callbackConfig((c) => (c.policy.attestationCaps = { none: 1, C: 1 })) });
+    const first = await firstCall(t);
+    await t.engine.requestCallback(first);
+    const dial = lastDial(t);
+    await t.engine.applyCallbackOutcome({ ref: dial.ref, answered: true, confirmed: true });
+    assert.equal(await finishOnCallback(t, dial.callId), 2, "the callback call reaches level 2 under a none cap of 1");
+    const finished = (await t.ledger.list()).filter((e) => e.callId === dial.callId && e.event === "verification.finished").at(-1)!;
+    assert.equal(finished.detail.capped, false);
+    assert.equal(await t.engine.authorize(dial.callId, "payment.request"), true, "authorize applies no cap to it either");
+  });
+});

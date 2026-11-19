@@ -203,7 +203,7 @@ describe("Engine sessions", () => {
       events.map((e) => e.name),
       ["call.started", "session.tainted"],
     );
-    assert.deepEqual(events[0]!.detail, { locale: "en", revision: "default" });
+    assert.deepEqual(events[0]!.detail, { locale: "en", revision: "default", attestation: "none" });
     assert.deepEqual(events[1]!.detail, { source: "business_endpoint" });
     const entries = await t.ledger.list();
     assert.deepEqual(entries.map((e) => e.event), ["call.started", "session.tainted"]);
@@ -1146,7 +1146,7 @@ describe("Engine prove", () => {
     assert.equal(verifyReceipt(receipt, t.engine.receiptKeys()), true);
     assert.equal(receipt.body.v, 1, "the fields are optional, so the format stays at version 1");
     const entries = await t.ledger.list();
-    assert.deepEqual(entries.find((e) => e.event === "call.started")!.detail, { locale: "en", revision: "default" });
+    assert.deepEqual(entries.find((e) => e.event === "call.started")!.detail, { locale: "en", revision: "default", attestation: "none" });
     assert.deepEqual(
       entries.filter((e) => e.event === "verification.finished").map((e) => [e.detail.policyVersion, e.detail.configRevision]),
       [["default-1", "default"], ["custom-2", "2026-11-18.2"]],
