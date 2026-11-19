@@ -764,7 +764,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     failed = { error };
   }
   // A duress PIN entry flags its subject, even a stale one: durable and hidden, before the visible reset.
-  if (pinDuress) await flagDuressUnlessCleared(counters, rt.workspaceId, current.subjectKey!, at, clears);
+  if (pinDuress) await flagDuressUnlessCleared(counters, rt.workspaceId, current.subjectKey!, clears);
   // A stale entry's failure stays counted across calls, as for any entry that was not accepted.
   if (stale !== null) throw stale;
   // Only once the result is saved: a write that failed after saving it (the ledger) still owes the

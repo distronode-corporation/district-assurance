@@ -84,10 +84,16 @@ export async function flagDuress(counters: AttemptCounters, key: AttemptCounterK
  * a clearing that landed meanwhile has the write taken back: `clearDuress` counts the clearing
  * before it clears the flag, so a clearing either is counted by then or clears this write itself.
  * A failure to take it back leaves the subject flagged (fail closed), and the business clears again.
+ *
+ * The write's instant is its count of clearings (that many milliseconds after the epoch), not the
+ * entry's time: the take-back removes one write of its own count, and a write under a later count
+ * (a newer entry, even in the same millisecond) is never one. Any other write of its count left
+ * after that clearing was also made after it, so its writer takes it back too.
  */
-export async function flagDuressUnlessCleared(counters: AttemptCounters, workspaceId: string, subjectKey: string, at: Date, clears: number): Promise<void> {
+export async function flagDuressUnlessCleared(counters: AttemptCounters, workspaceId: string, subjectKey: string, clears: number): Promise<void> {
   if ((await clearsSoFar(counters, workspaceId, subjectKey)) !== clears) return;
   const key = duressFlagKey(workspaceId, subjectKey);
+  const at = new Date(clears);
   await flagDuress(counters, key, at);
   if ((await clearsSoFar(counters, workspaceId, subjectKey)) !== clears) await counters.removeFailure(key, at.toISOString());
 }
