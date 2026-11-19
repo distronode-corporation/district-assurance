@@ -42,6 +42,7 @@ export const OIDS = {
   commonName: "550403",
   extendedKeyUsage: "551d25",
   basicConstraints: "551d13",
+  keyUsage: "551d0f",
   timeStamping: "2b06010505070308",
   codeSigning: "2b06010505070303",
   policy: "2a0304",
@@ -69,12 +70,23 @@ export interface CertificateSpec {
   /** An extended key usage; none when absent. */
   usage?: string;
   ca?: boolean;
+  /** basicConstraints pathLenConstraint, with `ca`. */
+  pathLen?: number;
+  /** A keyUsage extension: its one byte of bits (keyCertSign is 0x04, digitalSignature 0x80). */
+  keyUsage?: number;
+  /** Extensions added as given, to build malformed ones. */
+  rawExtensions?: Buffer[];
 }
 
 export function certificate(spec: CertificateSpec): Buffer {
   const alg = signatureAlgorithm(spec.signingKey);
   const extensions: Buffer[] = [];
-  if (spec.ca === true) extensions.push(seq(oid(OIDS.basicConstraints), der(0x01, Buffer.from([0xff])), octets(seq(der(0x01, Buffer.from([0xff]))))));
+  if (spec.ca === true) {
+    const limit = spec.pathLen === undefined ? [] : [int(spec.pathLen)];
+    extensions.push(seq(oid(OIDS.basicConstraints), der(0x01, Buffer.from([0xff])), octets(seq(der(0x01, Buffer.from([0xff])), ...limit))));
+  }
+  extensions.push(...(spec.rawExtensions ?? []));
+  if (spec.keyUsage !== undefined) extensions.push(seq(oid(OIDS.keyUsage), der(0x01, Buffer.from([0xff])), octets(der(0x03, Buffer.from([0, spec.keyUsage])))));
   if (spec.usage !== undefined) extensions.push(seq(oid(OIDS.extendedKeyUsage), der(0x01, Buffer.from([0xff])), octets(seq(oid(spec.usage)))));
   const tbs = seq(
     der(0xa0, int(2)),

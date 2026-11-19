@@ -36,6 +36,7 @@ import {
   text,
   timestampResponse,
   timestampToken,
+  type CertificateSpec,
   type TokenSpec,
 } from "./fixtures/anchor/build.ts";
 import { rejects } from "./helpers.ts";
@@ -293,6 +294,33 @@ describe("RFC 3161 tokens", () => {
       assert.deepEqual(check({}, certs), { ok: false, reason: "certificate" });
     }
     assert.deepEqual(check({}, [chain[0]!]), { ok: true, time: "2026-11-18T12:00:00.000Z" });
+  });
+
+  it("refuses an intermediate that is not a CA allowed to issue, and honours pathLen", () => {
+    const mid = ecKeys();
+    const tsa = ecKeys();
+    const midCert = (overrides: Partial<CertificateSpec> = {}) =>
+      new X509Certificate(certificate({ subject: "Mid", issuer: "Root", publicKey: mid.publicKey, signingKey: root.privateKey, serial: 3, notBefore: "260101000000Z", notAfter: "300101000000Z", ...overrides }));
+    const rootWith = (overrides: Partial<CertificateSpec>) =>
+      new X509Certificate(certificate({ subject: "Root", issuer: "Root", publicKey: root.publicKey, signingKey: root.privateKey, serial: 1, notBefore: "260101000000Z", notAfter: "360101000000Z", ca: true, ...overrides }));
+    const tsaCert = new X509Certificate(certificate({ subject: "TSA", issuer: "Mid", publicKey: tsa.publicKey, signingKey: mid.privateKey, serial: 4, notBefore: "260101000000Z", notAfter: "300101000000Z", usage: OIDS.timeStamping }));
+    const through = (...rest: X509Certificate[]) => check({ signingKey: tsa.privateKey, issuer: "Mid", serial: 4 }, [tsaCert, ...rest]);
+    const bits = (bytes: number[]) => seq(oid(OIDS.keyUsage), octets(der(0x03, Buffer.from(bytes))));
+
+    assert.deepEqual(through(midCert({ ca: true }), rootWith({})), { ok: true, time: "2026-11-18T12:00:00.000Z" }, "a CA intermediate");
+    assert.equal(through(midCert({ ca: true, keyUsage: 0x06 }), rootWith({ pathLen: 1, keyUsage: 0x06 })).ok, true, "keyCertSign and a pathLen that allows it");
+    for (const [why, intermediate, top] of [
+      ["a leaf with no extensions as an intermediate", midCert(), rootWith({})],
+      ["a leaf with extensions but no basicConstraints", midCert({ usage: OIDS.timeStamping }), rootWith({})],
+      ["cA false (an empty basicConstraints)", midCert({ rawExtensions: [seq(oid(OIDS.basicConstraints), octets(seq()))] }), rootWith({})],
+      ["a CA without keyCertSign", midCert({ ca: true, keyUsage: 0x80 }), rootWith({})],
+      ["a keyUsage with no bits", midCert({ ca: true, rawExtensions: [bits([0])] }), rootWith({})],
+      ["a basicConstraints that does not read (OpenSSL refuses the issuer first)", midCert({ rawExtensions: [seq(oid(OIDS.basicConstraints), octets(int(1)))] }), rootWith({})],
+      ["a root whose pathLen 0 allows no CA below it", midCert({ ca: true }), rootWith({ pathLen: 0 })],
+      ["a root that is not a CA", midCert({ ca: true }), rootWith({ ca: false })],
+    ] as const) {
+      assert.deepEqual(through(intermediate, top), { ok: false, reason: "certificate" }, why);
+    }
   });
 
   it("refuses a token that is not a well-formed, signed TSTInfo", () => {

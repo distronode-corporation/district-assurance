@@ -141,7 +141,10 @@ Whoever holds the ledger could rebuild the whole chain. **Control (PRV-9):** `an
 the head in time with a third party, and `verifyAnchor` checks it offline against the host's copy
 of the authority's certificate chain and Rekor's key: an entry an anchor covers cannot change
 afterwards without the change showing, and a rebuilt chain fails as `imprint` (tested; both
-adapters are tested on recorded answers). It does not prove the chain was honest before it was
+adapters are tested on answers built locally in the services' formats with throwaway keys, not yet
+on an answer recorded from a real authority or log). Every certificate above the authority's own
+must be a CA allowed to issue (cA true, keyCertSign, pathLen), so a leaf under the trusted root
+cannot stand in as an issuer (tested). It does not prove the chain was honest before it was
 anchored, nor anything after the last anchor. With a time-stamp authority alone, the authority
 sees only a hash and only the proofs the operator keeps exist, so an operator could drop an
 inconvenient one. With Rekor, everyone can see every head the operator anchored, so a missing

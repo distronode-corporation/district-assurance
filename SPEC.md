@@ -324,7 +324,8 @@ told, best effort, with `callId` null.
   `seq` (`chain`); the token: one signer, signed content type TSTInfo, signed message digest of the
   TSTInfo, signature by the first certificate with RSA or ECDSA over SHA-256, 384 or 512 (`token`);
   the chain: the first certificate has the time-stamping extended key usage, each is issued and
-  signed by the next, all are valid at the token's time, the last is trusted as given
+  signed by the next, every one after the first is a CA (basicConstraints cA true, keyCertSign when
+  it has a keyUsage extension) whose pathLenConstraint, if any, allows the CAs below it, all are valid at the token's time, the last is trusted as given
   (`certificate`); the imprint against the head recomputed from `entries` (`imprint`: the chain was
   changed or rebuilt after the anchor); for Rekor, the body's digest and signature, the RFC 9162
   inclusion proof, and a checkpoint for that tree signed by the log under its origin (`log`). It

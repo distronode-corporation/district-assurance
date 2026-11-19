@@ -197,7 +197,43 @@ function parseToken(der: Uint8Array): ParsedToken {
   };
 }
 
-/** Every certificate valid at the time, each issued and signed by the next, the first for time-stamping. The last is trusted as given. */
+const BASIC_CONSTRAINTS = "551d13"; // 2.5.29.19
+const BOOLEAN = 0x01;
+const INTEGER = 0x02;
+
+/**
+ * What a certificate may issue (RFC 5280 4.2.1.3 and 4.2.1.9): a CA only with basicConstraints
+ * cA true, then at most `pathLen` CA certificates below it (null: no limit). Node exposes
+ * neither, so the extensions are read from the DER; keyCertSign is OpenSSL's, in checkIssued.
+ */
+function issuingLimit(cert: X509Certificate): { pathLen: number | null } | null {
+  // The certificate already parsed as X.509, and OpenSSL refuses an issuer whose extensions do not
+  // read before this is reached; a throw here would still fail closed, in checkTimestamp.
+  const tbs = children(readDer(readOne(cert.raw, SEQUENCE).value)[0], SEQUENCE);
+  const wrapped = tbs.find((e) => e.tag === 0xa3);
+  if (wrapped === undefined) return null;
+  let limit: { pathLen: number | null } | null = null;
+  for (const extension of children(readOne(wrapped.value, SEQUENCE), SEQUENCE)) {
+    const parts = children(extension, SEQUENCE);
+    const id = oidHex(parts[0]);
+    const value = expectTag(parts.at(-1), OCTET_STRING).value;
+    if (id === BASIC_CONSTRAINTS) {
+      // cA is DEFAULT FALSE, so a CA's is present and true; pathLenConstraint follows when set.
+      const [ca, pathLen] = readDer(readOne(value, SEQUENCE).value);
+      if (ca?.tag === BOOLEAN && ca.value[0] === 0xff) {
+        limit = { pathLen: pathLen === undefined ? null : expectTag(pathLen, INTEGER).value.reduce((n, byte) => n * 256 + byte, 0) };
+      }
+    }
+  }
+  // keyCertSign, when the issuer has a keyUsage extension, is checked by OpenSSL in checkIssued.
+  return limit;
+}
+
+/**
+ * Every certificate valid at the time, each issued and signed by the next, the first for
+ * time-stamping, and every one after the first a CA allowed to issue what is below it (cA true,
+ * keyCertSign when keyUsage is present, its pathLen not exceeded). The last is trusted as given.
+ */
 function chainValid(chain: readonly X509Certificate[], at: number): boolean {
   // Node gives no extended key usage list (undefined) when a certificate has none.
   const usage = (chain[0]!.keyUsage as string[] | undefined) ?? [];
@@ -205,7 +241,10 @@ function chainValid(chain: readonly X509Certificate[], at: number): boolean {
   return chain.every((cert, i) => {
     const issuer = chain[i + 1];
     const current = cert.validFromDate.getTime() <= at && at <= cert.validToDate.getTime();
-    return current && (issuer === undefined || (cert.checkIssued(issuer) && cert.verify(issuer.publicKey)));
+    // The CAs below this one in the chain: every certificate between it and the leaf.
+    const limit = i === 0 ? { pathLen: null } : issuingLimit(cert);
+    const allowed = limit !== null && (limit.pathLen === null || i - 1 <= limit.pathLen);
+    return current && allowed && (issuer === undefined || (cert.checkIssued(issuer) && cert.verify(issuer.publicKey)));
   });
 }
 
