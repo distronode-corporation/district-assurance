@@ -22,7 +22,7 @@ import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import type { AssuranceModule, FlowStep, ModuleManifest, StepContext, StepStatus, StepView } from "../core/module.ts";
 import type { AssuranceLevel } from "../core/policy.ts";
-import type { CallDraft, CallRecord, EngineRuntime } from "../core/runtime.ts";
+import type { CallDraft, EngineRuntime } from "../core/runtime.ts";
 import { isDenseArray, isIntegerIn, isObject, isStringArray, unknownKeys } from "../core/shape.ts";
 import { signDocument } from "../prove/receipt.ts";
 import { accessGrantDigest, MAX_ACCESS_GRANT_SECONDS } from "./access.ts";
@@ -157,6 +157,15 @@ export const gateModule: AssuranceModule = {
     return errors;
   },
 
+  validateFlow(steps: readonly FlowStep[], ctx: StepContext): string[] {
+    // Each gate.grant step completes only on a grant of its own, and every grant counts against the
+    // call's limit, so a flow with more such steps than the limit could never finish (and would fail
+    // at the door after earlier grants were delivered).
+    const max = (ctx.settings as GateSettings).maxGrantsPerCall ?? DEFAULT_GRANTS_PER_CALL;
+    const grants = steps.filter((step) => isObject(step) && step.type === "gate.grant").length;
+    return grants > max ? [`${grants} gate.grant steps, but a call may have at most ${max} access grant${max === 1 ? "" : "s"} (maxGrantsPerCall)`] : [];
+  },
+
   initCall(settings: unknown): JsonValue {
     const s = settings as GateSettings;
     const slice: GateSlice = { targets: structuredClone(s.targets), maxGrantsPerCall: s.maxGrantsPerCall ?? DEFAULT_GRANTS_PER_CALL, grants: [] };
@@ -256,14 +265,14 @@ export async function grantAccess(rt: EngineRuntime, callId: string, input?: { t
   const digest = accessGrantDigest(body);
   // Signing can take a while (a KMS): checked again, in a write, right before the door is asked,
   // and the controller looked up in it: a grant that cannot be sent is failed, never unknown.
-  const checked = await rt.update(callId, (draft): { controller: AccessController; record: CallRecord } | EngineError => {
+  const checked = await rt.update(callId, (draft): AccessController | EngineError => {
     const g = find(draft, record.grantId);
     if (g.status !== "reserved") return new EngineError("scope_denied", "the access grant was not sent: it was settled meanwhile");
     const controller = controllerOf(rt, g.controller);
     const why = !rt.authorized(draft.record, ENTRY_SCOPE) ? "not_authorized" : Date.parse(g.expiresAt) <= Date.parse(rt.now()) ? "expired" : controller === null ? "not_sent" : null;
     g.digest = digest;
     g.kid = grant.kid;
-    if (why === null) return { controller: controller!, record: structuredClone(draft.record) };
+    if (why === null) return controller!;
     g.status = "failed";
     draft.emit("access.failed", "code", { grantId: g.grantId, digest, kid: grant.kid, reason: why });
     return why === "not_sent"
@@ -271,28 +280,30 @@ export async function grantAccess(rt: EngineRuntime, callId: string, input?: { t
       : new EngineError("scope_denied", `the access grant was not sent: ${why === "expired" ? "it expired" : "the call is no longer authorized"}`);
   });
   if (checked instanceof EngineError) throw checked;
-  const { controller } = checked;
-  // The config can change between that write and here (a stricter floor for entry.open): checked
-  // once more against the config in force, with nothing in between this check and the send.
-  if (!rt.authorized(checked.record, ENTRY_SCOPE)) {
+  const controller = checked;
+  // The call can change between that write and here (a taint, written by its own update), and so
+  // can the config (a stricter floor for entry.open): the call is read again, as it is now, and
+  // checked against the config in force, with nothing in between this check and the send. A taint
+  // that commits after this read lands while the grant is already on its way to the door.
+  if (!rt.authorized(await rt.read(callId), ENTRY_SCOPE)) {
     await failUnsent(rt, callId, record.grantId, { digest, kid: grant.kid, reason: "not_authorized" });
     throw new EngineError("scope_denied", "the access grant was not sent: the call is no longer authorized");
   }
-  let answer: UnlockResult | null;
+  let answer: UnlockResult | "lost" | "malformed";
   try {
-    answer = await controller.unlock({ grant, target: record.ref, idempotencyKey: rt.idempotencyKey(callId, record.grantId, "unlock") });
+    answer = readAnswer(await controller.unlock({ grant, target: record.ref, idempotencyKey: rt.idempotencyKey(callId, record.grantId, "unlock") }));
   } catch {
     // The answer was lost (a timeout, a dropped connection, a controller error). The door may or
     // may not have moved: record that, and never send this grant again.
-    answer = null;
+    answer = "lost";
   }
   return rt.update(callId, (draft) => {
     const g = find(draft, record.grantId);
     // Settled meanwhile (the call ended, or another process found it stale): it stays as it is.
     if (g.status === "reserved") {
-      if (answer === null) {
+      if (answer === "lost" || answer === "malformed") {
         g.status = "unknown";
-        draft.emit("access.unknown", "code", { grantId: g.grantId, digest, kid: grant.kid, reason: "answer_lost" });
+        draft.emit("access.unknown", "code", { grantId: g.grantId, digest, kid: grant.kid, reason: answer === "lost" ? "answer_lost" : "malformed_answer" });
       } else if (answer.outcome === "delivered") {
         Object.assign(g, { status: "delivered", confirmed: answer.confirmed, providerRef: answer.providerRef });
         draft.emit("access.delivered", "code", { grantId: g.grantId, digest, kid: grant.kid, confirmed: answer.confirmed });
@@ -378,6 +389,20 @@ async function failUnsent(rt: EngineRuntime, callId: string, grantId: string, de
 
 function find(draft: CallDraft, grantId: string): AccessRecord {
   return gateSlice(draft).grants.find((g) => g.grantId === grantId)!;
+}
+
+/**
+ * A controller's answer, read once and checked: a delivery with its provider ref and a boolean
+ * `confirmed`, or a refusal with a string reason. Anything else (nothing, an outcome it does not
+ * name, a field of the wrong type) does not establish what the door did: "malformed", recorded as
+ * unknown, never as a refusal.
+ */
+function readAnswer(raw: unknown): UnlockResult | "malformed" {
+  if (!isObject(raw)) return "malformed";
+  const { outcome, providerRef, confirmed, reason } = raw;
+  if (outcome === "delivered" && typeof providerRef === "string" && typeof confirmed === "boolean") return { outcome, providerRef, confirmed };
+  if (outcome === "refused" && typeof reason === "string") return { outcome, reason };
+  return "malformed";
 }
 
 /** A controller's refusal reason as a short code for the ledger; anything else becomes "refused". */

@@ -32,7 +32,8 @@ const grant: SignedAccessGrant = {
   kid: "k1",
   signature: "sig",
 };
-const input = (target: string) => ({ grant, target, idempotencyKey: '["w","c","acc_1","unlock"]' });
+// The grant names the device it opens: the adapter refuses one signed for another (L1 review, T5).
+const input = (target: string) => ({ grant: { ...grant, body: { ...grant.body, target } }, target, idempotencyKey: '["w","c","acc_1","unlock"]' });
 
 // Recorded answers, trimmed to the fields the adapter reads plus a few it must ignore.
 const device = (id: string, extra: Record<string, unknown> = {}) => ({

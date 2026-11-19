@@ -814,7 +814,10 @@ export class Engine {
 
   /** The key set door relays verify access grants with (empty without an access signer). */
   accessKeys(): JsonWebKey[] {
-    return this.#adapters.accessSigner === undefined ? [] : [publicMembers(this.#adapters.accessSigner.publicJwk())];
+    const signer = this.#adapters.accessSigner;
+    // The published `kid` is the one every grant carries (the signer's keyId), whatever its JWK says:
+    // relays select the key by it, so a JWK without one would leave every grant unverifiable.
+    return signer === undefined ? [] : [{ ...publicMembers(signer.publicJwk()), kid: signer.keyId } as JsonWebKey];
   }
 
   // ---- Step-up (web sign-in) ---------------------------------------------------------------
@@ -908,8 +911,12 @@ export class Engine {
 
   /** The key set for verifying this engine's receipts: with a key ring, the retired keys too (empty without a signer). */
   receiptKeys(): JsonWebKey[] {
-    // Only public members, whatever the signer's publicJwk or key ring returns (#47's check); a ring's retiredAt is kept.
-    return receiptKeySet(this.#adapters.signer).map((jwk) => ({ ...publicMembers(jwk), ...((jwk as { retiredAt?: string }).retiredAt === undefined ? {} : { retiredAt: (jwk as { retiredAt?: string }).retiredAt }) }) as JsonWebKey);
+    const signer = this.#adapters.signer;
+    if (signer === undefined) return [];
+    // A single signer: the published `kid` is the one every receipt carries (its keyId), whatever its JWK says.
+    if (typeof (signer as { keySet?: unknown }).keySet !== "function") return [{ ...publicMembers(signer.publicJwk()), kid: signer.keyId } as JsonWebKey];
+    // A key ring's whole history, each key under its own kid: only public members (#47's check), and a retired key's retiredAt.
+    return receiptKeySet(signer).map((jwk) => ({ ...publicMembers(jwk), ...((jwk as { retiredAt?: string }).retiredAt === undefined ? {} : { retiredAt: (jwk as { retiredAt?: string }).retiredAt }) }) as JsonWebKey);
   }
 
   // ---- outside modules ---------------------------------------------------------------------

@@ -56,6 +56,12 @@ export interface AccessCodeEntry {
   body: AccessGrantBody;
   /** Wrong guesses at this code's door since it was stored. At the limit the code is spent. */
   misses: number;
+  /**
+   * Set once the code is spent by wrong guesses: it opens nothing from then on, and the entry is
+   * kept, as the pending record of its `access.code_spent` entry, until that entry is in the
+   * ledger (then `revoke` removes it).
+   */
+  spent?: true;
 }
 
 /**
@@ -63,22 +69,25 @@ export interface AccessCodeEntry {
  * `take` atomic across processes: two keypads offering one code get it once between them.
  */
 export interface AccessCodeStore {
-  /** Stores an entry. False, and nothing written, when an entry with this digest is live. */
+  /** Stores an entry. False, and nothing written, when an entry with this digest is live or spent. */
   put(entry: AccessCodeEntry, now: Date): Promise<boolean>;
-  /** The entry with this digest, or null, leaving it in place. */
+  /** The entry with this digest, or null, leaving it in place. Null for a spent entry. */
   get(workspaceId: string, digest: string): Promise<AccessCodeEntry | null>;
   /**
    * Removes and returns the entry with this digest, or null, atomically: never one entry twice.
    * With `grantId`, only an entry for that grant: an entry another grant holds under the same
    * digest (the same code, drawn again once the first was used) is left in place, and null returned.
+   * A spent entry is never taken: it is left in place, and null returned.
    */
   take(workspaceId: string, digest: string, grantId?: string): Promise<AccessCodeEntry | null>;
-  /** Removes the code for a grant. Success when it is already gone. */
+  /** Removes the code for a grant, a spent one too. Success when it is already gone. */
   revoke(workspaceId: string, grantId: string): Promise<void>;
   /**
    * Counts one wrong guess against every live entry for this door (the grant body's `audience`
-   * and `target`), and removes and returns those that reached `limit`, atomically: two wrong
-   * guesses at once count twice, and an entry is returned once.
+   * and `target`), and marks those that reached `limit` spent, atomically: two wrong guesses at
+   * once count twice. Returns every spent entry of the workspace still held: those spent now, and
+   * those whose ledger entry is still to be written (kept until `revoke`), so a ledger append that
+   * failed is made again on the next wrong guess, without the code ever opening a door again.
    */
   miss(workspaceId: string, door: { audience: string; target: string }, limit: number, now: Date): Promise<AccessCodeEntry[]>;
 }
@@ -88,7 +97,8 @@ export class MemoryAccessCodeStore implements AccessCodeStore {
   readonly #entries = new Map<string, AccessCodeEntry>();
 
   async put(entry: AccessCodeEntry, now: Date): Promise<boolean> {
-    for (const [key, e] of this.#entries) if (Date.parse(e.body.expiresAt) <= now.getTime()) this.#entries.delete(key);
+    // Expired codes are pruned; a spent one stays until its ledger entry is written.
+    for (const [key, e] of this.#entries) if (e.spent !== true && Date.parse(e.body.expiresAt) <= now.getTime()) this.#entries.delete(key);
     const key = JSON.stringify([entry.workspaceId, entry.digest]);
     if (this.#entries.has(key)) return false;
     this.#entries.set(key, structuredClone(entry));
@@ -97,13 +107,13 @@ export class MemoryAccessCodeStore implements AccessCodeStore {
 
   async get(workspaceId: string, digest: string): Promise<AccessCodeEntry | null> {
     const entry = this.#entries.get(JSON.stringify([workspaceId, digest]));
-    return entry === undefined ? null : structuredClone(entry);
+    return entry === undefined || entry.spent === true ? null : structuredClone(entry);
   }
 
   async take(workspaceId: string, digest: string, grantId?: string): Promise<AccessCodeEntry | null> {
     const key = JSON.stringify([workspaceId, digest]);
-    const entry = this.#entries.get(key) ?? null;
-    if (entry !== null && grantId !== undefined && entry.grantId !== grantId) return null;
+    const entry = this.#entries.get(key);
+    if (entry === undefined || entry.spent === true || (grantId !== undefined && entry.grantId !== grantId)) return null;
     this.#entries.delete(key);
     return entry;
   }
@@ -114,17 +124,16 @@ export class MemoryAccessCodeStore implements AccessCodeStore {
 
   async miss(workspaceId: string, door: { audience: string; target: string }, limit: number, now: Date): Promise<AccessCodeEntry[]> {
     const spent: AccessCodeEntry[] = [];
-    for (const [key, e] of this.#entries) {
-      if (e.workspaceId !== workspaceId || e.body.audience !== door.audience || e.body.target !== door.target || Date.parse(e.body.expiresAt) <= now.getTime()) continue;
-      e.misses += 1;
-      if (e.misses < limit) continue;
-      this.#entries.delete(key);
-      spent.push(structuredClone(e));
+    for (const e of this.#entries.values()) {
+      if (e.workspaceId !== workspaceId) continue;
+      const live = e.spent !== true && e.body.audience === door.audience && e.body.target === door.target && Date.parse(e.body.expiresAt) > now.getTime();
+      if (live && ++e.misses >= limit) e.spent = true;
+      if (e.spent === true) spent.push(structuredClone(e));
     }
     return spent;
   }
 
-  /** How many entries are held, live or not yet pruned. */
+  /** How many entries are held, live, spent and not yet recorded, or not yet pruned. */
   get size(): number {
     return this.#entries.size;
   }
@@ -262,22 +271,33 @@ export class AccessCodes {
 
   /**
    * A guess that matched no live code at this door counts against every code live there; those at
-   * the limit are spent, each recorded in the ledger by its grant, never with the guess.
+   * the limit are spent, each recorded in the ledger by its grant, never with the guess. Each spent
+   * code's entry is appended (idempotent by its event id), and only then is the code removed: an
+   * append that fails leaves it held, spent, and the next wrong guess appends it again. Every spent
+   * code is tried; the first failure is thrown once all were.
    */
   async #wrongGuess(workspaceId: string, audience: string, target: string): Promise<void> {
     const now = this.#clock.now();
     const spent = await this.#options.store.miss(workspaceId, { audience, target }, this.#maxWrongGuesses, now);
+    const failures: unknown[] = [];
     for (const entry of spent) {
-      await this.#options.ledger.append({
-        // The workspace first, as every engine event id has it, so reports attribute the entry (PRV-8).
-        eventId: JSON.stringify([entry.workspaceId, "access.code_spent", entry.grantId]),
-        callId: entry.callId,
-        actor: "system",
-        event: "access.code_spent",
-        at: now.toISOString(),
-        detail: { grantId: entry.grantId, reason: "wrong_guesses", guesses: this.#maxWrongGuesses },
-      });
+      await this.#recordSpent(entry, now).catch((error: unknown) => failures.push(error));
     }
+    if (failures.length > 0) throw failures[0];
+  }
+
+  /** One spent code's ledger entry, then its removal from the store. */
+  async #recordSpent(entry: AccessCodeEntry, now: Date): Promise<void> {
+    await this.#options.ledger.append({
+      // The workspace first, as every engine event id has it, so reports attribute the entry (PRV-8).
+      eventId: JSON.stringify([entry.workspaceId, "access.code_spent", entry.grantId]),
+      callId: entry.callId,
+      actor: "system",
+      event: "access.code_spent",
+      at: now.toISOString(),
+      detail: { grantId: entry.grantId, reason: "wrong_guesses", guesses: this.#maxWrongGuesses },
+    });
+    await this.#options.store.revoke(entry.workspaceId, entry.grantId);
   }
 
   /** Removes a grant's code before its end. Success when it is already gone. */

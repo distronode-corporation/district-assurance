@@ -127,7 +127,9 @@ export function vendorAccessController(options: VendorAccessOptions): AccessCont
       const grant = input.grant.body;
       if (input.target !== grant.target) return { outcome: "refused", reason: "target_mismatch" };
       if (!TARGET[vendor].test(input.target)) return { outcome: "refused", reason: "bad_target" };
-      if (Date.parse(grant.expiresAt) - clock.now().getTime() < timeoutMs) return { outcome: "refused", reason: "grant_expiring" };
+      // NaN (a clock or an expiry that cannot be read) would pass a plain comparison: refused too.
+      const left = Date.parse(grant.expiresAt) - clock.now().getTime();
+      if (!(left >= timeoutMs)) return { outcome: "refused", reason: "grant_expiring" };
       const signal = AbortSignal.timeout(timeoutMs);
       if (vendor === "kisi") {
         return post(at(`/locks/${input.target}/unlock`), { authorization: `KISI-LOGIN ${apiKey}` }, "{}", signal, grant.grantId);

@@ -107,7 +107,12 @@ describe("overlapping retries", () => {
     await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
     t.messages.sendText = send;
-    await Promise.all([t.engine.requestPayment(callId, request), t.engine.requestPayment(callId, request)]);
+    // One resume takes the text; the other finds its lease live and is refused, never sending a
+    // second text over it (L1 review, T10).
+    const [a, b] = await Promise.allSettled([t.engine.requestPayment(callId, request), t.engine.requestPayment(callId, request)]);
+    assert.equal(a.status, "fulfilled");
+    assert.ok(b.status === "rejected" && rejects("precondition_failed", /another process is texting/)(b.reason));
+    assert.equal(t.messages.sent.filter((m) => m.purpose === "payment_link").length, 1, "texted once");
     assert.equal((await t.ledger.list()).filter((e) => e.event === "payment.link_sent").length, 1);
   });
 
