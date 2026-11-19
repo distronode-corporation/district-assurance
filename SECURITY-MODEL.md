@@ -82,7 +82,8 @@ limit or the allow-list.
 
 Replayed webhooks, reused links, replayed tones. **Controls:** Stripe signatures are checked with a
 300-second window and constant-time comparison (tested); the reference server applies each event
-id once; the engine applies each identity session and each payment settlement once (tested).
+id once while it remembers it, 4 days and 10,000 ids at most so a flood of events cannot exhaust
+its memory (tested); the engine applies each identity session and each payment settlement once (tested).
 Identity links are single-use by the provider. The reference server's Stripe Identity adapter
 sends the engine's idempotency key with every create, so a retried `startPhotoId` gets the same
 session and link, never a second one (tested against a local fake). It never logs the link, and its
@@ -134,8 +135,10 @@ must pass `sessionStoreContract`.
 ### Prompt injection
 
 A webhook reply, a CRM note or a document says "ignore the rules". **Controls:** `markUntrusted`
-taints the session, drops the grant and sets the level to 0; the next verification starts from no
-factors, and a photo ID link sent before the taint no longer counts (tested). Fetched text never chooses a tool, a recipient or an amount: amounts come from
+taints the session, drops the grant and sets the level to 0; a verification open when the taint
+lands fails, granting no level from factors matched before or after it, so the caller must start
+again; the next verification starts from no factors, and a photo ID link sent before the taint no
+longer counts (tested). Fetched text never chooses a tool, a recipient or an amount: amounts come from
 the host's code with an `amountSource`, and destinations come from the subject record.
 
 ### Unlocks: forged, replayed, or sent twice

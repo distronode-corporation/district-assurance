@@ -92,6 +92,13 @@ All notable changes to this project are documented here. The format follows
 
 - `PaymentLinks.createLink` takes a `PaymentLinkRequest` (mode, connected account, payment methods,
   expiry); `requestPayment` also returns `expiresAt`; receipts' payments carry `mode`.
+- `confirmIntake` refuses a `confirmedBy` other than `voice` or `keypad` (`invalid_input`) before
+  anything is written, so no host value reaches the record or the ledger unchecked.
+- `verifyStripeSignature` throws `invalid_input` for a `toleranceSeconds` that is not an integer
+  from 0 to 86,400, or a `now` that is not a valid `Date`: either could make a replay of any age
+  pass.
+- The reference server remembers webhook event ids for 4 days (Stripe retries for 3) and at most
+  10,000 of them, least recently seen first out, instead of in a set that grew without end.
 
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.

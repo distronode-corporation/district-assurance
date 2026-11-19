@@ -38,7 +38,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           package-manager-cache: false
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       # oxlint's correctness rules (.oxlintrc.json), warnings included.
       - run: npm run lint
       # Every tracked file against .editorconfig. Linux only (a Windows checkout may have CRLF

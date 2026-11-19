@@ -3,11 +3,11 @@ import { strict as assert } from "node:assert";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 
-import { createReferenceServer } from "../examples/reference-server/src/app.ts";
+import { SEEN_EVENT_MAX, SEEN_EVENT_TTL_MS, SeenEvents, createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { runDemo } from "../examples/reference-server/src/demo.ts";
 import { createDoorRelay } from "../examples/reference-server/src/door-relay.ts";
 import { canonicalJson, signDocument, signStripePayload, type Engine } from "../src/index.ts";
-import { createTestEngine, generateTestSigner, type TestEngine } from "../src/testing/index.ts";
+import { FixedClock, createTestEngine, generateTestSigner, type TestEngine } from "../src/testing/index.ts";
 
 const SECRET = "whsec_test_not_a_secret";
 
@@ -103,6 +103,60 @@ describe("reference server", () => {
       const connect = event("evt_12", "checkout.session.expired", { id: "cs_y" }, { account: "acct_1" });
       assert.deepEqual(await send("/webhooks/stripe/payments", connect), { received: true, applied: false, handled: false });
       assert.deepEqual(await send("/webhooks/stripe/connect", connect), { received: true, applied: false });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("remembers event ids for longer than Stripe retries, and no more than its cap (fixed clock)", async () => {
+    const clock = new FixedClock();
+    const seen = new SeenEvents(clock, 1000, 3);
+    seen.add("a");
+    clock.advance(999);
+    assert.equal(seen.has("a"), true, "within the ttl");
+    clock.advance(1);
+    assert.equal(seen.has("a"), false, "forgotten at the ttl");
+    assert.equal(seen.size, 0);
+    // The least recently seen goes first past the cap; a hit counts as a use.
+    for (const id of ["a", "b", "c"]) seen.add(id);
+    assert.equal(seen.has("a"), true);
+    seen.add("d");
+    assert.deepEqual(["a", "b", "c", "d"].map((id) => seen.has(id)), [true, false, true, true]);
+    // A flood of distinct ids never holds more than the cap, and expired ones go on the next look.
+    for (let i = 0; i < 10_000; i++) seen.add(`evt_${i}`);
+    assert.equal(seen.size, 3);
+    clock.advance(1000);
+    assert.equal(seen.has("evt_9999"), false);
+    assert.equal(seen.size, 0);
+    // A re-added id starts its ttl again.
+    seen.add("e");
+    clock.advance(600);
+    seen.add("e");
+    clock.advance(600);
+    assert.equal(seen.has("e"), true);
+    for (const [ttl, max] of [[0, 1], [1, 0], [1.5, 1], [1, Number.NaN]] as const) assert.throws(() => new SeenEvents(clock, ttl, max), TypeError);
+    // The defaults outlast Stripe's 3-day retry window.
+    assert.ok(SEEN_EVENT_TTL_MS > 3 * 24 * 60 * 60 * 1000);
+    assert.equal(SEEN_EVENT_MAX, 10_000);
+  });
+
+  it("answers a retried event as a duplicate only while it is remembered", async () => {
+    const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [SECRET], payments: [] }, clock: t.clock, seenEvents: { ttlMs: 60_000, max: 2 } });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/webhooks/stripe/identity`;
+    const send = async (id: string) => {
+      const body = event(id, "identity.verification_session.verified", { id: "vs_unknown" });
+      return (await fetch(url, { method: "POST", body, headers: signed(body) }).then((r) => r.json())) as Record<string, unknown>;
+    };
+    try {
+      assert.deepEqual(await send("evt_r1"), { received: true, applied: false });
+      assert.deepEqual(await send("evt_r1"), { received: true, duplicate: true });
+      await send("evt_r2");
+      await send("evt_r3");
+      assert.deepEqual(await send("evt_r2"), { received: true, duplicate: true }, "kept: among the two most recent");
+      assert.deepEqual(await send("evt_r1"), { received: true, applied: false }, "evicted past the cap");
+      t.clock.advance(60_000);
+      assert.deepEqual(await send("evt_r2"), { received: true, applied: false }, "forgotten after the ttl");
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

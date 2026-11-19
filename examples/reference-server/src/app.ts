@@ -21,6 +21,8 @@ export interface ReferenceServerOptions {
   clock: Clock;
   /** Default 64 KiB. */
   maxBodyBytes?: number;
+  /** How long and how many Stripe event ids are remembered (`SeenEvents`). Defaults: 4 days, 10,000. */
+  seenEvents?: { ttlMs?: number; max?: number };
   /** The demo's runs: serves the browser UI and the `/demo/*` routes. Off when absent. */
   ui?: DemoRuns;
 }
@@ -46,6 +48,63 @@ function isLocalHost(host: string, port: number): boolean {
   return h === `127.0.0.1:${port}` || h === `localhost:${port}` || h === `[::1]:${port}`;
 }
 
+/** Stripe retries an undelivered event for up to 3 days, re-signed each time; ids are kept a day longer. */
+export const SEEN_EVENT_TTL_MS = 4 * 24 * 60 * 60 * 1000;
+export const SEEN_EVENT_MAX = 10_000;
+
+/**
+ * The webhook event ids applied recently, so a retried delivery is answered as a duplicate. Bounded
+ * two ways, so a stream of distinct signed events cannot grow it without end: an id is forgotten
+ * after `ttlMs` (longer than Stripe's retry window), and past `max` ids the least recently seen goes
+ * first. A forgotten id that comes back is applied again, which the engine answers once anyway.
+ */
+export class SeenEvents {
+  readonly #ttlMs: number;
+  readonly #max: number;
+  readonly #clock: Clock;
+  /** Id to the time it is forgotten, least recently seen first (a Map keeps insertion order). */
+  readonly #ids = new Map<string, number>();
+
+  constructor(clock: Clock, ttlMs = SEEN_EVENT_TTL_MS, max = SEEN_EVENT_MAX) {
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 1) throw new TypeError("SeenEvents: ttlMs must be an integer of 1 or more");
+    if (!Number.isSafeInteger(max) || max < 1) throw new TypeError("SeenEvents: max must be an integer of 1 or more");
+    this.#clock = clock;
+    this.#ttlMs = ttlMs;
+    this.#max = max;
+  }
+
+  get size(): number {
+    return this.#ids.size;
+  }
+
+  /** Whether the id was seen and not yet forgotten; a hit counts as a use, for the cap. */
+  has(id: string): boolean {
+    const now = this.#clock.now().getTime();
+    this.#expire(now);
+    const until = this.#ids.get(id);
+    if (until === undefined) return false;
+    this.#ids.delete(id);
+    if (until <= now) return false;
+    this.#ids.set(id, until);
+    return true;
+  }
+
+  add(id: string): void {
+    const now = this.#clock.now().getTime();
+    this.#ids.delete(id);
+    this.#ids.set(id, now + this.#ttlMs);
+    while (this.#ids.size > this.#max) this.#ids.delete(this.#ids.keys().next().value!);
+  }
+
+  /** Forgets expired ids from the least recently seen end, until the first one still in time. */
+  #expire(now: number): void {
+    for (const [id, until] of this.#ids) {
+      if (until > now) return;
+      this.#ids.delete(id);
+    }
+  }
+}
+
 class HttpError extends Error {
   readonly status: number;
   constructor(status: number, message: string) {
@@ -55,7 +114,7 @@ class HttpError extends Error {
 }
 
 export function createReferenceServer(options: ReferenceServerOptions): Server {
-  const processed = new Set<string>();
+  const processed = new SeenEvents(options.clock, options.seenEvents?.ttlMs, options.seenEvents?.max);
   const maxBody = options.maxBodyBytes ?? 64 * 1024;
   const files = options.ui === undefined ? new Map<string, StaticFile>() : loadStaticFiles();
 
