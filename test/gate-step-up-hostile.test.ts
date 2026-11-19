@@ -100,12 +100,40 @@ describe("hostile #101: exchange", () => {
     const b64 = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
     const hostile: unknown[] = [null, 42, {}, [], "", "a.b", "a.b.c.d", "\ud800.\ud800.\ud800", "x".repeat(1_000_000), `e30.${b64({ sid: "__proto__", jti: "constructor", nonce: NONCE })}.c2ln`, `e30.${b64({ sid: callId, jti: "stu_1", nonce: NONCE })}.c2ln`];
     const parts = token.split(".");
-    hostile.push(`${parts[0]}.${parts[1]}.${parts[2]!.slice(0, -2)}AA`, `${parts[0]}.${parts[1]}x.${parts[2]}`);
+    const tamperedSignature = flipFirstBit(parts[2]!);
+    assert.notEqual(tamperedSignature, parts[2], "the tampered signature always differs");
+    hostile.push(`${parts[0]}.${parts[1]}.${tamperedSignature}`, `${parts[0]}.${parts[1]}x.${parts[2]}`);
     for (const bad of hostile) {
       const answer = await t.engine.exchangeStepUpToken(bad, portal);
       assert.equal(answer.ok, false, String(bad).slice(0, 30));
     }
     assert.equal((await t.engine.exchangeStepUpToken(token, portal)).ok, true, "none of them used the real token up");
+  });
+});
+
+/**
+ * A base64url signature with the lowest bit of its first byte flipped: always a different
+ * signature of the same length. (Replacing the last two characters with "AA" left it unchanged
+ * whenever it already ended in "AA", about 1 run in 256, since a 64-byte signature's last character
+ * holds only 2 bits.)
+ */
+function flipFirstBit(signature: string): string {
+  const bytes = Buffer.from(signature, "base64url");
+  bytes[0]! ^= 0x01;
+  return bytes.toString("base64url");
+}
+
+describe("hostile #101: the tamper itself", () => {
+  it("flips a bit of any signature, the worst case for the old tamper (one ending in AA) included", () => {
+    const worst = Buffer.alloc(64, 0).toString("base64url");
+    assert.match(worst, /AA$/, "a signature the old tamper left unchanged");
+    assert.equal(`${worst.slice(0, -2)}AA`, worst, "the old tamper on it: no change");
+    for (const signature of [worst, Buffer.alloc(64, 0xff).toString("base64url"), Buffer.from(Array.from({ length: 64 }, (_, i) => i)).toString("base64url")]) {
+      const flipped = flipFirstBit(signature);
+      assert.notEqual(flipped, signature);
+      assert.equal(flipped.length, signature.length);
+      assert.equal(Buffer.from(flipped, "base64url")[0]! ^ Buffer.from(signature, "base64url")[0]!, 0x01);
+    }
   });
 });
 
