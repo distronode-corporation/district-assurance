@@ -57,8 +57,13 @@ const DEFAULT_MAX_LENGTH = 500;
 export const MAX_PATTERN_LENGTH = 200;
 /** The most ways a pattern may have to try a value: about 100,000 paths of at most a value's length each. */
 export const MAX_PATTERN_WORK = 100_000;
-/** Words that name a card or a Social Insurance Number, in English or French, in a key or a label (accents and case ignored). */
-const FORBIDDEN_NAME = /\b(?:cards?|cartes?|cardholder|cvv2?|cvc|sin|nas|social insurance|assurance sociale)\b/;
+/**
+ * Words that name a card or a national identity number, in English or French, in a key or a label
+ * (accents and case ignored): a card, its number (PAN, cc), a Social Insurance Number (SIN, NAS)
+ * or a Social Security Number (SSN). Each is a whole word of the name split at spaces, `_`, `-`
+ * and camelCase humps, never a piece of one, so "account", "pancake" and "nasal" pass.
+ */
+const FORBIDDEN_NAME = /\b(?:cards?|cartes?|cardholder|cvv2?|cvc|sin|nas|ssn|pan|cc|social insurance|assurance sociale|social security)\b/;
 /**
  * The same names run together into one word, as snake_case keys and labels often write them
  * ("creditcard", "cardno", "sinnumber", "numerocarte"), without catching words that merely hold
@@ -67,7 +72,7 @@ const FORBIDDEN_NAME = /\b(?:cards?|cartes?|cardholder|cvv2?|cvc|sin|nas|social 
 const FORBIDDEN_COMPOUND = [
   /^(?:credit|debit|bank|gift|payment|pay)?cards?(?:no|num|number|numbers|holders?|name)?$/,
   /^(?:no|num|numero)?cartes?(?:no|num|numero)?$/,
-  /^(?:sin|nas)(?:no|num|number|numero)$/,
+  /^(?:sin|nas|ssn|ss|pan|cc)(?:no|num|number|numero)$/,
 ];
 
 /** Every problem with a form, as sentences. */
@@ -99,8 +104,14 @@ export function validateForm(form: IntakeForm): string[] {
 }
 
 function namesForbidden(name: string): boolean {
-  // Accents, case and dots go first, so "S.I.N." and "Numéro d'assurance sociale" are caught.
-  const plain = name.normalize("NFD").replace(/[\p{M}.]/gu, "").toLowerCase().replace(/[^a-z0-9]+/g, " ");
+  // Accents and dots go first, so "S.I.N." and "Numéro d'assurance sociale" are caught; a camelCase
+  // hump splits a word ("panNumber" is "pan number") before case goes.
+  const plain = name
+    .normalize("NFD")
+    .replace(/[\p{M}.]/gu, "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ");
   return FORBIDDEN_NAME.test(plain) || plain.split(" ").some((word) => FORBIDDEN_COMPOUND.some((compound) => compound.test(word)));
 }
 

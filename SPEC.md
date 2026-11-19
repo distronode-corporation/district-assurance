@@ -362,10 +362,13 @@ Field rules (FIL-4), each checked by `validateConfig`, which reports every bad o
 
 - A field has only `key`, `label`, `type`, `required`, `sensitive`, `maxLength`, `showIf`, `min`,
   `max` and `pattern`.
-- No field's key or label (either language; case, accents and dots ignored) names a card or a
-  Social Insurance Number: the words `card`, `carte`, `cardholder`, `cvv`, `cvc`, `sin`, `nas`,
-  `social insurance` or `assurance sociale`, or one of them run into one word with a number or
-  kind (`creditcard`, `cardno`, `cardholders`, `numerocarte`, `sinnumber`, `nasno`).
+- No field's key or label (either language; case, accents and dots ignored) names a card, its
+  number or a national identity number: the words `card`, `carte`, `cardholder`, `cvv`, `cvc`,
+  `pan`, `cc`, `sin`, `nas`, `ssn`, `social insurance`, `assurance sociale` or `social security`,
+  each a whole part of the name split at spaces, `_`, `-` and camelCase humps (`panNumber`), never a
+  piece of a longer word (`account`, `pancake`, `nasal` pass), or one of them run into one word
+  with a number or kind (`creditcard`, `cardno`, `numerocarte`, `sinnumber`, `ssnumber`,
+  `pannumber`, `ccno`). The card-number check on values still applies whatever a field is called.
 - `min` and `max` only on number fields (finite numbers) and date fields (`YYYY-MM-DD` dates),
   inclusive, with `min` at most `max`.
 - `pattern` only on text fields: a regular expression of 1 to 200 characters, valid in Unicode
