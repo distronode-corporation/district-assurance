@@ -225,6 +225,32 @@ describe("paylink modes: running", () => {
 });
 
 describe("paylink: the engine's own deadline", () => {
+  it("never ledgers an expire answer the provider cannot give: the payment stays open, and a good answer later settles it (from #114's hostile pass)", async () => {
+    const t = setup({ config: withFlow({ ...pay, mode: "connect", linkLifeMinutes: 10 }) });
+    const callId = await onPayStep(t);
+    await t.engine.requestPayment(callId);
+    t.clock.advance(10 * 60_000);
+    const real = t.payments.expireLink.bind(t.payments);
+    let reads = 0;
+    for (const answer of [{ state: "paid" }, { state: "+15555550100" }, undefined, null, "expired", { get state() {
+      reads++;
+      return reads === 1 ? "expired" : "+15555550100";
+    } }]) {
+      t.payments.expireLink = async () => answer as never;
+      const out = await t.engine.expirePaymentLinks(callId).then(
+        (r) => r,
+        (e: unknown) => (e as { code?: string }).code,
+      );
+      if (typeof out === "object") {
+        assert.equal(reads, 1, "a getter is read once");
+        assert.deepEqual(out, { expired: ["pay_1"] });
+      } else assert.equal(out, "precondition_failed", JSON.stringify(answer));
+    }
+    const provider = (await t.ledger.list()).filter((e) => e.event === "payment.link_expired").map((e) => e.detail.provider);
+    assert.deepEqual(provider, ["expired"], "only an answer it can give is ledgered");
+    t.payments.expireLink = real;
+  });
+
   it("expires a texted link at its deadline, at the provider first, and fails the flow", async () => {
     const t = setup({ config: withFlow({ ...pay, mode: "connect", linkLifeMinutes: 10 }) });
     const callId = await onPayStep(t);

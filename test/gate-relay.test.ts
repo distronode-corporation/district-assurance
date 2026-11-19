@@ -93,6 +93,22 @@ describe("webhookRelay", () => {
     assert.equal(seen.filter((s) => s.path === "/confirmed").length, 1);
   });
 
+  it("sends an idempotency key a header cannot carry as is, with its other characters as JSON escapes", async () => {
+    // The engine allows any id without a lone surrogate, but a header value is bytes: fetch threw
+    // on a character past U+00FF before sending, and Gate recorded a grant it never sent as unknown.
+    for (const tuple of [["工作区", "c", "acc_1", "unlock"], ["w", "通話-1", "acc_1", "unlock"], ["café", "c", "acc_1", "unlock"], ["w", "c\u007f", "acc_1", "unlock"]]) {
+      const key = JSON.stringify(tuple);
+      const before = seen.length;
+      assert.deepEqual(await webhookRelay({ url: `${base}/confirmed` }).unlock({ ...input, idempotencyKey: key }), { outcome: "delivered", providerRef: "relay-7", confirmed: true }, key);
+      assert.equal(seen.length, before + 1, "the request went out");
+      const header = seen.at(-1)!.headers["idempotency-key"] as string;
+      assert.match(header, /^[\x20-\x7e]*$/, "printable ASCII only");
+      assert.deepEqual(JSON.parse(header), tuple, "the same key, read as JSON");
+    }
+    await webhookRelay({ url: `${base}/confirmed` }).unlock(input);
+    assert.equal(seen.at(-1)!.headers["idempotency-key"], input.idempotencyKey, "an ASCII key is sent unchanged");
+  });
+
   it("treats any 2xx as delivered, confirmed only when the relay says so", async () => {
     const relay = (path: string) => webhookRelay({ url: `${base}${path}` }).unlock(input);
     assert.deepEqual(await relay("/accepted"), { outcome: "delivered", providerRef: "acc_1", confirmed: false });

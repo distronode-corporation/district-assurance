@@ -65,6 +65,7 @@ export function createDemoWorld(): DemoWorld {
   const sentGrants = new Map<string, SignedAccessGrant>();
   let relay: Server | null = null;
   let starting: Promise<string> | null = null;
+  let closed = false;
   // The relay adapter needs the relay's port, known once it listens: built per unlock.
   // Gate's adapters: its own signing key, and one controller, the relay adapter, whose URL is known
   // once the example relay listens (so it is built per unlock).
@@ -101,6 +102,8 @@ export function createDemoWorld(): DemoWorld {
     openedFor,
     sentGrants,
     relayUrl() {
+      // A closed world starts nothing: a start after close() would listen with no one to stop it.
+      if (closed) return Promise.reject(new Error("the demo world is closed"));
       // One startup shared by every caller, so two runs that begin together both wait for it.
       starting ??= (async () => {
         relay = createDoorRelay({
@@ -122,8 +125,15 @@ export function createDemoWorld(): DemoWorld {
       return starting;
     },
     async close() {
-      const running = relay;
-      if (running !== null) await new Promise<void>((resolve) => running.close(() => resolve()));
+      // A relay still starting is waited for, then stopped: closing a server before it listens
+      // leaves its listen pending forever, so relayUrl() and every unlock behind it would hang.
+      if (closed) return;
+      closed = true;
+      const pending = starting;
+      if (pending === null) return;
+      await pending;
+      const running = relay!;
+      await new Promise<void>((resolve) => running.close(() => resolve()));
     },
     async stripe(path, type, object, account) {
       const payload = JSON.stringify({ id: `evt_demo_${++n}`, type, livemode: false, data: { object }, ...(account === undefined ? {} : { account }) });

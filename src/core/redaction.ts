@@ -4,6 +4,7 @@
 // digits or spoken as single digit words in English or French, with spaces, hyphens, dots or
 // commas between groups. A match is replaced by a fixed marker. Over-redaction is accepted; the
 // risk this guards against is a card number reaching storage.
+import type { Locale } from "./runtime.ts";
 
 export type RedactionKind = "card_number";
 
@@ -43,12 +44,13 @@ export function luhnValid(digits: string): boolean {
   return sum % 10 === 0;
 }
 
-const DIGIT_WORDS: Record<string, string> = {
-  zero: "0", oh: "0", one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7",
-  eight: "8", nine: "9",
-  "zéro": "0", un: "1", une: "1", deux: "2", trois: "3", quatre: "4", cinq: "5", sept: "7", huit: "8",
-  neuf: "9",
+/** Single digit words, by locale. Every locale's are always on: a caller may read a card in any language. */
+export const DIGIT_WORDS_BY_LOCALE: Record<Locale, Readonly<Record<string, string>>> = {
+  en: { zero: "0", oh: "0", one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9" },
+  fr: { "zéro": "0", un: "1", une: "1", deux: "2", trois: "3", quatre: "4", cinq: "5", six: "6", sept: "7", huit: "8", neuf: "9" },
 };
+
+const DIGIT_WORDS: Record<string, string> = Object.assign({}, ...Object.values(DIGIT_WORDS_BY_LOCALE));
 
 interface Token {
   digits: string;
