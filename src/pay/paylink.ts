@@ -30,6 +30,7 @@ export const PAYMENT_MODES = ["connect", "platform"] as const;
 export type PaymentMode = (typeof PAYMENT_MODES)[number];
 
 const AMOUNT_SOURCES: readonly AmountSourceKind[] = ["intake_record", "business_endpoint", "price_list"];
+const CONFIRMED_BY: readonly string[] = ["voice", "keypad"];
 
 export interface PaylinkSettings {
   /** Upper bound per link, in minor units. At most 1,000,000. */
@@ -241,10 +242,13 @@ export async function readBackPayment(rt: EngineRuntime, callId: string, input?:
 /**
  * The caller said yes to the amount read back. `digest` is the read-back's digest as the host got
  * it; a different one (a newer read-back, or none) is refused, so a confirmation is only ever for
- * the amount the caller heard. Confirming twice is harmless.
+ * the amount the caller heard. Confirming twice is harmless. `confirmedBy` goes into the ledger,
+ * so it is one of two fixed words, never the host's text.
  */
 export async function confirmPaymentAmount(rt: EngineRuntime, callId: string, input: { digest: string; confirmedBy: "voice" | "keypad" }): Promise<void> {
   rt.settings(PAYLINK);
+  if (!isObject(input) || typeof input.digest !== "string") throw new EngineError("invalid_input", "digest must be the read-back's digest");
+  if (!CONFIRMED_BY.includes(input.confirmedBy as unknown as string)) throw new EngineError("invalid_input", "confirmedBy must be voice or keypad");
   await rt.update(callId, (draft) => {
     requestContext(rt, draft.record, undefined);
     // A call saved before PAY-2 has no quote field: the same as no read-back.

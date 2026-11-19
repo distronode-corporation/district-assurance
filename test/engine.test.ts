@@ -619,6 +619,32 @@ describe("Engine pay: amounts from code, read back first (PAY-2)", () => {
     assert.equal(entries.find((e) => e.event === "payment.amount_confirmed")!.actor, "caller");
   });
 
+  it("refuses a confirmation by anything but voice or keypad, so the host's text never reaches the ledger", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const back = await t.engine.readBackPayment(callId, request);
+    for (const confirmedBy of [PHONE_ON_FILE, "Jane Doe 1985-02-14", "", undefined, null, 42, { by: "voice" }, ["voice"]]) {
+      await assert.rejects(
+        t.engine.confirmPaymentAmount(callId, { digest: back.digest, confirmedBy: confirmedBy as unknown as "voice" }),
+        rejects("invalid_input", /confirmedBy must be voice or keypad/),
+        JSON.stringify(confirmedBy),
+      );
+    }
+    for (const digest of [undefined, null, 42, { digest: back.digest }]) {
+      await assert.rejects(
+        t.engine.confirmPaymentAmount(callId, { digest: digest as unknown as string, confirmedBy: "voice" }),
+        rejects("invalid_input", /digest must be/),
+        JSON.stringify(digest),
+      );
+    }
+    await assert.rejects(t.engine.confirmPaymentAmount(callId, null as unknown as { digest: string; confirmedBy: "voice" }), rejects("invalid_input"));
+    await assert.rejects(t.engine.requestPayment(callId), rejects("precondition_failed", /not confirmed/), "nothing was confirmed");
+    const entries = JSON.stringify(await t.ledger.list());
+    assert.equal(entries.includes("payment.amount_confirmed"), false);
+    assert.equal(entries.includes("5555550100"), false);
+    assert.equal(entries.includes("Jane"), false);
+  });
+
   it("builds the read-back in French, and a new read-back replaces the one before", async () => {
     const t = setup();
     const callId = await verifiedCall(t, "fr");
