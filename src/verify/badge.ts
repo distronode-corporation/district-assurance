@@ -447,7 +447,8 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
     const factors = draft.record.state.factors.filter((f) => step === null || step.factors.includes(f.kind));
     const result = evaluateAssurance(rt.policy, factors, s.carrier);
     // The call's caller ID attestation can only lower the level the factors reached, never raise it.
-    const level = capLevel(rt.policy, result.level, draft.record.attestation);
+    // A call stored before VER-10 has no attestation, and reads as none.
+    const level = capLevel(rt.policy, result.level, draft.record.attestation ?? "none");
     const scopes = scopesForLevel(rt.policy, level).filter((scope) => step?.scopes === undefined || step.scopes.includes(scope));
     const issuedAt = rt.clock.now();
     const grant =

@@ -532,7 +532,7 @@ export class Engine {
     return (
       grant !== null &&
       grant.scopes.includes(scope) &&
-      capLevel(this.#config.policy, grant.level, record.attestation) >= min &&
+      capLevel(this.#config.policy, grant.level, record.attestation ?? "none") >= min &&
       this.#clock.now().getTime() < Date.parse(grant.expiresAt)
     );
   }

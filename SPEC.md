@@ -49,7 +49,8 @@ enforces it.
 
 A call is one JSON record: `{v: 1, state, locale, revision, attestation, flow, modules}`, where
 `state` is the session above, `revision` the FlowConfig revision the call started under,
-`attestation` its caller ID attestation (section 4, set once by `startCall`), `flow` the cursor of the
+`attestation` its caller ID attestation (section 4, set once by `startCall`; a call stored before
+it existed has none, and reads as `none` for caps and the receipt), `flow` the cursor of the
 flow it runs (or null), and `modules` each enabled module's own part, created by its `initCall`
 when the call starts. A module turned on after a call started has no part in it and is refused on
 that call (`module_disabled`).

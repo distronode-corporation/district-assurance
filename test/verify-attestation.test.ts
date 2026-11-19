@@ -129,4 +129,27 @@ describe("Caller ID attestation", () => {
     assert.equal(await t.engine.authorize(callId, "payment.request"), false);
     assert.equal(await t.engine.authorize(callId, "status.read"), true);
   });
+
+  it("reads a call stored before attestations existed as none: capped as none, and its receipt still signs", async () => {
+    const t = capped({ none: 1 });
+    // A record written before VER-10 has no attestation field.
+    const strip = async (callId: string) => {
+      const stored = (await t.sessions.get("ws_test", callId))!;
+      const { attestation: _, ...old } = stored.record as { attestation: string };
+      assert.equal((await t.sessions.compareAndSet("ws_test", callId, stored.version, old as never)).ok, true);
+    };
+    // Verified at level 3 as A, then read back as a stored call: the grant is held to the none cap.
+    const verified = await strongCall(t, "A");
+    assert.equal((await t.engine.finishVerification(verified)).level, 3);
+    assert.equal(await t.engine.authorize(verified, "payment.request"), true);
+    await strip(verified);
+    assert.equal(await t.engine.authorize(verified, "payment.request"), false, "the none cap holds, not no cap at all");
+
+    const callId = await strongCall(t, "A");
+    await strip(callId);
+    assert.equal((await t.engine.finishVerification(callId)).level, 1, "capped as none when it finishes");
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.equal(receipt.body.attestation, "none");
+    assert.equal(verifyReceipt(receipt, t.engine.receiptKeys()), true);
+  });
 });
