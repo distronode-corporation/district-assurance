@@ -282,7 +282,7 @@ export class Engine {
     }
     const named = new Set(this.#config.policy.levels.flatMap((rule) => rule.anyOf.flat()));
     if (this.isEnabled(badge.BADGE)) for (const kind of this.#rt.settings<BadgeSettings>(badge.BADGE).factors) named.add(kind);
-    const inUse = (this.registry.get(name)?.factorPlugins ?? []).filter((plugin) => named.has(plugin.kind));
+    const inUse = this.registry.judgesOf(name).filter((plugin) => named.has(plugin.kind));
     if (inUse.length > 0) throw new EngineError("precondition_failed", `${name} supplies the factor ${inUse[0]!.kind}, which the config uses; take it out first`);
     this.registry.remove(name);
     this.#swapBadge(this.#badge.withOutsideFactors(this.registry.factorPlugins()));
