@@ -126,8 +126,12 @@ It checks every part in one pass: a malformed part is reported and the others ar
 The default policy: level 1 is keypad knowledge; level 2 is keypad plus a trusted texted code, or
 keypad plus carrier identity match, or a PIN plus a texted code; level 3 is keypad plus photo ID.
 Scopes: `status.read` 1, `intake.file` 1, `payment.request` 2, `contact.update` 3, `payout.update`
-3. Two keypad attempts per call. A texted code counts only when the carrier answered, its answer
-covered SIM changes (`simSwapChecked`), and it reported no SIM change or port in the last 72 hours.
+3. Two keypad attempts per call. With a carrier answer, a texted code counts only when the answer
+covered SIM changes (`simSwapChecked`) and reported no SIM change in the last 72 hours, and no port
+in them when it reports ports; a report without a port age (`lastPortHoursAgo: null`, which Twilio
+always gives) is not checked for ports, so a port-out with no SIM change it detects can still
+count. Without a carrier answer, a texted code counts only when the policy allows it
+(`trustTextCodeWithoutCarrierCheck`).
 
 Badge's settings turn factors on (`factors`, at least one), set the grant lifetime
 (`grantTtlSeconds`, default 900, at most 3600) and, when `pin` is on, the PIN settings (section 6).

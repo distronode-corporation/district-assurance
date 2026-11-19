@@ -131,7 +131,8 @@ the number, the identity or a credential; it may be async, and its errors, throw
 ignored without holding back the report.
 
 A `baseUrl` override must be `https:`; plain `http:` is accepted only on a loopback host (a local
-fake server), so credentials are never sent in clear text. Any other origin throws when the adapter
+fake server), so credentials never cross a network in clear text (on loopback they stay on the
+host, unencrypted). Any other origin throws when the adapter
 is built, before a credential is used, and so does a `timeoutMs` that is not a whole number from 1
 to 60000. A number on file that is not a string is not E.164.
 

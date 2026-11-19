@@ -372,7 +372,9 @@ export class TelnyxNumberLookupSignals extends LookupAdapter {
     if (status !== "Y") return { reason: "feature_unavailable" };
     const date = typeof field.ported_date === "string" ? field.ported_date : "";
     const dayOnly = /^\d{4}-\d{2}-\d{2}$/.test(date);
-    const at = dayOnly ? Date.parse(`${date}T00:00:00Z`) + 36 * HOUR_MS : Date.parse(date);
+    // Only an ISO date or time is read: Date.parse takes "1" as 2001 and "Jan 1" as a past date, an
+    // old port where there may have been a new one. Anything else is a port just now (0).
+    const at = dayOnly ? Date.parse(`${date}T00:00:00Z`) + 36 * HOUR_MS : ISO_TIME.test(date) ? Date.parse(date) : Number.NaN;
     return Number.isNaN(at) ? 0 : hoursSince(at, this.clock.now());
   }
 }

@@ -68,6 +68,17 @@ describe("attack: SIM swap answers that should never trust a texted code", () =>
       assert.equal(trusted(await telnyx().check({ phoneNumber: "+15555550100" })), false, JSON.stringify(ported));
     }
   });
+
+  it("a Telnyx port date that is not an ISO date is a port just now, even paired with a SIM-swap answer", async () => {
+    for (const date of ["1", "Jan 1", "2001", "01/01/2001", "2001-1-1", ""]) {
+      answer({ data: { country_code: "US", portability: { ported_status: "Y", ported_date: date }, carrier: null } });
+      const report = await telnyx().check({ phoneNumber: "+15555550100" });
+      assert.equal(report.lastPortHoursAgo, 0, JSON.stringify(date));
+      assert.equal(trusted({ ...report, simSwapChecked: true }), false, `${JSON.stringify(date)}: no texted code after an unknown port`);
+    }
+    answer({ data: { country_code: "US", portability: { ported_status: "Y", ported_date: "2001-01-01T00:00:00Z" }, carrier: null } });
+    assert.ok(((await telnyx().check({ phoneNumber: "+15555550100" })).lastPortHoursAgo ?? 0) > 0, "a full ISO time is still read");
+  });
 });
 
 describe("attack: hostile answers and input", () => {

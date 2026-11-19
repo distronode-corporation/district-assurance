@@ -58,10 +58,13 @@ them apart.
 ### SIM swap and port-out
 
 An attacker who took over the number on file receives the texted code or link. **Controls:** a
-texted code counts only when the carrier answered, its answer covered SIM changes
-(`simSwapChecked`), and it reported no SIM change or port inside the policy window (72 hours by
-default); an answer that did not cover SIM changes never makes one count, whatever the policy
-says, and without a carrier answer it does not count unless the policy says so (tested). A texted code is never a factor alone, and level 3 requires a photo ID plus
+carrier answer makes a texted code count only when it covered SIM changes (`simSwapChecked`) and
+reported no SIM change inside the policy window (72 hours by default), and no port inside it when
+it reports ports; an answer that did not cover SIM changes never makes one count, whatever the
+policy says (tested). Without a carrier answer, a texted code counts only when the policy allows
+it (`trustTextCodeWithoutCarrierCheck`, off by default). Gap: a report with no port age (Twilio
+gives none) is not checked for ports, so a port-out that the carrier does not show as a SIM change
+is not caught by this rule. A texted code is never a factor alone, and level 3 requires a photo ID plus
 selfie, which a stolen SIM alone does not pass. Contact and payout scopes default to level 3.
 The reference carrier adapters (Twilio Lookup, Telnyx Number Lookup) fail closed: a timeout, an
 error, a country outside their allow-list, a feature the account is not approved for or an answer
@@ -69,7 +72,8 @@ they cannot read gives `checked: false`, never an exception into the call; a SIM
 without a usable time counts as just now, Twilio's `swapped_period` (the window it looked at) is
 only a lower bound when it reports no change inside it, and hours are rounded down (tested against
 replayed responses). They refuse a plain-http `baseUrl` other than loopback, so credentials never
-travel in clear text. Their failure reports carry the vendor's status and error code, never the number or
+cross a network in clear text (plain http to a loopback host, for a local fake, stays on the host
+but is still unencrypted). Their failure reports carry the vendor's status and error code, never the number or
 the identity on file. Telnyx reports no SIM change, so its report says `simSwapChecked: false` and a
 texted code never counts on it (tested); a host that turns texted codes on (VER-2) takes the SIM
 swap signal from Twilio. Twilio Identity Match sends the identity on file to Twilio, in the
