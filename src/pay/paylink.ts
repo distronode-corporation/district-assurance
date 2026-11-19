@@ -248,17 +248,22 @@ export async function readBackPayment(rt: EngineRuntime, callId: string, input?:
  */
 export async function confirmPaymentAmount(rt: EngineRuntime, callId: string, input: { digest: string; confirmedBy: "voice" | "keypad" }): Promise<void> {
   rt.settings(PAYLINK);
-  if (!isObject(input) || typeof input.digest !== "string") throw new EngineError("invalid_input", "digest must be the read-back's digest");
-  if (!CONFIRMED_BY.includes(input.confirmedBy as unknown as string)) throw new EngineError("invalid_input", "confirmedBy must be voice or keypad");
+  if (!isObject(input)) throw new EngineError("invalid_input", "digest must be the read-back's digest");
+  // Read once: the checked values are the ones compared and ledgered, so a getter or a host
+  // changing the object while the update waits cannot swap them.
+  const digest: unknown = input.digest;
+  const confirmedBy = input.confirmedBy as unknown as string;
+  if (typeof digest !== "string") throw new EngineError("invalid_input", "digest must be the read-back's digest");
+  if (!CONFIRMED_BY.includes(confirmedBy)) throw new EngineError("invalid_input", "confirmedBy must be voice or keypad");
   await rt.update(callId, (draft) => {
     requestContext(rt, draft.record, undefined);
     // A call saved before PAY-2 has no quote field: the same as no read-back.
     const quote = draft.slice<PaylinkSlice>(PAYLINK).quote ?? null;
     if (quote === null) throw new EngineError("precondition_failed", "no amount was read back on this call");
-    if (!hexDigestsEqual(input.digest, quote.digest)) throw new EngineError("precondition_failed", "this is not the amount last read back; read it back again");
+    if (!hexDigestsEqual(digest, quote.digest)) throw new EngineError("precondition_failed", "this is not the amount last read back; read it back again");
     if (quote.confirmedAt !== null) return;
     quote.confirmedAt = rt.now();
-    draft.emit("payment.amount_confirmed", "caller", { digest: quote.digest, confirmedBy: input.confirmedBy });
+    draft.emit("payment.amount_confirmed", "caller", { digest: quote.digest, confirmedBy });
   });
 }
 
