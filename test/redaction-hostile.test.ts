@@ -3,7 +3,8 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import { LiveCardNumberDetector } from "../src/core/live-detector.ts";
-import { REDACTION_MARKERS, applyFindings, digitRuns, findCardNumbers } from "../src/core/redaction.ts";
+import { NUMBER_LANGUAGES, REDACTION_MARKERS, applyFindings, digitRuns, findCardNumbers } from "../src/core/redaction.ts";
+import { setup } from "./helpers.ts";
 
 const PAN = "4111111111111111";
 const redacted = (text: string) => applyFindings(text, findCardNumbers(text));
@@ -129,5 +130,34 @@ describe("hostile #89: Spanish numbers, read as people say them", () => {
     const live = new LiveCardNumberDetector();
     live.push("cuarenta y");
     assert.equal(live.push("uno once once once").interrupt, true, "a y at a chunk's end still joins the run");
+  });
+});
+
+describe("hostile #89: each call reads its own language's number words", () => {
+  const runsIn = (text: string, languages: Array<"en" | "fr" | "es">) => digitRuns(text, languages).map((run) => run.map((p) => p.digits).join(""));
+
+  it("never reads English text's once, dos, mil or y as Spanish numbers on an English call", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall({ locale: "en" });
+    const text = "card 4111 1111 1111 11 once, dos mil y more";
+    const result = await t.engine.redact(callId, text);
+    assert.equal(result.text, text, "nothing redacted: once is not eleven in English");
+    assert.equal(result.interrupt, false);
+    assert.deepEqual(runsIn("forty y two", ["en"]), ["40", "2"], "y is no connector in English: forty and two are two runs");
+    assert.deepEqual(runsIn("once dos mil", ["en"]), []);
+    const live = new LiveCardNumberDetector({ locale: "en" });
+    assert.equal(live.push("4111 1111 once once").interrupt, true, "8 numerals interrupt whatever the words");
+    assert.equal(new LiveCardNumberDetector({ locale: "en" }).push("1111 once once once").digits, 0, "once ends the run in English");
+  });
+
+  it("reads French words on a French call, and every language's when no call is named", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall({ locale: "fr" });
+    const fr = `carte ${Array.from(PAN, (d) => ["zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf"][Number(d)]).join(" ")}`;
+    assert.equal((await t.engine.redact(callId, fr)).text, `carte ${MARKER}`);
+    assert.deepEqual(runsIn("once", ["fr"]), []);
+    assert.deepEqual(runsIn("cuarenta y uno", NUMBER_LANGUAGES as Array<"en" | "fr" | "es">), ["41"], "with no call, Spanish too");
+    assert.equal(redacted("4111 1111 1111 11 once"), MARKER, "the standalone redactor reads every language: the safe side");
+    assert.throws(() => new LiveCardNumberDetector({ locale: "pt" as never }), /locale must be one of/);
   });
 });

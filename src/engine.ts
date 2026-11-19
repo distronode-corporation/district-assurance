@@ -238,10 +238,10 @@ export class Engine {
    * fixed "please don't read card numbers" line.
    */
   async redact(callId: string, text: string): Promise<{ text: string; findings: RedactionFinding[]; interrupt: boolean }> {
-    const result = this.#redactor.redact(text);
-    if (result.findings.length === 0) {
-      await this.#read(callId);
-    } else {
+    // The call's language decides whose number words are read: "once" is a number only in Spanish.
+    const { locale } = await this.#read(callId);
+    const result = this.#redactor.redact(text, { locale });
+    if (result.findings.length > 0) {
       const kinds: Record<string, number> = {};
       for (const f of result.findings) kinds[f.kind] = (kinds[f.kind] ?? 0) + 1;
       await this.#update(callId, (draft) => draft.emit("redaction.applied", "code", { kinds }));

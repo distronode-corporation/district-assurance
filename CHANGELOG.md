@@ -29,9 +29,21 @@ All notable changes to this project are documented here. The format follows
   once a run of 8 or more digits is read, numerals or spoken; redaction now reads spoken numbers
   ("forty two", "quarante-deux", "double four") through `digitRuns`, tested over a shared JSON
   corpus, `test/corpus/card-numbers.json`.
+- Spanish number words in redaction and the live detector: digit words, 10 to 29, the tens with
+  "y", the hundreds and "mil" ("cuarenta y uno", "cuatro mil ciento once"), for #122's Spanish
+  calls (PAY-5).
+- `SEPARATOR_CLASS`, the characters that may lie between the groups of one number (spaces, any
+  dash, the minus sign, dots, commas, slashes, underscores, middle dots, format characters and
+  combining marks), and `NUMBER_LANGUAGES`, `NUMBER_CONNECTORS` and `NumberLanguage`, exported
+  from `district-assurance`. `LEXEME` matches every script's decimal digits, read by their values.
+- `RedactionContext`: `Redactor.redact(text, context?)` takes the call's `locale`, and
+  `LiveCardNumberDetector` a `locale` option.
 
 ### Changed
 
+- A call reads only its own language's number words: on an English call "once", "dos" and "y" are
+  words, not numbers, and French words are not read (`Engine.redact` passes the call's locale).
+  Text redacted with no call reads every language, the safe side.
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

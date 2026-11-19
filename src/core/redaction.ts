@@ -22,9 +22,14 @@ export interface RedactionResult {
   findings: RedactionFinding[];
 }
 
+/** What a redactor knows of the text's call: its language, whose number words are read. Absent: every language. */
+export interface RedactionContext {
+  locale?: NumberLanguage;
+}
+
 /** The redaction interface: a host can add detectors and compose them. */
 export interface Redactor {
-  redact(text: string): RedactionResult;
+  redact(text: string, context?: RedactionContext): RedactionResult;
 }
 
 export const REDACTION_MARKERS: Record<RedactionKind, string> = {
@@ -53,51 +58,92 @@ interface NumberWord {
   value: number;
 }
 
-function words(kind: NumberWordKind, list: ReadonlyArray<readonly [string, number]>): Array<[string, NumberWord]> {
-  return list.map(([w, value]) => [w, { kind, value }]);
-}
+/**
+ * The languages number words are read in. A call reads only its own language's words (`once`, `dos`
+ * and `y` are Spanish numbers but English words); text redacted with no call reads every language,
+ * the safe side.
+ */
+export type NumberLanguage = "en" | "fr" | "es";
+export const NUMBER_LANGUAGES: readonly NumberLanguage[] = ["en", "fr", "es"];
 
-// A Map, not an object literal, so that a word such as "constructor" is never read as a number.
-const NUMBER_WORDS: ReadonlyMap<string, NumberWord> = new Map([
-  ...words("unit", [
-    ["zero", 0], ["oh", 0], ["one", 1], ["two", 2], ["three", 3], ["four", 4], ["five", 5], ["six", 6],
-    ["seven", 7], ["eight", 8], ["nine", 9],
-    ["zéro", 0], ["un", 1], ["une", 1], ["deux", 2], ["trois", 3], ["quatre", 4], ["cinq", 5], ["sept", 7],
-    ["huit", 8], ["neuf", 9],
-    // Spanish ("un" is shared with French).
-    ["cero", 0], ["uno", 1], ["una", 1], ["dos", 2], ["tres", 3], ["cuatro", 4], ["cinco", 5], ["seis", 6],
-    ["siete", 7], ["ocho", 8], ["nueve", 9],
-  ]),
-  ...words("teen", [
+type WordList = ReadonlyArray<readonly [NumberWordKind, string, number]>;
+const each = (kind: NumberWordKind, list: ReadonlyArray<readonly [string, number]>): WordList => list.map(([w, v]) => [kind, w, v] as const);
+
+const ENGLISH: WordList = [
+  ...each("unit", [["zero", 0], ["oh", 0], ["one", 1], ["two", 2], ["three", 3], ["four", 4], ["five", 5], ["six", 6], ["seven", 7], ["eight", 8], ["nine", 9]]),
+  ...each("teen", [
     ["ten", 10], ["eleven", 11], ["twelve", 12], ["thirteen", 13], ["fourteen", 14], ["fifteen", 15],
     ["sixteen", 16], ["seventeen", 17], ["eighteen", 18], ["nineteen", 19],
-    ["dix", 10], ["onze", 11], ["douze", 12], ["treize", 13], ["quatorze", 14], ["quinze", 15], ["seize", 16],
-    // Spanish: 10 to 19, and 21 to 29, which Spanish writes as one word ("veintiuno"), with or without accents.
+  ]),
+  ...each("tens", [["twenty", 20], ["thirty", 30], ["forty", 40], ["fifty", 50], ["sixty", 60], ["seventy", 70], ["eighty", 80], ["ninety", 90]]),
+  ...each("hundred", [["hundred", 100]]),
+  ...each("thousand", [["thousand", 1000]]),
+  ...each("repeat", [["double", 2], ["triple", 3]]),
+];
+
+const FRENCH: WordList = [
+  ...each("unit", [["zéro", 0], ["un", 1], ["une", 1], ["deux", 2], ["trois", 3], ["quatre", 4], ["cinq", 5], ["six", 6], ["sept", 7], ["huit", 8], ["neuf", 9]]),
+  ...each("teen", [["dix", 10], ["onze", 11], ["douze", 12], ["treize", 13], ["quatorze", 14], ["quinze", 15], ["seize", 16]]),
+  ...each("tens", [
+    ["vingt", 20], ["vingts", 20], ["trente", 30], ["quarante", 40], ["cinquante", 50], ["soixante", 60],
+    ["septante", 70], ["huitante", 80], ["octante", 80], ["nonante", 90],
+  ]),
+  ...each("hundred", [["cent", 100], ["cents", 100]]),
+  ...each("thousand", [["mille", 1000]]),
+  ...each("repeat", [["double", 2], ["triple", 3]]),
+];
+
+const SPANISH: WordList = [
+  ...each("unit", [["cero", 0], ["uno", 1], ["una", 1], ["un", 1], ["dos", 2], ["tres", 3], ["cuatro", 4], ["cinco", 5], ["seis", 6], ["siete", 7], ["ocho", 8], ["nueve", 9]]),
+  // 10 to 19, and 21 to 29, which Spanish writes as one word ("veintiuno"), with or without accents.
+  ...each("teen", [
     ["diez", 10], ["once", 11], ["doce", 12], ["trece", 13], ["catorce", 14], ["quince", 15],
     ["dieciséis", 16], ["dieciseis", 16], ["diecisiete", 17], ["dieciocho", 18], ["diecinueve", 19],
     ["veintiuno", 21], ["veintiún", 21], ["veintiun", 21], ["veintiuna", 21], ["veintidós", 22], ["veintidos", 22],
     ["veintitrés", 23], ["veintitres", 23], ["veinticuatro", 24], ["veinticinco", 25], ["veintiséis", 26],
     ["veintiseis", 26], ["veintisiete", 27], ["veintiocho", 28], ["veintinueve", 29],
   ]),
-  ...words("tens", [
-    ["twenty", 20], ["thirty", 30], ["forty", 40], ["fifty", 50], ["sixty", 60], ["seventy", 70],
-    ["eighty", 80], ["ninety", 90],
-    ["veinte", 20], ["treinta", 30], ["cuarenta", 40], ["cincuenta", 50], ["sesenta", 60], ["setenta", 70],
-    ["ochenta", 80], ["noventa", 90],
-    ["vingt", 20], ["vingts", 20], ["trente", 30], ["quarante", 40], ["cinquante", 50], ["soixante", 60],
-    ["septante", 70], ["huitante", 80], ["octante", 80], ["nonante", 90],
-  ]),
+  ...each("tens", [["veinte", 20], ["treinta", 30], ["cuarenta", 40], ["cincuenta", 50], ["sesenta", 60], ["setenta", 70], ["ochenta", 80], ["noventa", 90]]),
   // Spanish writes its hundreds as one word each ("doscientos" is 200), read like "hundred" with its count.
-  ...words("hundred", [
-    ["hundred", 100], ["cent", 100], ["cents", 100],
+  ...each("hundred", [
     ["cien", 100], ["ciento", 100], ["doscientos", 200], ["doscientas", 200], ["trescientos", 300], ["trescientas", 300],
     ["cuatrocientos", 400], ["cuatrocientas", 400], ["quinientos", 500], ["quinientas", 500], ["seiscientos", 600],
     ["seiscientas", 600], ["setecientos", 700], ["setecientas", 700], ["ochocientos", 800], ["ochocientas", 800],
     ["novecientos", 900], ["novecientas", 900],
   ]),
-  ...words("thousand", [["thousand", 1000], ["mille", 1000], ["mil", 1000]]),
-  ...words("repeat", [["double", 2], ["triple", 3]]),
-]);
+  ...each("thousand", [["mil", 1000]]),
+];
+
+// Maps, not object literals, so that a word such as "constructor" is never read as a number.
+const NUMBER_WORDS: Readonly<Record<NumberLanguage, ReadonlyMap<string, NumberWord>>> = {
+  en: new Map(ENGLISH.map(([kind, w, value]) => [w, { kind, value }])),
+  fr: new Map(FRENCH.map(([kind, w, value]) => [w, { kind, value }])),
+  es: new Map(SPANISH.map(([kind, w, value]) => [w, { kind, value }])),
+};
+
+/** The word inside a number in each language: "four hundred and two", "vingt et un", "cuarenta y uno". */
+export const NUMBER_CONNECTORS: Readonly<Record<NumberLanguage, string>> = { en: "and", fr: "et", es: "y" };
+
+/** The number words and connectors of some languages. Unknown names are ignored. */
+interface Vocabulary {
+  number(word: string): NumberWord | undefined;
+  connects(word: string): boolean;
+}
+
+function vocabulary(languages: readonly NumberLanguage[]): Vocabulary {
+  const known = NUMBER_LANGUAGES.filter((l) => languages.includes(l));
+  const connectors = new Set(known.map((l) => NUMBER_CONNECTORS[l]));
+  return {
+    number: (word) => {
+      for (const l of known) {
+        const w = NUMBER_WORDS[l].get(word);
+        if (w !== undefined) return w;
+      }
+      return undefined;
+    },
+    connects: (word) => connectors.has(word),
+  };
+}
 
 interface Lexeme {
   raw: string;
@@ -105,6 +151,10 @@ interface Lexeme {
   digits: string | null;
   /** Lower case, for the word table. */
   word: string;
+  /** The number word it is in the languages read, if any. */
+  number: NumberWord | undefined;
+  /** Whether it is a connector ("and", "et", "y") in the languages read. */
+  connects: boolean;
   start: number;
   end: number;
   /** Only separators lie between this lexeme and the one before it. */
@@ -161,14 +211,15 @@ function asciiDigits(raw: string): string {
   return out;
 }
 
-function lexemes(text: string): Lexeme[] {
+function lexemes(text: string, vocab: Vocabulary): Lexeme[] {
   const out: Lexeme[] = [];
   let lastEnd = 0;
   for (const match of text.matchAll(LEXEME)) {
     const raw = match[0];
     const start = match.index;
     const joined = out.length > 0 && SEPARATOR.test(text.slice(lastEnd, start));
-    out.push({ raw, digits: NUMERAL.test(raw) ? asciiDigits(raw) : null, word: raw.normalize("NFC").toLowerCase(), start, end: start + raw.length, joined });
+    const word = raw.normalize("NFC").toLowerCase();
+    out.push({ raw, digits: NUMERAL.test(raw) ? asciiDigits(raw) : null, word, number: vocab.number(word), connects: vocab.connects(word), start, end: start + raw.length, joined });
     lastEnd = start + raw.length;
   }
   return out;
@@ -180,13 +231,13 @@ function lexemes(text: string): Lexeme[] {
  */
 function numberWord(lx: readonly Lexeme[], i: number, first: boolean): NumberWord | undefined {
   const l = lx[i];
-  return l !== undefined && (first || l.joined) ? NUMBER_WORDS.get(l.word) : undefined;
+  return l !== undefined && (first || l.joined) ? l.number : undefined;
 }
 
 /** Whether `word` ("and", "et", "y") is at `i`, joined to the word before it. */
 function connector(lx: readonly Lexeme[], i: number, word: string): boolean {
   const l = lx[i];
-  return l !== undefined && l.joined && l.word === word;
+  return l !== undefined && l.joined && l.connects && l.word === word;
 }
 
 /** 1 to 9, continuing a number. */
@@ -270,7 +321,7 @@ const spokenNumber = scaled("thousand", scaled("hundred", below100));
 function part(lx: readonly Lexeme[], i: number): { digits: string; next: number } | undefined {
   const l = lx[i]!;
   if (l.digits !== null) return { digits: l.digits, next: i + 1 };
-  const w = NUMBER_WORDS.get(l.word);
+  const w = l.number;
   if (w?.kind === "repeat") {
     const times = w.value;
     const after = lx[i + 1];
@@ -286,10 +337,11 @@ function part(lx: readonly Lexeme[], i: number): { digits: string; next: number 
  * Runs of digits in a text: numerals and spoken numbers in English, French or Spanish, with only
  * separators between them (SEPARATOR_CLASS). Spoken numbers are read as people say them: "forty two" is
  * 42, "quatre-vingt-dix" is 90, "double four" is 44, "forty two hundred" is 4200, and "four two"
- * is 4 then 2. Any other word ends a run.
+ * is 4 then 2. Any other word ends a run. Only the given languages' words are read (every language
+ * by default); numerals are read in any.
  */
-export function digitRuns(text: string): DigitPart[][] {
-  const lx = lexemes(text);
+export function digitRuns(text: string, languages: readonly NumberLanguage[] = NUMBER_LANGUAGES): DigitPart[][] {
+  const lx = lexemes(text, vocabulary(languages));
   const runs: DigitPart[][] = [];
   let run: DigitPart[] = [];
   const close = () => {
@@ -313,9 +365,9 @@ export function digitRuns(text: string): DigitPart[][] {
 }
 
 /** Card numbers in a text, leftmost first, longest match at each position, never overlapping. */
-export function findCardNumbers(text: string): RedactionFinding[] {
+export function findCardNumbers(text: string, languages: readonly NumberLanguage[] = NUMBER_LANGUAGES): RedactionFinding[] {
   const findings: RedactionFinding[] = [];
-  for (const run of digitRuns(text)) {
+  for (const run of digitRuns(text, languages)) {
     let i = 0;
     while (i < run.length) {
       let best = -1;
@@ -348,8 +400,8 @@ export function applyFindings(text: string, findings: readonly RedactionFinding[
 }
 
 export const cardNumberRedactor: Redactor = {
-  redact(text) {
-    const findings = findCardNumbers(text);
+  redact(text, context) {
+    const findings = findCardNumbers(text, context?.locale === undefined ? NUMBER_LANGUAGES : [context.locale]);
     return { text: applyFindings(text, findings), findings };
   },
 };
@@ -360,11 +412,11 @@ export const cardNumberRedactor: Redactor = {
  */
 export function composeRedactors(...redactors: Redactor[]): Redactor {
   return {
-    redact(text) {
+    redact(text, context) {
       let current = text;
       const findings: RedactionFinding[] = [];
       for (const r of redactors) {
-        const result = r.redact(current);
+        const result = r.redact(current, context);
         current = result.text;
         findings.push(...result.findings);
       }

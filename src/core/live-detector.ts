@@ -14,7 +14,7 @@
 // long the run grows.
 
 import { EngineError } from "./errors.ts";
-import { digitRuns, LEXEME, SEPARATOR_CLASS } from "./redaction.ts";
+import { digitRuns, LEXEME, NUMBER_LANGUAGES, SEPARATOR_CLASS, type NumberLanguage } from "./redaction.ts";
 import { isIntegerIn } from "./shape.ts";
 
 export const LIVE_DETECTOR_MIN_DIGITS = 8;
@@ -22,6 +22,8 @@ export const LIVE_DETECTOR_MIN_DIGITS = 8;
 export interface LiveDetectorOptions {
   /** Digits in one run that trigger an interrupt: an integer from 4 to 19, 8 by default. */
   minDigits?: number;
+  /** The call's language: only its number words are read. Absent: every language's. */
+  locale?: NumberLanguage;
 }
 
 export interface LiveDetection {
@@ -32,7 +34,8 @@ export interface LiveDetection {
 }
 
 // After the last run, these may still continue it: separators, then at most one word that only
-// makes sense before more digits ("and", "et" or "y" inside a number, "double", "triple").
+// makes sense before more digits ("and", "et" or "y" inside a number, "double", "triple"). Kept
+// for every language: holding one more word than the call's language needs reads nothing new.
 const PENDING = new RegExp(`^${SEPARATOR_CLASS}*(?:(?:and|et|y|double|triple)${SEPARATOR_CLASS}*)?$`, "iu");
 const PENDING_WORD = new RegExp(`(?<!\\p{L})(?:double|triple)${SEPARATOR_CLASS}*$`, "iu");
 // Separators at the end of what is kept: dropped, since the next chunk is joined with a space,
@@ -49,6 +52,7 @@ type Part = { digits: string };
 /** One per call (or per caller channel). Not shared between calls. */
 export class LiveCardNumberDetector {
   readonly #minDigits: number;
+  readonly #languages: readonly NumberLanguage[];
   /** Digits of the open run's settled parts, whose text is no longer kept. */
   #settled = 0;
   /** The open run from its first unsettled part, or a trailing "double" or "triple". */
@@ -60,6 +64,10 @@ export class LiveCardNumberDetector {
       throw new EngineError("invalid_input", "minDigits must be an integer from 4 to 19");
     }
     this.#minDigits = minDigits;
+    if (options.locale !== undefined && !NUMBER_LANGUAGES.includes(options.locale)) {
+      throw new EngineError("invalid_input", `locale must be one of ${NUMBER_LANGUAGES.join(", ")}`);
+    }
+    this.#languages = options.locale === undefined ? NUMBER_LANGUAGES : [options.locale];
   }
 
   /**
@@ -69,7 +77,7 @@ export class LiveCardNumberDetector {
   push(chunk: string): LiveDetection {
     const text = this.#tail === "" ? chunk : `${this.#tail} ${chunk}`;
     const fresh = text.length - chunk.length;
-    const runs = digitRuns(text);
+    const runs = digitRuns(text, this.#languages);
     // When digits were settled, `#tail` starts with a part of their run, so the first run continues it.
     const carried = this.#settled;
     const total = (run: readonly Part[]) => digitCount(run) + (run === runs[0] ? carried : 0);
