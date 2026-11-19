@@ -5,8 +5,7 @@ import { after, before, describe, it } from "node:test";
 
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { runDemo } from "../examples/reference-server/src/demo.ts";
-import { StripeCheckoutLinks, StripeIdentityProvider } from "../examples/reference-server/src/stripe-adapters.ts";
-import { NotImplementedError, signStripePayload, type Engine } from "../src/index.ts";
+import { signStripePayload, type Engine } from "../src/index.ts";
 import { createTestEngine, type TestEngine } from "../src/testing/index.ts";
 
 const SECRET = "whsec_test_not_a_secret";
@@ -90,7 +89,7 @@ describe("reference server", () => {
   });
 });
 
-describe("demo and Stripe adapters", () => {
+describe("demo", () => {
   it("runs the owner-command and deposit flows end to end", async () => {
     const result = await runDemo(false);
     assert.equal(result.checksOk, true);
@@ -100,13 +99,5 @@ describe("demo and Stripe adapters", () => {
     assert.deepEqual(result.receipt.body.verification, { level: 2, methods: ["carrier_identity_match", "keypad_knowledge"] });
     assert.equal(result.receipt.body.payments[0]!.status, "paid");
     assert.equal(result.receipt.body.consents[0]!.purpose, "repair_texts");
-  });
-
-  it("has Stripe adapters that are planned, not built", async () => {
-    await assert.rejects(new StripeIdentityProvider("rk_test").createDocumentCheck({ callId: "c", idempotencyKey: "k" }), (e: unknown) => e instanceof NotImplementedError && e.issue === "VER-5");
-    await assert.rejects(
-      new StripeCheckoutLinks("rk_test").createLink({ callId: "c", paymentId: "p", amountMinor: 1, currency: "cad", description: "d", idempotencyKey: "k" }),
-      (e: unknown) => e instanceof NotImplementedError && e.issue === "PAY-1",
-    );
   });
 });

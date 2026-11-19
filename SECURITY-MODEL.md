@@ -75,7 +75,12 @@ allow-list, before texted codes ship (VER-2).
 Replayed webhooks, reused links, replayed tones. **Controls:** Stripe signatures are checked with a
 300-second window and constant-time comparison (tested); the reference server applies each event
 id once; the engine applies each identity session and each payment settlement once (tested).
-Identity links are single-use by the provider. Left to the host: whether keypad tones arrive as
+Identity links are single-use by the provider. The reference server's Stripe Identity adapter
+sends the engine's idempotency key with every create, so a retried `startPhotoId` gets the same
+session and link, never a second one (tested against a local fake). It never logs the link, and its
+errors carry a status and Stripe's error type and code only, never the link, the key or Stripe's
+message (tested). It takes a restricted key only, never a secret key, and `npm run serve` takes a
+test-mode one only (tested); the key comes from the environment. Left to the host: whether keypad tones arrive as
 out-of-band events or as in-band audio on each carrier bridge, since in-band tones can be replayed
 acoustically and can reach speech-to-text.
 

@@ -68,7 +68,7 @@ How the page is kept small and safe:
 | `src/main.ts` | `npm run serve`: reads the environment, starts the server |
 | `src/ui.ts` | `npm run ui`: the server with the demo UI |
 | `public/` | the page: `index.html`, `style.css`, `app.js`, and `receipt-check.js` (no DOM, tested in Node) |
-| `src/stripe-adapters.ts` | Stripe Identity and Checkout adapters, planned (VER-5, PAY-1) |
+| `src/stripe-adapters.ts` | the Stripe Identity adapter (VER-5); the Checkout adapter, planned (PAY-1) |
 
 ## Trying it with your own Stripe test account
 
@@ -83,8 +83,11 @@ How the page is kept small and safe:
 
 3. Trigger a test event (`stripe trigger checkout.session.completed`). The server checks the
    signature and answers `{"received": true, "applied": false}`: the signature is good, and the
-   session is unknown to this engine because the Stripe adapters are not built yet. A wrong secret
-   answers `400` with the reason.
+   session is unknown to this engine because the Checkout adapter is not built yet (PAY-1). A wrong
+   secret answers `400` with the reason.
+
+For a photo ID check that goes to Stripe Identity and back, applied to a call, follow "Trying
+Stripe Identity with your own test account" in the repository's README.md.
 
 Use test-mode keys only. Never commit a secret; the server reads them from the environment.
 

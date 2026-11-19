@@ -1,0 +1,40 @@
+{
+  "id": "evt_1QfixtureVerified00000001",
+  "object": "event",
+  "api_version": "2025-03-31.basil",
+  "created": 1767225900,
+  "data": {
+    "object": {
+      "id": "vs_1QfixtureCreated0000000001",
+      "object": "identity.verification_session",
+      "client_reference_id": null,
+      "client_secret": null,
+      "created": 1767225600,
+      "last_error": null,
+      "last_verification_report": "vr_1QfixtureReport000000001",
+      "livemode": false,
+      "metadata": {
+        "call_id": "call_1"
+      },
+      "options": {
+        "document": {
+          "require_matching_selfie": true
+        }
+      },
+      "provided_details": null,
+      "redaction": null,
+      "related_customer": null,
+      "status": "verified",
+      "type": "document",
+      "url": null,
+      "verified_outputs": null
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "identity.verification_session.verified"
+}

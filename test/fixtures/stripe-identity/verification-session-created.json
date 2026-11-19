@@ -1,0 +1,25 @@
+{
+  "id": "vs_1QfixtureCreated0000000001",
+  "object": "identity.verification_session",
+  "client_reference_id": null,
+  "client_secret": "vs_1QfixtureCreated0000000001_secret_fixture_not_a_secret",
+  "created": 1767225600,
+  "last_error": null,
+  "last_verification_report": null,
+  "livemode": false,
+  "metadata": {
+    "call_id": "call_1"
+  },
+  "options": {
+    "document": {
+      "require_matching_selfie": true
+    }
+  },
+  "provided_details": null,
+  "redaction": null,
+  "related_customer": null,
+  "status": "requires_input",
+  "type": "document",
+  "url": "https://verify.stripe.com/start/test_fixture_single_use_link_not_a_secret",
+  "verified_outputs": null
+}
