@@ -38,6 +38,12 @@ name: Release
 # outside this file: the package's trusted publisher is this repository, the workflow file
 # `release.yml` and the environment `npm-publish`. The environment, with required reviewers
 # and a tag rule of `v*`, is set up in the repository's settings.
+#
+# First release: npm sets a trusted publisher only on a package that already exists, so this
+# workflow cannot publish the first version (with no token and no trusted publisher it has no
+# credential, and the publish step fails closed). The package's first publication, who makes it
+# and how, is part of the release decision (ADR-12); once it exists, the trusted publisher above
+# is set up, and every later version is published by a manual run of this workflow.
 on:
   push:
     tags: ['v[0-9]*.[0-9]*.[0-9]*']
