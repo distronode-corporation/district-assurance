@@ -35,6 +35,19 @@ describe("#77 hostile: the adapter's own options", () => {
     );
   });
 
+  it("I6 options are read once when the adapter is built: changing them later, or a getter, never moves the key off https", async () => {
+    const { fetch, asked } = answering({ id: "vs_1", url: "https://verify.stripe.com/start/test_abc" });
+    const options: { apiBase?: string; fetch?: typeof globalThis.fetch } = { apiBase: "https://api.stripe.com", fetch };
+    const provider = new StripeIdentityProvider(KEY, options);
+    options.apiBase = "http://stripe-proxy.example";
+    options.fetch = (async () => assert.fail("a fetch swapped in after the adapter was built")) as typeof globalThis.fetch;
+    await provider.createDocumentCheck({ callId: "c", idempotencyKey: "k" });
+    let reads = 0;
+    const shifty = { fetch, get apiBase() { return reads++ === 0 ? "https://api.stripe.com" : "http://stripe-proxy.example"; } };
+    await new StripeIdentityProvider(KEY, shifty).createDocumentCheck({ callId: "c", idempotencyKey: "k" });
+    assert.deepEqual(asked, ["https://api.stripe.com/v1/identity/verification_sessions", "https://api.stripe.com/v1/identity/verification_sessions"]);
+  });
+
   it("I3 a timeout that is not a whole number of milliseconds from 1 to 60000 is refused when the adapter is built", () => {
     for (const timeoutMs of [Number.NaN, -1, 0, 1.5, Infinity, 60_001, "1000"]) {
       assert.throws(() => new StripeIdentityProvider(KEY, { timeoutMs: timeoutMs as never }), /timeoutMs/, String(timeoutMs));

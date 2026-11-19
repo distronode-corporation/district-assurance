@@ -143,13 +143,20 @@ export class StripeIdentityProvider implements IdentityProvider {
   /** `apiKey` is a restricted key with write access to Identity VerificationSessions and nothing else. */
   constructor(apiKey: string, options: StripeAdapterOptions = {}) {
     if (!RESTRICTED_KEY.test(apiKey)) throw new Error("StripeIdentityProvider needs a restricted key (rk_test_... or rk_live_...)");
-    if (options.apiBase !== undefined) checkApiBase(options.apiBase);
+    // Each option read once, into a copy of our own: a caller changing its object later, or a
+    // getter answering differently, can never move the key to an apiBase that was not checked.
+    const { apiBase, fetch: doFetch, timeoutMs } = options;
+    if (apiBase !== undefined) checkApiBase(apiBase);
     // AbortSignal.timeout throws on anything else, at every request instead of here.
-    if (options.timeoutMs !== undefined && !(Number.isInteger(options.timeoutMs) && options.timeoutMs >= 1 && options.timeoutMs <= 60_000)) {
+    if (timeoutMs !== undefined && !(Number.isInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60_000)) {
       throw new Error("StripeIdentityProvider timeoutMs must be a whole number of milliseconds from 1 to 60000");
     }
     this.#apiKey = apiKey;
-    this.#options = options;
+    this.#options = Object.freeze({
+      ...(apiBase === undefined ? {} : { apiBase }),
+      ...(doFetch === undefined ? {} : { fetch: doFetch }),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    });
   }
 
   /**
