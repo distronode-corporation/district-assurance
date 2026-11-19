@@ -137,7 +137,7 @@ async function allowCallback(rt: EngineRuntime, reserved: CallbackState, resume:
   const lockout = lockoutOf(rt.settings<BadgeSettings>(BADGE).lockout);
   const at = reserved.at!;
   const now = new Date(at);
-  const placed: AttemptCounterKey = { workspaceId: rt.workspaceId, factor: CALLBACKS_PLACED, scope: "subject", key: reserved.subjectKey! };
+  const placed = placedKey(rt, reserved.subjectKey!);
   const since = new Date(now.getTime() - DAY_MS + 1).toISOString();
   let counted = resume ? recordedAt(await counters.get(placed, since), at) : null;
   if (counted === null) {
@@ -151,6 +151,29 @@ async function allowCallback(rt: EngineRuntime, reserved: CallbackState, resume:
   const recorded = await recordFailures(counters, lockout, reserved.keys, now, resume);
   if (recorded.raced !== null) return { placed: false, lock: recorded.raced, hard: null };
   return { placed: true, lock: null, hard: recorded.hard };
+}
+
+/** The counter a subject's callbacks are counted in toward the daily limit. */
+function placedKey(rt: EngineRuntime, subjectKey: string): AttemptCounterKey {
+  return { workspaceId: rt.workspaceId, factor: CALLBACKS_PLACED, scope: "subject", key: subjectKey };
+}
+
+/**
+ * When a dial counts toward the daily limit: when it was last counted, while that is within the
+ * day. A placed callback whose dial is resumed later is counted again now, or refused (null) when
+ * the subject is at the limit, so a resumed dial never rings past it.
+ */
+async function countDial(rt: EngineRuntime, callback: CallbackState): Promise<string | null> {
+  const counted = callback.countedAt ?? callback.at!;
+  const now = rt.clock.now();
+  if (now.getTime() - Date.parse(counted) < DAY_MS) return counted;
+  const counters = rt.adapter("counters");
+  const placed = placedKey(rt, callback.subjectKey!);
+  const since = new Date(now.getTime() - DAY_MS + 1).toISOString();
+  if ((await counters.get(placed, since)).length >= MAX_CALLBACKS_PER_DAY) return null;
+  const at = now.toISOString();
+  // Another request got in first: the list this one returned is over the limit.
+  return (await counters.recordFailure(placed, at, since)).length > MAX_CALLBACKS_PER_DAY ? null : at;
 }
 
 /**
@@ -182,8 +205,11 @@ export function beginCallbackCall(draft: CallDraft, plan: CallbackPlan, requeste
  * Dials the number on file for a callback call, keeps the dialer's reference, then binds it to the
  * call. The number is read from the store each time it dials, a retry included, never from the copy
  * taken when verification began: a number the business changed since (after a SIM swap, say) is
- * the one rung, and with no number on file now the callback fails without ringing. A retry dials
- * again with the same idempotency key, so the line rings once.
+ * the one rung, and with no number on file now the callback fails without ringing. The dial is
+ * claimed in a write that checks the callback is still dialing and keeps the number, so a callback
+ * voided while the store was read never rings, and the carrier check asks about the line rung. A
+ * retry to the same number dials again with the same idempotency key, so the line rings once; a
+ * number changed between tries gets a key of its own, and only the dial to the number kept is bound.
  */
 export async function dialCallback(rt: EngineRuntime, callId: string): Promise<void> {
   const record = await rt.read(callId);
@@ -192,24 +218,35 @@ export async function dialCallback(rt: EngineRuntime, callId: string): Promise<v
   if (s.callback.status === "dialing") {
     const onFile = await rt.adapter("records").getSubject(rt.workspaceId, s.subjectKey!);
     const to = onFile?.phoneOnFile ?? "";
-    if (!isCallingNumber(to)) {
-      await rt.update(callId, (draft) => {
-        const callback = draft.slice<BadgeSlice>(BADGE).callback;
-        if (callback.status !== "dialing") return;
+    const countedAt = isCallingNumber(to) ? await countDial(rt, s.callback) : null;
+    const claimed = await rt.update(callId, (draft) => {
+      const callback = draft.slice<BadgeSlice>(BADGE).callback;
+      // Voided while the store was read (untrusted content): never dialed, nothing recorded.
+      if (callback.status !== "dialing") return null;
+      // No number on file now, or a resumed dial past the daily limit: refused, without ringing.
+      if (countedAt === null) {
         callback.status = "failed";
         draft.emit("verification.callback_finished", "code", { outcome: "refused" });
-      });
-      return;
-    }
-    ({ ref } = await rt.adapter("dialer").dial({ callId, to, locale: record.locale, idempotencyKey: rt.idempotencyKey(callId, CALLBACK) }));
+        return null;
+      }
+      if (callback.to !== undefined && callback.to !== to) callback.redials = (callback.redials ?? 0) + 1;
+      callback.to = to;
+      callback.countedAt = countedAt;
+      return callback.redials ?? 0;
+    });
+    if (claimed === null) return;
+    // The first number keeps the key every dial had before numbers were kept.
+    const idempotencyKey = claimed === 0 ? rt.idempotencyKey(callId, CALLBACK) : rt.idempotencyKey(callId, CALLBACK, `redial:${claimed}`);
+    ({ ref } = await rt.adapter("dialer").dial({ callId, to, locale: record.locale, idempotencyKey }));
     const kept = await rt.update(callId, (draft) => {
       const callback = draft.slice<BadgeSlice>(BADGE).callback;
-      if (callback.status !== "dialing") return false;
+      // Voided while it was dialed, or the number changed and another try dials the new one.
+      if (callback.status !== "dialing" || (callback.redials ?? 0) !== claimed) return false;
       callback.status = "dialed";
       callback.ref = ref;
       return true;
     });
-    // Voided while it was dialed (untrusted content): its outcome would never count.
+    // Its outcome would never count.
     if (!kept) return;
   }
   if (ref !== null) await rt.bindRef(`callback:${ref}`, callId);

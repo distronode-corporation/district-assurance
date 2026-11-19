@@ -158,6 +158,12 @@ export interface CallbackState {
   at: string | null;
   /** On a passed callback call: its failure is still to be forgotten. A replayed outcome retries that. */
   forgetPending: boolean;
+  /** On the callback call: the number the dial goes to, kept in the write that claims the dial, and the one the carrier check asks about. */
+  to?: string;
+  /** On the callback call: how often the number on file changed between tries of the dial. Each number gets its own idempotency key. */
+  redials?: number;
+  /** On the callback call: ISO 8601, when a dial resumed a day or more after `at` was counted toward the daily limit again. */
+  countedAt?: string;
 }
 
 export interface KeypadResult {
@@ -749,8 +755,11 @@ export async function checkCarrier(rt: EngineRuntime, callId: string): Promise<{
   if (!canApply(before.state, { type: "factor_recorded", factor: { kind: "carrier_identity_match", passed: false, at: rt.now() } })) {
     throw new EngineError("invalid_transition", `the carrier is checked while verifying, not while ${before.state.phase}`);
   }
-  const epoch = (before.modules[BADGE] as unknown as BadgeSlice).epoch;
-  const report = await rt.adapter("carrier").check({ phoneNumber: subject.phoneOnFile });
+  const { epoch, callback } = before.modules[BADGE] as unknown as BadgeSlice;
+  // On a callback call, the line the dial rang, which the business may have changed since the
+  // subject was copied: never another line's evidence beside possession of this one.
+  if (callback.status === "dialing") throw new EngineError("precondition_failed", "the carrier is checked on a callback call once it is dialed");
+  const report = await rt.adapter("carrier").check({ phoneNumber: callback.to ?? subject.phoneOnFile });
   const trusted = textCodeTrusted(rt.policy, report);
   await rt.update(callId, (draft) => {
     allowFactor(rt, draft.record, "carrier_identity_match");
