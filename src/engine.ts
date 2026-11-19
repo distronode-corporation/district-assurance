@@ -10,7 +10,7 @@
 // throws NotImplementedError. SPEC.md describes the flow.
 import type { JsonWebKey } from "node:crypto";
 
-import type { IntakeRecord, SessionStore } from "./core/adapters.ts";
+import type { AuditEntry, IntakeRecord, SessionStore } from "./core/adapters.ts";
 import type { JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
@@ -29,6 +29,7 @@ import type { NormaliseResult } from "./file/intake.ts";
 import { BUILT_IN_MODULES, builtInModules, defaultConfig } from "./modules.ts";
 import * as paylink from "./pay/paylink.ts";
 import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
+import { anchorPayload, isAnchorProof } from "./prove/anchor.ts";
 import type { ConsentRecord } from "./prove/consent.ts";
 import { detailCarriesCardNumber } from "./prove/ledger.ts";
 import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
@@ -410,6 +411,29 @@ export class Engine {
   async receipt(callId: string): Promise<SignedReceipt | null> {
     const slice = (await this.#read(callId)).modules[trace.TRACE] as unknown as trace.TraceSlice;
     return slice.receipt === null ? null : structuredClone(slice.receipt);
+  }
+
+  /**
+   * Anchors the ledger's current head (PRV-9): the `anchor` adapter gets a proof for it from a third
+   * party (a time-stamp authority, or Rekor plus one), and a `ledger.anchored` entry records the
+   * proof and the seq it covers. The host schedules this, daily for example; the engine never calls
+   * out on its own. Two engines anchoring the same head append one entry.
+   */
+  async anchorLedger(): Promise<AuditEntry> {
+    const anchor = this.#adapters.anchor;
+    if (anchor === undefined) throw new EngineError("precondition_failed", "anchoring needs the anchor adapter");
+    const head = await this.#adapters.ledger.head();
+    if (head.seq === 0) throw new EngineError("precondition_failed", "the ledger is empty; there is no head to anchor");
+    const proof: unknown = await anchor.anchor({ seq: head.seq, hash: head.hash, payload: anchorPayload(head) });
+    if (!isAnchorProof(proof)) throw new EngineError("invalid_input", "the anchor adapter answered with a malformed proof");
+    return this.#adapters.ledger.append({
+      eventId: JSON.stringify(["ledger.anchored", head.seq]),
+      callId: null,
+      actor: "system",
+      event: "ledger.anchored",
+      at: this.#now(),
+      detail: { seq: head.seq, proof },
+    });
   }
 
   /** The key set for verifying this engine's receipts (empty without a signer). */

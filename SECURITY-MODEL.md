@@ -137,6 +137,19 @@ A step's ledger entries are saved with the step itself (an outbox in the call re
 appended by event id, once each; a ledger that fails leaves them pending, and the next write or
 `flushLedger` appends them, so no saved step is ever missing from the ledger for good (tested).
 
+Whoever holds the ledger could rebuild the whole chain. **Control (PRV-9):** `anchorLedger` fixes
+the head in time with a third party, and `verifyAnchor` checks it offline against the host's copy
+of the authority's certificate chain and Rekor's key: an entry an anchor covers cannot change
+afterwards without the change showing, and a rebuilt chain fails as `imprint` (tested; both
+adapters are tested on recorded answers). It does not prove the chain was honest before it was
+anchored, nor anything after the last anchor. With a time-stamp authority alone, the authority
+sees only a hash and only the proofs the operator keeps exist, so an operator could drop an
+inconvenient one. With Rekor, everyone can see every head the operator anchored, so a missing
+anchor shows too. A public log shows each anchored head (a hash), the key that signed it and the
+time, and nothing else: no entry, no call and no workspace. The anchor payload is domain-separated,
+so a head signed for the log can never verify as a receipt, even under the receipt key (tested).
+The time always comes from the authority, since Rekor v2 keeps none.
+
 ### Breach of stored data
 
 **Controls:** reference values are HMACs under a per-workspace key, because a plain hash of a date
@@ -149,6 +162,8 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
   speech-to-text and the model while `sensitive` is set.
 - Keeping the knowledge key and the receipt signing key in a key store.
+- Scheduling `anchorLedger` (daily, for example), keeping the authority's certificate chain and
+  Rekor's key from a source it trusts, and choosing the authority and the log.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
   guarantees (`sessionStoreContract` today; PRV-5 for the others).
 - Choosing the subject when it starts verification with a subject key (for example the owner of

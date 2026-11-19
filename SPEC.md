@@ -280,6 +280,7 @@ answer on file, a phone number, a link or card data.
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
+| `ledger.anchored` | `seq` (the head it covers), `proof` (section 10); no call: `callId` is null |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
 A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
@@ -298,6 +299,38 @@ Entry: `{seq, prevHash, eventId?, callId, actor, event, at, detail, hash}`. `seq
 `verifyChain(entries, from?)` reports the first entry whose `seq`, `prevHash` or `hash` is wrong.
 `chainEntry` refuses a detail in which any string (other than a 64-character hex digest) contains
 a card number.
+
+**Anchors (PRV-9).** A chain shows that no entry changed after later ones were written, but whoever
+holds the ledger could rebuild all of it. `engine.anchorLedger()` takes the ledger's head
+`{seq, hash}`, hands its **anchor payload** to the `anchor` adapter, and appends a
+`ledger.anchored` entry `{seq, proof}` (event id `["ledger.anchored", seq]`, so engines anchoring
+the same head append one entry). It refuses without the adapter or on an empty ledger
+(`precondition_failed`), and refuses a malformed proof (`invalid_input`). The host schedules it
+(daily, for example); the engine never calls out on its own.
+
+- Anchor payload: the UTF-8 bytes of `"district-assurance/ledger-anchor/v1\n" +
+  canonicalJson({seq, hash})`. It is not JSON, so a signature over it never verifies as a receipt.
+- `proof` is `{kind: "rfc3161", token}` or `{kind: "rekor", token, entry}`, every value base64.
+  `token` is an RFC 3161 TimeStampToken (DER) whose imprint is SHA-256 of the payload. `entry` is
+  the Rekor v2 TransparencyLogEntry JSON for a `hashedrekord` v0.0.2 of the payload, signed by the
+  host's P-256 key. Rekor v2 gives an inclusion proof and a signed checkpoint but no time, so the
+  time is always the token's.
+- `verifyAnchor(entry, entries, {tsa, rekor?})` checks offline and never throws. `entries` run from
+  seq 1 to at least the covered seq; `tsa` is the authority's certificate chain as the host has it,
+  signing certificate first (certificates in the token are ignored); `rekor` is the log's public
+  key (Ed25519 or ECDSA) and origin. In order: the entry's shape (`malformed`); the chain up to
+  `seq` (`chain`); the token: one signer, signed content type TSTInfo, signed message digest of the
+  TSTInfo, signature by the first certificate with RSA or ECDSA over SHA-256, 384 or 512 (`token`);
+  the chain: the first certificate has the time-stamping extended key usage, each is issued and
+  signed by the next, all are valid at the token's time, the last is trusted as given
+  (`certificate`); the imprint against the head recomputed from `entries` (`imprint`: the chain was
+  changed or rebuilt after the anchor); for Rekor, the body's digest and signature, the RFC 9162
+  inclusion proof, and a checkpoint for that tree signed by the log under its origin (`log`). It
+  returns `{seq, hash, time, logIndex}`.
+- The DER reader (`readDer`) takes one-byte tags and definite lengths up to four bytes.
+- The reference server has `TimestampAuthorityAnchor` (RFC 3161 over HTTP) and `RekorAnchor`
+  (`POST /api/v2/log/entries`, plus the authority for the time); each checks what it got before
+  the engine writes it.
 
 ## 11. Canonical JSON
 

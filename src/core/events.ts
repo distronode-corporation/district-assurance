@@ -28,6 +28,7 @@ export const ENGINE_EVENTS = [
   "call.ended",
   "receipt.issued",
   "module.event",
+  "ledger.anchored",
 ] as const;
 
 export type EngineEventName = (typeof ENGINE_EVENTS)[number];

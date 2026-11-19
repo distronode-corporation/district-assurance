@@ -25,6 +25,7 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Public timestamp anchors for the ledger (PRV-9): `anchorLedger()` appends a `ledger.anchored` entry with a proof from an `Anchor` adapter, `verifyAnchor` checks it offline, and the reference server has an RFC 3161 time-stamp authority adapter and a Rekor v2 one; no new dependency.
 
 ### Changed
 

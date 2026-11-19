@@ -1,0 +1,237 @@
+// Builders for the anchor tests (PRV-9): a DER writer, X.509 certificates, RFC 3161 tokens and
+// responses, and a Rekor v2 style log (an RFC 9162 Merkle tree, inclusion proofs and a signed
+// checkpoint). `record.ts` uses them to write the recorded fixtures; the tests use them to build
+// broken tokens and entries. Test code only: every key here is a throwaway, not a secret.
+import { createHash, sign, type KeyObject } from "node:crypto";
+
+import { MemoryAuditLedger } from "../../../src/prove/ledger.ts";
+import type { AuditEntry } from "../../../src/core/adapters.ts";
+
+// ---- DER ----------------------------------------------------------------------------------------
+
+export function der(tag: number, ...parts: Uint8Array[]): Buffer {
+  const body = Buffer.concat(parts);
+  const size: number[] = [];
+  for (let n = body.length; n > 0; n = Math.floor(n / 256)) size.unshift(n % 256);
+  const length = body.length < 0x80 ? [body.length] : [0x80 | size.length, ...size];
+  return Buffer.concat([Buffer.from([tag, ...length]), body]);
+}
+
+export const seq = (...parts: Uint8Array[]): Buffer => der(0x30, ...parts);
+export const set = (...parts: Uint8Array[]): Buffer => der(0x31, ...parts);
+export const oid = (hex: string): Buffer => der(0x06, Buffer.from(hex, "hex"));
+export const octets = (bytes: Uint8Array): Buffer => der(0x04, bytes);
+export const int = (n: number): Buffer => der(0x02, Buffer.from([n]));
+export const text = (tag: number, value: string): Buffer => der(tag, Buffer.from(value, "latin1"));
+export const explicit0 = (...parts: Uint8Array[]): Buffer => der(0xa0, ...parts);
+
+export const OIDS = {
+  sha256: "608648016503040201",
+  sha384: "608648016503040202",
+  md5: "2a864886f70d0205",
+  rsaEncryption: "2a864886f70d010101",
+  sha256WithRsa: "2a864886f70d01010b",
+  ecdsaSha256: "2a8648ce3d040302",
+  ed25519: "2b6570",
+  signedData: "2a864886f70d010702",
+  data: "2a864886f70d010701",
+  tstInfo: "2a864886f70d0109100104",
+  contentType: "2a864886f70d010903",
+  messageDigest: "2a864886f70d010904",
+  signingCertificateV2: "2a864886f70d010910022f",
+  commonName: "550403",
+  extendedKeyUsage: "551d25",
+  basicConstraints: "551d13",
+  timeStamping: "2b06010505070308",
+  codeSigning: "2b06010505070303",
+  policy: "2a0304",
+};
+
+export const algorithm = (hex: string, params = true): Buffer => (params ? seq(oid(hex), der(0x05)) : seq(oid(hex)));
+
+export const name = (cn: string): Buffer => seq(set(seq(oid(OIDS.commonName), text(0x0c, cn))));
+
+/** The DER signature algorithm and hash for a signing key. */
+function signatureAlgorithm(key: KeyObject): { id: Buffer; hash: string } {
+  return key.asymmetricKeyType === "rsa" ? { id: algorithm(OIDS.sha256WithRsa), hash: "sha256" } : { id: algorithm(OIDS.ecdsaSha256, false), hash: "sha256" };
+}
+
+export interface CertificateSpec {
+  subject: string;
+  issuer: string;
+  publicKey: KeyObject;
+  /** The issuer's private key. */
+  signingKey: KeyObject;
+  serial: number;
+  /** UTCTime, YYMMDDHHMMSSZ. */
+  notBefore: string;
+  notAfter: string;
+  /** An extended key usage; none when absent. */
+  usage?: string;
+  ca?: boolean;
+}
+
+export function certificate(spec: CertificateSpec): Buffer {
+  const alg = signatureAlgorithm(spec.signingKey);
+  const extensions: Buffer[] = [];
+  if (spec.ca === true) extensions.push(seq(oid(OIDS.basicConstraints), der(0x01, Buffer.from([0xff])), octets(seq(der(0x01, Buffer.from([0xff]))))));
+  if (spec.usage !== undefined) extensions.push(seq(oid(OIDS.extendedKeyUsage), der(0x01, Buffer.from([0xff])), octets(seq(oid(spec.usage)))));
+  const tbs = seq(
+    der(0xa0, int(2)),
+    int(spec.serial),
+    alg.id,
+    name(spec.issuer),
+    seq(text(0x17, spec.notBefore), text(0x17, spec.notAfter)),
+    name(spec.subject),
+    spec.publicKey.export({ type: "spki", format: "der" }),
+    ...(extensions.length === 0 ? [] : [der(0xa3, seq(...extensions))]),
+  );
+  return seq(tbs, alg.id, der(0x03, Buffer.from([0]), sign(alg.hash, tbs, spec.signingKey)));
+}
+
+export const pem = (cert: Buffer): string => `-----BEGIN CERTIFICATE-----\n${cert.toString("base64").replace(/.{64}/g, "$&\n").replace(/\n$/, "")}\n-----END CERTIFICATE-----\n`;
+
+// ---- RFC 3161 -----------------------------------------------------------------------------------
+
+export interface TokenSpec {
+  /** What the token's imprint covers. */
+  payload: Uint8Array;
+  /** GeneralizedTime. */
+  time: string;
+  signingKey: KeyObject;
+  /** The signer's issuer name and serial (IssuerAndSerialNumber). */
+  issuer: string;
+  serial: number;
+  /** Certificates to carry in the token (ignored by the verifier). */
+  certificates?: Buffer[];
+  /** The SignerInfo's signature algorithm; default from the key. */
+  signatureAlgorithm?: Buffer;
+  /** The signed hash, when the signature algorithm leaves it to the digest algorithm. */
+  signatureHash?: string;
+  /** Replaces the TSTInfo, or parts of a token, to build broken ones. */
+  tstInfo?: (parts: { imprint: Buffer; time: Buffer }) => Buffer;
+  attributes?: (parts: { contentType: Buffer; messageDigest: Buffer; extra: Buffer[] }) => Buffer[];
+  signerInfos?: (signerInfo: Buffer) => Buffer;
+  signedData?: (parts: { version: Buffer; digests: Buffer; content: Buffer; certificates: Buffer[]; signerInfos: Buffer }) => Buffer;
+  contentInfo?: (signedData: Buffer) => Buffer;
+}
+
+export function timestampToken(spec: TokenSpec): Buffer {
+  const imprint = seq(algorithm(OIDS.sha256), octets(createHash("sha256").update(spec.payload).digest()));
+  const time = text(0x18, spec.time);
+  const tstInfo =
+    spec.tstInfo?.({ imprint, time }) ??
+    seq(int(1), oid(OIDS.policy), imprint, int(spec.serial), time, seq(int(1)), int(42), der(0xa0, der(0xa4, name("Test TSA"))));
+  const essCertId = seq(seq(seq(octets(Buffer.alloc(32, 7)))));
+  const parts = {
+    contentType: seq(oid(OIDS.contentType), set(oid(OIDS.tstInfo))),
+    messageDigest: seq(oid(OIDS.messageDigest), set(octets(createHash("sha256").update(tstInfo).digest()))),
+    extra: [seq(oid(OIDS.signingCertificateV2), set(essCertId))],
+  };
+  const attributes = spec.attributes?.(parts) ?? [parts.contentType, parts.messageDigest, ...parts.extra];
+  const alg = signatureAlgorithm(spec.signingKey);
+  const signature = sign(spec.signatureHash ?? alg.hash, set(...attributes), spec.signingKey);
+  const signerInfo = seq(int(1), seq(name(spec.issuer), int(spec.serial)), algorithm(OIDS.sha256), der(0xa0, ...attributes), spec.signatureAlgorithm ?? alg.id, octets(signature));
+  const signerInfos = spec.signerInfos?.(signerInfo) ?? set(signerInfo);
+  const certificates = spec.certificates === undefined ? [] : [der(0xa0, ...spec.certificates)];
+  const content = seq(oid(OIDS.tstInfo), explicit0(octets(tstInfo)));
+  const signedParts = { version: int(3), digests: set(algorithm(OIDS.sha256)), content, certificates, signerInfos };
+  const signedData = spec.signedData?.(signedParts) ?? seq(signedParts.version, signedParts.digests, content, ...certificates, signerInfos);
+  return spec.contentInfo?.(signedData) ?? seq(oid(OIDS.signedData), explicit0(signedData));
+}
+
+/** A TimeStampResp: a PKIStatusInfo and, when granted, the token. */
+export function timestampResponse(status: number, token?: Buffer): Buffer {
+  return seq(seq(int(status)), ...(token === undefined ? [] : [token]));
+}
+
+// ---- a Rekor v2 style log -----------------------------------------------------------------------
+
+const hash = (...parts: Uint8Array[]): Buffer => {
+  const h = createHash("sha256");
+  for (const part of parts) h.update(part);
+  return h.digest();
+};
+
+export const leafHash = (leaf: Uint8Array): Buffer => hash(Buffer.from([0]), leaf);
+const nodeHash = (left: Buffer, right: Buffer): Buffer => hash(Buffer.from([1]), left, right);
+
+/** The largest power of two smaller than n (n > 1). */
+const split = (n: number): number => 2 ** Math.floor(Math.log2(n - 1));
+
+/** RFC 9162 MTH. */
+export function merkleRoot(leaves: readonly Buffer[]): Buffer {
+  if (leaves.length === 1) return leafHash(leaves[0]!);
+  const k = split(leaves.length);
+  return nodeHash(merkleRoot(leaves.slice(0, k)), merkleRoot(leaves.slice(k)));
+}
+
+/** RFC 9162 PATH(m, D[n]). */
+export function inclusionPath(m: number, leaves: readonly Buffer[]): Buffer[] {
+  if (leaves.length === 1) return [];
+  const k = split(leaves.length);
+  return m < k ? [...inclusionPath(m, leaves.slice(0, k)), merkleRoot(leaves.slice(k))] : [...inclusionPath(m - k, leaves.slice(k)), merkleRoot(leaves.slice(0, k))];
+}
+
+/** A C2SP signed note over a checkpoint: Ed25519 key ids as C2SP has them, ECDSA ones as the SPKI hash. */
+export function signedCheckpoint(origin: string, size: number, root: Buffer, logKey: KeyObject, logPublicKey: KeyObject): string {
+  const body = `${origin}\n${size}\n${root.toString("base64")}\n`;
+  const spki = logPublicKey.export({ type: "spki", format: "der" });
+  const ed25519 = logKey.asymmetricKeyType === "ed25519";
+  const id = ed25519 ? hash(Buffer.from(`${origin}\n\u0001`), spki.subarray(12)).subarray(0, 4) : hash(spki).subarray(0, 4);
+  const signature = sign(ed25519 ? null : "sha256", Buffer.from(body), logKey);
+  return `${body}\n${String.fromCharCode(0x2014)} ${origin} ${Buffer.concat([id, signature]).toString("base64")}\n`;
+}
+
+/** The canonicalized body of a hashedrekord v0.0.2 entry, as Rekor v2 writes it. */
+export function hashedRekordBody(payload: Uint8Array, signature: Buffer, signerPublicKey: KeyObject): Buffer {
+  return Buffer.from(
+    JSON.stringify({
+      apiVersion: "0.0.2",
+      kind: "hashedrekord",
+      spec: {
+        hashedRekordV002: {
+          data: { algorithm: "SHA2_256", digest: hash(payload).toString("base64") },
+          signature: {
+            content: signature.toString("base64"),
+            verifier: { publicKey: { rawBytes: signerPublicKey.export({ type: "spki", format: "der" }).toString("base64") }, keyDetails: "PKIX_ECDSA_P256_SHA_256" },
+          },
+        },
+      },
+    }),
+  );
+}
+
+/** A TransparencyLogEntry for the body at `index` in a log of `others` plus it. */
+export function logEntry(input: { body: Buffer; index: number; size: number; origin: string; logKey: KeyObject; logPublicKey: KeyObject }): Record<string, unknown> {
+  const leaves = Array.from({ length: input.size }, (_, i) => (i === input.index ? input.body : Buffer.from(`another entry ${i}`)));
+  const root = merkleRoot(leaves);
+  return {
+    logIndex: String(input.index),
+    logId: { keyId: hash(input.logPublicKey.export({ type: "spki", format: "der" })).toString("base64") },
+    kindVersion: { kind: "hashedrekord", version: "0.0.2" },
+    inclusionProof: {
+      logIndex: String(input.index),
+      rootHash: root.toString("base64"),
+      treeSize: String(input.size),
+      hashes: inclusionPath(input.index, leaves).map((h) => h.toString("base64")),
+      checkpoint: { envelope: signedCheckpoint(input.origin, input.size, root, input.logKey, input.logPublicKey) },
+    },
+    canonicalizedBody: input.body.toString("base64"),
+  };
+}
+
+// ---- the recorded ledger ------------------------------------------------------------------------
+
+/** The ledger the fixtures anchor: five entries, the same bytes every run. */
+export async function fixtureLedger(): Promise<{ ledger: MemoryAuditLedger; entries: AuditEntry[] }> {
+  const ledger = new MemoryAuditLedger();
+  const at = "2026-11-18T09:00:00.000Z";
+  for (const event of ["call.started", "verification.started", "verification.finished", "call.ended"] as const) {
+    await ledger.append({ eventId: `fixture-${event}`, callId: "call_fixture", actor: "system", event, at, detail: {} });
+  }
+  await ledger.append({ callId: null, actor: "system", event: "module.event", at, detail: { note: "the head the fixtures anchor" } });
+  return { ledger, entries: await ledger.list() };
+}
+
+export const REKOR_ORIGIN = "log2025-test.rekor.example.test";

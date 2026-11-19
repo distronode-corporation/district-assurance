@@ -2,6 +2,7 @@
 // change it (one compare-and-set write per change), the adapters and the clock. This is internal
 // to the package; outside modules use `Engine.updateModule` and `Engine.moduleState` instead.
 import type {
+  Anchor,
   AuditLedger,
   CarrierSignals,
   IdentityProvider,
@@ -36,6 +37,8 @@ export interface EngineAdapters {
   payments?: PaymentLinks;
   signer?: ReceiptSigner;
   pinVerifier?: PinVerifier;
+  /** A time-stamp authority, or a public log plus one, for `anchorLedger` (PRV-9). */
+  anchor?: Anchor;
 }
 
 export type AdapterName = keyof EngineAdapters;

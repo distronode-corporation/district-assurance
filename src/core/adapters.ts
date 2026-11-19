@@ -142,6 +142,33 @@ export interface AuditLedger {
   list(fromSeq?: number): Promise<AuditEntry[]>;
 }
 
+/**
+ * A proof that a ledger head existed at a time (PRV-9). Every value is base64, so the ledger keeps
+ * the bytes exactly as the third party gave them.
+ */
+export type AnchorProof =
+  /** An RFC 3161 time-stamp token (DER) over SHA-256 of the head's anchor payload. */
+  | { kind: "rfc3161"; token: string }
+  /**
+   * The same time-stamp token, plus the Rekor v2 log entry (the JSON Rekor answered) for the anchor
+   * payload signed by the host's key. Rekor v2 keeps no time of its own: the time is the token's.
+   */
+  | { kind: "rekor"; token: string; entry: string };
+
+/**
+ * A third party that fixes the ledger's head in time (PRV-9): a time-stamp authority, or a public
+ * log plus one. It is given the head and its anchor payload, never the ledger. The engine asks
+ * only when the host calls `anchorLedger`.
+ */
+export interface Anchor {
+  anchor(input: {
+    seq: number;
+    hash: string;
+    /** The bytes to time-stamp or sign: `anchorPayload(head)`, domain-separated so they are never a receipt. */
+    payload: Uint8Array;
+  }): Promise<AnchorProof>;
+}
+
 /** Signs receipt payloads. The private key stays with the host (a KMS, an HSM, a file). */
 export interface ReceiptSigner {
   readonly keyId: string;
