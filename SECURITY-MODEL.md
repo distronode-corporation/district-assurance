@@ -53,7 +53,8 @@ number, so one line trying account after account is locked out (tested).
 **Controls:** a per-call limit on judged attempts for every factor the caller enters (keypad
 knowledge, the PIN at 1 to 5, plug-ins at 1 to 5), after which the line stops judging, even the
 right answer (tested). Each attempt is counted in its own write before it is judged, so a crash, a
-failing PIN verifier or a second process never gives a free try (tested, two engines on one
+failing PIN verifier or knowledge key store, an entry crafted to make a judge throw, or a second
+process never gives a free try (tested, two engines on one
 store). PINs are at least 4 digits, and keypad attempts are capped at 5 per call like the PIN's.
 Across calls (VER-1), every entered factor is counted per subject and per calling number in an
 `AttemptCounters` store all engines share: a wait after each failure (5, 15, 60, 300, then 900
@@ -384,39 +385,39 @@ of birth is reversed by trying every date; the caller's entries are never stored
 fields are refused by `validateConfig` until field encryption exists (FIL-2). PINs on file are
 HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode).
 
+### Theft of the keys
+
+**Controls:** neither key has to be in the engine's process. The knowledge key can be an opaque,
+asynchronous HMAC function that calls the host's key management service; the engine, the built-in
+factors and plug-ins all hash through that one function, an answer that is not a 64-character
+lower-case hex digest is refused without being quoted, and a key store that rejects fails closed:
+no factor, the attempt counted, nothing it was asked written to the ledger (tested). The receipt key stays behind `ReceiptSigner`; a signer that returns anything but
+a 64-byte P1363 signature is refused, and `derToP1363` converts a key store's DER answer, checked
+against `node:crypto` (tested). An HMAC function does not stop a process that can call it from
+computing digests, so who may call the key store remains the host's control.
+
 ## Open questions
 
-- **Refunds and disputes in platform mode.** In `platform` mode the platform is the merchant of
-  record, so a refund or a dispute lands on the platform's account, not the business's. Who
-  carries them, and on what terms, is a legal and payment provider question that is not decided.
-  The engine has no refund or dispute code in either mode; a host handles both at the provider.
-- **Seam in the door path.** The adapter is built (GAT-5), but putting a paid third party between
-  the engine and a door in production still waits on its pricing and its handling of Canadian data
-  being checked, and on one unlock proven by hand in Seam's sandbox.
 - **Who carries refunds and disputes in platform mode.** The engine now refunds platform payments
   and records their disputes (above), but who bears a lost dispute, and on what terms between the
   platform and the business, is a legal and payment provider question that is not decided.
   Refund status changes after the provider's first answer (`charge.refund.updated`) are not
   followed yet.
-- **Seam in the door path.** A paid third party between the engine and a door (GAT-5) waits on its
-  pricing and its handling of Canadian data being checked.
+- **Seam in the door path.** The adapter is built (GAT-5), but putting a paid third party between
+  the engine and a door in production still waits on its pricing and its handling of Canadian data
+  being checked, and on one unlock proven by hand in Seam's sandbox.
 
 ## Left to the host
 
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
   speech-to-text and the model while `sensitive` is set.
-- Keeping the knowledge key, the receipt signing key, the access signing key and the access code
-  key in a key store, the access key apart from the receipts'.
+- Keeping the knowledge key, the receipt signing key, the access signing key, the access code key
+  and the step-up signing key in a key store, each apart from the others, behind a `KnowledgeHmac`
+  function and `ReceiptSigner`s, and limiting who may call them.
 - A door keypad that slows after wrong access codes, and a durable `AccessCodeStore` whose
   `take` and `miss` are atomic across processes.
-- Keeping the knowledge key, the receipt signing key, the access signing key and the step-up
-  signing key in a key store, each apart from the others.
 - Exchanging each step-up token through the engine (`exchangeStepUpToken`), and only for the
   browser session that showed its nonce.
-- Calling `expirePaymentLinks` at each link's `expiresAt` (a timer or a sweep); until it does, a
-  link lives as long as the provider keeps it.
-- Keeping the knowledge key, the receipt signing key and the access signing key in a key store, the access key
-  apart from the receipts'.
 - Calling `expirePaymentLinks` at each link's `expiresAt` (a timer or a sweep); until it does, or
   the call ends, a link lives as long as the provider keeps it. Calling `endCall` again when it
   failed at the provider, so the call's open links are expired and its receipt issued.

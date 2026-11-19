@@ -112,8 +112,8 @@ export interface EngineRuntime {
   /** The revision of the config in force now (a call keeps the one it started under in `CallRecord.revision`). */
   readonly revision: string;
   now(): string;
-  /** HMAC-SHA256 under the workspace's knowledge key, hex. The key itself never leaves the engine. */
-  hmac(data: string): string;
+  /** HMAC-SHA256 under the workspace's knowledge key, hex. The engine never holds a key kept in a key store. */
+  hmac(data: string): Promise<string>;
   /** The module's validated settings. Throws `module_disabled` when it is off. */
   settings<T>(module: string): T;
   adapter<K extends AdapterName>(name: K): NonNullable<EngineAdapters[K]>;

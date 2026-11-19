@@ -1,7 +1,9 @@
 // The pure pieces of the verify, file and pay modules.
 import { strict as assert } from "node:assert";
+import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
 
+import { EngineError } from "../src/core/errors.ts";
 import {
   intakeDigest,
   isCalendarDate,
@@ -12,7 +14,7 @@ import {
   type IntakeForm,
 } from "../src/file/intake.ts";
 import { MAX_LINK_AMOUNT_MINOR, settlementFor, validateAmount } from "../src/pay/payment.ts";
-import { isKeypadEntry, judgeKeypadFactors, knowledgeDigest, subjectKeyFor } from "../src/verify/knowledge.ts";
+import { isKeypadEntry, judgeKeypadFactors, knowledgeDigest, knowledgeHmac, pinDigest, subjectKeyFor } from "../src/verify/knowledge.ts";
 
 const KEY = "0123456789abcdef-test";
 
@@ -47,6 +49,19 @@ describe("verify: keypad knowledge", () => {
     const odd = { ...subject, knowledge: { dob: knowledgeDigest(KEY, "dob", "") } };
     assert.equal(judgeKeypadFactors(KEY, odd, ["dob"], { dob: "abc" }), false);
     assert.equal(judgeKeypadFactors(KEY, odd, ["dob"], {}), false);
+  });
+
+  it("takes the key as an asynchronous HMAC function, with the same digests as the bytes", async () => {
+    const kms = async (data: string): Promise<string> => createHmac("sha256", KEY).update(data).digest("hex");
+    assert.equal(await subjectKeyFor(kms, "12345678"), subject.subjectKey);
+    assert.equal(await knowledgeDigest(kms, "dob", "19850214"), subject.knowledge.dob);
+    assert.equal(await pinDigest(kms, subject.subjectKey, "4826"), pinDigest(KEY, subject.subjectKey, "4826"));
+    assert.equal(await judgeKeypadFactors(kms, subject, ["dob", "zip"], { dob: "19850214", zip: "90210" }), true);
+    assert.equal(await judgeKeypadFactors(kms, subject, ["dob", "zip"], { dob: "19850214", zip: "90211" }), false);
+    assert.equal(await judgeKeypadFactors(kms, subject, ["dob"], { dob: "abc" }), false);
+    assert.equal(await knowledgeHmac(kms)("x"), await knowledgeHmac(KEY)("x"));
+    await assert.rejects(subjectKeyFor(async () => "not hex", "1"), (e: unknown) => e instanceof EngineError && e.code === "invalid_input");
+    await assert.rejects(judgeKeypadFactors(async () => Promise.reject(new Error("down")), subject, ["dob"], { dob: "19850214" }), /down/);
   });
 });
 

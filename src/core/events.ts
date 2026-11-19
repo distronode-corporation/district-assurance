@@ -11,6 +11,7 @@ export const ENGINE_EVENTS = [
   "flow.abandoned",
   "verification.started",
   "verification.factor",
+  "verification.factor_error",
   "verification.carrier_checked",
   "verification.locked",
   "verification.finished",

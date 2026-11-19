@@ -128,8 +128,8 @@ Built-in factor kinds: `keypad_knowledge`, `pin`, `carrier_identity_match`, `pho
 kind the caller enters and code judges: `{kind, summary, maxAttemptsPerCall (1 to 5), adapters,
 judge}`, installed with `badgeModule({ factors })`. Its kind is snake_case, 3 to 32 characters, not
 a built-in kind, and never `caller_id`, `calling_number`, `ani` or `cli`. Its judge gets the
-subject, the entry and `hmac(data)` under the knowledge key, never the key. Caller ID is not a
-kind.
+subject, the entry and `hmac(data)` under the knowledge key (asynchronous, a `Promise` of the hex
+digest), never the key. Caller ID is not a kind.
 
 A policy lists, per level 1 to 3, sets of factor kinds; a level is reached when every kind in one
 of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:
@@ -175,6 +175,17 @@ texts.
 
 ## 5. Keypad knowledge
 
+- The knowledge key (`EngineOptions.knowledgeKey`) is its bytes, at least 16 (a string or a
+  `Uint8Array`; anything else is `invalid_input` when the engine is built), or an opaque
+  `KnowledgeHmac` function, `async (data) => HMAC-SHA256(key, UTF-8 data)` as 64 lower-case hex,
+  which can call a key management service so the key never enters the engine's process. It is
+  asynchronous, the same shape as a plug-in's `hmac`, and the engine's own hashing (subject keys,
+  field and PIN digests) goes through the same function; every keypad field is hashed before any
+  is compared. An answer that is not 64 lower-case hex is refused with `invalid_input`, whose
+  message never quotes it. A function that throws or rejects fails closed: no factor, the attempt
+  counted, the error passed to the host (below). `subjectKeyFor`, `knowledgeDigest`, `pinDigest`
+  and `judgeKeypadFactors` take either form and give the same digests for the same key: at once
+  for bytes, as a `Promise` for a function.
 - Subject key: `HMAC-SHA256(knowledgeKey, "subject:" + accountNumber)`, hex. A host may instead
   start verification with a subject key its own code chose (`{subjectKey}`, a string of 64 lower-case hex, read once; anything else is `invalid_input`);
   choosing the subject is not a factor.
@@ -199,8 +210,12 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   PIN is passed once and kept nowhere. It is asked for every attempt: for a malformed entry or an
   account a keypad cannot produce, with a stand-in (`minDigits` zeros, an HMAC subject key) whose
   answer is ignored. A subject the `RecordStore` does not have never passes, whatever it says.
-- Each attempt is counted in its own write before it is judged. Every `beginVerification` starts a
-  new epoch; a factor result, a carrier report or a photo ID check from an earlier epoch is never
+- Each attempt is counted in its own write before it is judged. A judge that throws (the knowledge
+  key store, a `PinVerifier`, a plug-in) records no factor, writes `verification.factor_error`
+  (unless the call ended or the verification restarted meanwhile) and passes the error to the
+  host. The attempt is not refunded, so an entry crafted to make a judge throw never gives a free
+  try; a key store outage can use up the call's attempts. Every `beginVerification` starts a new
+  epoch; a factor result, a carrier report or a photo ID check from an earlier epoch is never
   applied (`precondition_failed`), and a change of subject drops pending photo ID checks.
 - The photo ID link is reserved, created, enrolled and texted in turn; after a failure,
   `startPhotoId` resumes with the same idempotency keys, so a call never has two links. If the
@@ -367,6 +382,7 @@ answer on file, a phone number, a link or card data.
 | `flow.abandoned` | `flow`, `step` |
 | `verification.started` | `subject`: `account` or `host` |
 | `verification.factor` | `kind`, `passed` (and `status` for photo ID) |
+| `verification.factor_error` | `kind` (the judge threw; no factor recorded, the attempt stays counted) |
 | `verification.carrier_checked` | `checked`, `textCodeTrusted`, `identityMatch` |
 | `verification.locked` | `kind`, `scope` (`subject` or `number`), `hard`, `until`: never the subject key, the number or its hash |
 | `identity.link_sent` | none |
@@ -463,6 +479,17 @@ status}` as the end of the call left it, `failed` ones included (a reservation w
 is listed too, so the part's presence is no proof that a token became valid). It is present only
 on a call with at least one record, so the format stays at `v: 1`. `verifyReceipt(receipt, keys)` picks the key by `kid`
 and returns false for any change, a wrong algorithm, a malformed signature or an unknown key.
+
+The `ReceiptSigner` contract: `sign(payload)` returns an ES256 (ECDSA P-256 with SHA-256)
+signature over exactly the payload bytes, in IEEE P1363 form: `r || s`, each a 32-byte big-endian
+integer, 64 bytes in all. `signReceipt` refuses any other length with `invalid_input`, and then
+verifies the signature against the signer's own `publicJwk()` (with `verifyReceipt`), refusing one
+that does not verify (a wrong key, a 64-byte DER signature, bytes that are not a signature), so no
+receipt is issued that cannot verify. Most key management services return DER
+(`SEQUENCE { r INTEGER, s INTEGER }`); `derToP1363(der)` converts it, and throws a TypeError on
+anything that is not a minimal DER encoding of two positive integers of at most 32 bytes with
+nothing after them. `publicJwk()` returns the public key published in the key set.
+
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
 `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
 

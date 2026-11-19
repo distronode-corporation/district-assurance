@@ -26,7 +26,7 @@ import type { Clock, IdGenerator } from "../core/clock.ts";
 import type { CarrierSignalReport } from "../core/policy.ts";
 import type { AccessController, SignedAccessGrant, UnlockResult } from "../gate/access.ts";
 import { keyPairSigner } from "../prove/receipt.ts";
-import { knowledgeDigest, pinDigest, subjectKeyFor } from "../verify/knowledge.ts";
+import { knowledgeDigest, pinDigest, subjectKeyFor, type KnowledgeKeyBytes } from "../verify/knowledge.ts";
 
 /** A clock that only moves when told to. */
 export class FixedClock implements Clock {
@@ -295,7 +295,7 @@ function counterId(key: AttemptCounterKey): string {
 
 /** A subject record built from plain values, hashed the way the engine compares them. */
 export function testSubject(
-  knowledgeKey: string | Uint8Array,
+  knowledgeKey: KnowledgeKeyBytes,
   input: { accountNumber: string; phoneOnFile: string; knowledge: Record<string, string>; pin?: string },
 ): SubjectRecord {
   const knowledge: Record<string, string> = {};

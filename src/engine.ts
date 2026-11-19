@@ -17,7 +17,6 @@ import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./cor
 import { EngineError, NotImplementedError } from "./core/errors.ts";
 import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
 import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
-import { hmacSha256Hex } from "./core/hash.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
 import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
@@ -39,6 +38,7 @@ import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
 import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
 import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
+import { knowledgeHmac, type KnowledgeHmac, type KnowledgeKey } from "./verify/knowledge.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
 export { SUPPORTED_LOCALES, isSupportedLocale } from "./core/runtime.ts";
@@ -54,8 +54,12 @@ export const MAX_WRITE_ATTEMPTS = 5;
 
 export interface EngineOptions {
   workspaceId: string;
-  /** The per-workspace HMAC key for knowledge factors and PINs. At least 16 bytes. */
-  knowledgeKey: string | Uint8Array;
+  /**
+   * The per-workspace HMAC key for knowledge factors and PINs: at least 16 bytes, or an opaque,
+   * asynchronous HMAC-SHA256 function that calls the host's key management service, so the key
+   * never enters this process.
+   */
+  knowledgeKey: KnowledgeKey;
   adapters: EngineAdapters;
   /** The workspace's FlowConfig. Default: `defaultConfig()`. Checked with `validateConfig`; any problem throws a ConfigError. */
   config?: unknown;
@@ -104,7 +108,8 @@ interface QueuedEvent {
 export class Engine {
   readonly workspaceId: string;
   readonly registry: ModuleRegistry;
-  readonly #key: string | Uint8Array;
+  /** HMAC-SHA256 under the knowledge key, the one keyed hash the engine and every factor use. */
+  readonly #hmac: KnowledgeHmac;
   readonly #adapters: EngineAdapters;
   readonly #sessions: SessionStore;
   readonly #clock: Clock;
@@ -118,8 +123,15 @@ export class Engine {
 
   constructor(options: EngineOptions) {
     const errors: string[] = [];
-    const keyLength = typeof options.knowledgeKey === "string" ? Buffer.byteLength(options.knowledgeKey) : options.knowledgeKey.byteLength;
-    if (keyLength < 16) errors.push("knowledgeKey must be at least 16 bytes");
+    const key: unknown = options.knowledgeKey;
+    // An HMAC function keeps its key in the key store: only bytes can be measured here. Anything that
+    // is not a string, a Uint8Array or a function (a number, an object with a byteLength) is refused
+    // now, not at the first hash.
+    if (typeof key === "string" || key instanceof Uint8Array) {
+      if ((typeof key === "string" ? Buffer.byteLength(key) : key.byteLength) < 16) errors.push("knowledgeKey must be at least 16 bytes");
+    } else if (typeof key !== "function") {
+      errors.push("knowledgeKey must be at least 16 bytes (a string or a Uint8Array), or an HMAC function");
+    }
     if (typeof options.workspaceId !== "string" || options.workspaceId === "" || hasLoneSurrogate(options.workspaceId)) {
       errors.push("workspaceId must be a non-empty string the ledger can carry (no lone surrogate)");
     }
@@ -144,7 +156,7 @@ export class Engine {
     }
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     this.workspaceId = options.workspaceId;
-    this.#key = options.knowledgeKey;
+    this.#hmac = knowledgeHmac(options.knowledgeKey);
     this.#sessions = options.adapters.sessions ?? new MemorySessionStore();
     this.#adapters = { ...options.adapters, sessions: this.#sessions };
     this.#clock = options.clock ?? systemClock;
@@ -654,7 +666,7 @@ export class Engine {
         return config().revision;
       },
       now: () => this.#now(),
-      hmac: (data) => hmacSha256Hex(this.#key, data),
+      hmac: this.#hmac,
       settings: <T>(name: string): T => {
         if (!this.isEnabled(name)) throw new EngineError("module_disabled", `the ${name} module is turned off`);
         return this.#config.modules[name]?.settings as T;

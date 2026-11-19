@@ -344,11 +344,11 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
     if (typeof given !== "string" || !/^[0-9a-f]{64}$/.test(given)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
     subjectKey = given;
   } else {
-    subjectKey = typeof given === "string" && isKeypadEntry(given) ? rt.hmac(`subject:${given}`) : null;
+    subjectKey = typeof given === "string" && isKeypadEntry(given) ? await rt.hmac(`subject:${given}`) : null;
   }
   const number = input.callingNumber;
   if (number !== undefined && !isCallingNumber(number)) throw new EngineError("invalid_input", "callingNumber must be E.164; leave it out when the number is withheld");
-  const numberKey = number === undefined ? null : rt.hmac(`number:${number}`);
+  const numberKey = number === undefined ? null : await rt.hmac(`number:${number}`);
   const subject = subjectKey === null ? null : await rt.adapter("records").getSubject(rt.workspaceId, subjectKey);
   await rt.update(callId, (draft) => {
     stepOfType(draft.record, "badge.verify");
@@ -395,6 +395,7 @@ async function refuseLocked(rt: EngineRuntime, callId: string, kind: string, epo
  * are read first, and a locked subject or number is refused without judging or counting. Then the
  * attempt is counted on the call and as a failure across calls, both before it is judged; an
  * accepted pass forgets the subject's failures and its own on the number. After the factor's limit the line stops judging, even the right answer.
+ * A judge that throws records no factor and does not refund the attempt.
  */
 export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callId: string, kind: string, entry: FactorEntry): Promise<KeypadResult> {
   const builtIn = BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS];
@@ -432,12 +433,28 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     return refuseLocked(rt, callId, kind, reserved.epoch, recorded.raced);
   }
   const input = { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey, subject: reserved.subject, entry, hmac: (d: string) => rt.hmac(d) };
-  const passed =
-    kind === "keypad_knowledge"
-      ? await judgeKeypad(rt.policy, input)
-      : kind === "pin"
-        ? await judgePin(rt, rt.settings<BadgeSettings>(BADGE).pin as PinSettings, input)
-        : (await plugin!.judge(input)) === true;
+  let passed: boolean;
+  try {
+    passed =
+      kind === "keypad_knowledge"
+        ? await judgeKeypad(rt.policy, input)
+        : kind === "pin"
+          ? await judgePin(rt, rt.settings<BadgeSettings>(BADGE).pin as PinSettings, input)
+          : (await plugin!.judge(input)) === true;
+  } catch (error) {
+    // A key store, PIN verifier or plug-in that throws is not a wrong answer: no factor is recorded
+    // and the error reaches the host. The attempt stays counted, so an entry crafted to make a judge
+    // throw never gives a free try. The ledger notes the failure, as the success path would, only on
+    // the same verification of a call still open; a note refused or failed never hides the error.
+    await rt
+      .update(callId, (draft) => {
+        assertSameVerification(draft.slice<BadgeSlice>(BADGE), reserved.epoch);
+        draft.assertCan({ type: "factor_recorded", factor: { kind, passed: false, at: rt.now() } });
+        draft.emit("verification.factor_error", "code", { kind });
+      })
+      .catch(() => undefined);
+    throw error;
+  }
   const hard = passed ? null : recorded.hard;
   let failed: { error: unknown } | null = null;
   try {

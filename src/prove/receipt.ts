@@ -7,6 +7,7 @@ import { createPrivateKey, createPublicKey, sign, verify, type JsonWebKey, type 
 
 import type { ReceiptSigner } from "../core/adapters.ts";
 import { canonicalJson } from "../core/canonical.ts";
+import { EngineError } from "../core/errors.ts";
 import { sha256Hex } from "../core/hash.ts";
 import type { AssuranceLevel, FactorKind } from "../core/policy.ts";
 
@@ -56,6 +57,7 @@ export function canonicalPayload(body: unknown): Uint8Array {
 
 export async function signDocument<B>(signer: ReceiptSigner, body: B): Promise<SignedDocument<B>> {
   const signature = await signer.sign(canonicalPayload(body));
+  if (signature.byteLength !== 64) throw new EngineError("invalid_input", `the signer returned ${signature.byteLength} bytes, not a 64-byte P1363 signature`);
   return { body, alg: signer.algorithm, kid: signer.keyId, signature: Buffer.from(signature).toString("base64url") };
 }
 
@@ -87,13 +89,53 @@ export function receiptDigest(body: ReceiptBody): string {
   return sha256Hex(receiptPayload(body));
 }
 
-export function signReceipt(signer: ReceiptSigner, body: ReceiptBody): Promise<SignedReceipt> {
-  return signDocument(signer, body);
+/**
+ * Signs a receipt body. The signer must keep its contract: an ES256 signature in IEEE P1363 form,
+ * exactly 64 bytes (`derToP1363` converts the DER most key stores return). Any other length is
+ * refused (`invalid_input`, in `signDocument`), and so is a signature that does not verify against
+ * the signer's own public key (a wrong key, a DER signature that happens to be 64 bytes, bytes that
+ * are not a signature): no receipt is issued that cannot verify.
+ */
+export async function signReceipt(signer: ReceiptSigner, body: ReceiptBody): Promise<SignedReceipt> {
+  const receipt = await signDocument(signer, body);
+  if (!verifyReceipt(receipt, [{ ...signer.publicJwk(), kid: signer.keyId }])) {
+    throw new EngineError("invalid_input", "the receipt signer's signature does not verify against its own public key");
+  }
+  return receipt;
 }
 
 /** Checks a receipt against a key set (`verifyDocument`). Never throws on bad input. */
 export function verifyReceipt(receipt: SignedReceipt, keys: ReadonlyArray<JsonWebKey & { kid?: string }>): boolean {
   return verifyDocument(receipt, keys);
+}
+
+/**
+ * Converts a DER ECDSA P-256 signature (`SEQUENCE { r INTEGER, s INTEGER }`, what most key
+ * management services return) to the 64-byte IEEE P1363 form (`r || s`) a `ReceiptSigner` must
+ * return. Strict: anything that is not a minimal DER encoding of two positive integers of at most
+ * 32 bytes, with nothing after it, throws a TypeError.
+ */
+export function derToP1363(der: Uint8Array): Uint8Array {
+  const malformed = (): never => {
+    throw new TypeError("derToP1363 needs a DER-encoded ECDSA P-256 signature");
+  };
+  // Short-form lengths only: a P-256 signature is at most 72 bytes, so DER never uses the long form.
+  if (der[0] !== 0x30 || der[1] !== der.length - 2) malformed();
+  const out = new Uint8Array(64);
+  let at = 2;
+  for (const offset of [0, 32]) {
+    const length = der[at + 1] ?? 0;
+    const value = der.subarray(at + 2, at + 2 + length);
+    if (der[at] !== 0x02 || length === 0 || value.length !== length) malformed();
+    // Positive and minimal: no sign bit, and a leading zero only in front of one.
+    if ((value[0]! & 0x80) !== 0 || (value[0] === 0 && (length === 1 || (value[1]! & 0x80) === 0))) malformed();
+    const magnitude = value[0] === 0 ? value.subarray(1) : value;
+    if (magnitude.length > 32) malformed();
+    out.set(magnitude, offset + 32 - magnitude.length);
+    at += 2 + length;
+  }
+  if (at !== der.length) malformed();
+  return out;
 }
 
 /** A signer over a P-256 private key the host holds (a PEM string or a private JWK). */
