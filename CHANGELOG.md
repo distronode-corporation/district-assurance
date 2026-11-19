@@ -29,6 +29,11 @@ All notable changes to this project are documented here. The format follows
   reproducible pack, a file list check and an exports smoke test as a dry run. Only a manual run
   on the tag with `publish` ticked, upstream and after an environment approval, publishes with npm
   provenance by trusted publishing. The package stays private (ADR-12).
+- Performance benchmarks (SRV-10): `npm run bench` measures the owner-command flow, a level 2
+  verification, ledger appends, receipt signing and verifying, and `validateConfig` on a large
+  config, on the memory adapters with `node:perf_hooks` only, and writes JSON with the machine and
+  commit. CI runs it on a small budget; each release compares with the previous release on the
+  same runner and reports a case over 20% slower in the run summary, never failing. BENCHMARKS.md.
 
 ### Changed
 

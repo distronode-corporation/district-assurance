@@ -75,3 +75,8 @@ jobs:
       - run: npm run build
       # The scripted call, end to end, on fake adapters and a loopback server.
       - run: npm run demo
+      # The benchmarks on a small budget, so the scripts cannot rot (BENCHMARKS.md). Numbers from
+      # a run this short mean little; the release workflow compares releases on full runs.
+      - name: Benchmarks, short
+        shell: bash
+        run: npm run bench -- --budget-ms 25 --out "$RUNNER_TEMP/bench.json"
