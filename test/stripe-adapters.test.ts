@@ -41,6 +41,8 @@ class FakeStripe {
   createLive = false;
   /** The payer pays just as the demo closes the page. */
   payOnExpire = false;
+  /** Overrides the next GET only: an answer, or "drop" (a body lost on the way). */
+  nextGet: { status: number; body: string } | "drop" | null = null;
   #n = 0;
   server: Server;
   base = "";
@@ -56,6 +58,17 @@ class FakeStripe {
         if (this.next !== null) {
           const next = this.next;
           this.next = null;
+          return send(next.status, next.body);
+        }
+        if (req.method === "GET" && this.nextGet !== null) {
+          const next = this.nextGet;
+          this.nextGet = null;
+          if (next === "drop") {
+            // Headers, then the connection drops before the promised body arrives.
+            res.writeHead(200, { "content-type": "application/json", "content-length": "500" });
+            res.write("{");
+            return void res.socket?.destroy();
+          }
           return send(next.status, next.body);
         }
         if (req.method === "POST" && url.pathname === "/v1/checkout/sessions") {
@@ -94,6 +107,7 @@ class FakeStripe {
     this.paidAfterReads = -1;
     this.createLive = false;
     this.payOnExpire = false;
+    this.nextGet = null;
   }
 }
 
@@ -365,6 +379,32 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
     }
   });
 
+  it("asks again after a body lost on the way, on the first read and while polling", async () => {
+    const { relay, runs } = await world({ pollMs: 1, waitMs: 5000 });
+    try {
+      const run = await runs.start("visit");
+      for (let i = 0; i < 2; i++) await runs.step(run.runId);
+      fake.nextGet = "drop";
+      let answer = await runs.step(run.runId);
+      assert.ok(answer.ok);
+      assert.deepEqual([answer.view.results.at(-1)!.ok, answer.view.done], [true, false], "the link step read again after the lost body");
+      fake.sessions.get([...fake.sessions.keys()].at(-1)!)!.paidAfterReads = 1;
+      fake.nextGet = "drop";
+      answer = await runs.step(run.runId);
+      assert.ok(answer.ok);
+      assert.match(answer.view.results.at(-1)!.detail, /session complete, payment paid/);
+      // A body that arrived but is not JSON is Stripe's answer, not a lost read: the step ends.
+      const second = await runs.start("visit");
+      for (let i = 0; i < 3; i++) await runs.step(second.runId);
+      fake.nextGet = { status: 200, body: "not json" };
+      answer = await runs.step(second.runId);
+      assert.ok(answer.ok);
+      assert.deepEqual([answer.view.results.at(-1)!.detail, answer.view.done], ["failed: internal error", true]);
+    } finally {
+      await new Promise<void>((resolve) => relay.close(() => resolve()));
+    }
+  });
+
   it("ends the run on a payment that does not come, and on a session that expired, before any door", async () => {
     const lines: string[] = [];
     const { w, relay, runs } = await world({ pollMs: 1, waitMs: 30, log: (label, detail) => lines.push(`${label} ${detail}`) });
@@ -436,11 +476,12 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
       const answer = await waiting;
       assert.ok(answer.ok);
       assert.deepEqual([answer.view.results.at(-1)!.ok, answer.view.results.at(-1)!.detail], [false, "stopped: the demo is shutting down"]);
+      // Once stopped, a new run's Stripe read is cancelled at once: the link step ends the run.
       const next = await runs.start("visit");
-      for (let i = 0; i < 3; i++) await runs.step(next.runId);
+      for (let i = 0; i < 2; i++) await runs.step(next.runId);
       const after = await runs.step(next.runId);
       assert.ok(after.ok);
-      assert.equal(after.view.results.at(-1)!.detail, "stopped: the demo is shutting down", "an aborted signal answers at once");
+      assert.deepEqual([after.view.results.at(-1)!.label, after.view.done], ["pay: Checkout link created (Stripe test mode)", true]);
     } finally {
       await new Promise<void>((resolve) => relay.close(() => resolve()));
     }
@@ -460,12 +501,19 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
       const next = () => fetch(`${demo.base}/demo/runs/${run.runId}/next`, { method: "POST", headers: json, body: "{}" });
       for (let i = 0; i < 3; i++) assert.equal((await next()).status, 200);
       assert.equal(fake.seen.find((s) => s.method === "POST")!.form.get("success_url"), `${demo.base}/`);
+      const reads = fake.seen.filter((s) => s.method === "GET").length;
       waiting = next();
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Close only once the payment step is polling (its first read reached the fake).
+      const deadline = Date.now() + 5000;
+      while (fake.seen.filter((s) => s.method === "GET").length === reads && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.ok(fake.seen.filter((s) => s.method === "GET").length > reads, "the payment step polled");
     } finally {
       await demo.close();
     }
-    assert.equal((await waiting!).status, 200, "answered when the demo stopped");
+    const stopped = await waiting!;
+    assert.equal(stopped.status, 200, "answered when the demo stopped");
+    const view = (await stopped.json()) as { results: Array<{ detail: string }> };
+    assert.equal(view.results.at(-1)!.detail, "stopped: the demo is shutting down");
     await assert.rejects(
       (async () => {
         const first = await startE2eDemo(KEY, await freePort(), { apiBase: fake.base });

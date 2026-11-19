@@ -53,9 +53,31 @@ async function endCallWhenDoorsSettle(w: DemoWorld, callId: string): Promise<Sig
   }
 }
 
+/** A lost read (no answer, a dropped body) or Stripe busy or failing on its side. */
+function isTransient(error: unknown): boolean {
+  return !(error instanceof StripeApiError) || error.retryable;
+}
+
+/**
+ * Reads the session just created, asking again (up to 5 times, a second apart) after a transient
+ * failure: the link exists, so the run must not fail on one lost read.
+ */
+async function readUntilAnswered(stripe: StripeCheckoutLinks, linkId: string, signal: AbortSignal | undefined): Promise<CheckoutSessionStatus> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await stripe.readLink(linkId, undefined, signal);
+    } catch (error) {
+      if (signal?.aborted === true || !isTransient(error) || attempt >= 5) throw error;
+      await sleep(1000, signal);
+    }
+  }
+}
+
 /** Waits `ms`, or less when `signal` aborts. */
 function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
   return new Promise((resolve) => {
+    // An abort that came before the wait (during a read) has already fired its one event.
+    if (signal?.aborted === true) return resolve();
     const timer = setTimeout(done, ms);
     signal?.addEventListener("abort", done, { once: true });
     function done(): void {
@@ -101,7 +123,7 @@ export function e2eScripts(stripe: StripeCheckoutLinks, options: E2eOptions = {}
         call.linkId = link.linkId;
         call.paymentExpiresAt = payment.expiresAt;
         const paymentId = payment.paymentId;
-        const session = await stripe.readLink(link.linkId);
+        const session = await readUntilAnswered(stripe, link.linkId, options.signal);
         return {
           detail: `${paymentId}: Checkout Session ${shortSessionId(link.linkId)} created, livemode ${session.livemode}, status ${session.status}. Open it and pay with the test card 4242 4242 4242 4242.`,
           ok: !session.livemode && session.status === "open",
@@ -121,15 +143,19 @@ export function e2eScripts(stripe: StripeCheckoutLinks, options: E2eOptions = {}
         const now = () => w.clock.now().getTime();
         const engineDeadline = Date.parse(call.paymentExpiresAt ?? "") || now();
         const until = Math.min(engineDeadline + 1000, now() + waitMs);
+        // A function, so a check after an await reads the signal again.
+        const stopping = (): boolean => options.signal?.aborted === true;
+        const stopped: StepOutcome = { detail: "stopped: the demo is shutting down", ok: false };
         for (;;) {
-          if (options.signal?.aborted === true) return { detail: "stopped: the demo is shutting down", ok: false };
+          if (stopping()) return stopped;
           let session: CheckoutSessionStatus | null = null;
           try {
-            session = await stripe.readLink(call.linkId);
+            session = await stripe.readLink(call.linkId, undefined, options.signal);
           } catch (error) {
+            if (stopping()) return stopped;
             // A lost read, or Stripe busy or failing on its side: ask again. A refusal or an answer
             // this adapter cannot trust ends the step.
-            if (error instanceof StripeApiError && !error.retryable) throw error;
+            if (!isTransient(error)) throw error;
           }
           if (session !== null && paid(session)) return settle(session);
           if (session?.status === "expired") return { detail: "the session expired unpaid", ok: false };

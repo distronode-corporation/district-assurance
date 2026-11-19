@@ -173,10 +173,10 @@ export class StripeCheckoutLinks implements PaymentLinks {
     throw new StripeApiError(res.status, `Stripe did not expire the Checkout Session (${describeError(res)})`);
   }
 
-  /** Reads a Checkout Session's status from Stripe. Read only: it changes nothing. */
-  async readLink(linkId: string, connectedAccountId?: string): Promise<CheckoutSessionStatus> {
+  /** Reads a Checkout Session's status from Stripe. Read only: it changes nothing. `signal` cancels the read. */
+  async readLink(linkId: string, connectedAccountId?: string, signal?: AbortSignal): Promise<CheckoutSessionStatus> {
     const id = checkedSessionId(linkId);
-    const res = await this.#call("GET", `/v1/checkout/sessions/${id}`, { account: connectedAccountId });
+    const res = await this.#call("GET", `/v1/checkout/sessions/${id}`, { account: connectedAccountId, signal });
     const { status, payment_status: paymentStatus, livemode } = res.body;
     if (
       res.status !== 200 ||
@@ -193,18 +193,27 @@ export class StripeCheckoutLinks implements PaymentLinks {
   async #call(
     method: "GET" | "POST",
     path: string,
-    options: { form?: Array<[string, string]>; idempotencyKey?: string; account?: string | undefined },
+    options: { form?: Array<[string, string]>; idempotencyKey?: string; account?: string | undefined; signal?: AbortSignal | undefined },
   ): Promise<{ status: number; body: Record<string, unknown> }> {
     const headers: Record<string, string> = { authorization: `Bearer ${this.#apiKey}` };
     if (options.idempotencyKey !== undefined) headers["idempotency-key"] = options.idempotencyKey;
     if (options.account !== undefined) headers["stripe-account"] = options.account;
-    const init: RequestInit = { method, headers, redirect: "error", signal: AbortSignal.timeout(this.#timeoutMs) };
+    const timeout = AbortSignal.timeout(this.#timeoutMs);
+    const init: RequestInit = { method, headers, redirect: "error", signal: options.signal === undefined ? timeout : AbortSignal.any([timeout, options.signal]) };
     if (options.form !== undefined) {
       headers["content-type"] = "application/x-www-form-urlencoded";
       init.body = new URLSearchParams(options.form).toString();
     }
     const response = await fetch(new URL(path, this.#base), init);
-    const parsed: unknown = await response.json().catch(() => null);
+    // A body lost on the way (a dropped connection, a timeout) throws as it is: a transport
+    // failure, worth asking again. A body that arrived but is not JSON is Stripe's answer.
+    const text = await response.text();
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
     return { status: response.status, body: typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {} };
   }
 }
