@@ -78,6 +78,13 @@ export interface ModuleCallView {
   authorized(scope: string): boolean;
   /** A ledger entry `module.event` with `{ module, event, detail }`. Never put a value the caller keyed in it. */
   emit(event: string, detail: { [key: string]: JsonValue }): void;
+  /**
+   * Call this in the same change that changes the matched subject's contact details, in a flow or
+   * outside one: the call then owes the security notice (PRV-10) to the number on file before the
+   * change, saved by this same write and sent right after it. Refused (`precondition_failed`, the
+   * whole change with it) when no keypad or PIN match stands, since there is no number to alert.
+   */
+  contactChanged(): void;
 }
 
 interface QueuedEvent {
@@ -403,7 +410,7 @@ export class Engine {
       draft.emit("call.ended", "system", {});
       return structuredClone(draft.record);
     });
-    await trace.sendContactNotice(this.#rt, record);
+    await this.#deliverAlerts(callId);
     if (!trace.wantsReceipt(this.#rt, record)) return null;
     const issued = trace.receiptOf(record);
     if (issued !== null) return structuredClone(issued);
@@ -424,6 +431,37 @@ export class Engine {
    */
   textReceiptLink(callId: string, url: string): Promise<{ texted: boolean }> {
     return trace.textReceiptLink(this.#rt, callId, url, (record) => this.#currentSubject(record));
+  }
+
+  /**
+   * Sends every alert still owed on this workspace's calls (a contact change notice whose text
+   * failed), ended or not, so a call that is never ended still alerts. The host runs it on a
+   * schedule. Finds the calls by their `contact.notice_owed` ledger entries, reading the whole
+   * ledger once; a call whose debt is saved but not yet appended to the ledger (a ledger outage) is
+   * found once `flushLedger` or its next write appends it. Returns the calls it finished and the
+   * calls whose text failed again, which stay owed.
+   */
+  async sweepAlerts(): Promise<{ sent: string[]; failed: string[] }> {
+    const prefix = `${JSON.stringify([this.workspaceId]).slice(0, -1)},`;
+    const owed = new Map<string, number>();
+    for (const e of await this.#adapters.ledger.list()) {
+      const step = e.event === "contact.notice_owed" ? 1 : e.event === "contact.notice_sent" ? -1 : 0;
+      // Only this workspace's entries (its id leads every event id), which the engine wrote with their call.
+      if (step === 0 || e.eventId?.startsWith(prefix) !== true) continue;
+      owed.set(e.callId!, (owed.get(e.callId!) ?? 0) + step);
+    }
+    const result = { sent: [] as string[], failed: [] as string[] };
+    for (const [callId, count] of owed) {
+      if (count <= 0) continue;
+      try {
+        // A call the host's session retention removed has nothing left to send from.
+        if (!trace.noticeDue(await this.#read(callId))) continue;
+        if (await this.#deliverAlerts(callId)) result.sent.push(callId);
+      } catch {
+        result.failed.push(callId);
+      }
+    }
+    return result;
   }
 
   async receipt(callId: string): Promise<SignedReceipt | null> {
@@ -465,6 +503,7 @@ export class Engine {
         state: snapshot(draft.record.state),
         authorized: (scope) => this.#authorized(draft.record, scope),
         emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
+        contactChanged: () => trace.noteAction(draft, "contact", badge.matchedSubject(draft.record)),
       };
       const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);
       draft.record.modules[name] = structuredClone(next);
@@ -565,6 +604,9 @@ export class Engine {
       const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
       if (saved.ok) {
         await this.#flush(callId, version, record);
+        // An alert owed (a contact change notice) is sent once its debt is saved, on this write or
+        // the next one on the call; a failure leaves it owed for the next write, endCall or sweepAlerts.
+        if (trace.noticeDue(record)) await this.#deliverAlerts(callId).catch(() => false);
         return result;
       }
     }
@@ -613,7 +655,7 @@ export class Engine {
       // Such a step follows a level 2 verification, which a keypad or PIN match always unlocked:
       // matchedSubject fails closed if that ever did not hold.
       const action = this.#actionClass(owner!, step.type);
-      if (action !== null) trace.noteAction(record, action, badge.matchedSubject(record));
+      if (action !== null) trace.noteAction(draft, action, badge.matchedSubject(record));
       flow.index++;
       const next = flow.steps[flow.index];
       if (next === undefined) {
@@ -623,6 +665,21 @@ export class Engine {
       }
       const nextOwner = this.registry.stepOwner(next.type);
       flow.mark = nextOwner === undefined ? null : nextOwner.enterStep(next, record.modules[nextOwner.manifest.name]!);
+    }
+  }
+
+  /** Calls whose alerts are being sent by this engine now, so sending (which writes) does not send again. */
+  readonly #delivering = new Set<string>();
+
+  /** Sends the call's owed alerts; false when this engine is already sending them (that send finishes them). */
+  async #deliverAlerts(callId: string): Promise<boolean> {
+    if (this.#delivering.has(callId)) return false;
+    this.#delivering.add(callId);
+    try {
+      await trace.sendContactNotice(this.#rt, callId);
+      return true;
+    } finally {
+      this.#delivering.delete(callId);
     }
   }
 

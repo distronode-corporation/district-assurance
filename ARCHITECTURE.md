@@ -80,7 +80,8 @@ turns it on in the config. Its steps can appear in flows, its settings are check
 validator, and `validateConfig` holds its steps to the scopes its manifest says they need. At run
 time the host's code changes the module's part of a call with `engine.updateModule(callId, name,
 fn)`, one compare-and-set write, and reads it with `engine.moduleState`. `fn` sees the session
-state, can ask whether a scope is authorized, and can write `module.event` ledger entries. A
+state, can ask whether a scope is authorized, can write `module.event` ledger entries, and says
+when its change changed contact details (`contactChanged`), so the call owes a security notice. A
 running flow moves on when the module's `stepStatus` says its step is complete.
 
 ## One call, step by step

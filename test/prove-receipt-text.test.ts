@@ -284,22 +284,116 @@ describe("contact change security notice", () => {
     assert.equal(notices[0]!.body, contactNoticeText("fr", BUSINESS));
   });
 
+  it("goes for a contact change an outside module makes outside a flow, right after the change is saved", async () => {
+    const t = engine();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: NEW_PHONE, knowledge: { dob: DOB } }));
+    await t.engine.updateModule(callId, "acme", (s, call) => {
+      call.contactChanged();
+      return { done: (s as { done: number }).done + 1 };
+    });
+    assert.deepEqual(texts(t, "contact_changed").map((m) => [m.to, m.body]), [[PHONE_ON_FILE, contactNoticeText("en", BUSINESS)]], "to the number before the change, before the call ends");
+    assert.deepEqual([(await events(t, "contact.notice_owed")).length, (await events(t, "contact.notice_sent")).length], [1, 1]);
+    await t.engine.endCall(callId);
+    assert.equal(texts(t, "contact_changed").length, 1, "never twice");
+  });
+
+  it("refuses a contact change outside a flow with no keypad or PIN match, and keeps none of it", async () => {
+    const t = engine();
+    const { callId } = await t.engine.startCall();
+    await assert.rejects(
+      t.engine.updateModule(callId, "acme", (s, call) => {
+        call.contactChanged();
+        return { done: (s as { done: number }).done + 1 };
+      }),
+      rejects("precondition_failed"),
+    );
+    assert.deepEqual(await t.engine.moduleState(callId, "acme"), { done: 0 });
+  });
+
+  it("alerts through sweepAlerts on a call that is never ended", async () => {
+    const t = engine();
+    const callId = await verified(t, "change-only");
+    const send = t.messages.sendText.bind(t.messages);
+    let down = true;
+    t.messages.sendText = async (input) => {
+      if (down) throw new Error("carrier down");
+      return send(input);
+    };
+    await changePhone(t, callId);
+    // Another workspace's entry and one with no event id on the same ledger are not this engine's.
+    await t.ledger.append({ eventId: JSON.stringify(["ws_other", callId, 1, 0]), callId, actor: "code", event: "contact.notice_owed", at: "2026-01-01T00:00:00.000Z", detail: {} });
+    await t.ledger.append({ callId: "call_x", actor: "code", event: "contact.notice_owed", at: "2026-01-01T00:00:00.000Z", detail: {} });
+    assert.deepEqual(await t.engine.sweepAlerts(), { sent: [], failed: [callId] }, "still owed while the carrier is down");
+    down = false;
+    assert.deepEqual(await t.engine.sweepAlerts(), { sent: [callId], failed: [] });
+    assert.deepEqual(texts(t, "contact_changed").map((m) => m.to), [PHONE_ON_FILE]);
+    assert.notEqual((await t.engine.state(callId)).phase, "ended", "the call was never ended");
+    assert.deepEqual(await t.engine.sweepAlerts(), { sent: [], failed: [] }, "nothing owed now");
+    assert.equal(texts(t, "contact_changed").length, 1);
+  });
+
+  it("is logged once when two processes sweep the same notice at once, and a notice sent but not yet logged is not sent again", async () => {
+    const t = engine();
+    const other = setup({ config: config(), modules: [acmeModule()], adapters: { sessions: t.sessions, ledger: t.ledger, records: t.records, messages: t.messages } });
+    const callId = await verified(t, "change-only");
+    const send = t.messages.sendText.bind(t.messages);
+    let down = true;
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let holds = 0;
+    t.messages.sendText = async (input) => {
+      if (down) throw new Error("carrier down");
+      // The first sweep's text is held until the other process has sent and logged the same notice.
+      if (holds++ === 0) await held;
+      return send(input);
+    };
+    await changePhone(t, callId);
+    down = false;
+    const first = t.engine.sweepAlerts();
+    while (holds === 0) await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(await other.engine.sweepAlerts(), { sent: [callId], failed: [] });
+    release();
+    assert.deepEqual(await first, { sent: [callId], failed: [] });
+    assert.equal((await events(t, "contact.notice_sent")).length, 1, "logged once");
+    assert.equal(texts(t, "contact_changed").length, 2, "one text by its idempotency key, sent by both");
+
+    // Sent, its ledger entry pending: the ledger still says owed, the call does not.
+    t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } }));
+    const callId2 = await verified(t, "change-only");
+    const append = t.ledger.append.bind(t.ledger);
+    t.ledger.append = async (input) => {
+      if (input.event === "contact.notice_sent") throw new Error("ledger down");
+      return append(input);
+    };
+    await changePhone(t, callId2);
+    const sent = texts(t, "contact_changed").length;
+    assert.deepEqual(await t.engine.sweepAlerts(), { sent: [], failed: [] });
+    assert.equal(texts(t, "contact_changed").length, sent, "not sent again");
+    t.ledger.append = append;
+  });
+
   it("is sent again by endCall after a failed text, without ending the call again", async () => {
     const t = engine((c) => {
       c.modules.trace!.settings = { receipts: true, wordings: [consentWording] };
       c.flows = { "change-only": c.flows["change-only"]! };
     });
     const callId = await verified(t, "change-only");
-    await changePhone(t, callId);
     const send = t.messages.sendText.bind(t.messages);
-    let fail = true;
+    // Down for the send right after the change, and for both of endCall's tries (after its write, then its own).
+    let failures = 3;
     t.messages.sendText = async (input) => {
-      if (fail) {
-        fail = false;
+      if (failures > 0) {
+        failures--;
         throw new Error("carrier down");
       }
       return send(input);
     };
+    await changePhone(t, callId);
+    assert.equal(texts(t, "contact_changed").length, 0, "owed, not sent: the change itself still succeeded");
+    assert.equal((await events(t, "contact.notice_owed")).length, 1);
     await assert.rejects(t.engine.endCall(callId), /carrier down/);
     assert.equal((await t.engine.state(callId)).phase, "ended");
     assert.equal(await t.engine.endCall(callId), null);
@@ -339,16 +433,19 @@ describe("contact change security notice", () => {
   it("finishes after the notice was sent but its ledger entry failed, without ending or texting again", async () => {
     const t = engine();
     const callId = await verified(t, "change-only");
-    await changePhone(t, callId);
     const append = t.ledger.append.bind(t.ledger);
+    let fail = true;
     t.ledger.append = async (input) => {
-      if (input.event === "contact.notice_sent") {
-        t.ledger.append = append;
+      if (fail && input.event === "contact.notice_sent") {
+        fail = false;
         throw new Error("ledger down");
       }
       return append(input);
     };
-    await assert.rejects(t.engine.endCall(callId), /ledger down/);
+    // The notice goes right after the change; its ledger entry fails and stays pending.
+    await changePhone(t, callId);
+    assert.equal(texts(t, "contact_changed").length, 1);
+    assert.equal((await events(t, "contact.notice_sent")).length, 0);
     assert.equal(await t.engine.endCall(callId), null);
     assert.equal(texts(t, "contact_changed").length, 1);
     assert.equal((await events(t, "contact.notice_sent")).length, 1);

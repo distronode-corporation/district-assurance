@@ -66,16 +66,22 @@ selfie, which a stolen SIM alone does not pass. Contact and payout scopes defaul
 ### Account takeover by a contact change
 
 Someone who passed verification changes the phone number on file, so the real customer hears
-nothing from then on. **Controls:** each flow step that needs a contact-class scope makes the call
-owe a security notice, sent by `endCall` to the changed subject's number on file as Badge read it
-before the change, whatever the caller answered about receipt texts; a call that changes two
+nothing from then on. **Controls:** each flow step that needs a contact-class scope, and each
+change an outside module marks with `contactChanged()` (in a flow or outside one), makes the call
+owe a security notice, saved in the same write as the change and sent right after it to the
+changed subject's number on file as Badge read it before the change, whatever the caller answered
+about receipt texts. A notice whose text failed stays owed and is retried by the call's next write,
+by `endCall`, and by `sweepAlerts()`, which the host runs on a schedule, so an attacker who changes
+the number and never lets the call end still triggers it (tested); a call that changes two
 subjects, or the same subject under two numbers, sends one to each, and never two to the same
 subject's same number. Nobody on the call can turn it off. The receipt link of that call goes to
 the earlier number only when it was kept for the subject the receipt link is for; a number kept
 for another subject is never used (tested in `prove-receipt-text.test.ts`). A notice texted but not
 yet logged (a ledger outage) is logged by the next `endCall`, which neither texts nor ends again. A config with such a step is refused without a `messages` adapter.
-The notice carries no values, not even which detail changed. Left to the host: a contact change
-made outside a flow step is not seen by the engine, and owes no notice.
+The notice carries no values, not even which detail changed. Left to the host: an outside module
+must call `contactChanged()` in the change that changes contact details (the engine cannot see a
+change made in the host's own systems otherwise); running `sweepAlerts()` on a schedule; and
+keeping call records at least until their alerts are sent.
 
 ### Text flooding and SMS pumping
 

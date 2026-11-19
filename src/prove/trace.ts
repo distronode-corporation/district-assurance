@@ -10,7 +10,7 @@ import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
 import type { ScopeClass } from "../core/policy.ts";
-import type { CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
+import type { CallDraft, CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
 import { isObject, unknownKeys } from "../core/shape.ts";
 import { wordingDigest, type ConsentRecord, type ConsentWording } from "./consent.ts";
 import { receiptDigest, signReceipt, type ReceiptBody, type SignedReceipt } from "./receipt.ts";
@@ -286,21 +286,28 @@ export async function issueReceipt(
 // ---- texts after the call ------------------------------------------------------------------
 
 function textsOf(record: CallRecord): TraceTexts {
-  return (record.modules[TRACE] as unknown as TraceSlice).texts;
+  const slice = record.modules[TRACE] as unknown as TraceSlice;
+  // A call stored before PRV-10 has no texts yet: it loads with none.
+  slice.texts ??= { actions: [], notices: [], receiptLink: "none" };
+  return slice.texts;
 }
 
 /**
- * A flow step that needed a money, contact or access scope completed, for `subject`, the matched
- * subject as Badge read it when verification started. Each class is noted once. Each contact step
- * owes a security notice to the subject's number on file before the change, unless one is owed or
- * sent to that same number for that same subject already (no two identical texts to one number).
+ * A money, contact or access action happened on the call, for `subject`, the matched subject as
+ * Badge read it when verification started: a flow step that needed such a scope completed, or an
+ * outside module said it changed contact details (`ModuleCallView.contactChanged`). Each class is
+ * noted once. Each contact change owes a security notice to the subject's number on file before
+ * the change, unless one is owed or sent to that same number for that same subject already (no two
+ * identical texts to one number). The notice owed is saved in the same write as the change, and
+ * `contact.notice_owed` goes to the ledger with it, so a sweep can find a call that never ends.
  */
-export function noteAction(record: CallRecord, action: ActionClass, subject: { subjectKey: string; phoneOnFile: string }): void {
-  const texts = textsOf(record);
+export function noteAction(draft: CallDraft, action: ActionClass, subject: { subjectKey: string; phoneOnFile: string }): void {
+  const texts = textsOf(draft.record);
   if (!texts.actions.includes(action)) texts.actions.push(action);
   if (action !== "contact") return;
   if (texts.notices.some((n) => n.subjectKey === subject.subjectKey && n.to === subject.phoneOnFile)) return;
   texts.notices.push({ subjectKey: subject.subjectKey, to: subject.phoneOnFile, sent: false });
+  draft.emit("contact.notice_owed", "code", {});
 }
 
 /** Whether the call still owes a security notice of a contact change. */
@@ -310,22 +317,24 @@ export function noticeDue(record: CallRecord): boolean {
 
 /**
  * Texts each owed security notice of a contact change to the number on file before that change,
- * once each. Nobody can turn them off: they alert the real customer, they are not receipts. A
- * retry after a failure sends again with the same idempotency key, one key per notice.
+ * once each, in order. Nobody can turn them off: they alert the real customer, they are not
+ * receipts. Each is read fresh before it is sent, so a notice another write already sent is not
+ * sent again. A retry after a failure sends again with the same idempotency key, one key per notice.
  */
-export async function sendContactNotice(rt: EngineRuntime, record: CallRecord): Promise<void> {
-  const callId = record.state.callId;
-  const slice = record.modules[TRACE] as unknown as TraceSlice;
-  for (const [index, notice] of slice.texts.notices.entries()) {
-    if (notice.sent) continue;
+export async function sendContactNotice(rt: EngineRuntime, callId: string): Promise<void> {
+  for (;;) {
+    const record = await rt.read(callId);
+    const index = textsOf(record).notices.findIndex((n) => !n.sent);
+    if (index === -1) return;
+    const slice = record.modules[TRACE] as unknown as TraceSlice;
     await rt.adapter("messages").sendText({
-      to: notice.to,
+      to: slice.texts.notices[index]!.to,
       body: contactNoticeText(record.locale, slice.businessName),
       purpose: "contact_changed",
       idempotencyKey: rt.idempotencyKey(callId, "contact-notice", String(index), "text"),
     });
     await rt.update(callId, (draft) => {
-      const kept = draft.slice<TraceSlice>(TRACE).texts.notices[index]!;
+      const kept = textsOf(draft.record).notices[index]!;
       // Two processes can both send (one text, by its key): the first records it, once.
       if (kept.sent) return;
       kept.sent = true;

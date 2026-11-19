@@ -31,8 +31,12 @@ All notable changes to this project are documented here. The format follows
 - Receipt link texted to the caller (PRV-10): `textReceiptLink(callId, url)` after a money, contact
   or access step, when the flow's `trace.receipt` step has `textLink` and the caller consented, at
   most once, to the number on file; each contact change always texts a security notice to the
-  changed subject's number on file before the change, never twice to the same subject and number. New message purposes `receipt_link` and `contact_changed`, Trace's
-  `businessName` setting, events `receipt.link_texted` and `contact.notice_sent`.
+  changed subject's number on file before the change, never twice to the same subject and number.
+  The notice is owed in the same write as the change (a flow step, or an outside module's
+  `ModuleCallView.contactChanged()` in or outside a flow), sent right after it, and retried by the
+  call's next write, `endCall` and `Engine.sweepAlerts()`, so a call that never ends still alerts.
+  New message purposes `receipt_link` and `contact_changed`, Trace's `businessName` setting, events
+  `receipt.link_texted`, `contact.notice_owed` and `contact.notice_sent`.
 
 ### Changed
 

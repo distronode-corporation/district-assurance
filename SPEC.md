@@ -283,6 +283,7 @@ answer on file, a phone number, a link or card data.
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
 | `receipt.link_texted` | `actions` (the classes: `money`, `contact`, `access`) |
+| `contact.notice_owed` | none: saved in the same write as the contact change that owes it |
 | `contact.notice_sent` | none |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
 
@@ -420,10 +421,14 @@ AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the a
 the currency's own decimals.
 
 **Actions.** When a flow step whose needed scope is of class money, contact or access completes
-(section 4), the call notes the class, once each. Each contact step also keeps the matched
-subject and its number on file as Badge read it when verification started, before the change,
-unless the call already kept that same subject with that same number; Badge's keypad or PIN match
-always stands then, since such a step follows a level 2 verification.
+(section 4), the call notes the class, once each. An outside module that changes contact details,
+in a flow or outside one, calls `contactChanged()` on its `ModuleCallView` in that same
+`updateModule` change, which notes a contact action the same way; with no keypad or PIN match
+standing it is refused (`precondition_failed`) and the module's change is not saved, since there
+is no number to alert. Each contact action also keeps the matched subject and its number on file
+as Badge read it when verification started, before the change, unless the call already kept that
+same subject with that same number; Badge's keypad or PIN match always stands then, since such a
+step follows a level 2 verification. Keeping one writes `contact.notice_owed` in the same write.
 
 **Receipt link** (purpose `receipt_link`). `textReceiptLink(callId, url)` texts the host's
 capability link to an ended call's receipt (section 12, an `https` URL of at most 512 characters
@@ -443,9 +448,17 @@ same idempotency key; the ledger gets one `receipt.link_texted`.
 
 **Contact change notice** (purpose `contact_changed`). Each subject and number a contact step kept
 is owed a security notice, whatever the caller answered about receipts: it is not a receipt and
-has no setting. `endCall` sends each, in order, to the number kept before the change, before
-signing the receipt, with one idempotency key per notice; if a text fails, `endCall` throws, and
-calling it again sends the notices still owed (and the receipt) without ending the call again. A
+has no setting. Each is sent, in order, to the number kept before the change, with one
+idempotency key per notice, as soon as the write that owes it is saved; a failed text leaves it
+owed (the change itself still succeeds), and the call's next write, `endCall` or `sweepAlerts()`
+sends it. `endCall` sends any still owed before signing the receipt; if a text fails there,
+`endCall` throws, and calling it again sends the notices still owed (and the receipt) without
+ending the call again. `sweepAlerts()` (the host runs it on a schedule) finds this workspace's
+calls with a `contact.notice_owed` not matched by a `contact.notice_sent` on the ledger, reading
+the whole ledger once, and sends what each still owes, ended or not, so a call that is never ended
+still alerts; it returns `{sent, failed}` (call ids; a failed one stays owed, and a call the host's
+session retention removed is reported as failed). A debt saved but not yet on the ledger (a ledger
+outage) is found once the call's next write or `flushLedger` appends it. A
 call that ended with ledger entries still pending (a notice or receipt saved, then not appended)
 is finished the same way: `endCall` appends them and returns the kept receipt, or null. "BUSINESS: the contact details on your account were changed during a call.
 If it was not you, contact us right away." / "BUSINESS : les coordonnées de votre compte ont été

@@ -28,6 +28,7 @@ export const ENGINE_EVENTS = [
   "call.ended",
   "receipt.issued",
   "receipt.link_texted",
+  "contact.notice_owed",
   "contact.notice_sent",
   "module.event",
 ] as const;
