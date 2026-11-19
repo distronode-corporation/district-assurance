@@ -607,7 +607,8 @@ intent is kept on it and bound to the call (`payment_intent:<id>`), after the wr
 every later outcome for the link, so a lost binding is made when the event comes again.
 `applyDisputeOutcome` finds the payment by it and records the dispute's status and amount
 (`payment.disputed`). A dispute that names no payment intent is not applied (`{applied: false}`);
-one whose payment intent is not bound yet answers `{applied: false, unbound: true}`, since
+one whose payment intent is not bound yet answers `{applied: false, unbound: true}` (a connected
+account's event never does: it answers `{applied: false}` and is acknowledged), since
 webhooks come in any order and the payment's own event may still be on its way: the host has it
 delivered again (the reference server answers 503 and does not remember the event, so Stripe
 retries it within its own retry window). A connected account's dispute event is ignored
@@ -773,7 +774,8 @@ receipt never verifies as an access grant. A host's module can never take a buil
    (signed, not expired, and `reserved`, `delivered` or `unknown`), and the engine then asks each
    one's controller to withdraw it with its optional `revoke({grant, target, callId,
    idempotencyKey})` (key `[workspaceId, callId, grantId, "revoke"]`), once, recording
-   `access.revoked` `{grantId, outcome: "revoked" | "failed"}`. A controller without `revoke` is
+   `access.revoked` `{grantId, outcome: "revoked" | "failed"}`; a taint whose ledger append then
+   fails still asks, and `markUntrusted` throws that failure after. A controller without `revoke` is
    asked nothing and the grant runs to its expiry. A grant already delivered and acted on cannot be
    pulled back: a door that opened stays opened, and `revoke` only stops what has not happened yet
    (an access code not yet redeemed, a credential not yet used). A config changed by another

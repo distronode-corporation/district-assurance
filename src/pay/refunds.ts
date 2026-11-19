@@ -279,7 +279,8 @@ export async function applyDisputeOutcome(rt: EngineRuntime, outcome: DisputeOut
   const callId = await rt.resolveRef(paymentIntentRef(paymentIntentId));
   // Not bound yet: the payment's own outcome may still be on its way (webhooks come in any order).
   // `unbound` tells the host to have the event delivered again rather than drop it.
-  if (callId === null) return { applied: false, unbound: true };
+  // A connected account's event is never the platform's to wait for: acknowledged, not retried.
+  if (callId === null) return account === undefined ? { applied: false, unbound: true } : { applied: false };
   return rt.update(callId, (draft) => {
     const slice = draft.slice<PaylinkSlice>(PAYLINK);
     const payment = slice.payments.find((p) => p.paymentIntentId === paymentIntentId)!;

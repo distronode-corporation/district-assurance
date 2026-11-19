@@ -302,7 +302,7 @@ describe("refunds: disputes", () => {
       await connect.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid", paymentIntentId: "pi_1", account: ACCT }),
       { applied: true, callId: connectCall, status: "paid" },
     );
-    assert.deepEqual(await connect.engine.applyDisputeOutcome(dispute({ account: ACCT })), { applied: false, unbound: true }, "never bound");
+    assert.deepEqual(await connect.engine.applyDisputeOutcome(dispute({ account: ACCT })), { applied: false }, "never bound, and a connected account's event is not retried");
     await assert.rejects(connect.engine.refundPayment({ callId: connectCall, paymentId: "pay_1", reason: "duplicate" }), rejects("precondition_failed", /business's/));
     assert.equal(connect.payments.refunds.length, 0);
   });

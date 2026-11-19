@@ -254,17 +254,25 @@ export class Engine {
     // A grant that may still be acted on when the taint lands is written down with it, and its
     // controller is asked to withdraw it where it can (Gate, SPEC.md section 17).
     let tainted: gate.AccessRecord[] = [];
-    await this.#update(callId, (draft) => {
-      draft.apply({ type: "untrusted_content", source });
-      for (const module of this.registry.list()) {
-        const name = module.manifest.name;
-        const slice = draft.record.modules[name];
-        if (module.onUntrusted !== undefined && slice !== undefined) draft.record.modules[name] = module.onUntrusted(slice);
-      }
-      draft.emit("session.tainted", "code", { source });
-      tainted = gate.noteTaintedGrants(this.#rt, draft);
-    });
+    // A write saved whose ledger flush then failed still asks for the revokes: the taint stands
+    // either way, and the controllers hear of it once. The write's error is thrown after.
+    let failure: { error: unknown } | null = null;
+    try {
+      await this.#update(callId, (draft) => {
+        draft.apply({ type: "untrusted_content", source });
+        for (const module of this.registry.list()) {
+          const name = module.manifest.name;
+          const slice = draft.record.modules[name];
+          if (module.onUntrusted !== undefined && slice !== undefined) draft.record.modules[name] = module.onUntrusted(slice);
+        }
+        draft.emit("session.tainted", "code", { source });
+        tainted = gate.noteTaintedGrants(this.#rt, draft);
+      });
+    } catch (error) {
+      failure = { error };
+    }
     await gate.revokeTainted(this.#rt, callId, tainted);
+    if (failure !== null) throw failure.error;
   }
 
   /** Keypad entry is open: the host pauses transcripts, cuts audio to the model and holds listen-in. */
@@ -484,7 +492,12 @@ export class Engine {
     const failed: string[] = [];
     for (const [name, controller] of Object.entries(this.#adapters.access ?? {})) {
       if (typeof controller.flush !== "function") continue;
-      await controller.flush({ workspaceId: this.workspaceId }).catch(() => failed.push(name));
+      // try, not .catch: a flush that throws before it returns a promise is a failure too.
+      try {
+        await controller.flush({ workspaceId: this.workspaceId });
+      } catch {
+        failed.push(name);
+      }
     }
     return { failed };
   }
@@ -573,7 +586,12 @@ export class Engine {
     // What an access controller still owes the ledger for this call is written now, before the
     // receipt's head is taken; one that fails is left to the next sweep (it opens nothing).
     for (const controller of Object.values(this.#adapters.access ?? {})) {
-      if (typeof controller.flush === "function") await controller.flush({ workspaceId: this.workspaceId, callId }).catch(() => undefined);
+      if (typeof controller.flush !== "function") continue;
+      try {
+        await controller.flush({ workspaceId: this.workspaceId, callId });
+      } catch {
+        // Left to the next sweep: a spent code opens nothing meanwhile.
+      }
     }
     // No new payment can start once the call ended, so this closes every link the call will have.
     await paylink.expireOpenPayments(this.#rt, ended);
