@@ -296,6 +296,7 @@ describe("Engine verify", () => {
     assert.equal(t.messages.sent.length, 0);
     await t.engine.submitKeypad(callId, { dob: DOB });
     assert.deepEqual(await t.engine.sendTextCode(callId), { sent: true });
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
     assert.equal(t.messages.sent.length, 1);
     assert.deepEqual({ to: t.messages.sent[0]!.to, purpose: t.messages.sent[0]!.purpose }, { to: PHONE_ON_FILE, purpose: "one_time_code" });
   });

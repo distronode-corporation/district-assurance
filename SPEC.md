@@ -161,8 +161,12 @@ A send counted at step 2 stays counted when step 3 refuses it, or when the text 
 + ":" + code)`, valid for 10 minutes and 5 tries, and replaces any earlier code on the call.
 Whether it sent or was refused, `sendTextCode` returns `{sent: true}`: a refused send leaves the
 call with a code that has no digest (it never matches) and the same expiry and tries, unless a code
-from an earlier send is still live, which it keeps. The ledger says which (`verification.code_sent`,
-or `verification.code_refused` with `reason`: `country`, `subject_limit` or `number_limit`).
+from an earlier send is still live, which it keeps. It answers without waiting for the SMS adapter:
+a sent send and a refused one take the same store steps up to the reply (a country refusal skips
+the `CodeStore`, and a subject refusal the number's count), and the text goes out after it. The
+ledger then says which (`verification.code_sent`, or `verification.code_refused` with `reason`:
+`country`, `subject_limit`, `number_limit`, or `send_failed` when the SMS adapter failed; the send
+stays counted and the host hears nothing of it).
 
 `checkTextCode(callId, code)` counts and judges a try in one write and records a `text_code`
 factor, passed or not. An entry that is not 6 ASCII digits is a try and fails. After the 5th try,
@@ -300,7 +304,7 @@ answer on file, a phone number, a link or card data.
 | `verification.carrier_checked` | `checked`, `textCodeTrusted`, `identityMatch` |
 | `identity.link_sent` | none |
 | `verification.code_sent` | none |
-| `verification.code_refused` | `reason`: `country`, `subject_limit` or `number_limit` |
+| `verification.code_refused` | `reason`: `country`, `subject_limit`, `number_limit` or `send_failed` |
 | `verification.finished` | `level`, `methods`, `discounted` |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt` |
 | `session.tainted` | `source` |

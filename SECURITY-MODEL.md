@@ -71,8 +71,9 @@ call (tested). Texted codes go only to the country calling codes the policy list
 list (tested); at most 5 per subject and 10 per calling number in 24 hours, 60 seconds apart,
 counted across calls and engines in the shared `CodeStore` before the text goes out (tested). A
 refused send answers exactly like a sent one, with a code that never matches and the same tries
-and expiry, so the line never tells a caller that a limit was hit or which one (tested); the
-ledger says why. A withheld calling number is held to the per-subject limit only.
+and expiry, and in the same steps: the answer never waits for the SMS adapter, which runs after the
+reply, so its time cannot tell a sent code from a refused one (tested). The line never tells a
+caller that a limit was hit or which one (tested); the ledger says why. A withheld calling number is held to the per-subject limit only.
 
 ### Guessing a texted code
 

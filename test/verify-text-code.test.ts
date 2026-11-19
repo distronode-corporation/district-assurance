@@ -33,6 +33,17 @@ async function matchedCall(t: TestEngine, input: { account?: string; callingNumb
   return callId;
 }
 
+/** Sends a code and lets the text go out: it is sent after the reply. */
+async function sendCode(t: TestEngine, callId: string): Promise<{ sent: true }> {
+  const answer = await t.engine.sendTextCode(callId);
+  await settle();
+  return answer;
+}
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+}
+
 function lastCode(t: TestEngine): string {
   return /\d{6}/.exec(t.messages.sent.at(-1)!.body)![0];
 }
@@ -64,7 +75,7 @@ describe("texted codes", () => {
     const t = codeSetup();
     for (const locale of ["en", "fr"] as const) {
       const callId = await matchedCall(t, { locale });
-      assert.deepEqual(await t.engine.sendTextCode(callId), { sent: true });
+      assert.deepEqual(await sendCode(t, callId), { sent: true });
       const code = lastCode(t);
       assert.equal(t.messages.sent.at(-1)!.body, textCodeText(locale, code));
       assert.equal(t.messages.sent.at(-1)!.to, PHONE_ON_FILE);
@@ -80,7 +91,7 @@ describe("texted codes", () => {
   it("records a text_code factor that counts toward level 2 only under the policy's carrier rule", async () => {
     const t = codeSetup();
     const callId = await matchedCall(t);
-    await t.engine.sendTextCode(callId);
+    await sendCode(t, callId);
     const code = lastCode(t);
     assert.deepEqual(await t.engine.checkTextCode(callId, code), { matched: true, locked: false });
     assert.deepEqual((await t.engine.finishVerification(callId)).level, 1, "no carrier answer: the code does not count");
@@ -91,7 +102,7 @@ describe("texted codes", () => {
     const clean = await matchedCall(t);
     await t.engine.checkCarrier(clean);
     t.clock.advance(MINUTE);
-    await t.engine.sendTextCode(clean);
+    await sendCode(t, clean);
     await t.engine.checkTextCode(clean, lastCode(t));
     assert.equal((await t.engine.finishVerification(clean)).level, 2);
   });
@@ -100,10 +111,10 @@ describe("texted codes", () => {
     const t = codeSetup();
     const first = await matchedCall(t);
     const second = await matchedCall(t, { callingNumber: CALLING });
-    await t.engine.sendTextCode(first);
+    await sendCode(t, first);
     const code = lastCode(t);
     t.clock.advance(MINUTE);
-    await t.engine.sendTextCode(second);
+    await sendCode(t, second);
     const other = lastCode(t);
     if (other !== code) assert.deepEqual(await t.engine.checkTextCode(second, code), { matched: false, locked: false }, "another call's code");
     assert.deepEqual(await t.engine.checkTextCode(first, code), { matched: true, locked: false });
@@ -114,7 +125,7 @@ describe("texted codes", () => {
   it("allows 5 tries, a malformed entry being one, and then judges nothing, not even the right code", async () => {
     const t = codeSetup();
     const callId = await matchedCall(t);
-    await t.engine.sendTextCode(callId);
+    await sendCode(t, callId);
     const code = lastCode(t);
     assert.deepEqual(await t.engine.checkTextCode(callId, "12"), { matched: false, locked: false });
     assert.deepEqual(await t.engine.checkTextCode(callId, `${code}0`), { matched: false, locked: false });
@@ -124,14 +135,14 @@ describe("texted codes", () => {
     assert.equal((await events(t, "verification.factor")).filter((d) => (d as { kind: string }).kind === "text_code").length, 5);
     // A new send gives a new code and new tries.
     t.clock.advance(MINUTE);
-    await t.engine.sendTextCode(callId);
+    await sendCode(t, callId);
     assert.deepEqual(await t.engine.checkTextCode(callId, lastCode(t)), { matched: true, locked: false });
   });
 
   it("expires after 10 minutes", async () => {
     const t = codeSetup();
     const callId = await matchedCall(t);
-    await t.engine.sendTextCode(callId);
+    await sendCode(t, callId);
     const code = lastCode(t);
     t.clock.advance(10 * MINUTE - 1);
     assert.deepEqual(await t.engine.checkTextCode(callId, wrong(code)), { matched: false, locked: false });
@@ -143,7 +154,7 @@ describe("texted codes", () => {
     const t = codeSetup();
     const callId = await matchedCall(t);
     await assert.rejects(t.engine.checkTextCode(callId, "123456"), rejects("precondition_failed", /no code was sent/));
-    await t.engine.sendTextCode(callId);
+    await sendCode(t, callId);
     await t.engine.finishVerification(callId);
     await assert.rejects(t.engine.checkTextCode(callId, "123456"), rejects("invalid_transition"));
     await assert.rejects(t.engine.sendTextCode(callId), rejects("invalid_transition", /while verifying, not while open/));
@@ -159,12 +170,12 @@ describe("texted codes", () => {
     const t = codeSetup();
     t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: "22222222", phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } }));
     const tainted = await matchedCall(t);
-    await t.engine.sendTextCode(tainted);
+    await sendCode(t, tainted);
     await t.engine.markUntrusted(tainted, "crm_note");
     await assert.rejects(t.engine.checkTextCode(tainted, lastCode(t)), rejects("precondition_failed", /no code was sent/));
     const moved = await matchedCall(t, { callingNumber: CALLING });
     t.clock.advance(MINUTE);
-    await t.engine.sendTextCode(moved);
+    await sendCode(t, moved);
     await t.engine.finishVerification(moved);
     await t.engine.beginVerification(moved, { accountNumber: "22222222" });
     await assert.rejects(t.engine.checkTextCode(moved, lastCode(t)), rejects("precondition_failed", /no code was sent/));
@@ -224,7 +235,7 @@ describe("texted codes", () => {
   it("judges expiry by the clock when the check is written, not when it started", async () => {
     const t = codeSetup();
     const callId = await matchedCall(t);
-    await t.engine.sendTextCode(callId);
+    await sendCode(t, callId);
     const code = lastCode(t);
     t.clock.advance(10 * MINUTE - 1000);
     const get = t.sessions.get.bind(t.sessions);
@@ -244,29 +255,29 @@ describe("send limits", () => {
   it("allows 5 codes per subject per 24 hours, across calls", async () => {
     const t = codeSetup();
     for (let i = 0; i < 5; i++) {
-      await t.engine.sendTextCode(await matchedCall(t));
+      await sendCode(t, await matchedCall(t));
       t.clock.advance(MINUTE);
     }
     const sixth = await matchedCall(t);
-    assert.deepEqual(await t.engine.sendTextCode(sixth), { sent: true });
+    assert.deepEqual(await sendCode(t, sixth), { sent: true });
     assert.equal(t.messages.sent.length, 5);
     assert.deepEqual(await events(t, "verification.code_refused"), [{ reason: "subject_limit" }]);
     t.clock.advance(TEXT_CODE_LIMITS.subject.windowSeconds * 1000 - 5 * MINUTE);
-    await t.engine.sendTextCode(await matchedCall(t));
+    await sendCode(t, await matchedCall(t));
     assert.equal(t.messages.sent.length, 6, "the first send left the window");
   });
 
   it("waits 60 seconds between sends, and a refused send keeps the live code", async () => {
     const t = codeSetup();
     const callId = await matchedCall(t);
-    await t.engine.sendTextCode(callId);
+    await sendCode(t, callId);
     const code = lastCode(t);
     t.clock.advance(MINUTE - 1);
-    assert.deepEqual(await t.engine.sendTextCode(callId), { sent: true });
+    assert.deepEqual(await sendCode(t, callId), { sent: true });
     assert.equal(t.messages.sent.length, 1);
     assert.deepEqual(await t.engine.checkTextCode(callId, code), { matched: true, locked: false }, "the live code still works");
     t.clock.advance(1);
-    await t.engine.sendTextCode(callId);
+    await sendCode(t, callId);
     assert.equal(t.messages.sent.length, 2);
   });
 
@@ -275,22 +286,22 @@ describe("send limits", () => {
     const accounts = ["11111111", "22222222", "33333333"];
     for (const accountNumber of accounts) t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } }));
     for (let i = 0; i < TEXT_CODE_LIMITS.number.max; i++) {
-      await t.engine.sendTextCode(await matchedCall(t, { account: accounts[Math.floor(i / 5)]!, callingNumber: CALLING }));
+      await sendCode(t, await matchedCall(t, { account: accounts[Math.floor(i / 5)]!, callingNumber: CALLING }));
       t.clock.advance(MINUTE);
     }
     assert.equal(t.messages.sent.length, 10);
-    await t.engine.sendTextCode(await matchedCall(t, { account: accounts[2]!, callingNumber: CALLING }));
+    await sendCode(t, await matchedCall(t, { account: accounts[2]!, callingNumber: CALLING }));
     assert.equal(t.messages.sent.length, 10);
     assert.deepEqual(await events(t, "verification.code_refused"), [{ reason: "number_limit" }]);
     t.clock.advance(MINUTE);
-    await t.engine.sendTextCode(await matchedCall(t, { account: accounts[2]!, callingNumber: "+15555550198" }));
+    await sendCode(t, await matchedCall(t, { account: accounts[2]!, callingNumber: "+15555550198" }));
     assert.equal(t.messages.sent.length, 11, "another number, same subject");
   });
 
   it("texts only to countries the policy allows, and counts nothing it refuses for that", async () => {
     const t = codeSetup((c) => (c.policy.textCodeCountryCodes = ["33", "1204"]));
     const callId = await matchedCall(t);
-    assert.deepEqual(await t.engine.sendTextCode(callId), { sent: true });
+    assert.deepEqual(await sendCode(t, callId), { sent: true });
     assert.equal(t.messages.sent.length, 0);
     assert.deepEqual(await events(t, "verification.code_refused"), [{ reason: "country" }]);
     t.engine.configure(testConfig((c) => {
@@ -298,7 +309,7 @@ describe("send limits", () => {
       c.policy.textCodeCountryCodes = ["1555"];
     }));
     for (let i = 0; i < 5; i++) {
-      await t.engine.sendTextCode(await matchedCall(t));
+      await sendCode(t, await matchedCall(t));
       t.clock.advance(MINUTE);
     }
     assert.equal(t.messages.sent.length, 5, "the refusal by country used none of the subject's five");
@@ -308,7 +319,7 @@ describe("send limits", () => {
     const run = async (refuse: boolean) => {
       const t = codeSetup((c) => (c.policy.textCodeCountryCodes = refuse ? ["44"] : ["1"]));
       const callId = await matchedCall(t);
-      const answers: unknown[] = [await t.engine.sendTextCode(callId)];
+      const answers: unknown[] = [await sendCode(t, callId)];
       // The caller keys a wrong code: anything, when none was texted.
       const entry = refuse ? "000000" : wrong(lastCode(t));
       for (let i = 0; i < 6; i++) answers.push(await t.engine.checkTextCode(callId, entry));
@@ -318,10 +329,56 @@ describe("send limits", () => {
     // And the same expiry.
     const t = codeSetup((c) => (c.policy.textCodeCountryCodes = ["44"]));
     const callId = await matchedCall(t);
-    await t.engine.sendTextCode(callId);
+    await sendCode(t, callId);
     assert.deepEqual(await t.engine.checkTextCode(callId, "000000"), { matched: false, locked: false });
     t.clock.advance(10 * MINUTE);
     assert.deepEqual(await t.engine.checkTextCode(callId, "000000"), { matched: false, locked: true });
+  });
+
+  it("answers a sent send and a refused one with the same steps, never waiting for the SMS adapter (#79 review)", async () => {
+    /** The store reads and writes a send makes before it answers, in order, with the SMS adapter never answering. */
+    const trace = async (refuse: boolean) => {
+      const steps: string[] = [];
+      // A refused send: the subject's limit is used up.
+      const store = new MemoryCodeStore();
+      const codes = { take: async (input: Parameters<MemoryCodeStore["take"]>[0]) => (steps.push("codes.take"), refuse ? false : store.take(input)) };
+      const t = codeSetup(undefined, codes as unknown as MemoryCodeStore);
+      const callId = await matchedCall(t);
+      steps.length = 0;
+      const get = t.sessions.get.bind(t.sessions);
+      const cas = t.sessions.compareAndSet.bind(t.sessions);
+      t.sessions.get = async (...args) => (steps.push("session.get"), get(...args));
+      t.sessions.compareAndSet = async (...args) => (steps.push("session.write"), cas(...args));
+      let asked = false;
+      t.messages.sendText = () => ((asked = true), new Promise(() => undefined));
+      assert.deepEqual(await t.engine.sendTextCode(callId), { sent: true });
+      const before = [...steps];
+      assert.equal(asked, false, "the SMS adapter runs only after the reply");
+      await settle();
+      assert.equal(asked, !refuse);
+      return before;
+    };
+    assert.deepEqual(await trace(true), await trace(false));
+  });
+
+  it("writes send_failed to the ledger when the SMS adapter fails, and nothing reaches the caller", async () => {
+    const t = codeSetup();
+    const callId = await matchedCall(t);
+    t.messages.sendText = async () => {
+      throw new Error("sms down");
+    };
+    assert.deepEqual(await sendCode(t, callId), { sent: true });
+    assert.deepEqual(await events(t, "verification.code_refused"), [{ reason: "send_failed" }]);
+    assert.deepEqual(await events(t, "verification.code_sent"), []);
+    // A session store that fails for the ledger write after the reply raises nothing unhandled.
+    t.clock.advance(60_000);
+    t.messages.sendText = async () => {
+      t.sessions.get = async () => {
+        throw new Error("session store down");
+      };
+      return { messageId: "m" };
+    };
+    assert.deepEqual(await sendCode(t, callId), { sent: true });
   });
 
   it("works in a flow whose verify step lists text_code", async () => {
@@ -332,7 +389,7 @@ describe("send limits", () => {
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     await t.engine.submitKeypad(callId, { dob: DOB });
     await t.engine.checkCarrier(callId);
-    await t.engine.sendTextCode(callId);
+    await sendCode(t, callId);
     await t.engine.checkTextCode(callId, lastCode(t));
     assert.deepEqual(await t.engine.finishVerification(callId), { level: 2, scopes: ["payment.request"] });
     assert.equal((await t.engine.flowPosition(callId))!.status, "completed");

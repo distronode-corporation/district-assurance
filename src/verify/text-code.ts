@@ -33,8 +33,8 @@ export const TEXT_CODE_LIMITS: Readonly<Record<CodeSendKey["scope"], { max: numb
   number: { max: 10, windowSeconds: 86_400, minIntervalSeconds: 60 },
 };
 
-/** Why a send was refused. Written to the ledger only; the caller is never told. */
-export type TextCodeRefusal = "country" | "subject_limit" | "number_limit";
+/** Why a send was refused, or that the SMS adapter failed it. Written to the ledger only; the caller is never told. */
+export type TextCodeRefusal = "country" | "subject_limit" | "number_limit" | "send_failed";
 
 /** The code a call holds, in Badge's part of the call record. */
 export interface TextCodeState {
@@ -94,7 +94,8 @@ async function refusalFor(rt: EngineRuntime, phoneOnFile: string, subjectKey: st
  * country allow-list or a limit leaves the call holding a code that never matches (or the code
  * still live from an earlier send), so the caller hears the same thing and gets the same tries.
  * Each send is counted against the limits before the text goes out; a send that fails after that
- * stays counted.
+ * stays counted. The answer never waits for the SMS adapter: a sent code and a refused one take the
+ * same steps up to the reply, and the text goes out, and the ledger entry is written, after it.
  */
 export async function sendTextCode(rt: EngineRuntime, callId: string): Promise<{ sent: true }> {
   const before = await rt.read(callId);
@@ -114,15 +115,25 @@ export async function sendTextCode(rt: EngineRuntime, callId: string): Promise<{
       slice.textCode = { digest: code === null ? null : codeDigest(rt, callId, code), expiresAt, tries: 0 };
     }
   });
+  // After the reply, for a sent code and a refused one alike, so the SMS adapter's time never says which.
+  setImmediate(() => void finishSend(rt, callId, code, refusal, { to: subject.phoneOnFile, locale: before.locale, sendId }).catch(() => undefined));
+  return { sent: true };
+}
+
+/** Texts the code, if the send was not refused, then writes what happened to the ledger. */
+async function finishSend(rt: EngineRuntime, callId: string, code: string | null, refusal: TextCodeRefusal | null, send: { to: string; locale: Locale; sendId: string }): Promise<void> {
+  let outcome = refusal;
   if (code !== null) {
-    const body = textCodeText(before.locale, code);
-    await rt.adapter("messages").sendText({ to: subject.phoneOnFile, body, purpose: "one_time_code", idempotencyKey: rt.idempotencyKey(callId, "text_code", sendId) });
+    const body = textCodeText(send.locale, code);
+    await rt
+      .adapter("messages")
+      .sendText({ to: send.to, body, purpose: "one_time_code", idempotencyKey: rt.idempotencyKey(callId, "text_code", send.sendId) })
+      .catch(() => (outcome = "send_failed"));
   }
   await rt.update(callId, (draft) => {
-    if (refusal === null) draft.emit("verification.code_sent", "code", {});
-    else draft.emit("verification.code_refused", "code", { reason: refusal });
+    if (outcome === null) draft.emit("verification.code_sent", "code", {});
+    else draft.emit("verification.code_refused", "code", { reason: outcome });
   });
-  return { sent: true };
 }
 
 function isLive(held: TextCodeState | null, now: Date): boolean {
