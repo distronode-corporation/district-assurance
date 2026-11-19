@@ -69,6 +69,7 @@ How the page is kept small and safe:
 | `src/ui.ts` | `npm run ui`: the server with the demo UI |
 | `public/` | the page: `index.html`, `style.css`, `app.js`, and `receipt-check.js` (no DOM, tested in Node) |
 | `src/stripe-adapters.ts` | Stripe Identity and Checkout adapters, planned (VER-5, PAY-1) |
+| `src/carrier-adapters.ts` | Twilio Lookup and Telnyx Number Lookup carrier signal adapters (VER-4) |
 
 ## Trying it with your own Stripe test account
 
@@ -90,10 +91,48 @@ Use test-mode keys only. Never commit a secret; the server reads them from the e
 
 ## Carrier signals
 
-Planned (VER-4), Twilio and Telnyx. What each offers, to be confirmed per country when the adapters
-are built. `CarrierSignals` is vendor-neutral, so another carrier can be added as its own adapter.
+`src/carrier-adapters.ts` (VER-4) has two `CarrierSignals` adapters. They call the vendors' REST
+APIs with `fetch`, and their tests replay fixture responses from a local fake server, never the
+network. `CarrierSignals` is vendor-neutral, so another carrier (Sinch, for example) can be added
+as its own adapter.
 
-| Carrier | SIM swap | Porting | Identity match | One-time codes |
-|---|---|---|---|---|
-| Twilio (Lookup, Verify) | yes, with carrier approval | yes | yes, with carrier approval | SMS, voice, WhatsApp |
-| Telnyx (Number Lookup, Verify) | not found | porting status and date, carrier | caller identity (name, address) | SMS, voice, flash call, WhatsApp |
+| Signal | Twilio Lookup v2 (`TwilioLookupSignals`) | Telnyx Number Lookup (`TelnyxNumberLookupSignals`) |
+|---|---|---|
+| SIM swap (`lastSimSwapHoursAgo`) | yes, the `sim_swap` field; needs Twilio's approval and the carrier's, per country | no: always null (none known) |
+| Porting (`lastPortHoursAgo`) | not used: always null | yes, `portability.ported_status` and `ported_date`; no approval |
+| Identity match (`identityMatch`) | yes, the `identity_match` field, when the host gives the identity on file; needs Twilio's approval, per country | no: always `unavailable` |
+| Carrier | not used | yes, name and line type, from `lookup()`, outside the report |
+| Countries this account may use | `TWILIO_LOOKUP_COUNTRIES`, `US` by default | `TELNYX_LOOKUP_COUNTRIES`, `US` by default; Canadian lookups are not enabled on our account yet |
+
+How the answers are read:
+
+- **SIM swap:** hours since `last_sim_swap_date`, else from `swapped_period` (an ISO 8601
+  duration), else 0 when Twilio says only `swapped_in_period: true`. Anything else is no answer.
+- **Identity match:** `match` when `summary_score` is at least `identityMinScore` (80 by
+  default), else `no_match`. The identity comes from the host's `identityFor(phoneNumber)`;
+  without it only SIM Swap is asked. Twilio takes the identity in the query string.
+- **Porting:** `N` is none known; `Y` gives the hours from the end of the port date (Telnyx gives
+  a day, not a time), or 0 without a date; anything else is no answer.
+- Hours are rounded down and never negative.
+
+Every failure answers `checked: false` with nothing known, and never throws into the call: a
+number that is not E.164, an answer for a country outside the allow-list, a timeout (`timeoutMs`,
+3000 by default, over the whole exchange), a network or HTTP error, a field error (a feature the
+account is not approved for, or a country it does not cover), or an answer that cannot be read. A
+Twilio report is `checked` only when every field asked for answered. The optional `onUnavailable`
+listener hears why (`vendor`, `reason`, the HTTP `status` and the vendor's error `code`), never
+the number, the identity or a credential.
+
+Telnyx alone reports no SIM change, so its `checked: true` report has no SIM swap known, which the
+policy reads as no recent SIM change. Before texted codes (VER-2) go live, take SIM swap from
+Twilio, not from Telnyx alone.
+
+Credentials come from the environment only:
+
+```sh
+TWILIO_API_KEY=SK... TWILIO_API_SECRET=...       # or TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN
+TELNYX_API_KEY=KEY...
+```
+
+`twilioLookupFromEnv()` and `telnyxLookupFromEnv()` return the adapter, or null when its
+credentials are not set. The reference server itself still runs on the fake carrier.

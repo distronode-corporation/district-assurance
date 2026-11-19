@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Carrier signal adapters for the reference server (VER-4): Twilio Lookup (SIM Swap, Identity
+  Match) and Telnyx Number Lookup (porting status and date, the carrier), credentials from the
+  environment, failing closed with `checked: false`; tested against a local fake server.
 
 ### Changed
 

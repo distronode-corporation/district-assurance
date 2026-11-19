@@ -62,6 +62,15 @@ texted code counts only when the carrier answered and reported no SIM change or 
 policy window (72 hours by default); without a carrier answer it does not count unless the policy
 says so (tested). A texted code is never a factor alone, and level 3 requires a photo ID plus
 selfie, which a stolen SIM alone does not pass. Contact and payout scopes default to level 3.
+The reference carrier adapters (Twilio Lookup, Telnyx Number Lookup) fail closed: a timeout, an
+error, a country outside their allow-list, a feature the account is not approved for or an answer
+they cannot read gives `checked: false`, never an exception into the call; a SIM change or port
+without a usable time counts as just now, and hours are rounded down (tested against replayed
+responses). Their failure reports carry the vendor's status and error code, never the number or
+the identity on file. **Gap:** Telnyx reports no SIM change, so a Telnyx report says `checked` with
+no SIM swap known; before texted codes ship (VER-2), a host must take the SIM swap signal from
+Twilio, not Telnyx alone. Twilio Identity Match sends the identity on file to Twilio, in the
+request's query string.
 
 ### Text flooding and SMS pumping
 

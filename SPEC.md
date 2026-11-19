@@ -142,6 +142,19 @@ Links go only to the subject's number on file, and only after a `keypad_knowledg
 factor passed since verification last started from nothing. A plug-in's pass does not unlock
 texts.
 
+**Carrier signals.** `checkCarrier` asks the `CarrierSignals` adapter about the number on file
+and gets a `CarrierSignalReport`: `checked`, `lastSimSwapHoursAgo`, `lastPortHoursAgo` (null when
+none is known) and `identityMatch` (`match`, `no_match`, `unavailable`). An `identityMatch` other
+than `unavailable` records the `carrier_identity_match` factor. The reference server's adapters
+(`examples/reference-server/src/carrier-adapters.ts`, VER-4) map Twilio Lookup v2 (SIM Swap, and
+Identity Match by `summary_score`, 80 by default) and Telnyx Number Lookup (porting status and
+date; no SIM swap, identity match `unavailable`). They round hours down and read a change without
+a usable time as 0 hours ago (a Telnyx port date as the end of that day). Any failure gives
+`checked: false` with nothing known, and they never throw: a number that is not E.164, a country
+outside the adapter's allow-list, a timeout (3 seconds by default), a network or HTTP error, a
+feature the account is not approved for, or an answer they cannot read. A Twilio report is
+`checked` only when every field asked for answered.
+
 ## 5. Keypad knowledge
 
 - Subject key: `HMAC-SHA256(knowledgeKey, "subject:" + accountNumber)`, hex. A host may instead
