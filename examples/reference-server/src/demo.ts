@@ -10,38 +10,36 @@
 //    the platform endpoint, without the connected account, is ignored; the Connect one settles it.
 // 4. `entry`: verification to level 2, then Gate signs a 30-second access grant and the
 //    signed-webhook relay adapter posts it to an example door relay on the loopback, which checks
-//    it with Gate's public key and opens the (pretend) door. The same grant sent again is refused.
+//    it with Gate's public key and opens the (pretend) door. The same grant again, and a changed
+//    copy, are refused.
 import type { JsonWebKey } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 import { verifyChain, verifyReceipt, type SignedReceipt } from "../../../src/index.ts";
 import { createReferenceServer } from "./app.ts";
-import { DEMO_CONNECT_SECRET, DEMO_SECRET, SCRIPTS, createDemoWorld, startDoorRelay, type DemoFlow, type ScriptRun } from "./script.ts";
+import { DEMO_CONNECT_SECRET, DEMO_SECRET, SCRIPTS, createDemoWorld, type DemoFlow, type ScriptRun } from "./script.ts";
 
 const log = (step: string, detail = "") => console.log(`  ${step.padEnd(36)} ${detail}`);
 
 export interface DemoResult {
-  /** Every step's own check held. */
+  /** Every step's own check held (script.ts). */
   checksOk: boolean;
   ownerReceipt: SignedReceipt | null;
   receipt: SignedReceipt;
-  connectReceipt: SignedReceipt;
   tamperedFails: boolean;
   chainOk: boolean;
+  /** The connect-mode deposit's receipt. */
+  connectReceipt: SignedReceipt;
+  /** Every door the example relay opened. */
   doorOpened: string[];
 }
 
 export async function runDemo(print = true): Promise<DemoResult> {
   const say = print ? log : () => undefined;
   const world = createDemoWorld();
-  const server = createReferenceServer({
-    engine: world.engine,
-    stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET], connect: [DEMO_CONNECT_SECRET] },
-    clock: world.clock,
-  });
+  const server = createReferenceServer({ engine: world.engine, stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET], connect: [DEMO_CONNECT_SECRET] }, clock: world.t.clock });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   world.base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const relay = await startDoorRelay(world);
   let allOk = true;
   const play = async (flow: DemoFlow): Promise<ScriptRun> => {
     const call: ScriptRun = { callId: "", linkId: "", receipt: null };
@@ -49,8 +47,6 @@ export async function runDemo(print = true): Promise<DemoResult> {
       const outcome = await step.run(world, call);
       allOk &&= outcome.ok;
       say(step.label, outcome.detail);
-      // A later step may need this one's result (a receipt, a link, a grant): stop here.
-      if (!outcome.ok) throw new Error(`the demo's check failed at "${step.label}": ${outcome.detail}`);
     }
     return call;
   };
@@ -68,18 +64,14 @@ export async function runDemo(print = true): Promise<DemoResult> {
     say("prove: receipt signature", valid ? "valid" : "INVALID");
     say("prove: receipt with one change", tamperedFails ? "rejected" : "ACCEPTED");
     const connect = await play("deposit-connect");
-    const connectValid = verifyReceipt(connect.receipt!, keys);
-    say("prove: connect receipt", `${connectValid ? "valid" : "INVALID"}, payment mode ${connect.receipt!.body.payments[0]!.mode}`);
     await play("entry");
-    const lastGrant = (await world.t.ledger.list()).filter((e) => e.event === "module.event" && e.detail.event === "access.delivered").at(-1)!;
-    say("gate: ledger", `grant ${String((lastGrant.detail.detail as Record<string, unknown>).grantId)}, digest only, never the grant`);
     const chain = verifyChain(await world.t.ledger.list());
     say("prove: audit ledger (all calls)", chain.ok ? `${chain.head.seq} entries, hash chain intact` : "BROKEN");
-    if (!allOk || !valid || !tamperedFails || !connectValid || !chain.ok || world.doorOpened.length !== 1) throw new Error("the demo's checks failed");
-    return { checksOk: allOk, ownerReceipt: owner.receipt, receipt, connectReceipt: connect.receipt!, tamperedFails, chainOk: chain.ok, doorOpened: world.doorOpened };
+    if (!allOk || !valid || !tamperedFails || !chain.ok) throw new Error("the demo's checks failed");
+    return { checksOk: allOk, ownerReceipt: owner.receipt, receipt, tamperedFails, chainOk: chain.ok, connectReceipt: connect.receipt!, doorOpened: [...world.doorsOpened] };
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    await new Promise<void>((resolve) => relay.close(() => resolve()));
+    await world.close();
   }
 }
 

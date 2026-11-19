@@ -1,26 +1,27 @@
-// The demo's scripted calls, one step at a time. `npm run demo` runs every step of every flow in a
-// row and prints a line per step; the browser UI (`npm run ui`) runs the same steps one click at a
+// The demo's scripted calls, one step at a time. `npm run demo` runs every step of the four flows
+// in a row and prints a line per step; the browser UI (`npm run ui`) runs the same steps one click at a
 // time. A step takes no input: what the caller keys is fixed here, so the UI can only replay the
 // script, never drive the engine with values of its own.
 //
 // Everything is made up: the accounts, the PIN, the date of birth and the phone numbers (555
 // numbers). The Stripe webhooks are signed here with a demo secret and posted to the reference
-// server over the loopback. Gate's grants go to an example door relay on the loopback.
+// server over the loopback. Gate's door is an example relay on the loopback that checks each grant
+// with Gate's public key before it "opens" (it only records the door's name).
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import {
+  canonicalJson,
   createEngine,
   gateModule,
   signStripePayload,
   subjectKeyFor,
   webhookRelay,
-  type AccessController,
   type Clock,
   type Engine,
   type FlowConfig,
-  type IdGenerator,
   type GateModule,
+  type IdGenerator,
   type PaymentLinks,
   type SignedAccessGrant,
   type SignedReceipt,
@@ -31,175 +32,182 @@ import { demoConfig } from "./flows.ts";
 
 /** The demo's webhook signing secret. Not a secret: it is published here on purpose. */
 export const DEMO_SECRET = "whsec_demo_not_a_secret";
-/** The demo's Connect endpoint secret, published on purpose too. */
+/** The demo's Connect endpoint secret (connect-mode payments), published on purpose too. */
 export const DEMO_CONNECT_SECRET = "whsec_demo_connect_not_a_secret";
-/** The made-up connected account of `deposit-connect`. */
+/** The made-up business account connect-mode deposits are taken on. */
 export const DEMO_ACCOUNT = "acct_demo_business";
-export const DEMO_WORKSPACE = "ws_test";
 const OWNER_ACCOUNT = "10000001";
 const OWNER_PIN = "4826";
 
-/** A payment link as the payments adapter answered it, by payment id. */
+/** A payment link as the payments adapter answered it. */
 export interface CreatedLink {
   paymentId: string;
   linkId: string;
   url: string;
-  connectedAccountId?: string;
-  paymentMethods: readonly string[];
 }
 
+/** What `npm run demo:e2e` changes in the world; the fake demo and the UI pass nothing. */
 export interface DemoWorldOptions {
-  /** The payments adapter. Default: the fake from `createTestEngine`. */
+  /** The payments adapter. Default: the test engine's fake. */
   payments?: PaymentLinks;
-  /** Default: the test engine's fixed clock. The live demo passes the system clock. */
+  /** Default: the test engine's fixed clock. The live demo passes the wall clock (Stripe and the relay read it). */
   clock?: Clock;
-  /** Default: `demoConfig()`. */
-  config?: FlowConfig;
   /**
    * Default: the test engine's sequential ids. The live demo passes random ids: the engine's
    * idempotency keys are built from them, and Stripe keeps a key for 24 hours, so ids that restart
-   * at `call_1` with every run would collide with the last run's requests.
+   * at `call_1` with every run would collide with an earlier run's requests.
    */
   ids?: IdGenerator;
+  /** Default: `demoConfig()`. */
+  config?: FlowConfig;
+  /** Hears each door the example relay opens. */
+  onDoorOpened?: (target: string) => void;
 }
 
-/** One engine with the demo's records, a second engine on the same stores, Gate, and a signed-webhook poster. */
+/** One engine with the demo's records, a second engine on the same stores, and a signed-webhook poster. */
 export interface DemoWorld {
   t: TestEngine;
   /** Process A: the engine the reference server holds. */
   engine: Engine;
   /** Process B: another engine on the same session store and ledger. */
   other: Engine;
+  /** The reference server's base URL, set once it listens. */
+  base: string;
+  /** Signs a Stripe event with the demo secret (the Connect one on the Connect route) and posts it. */
+  stripe(path: string, type: string, object: Record<string, unknown>, account?: string): Promise<Record<string, unknown>>;
+  /** Gate, installed on both engines, with one controller: the relay adapter, to the example door relay. */
   gate: GateModule;
+  /** Every door the example relay opened, in order. */
+  doorsOpened: string[];
+  /** Each grant Gate sent, by grant id, so a step can try to replay it. */
+  sentGrants: Map<string, SignedAccessGrant>;
+  /** The example door relay's unlock URL; starts the relay on the loopback the first time. */
+  relayUrl(): Promise<string>;
+  /** Stops the door relay, if it was started. */
+  close(): Promise<void>;
+  /** The clock both engines and the door relay read. */
   clock: Clock;
   /** The FlowConfig both engines run. */
   config: FlowConfig;
-  /** The reference server's base URL, set once it listens. */
-  base: string;
-  /** The example door relay's unlock URL, set once it listens (`startDoorRelay`). */
-  relayUrl: string;
   /** Every link the payments adapter created, oldest first. */
   links: CreatedLink[];
-  /** Every grant Gate handed the relay adapter, oldest first. */
-  sentGrants: SignedAccessGrant[];
-  /** Every door the relay opened, oldest first. */
-  doorOpened: string[];
-  /** The door each grant opened, by grant id. */
-  openedBy: Map<string, string>;
-  /** Signs a Stripe event with the demo secret (the Connect one on `/connect`) and posts it to the server. */
-  stripe(path: string, type: string, object: Record<string, unknown>, account?: string): Promise<Record<string, unknown>>;
 }
 
 export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
+  const doorsOpened: string[] = [];
   const links: CreatedLink[] = [];
-  const sentGrants: SignedAccessGrant[] = [];
-  let world: DemoWorld | undefined;
-  // Gate's one controller, the signed-webhook relay, pointed at the example door relay once it listens.
-  const lobby: AccessController = {
-    unlock: (input) => {
-      sentGrants.push(input.grant);
-      return webhookRelay({ url: world!.relayUrl }).unlock(input);
-    },
-  };
-  const gate = gateModule({ signer: generateTestSigner("demo-gate-key-1"), controllers: { lobby } });
   const config = options.config ?? demoConfig();
-  const t = createTestEngine({ config, modules: [gate], ...(options.clock === undefined ? {} : { clock: options.clock }) });
-  const clock = options.clock ?? t.clock;
-  const ids = options.ids ?? t.ids;
-  const inner = options.payments ?? t.payments;
-  // Records what the adapter answered, so a step finds its own call's link whatever the adapter.
-  const payments: PaymentLinks = {
-    capabilities: inner.capabilities,
-    async createLink(input) {
-      const link = await inner.createLink(input);
-      links.push({
-        paymentId: input.paymentId,
-        linkId: link.linkId,
-        url: link.url,
-        paymentMethods: input.paymentMethods,
-        ...(input.connectedAccountId === undefined ? {} : { connectedAccountId: input.connectedAccountId }),
-      });
-      return link;
+  const sentGrants = new Map<string, SignedAccessGrant>();
+  let relay: Server | null = null;
+  let url = "";
+  // The relay adapter needs the relay's port, known once it listens: built per unlock.
+  const gate = gateModule({
+    signer: generateTestSigner("demo-gate-key-1"),
+    controllers: {
+      lobby: {
+        unlock: async (input) => {
+          sentGrants.set(input.grant.body.grantId, input.grant);
+          return webhookRelay({ url: await world.relayUrl() }).unlock(input);
+        },
+      },
     },
-    expireLink: (input) => inner.expireLink(input),
-  };
-  const adapters = { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments, signer: generateTestSigner() };
-  const engine = createEngine({ workspaceId: DEMO_WORKSPACE, knowledgeKey: TEST_KNOWLEDGE_KEY, config, modules: [gate], clock, ids, adapters });
-  t.records.putSubject(DEMO_WORKSPACE, testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: OWNER_ACCOUNT, phoneOnFile: "+15555550101", knowledge: {}, pin: OWNER_PIN }));
+  });
+  // A real adapter (the live demo) is wrapped to record what it answered, so a step finds its own
+  // call's link; the fake records its links itself (`t.payments.created`).
+  const real = options.payments;
+  const recorded: PaymentLinks | undefined =
+    real === undefined
+      ? undefined
+      : {
+          capabilities: real.capabilities,
+          async createLink(input) {
+            const link = await real.createLink(input);
+            links.push({ paymentId: input.paymentId, linkId: link.linkId, url: link.url });
+            return link;
+          },
+          expireLink: (input) => real.expireLink(input),
+        };
+  const t = createTestEngine({
+    config,
+    modules: [gate],
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.ids === undefined ? {} : { ids: options.ids }),
+    ...(recorded === undefined ? {} : { adapters: { payments: recorded } }),
+  });
+  const payments = recorded ?? t.payments;
+  const clock = options.clock ?? t.clock;
+  t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: OWNER_ACCOUNT, phoneOnFile: "+15555550101", knowledge: {}, pin: OWNER_PIN }));
   t.records.putSubject(
-    DEMO_WORKSPACE,
+    "ws_test",
     testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: "12345678", phoneOnFile: "+15555550100", knowledge: { dob: "19850214" } }),
   );
   t.carrier.set("+15555550100", { identityMatch: "match" });
-  // A second engine on the same session store and ledger: another process of the same host.
   const other = createEngine({
-    workspaceId: DEMO_WORKSPACE,
+    workspaceId: "ws_test",
     knowledgeKey: TEST_KNOWLEDGE_KEY,
     config,
     modules: [gate],
     clock,
-    ids,
-    adapters: { ...adapters, signer: generateTestSigner() },
+    ids: options.ids ?? t.ids,
+    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments, signer: generateTestSigner() },
   });
   let n = 0;
-  world = {
+  const world: DemoWorld = {
     t,
-    engine,
+    engine: t.engine,
     other,
+    base: "",
     gate,
+    doorsOpened,
+    sentGrants,
     clock,
     config,
-    base: "",
-    relayUrl: "",
     links,
-    sentGrants,
-    doorOpened: [],
-    openedBy: new Map(),
+    async relayUrl() {
+      if (relay === null) {
+        relay = createDoorRelay({
+          workspaceId: "ws_test",
+          audience: "lobby",
+          keys: gate.keys(),
+          clock,
+          open: async (target) => {
+            doorsOpened.push(target);
+            options.onDoorOpened?.(target);
+          },
+        });
+        const started = relay;
+        await new Promise<void>((resolve) => started.listen(0, "127.0.0.1", resolve));
+        // Never keeps a process alive on its own: the demo, the UI and the tests decide when to stop.
+        started.unref();
+        url = `http://127.0.0.1:${(started.address() as AddressInfo).port}/unlock`;
+      }
+      return url;
+    },
+    async close() {
+      const running = relay;
+      if (running !== null) await new Promise<void>((resolve) => running.close(() => resolve()));
+    },
     async stripe(path, type, object, account) {
       const payload = JSON.stringify({ id: `evt_demo_${++n}`, type, livemode: false, data: { object }, ...(account === undefined ? {} : { account }) });
       const secret = path.endsWith("/connect") ? DEMO_CONNECT_SECRET : DEMO_SECRET;
       const header = signStripePayload(payload, secret, Math.floor(clock.now().getTime() / 1000));
-      const res = await fetch(`${world!.base}${path}`, { method: "POST", headers: { "stripe-signature": header }, body: payload });
+      const res = await fetch(`${world.base}${path}`, { method: "POST", headers: { "stripe-signature": header }, body: payload });
       return (await res.json()) as Record<string, unknown>;
     },
   };
   return world;
 }
 
-/**
- * Starts the example door relay on 127.0.0.1 with Gate's public key and the demo's workspace, and
- * points Gate's relay adapter at it. `onOpen` hears each door it opens.
- */
-export async function startDoorRelay(world: DemoWorld, port = 0, onOpen: (target: string) => void = () => undefined): Promise<Server> {
-  const relay = createDoorRelay({
-    audience: "lobby",
-    workspaceId: DEMO_WORKSPACE,
-    keys: world.gate.keys(),
-    clock: world.clock,
-    open: async (target, grant) => {
-      world.doorOpened.push(target);
-      world.openedBy.set(grant.grantId, target);
-      onOpen(target);
-    },
-  });
-  await new Promise<void>((resolve, reject) => {
-    relay.once("error", reject);
-    relay.listen(port, "127.0.0.1", resolve);
-  });
-  world.relayUrl = `http://127.0.0.1:${(relay.address() as AddressInfo).port}/unlock`;
-  return relay;
-}
-
 /** One scripted call in progress. */
 export interface ScriptRun {
   callId: string;
-  /** This call's payment link, once requested: runs share the adapters, so never "the latest link". */
+  /** This call's payment link, once requested: runs share the fakes, so never "the latest link". */
   linkId: string;
   receipt: SignedReceipt | null;
-  /** The engine's deadline for this call's link, once texted. */
-  paymentExpiresAt?: string | null;
-  /** This call's access grant, once Gate sent one: runs share the relay, so never "the latest grant". */
+  /** This call's access grant, once Gate sent one (entry). */
   grantId?: string;
+  /** The engine's deadline for this call's link, once texted (the live demo's payment wait). */
+  paymentExpiresAt?: string | null;
 }
 
 /** What a step did, in one line, and whether the demo's check on it held. */
@@ -275,82 +283,40 @@ const ownerCommand: ScriptStep[] = [
   },
 ];
 
-/** The steps that take a deposit caller to level 2: keypad knowledge, then a carrier identity match. */
-export function verifyToLevel2(flow: string, locale: "en" | "fr" = "en"): ScriptStep[] {
-  return [
-    {
-      label: `${flow}: call started`,
-      async run(w, call) {
-        call.callId = (await w.engine.startCall({ locale, flow })).callId;
-        return pass(call.callId);
-      },
-    },
-    {
-      label: "verify: keypad checks",
-      async run(w, call) {
-        await w.engine.beginVerification(call.callId, { accountNumber: "12345678" });
-        await w.engine.openSensitive(call.callId, "keypad");
-        const keypad = await w.engine.submitKeypad(call.callId, { dob: "19850214" });
-        await w.engine.closeSensitive(call.callId);
-        return { detail: keypad.matched ? "matched (one answer for all fields)" : "no match", ok: keypad.matched };
-      },
-    },
-    {
-      label: "verify: carrier signals",
-      async run(w, call) {
-        const carrier = await w.engine.checkCarrier(call.callId);
-        return pass(`identity match recorded, texted code trusted: ${carrier.textCodeTrusted}`);
-      },
-    },
-    {
-      label: "verify: finished",
-      async run(w, call) {
-        const verified = await w.engine.finishVerification(call.callId);
-        const noOwnerScope = !(await w.engine.authorize(call.callId, "owner.command"));
-        return { detail: `level ${verified.level}, scopes ${verified.scopes.join(", ")}`, ok: verified.level === 2 && noOwnerScope };
-      },
-    },
-  ];
-}
-
-/** Requests the call's payment and finds its own link among the adapter's. */
-export async function requestLink(w: DemoWorld, call: ScriptRun): Promise<{ paymentId: string; expiresAt: string | null; link: CreatedLink }> {
-  const payment = await w.engine.requestPayment(call.callId);
-  const link = w.links.find((l) => l.paymentId === payment.paymentId)!;
-  call.linkId = link.linkId;
-  call.paymentExpiresAt = payment.expiresAt;
-  return { paymentId: payment.paymentId, expiresAt: payment.expiresAt, link };
-}
-
-/** Gate's grant for the call, sent to the door relay. */
-export const openDoor: ScriptStep = {
-  label: "gate: access grant delivered",
-  async run(w, call) {
-    const access = await w.gate.grantAccess(w.engine, call.callId);
-    call.grantId = access.grantId;
-    const opened = w.openedBy.get(access.grantId);
-    return {
-      detail: `${access.grantId}, ${access.status}, door moved: ${access.confirmed}${opened === undefined ? "" : `, opened ${opened}`}`,
-      ok: access.status === "delivered" && access.confirmed,
-    };
-  },
-};
-
-/** Ends the call and keeps its signed receipt. */
-export function endWithReceipt(flow: string): ScriptStep {
-  return {
-    label: `${flow}: call ended`,
-    async run(w, call) {
-      const done = await w.engine.flowPosition(call.callId);
-      call.receipt = await w.engine.endCall(call.callId);
-      return { detail: `flow ${done!.status} (${done!.index} steps), receipt ${call.receipt === null ? "MISSING" : "signed"}`, ok: call.receipt !== null };
-    },
-  };
-}
-
-/** Level 2, a repair form, a deposit by link settled by a signed webhook, a consent, a receipt. */
+/** Keypad and carrier to level 2, a repair form, a deposit by link settled by a signed webhook, a consent, a receipt. */
 const deposit: ScriptStep[] = [
-  ...verifyToLevel2("deposit"),
+  {
+    label: "deposit: call started",
+    async run(w, call) {
+      call.callId = (await w.engine.startCall({ locale: "en", flow: "deposit" })).callId;
+      return pass(call.callId);
+    },
+  },
+  {
+    label: "verify: keypad checks",
+    async run(w, call) {
+      await w.engine.beginVerification(call.callId, { accountNumber: "12345678" });
+      await w.engine.openSensitive(call.callId, "keypad");
+      const keypad = await w.engine.submitKeypad(call.callId, { dob: "19850214" });
+      await w.engine.closeSensitive(call.callId);
+      return { detail: keypad.matched ? "matched (one answer for all fields)" : "no match", ok: keypad.matched };
+    },
+  },
+  {
+    label: "verify: carrier signals",
+    async run(w, call) {
+      const carrier = await w.engine.checkCarrier(call.callId);
+      return pass(`identity match recorded, texted code trusted: ${carrier.textCodeTrusted}`);
+    },
+  },
+  {
+    label: "verify: finished",
+    async run(w, call) {
+      const verified = await w.engine.finishVerification(call.callId);
+      const noOwnerScope = !(await w.engine.authorize(call.callId, "owner.command"));
+      return { detail: `level ${verified.level}, scopes ${verified.scopes.join(", ")}`, ok: verified.level === 2 && noOwnerScope };
+    },
+  },
   {
     label: "file: record confirmed",
     async run(w, call) {
@@ -371,9 +337,10 @@ const deposit: ScriptStep[] = [
   {
     label: "pay: link texted, amount from flow",
     async run(w, call) {
-      const { paymentId } = await requestLink(w, call);
+      const payment = await w.engine.requestPayment(call.callId);
+      call.linkId = w.t.payments.created.find((link) => link.paymentId === payment.paymentId)!.linkId;
       const text = w.t.messages.sent.find((message) => message.body.endsWith(`/${call.linkId}`))!;
-      return pass(`${paymentId}: "${text.body}"`);
+      return pass(`${payment.paymentId}: "${text.body}"`);
     },
   },
   {
@@ -397,17 +364,45 @@ const deposit: ScriptStep[] = [
       return pass("wording fingerprinted, answer yes");
     },
   },
-  endWithReceipt("deposit"),
+  {
+    label: "deposit: call ended",
+    async run(w, call) {
+      const done = await w.engine.flowPosition(call.callId);
+      call.receipt = await w.engine.endCall(call.callId);
+      return { detail: `flow ${done!.status} (${done!.index} steps), receipt ${call.receipt === null ? "MISSING" : "signed"}`, ok: call.receipt !== null };
+    },
+  },
 ];
 
-/** A deposit on the business's own account: the platform endpoint's webhook is ignored, the Connect one settles it. */
+/** Keypad and carrier to level 2, the scopes the flow's verify step names. */
+export async function verifyToLevel2(w: DemoWorld, call: ScriptRun, scope: string): Promise<StepOutcome> {
+  await w.engine.beginVerification(call.callId, { accountNumber: "12345678" });
+  await w.engine.submitKeypad(call.callId, { dob: "19850214" });
+  await w.engine.checkCarrier(call.callId);
+  const verified = await w.engine.finishVerification(call.callId);
+  return { detail: `level ${verified.level}, scopes ${verified.scopes.join(", ")}`, ok: verified.level === 2 && verified.scopes.includes(scope) };
+}
+
+/** A deposit on the business's own account (connect mode), settled by the Connect webhook only. */
 const depositConnect: ScriptStep[] = [
-  ...verifyToLevel2("deposit-connect", "fr"),
+  {
+    label: "deposit-connect: call started",
+    async run(w, call) {
+      call.callId = (await w.engine.startCall({ locale: "fr", flow: "deposit-connect" })).callId;
+      return pass(call.callId);
+    },
+  },
+  { label: "verify: level 2", run: (w, call) => verifyToLevel2(w, call, "payment.request") },
   {
     label: "pay: connect mode",
     async run(w, call) {
-      const { expiresAt, link } = await requestLink(w, call);
-      return { detail: `account ${link.connectedAccountId}, methods ${link.paymentMethods.join(", ")}, expires ${expiresAt}`, ok: link.connectedAccountId === DEMO_ACCOUNT };
+      const payment = await w.engine.requestPayment(call.callId);
+      const asked = w.t.payments.created.find((link) => link.paymentId === payment.paymentId)!;
+      call.linkId = asked.linkId;
+      return {
+        detail: `account ${asked.connectedAccountId}, methods ${asked.paymentMethods.join(", ")}, the engine expires it at ${payment.expiresAt}`,
+        ok: asked.mode === "connect" && asked.connectedAccountId === DEMO_ACCOUNT,
+      };
     },
   },
   {
@@ -424,36 +419,52 @@ const depositConnect: ScriptStep[] = [
       return { detail: `signed with its own secret, applied: ${String(hook.applied)}`, ok: hook.applied === true };
     },
   },
-  endWithReceipt("deposit-connect"),
+  {
+    label: "deposit-connect: call ended",
+    async run(w, call) {
+      call.receipt = await w.engine.endCall(call.callId);
+      const mode = call.receipt?.body.payments[0]?.mode;
+      return { detail: `receipt ${call.receipt === null ? "MISSING" : "signed"}, payment mode ${String(mode)}`, ok: mode === "connect" };
+    },
+  },
 ];
 
-/** The grant Gate sent for this call. */
-function sentGrant(w: DemoWorld, call: ScriptRun): SignedAccessGrant {
-  return w.sentGrants.find((grant) => grant.body.grantId === call.grantId)!;
-}
-
-/** Level 2 for `entry.open`, a signed grant the door relay checks; the same grant again and a changed copy are refused. */
+/** Verification to level 2 for entry.open, then a signed 30-second grant, checked by the door relay. */
 const entry: ScriptStep[] = [
-  ...verifyToLevel2("entry"),
-  openDoor,
+  {
+    label: "entry: call started",
+    async run(w, call) {
+      call.callId = (await w.engine.startCall({ flow: "entry" })).callId;
+      return pass(call.callId);
+    },
+  },
+  { label: "verify: level 2", run: (w, call) => verifyToLevel2(w, call, "entry.open") },
+  {
+    label: "gate: access grant delivered",
+    async run(w, call) {
+      const opened = w.doorsOpened.length;
+      const access = await w.gate.grantAccess(w.engine, call.callId);
+      call.grantId = access.grantId;
+      return {
+        detail: `${access.grantId}, ${access.status}, door moved: ${access.confirmed}, opened ${w.doorsOpened.slice(opened).join(", ")}`,
+        ok: access.status === "delivered" && w.doorsOpened.length === opened + 1,
+      };
+    },
+  },
   {
     label: "gate: same grant sent again",
     async run(w, call) {
-      const again = await fetch(w.relayUrl, { method: "POST", body: JSON.stringify(sentGrant(w, call)) });
-      return { detail: `${again.status} ${((await again.json()) as { error: string }).error}`, ok: again.status === 409 };
+      const res = await fetch(await w.relayUrl(), { method: "POST", body: canonicalJson(w.sentGrants.get(call.grantId!)!) });
+      return { detail: `${res.status} ${((await res.json()) as { error: string }).error}`, ok: res.status === 409 };
     },
   },
   {
     label: "gate: a changed grant",
     async run(w, call) {
-      const opened = w.doorOpened.length;
-      const forged = structuredClone(sentGrant(w, call));
+      const forged = structuredClone(w.sentGrants.get(call.grantId!)!);
       forged.body.target = "door-2";
-      const changed = await fetch(w.relayUrl, { method: "POST", body: JSON.stringify(forged) });
-      return {
-        detail: `${changed.status} ${((await changed.json()) as { error: string }).error}, the door stays shut`,
-        ok: changed.status === 401 && w.doorOpened.length === opened,
-      };
+      const res = await fetch(await w.relayUrl(), { method: "POST", body: canonicalJson(forged) });
+      return { detail: `${res.status} ${((await res.json()) as { error: string }).error}, the door stays shut`, ok: res.status === 401 };
     },
   },
   {
@@ -461,7 +472,7 @@ const entry: ScriptStep[] = [
     async run(w, call) {
       const done = await w.engine.flowPosition(call.callId);
       call.receipt = await w.engine.endCall(call.callId);
-      return { detail: `flow ${done!.status}`, ok: done!.status === "completed" };
+      return { detail: `flow ${done!.status}; the ledger holds the grant's digest, never the grant`, ok: done!.status === "completed" };
     },
   },
 ];
@@ -469,5 +480,5 @@ const entry: ScriptStep[] = [
 export const SCRIPTS: Readonly<Record<DemoFlow, readonly ScriptStep[]>> = { "owner-command": ownerCommand, deposit, "deposit-connect": depositConnect, entry };
 
 export function isDemoFlow(name: unknown): name is DemoFlow {
-  return typeof name === "string" && Object.hasOwn(SCRIPTS, name);
+  return name === "owner-command" || name === "deposit" || name === "deposit-connect" || name === "entry";
 }

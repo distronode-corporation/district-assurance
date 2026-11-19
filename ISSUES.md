@@ -736,7 +736,7 @@ A link should not outlive its purpose. The engine already expires a link at its 
 ## Acceptance criteria
 
 - [ ] `cancelPaymentLink` (the caller changed their mind) through `PaymentLinks.expireLink`; open links are expired when the call ends, and the receipt shows them as expired.
-- [ ] A late `paid` after cancellation is still recorded as paid (the money moved) and flagged in the ledger.
+- [ ] A late `paid` after cancellation is still recorded as paid and flagged in the ledger: the engine already does this for any request it expired (`late: true`); keep it for cancellations.
 
 ## Files
 

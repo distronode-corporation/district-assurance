@@ -7,7 +7,7 @@ import { after, before, beforeEach, describe, it } from "node:test";
 
 import { DemoRuns, type RunView } from "../examples/reference-server/src/demo-runs.ts";
 import { e2eConfig, e2eScripts, shortSessionId, startE2eDemo } from "../examples/reference-server/src/e2e.ts";
-import { createDemoWorld, startDoorRelay } from "../examples/reference-server/src/script.ts";
+import { createDemoWorld } from "../examples/reference-server/src/script.ts";
 import { StripeApiError, StripeCheckoutLinks, StripeKeyRefused, assertTestModeSecretKey, checkoutPaymentMethodTypes } from "../examples/reference-server/src/stripe-adapters.ts";
 import { systemClock, type Clock, type PaymentLinkRequest } from "../src/index.ts";
 
@@ -153,7 +153,7 @@ describe("Stripe Checkout adapter: test-mode keys only", () => {
     assert.throws(() => new StripeCheckoutLinks(KEY, {} as never), TypeError, "a hosted page needs a return URL");
     assert.doesNotThrow(() => new StripeCheckoutLinks(KEY, { successUrl: "https://example.com/done" }));
     const links = new StripeCheckoutLinks(KEY, { successUrl: RETURN });
-    assert.deepEqual(links.capabilities, { modes: ["platform"], minLinkMinutes: 31, maxLinkMinutes: 1439 });
+    assert.deepEqual(links.capabilities, { modes: ["platform"], minLinkMinutes: 30, maxLinkMinutes: 1440 });
   });
 
   it("maps Apple Pay and Google Pay to card, and keeps Link", () => {
@@ -308,7 +308,8 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
   async function world(options: Parameters<typeof e2eScripts>[1], clock: Clock = systemClock) {
     const stripe = new StripeCheckoutLinks(KEY, { apiBase: fake.base, successUrl: RETURN });
     const w = createDemoWorld({ payments: stripe, clock, config: e2eConfig() });
-    const relay = await startDoorRelay(w);
+    await w.relayUrl();
+    const relay = { close: (done: () => void) => void w.close().then(done) };
     return { w, relay, runs: new DemoRuns(w, 20, e2eScripts(stripe, options)) };
   }
 
@@ -330,7 +331,7 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
       assert.equal(link.link!.href, "https://checkout.stripe.com/c/pay/cs_test_fake1");
       assert.match(visit.results.at(-3)!.detail, /session complete, payment paid, livemode false; settled: true/);
       assert.match(visit.results.at(-2)!.detail, /delivered, door moved: true, opened door-1$/);
-      assert.deepEqual(w.doorOpened, ["door-1"]);
+      assert.deepEqual(w.doorsOpened, ["door-1"]);
       const receipt = (await w.engine.receipt(visit.callId!))!;
       assert.deepEqual(receipt.body.payments.map((p) => [p.status, p.mode, p.providerRef]), [["paid", "platform", "cs_test_fake1"]]);
       assert.equal(lines.length, owner.results.length + visit.results.length);
@@ -347,13 +348,13 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
     try {
       fake.paidAfterReads = 1;
       const run = await runs.start("visit");
-      for (let i = 0; i < 5; i++) await runs.step(run.runId);
+      for (let i = 0; i < 3; i++) await runs.step(run.runId);
       fake.next = { status: 503, body: "{}" };
       let answer = await runs.step(run.runId);
       assert.ok(answer.ok);
       assert.deepEqual([answer.view.results.at(-1)!.label, answer.view.results.at(-1)!.ok], [WAIT, true]);
       const second = await runs.start("visit");
-      for (let i = 0; i < 5; i++) await runs.step(second.runId);
+      for (let i = 0; i < 3; i++) await runs.step(second.runId);
       fake.next = { status: 401, body: JSON.stringify({ error: { type: "authentication_error" } }) };
       answer = await runs.step(second.runId);
       assert.ok(answer.ok);
@@ -372,10 +373,10 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
       assert.deepEqual([visit.results.at(-1)!.label, visit.results.at(-1)!.ok, visit.results.at(-1)!.detail], [WAIT, false, "not paid in time: start a new run"]);
       assert.equal(visit.done, true, "a failed check ends the run: no door step after it");
       assert.deepEqual(await runs.step(visit.runId), { ok: false, status: 409, error: "done" });
-      assert.deepEqual(w.doorOpened, []);
+      assert.deepEqual(w.doorsOpened, []);
       assert.ok(lines.some((line) => line.includes("CHECK FAILED: not paid")));
       const run = await runs.start("visit");
-      for (let i = 0; i < 5; i++) await runs.step(run.runId);
+      for (let i = 0; i < 3; i++) await runs.step(run.runId);
       fake.sessions.get(w.links.at(-1)!.linkId)!.status = "expired";
       const answer = await runs.step(run.runId);
       assert.ok(answer.ok);
@@ -384,7 +385,7 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
       // A refusal from Stripe ends the run; the terminal names the status, type and code only.
       fake.next = { status: 400, body: JSON.stringify({ error: { type: "idempotency_error", message: `Keys for idempotent requests ... ${KEY}` } }) };
       const third = await runs.start("visit");
-      for (let i = 0; i < 5; i++) await runs.step(third.runId);
+      for (let i = 0; i < 3; i++) await runs.step(third.runId);
       const failed = lines.find((line) => line.includes(") FAILED: "))!;
       assert.equal(failed, "pay: Checkout link created (Stripe test mode) FAILED: Stripe did not create the Checkout Session (HTTP 400, type idempotency_error)");
     } finally {
@@ -398,7 +399,7 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
     const { w, relay, runs } = await world({ pollMs: 1 }, clock);
     try {
       const run = await runs.start("visit");
-      for (let i = 0; i < 5; i++) await runs.step(run.runId);
+      for (let i = 0; i < 3; i++) await runs.step(run.runId);
       // The engine's deadline (the text plus 15 minutes) is already behind it.
       offset = 20 * 60_000;
       const closed = await runs.step(run.runId);
@@ -409,7 +410,7 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
 
       offset = 0;
       const late = await runs.start("visit");
-      for (let i = 0; i < 5; i++) await runs.step(late.runId);
+      for (let i = 0; i < 3; i++) await runs.step(late.runId);
       offset = 20 * 60_000;
       fake.payOnExpire = true;
       const paid = await runs.step(late.runId);
@@ -429,14 +430,14 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
     const { relay, runs } = await world({ pollMs: 60_000, signal: stop.signal });
     try {
       const run = await runs.start("visit");
-      for (let i = 0; i < 5; i++) await runs.step(run.runId);
+      for (let i = 0; i < 3; i++) await runs.step(run.runId);
       const waiting = runs.step(run.runId);
       setTimeout(() => stop.abort(), 50);
       const answer = await waiting;
       assert.ok(answer.ok);
       assert.deepEqual([answer.view.results.at(-1)!.ok, answer.view.results.at(-1)!.detail], [false, "stopped: the demo is shutting down"]);
       const next = await runs.start("visit");
-      for (let i = 0; i < 5; i++) await runs.step(next.runId);
+      for (let i = 0; i < 3; i++) await runs.step(next.runId);
       const after = await runs.step(next.runId);
       assert.ok(after.ok);
       assert.equal(after.view.results.at(-1)!.detail, "stopped: the demo is shutting down", "an aborted signal answers at once");
@@ -453,11 +454,11 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
       assert.equal(demo.base, `http://127.0.0.1:${port}`);
       const { flows } = (await (await fetch(`${demo.base}/demo/flows`)).json()) as { flows: Array<{ flow: string }> };
       assert.deepEqual(flows.map((f) => f.flow), ["owner-command", "visit"]);
-      assert.equal((demo.relay.address() as AddressInfo).address, "127.0.0.1");
+      assert.match(demo.relayUrl, /^http:\/\/127\.0\.0\.1:\d+\/unlock$/);
       const json = { "content-type": "application/json" };
       const run = (await (await fetch(`${demo.base}/demo/runs`, { method: "POST", headers: json, body: JSON.stringify({ flow: "visit" }) })).json()) as { runId: string };
       const next = () => fetch(`${demo.base}/demo/runs/${run.runId}/next`, { method: "POST", headers: json, body: "{}" });
-      for (let i = 0; i < 5; i++) assert.equal((await next()).status, 200);
+      for (let i = 0; i < 3; i++) assert.equal((await next()).status, 200);
       assert.equal(fake.seen.find((s) => s.method === "POST")!.form.get("success_url"), `${demo.base}/`);
       waiting = next();
       await new Promise((resolve) => setTimeout(resolve, 50));

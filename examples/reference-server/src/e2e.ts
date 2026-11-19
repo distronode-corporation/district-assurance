@@ -23,7 +23,7 @@ import { randomIds, systemClock, type FlowConfig } from "../../../src/index.ts";
 import { createReferenceServer } from "./app.ts";
 import { DemoRuns } from "./demo-runs.ts";
 import { demoConfig } from "./flows.ts";
-import { SCRIPTS, createDemoWorld, endWithReceipt, openDoor, requestLink, startDoorRelay, verifyToLevel2, type ScriptStep, type Scripts, type StepOutcome } from "./script.ts";
+import { SCRIPTS, createDemoWorld, pass, verifyToLevel2, type ScriptStep, type Scripts, type StepOutcome } from "./script.ts";
 import { StripeApiError, StripeCheckoutLinks, assertTestModeSecretKey, type CheckoutSessionStatus } from "./stripe-adapters.ts";
 
 /** A session id shortened for the screen and the log: its `cs_test_` prefix and a few characters. */
@@ -70,11 +70,22 @@ export function e2eScripts(stripe: StripeCheckoutLinks, options: E2eOptions = {}
   const waitMs = options.waitMs ?? Number.POSITIVE_INFINITY;
   const pollMs = options.pollMs ?? 3000;
   const visit: ScriptStep[] = [
-    ...verifyToLevel2("visit"),
+    {
+      label: "visit: call started",
+      async run(w, call) {
+        call.callId = (await w.engine.startCall({ locale: "en", flow: "visit" })).callId;
+        return pass(call.callId);
+      },
+    },
+    { label: "verify: level 2", run: (w, call) => verifyToLevel2(w, call, "payment.request") },
     {
       label: "pay: Checkout link created (Stripe test mode)",
       async run(w, call) {
-        const { paymentId, link } = await requestLink(w, call);
+        const payment = await w.engine.requestPayment(call.callId);
+        const link = w.links.find((l) => l.paymentId === payment.paymentId)!;
+        call.linkId = link.linkId;
+        call.paymentExpiresAt = payment.expiresAt;
+        const paymentId = payment.paymentId;
         const session = await stripe.readLink(link.linkId);
         return {
           detail: `${paymentId}: Checkout Session ${shortSessionId(link.linkId)} created, livemode ${session.livemode}, status ${session.status}. Open it and pay with the test card 4242 4242 4242 4242.`,
@@ -124,8 +135,26 @@ export function e2eScripts(stripe: StripeCheckoutLinks, options: E2eOptions = {}
         };
       },
     },
-    { ...openDoor, label: "gate: door opened" },
-    endWithReceipt("visit"),
+    {
+      label: "gate: door opened",
+      async run(w, call) {
+        const opened = w.doorsOpened.length;
+        const access = await w.gate.grantAccess(w.engine, call.callId);
+        call.grantId = access.grantId;
+        return {
+          detail: `${access.grantId}, ${access.status}, door moved: ${access.confirmed}, opened ${w.doorsOpened.slice(opened).join(", ")}`,
+          ok: access.status === "delivered" && access.confirmed,
+        };
+      },
+    },
+    {
+      label: "visit: call ended",
+      async run(w, call) {
+        const done = await w.engine.flowPosition(call.callId);
+        call.receipt = await w.engine.endCall(call.callId);
+        return { detail: `flow ${done!.status} (${done!.index} steps), receipt ${call.receipt === null ? "MISSING" : "signed"}`, ok: call.receipt !== null };
+      },
+    },
   ];
   const scripts: Record<string, readonly ScriptStep[]> = { "owner-command": SCRIPTS["owner-command"], visit };
   const log = options.log;
@@ -154,7 +183,8 @@ export function e2eScripts(stripe: StripeCheckoutLinks, options: E2eOptions = {}
 
 export interface E2eDemo {
   server: Server;
-  relay: Server;
+  /** The example door relay's unlock URL, on 127.0.0.1. */
+  relayUrl: string;
   base: string;
   close(): Promise<void>;
 }
@@ -169,10 +199,17 @@ export async function startE2eDemo(apiKey: string, port: number, options: Omit<E
   const log = options.log ?? (() => undefined);
   const base = `http://127.0.0.1:${port}`;
   const stripe = new StripeCheckoutLinks(apiKey, { successUrl: `${base}/`, ...(options.apiBase === undefined ? {} : { apiBase: options.apiBase }) });
-  const world = createDemoWorld({ payments: stripe, clock: systemClock, ids: randomIds, config: e2eConfig() });
+  const world = createDemoWorld({
+    payments: stripe,
+    clock: systemClock,
+    ids: randomIds,
+    config: e2eConfig(),
+    onDoorOpened: (target) => log("door relay", `door opened: ${target} (grant checked: ES256 signature, workspace, audience, window, not seen before)`),
+  });
   const stop = new AbortController();
-  const relay = await startDoorRelay(world, 0, (target) => log("door relay", `door opened: ${target} (grant checked: ES256 signature, workspace, audience, window, not seen before)`));
-  const closeRelay = () => new Promise<void>((resolve) => relay.close(() => resolve()));
+  // Started now rather than at the first grant, so the terminal can say where it listens.
+  const relayUrl = await world.relayUrl();
+  const closeRelay = () => world.close();
   let server: Server;
   try {
     server = createReferenceServer({
@@ -194,7 +231,7 @@ export async function startE2eDemo(apiKey: string, port: number, options: Omit<E
   world.base = base;
   return {
     server,
-    relay,
+    relayUrl,
     base,
     close: async () => {
       // A payment step that is waiting answers at once, so the server can close.

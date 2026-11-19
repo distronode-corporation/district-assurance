@@ -484,7 +484,7 @@ export class Engine {
     if ((BUILT_IN_MODULES as readonly string[]).includes(name)) throw new EngineError("precondition_failed", `${name} is built in; use its own methods`);
     if (this.registry.get(name) === undefined) throw new EngineError("module_disabled", `no module named ${name} is installed`);
     return this.#update(callId, (draft) => {
-      if (!(draft.record.reservations?.[name] ?? []).includes(reservation)) {
+      if (!openReservations(draft.record, name).includes(reservation)) {
         throw new EngineError("precondition_failed", `${name} has no open reservation ${reservation} on this call; an outcome settles only work updateModule reserved`);
       }
       return this.#applyModule(draft, name, fn, { reserve: false, settling: reservation });
@@ -494,7 +494,7 @@ export class Engine {
   /** Every open reservation an outside module has on a call. */
   async moduleReservations(callId: string, name: string): Promise<string[]> {
     this.#outsideModule(name);
-    return [...((await this.#read(callId)).reservations?.[name] ?? [])];
+    return [...openReservations(await this.#read(callId), name)];
   }
 
   #applyModule(draft: CallDraft, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue, mode: { reserve: boolean; settling: string | null }): JsonValue {
@@ -508,7 +508,7 @@ export class Engine {
       reserve: (ref) => {
         if (!mode.reserve) throw new EngineError("precondition_failed", "only updateModule opens a reservation");
         if (typeof ref !== "string" || ref === "") throw new EngineError("invalid_input", "a reservation is a non-empty string");
-        open[name] = [...new Set([...(open[name] ?? []), ref])];
+        open[name] = [...new Set([...openReservations(draft.record, name), ref])];
       },
       release: () => {
         if (mode.settling === null) throw new EngineError("precondition_failed", "only recordModuleOutcome closes a reservation");
@@ -705,6 +705,12 @@ export class Engine {
     if (stored === null) throw new EngineError("unknown_call", "no such call");
     await this.#flush(callId, stored.version, structuredClone(stored.record) as unknown as CallRecord);
   }
+}
+
+/** A module's open reservations on a call. Own properties only: a module may be named `constructor`. */
+function openReservations(record: CallRecord, name: string): string[] {
+  const all = record.reservations;
+  return all !== undefined && Object.hasOwn(all, name) ? all[name]! : [];
 }
 
 export function createEngine(options: EngineOptions): Engine {

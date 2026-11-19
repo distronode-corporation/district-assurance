@@ -119,11 +119,10 @@ export class StripeCheckoutLinks implements PaymentLinks {
   /**
    * Platform mode only, the one this minimal adapter has proven against Stripe test mode (the
    * `Stripe-Account` header for connect mode is sent, but not yet proven live). Checkout's
-   * `expires_at` runs from 30 minutes to 24 hours after creation; the declared window keeps a
-   * minute of margin at each end, since the engine counts from the request and Stripe from its
-   * arrival.
+   * `expires_at` runs from 30 minutes to 24 hours after creation; the engine asks for at least the
+   * minimum plus 5 minutes (35), which covers the time between its request and Stripe's arrival.
    */
-  readonly capabilities: PaymentLinkCapabilities = { modes: ["platform"], minLinkMinutes: 31, maxLinkMinutes: 1439 };
+  readonly capabilities: PaymentLinkCapabilities = { modes: ["platform"], minLinkMinutes: 30, maxLinkMinutes: 1440 };
   readonly #apiKey: string;
   readonly #base: URL;
   readonly #successUrl: string;

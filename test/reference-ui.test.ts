@@ -9,7 +9,7 @@ import { after, before, describe, it } from "node:test";
 
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { DemoRuns, type RunView } from "../examples/reference-server/src/demo-runs.ts";
-import { DEMO_SECRET, SCRIPTS, createDemoWorld, isDemoFlow, type DemoWorld } from "../examples/reference-server/src/script.ts";
+import { DEMO_CONNECT_SECRET, DEMO_SECRET, SCRIPTS, createDemoWorld, isDemoFlow, type DemoWorld } from "../examples/reference-server/src/script.ts";
 import { STATIC_FILES, UI_CSP } from "../examples/reference-server/src/static.ts";
 import { EngineError, canonicalJson, signStripePayload, verifyReceipt, type AuditEntry, type SignedReceipt } from "../src/index.ts";
 
@@ -40,14 +40,22 @@ async function serve(ui = true): Promise<Served> {
   const world = createDemoWorld();
   const server = createReferenceServer({
     engine: world.engine,
-    clock: world.clock,
-    stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET] },
+    clock: world.t.clock,
+    stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET], connect: [DEMO_CONNECT_SECRET] },
     ...(ui ? { ui: new DemoRuns(world) } : {}),
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   world.base = `http://127.0.0.1:${port}`;
-  return { world, base: world.base, port, close: () => new Promise((resolve) => server.close(() => resolve())) };
+  return {
+    world,
+    base: world.base,
+    port,
+    close: async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await world.close();
+    },
+  };
 }
 
 /** A raw request, so the path and the Host header go out exactly as written. */
@@ -220,7 +228,7 @@ describe("reference UI: demo routes", () => {
 
   it("lists the demo's four flows with their steps", async () => {
     const { flows } = (await (await fetch(`${s.base}/demo/flows`)).json()) as { flows: Array<{ flow: string; summary: string; steps: string[] }> };
-    assert.deepEqual(flows.map((f) => [f.flow, f.steps.length]), [["owner-command", 6], ["deposit", 11], ["deposit-connect", 8], ["entry", 8]]);
+    assert.deepEqual(flows.map((f) => [f.flow, f.steps.length]), [["owner-command", 6], ["deposit", 11], ["deposit-connect", 6], ["entry", 6]]);
     assert.match(flows[1]!.summary, /deposit/);
     assert.equal((await fetch(`${s.base}/demo/flows`, { method: "POST", headers: json, body: "{}" })).status, 405);
   });
@@ -264,6 +272,16 @@ describe("reference UI: demo routes", () => {
     assert.deepEqual(last.results.map((r) => r.ok), [true, true, true, true, true, true]);
     assert.equal(last.done, true);
     assert.equal((await fetch(`${s.base}/receipts/${last.callId}`)).status, 404);
+  });
+
+  it("runs deposit-connect and entry to the end, one step per request", async () => {
+    for (const flow of ["deposit-connect", "entry"] as const) {
+      const [, view] = await start(flow);
+      let last = view;
+      for (let i = 0; i < SCRIPTS[flow].length; i++) last = (await (await next(view.runId)).json()) as RunView;
+      assert.deepEqual(last.results.map((r) => [r.label, r.ok]), SCRIPTS[flow].map((step) => [step.label, true]), flow);
+      assert.equal(last.done, true);
+    }
   });
 
   it("refuses an unknown flow, bad JSON, a non-JSON body and another origin", async () => {
@@ -390,8 +408,6 @@ describe("reference UI: DemoRuns", () => {
       [isDemoFlow("deposit"), isDemoFlow("owner-command"), isDemoFlow("deposit-connect"), isDemoFlow("entry"), isDemoFlow("toString"), isDemoFlow(1)],
       [true, true, true, true, false, false],
     );
-    const runs = new DemoRuns(createDemoWorld());
-    assert.deepEqual([runs.hasFlow("entry"), runs.hasFlow("visit"), runs.hasFlow("constructor")], [true, false, false]);
   });
 });
 

@@ -61,11 +61,11 @@ How the page is kept small and safe:
 | File | |
 |---|---|
 | `src/app.ts` | `createReferenceServer({ engine, stripeSecrets, clock })`: the routes |
-| `src/script.ts` | the scripted calls, one step at a time, and the demo's records, engines, Gate and door relay |
+| `src/script.ts` | the scripted calls, one step at a time, and the demo's records, engines and door relay |
 | `src/demo.ts` | `npm run demo`: every step in a row; `runDemo(false)` is also run by the test suite |
 | `src/demo-runs.ts` | the UI's runs: one step per request, and the run's state, ledger and chain check |
-| `src/door-relay.ts` | an example door relay for Gate's `webhookRelay` adapter: checks the grant with Gate's public key, refuses replays, works the door |
 | `src/static.ts` | the UI's file allow-list and its headers |
+| `src/door-relay.ts` | an example door relay for Gate's `webhookRelay` adapter: checks the grant with Gate's public key and its workspace, refuses replays, works the door |
 | `src/flows.ts` | the demo's FlowConfig: the `owner-command`, `deposit`, `deposit-connect`, `entry` and `visit` flows |
 | `src/main.ts` | `npm run serve`: reads the environment, starts the server |
 | `src/ui.ts` | `npm run ui`: the server with the demo UI |

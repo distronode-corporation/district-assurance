@@ -125,6 +125,9 @@ function termsFor(settings: PaylinkSettings, step: PaylinkRequestStep | null): P
   };
 }
 
+/** How long a process that is texting a link holds it against a concurrent expiry. */
+const SEND_LEASE_MS = 60_000;
+
 const CONNECT_NEEDS_ACCOUNT = "connect mode needs connectedAccountId in the paylink settings";
 
 function isCapabilities(value: unknown): value is PaymentLinkCapabilities {
@@ -147,7 +150,8 @@ function adapterErrors(caps: PaymentLinkCapabilities, mode: PaymentMode, lifeMin
  * declares (Stripe Checkout: 30 minutes to 24 hours), so the provider never refuses the time.
  */
 function providerExpiry(requestedAt: string, lifeMinutes: number, caps: PaymentLinkCapabilities): string {
-  const minutes = Math.min(Math.max(2 * lifeMinutes, caps.minLinkMinutes), caps.maxLinkMinutes);
+  // A margin over the provider's minimum, so the create that follows the reservation is never under it.
+  const minutes = Math.min(Math.max(2 * lifeMinutes, caps.minLinkMinutes + MIN_LINK_LIFE_MINUTES), caps.maxLinkMinutes);
   return deadline(requestedAt, minutes);
 }
 
@@ -186,6 +190,10 @@ export const paylinkModule: AssuranceModule = {
     const caps = capabilities.payments;
     if (caps === undefined) return [];
     if (!isCapabilities(caps)) return ["the payments adapter's capabilities must be { modes, minLinkMinutes, maxLinkMinutes }"];
+    // The provider is asked for at least its minimum plus 5 minutes, so a narrower range could never create a link.
+    if (caps.maxLinkMinutes < caps.minLinkMinutes + MIN_LINK_LIFE_MINUTES) {
+      return [`the payments adapter's maxLinkMinutes must be at least its minLinkMinutes plus ${MIN_LINK_LIFE_MINUTES}`];
+    }
     return adapterErrors(caps, s.mode ?? "platform", s.linkLifeMinutes ?? DEFAULT_LINK_LIFE_MINUTES);
   },
 
@@ -295,11 +303,29 @@ export async function requestPayment(
       ...terms,
       expiresAt: null,
       providerExpiresAt: providerExpiry(requestedAt, terms.linkLifeMinutes, rt.adapter("payments").capabilities),
+      sendingSince: null,
     };
     draft.slice<PaylinkSlice>(PAYLINK).payments.push(request);
     return { request, ...where };
   });
   const { request } = reserved;
+  // A link not known to exist yet must be created with at least the provider's shortest life left,
+  // or the provider refuses it, every retry included. Too late for that: the request is expired
+  // (it was never texted, so nobody holds its link) and a new one may follow.
+  const caps = rt.adapter("payments").capabilities;
+  // One minute over the minimum, for the provider's own latency on the create.
+  if (request.linkId === "" && Date.parse(request.providerExpiresAt) - rt.clock.now().getTime() < (caps.minLinkMinutes + 1) * 60_000) {
+    await rt.update(callId, (draft) => {
+      const current = find(draft, request.paymentId);
+      if (current.status !== "open") return;
+      // Checked again in this write: another process may have created the link meanwhile, and only
+      // it may decide about a link that exists (it expires it at the provider if it is too late).
+      if (current.linkId !== "") throw new EngineError("precondition_failed", "another process created this payment link meanwhile");
+      draft.emit("payment.link_expired", "code", { paymentId: request.paymentId, provider: "not_created", reason: "not_created_in_time" });
+      settle(rt, draft, request.paymentId, "expired");
+    });
+    throw new EngineError("precondition_failed", "the payment link could not be created in time and the request was expired; request a new payment");
+  }
   const link = await rt.adapter("payments").createLink({
     callId,
     paymentId: request.paymentId,
@@ -315,23 +341,36 @@ export async function requestPayment(
   });
   // A text that goes out this late would carry a link with less than the shortest life left, or
   // one already dead: the request is expired instead (at the provider too), and never sent.
-  const tooLate = await rt.update(callId, (draft) => {
+  // The process that will text it holds a short lease, so a concurrent resume never expires the
+  // link while it is being sent; once the lease lapses (that sender stopped), it may.
+  const tooLate = await rt.update(callId, (draft): boolean | "settled" => {
     const pending = find(draft, request.paymentId);
     pending.linkId = link.linkId;
-    return pending.textedAt === null && Date.parse(request.providerExpiresAt) - rt.clock.now().getTime() < MIN_LINK_LIFE_MINUTES * 60_000;
+    if (pending.textedAt !== null) return false;
+    // Another process settled the request while this one created the link (it took too long): the
+    // link is live at the provider but must never be texted.
+    if (pending.status !== "open") return "settled";
+    const now = rt.clock.now().getTime();
+    const leased = pending.sendingSince !== null && now - Date.parse(pending.sendingSince) < SEND_LEASE_MS;
+    if (Date.parse(request.providerExpiresAt) - now >= MIN_LINK_LIFE_MINUTES * 60_000) {
+      pending.sendingSince = rt.now();
+      return false;
+    }
+    if (leased) throw new EngineError("precondition_failed", "another process is texting this payment link");
+    return true;
   });
   await rt.bindRef(`payment:${link.linkId}`, callId);
+  if (tooLate === "settled") {
+    await expireAtProvider(rt, callId, request, link.linkId);
+    throw new EngineError("precondition_failed", "the payment request was settled while its link was created; the link was expired and never texted");
+  }
   if (tooLate) {
-    const answer = await rt.adapter("payments").expireLink({
-      linkId: link.linkId,
-      mode: request.mode,
-      ...(request.connectedAccountId === null ? {} : { connectedAccountId: request.connectedAccountId }),
-      idempotencyKey: rt.idempotencyKey(callId, request.paymentId, "expire", request.mode),
-    });
+    const answer = await expireAtProvider(rt, callId, request, link.linkId);
     await rt.update(callId, (draft) => {
       if (find(draft, request.paymentId).status !== "open") return;
       draft.emit("payment.link_expired", "code", { paymentId: request.paymentId, provider: answer.state, reason: "not_sent_in_time" });
-      settle(rt, draft, request.paymentId, "expired");
+      // Only an expiry the provider confirms settles it; a link no longer open waits for its webhook.
+      if (answer.state === "expired") settle(rt, draft, request.paymentId, "expired");
     });
     throw new EngineError("precondition_failed", "the payment link could not be texted in time and was expired; request a new payment");
   }
@@ -359,6 +398,16 @@ export async function requestPayment(
       expiresAt: sent.expiresAt,
     });
     return { paymentId: request.paymentId, status: sent.status, expiresAt: sent.expiresAt };
+  });
+}
+
+/** Asks the provider to expire a link, on the account the payment was taken on. */
+function expireAtProvider(rt: EngineRuntime, callId: string, payment: PaymentRequest, linkId: string): Promise<{ state: "expired" | "not_open" }> {
+  return rt.adapter("payments").expireLink({
+    linkId,
+    mode: payment.mode,
+    ...(payment.connectedAccountId === null ? {} : { connectedAccountId: payment.connectedAccountId }),
+    idempotencyKey: rt.idempotencyKey(callId, payment.paymentId, "expire", payment.mode),
   });
 }
 
@@ -395,6 +444,14 @@ export async function applyPaymentOutcome(rt: EngineRuntime, outcome: PaymentOut
       return { applied: false } as const;
     }
     const status = settlementFor(outcome);
+    // Money that moved is always recorded: a payment the engine had expired (its own deadline, or a
+    // race with a slow create) and the provider then reports paid becomes paid, flagged as late.
+    if (request.status === "expired" && status === "paid") {
+      request.status = "paid";
+      request.settledAt = rt.now();
+      draft.emit("payment.settled", "system", { paymentId: request.paymentId, status: "paid", late: true });
+      return { applied: true, callId, status } as const;
+    }
     if (request.status !== "open" || status === null) return { applied: false } as const;
     settle(rt, draft, request.paymentId, status);
     return { applied: true, callId, status } as const;
@@ -415,12 +472,7 @@ export async function expirePaymentLinks(rt: EngineRuntime, callId: string): Pro
   const due = slice.payments.filter((p) => p.status === "open" && p.expiresAt !== null && Date.parse(p.expiresAt) <= now);
   const expired: string[] = [];
   for (const payment of due) {
-    const answer = await rt.adapter("payments").expireLink({
-      linkId: payment.linkId,
-      mode: payment.mode,
-      ...(payment.connectedAccountId === null ? {} : { connectedAccountId: payment.connectedAccountId }),
-      idempotencyKey: rt.idempotencyKey(callId, payment.paymentId, "expire", payment.mode),
-    });
+    const answer = await expireAtProvider(rt, callId, payment, payment.linkId);
     const settled = await rt.update(callId, (draft) => {
       const request = find(draft, payment.paymentId);
       if (request.status !== "open") return false;

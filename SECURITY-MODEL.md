@@ -152,7 +152,10 @@ A webhook from one account settles a payment taken on another, or a config sends
 wrong merchant. **Controls:** each step names its mode; connect mode needs a connected account in
 the settings, checked when the config is saved and again when the link is requested, and a
 business account with no explicit mode is refused rather than defaulting to the platform (tested).
-A mode the payments adapter does not declare is refused when the config is saved (tested). An
+A mode the payments adapter does not declare is refused when the config is saved (tested). Money
+that moved is never dropped: a payment the engine had expired that the provider then reports paid
+is recorded as paid and flagged late in the ledger (tested), so no race between processes can take
+a caller's money without a record. An
 outcome from a connected account other than the payment's, or a connected account's outcome for a
 platform payment, is ignored and written to the ledger (tested). The reference server takes
 connect-mode events on their own endpoint with their own signing secret. The idempotency key of a
