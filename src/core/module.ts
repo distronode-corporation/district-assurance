@@ -5,10 +5,44 @@
 // A module declares four things in code: what it provides (factors, flow steps, outcomes), the
 // scopes it grants or needs, the adapters it requires, and a validator for its settings. The
 // registry holds the installed modules; a workspace's FlowConfig turns each one on or off.
+//
+// Factor plug-ins are described here too, because the registry checks them: a host adds one to
+// Badge (at construction, or later with `engine.useFactor`), or an outside module supplies the
+// judges for the factors its manifest provides. Badge runs them all.
+import type { SubjectRecord } from "./adapters.ts";
 import type { JsonValue } from "./canonical.ts";
 import { EngineError } from "./errors.ts";
-import { scopeClass, type ScopeClass, type VerificationPolicy } from "./policy.ts";
+import { FORBIDDEN_FACTOR_KINDS, scopeClass, type ScopeClass, type VerificationPolicy } from "./policy.ts";
+import type { AdapterName } from "./runtime.ts";
 import type { SessionState } from "./session.ts";
+import { isIntegerIn } from "./shape.ts";
+
+/** What the caller entered: one string (a PIN), or one value per field (keypad knowledge). */
+export type FactorEntry = string | Readonly<Record<string, string>>;
+
+export interface FactorJudgeInput {
+  workspaceId: string;
+  /** Null when the account number was not something a keypad can produce. */
+  subjectKey: string | null;
+  /** Null for an unknown subject. Judge it the same way, and give the same answer as a wrong entry. */
+  subject: SubjectRecord | null;
+  /** From a code path, never from the model. Discarded after judging. */
+  entry: FactorEntry;
+  /** HMAC-SHA256 under the workspace's knowledge key, hex. */
+  hmac(data: string): string;
+}
+
+/** A factor the caller enters and code judges. The engine counts each attempt before judging it. */
+export interface FactorPlugin {
+  /** snake_case, 3 to 32 characters. Never a name for caller ID. */
+  kind: string;
+  summary: string;
+  /** Attempts per call, 1 to 5. */
+  maxAttemptsPerCall: number;
+  /** Adapter names the judge needs. */
+  adapters: readonly AdapterName[];
+  judge(input: FactorJudgeInput): Promise<boolean>;
+}
 
 /** One step of a flow, as stored in a FlowConfig: `type` is `<module>.<step>`, the rest is the step's own. */
 export interface FlowStep {
@@ -65,6 +99,12 @@ export type StepStatus = "pending" | "complete" | "failed";
 
 export interface AssuranceModule {
   readonly manifest: ModuleManifest;
+  /**
+   * The judges for the factors this module's manifest provides, one per factor, when an outside
+   * module brings its own factors. Badge runs them like its own plug-ins, and Badge's settings turn
+   * them on. Badge leaves this out: its own code judges its factors.
+   */
+  readonly factorPlugins?: readonly FactorPlugin[];
   /** Every problem with this module's settings, as sentences. Settings come from storage: check every type. */
   validateSettings(settings: unknown): string[];
   /** Every adapter valid settings need, the manifest's included. */
@@ -99,6 +139,50 @@ export interface AssuranceModule {
 
 const MODULE_NAME = /^[a-z][a-z0-9-]{1,31}$/;
 const STEP_NAME = /^[a-z][a-z0-9_]{0,31}$/;
+const FACTOR_KIND = /^[a-z][a-z0-9_]{2,31}$/;
+
+/** Every problem with a factor kind's name: snake_case, 3 to 32 characters, and never caller ID. */
+export function checkFactorKind(kind: string): string[] {
+  const errors: string[] = [];
+  if (!FACTOR_KIND.test(kind)) errors.push(`factor kind ${JSON.stringify(kind)} must be snake_case, 3 to 32 characters`);
+  if (FORBIDDEN_FACTOR_KINDS.includes(kind)) errors.push(`factor kind ${kind} would make caller ID a factor, which it never is`);
+  return errors;
+}
+
+/** Every problem with a factor plug-in, given the kinds already taken. */
+export function checkFactorPlugin(plugin: FactorPlugin, taken: readonly string[]): string[] {
+  const errors = checkFactorKind(plugin.kind);
+  if (taken.includes(plugin.kind)) errors.push(`factor kind ${plugin.kind} already exists`);
+  errors.push(...judgeErrors(plugin).map((e) => `factor ${plugin.kind}: ${e}`));
+  return errors;
+}
+
+function judgeErrors(plugin: FactorPlugin): string[] {
+  const errors: string[] = [];
+  if (!isIntegerIn(plugin.maxAttemptsPerCall, 1, 5)) errors.push("maxAttemptsPerCall must be 1 to 5");
+  if (typeof plugin.judge !== "function") errors.push("judge must be a function");
+  return errors;
+}
+
+/**
+ * Every problem with the judges a module supplies: exactly one for each factor its manifest
+ * provides. The kinds' names and clashes are checked with the manifest.
+ */
+export function checkFactorPlugins(module: AssuranceModule): string[] {
+  const plugins = module.factorPlugins;
+  if (plugins === undefined) return [];
+  const { name, provides } = module.manifest;
+  const errors: string[] = [];
+  const judged: string[] = [];
+  for (const plugin of plugins) {
+    if (!provides.factors.includes(plugin.kind)) errors.push(`module ${name}: judges ${plugin.kind}, a factor its manifest does not provide`);
+    if (judged.includes(plugin.kind)) errors.push(`module ${name}: judges ${plugin.kind} twice`);
+    errors.push(...judgeErrors(plugin).map((e) => `module ${name}: factor ${plugin.kind}: ${e}`));
+    judged.push(plugin.kind);
+  }
+  for (const kind of provides.factors) if (!judged.includes(kind)) errors.push(`module ${name}: factor ${kind} has no judge`);
+  return errors;
+}
 
 /** Names the package keeps for itself: its own modules, and words that would read as the core. */
 export const RESERVED_MODULE_NAMES: readonly string[] = ["core", "engine", "flow", "module"];
@@ -121,6 +205,7 @@ export function checkManifest(manifest: ModuleManifest, installed: readonly Assu
     if (!manifest.provides.steps.includes(step)) errors.push(`module ${name}: needs a scope for ${step}, which it does not provide`);
   }
   for (const factor of manifest.provides.factors) {
+    errors.push(...checkFactorKind(factor).map((e) => `module ${name}: ${e}`));
     const owner = installed.find((m) => m.manifest.provides.factors.includes(factor));
     if (owner !== undefined) errors.push(`module ${name}: factor ${factor} is already provided by ${owner.manifest.name}`);
   }
@@ -143,12 +228,27 @@ export class ModuleRegistry {
     for (const module of options.modules ?? []) this.use(module);
   }
 
-  /** Installs a module. Refuses a bad or clashing manifest with every problem. */
+  /** Installs a module. Refuses a bad or clashing manifest, or bad factor judges, with every problem. */
   use(module: AssuranceModule): this {
-    const errors = checkManifest(module.manifest, this.list());
-    if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+    this.#check(module, this.list());
     this.#modules.set(module.manifest.name, module);
     return this;
+  }
+
+  /**
+   * Swaps an installed module for a new build of it under the same name (Badge with one more
+   * factor), checked against the other modules as a new one would be. It keeps its place in the order.
+   */
+  replace(module: AssuranceModule): void {
+    const name = module.manifest.name;
+    if (!this.#modules.has(name)) throw new EngineError("invalid_input", `no module named ${name} is installed`);
+    this.#check(module, this.list().filter((m) => m.manifest.name !== name));
+    this.#modules.set(name, module);
+  }
+
+  #check(module: AssuranceModule, others: readonly AssuranceModule[]): void {
+    const errors = [...checkManifest(module.manifest, others), ...checkFactorPlugins(module)];
+    if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
   }
 
   /** Uninstalls a module. The ledger's module cannot be removed. */
@@ -185,5 +285,10 @@ export class ModuleRegistry {
   /** Every factor kind the installed modules provide. */
   factorKinds(): string[] {
     return this.list().flatMap((m) => [...m.manifest.provides.factors]);
+  }
+
+  /** The judges outside modules supply for their factors. Badge's own plug-ins are inside Badge. */
+  factorPlugins(): FactorPlugin[] {
+    return this.list().flatMap((m) => [...(m.factorPlugins ?? [])]);
   }
 }

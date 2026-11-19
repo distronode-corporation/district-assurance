@@ -103,6 +103,11 @@ Someone who can edit a workspace's FlowConfig. **Controls:** the engine refuses 
 problem, Trace (the ledger) cannot be turned off, the floors cannot be lowered, planned factors
 and payment modes cannot be turned on, and every call's ledger entries carry the config revision
 it ran under. Who may edit a config, and how its history is kept, is the host's (left to the host).
+A factor added after the engine was built (`engine.useFactor`, or an outside module's factor and
+judge with `engine.use`) is off until a config turns it on in Badge's settings; adding one never
+changes the config in force (tested). The registry refuses a factor whose kind another module
+provides or is a name for caller ID, from a plug-in and from any module's manifest alike (tested).
+A module cannot be removed while the config in force names a factor it supplies (tested).
 
 ### Races across processes
 
@@ -156,7 +161,9 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.
 - Who may edit a workspace's FlowConfig, and keeping its revisions.
 - Outside modules: their code runs inside the engine's writes and is part of the host's security
-  model.
+  model. So do factor judges, the host's plug-ins and those an outside module supplies: the
+  engine counts and limits their attempts, but whether a judge answers the same way for an unknown
+  subject and a wrong entry is the judge's.
 - The person path: a caller who fails or cannot use a keypad reaches someone who can help.
 - Disclosure that an automated assistant answers and that the call is transcribed.
 - Deciding who may switch these modules on (business verification), so the line cannot be used to

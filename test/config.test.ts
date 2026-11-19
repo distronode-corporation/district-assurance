@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import type { JsonValue } from "../src/core/canonical.ts";
 import { ConfigError, assertConfig, moduleEnabled, validateConfig, type FlowConfig } from "../src/core/config.ts";
 import { EngineError } from "../src/core/errors.ts";
-import { ModuleRegistry, checkManifest, type AssuranceModule, type ModuleManifest } from "../src/core/module.ts";
+import { ModuleRegistry, checkFactorPlugin, checkFactorPlugins, checkManifest, type AssuranceModule, type FactorPlugin, type ModuleManifest } from "../src/core/module.ts";
 import { isBilingual } from "../src/core/shape.ts";
 import { builtInModules, defaultConfig } from "../src/modules.ts";
 import { badgeModule } from "../src/verify/badge.ts";
@@ -517,6 +517,46 @@ describe("module registry", () => {
             "factor kind voice_x already exists",
           ].join("; "),
     );
+  });
+
+  it("checks the factors a manifest provides, and the judges a module supplies for them (MOD-3)", () => {
+    const installed = builtInModules();
+    const judge = async () => true;
+    const manifest = (factors: string[]) => ({ ...outside("x1").manifest, provides: { factors, steps: [], outcomes: [] }, scopes: { grants: [], needs: {} } });
+    assert.deepEqual(checkManifest(manifest(["caller_id", "ab", "pin"]), installed), [
+      "module x1: factor kind caller_id would make caller ID a factor, which it never is",
+      'module x1: factor kind "ab" must be snake_case, 3 to 32 characters',
+      "module x1: factor pin is already provided by badge",
+    ]);
+    const supplying = (factors: string[], factorPlugins: FactorPlugin[]): AssuranceModule => ({ ...outside("x1"), manifest: manifest(factors), factorPlugins });
+    const plugin = (kind: string, patch: Partial<FactorPlugin> = {}): FactorPlugin => ({ kind, summary: "x", maxAttemptsPerCall: 1, adapters: [], judge, ...patch });
+    assert.deepEqual(checkFactorPlugins(outside("x1")), [], "a module without judges supplies none");
+    assert.deepEqual(checkFactorPlugins(supplying(["desk_code"], [plugin("desk_code")])), []);
+    assert.deepEqual(
+      checkFactorPlugins(supplying(["desk_code", "token_code"], [plugin("desk_code"), plugin("desk_code", { maxAttemptsPerCall: 6 }), plugin("other_code", { judge: "yes" as unknown as FactorPlugin["judge"] })])),
+      [
+        "module x1: judges desk_code twice",
+        "module x1: factor desk_code: maxAttemptsPerCall must be 1 to 5",
+        "module x1: judges other_code, a factor its manifest does not provide",
+        "module x1: factor other_code: judge must be a function",
+        "module x1: factor token_code has no judge",
+      ],
+    );
+    assert.throws(() => registry().use(supplying(["desk_code"], [])), /module x1: factor desk_code has no judge/);
+    assert.deepEqual(checkFactorPlugin(plugin("desk_code", { judge: undefined as unknown as FactorPlugin["judge"] }), []), ["factor desk_code: judge must be a function"]);
+  });
+
+  it("lists the judges outside modules supply, and replaces a module in its place (MOD-3)", () => {
+    const reg = registry(ALL_ADAPTERS, [{ ...outside("x1"), manifest: { ...outside("x1").manifest, provides: { factors: ["desk_code"], steps: ["x1.lookup"], outcomes: [] } }, factorPlugins: [{ kind: "desk_code", summary: "x", maxAttemptsPerCall: 1, adapters: [], judge: async () => true }] }]);
+    assert.deepEqual(reg.factorPlugins().map((p) => p.kind), ["desk_code"]);
+    const plugin = { kind: "desk_code", summary: "x", maxAttemptsPerCall: 1, adapters: [], judge: async () => true };
+    assert.throws(() => reg.replace(badgeModule({ factors: [plugin] })), /factor desk_code is already provided by x1/);
+    const next = badgeModule({ factors: [{ ...plugin, kind: "lobby_code" }] });
+    reg.replace(next);
+    assert.equal(reg.get("badge"), next);
+    assert.deepEqual(reg.list().map((m) => m.manifest.name), ["badge", "dossier", "paylink", "trace", "x1"]);
+    assert.ok(reg.factorKinds().includes("lobby_code"));
+    assert.throws(() => reg.replace(outside("loyalty")), (e: unknown) => e instanceof EngineError && e.code === "invalid_input" && /no module named loyalty/.test(e.message));
   });
 
   it("has small shape helpers", () => {

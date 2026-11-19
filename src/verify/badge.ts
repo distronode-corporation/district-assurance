@@ -102,11 +102,19 @@ export function badgeModule(options: { factors?: readonly FactorPlugin[] } = {})
   return new BadgeModule(options.factors ?? []);
 }
 
+/**
+ * Badge never changes once built: a factor added later (`withFactor`) or supplied by an outside
+ * module (`withOutsideFactors`) gives a new Badge, which the engine swaps into its registry. So a
+ * Badge shared by several engines never gains a factor through one of them.
+ */
 export class BadgeModule implements AssuranceModule {
   readonly manifest: AssuranceModule["manifest"];
+  /** The host's plug-ins: Badge provides them, in its manifest. */
   readonly #plugins = new Map<string, FactorPlugin>();
+  /** The judges outside modules supply: those modules provide the factors (and the registry checked them); Badge runs them. */
+  readonly #outside = new Map<string, FactorPlugin>();
 
-  constructor(plugins: readonly FactorPlugin[]) {
+  constructor(plugins: readonly FactorPlugin[], outside: readonly FactorPlugin[] = []) {
     const errors: string[] = [];
     for (const plugin of plugins) {
       const problems = checkFactorPlugin(plugin, [...FACTOR_KINDS, ...this.#plugins.keys()]);
@@ -114,6 +122,7 @@ export class BadgeModule implements AssuranceModule {
       if (problems.length === 0) this.#plugins.set(plugin.kind, plugin);
     }
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+    for (const plugin of outside) this.#outside.set(plugin.kind, plugin);
     this.manifest = {
       name: BADGE,
       version: "1",
@@ -124,14 +133,24 @@ export class BadgeModule implements AssuranceModule {
     };
   }
 
+  /** This Badge with one more plug-in of the host's. Refuses a bad plug-in or a kind Badge already has. */
+  withFactor(plugin: FactorPlugin): BadgeModule {
+    return new BadgeModule([...this.#plugins.values(), plugin], [...this.#outside.values()]);
+  }
+
+  /** This Badge running the judges the installed outside modules supply (all of them, replacing the last set). */
+  withOutsideFactors(outside: readonly FactorPlugin[]): BadgeModule {
+    return new BadgeModule([...this.#plugins.values()], outside);
+  }
+
   plugin(kind: string): FactorPlugin | undefined {
-    return this.#plugins.get(kind);
+    return this.#plugins.get(kind) ?? this.#outside.get(kind);
   }
 
   validateSettings(settings: unknown): string[] {
     if (!isObject(settings)) return ["must be an object with the factors that are on"];
     const errors = unknownKeys(settings, SETTINGS_KEYS).map((k) => `${k} is not a badge setting`);
-    const known = this.manifest.provides.factors;
+    const known = [...this.manifest.provides.factors, ...this.#outside.keys()];
     if (!isStringArray(settings.factors) || settings.factors.length === 0) {
       errors.push("factors must list at least one factor");
     } else {
@@ -153,7 +172,7 @@ export class BadgeModule implements AssuranceModule {
     const s = settings as BadgeSettings;
     const adapters = new Set<string>(this.manifest.adapters);
     for (const kind of s.factors) {
-      for (const a of BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS]?.adapters ?? this.#plugins.get(kind)!.adapters) adapters.add(a);
+      for (const a of BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS]?.adapters ?? this.plugin(kind)!.adapters) adapters.add(a);
     }
     if (s.pin?.mode === "verifier" && s.factors.includes("pin")) adapters.add("pinVerifier");
     return [...adapters];

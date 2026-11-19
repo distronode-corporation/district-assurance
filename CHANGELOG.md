@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Badge factor plug-ins after the engine is built (MOD-3): `engine.useFactor(plugin)`, and outside
+  modules that supply `factorPlugins` for the factors their manifest provides. The registry checks
+  them for clashes and caller-ID names; they stay off until a config turns them on.
 
 ### Changed
 
