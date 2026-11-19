@@ -139,8 +139,9 @@ appended by event id, once each; a ledger that fails leaves them pending, and th
 The reference server's optional SQLite ledger (SRV-4) adds triggers that refuse any UPDATE or
 DELETE of an entry, and any INSERT (such as INSERT OR REPLACE) over a stored `seq` or `eventId`,
 from any connection, and takes the database's write lock for each append, so
-two processes on one file keep one chain (tested). Someone who can write the file itself can still
-rewrite it; the hash chain and signed receipts are what detect that.
+two processes on one file keep one chain (tested). The triggers stop mistakes, not an attacker: any
+connection can drop them, and anyone who can write the file can rewrite it; the hash chain and
+signed receipts are what detect that.
 
 ### Breach of stored data
 

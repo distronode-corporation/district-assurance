@@ -58,8 +58,9 @@ function writeTransaction<T>(db: DatabaseSync, body: () => T): T {
  * The audit ledger in a table. Each row holds an entry exactly as `chainEntry` built it, as JSON,
  * so it reads back with the same hash. Triggers refuse any UPDATE or DELETE, and any INSERT whose
  * `seq` or `eventId` is already stored (so INSERT OR REPLACE cannot swap an entry), so the table is
- * append-only for every connection, not only this class. `eventId` is UNIQUE: an id is appended
- * once, and a second append returns the first entry.
+ * append-only for every connection that keeps the triggers, not only this class. A connection can
+ * still drop them and rewrite a row; the hash chain shows it (verifyChain). `eventId` is UNIQUE: an
+ * id is appended once, and a second append returns the first entry.
  */
 export class SqliteAuditLedger implements AuditLedger {
   readonly #db: DatabaseSync;
