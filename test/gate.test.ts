@@ -69,6 +69,11 @@ function recordsModule(name: string) {
       const { [ref]: record, ...rest } = records;
       return { record: record!, rest: { ...other, records: rest } as JsonValue };
     },
+    /** "open" to "open" stays pending, "open" to "done" settles; anything else is refused. */
+    checkOutcome(before: JsonValue, after: JsonValue): "open" | "settled" | { refused: string } {
+      if (before !== "open") return { refused: "already settled" };
+      return after === "open" ? "open" : after === "done" ? "settled" : { refused: `no transition to ${String(after)}` };
+    },
   };
 }
 
@@ -330,6 +335,22 @@ describe("gate: grants", () => {
     ]);
   });
 
+  it("throws a store failure met while settling a stale grant, and sends nothing", async () => {
+    const t = gateSetup();
+    const callId = await verified(t, null);
+    const stopped: GateHost = {
+      workspaceId: t.engine.workspaceId,
+      updateModule: (c, n, fn) => t.engine.updateModule(c, n, fn),
+      moduleState: (c, n) => t.engine.moduleState(c, n),
+      recordModuleOutcome: () => Promise.reject(new Error("store down")),
+    };
+    await assert.rejects(t.gate.grantAccess(stopped, callId, { target: "front-door" }), /store down/);
+    t.clock.advance(60_000);
+    await assert.rejects(t.gate.grantAccess(stopped, callId, { target: "front-door" }), /store down/, "met in the stale settle, before any reserve");
+    assert.equal(t.door.received.length, 0);
+    assert.equal((await slice(t, callId)).grants.length, 1, "no second grant was reserved");
+  });
+
   it("fails the step at the grant limit once a stale reservation settles, and keeps that settlement", async () => {
     const t = gateSetup("confirm", (c) => (c.modules.gate!.settings = { targets: structuredClone(targets), maxGrantsPerCall: 1 }));
     const callId = await verified(t);
@@ -377,13 +398,29 @@ describe("gate: grants", () => {
     assert.equal((await t.gate.grantAccess(t.engine, callId)).status, "delivered");
     assert.equal((await t.engine.flowPosition(callId))!.status, "completed");
 
-    const c2 = await verified(t, null);
+    // The entry flow has no receipt step: a call that ends while the door answers still records it.
+    const c2 = await verified(t);
     t.door.unlock = async (input) => {
       await t.engine.endCall(c2);
       return unlock(input);
     };
-    assert.equal((await t.gate.grantAccess(t.engine, c2, { target: "front-door" })).status, "delivered");
+    assert.equal((await t.gate.grantAccess(t.engine, c2)).status, "delivered");
     assert.equal((await slice(t, c2)).grants[0]!.status, "delivered");
+  });
+
+  it("writes nothing once the call's receipt is signed, a late door answer included (review b3)", async () => {
+    const t = gateSetup();
+    const callId = await verified(t, null);
+    const unlock = t.door.unlock.bind(t.door);
+    t.door.unlock = async (input) => {
+      assert.notEqual(await t.engine.endCall(callId), null, "a call with no flow ends with a receipt here");
+      return unlock(input);
+    };
+    const head = (await t.ledger.list()).length;
+    await assert.rejects(t.gate.grantAccess(t.engine, callId, { target: "front-door" }), rejects("precondition_failed", /receipt is signed/));
+    const after = await t.ledger.list();
+    assert.deepEqual(after.slice(head).map((e) => e.event === "module.event" ? e.detail.event : e.event).filter((e) => e !== "access.issued" && e !== "call.ended" && e !== "receipt.issued"), [], "nothing after the receipt");
+    assert.equal((await slice(t, callId)).grants[0]!.status, "reserved", "the answer is not recorded: the receipt does not change");
   });
 
   it("sends nothing when the call was tainted or the grant expired while it was being signed", async () => {
@@ -412,10 +449,9 @@ describe("gate: grants", () => {
     during = async () => {
       t.clock.advance(60_000);
       const [open] = await t.engine.moduleReservations(raced, "gate");
-      await t.engine.recordModuleOutcome(raced, "gate", open!, (s, call) => {
-        const sl = s as unknown as GateSlice;
-        sl.grants[0]!.status = "unknown";
-        call.release();
+      // The grant (60 seconds) has expired: the other process's stale settle is a legal one.
+      await t.engine.recordModuleOutcome(raced, "gate", open!, (s) => {
+        (s as unknown as GateSlice).grants[0]!.status = "unknown";
         return s;
       });
     };
@@ -488,14 +524,15 @@ describe("gate: grants", () => {
       rejects("precondition_failed"),
     );
     assert.equal((await t.ledger.list()).length, before, "nothing appended after the receipt");
-    // A grant in flight when the call ends still records its answer: that is the reservation's purpose.
-    const c2 = await verified(t, null);
+    // A grant in flight when the call ends still records its answer (a flow with no receipt): that is
+    // the reservation's purpose, and the settling write consumes it.
+    const c2 = await verified(t);
     const unlock = t.door.unlock.bind(t.door);
     t.door.unlock = async (input) => {
       await t.engine.endCall(c2);
       return unlock(input);
     };
-    assert.equal((await t.gate.grantAccess(t.engine, c2, { target: "front-door" })).status, "delivered");
+    assert.equal((await t.gate.grantAccess(t.engine, c2)).status, "delivered");
     assert.deepEqual(await t.engine.moduleReservations(c2, "gate"), [], "and its reservation is closed");
   });
 
@@ -513,10 +550,11 @@ describe("gate: grants", () => {
       recordModuleOutcome: async (c, n, r, fn) => {
         if (!raced) {
           raced = true;
-          fn(await real.moduleState(c, n), { authorized: () => true, now: t.clock.now().toISOString(), emit: () => undefined, release: () => undefined } as never);
-          await real.recordModuleOutcome(c, n, r, (s, call) => {
+          fn(await real.moduleState(c, n), { authorized: () => true, now: t.clock.now().toISOString(), emit: () => undefined } as never);
+          // The other process settles it as stale, which it may once the grant expired.
+          t.clock.advance(60_000);
+          await real.recordModuleOutcome(c, n, r, (s) => {
             (s as unknown as GateSlice).grants.find((g) => g.grantId === r)!.status = "unknown";
-            call.release();
             return s;
           });
         }
@@ -537,26 +575,55 @@ describe("gate: grants", () => {
     await assert.rejects(t.engine.recordModuleOutcome(callId, "constructor", "r1", (s) => s), rejects("precondition_failed"));
     await t.engine.updateModule(callId, "constructor", (_s, call) => (call.reserve("r1"), { records: { r1: "open" } }));
     assert.deepEqual(await t.engine.moduleReservations(callId, "constructor"), ["r1"]);
-    await t.engine.recordModuleOutcome(callId, "constructor", "r1", (s, call) => (call.release(), s));
+    await t.engine.recordModuleOutcome(callId, "constructor", "r1", () => ({ records: { r1: "done" } }));
     assert.deepEqual(await t.engine.moduleReservations(callId, "constructor"), []);
   });
 
-  it("opens reservations only in updateModule and closes them only in recordModuleOutcome", async () => {
+  it("opens reservations only in updateModule, on a live call, and closes them with the first settling write (review b2)", async () => {
     const t = setup();
     t.engine.use(recordsModule("ledger-test"));
     t.engine.configure(testConfig((c) => (c.modules["ledger-test"] = {})));
     const { callId } = await t.engine.startCall();
     const name = "ledger-test";
-    await assert.rejects(t.engine.updateModule(callId, name, (s, call) => (call.release(), s)), rejects("precondition_failed", /only recordModuleOutcome/));
     await assert.rejects(t.engine.updateModule(callId, name, (s, call) => (call.reserve(""), s)), rejects("invalid_input"));
     await t.engine.updateModule(callId, name, (_s, call) => (call.reserve("r1"), call.reserve("r1"), call.reserve("r2"), { records: { r1: "open", r2: "open" } }));
     assert.deepEqual(await t.engine.moduleReservations(callId, name), ["r1", "r2"]);
     await assert.rejects(t.engine.recordModuleOutcome(callId, name, "r1", (s, call) => (call.reserve("r3"), s)), rejects("precondition_failed", /only updateModule/));
-    await t.engine.recordModuleOutcome(callId, name, "r1", (_s, call) => (call.release(), { records: { r1: "done", r2: "open" } }));
+    // A write that leaves the record pending keeps the reservation; one that settles it consumes it.
+    await t.engine.recordModuleOutcome(callId, name, "r1", (s) => s);
+    assert.deepEqual(await t.engine.moduleReservations(callId, name), ["r1", "r2"]);
+    await t.engine.recordModuleOutcome(callId, name, "r1", () => ({ records: { r1: "done", r2: "open" } }));
     assert.deepEqual(await t.engine.moduleReservations(callId, name), ["r2"]);
-    await t.engine.recordModuleOutcome(callId, name, "r2", (_s, call) => (call.release(), { records: { r1: "done", r2: "done" } }));
-    assert.deepEqual(await t.engine.moduleReservations(callId, name), []);
-    await assert.rejects(t.engine.recordModuleOutcome(callId, name, "r2", (s) => s), rejects("precondition_failed"), "closed: refused");
+    await assert.rejects(t.engine.recordModuleOutcome(callId, name, "r1", () => ({ records: { r1: "done", r2: "open" } })), rejects("precondition_failed", /no open reservation r1/), "settled once: the second is refused");
+    await assert.rejects(t.engine.recordModuleOutcome(callId, name, "r2", () => ({ records: { r1: "done", r2: "undone" } })), rejects("precondition_failed", /refused the outcome for r2: no transition to undone/));
+    // After the call ended: no new reservation, and only a settling write for one opened before.
+    await t.engine.updateModule(callId, name, (_s, call) => (call.reserve("r3"), { records: { r1: "done", r2: "open", r3: "open" } }));
+    await t.engine.endCall(callId);
+    await assert.rejects(t.engine.updateModule(callId, name, (s, call) => (call.reserve("r4"), s)), rejects("invalid_transition", /no new reservation/));
+  });
+
+  it("after the call ended, takes only a settling write for a reservation opened before, and nothing once a receipt is signed (review b3)", async () => {
+    const name = "ledger-test";
+    const make = async (receipts: boolean) => {
+      const t = setup();
+      t.engine.use(recordsModule(name));
+      t.engine.configure(testConfig((c) => ((c.modules[name] = {}), (c.modules.trace = { settings: { receipts, wordings: [] } }))));
+      const { callId } = await t.engine.startCall();
+      await t.engine.updateModule(callId, name, (_s, call) => (call.reserve("r1"), { records: { r1: "open" } }));
+      await t.engine.endCall(callId);
+      return { t, callId };
+    };
+    const { t, callId } = await make(false);
+    await assert.rejects(t.engine.recordModuleOutcome(callId, name, "r1", (s) => s), rejects("precondition_failed", /only a final outcome/));
+    await t.engine.recordModuleOutcome(callId, name, "r1", () => ({ records: { r1: "done" } }));
+    assert.deepEqual(await t.engine.moduleState(callId, name), { records: { r1: "done" } });
+    const signed = await make(true);
+    const before = (await signed.t.ledger.list()).length;
+    await assert.rejects(
+      signed.t.engine.recordModuleOutcome(signed.callId, name, "r1", (_s, call) => (call.emit("late", {}), { records: { r1: "done" } })),
+      rejects("precondition_failed", /receipt is signed/),
+    );
+    assert.equal((await signed.t.ledger.list()).length, before, "nothing after the receipt");
   });
 
   it("lets an outcome write change only the record its reservation names (review A3)", async () => {
@@ -615,6 +682,94 @@ describe("gate: grants", () => {
     answer({ outcome: "refused", reason: "door_offline" });
     assert.equal((await pending).status, "refused", "the real grant still settles, and only it");
     assert.deepEqual((await slice(t, callId)).grants.map((g) => g.status), ["refused"]);
+  });
+
+  /** A door that holds its answer until told, so the grant's reservation stays open meanwhile. */
+  function holdDoor(t: ReturnType<typeof gateSetup>) {
+    let answer: (r: UnlockResult) => void = () => undefined;
+    let reached: () => void = () => undefined;
+    const atDoor = new Promise<void>((resolve) => (reached = resolve));
+    t.door.unlock = (input) => {
+      t.door.received.push(structuredClone(input));
+      reached();
+      return new Promise<UnlockResult>((resolve) => (answer = resolve));
+    };
+    return { atDoor, answer: (r: UnlockResult) => answer(r) };
+  }
+
+  for (const [label, patch] of [
+    ["delivered and confirmed, with the door still deciding", { status: "delivered", confirmed: true, providerRef: "forged" }],
+    ["re-pointed at another door", { ref: "door-999", controller: "other", target: "back-door", status: "delivered", confirmed: true }],
+    ["lowered to level 0 with a far expiry", { level: 0, expiresAt: "2099-01-01T00:00:00.000Z", status: "delivered", confirmed: true }],
+    ["an invented status", { status: "opened_by_magic" }],
+    ["a reserved grant given an answer", { confirmed: true, providerRef: "forged" }],
+    ["its key id rewritten", { kid: "other-key" }],
+  ] as const) {
+    it(`refuses a forged outcome on the reserved grant itself: ${label} (review round 3, a)`, async () => {
+      const t = gateSetup();
+      const door = holdDoor(t);
+      const callId = await verified(t);
+      const pending = t.gate.grantAccess(t.engine, callId);
+      await door.atDoor;
+      const [open] = await t.engine.moduleReservations(callId, "gate");
+      t.clock.advance(900_000);
+      const before = (await t.ledger.list()).length;
+      await assert.rejects(
+        t.engine.recordModuleOutcome(callId, "gate", open!, (s, call) => {
+          const slice = s as unknown as GateSlice;
+          Object.assign(slice.grants.find((g) => g.grantId === open)!, patch);
+          call.emit("access.delivered", { grantId: open!, confirmed: true });
+          return slice as never;
+        }),
+        rejects("precondition_failed", /refused the outcome/),
+      );
+      assert.equal((await t.ledger.list()).length, before, "no forged ledger entry");
+      assert.equal((await t.engine.flowPosition(callId))!.status, "running", "the flow did not complete");
+      door.answer({ outcome: "refused", reason: "door_offline" });
+      assert.deepEqual(await pending, { grantId: open!, status: "refused", confirmed: false }, "the door's real answer, nothing else");
+      const g = (await slice(t, callId)).grants[0]!;
+      assert.deepEqual([g.status, g.ref, g.target, g.level], ["refused", "door-1", "front-door", 2]);
+    });
+  }
+
+  it("refuses a no-op settle that would write forged events, and settles once (review round 3, a2)", async () => {
+    const t = gateSetup();
+    const door = holdDoor(t);
+    const callId = await verified(t, null);
+    const pending = t.gate.grantAccess(t.engine, callId, { target: "front-door" });
+    await door.atDoor;
+    const [open] = await t.engine.moduleReservations(callId, "gate");
+    for (let i = 0; i < 3; i++) {
+      await assert.rejects(
+        t.engine.recordModuleOutcome(callId, "gate", open!, (s, call) => (call.emit("access.delivered", { grantId: open!, i }), s)),
+        rejects("precondition_failed", /only takes its digest and key id, once/),
+      );
+    }
+    door.answer({ outcome: "delivered", providerRef: "p", confirmed: true });
+    assert.equal((await pending).status, "delivered");
+    const delivered = (await gateEvents(t)).filter(([e]) => e === "access.delivered");
+    assert.equal(delivered.length, 1, "only the real one");
+    assert.deepEqual(await t.engine.moduleReservations(callId, "gate"), [], "consumed by the settling write");
+    await assert.rejects(t.engine.recordModuleOutcome(callId, "gate", open!, (s) => s), rejects("precondition_failed", /no open reservation/));
+  });
+
+  it("refuses a final outcome this gate never received, or one at odds with it", async () => {
+    const t = gateSetup();
+    const door = holdDoor(t);
+    const callId = await verified(t, null);
+    const pending = t.gate.grantAccess(t.engine, callId, { target: "front-door" });
+    await door.atDoor;
+    const [open] = await t.engine.moduleReservations(callId, "gate");
+    // Unknown before the grant expired: only the gate that sent it may say so (a lost answer).
+    for (const forged of [{ status: "unknown" }, { status: "refused" }, { status: "failed" }]) {
+      await assert.rejects(
+        t.engine.recordModuleOutcome(callId, "gate", open!, (s) => (Object.assign((s as unknown as GateSlice).grants[0]!, forged), s)),
+        rejects("precondition_failed", /never received/),
+        JSON.stringify(forged),
+      );
+    }
+    door.answer({ outcome: "delivered", providerRef: "p", confirmed: false });
+    assert.deepEqual(await pending, { grantId: open!, status: "delivered", confirmed: false });
   });
 
   it("records outcomes only for installed outside modules", async () => {

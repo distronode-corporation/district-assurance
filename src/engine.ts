@@ -82,12 +82,10 @@ export interface ModuleCallView {
   /** A new id from the engine's id source, `prefix_...`. A retried attempt draws a new one. */
   newId(prefix: string): string;
   /**
-   * `updateModule` only: opens a reservation (work whose outcome comes later, such as an unlock),
-   * the one thing `recordModuleOutcome` may later settle. Ids are the module's own.
+   * `updateModule` only, on a call that has not ended: opens a reservation (work whose outcome
+   * comes later, such as an unlock), naming the one record `recordModuleOutcome` may later settle.
    */
   reserve(ref: string): void;
-  /** `recordModuleOutcome` only: closes the reservation being settled, once its outcome is written. */
-  release(): void;
   authorized(scope: string): boolean;
   /** A ledger entry `module.event` with `{ module, event, detail }`. Never put a value the caller keyed in it. */
   emit(event: string, detail: { [key: string]: JsonValue }): void;
@@ -468,36 +466,50 @@ export class Engine {
         const scope = module.manifest.scopes.needs[step.type];
         if (scope !== undefined && !this.#authorized(draft.record, scope)) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
       }
-      return this.#applyModule(draft, name, fn, { reserve: true, settling: null });
+      return this.#applyModule(draft, name, fn, { reserve: true });
     });
   }
 
   /**
    * Records the outcome of work an outside module started, and reserved, in `updateModule` (a
-   * provider's answer), in one compare-and-set write. It is refused unless `reservation` is open
-   * for this module on this call, so it can settle work that was authorized when it started, never
-   * start any. Unlike `updateModule` it is not held to the step's scope and runs after the flow or
-   * the call ended, because that result must still be written: Gate records an unlock's answer this
-   * way even if the caller's grant expired while the door answered. `call.release()` closes the
-   * reservation.
+   * provider's answer), in one compare-and-set write. Refused unless `reservation` is open for this
+   * module on this call; the write may change only the record the reservation names
+   * (`outcomeRecord`), and only as the module's `checkOutcome` allows. The first settling write
+   * consumes the reservation. Unlike `updateModule` it is not held to the step's scope, because the
+   * work was authorized when it started: Gate records an unlock's answer this way even if the
+   * caller's grant expired while the door answered. After the call ended, only a settling write is
+   * taken (the reservation was opened before the end), and none once the call's receipt is signed.
    */
   async recordModuleOutcome(callId: string, name: string, reservation: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): Promise<JsonValue> {
     if ((BUILT_IN_MODULES as readonly string[]).includes(name)) throw new EngineError("precondition_failed", `${name} is built in; use its own methods`);
     const module = this.registry.get(name);
     if (module === undefined) throw new EngineError("module_disabled", `no module named ${name} is installed`);
     const split = module.outcomeRecord?.bind(module);
-    if (split === undefined) throw new EngineError("precondition_failed", `${name} does not say which record a reservation names (outcomeRecord)`);
+    const judge = module.checkOutcome?.bind(module);
+    if (split === undefined || judge === undefined) {
+      throw new EngineError("precondition_failed", `${name} does not say which record a reservation names and how it may change (outcomeRecord, checkOutcome)`);
+    }
     return this.#update(callId, (draft) => {
       if (!openReservations(draft.record, name).includes(reservation)) {
         throw new EngineError("precondition_failed", `${name} has no open reservation ${reservation} on this call; an outcome settles only work updateModule reserved`);
       }
+      if (trace.receiptOf(draft.record) !== null) throw new EngineError("precondition_failed", "the call's receipt is signed; nothing more is written to this call");
       const before = split(this.#slice(draft.record.modules, name), reservation);
       if (before === null) throw new EngineError("precondition_failed", `${name} has no record for its reservation ${reservation}`);
-      const next = this.#applyModule(draft, name, fn, { reserve: false, settling: reservation });
+      const now = this.#now();
+      const next = this.#applyModule(draft, name, fn, { reserve: false });
       // The write may settle the reserved record only: everything else must be byte for byte as it was.
       const after = split(next, reservation);
       if (after === null || canonicalJson(after.rest) !== canonicalJson(before.rest)) {
         throw new EngineError("precondition_failed", `an outcome write for ${reservation} may change that record only`);
+      }
+      const verdict = judge(before.record, after.record, { reservation, now });
+      if (typeof verdict === "object") throw new EngineError("precondition_failed", `${name} refused the outcome for ${reservation}: ${verdict.refused}`);
+      if (verdict === "open" && draft.record.state.phase === "ended") throw new EngineError("precondition_failed", "the call has ended: only a final outcome is written now");
+      if (verdict === "settled") {
+        const left = openReservations(draft.record, name).filter((r) => r !== reservation);
+        if (left.length > 0) draft.record.reservations![name] = left;
+        else delete draft.record.reservations![name];
       }
       return next;
     });
@@ -509,7 +521,7 @@ export class Engine {
     return [...openReservations(await this.#read(callId), name)];
   }
 
-  #applyModule(draft: CallDraft, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue, mode: { reserve: boolean; settling: string | null }): JsonValue {
+  #applyModule(draft: CallDraft, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue, mode: { reserve: boolean }): JsonValue {
     const step = draft.step();
     const open = (draft.record.reservations ??= {});
     const view: ModuleCallView = {
@@ -520,14 +532,8 @@ export class Engine {
       reserve: (ref) => {
         if (!mode.reserve) throw new EngineError("precondition_failed", "only updateModule opens a reservation");
         if (typeof ref !== "string" || ref === "") throw new EngineError("invalid_input", "a reservation is a non-empty string");
+        if (draft.record.state.phase === "ended") throw new EngineError("invalid_transition", "the call has ended: no new reservation");
         open[name] = [...new Set([...openReservations(draft.record, name), ref])];
-      },
-      release: () => {
-        if (mode.settling === null) throw new EngineError("precondition_failed", "only recordModuleOutcome closes a reservation");
-        // recordModuleOutcome checked that the reservation being settled is open, so the list exists.
-        const left = open[name]!.filter((r) => r !== mode.settling);
-        if (left.length > 0) open[name] = left;
-        else delete open[name];
       },
       authorized: (scope) => this.#authorized(draft.record, scope),
       emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),

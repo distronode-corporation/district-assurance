@@ -247,11 +247,15 @@ core): if Gate can be built on it, so can a host's module, and the scope check l
 Recording outcomes on a separate path keeps that check strict while never losing a door's
 answer. One signing format for receipts and grants means one verifier in every language.
 **Amended (hostile review of PR 2):** an outcome write needs a reservation that `updateModule`
-opened (`call.reserve(ref)`), names it, and closes it (`call.release()`), so it can settle
-authorized work but never mark a door delivered on its own or write to the ledger after a call
-ended with nothing in flight. A reservation names one record (the module's `outcomeRecord`
-finds it), and the engine refuses an outcome write that changes anything but that record, so a
-pending grant's reservation cannot be used to write another, forged one. A verifier must name the
+opened (`call.reserve(ref)`) on a live call, and names it. The reservation names one record (the
+module's `outcomeRecord` finds it); the engine refuses a write that changes anything but that
+record, and asks the module's `checkOutcome` whether the change is legal. Gate allows only its one
+pre-send annotation and a final status that matches its controller's real answer (or `unknown`
+once the grant expired); identities never change. The first settling write consumes the
+reservation. After the call ended, only a settling write for a reservation opened before the end is
+taken, because late door answers are real; once the call's receipt is signed, nothing is, because
+the receipt holds the ledger head and must not be contradicted (re-issuing receipts is not
+supported). A verifier must name the
 workspace it serves: grants are bound to their workspace as well as their audience.
 **Revisit** when Gate needs a receipt part (access on the call's receipt).
 

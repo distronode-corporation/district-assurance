@@ -25,6 +25,9 @@ import { accessGrantDigest, MAX_ACCESS_GRANT_SECONDS, type AccessController, typ
 
 export const GATE = "gate";
 
+/** The fields of a grant an outcome write can never change. */
+const IDENTITY = ["grantId", "target", "controller", "ref", "level", "issuedAt", "expiresAt"];
+
 /** The scope a `gate.grant` step needs. An access scope: never below level 2. */
 export const ENTRY_SCOPE = "entry.open";
 
@@ -116,6 +119,12 @@ export class GateModule implements AssuranceModule {
   };
   readonly #signer: ReceiptSigner;
   readonly #controllers: ReadonlyMap<string, AccessController>;
+  /**
+   * The final outcomes this Gate is about to write, by grant id: what its controller actually
+   * answered (or that nothing was sent). `checkOutcome` accepts a final status only if it is one of
+   * these, so a write that did not come from this Gate's own answer is refused.
+   */
+  readonly #intents = new Map<string, Array<Pick<AccessRecord, "status" | "confirmed" | "providerRef">>>();
 
   constructor(options: GateOptions) {
     const names = Object.keys(options.controllers);
@@ -183,6 +192,41 @@ export class GateModule implements AssuranceModule {
     return (s as unknown as GateSlice).grants.length;
   }
 
+  /**
+   * What an outcome write may do to the reserved grant. Its identity (id, target, controller, ref,
+   * level, issue and expiry times) never changes; it settles once, from reserved; while reserved
+   * only its digest and key id may be written, once; and a final status must be the answer this
+   * Gate received (or, once the grant expired, unknown).
+   */
+  checkOutcome(before: JsonValue, after: JsonValue, context: { reservation: string; now: string }): "open" | "settled" | { refused: string } {
+    const b = before as unknown as Record<string, JsonValue>;
+    const a = after as unknown as Record<string, JsonValue>;
+    if (IDENTITY.some((k) => a[k] !== b[k])) return { refused: "a grant's identity cannot change" };
+    // `before` is always reserved: the engine consumes a reservation when its grant settles, so a
+    // write can never reach a settled grant.
+    for (const k of ["digest", "kid"]) {
+      if (b[k] !== null ? a[k] !== b[k] : a[k] !== null && typeof a[k] !== "string") return { refused: `the grant's ${k} is written once` };
+    }
+    // The one write that leaves a grant reserved: its digest and key id, just before it is sent.
+    if (a.status === "reserved") {
+      const annotates = b.digest === null && typeof a.digest === "string" && typeof a.kid === "string";
+      return annotates && a.confirmed === false && a.providerRef === null ? "open" : { refused: "a reserved grant only takes its digest and key id, once" };
+    }
+    const said = (this.#intents.get(context.reservation) ?? []).some((i) => i.status === a.status && i.confirmed === a.confirmed && i.providerRef === a.providerRef);
+    const stale = a.status === "unknown" && a.confirmed === false && a.providerRef === null && Date.parse(b.expiresAt as string) <= Date.parse(context.now);
+    return said || stale ? "settled" : { refused: "an outcome this gate never received" };
+  }
+
+  /** Lets `checkOutcome` accept these outcomes for a grant while `write` runs, and only then. */
+  async #withIntent<T>(grantId: string, outcomes: Array<Pick<AccessRecord, "status" | "confirmed" | "providerRef">>, write: () => Promise<T>): Promise<T> {
+    this.#intents.set(grantId, outcomes);
+    try {
+      return await write();
+    } finally {
+      this.#intents.delete(grantId);
+    }
+  }
+
   /** A reservation names one grant, by its id: an outcome write may settle that grant and nothing else. */
   outcomeRecord(s: JsonValue, reservation: string): { record: JsonValue; rest: JsonValue } | null {
     const slice = s as unknown as GateSlice;
@@ -232,7 +276,8 @@ export class GateModule implements AssuranceModule {
       grant = await signDocument(this.#signer, body);
     } catch (error) {
       // Nothing was sent: the grant failed, and a new request may follow.
-      await commit(engine, callId, record.grantId, { status: "failed", confirmed: false, providerRef: null }, "access.failed", {});
+      const failed = { status: "failed" as const, confirmed: false, providerRef: null };
+      await this.#withIntent(record.grantId, [failed], () => commit(engine, callId, record.grantId, failed, "access.failed", {}));
       throw error;
     }
     const digest = accessGrantDigest(body);
@@ -254,20 +299,13 @@ export class GateModule implements AssuranceModule {
     }
     // Only the controller's call decides the outcome. A failure to write it afterwards is thrown
     // as it is; the reservation then settles as unknown once its grant expires.
-    const stored =
+    const [result, event, detail]: [Pick<AccessRecord, "status" | "confirmed" | "providerRef">, string, { [key: string]: JsonValue }] =
       answer === null
-        ? await commit(engine, callId, record.grantId, { status: "unknown", confirmed: false, providerRef: null }, "access.unknown", { digest, kid: grant.kid })
+        ? [{ status: "unknown", confirmed: false, providerRef: null }, "access.unknown", { digest, kid: grant.kid }]
         : answer.outcome === "delivered"
-          ? await commit(engine, callId, record.grantId, { status: "delivered", confirmed: answer.confirmed, providerRef: answer.providerRef }, "access.delivered", {
-              digest,
-              confirmed: answer.confirmed,
-              kid: grant.kid,
-            })
-          : await commit(engine, callId, record.grantId, { status: "refused", confirmed: false, providerRef: null }, "access.refused", {
-              digest,
-              reason: reasonCode(answer.reason),
-              kid: grant.kid,
-            });
+          ? [{ status: "delivered", confirmed: answer.confirmed, providerRef: answer.providerRef }, "access.delivered", { digest, confirmed: answer.confirmed, kid: grant.kid }]
+          : [{ status: "refused", confirmed: false, providerRef: null }, "access.refused", { digest, reason: reasonCode(answer.reason), kid: grant.kid }];
+    const stored = await this.#withIntent(record.grantId, [result], () => commit(engine, callId, record.grantId, result, event, detail));
     // What the call holds, which another process may have settled first (as unknown), not only what the door said.
     return { grantId: record.grantId, status: stored.status as AccessResult["status"], confirmed: stored.confirmed };
   }
@@ -276,7 +314,8 @@ export class GateModule implements AssuranceModule {
   async #stillAuthorized(engine: GateHost, callId: string, grantId: string, digest: string, kid: string): Promise<string | null> {
     // Set by each attempt of the write; the attempt that was saved is the last one to run.
     let lapsed: string | null = null;
-    const after = (await outcome(engine, callId, grantId, (s, call) => {
+    const failed = { status: "failed" as const, confirmed: false, providerRef: null };
+    const after = (await this.#withIntent(grantId, [failed], () => outcome(engine, callId, grantId, (s, call) => {
       const slice = s as unknown as GateSlice;
       const record = slice.grants.find((g) => g.grantId === grantId)!;
       // The reservation is open, and Gate closes it whenever it settles a grant: this grant is still reserved.
@@ -286,11 +325,10 @@ export class GateModule implements AssuranceModule {
       record.kid = kid;
       if (lapsed !== null) {
         record.status = "failed";
-        call.release();
         call.emit("access.failed", { grantId, digest, kid, reason: lapsed === "it expired" ? "expired" : "not_authorized" });
       }
       return slice as unknown as JsonValue;
-    })) as unknown as GateSlice;
+    }))) as unknown as GateSlice;
     // Decided by what was stored, not by an attempt that may have been discarded: a grant another
     // process settled meanwhile (its reservation closed, so the write was refused) is never sent.
     const stored = after.grants.find((g) => g.grantId === grantId)!;
@@ -350,25 +388,31 @@ function reserve(slice: GateSlice, call: ModuleCallView, input: { target: string
  * process stopped while the door answered) as unknown. Its own write, so it holds even when the
  * request that follows is refused: at the grant limit, the step then fails instead of waiting.
  */
+/** Thrown inside a stale-settle write to abandon it when the grant is still in time. */
+const NOT_STALE = new Error("not stale");
+
 async function settleStale(engine: GateHost, callId: string): Promise<void> {
   const before = (await engine.moduleState(callId, GATE)) as unknown as GateSlice;
   // One write per stale reservation, each settling only the grant it reserved.
   for (const stale of before.grants.filter((g) => g.status === "reserved")) {
-    await outcome(engine, callId, stale.grantId, (s, call) => {
-      const slice = s as unknown as GateSlice;
-      const g = slice.grants.find((r) => r.grantId === stale.grantId)!;
-      if (g.status === "reserved" && Date.parse(g.expiresAt) <= Date.parse(call.now)) {
+    try {
+      await outcome(engine, callId, stale.grantId, (s, call) => {
+        const slice = s as unknown as GateSlice;
+        const g = slice.grants.find((r) => r.grantId === stale.grantId)!;
+        // Still in time: another request is delivering it. Nothing to write, so the write is abandoned.
+        if (Date.parse(g.expiresAt) > Date.parse(call.now)) throw NOT_STALE;
         g.status = "unknown";
-        call.release();
         call.emit("access.unknown", {
           grantId: g.grantId,
           ...(g.digest === null ? {} : { digest: g.digest }),
           ...(g.kid === null ? {} : { kid: g.kid }),
           reason: "no_answer_recorded",
         });
-      }
-      return slice as unknown as JsonValue;
-    });
+        return slice as unknown as JsonValue;
+      });
+    } catch (error) {
+      if (error !== NOT_STALE) throw error;
+    }
   }
 }
 
@@ -402,7 +446,6 @@ async function commit(
     // Only a reservation takes an outcome: one settled as unknown meanwhile stays unknown.
     if (record.status === "reserved") {
       Object.assign(record, result);
-      call.release();
       call.emit(event, { grantId, ...detail });
     }
     return slice as unknown as JsonValue;

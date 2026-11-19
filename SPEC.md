@@ -105,15 +105,22 @@ module's step, and held by the engine to the scope the current step needs. `fn` 
 module's part and a view: the session state, the current step (a copy, or null), the engine's
 clock (`now`), `newId(prefix)`, `authorized(scope)`, `emit(event, detail)` (a `module.event`
 ledger entry) and `reserve(ref)`, which opens a reservation in the call record for work whose
-outcome comes later. `recordModuleOutcome(callId, name, ref, fn)` is the write for that outcome (a
-provider's answer): refused unless `ref` is an open reservation of that module on that call, so it
-settles authorized work and never starts any; not held to the scope; allowed after the flow or the
-call ended while the reservation is open; `call.release()` closes it. The module must say which
-record a reservation names (`outcomeRecord(slice, ref)`, which splits that record from the rest),
-and the write may change that record only: one that adds a record, drops it, or touches anything
-else in the module's part is refused (`precondition_failed`). Gate's record is the grant with that
-id. `moduleReservations(callId,
-name)` lists the open ones.
+outcome comes later (refused once the call has ended). `recordModuleOutcome(callId, name, ref, fn)`
+is the write for that outcome (a provider's answer), not held to the scope. A module that uses it
+declares two pure functions: `outcomeRecord(slice, ref)` splits the record a reservation names
+from the rest, and `checkOutcome(before, after, {reservation, now})` judges the record's change:
+`"open"` (still pending), `"settled"` (final) or `{refused}`. The write is refused
+(`precondition_failed`, nothing saved, no ledger entry) when:
+
+- `ref` is not an open reservation of that module on that call (never opened, or consumed);
+- the call's receipt is signed: nothing more is written to that call, a late answer included;
+- anything but the named record changed (a record added, dropped or touched), or the record is gone;
+- `checkOutcome` refuses the change;
+- the call has ended and the change is not final: after the end, only a reservation opened before
+  it takes its one settling write.
+
+The first `"settled"` write consumes the reservation, so an outcome is written once.
+`moduleReservations(callId, name)` lists the open ones.
 
 ## 4. Factors, levels and scopes
 
@@ -438,8 +445,9 @@ texted never expires this way; it stays open to resume.
 maxLinkMinutes}`. When the config is saved, a step's mode (and Paylink's default mode) must be one
 the adapter takes, and the link life no longer than its maximum; malformed capabilities are a
 problem too, and so is an engine's payments adapter that declares no capabilities at all (a plain
-JavaScript adapter), refused when the engine is built or a config is saved rather than failing
-mid-call. A registry built without capabilities (only adapter names) skips these checks; an engine
+JavaScript adapter). Adapters are given when the engine is built, so these checks run when the
+engine is built (`createEngine`) and when a config is saved (`configure`), not at `engine.use`,
+which installs modules; a refused adapter never fails mid-call. A registry built without capabilities (only adapter names) skips these checks; an engine
 always has them.
 
 **Methods.** `paymentMethods` lists only methods that settle during the call: `card` (credit, and
@@ -495,6 +503,12 @@ the lifetime (pass no input); outside one the host's code passes `{target, lifet
 
 1. **Reserve** (`updateModule`, held to `entry.open`; Gate also checks `authorized("entry.open")`),
    opening a reservation named by the grant id; every later write for this grant settles only it.
+   Gate's `checkOutcome`: the grant's identity (id, target, controller, ref, level, issue and expiry
+   times) never changes; it settles once, from `reserved`; while reserved, the only legal write is
+   its digest and key id, once, just before the send; a final status must be the answer this Gate
+   received from its controller (or `failed`, when nothing was sent), except `unknown` once the
+   grant expired (a stale reservation, which any process may settle). A forged write that comes from
+   anywhere else is refused.
    Refused: `scope_denied` without a verification grant covering `entry.open` (none, expired,
    tainted, or below today's minimum); `invalid_input` for a missing or unknown target or a bad
    lifetime; `precondition_failed` while another grant of the call is in flight or once

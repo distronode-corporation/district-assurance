@@ -99,6 +99,13 @@ export interface AssuranceModule {
    * may change that record and nothing else, so it can never add a record or touch another one.
    */
   outcomeRecord?(slice: JsonValue, reservation: string): { record: JsonValue; rest: JsonValue } | null;
+  /**
+   * Judges an outcome write's change to the reserved record (required with `outcomeRecord`). `open`:
+   * a legal change that leaves the work pending. `settled`: a legal final outcome, which consumes
+   * the reservation. `{ refused }`: anything else (a changed identity, an illegal transition, an
+   * outcome the module never saw), and the write is refused. Pure.
+   */
+  checkOutcome?(before: JsonValue, after: JsonValue, context: { reservation: string; now: string }): "open" | "settled" | { refused: string };
   /** Why the call cannot end now (work in progress that would be lost), or null. */
   blocksEnd?(slice: JsonValue): string | null;
   /** Untrusted text entered the call: drop anything that relied on trust. Returns the new slice. */

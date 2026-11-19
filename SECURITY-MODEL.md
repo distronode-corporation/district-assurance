@@ -136,7 +136,13 @@ public key, so taking a relay over does not let anyone mint grants, and one chan
 workspaces that share a key and a controller name never open each other's doors (tested). The
 example relay refuses a grant id it has seen (`SeenGrants`, tested in the demo). An outcome write
 settles only the one grant its reservation names, and the engine refuses any other change, so a
-pending grant's reservation cannot write a forged one (tested). It settles only a grant Gate
+pending grant's reservation cannot write a forged one (tested). Even on that grant, the identity
+(door, ref, target, level, expiry) is fixed, the status moves only from reserved to a final value,
+and a final value must be the controller's actual answer to this Gate, so no write can mark a door
+delivered that the controller did not report, re-point a grant, or settle it twice (tested). After
+a call ends, a door answer that arrives late is still recorded, only as that grant's one settling
+write; once the call's receipt is signed, nothing is written to the call, and a late answer is
+refused rather than appended after the receipt (tested). It settles only a grant Gate
 reserved under its scope check, so no write marks a door delivered
 without a grant, and none reaches the ledger after a call ended with nothing in flight (tested).
 **An unlock is never retried:** one grant in flight per call, sent once, no redirects followed;
