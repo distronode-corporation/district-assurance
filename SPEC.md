@@ -60,7 +60,8 @@ The record lives in a `SessionStore`:
 - `compareAndSet(workspaceId, callId, expectedVersion, record)` writes only if the stored version is
   `expectedVersion`, and the new version is `expectedVersion + 1`; otherwise `{ok: false}`.
 - `bindRef(workspaceId, ref, callId)` points a provider reference (`identity:<session id>`,
-  `payment:<link id>`) at a call, first binding wins; `resolveRef` reads it.
+  `payment:<link id>`, `payment_intent:<payment intent id>`) at a call, first binding wins;
+  `resolveRef` reads it.
 
 Every engine step reads the record, applies one pure change, and writes it with compare-and-set.
 On `{ok: false}` the step starts again from a fresh read, up to 5 attempts (`MAX_WRITE_ATTEMPTS`),
@@ -315,6 +316,9 @@ answer on file, a phone number, a link or card data.
 | `payment.link_expired` | `paymentId`, `provider` (`expired`, `not_open`, or `not_created` when no link was created), and `reason`: none when the engine's deadline came, else `not_sent_in_time`, `not_created_in_time`, `cancelled` or `call_ended` |
 | `payment.outcome_ignored` | `paymentId`, `reason` (`account`): an outcome from another account |
 | `payment.settled` | `paymentId`, `status`, and `late: true` for a payment made after the engine closed its link |
+| `payment.settled` | `paymentId`, `status` |
+| `payment.refunded` | `paymentId`, `refundId`, `providerRef`, `amountMinor`, `currency`, `reason`, `status` (`pending`, `succeeded` or `failed`) |
+| `payment.disputed` | `paymentId`, `disputeId`, `status`, `amountMinor`, `currency` |
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
@@ -437,8 +441,9 @@ the merchant). The step's `mode`, else Paylink's `mode`, else `platform`. The re
 Paylink's settings), `paymentMethods` and `expiresAt`, and its idempotency key is the JSON tuple
 `[workspaceId, callId, paymentId, "link", mode]`. A provider outcome carries `account` when it
 came from a connected account; it must equal the payment's `connectedAccountId` in connect mode
-and be absent in platform mode, or it is ignored (`payment.outcome_ignored`). Refunds and
-disputes are not handled by the engine (SECURITY-MODEL.md, open questions).
+and be absent in platform mode, or it is ignored (`payment.outcome_ignored`). In platform mode
+the platform refunds and answers disputes (below); in connect mode both are the business's, on its
+own account, and the engine handles neither.
 
 **Link life.** A link lives `linkLifeMinutes` (step, else settings, else 15; 5 to 60) from the
 moment it was texted, but never past what the provider was asked for: `expiresAt`. The provider is
@@ -499,7 +504,8 @@ already signed is not changed: the ledger is where the late payment shows.
 
 **Adapter capabilities.** `PaymentLinks.capabilities` declares `{modes, minLinkMinutes,
 maxLinkMinutes}`. When the config is saved, a step's mode (and Paylink's default mode) must be one
-the adapter takes, and the link life no longer than its maximum; malformed capabilities are a
+the adapter takes, and the link life no longer than its maximum (`refund` is optional: no flow
+step needs it, so a platform payment flow is valid without it); malformed capabilities are a
 problem too, and so is an engine's payments adapter that declares no capabilities at all (a plain
 JavaScript adapter). Adapters are given when the engine is built, so these checks run when the
 engine is built (`createEngine`) and when a config is saved (`configure`), not at `engine.use`,
@@ -529,6 +535,55 @@ always recorded. A request the engine expired (its own deadline, a link too late
 with a slow create, a cancel or the end of the call) that the provider then reports paid becomes
 `paid`, and `payment.settled` carries `late: true`.
 
+**Refunds (platform mode).** `refundPayment({callId, paymentId, amountMinor?, reason})` is a host
+call made for the business (its back office or staff): no grant reaches it, no flow step runs it,
+and the model is never given it. It refunds a `paid` platform payment in full (the default: all
+that is left) or in part, with `reason` one of `requested_by_customer`, `duplicate`, `fraudulent`.
+Refused: `invalid_input` for a bad reason or amount, an unknown payment, or refunds that would add
+up to more than was paid (a refund the provider answered `failed` does not count);
+`precondition_failed` for a payment not `paid`, a connect payment, a payment refunded in full, a
+payment with a dispute open or lost (the provider refuses those too), and an engine whose payments
+adapter has no `refund`; `module_disabled` on a call that started with Paylink off. A refund is
+reserved in one write (one in flight per payment; asking again while it is resumes it, and another
+amount is refused), sent with `PaymentLinks.refund({linkId, paymentIntentId?, mode: "platform",
+amountMinor, currency, reason, idempotencyKey})`, the key being `[workspaceId, callId, paymentId,
+"refund", refundId]`, and committed in another write with the provider's answer and
+`payment.refunded`. It returns `{refundId, status, amountMinor, refundedMinor}`. A refund still
+in flight is resumed with its own key before the dispute check, which is for new refunds: a refund
+the provider made whose answer was lost is learned even if a dispute opened since. An adapter
+answers a refund the provider refused as `failed` and throws only when the answer was lost: a
+refund that threw stays in flight and the next `refundPayment` resumes it with the same key, so
+an adapter that throws for a refusal blocks the payment's refunds. An answer that is not one of the
+provider's three (`pending`, `succeeded`, `failed`, with a refund id) is treated the same way, as a
+lost answer (`precondition_failed`): nothing is recorded or ledgered, the refund stays in flight,
+and while an adapter keeps answering that way every later refund of the payment is blocked, since
+one is in flight at a time. A refund the provider made is learned once the adapter answers properly. A `pending` refund counts
+toward the total; its later outcome at the provider is not tracked yet (#117), so one that fails
+later still counts until the business refunds the rest by hand at the provider.
+
+A platform payment paid late (after the engine closed its link) keeps its payment intent too, so
+its disputes and refunds land like any other's.
+
+**Disputes (platform mode).** Stripe's `charge.dispute.*` events name the charge and the payment
+intent, not the Checkout Session. When a platform payment settles `paid`, the outcome's payment
+intent is kept on it and bound to the call (`payment_intent:<id>`), after the write, and again on
+every later outcome for the link, so a lost binding is made when the event comes again.
+`applyDisputeOutcome` finds the payment by it and records the dispute's status and amount
+(`payment.disputed`). A dispute that names no payment intent is not applied (`{applied: false}`);
+one whose payment intent is not bound yet answers `{applied: false, unbound: true}`, since
+webhooks come in any order and the payment's own event may still be on its way: the host has it
+delivered again (the reference server answers 503 and does not remember the event, so Stripe
+retries it within its own retry window). A connected account's dispute event is ignored
+(`payment.outcome_ignored`). A later paid outcome that names the payment intent of a payment
+already paid without one keeps it too. `won` and `lost` are
+final; an event that changes neither status nor amount is not written again.
+
+Refunds and disputes work after the flow and the call ended. They never change a payment's
+`status`, the flow, or the receipt already issued. `PaymentLinks.refund` is optional: refunds and
+disputes are host calls and webhooks, never flow steps, so no config needs it and a platform
+payment flow is valid without it; `refundPayment` on an engine whose adapter has none is
+refused (`precondition_failed`), and disputes are still recorded.
+
 ## 15. Stripe webhooks
 
 `verifyStripeSignature` follows Stripe's published scheme: the `Stripe-Signature` header has
@@ -536,9 +591,13 @@ with a slow create, a cancel or the end of the call) that the provider then repo
 body)`. The check passes if any `v1` matches any configured secret and `t` is within 300 seconds
 of now, either way. `parseStripeEvent` maps
 `identity.verification_session.{verified,requires_input,canceled}` and
-`checkout.session.{completed,async_payment_succeeded,async_payment_failed,expired}`; other types
+`checkout.session.{completed,async_payment_succeeded,async_payment_failed,expired}` (with the
+session's `payment_intent` when it is a string) and
+`charge.dispute.{created,updated,closed,funds_withdrawn,funds_reinstated}` (the dispute id, `charge`,
+`payment_intent` or null, `status`, `amount` and `currency`; never its evidence); other types
 are reported as ignored, and a body that is not a well-formed event is `null`, including one whose
-`account` is present but not a string (never read as "no account").
+`account` is present but not a string (never read as "no account"). The reference server
+applies dispute events from the platform's payments endpoint only.
 
 ## 16. Texts
 

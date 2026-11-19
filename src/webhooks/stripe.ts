@@ -4,6 +4,7 @@
 // endpoint's signing secret. Nothing here calls Stripe.
 import { hexDigestsEqual, hmacSha256Hex } from "../core/hash.ts";
 import type { PaymentOutcome } from "../pay/payment.ts";
+import { DISPUTE_STATUSES, type DisputeOutcome, type DisputeStatus } from "../pay/refunds.ts";
 
 export type SignatureCheck =
   | { ok: true; timestamp: number }
@@ -59,8 +60,12 @@ export interface IdentityOutcome {
 
 export type ParsedStripeEvent =
   | { eventId: string; livemode: boolean; kind: "identity"; outcome: IdentityOutcome }
-  | { eventId: string; livemode: boolean; kind: "payment"; outcome: PaymentOutcome }
+  | { eventId: string; livemode: boolean; kind: "payment"; outcome: PaymentOutcome & { paymentIntentId?: string } }
+  | { eventId: string; livemode: boolean; kind: "dispute"; outcome: DisputeOutcome }
   | { eventId: string; livemode: boolean; kind: "ignored"; type: string };
+
+/** Stripe's dispute events. Each carries the dispute as it is now; the engine keeps the latest. */
+const DISPUTE_TYPES = new Set(["charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed", "charge.dispute.funds_withdrawn", "charge.dispute.funds_reinstated"]);
 
 const IDENTITY_TYPES: Record<string, IdentityOutcome["status"]> = {
   "identity.verification_session.verified": "verified",
@@ -93,20 +98,38 @@ export function parseStripeEvent(body: string): ParsedStripeEvent | null {
   const linkId = object.id;
   const identity = IDENTITY_TYPES[event.type];
   if (identity !== undefined) return { ...base, kind: "identity", outcome: { sessionId: linkId, status: identity } };
+  if (DISPUTE_TYPES.has(event.type)) {
+    const dispute = disputeOutcome(object);
+    return dispute === null ? null : { ...base, kind: "dispute", outcome: { ...dispute, ...account } };
+  }
+  // A Checkout Session names its payment intent; a platform payment's disputes are found by it.
+  const intent = typeof object.payment_intent === "string" ? { paymentIntentId: object.payment_intent } : {};
   switch (event.type) {
     case "checkout.session.completed": {
       const status = object.payment_status;
       if (typeof status !== "string" || !PAYMENT_STATUSES.has(status)) return null;
       const paymentStatus = status as "paid" | "unpaid" | "no_payment_required";
-      return { ...base, kind: "payment", outcome: { kind: "completed", linkId, paymentStatus, ...account } };
+      return { ...base, kind: "payment", outcome: { kind: "completed", linkId, paymentStatus, ...intent, ...account } };
     }
     case "checkout.session.async_payment_succeeded":
-      return { ...base, kind: "payment", outcome: { kind: "async_succeeded", linkId, ...account } };
+      return { ...base, kind: "payment", outcome: { kind: "async_succeeded", linkId, ...intent, ...account } };
     case "checkout.session.async_payment_failed":
-      return { ...base, kind: "payment", outcome: { kind: "async_failed", linkId, ...account } };
+      return { ...base, kind: "payment", outcome: { kind: "async_failed", linkId, ...intent, ...account } };
     case "checkout.session.expired":
-      return { ...base, kind: "payment", outcome: { kind: "expired", linkId, ...account } };
+      return { ...base, kind: "payment", outcome: { kind: "expired", linkId, ...intent, ...account } };
     default:
       return { ...base, kind: "ignored", type: event.type };
   }
+}
+
+/**
+ * A Dispute object: its id, the charge and payment intent it names, its status and amount. Never
+ * its evidence or the card's details. Null when a field is missing or not what Stripe sends.
+ */
+function disputeOutcome(object: Record<string, unknown>): Omit<DisputeOutcome, "account"> | null {
+  const { charge, payment_intent: intent, status, amount, currency } = object;
+  if (typeof charge !== "string" || (intent !== null && typeof intent !== "string")) return null;
+  if (!(DISPUTE_STATUSES as readonly unknown[]).includes(status) || !Number.isSafeInteger(amount) || (amount as number) < 0) return null;
+  if (typeof currency !== "string" || !/^[a-z]{3}$/.test(currency)) return null;
+  return { disputeId: object.id as string, chargeId: charge, paymentIntentId: intent, status: status as DisputeStatus, amountMinor: amount as number, currency };
 }

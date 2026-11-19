@@ -14,6 +14,7 @@ import type {
   PaymentLinkRequest,
   PaymentLinks,
   PaymentMode,
+  PaymentRefundRequest,
   PinVerifier,
   ReceiptSigner,
   RecordStore,
@@ -109,7 +110,10 @@ export class FakePaymentLinks implements PaymentLinks {
   readonly capabilities: PaymentLinkCapabilities;
   readonly created: Array<Omit<PaymentLinkRequest, "callId" | "description" | "idempotencyKey"> & { linkId: string }> = [];
   readonly expired: Array<{ linkId: string; mode: PaymentMode; connectedAccountId?: string }> = [];
+  readonly refunds: Array<Omit<PaymentRefundRequest, "idempotencyKey"> & { refundId: string }> = [];
+  refundStatus: "pending" | "succeeded" | "failed" = "succeeded";
   readonly #byKey = new Map<string, { linkId: string; url: string }>();
+  readonly #refundsByKey = new Map<string, { refundId: string; status: "pending" | "succeeded" | "failed" }>();
   readonly #closed = new Set<string>();
 
   constructor(capabilities: Partial<PaymentLinkCapabilities> = {}) {
@@ -133,6 +137,20 @@ export class FakePaymentLinks implements PaymentLinks {
     const { idempotencyKey: _k, ...asked } = input;
     this.expired.push(asked);
     return { state: "expired" };
+  }
+
+  /**
+   * Refunds once per idempotency key, like the provider: a repeated key returns the first answer.
+   * `refunds` records each refund asked for; `refundStatus` is what a new one answers.
+   */
+  async refund(input: PaymentRefundRequest): Promise<{ refundId: string; status: "pending" | "succeeded" | "failed" }> {
+    const existing = this.#refundsByKey.get(input.idempotencyKey);
+    if (existing !== undefined) return existing;
+    const answer = { refundId: `re_fake_${this.refunds.length + 1}`, status: this.refundStatus };
+    this.#refundsByKey.set(input.idempotencyKey, answer);
+    const { idempotencyKey: _k, ...asked } = input;
+    this.refunds.push({ ...structuredClone(asked), refundId: answer.refundId });
+    return answer;
   }
 
   /** The provider closed a link on its own (paid or expired): a later expireLink answers not_open. */

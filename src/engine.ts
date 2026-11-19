@@ -31,6 +31,7 @@ import type { NormaliseResult } from "./file/intake.ts";
 import { BUILT_IN_MODULES, builtInModules, defaultConfig } from "./modules.ts";
 import * as paylink from "./pay/paylink.ts";
 import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
+import * as refunds from "./pay/refunds.ts";
 import type { ConsentRecord } from "./prove/consent.ts";
 import { detailCarriesCardNumber } from "./prove/ledger.ts";
 import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
@@ -428,9 +429,26 @@ export class Engine {
     return paylink.cancelPaymentLink(this.#rt, callId, paymentId);
   }
 
-  /** A provider's outcome. A payment the engine closed that is paid after all is recorded paid, flagged `late`. */
-  applyPaymentOutcome(outcome: PaymentOutcome): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
+  /**
+   * A provider's verified outcome. A payment the engine closed that is paid after all is recorded
+   * paid, flagged `late`. A platform payment's `paymentIntentId` is bound to the call, for its disputes.
+   */
+  applyPaymentOutcome(outcome: PaymentOutcome & { paymentIntentId?: string }): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
     return paylink.applyPaymentOutcome(this.#rt, outcome);
+  }
+
+  /**
+   * Refunds a paid platform payment, in full or in part, for the business. A host call from the
+   * business's side (its back office or staff), never from a call's tool path: no grant reaches
+   * it, and the model must never be given it. Works after the call ended.
+   */
+  refundPayment(input: refunds.RefundInput): Promise<refunds.RefundResult> {
+    return refunds.refundPayment(this.#rt, input);
+  }
+
+  /** A verified dispute event (`charge.dispute.*`), recorded against the platform payment it names. */
+  applyDisputeOutcome(outcome: refunds.DisputeOutcome): Promise<refunds.DisputeApplied> {
+    return refunds.applyDisputeOutcome(this.#rt, outcome);
   }
 
   // ---- Gate (entry) ------------------------------------------------------------------------

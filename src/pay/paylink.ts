@@ -41,7 +41,7 @@ import {
   type PaymentRequest,
   type PaymentStatus,
 } from "./payment.ts";
-
+import type { PaymentAfterwards } from "./refunds.ts";
 
 export const PAYLINK = "paylink";
 
@@ -82,7 +82,8 @@ export interface PaymentInput {
 }
 
 export interface PaylinkSlice {
-  payments: PaymentRequest[];
+  /** Each request, and once a platform payment is paid, its payment intent, refunds and disputes (`refunds.ts`). */
+  payments: Array<PaymentRequest & PaymentAfterwards>;
 }
 
 /** How a payment is taken: from the step, then the settings, then the defaults. */
@@ -141,6 +142,8 @@ function isCapabilities(value: unknown): value is PaymentLinkCapabilities {
 /** Problems between a mode and a link life and what the payments adapter declares it can do. */
 function adapterErrors(caps: PaymentLinkCapabilities, mode: PaymentMode, lifeMinutes: number): string[] {
   const errors: string[] = [];
+  // A refund is optional for the adapter: no flow step needs one (refunds are host calls), so a
+  // platform payment flow is valid without it, and `refundPayment` is refused at run time instead.
   if (!caps.modes.includes(mode)) errors.push(`the payments adapter does not take ${mode} payments (it takes: ${caps.modes.join(", ") || "none"})`);
   if (lifeMinutes > caps.maxLinkMinutes) errors.push(`linkLifeMinutes ${lifeMinutes} is longer than the payments adapter keeps a link (${caps.maxLinkMinutes} minutes)`);
   return errors;
@@ -497,33 +500,56 @@ function settle(rt: EngineRuntime, draft: CallDraft, paymentId: string, status: 
  * deadline came) can still be paid at the provider, by a caller already on the page. The money
  * moved, so it is recorded as paid, flagged `late` in the ledger. The session does not move.
  */
-export async function applyPaymentOutcome(rt: EngineRuntime, outcome: PaymentOutcome): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
+export async function applyPaymentOutcome(
+  rt: EngineRuntime,
+  outcome: PaymentOutcome & { paymentIntentId?: string },
+): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
   // A connect-mode payment is bound under its account, so two accounts' link ids never collide. A
   // platform payment's binding is tried last, so a connected account's event for one is seen (and
   // written down as ignored) rather than lost.
   const account = outcome.account ?? null;
   const callId = (account === null ? null : await rt.resolveRef(paymentRef({ connectedAccountId: account }, outcome.linkId))) ?? (await rt.resolveRef(paymentRef({ connectedAccountId: null }, outcome.linkId)));
   if (callId === null) return { applied: false };
-  return rt.update(callId, (draft) => {
+  const { result, paymentIntentId } = await rt.update(callId, (draft) => {
     const payments = draft.slice<PaylinkSlice>(PAYLINK).payments.filter((p) => p.linkId === outcome.linkId);
     const request = payments.find((p) => p.connectedAccountId === account) ?? payments[0]!;
     if (!outcomeAccountMatches(request, outcome)) {
       draft.emit("payment.outcome_ignored", "system", { paymentId: request.paymentId, reason: "account" });
-      return { applied: false } as const;
+      return { result: { applied: false } as const, paymentIntentId: undefined };
     }
     const status = settlementFor(outcome);
+    // A platform payment's disputes name its payment intent, not the page: it is kept to bind,
+    // whenever it is paid (late too: a disputed late payment is still the platform's).
+    const keepIntent = () => {
+      if (request.mode === "platform" && outcome.paymentIntentId !== undefined) request.paymentIntentId ??= outcome.paymentIntentId;
+    };
     // Money that moved is always recorded: a payment the engine had expired (its own deadline, or a
     // race with a slow create) and the provider then reports paid becomes paid, flagged as late.
     if (request.status === "expired" && status === "paid") {
       request.status = "paid";
       request.settledAt = rt.now();
+      keepIntent();
       draft.emit("payment.settled", "system", { paymentId: request.paymentId, status: "paid", late: true });
-      return { applied: true, callId, status } as const;
+      return { result: { applied: true, callId, status } as const, paymentIntentId: request.paymentIntentId };
     }
-    if (request.status !== "open" || status === null) return { applied: false } as const;
-    settle(rt, draft, request.paymentId, status);
-    return { applied: true, callId, status } as const;
+    if (request.status === "open" && status !== null) {
+      settle(rt, draft, request.paymentId, status);
+      if (status === "paid") keepIntent();
+      return { result: { applied: true, callId, status } as const, paymentIntentId: request.paymentIntentId };
+    }
+    // Paid already, by an outcome that named no payment intent: a later one that names it is kept.
+    if (request.status === "paid" && status === "paid") keepIntent();
+    return { result: { applied: false } as const, paymentIntentId: request.paymentIntentId };
   });
+  // Bound after the write, and again on every later outcome for the link, so a bind that failed
+  // is made when the provider sends the event again.
+  if (paymentIntentId !== undefined) await rt.bindRef(paymentIntentRef(paymentIntentId), callId);
+  return result;
+}
+
+/** The provider reference a payment intent is bound under, so a dispute can land on any process. */
+export function paymentIntentRef(paymentIntentId: string): string {
+  return `payment_intent:${paymentIntentId}`;
 }
 
 /**

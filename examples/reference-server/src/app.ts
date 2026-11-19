@@ -84,6 +84,16 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       const outcome = event.outcome;
       apply = async () => (await options.engine.applyPaymentOutcome(outcome)).applied;
     }
+    // Disputes of platform payments come to the platform's own endpoint; a connect payment's are the business's.
+    if (route === "payments" && event.kind === "dispute") {
+      if (processed.has(event.eventId)) return [200, { received: true, duplicate: true }];
+      const result = await options.engine.applyDisputeOutcome(event.outcome);
+      // A dispute for a payment not bound yet (its own event still on its way) is not acknowledged,
+      // so Stripe delivers it again; it is never remembered as processed.
+      if (!result.applied && result.unbound === true) return [503, { received: true, applied: false, retry: true }];
+      processed.add(event.eventId);
+      return [200, { received: true, applied: result.applied }];
+    }
     if (apply === null) return [200, { received: true, applied: false, handled: false }];
     if (processed.has(event.eventId)) return [200, { received: true, duplicate: true }];
     const applied = await apply();

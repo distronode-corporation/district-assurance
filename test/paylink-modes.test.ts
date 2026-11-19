@@ -448,7 +448,7 @@ describe("paylink: the engine's own deadline", () => {
     }
     // A step whose own mode is invalid is reported for that, not checked against the adapter.
     assert.deepEqual(
-      validateConfig(withFlow({ ...pay, mode: "cash" }), new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer"], capabilities: { payments: platformOnly }, modules: builtInModules() })),
+      validateConfig(withFlow({ ...pay, mode: "cash" }), new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer"], capabilities: { payments: { ...platformOnly, refund: true } }, modules: builtInModules() })),
       ["flows.deposit.steps[1] (paylink.request): mode must be connect or platform"],
     );
   });
