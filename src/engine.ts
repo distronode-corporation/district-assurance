@@ -565,7 +565,8 @@ export class Engine {
     return steps.some((step) => {
       const owner = this.registry.stepOwner(step.type)!;
       const level = owner.stepLevel?.(step) ?? null;
-      const scopes = level === null ? [] : (owner.stepGrants?.(step) ?? scopesForLevel(policy, level as AssuranceLevel));
+      // A copy: the list a module returns may be its own, shared or frozen.
+      const scopes = [...(level === null ? [] : (owner.stepGrants?.(step) ?? scopesForLevel(policy, level as AssuranceLevel)))];
       const need = owner.manifest.scopes.needs[step.type];
       if (need !== undefined) scopes.push(need);
       return scopes.some((scope) => LIMITED_CLASSES.includes(scopeClass(scope, policy.scopeClasses, declared)));
@@ -625,7 +626,8 @@ export class Engine {
     // the same `rate_limited` as a refused start.
     const record = await this.#read(callId);
     const flow = record.flow;
-    if (flow === null || flow.counted === null) return;
+    // A flow started before `counted` existed (undefined) was never counted: it stays as it was. [] is a new limited flow.
+    if (flow === null || flow.counted === null || flow.counted === undefined) return;
     const keys = counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice).filter((key) => !flow.counted!.includes(counterId(key)));
     if (keys.length === 0) return;
     const { over } = await this.#countStarts(keys);
