@@ -2,11 +2,6 @@
 import { NotImplementedError } from "../core/errors.ts";
 import type { AccessController } from "./access.ts";
 
-/** A one-time access code texted to the number on file, for a keypad at the door (GAT-3, after VER-2's send limits). */
-export function issueAccessCode(_input: { callId: string; target: string }): never {
-  throw new NotImplementedError("issueAccessCode", "GAT-3");
-}
-
 /**
  * Web sign-in step-up: an ES256 JWT bound to the site's nonce, checked by the site against the
  * engine's published JWKS (GAT-4).

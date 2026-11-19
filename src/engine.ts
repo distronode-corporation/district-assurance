@@ -365,6 +365,17 @@ export class Engine {
     return badge.checkCarrier(this.#rt, callId);
   }
 
+  /**
+   * Where a code text for this call goes: the subject Badge matched by keypad or PIN, its number
+   * on file and the call's locale, for a module that texts it (Gate's access codes). Throws
+   * `precondition_failed` before a match. Never the calling number.
+   */
+  async numberOnFile(callId: string): Promise<{ subjectKey: string; phoneOnFile: string; locale: Locale }> {
+    const record = await this.#read(callId);
+    const subject = badge.matchedSubject(record);
+    return { subjectKey: subject.subjectKey, phoneOnFile: subject.phoneOnFile, locale: record.locale };
+  }
+
   sendTextCode(callId: string): Promise<never> {
     return badge.sendTextCode(this.#rt, callId);
   }

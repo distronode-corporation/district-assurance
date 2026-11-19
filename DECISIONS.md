@@ -340,4 +340,8 @@ instead of policing it: there is no write path left to attack. A late door answe
 **Revisit** if a host needs its own access module with engine-held outcomes: that would be a
 generic "held work" contract in the core (the engine calls an adapter the module names and records
 its answer), designed once, not per module.
+**Amended (GAT-3):** a one-time access code's grant is `delivered` when the code is texted, and
+the door acts on it later, when the code is redeemed, which may follow `receipt.issued` (until the
+grant expires, at most 15 minutes). The ledger still gets no access entry after the receipt: the
+redemption is the door's to log, and the host revokes a code it no longer wants.
 

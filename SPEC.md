@@ -312,6 +312,7 @@ answer on file, a phone number, a link or card data.
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
 | `access.issued` | `grantId`, `target`, `controller`, `scope`, `level`, `verificationGrantId`, `expiresAt` (section 17) |
 | `access.delivered` / `access.refused` / `access.unknown` / `access.failed` | `grantId`, `digest` and `kid` once signed, `confirmed` or `reason` (written by the engine only) |
+| `access.code_spent` | `grantId`, `reason` (`wrong_guesses`), `guesses`: a one-time code spent by wrong guesses at its door, never the guess |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
@@ -501,7 +502,9 @@ words by comparing a locale instead, so a new locale grows every catalog. The de
 subject's number on file. Identity link: "Your one-time identity check link: URL" / "Votre lien
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
-the currency's own decimals.
+the currency's own decimals. Access code (section 17): "Your one-time door code: CODE. It works
+once, within N min." / "Votre code de porte, à usage unique : CODE. Valable une fois, dans les N
+min.", N being the minutes left on the access grant, rounded up, at least 1.
 
 ## 17. Gate and access grants
 
@@ -621,5 +624,78 @@ the door, so it is `unknown`. Anything else, including no answer, is `unknown` t
 `engine.accessKeys()`, its own workspace and its own audience, and refuses a grant id it has seen.
 
 A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);
-revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS
+revoking an issued code belongs to one-time codes, below. Planned: web sign-in step-up as an ES256 JWT against a JWKS
 (GAT-4), a Seam adapter (GAT-5), direct vendor adapters (GAT-6).
+
+**One-time access codes** (`src/gate/codes.ts`), for a door whose controller cannot be called
+live: `accessCodes({key, signer, store, ledger, messages, limits, maxWrongGuesses?, clock?, newCode?})`.
+`key` is the codes' own HMAC key, at least 16 bytes (else `invalid_input`); `signer` is the
+engine's `accessSigner`, so a relay checks a redeemed grant against `engine.accessKeys()`;
+`ledger` is the engine's, for `access.code_spent`; `maxWrongGuesses` is 1 to 10, default 5 (else
+`invalid_input`). Its `controller` is an
+`AccessController` that the engine's `access` adapter names like any other
+(`access: { keypad: codes.controller }`), and a target names that controller.
+
+- `codes.issue(engine, callId, input?)` first draws its 3 candidate codes from `newCode`; any that
+  is not exactly 8 digits (`ACCESS_CODE_DIGITS`) fails the issue with `invalid_input`, a host
+  fault, before anything is reserved, counted, stored or texted. It then runs
+  `engine.grantAccess(callId, input)` with the same
+  input, steps and refusals, so the engine reserves the grant, holds it to `entry.open`, checks it
+  again before it is sent, limits it per call, writes it to the ledger as above, never lets it
+  outlive the verification grant, and records the controller's answer itself (ADR-25): the codes
+  write no outcome. Where the controller would be asked, a code is texted instead:
+  1. The call is found among the `issue` calls running in this process: one of the engine's
+     workspace whose in-flight grant has this grant id and the digest the engine recorded for the
+     grant it signed (a grant id alone could name another workspace's call). A grant sent to the
+     code controller any other way is refused (`not_requested`) and nothing is texted.
+  2. The destination is `engine.numberOnFile(callId)`: the subject Badge matched by keypad or
+     PIN, its number on file and the call's locale (`precondition_failed` before a match, which
+     Gate records as `unknown`). Never the calling number.
+  3. `limits.take({workspaceId, key: {scope: "subject", key: subjectKey}, at, ...ACCESS_CODE_SEND_LIMITS})`
+     counts the text against VER-2's `CodeStore`; false refuses it (`send_limit`) and nothing is
+     texted.
+  4. A drawn code is stored with `store.put` as an `AccessCodeEntry`:
+     `{workspaceId, digest, grantId, callId, body, misses: 0}`, the digest being
+     `HMAC-SHA256(key, JSON.stringify(["access-code", workspaceId, audience, target, code]))`
+     (`accessCodeDigest`) and `body` the grant's body, unsigned. A digest already live for that
+     door draws a new code, up to 3 times, then the request is refused (`no_free_code`).
+  5. A grant that expired while the limiter or the store answered is not texted: its entry is
+     taken back and it is `refused` (`expired`). Otherwise the code is texted (`purpose:
+     "one_time_code"`, idempotency key `[workspaceId, callId, grantId, "access_code"]`), and the
+     minutes in the text count from then. `delivered`, with `confirmed: false` and the message id
+     as `providerRef`, once sent. A text that throws may still have arrived, so the code is taken
+     back (`store.take` with its grant id, so another grant holding the same code by then is left
+     alone): taken, it was never redeemed, and the grant is `refused` (`text_failed`); already
+     gone (redeemed, or expired) or a store that throws, it is `unknown`.
+  The ledger holds what Gate writes for any grant (`access.issued`, then `access.delivered`,
+  `access.refused` with the reason above, or `access.unknown`), never the code. For a code,
+  `delivered` means texted: the door acts later, when the code is redeemed. So unlike a relay
+  grant, a code's grant may be acted on after the call ended and its receipt was issued, until its
+  `expiresAt` (at most 15 minutes after it was issued); the redemption is in the door's own log,
+  not the call's ledger, and `codes.revoke` ends it early.
+- `codes.redeem({workspaceId, audience, target, code})`: `store.get` of the code's digest, the
+  body signed again by `signer`, then `store.take` of the digest, so a code is redeemed once;
+  only for the grant that was signed (an entry another grant holds under that digest by then stays);
+  `{ok: true, grant}`, or `{ok: false}`, the same for a wrong, used, revoked, expired or malformed
+  code (a code that is not a string of at most 32 characters is hashed as an empty one). A guess
+  that matches no live code at that door (`audience` and `target`) is a wrong guess: it counts
+  against every code live there (`store.miss`), and a code that reaches `maxWrongGuesses` is spent,
+  removed, and recorded on its call as `access.code_spent` `{grantId, reason: "wrong_guesses",
+  guesses}`, never with the guess or the code. Signing
+  comes before the take, so a signer that throws leaves the code redeemable; a code taken, revoked
+  or expired while it was signed is refused and its signature dropped. A code expires with its grant's
+  `expiresAt`. The door's relay checks the grant with `verifyAccessGrant` (audience `audience`)
+  and `SeenGrants`, as for any grant.
+- `codes.revoke(workspaceId, grantId)` removes a grant's code; one already gone is success.
+- `AccessCodeStore`: `put(entry, now)` (false when the digest is live), `get(workspaceId,
+  digest)` (reads, leaving it), `take(workspaceId, digest, grantId?)` (removes and returns,
+  atomically: never one entry twice; with `grantId`, only that grant's entry), `revoke(workspaceId, grantId)`,
+  `miss(workspaceId, {audience, target}, limit, now)` (one wrong guess counted against every live
+  entry for that door, atomically, removing and returning those at `limit`). `MemoryAccessCodeStore` is the in-memory reference, dropping expired entries on `put`.
+- `limits` is VER-2's `CodeStore` (`take` counts one send atomically, or refuses and counts
+  nothing; `MemoryCodeStore` in `district-assurance/testing` is the reference), the same instance
+  the engine's texted codes count against, so both kinds of code share one budget per subject.
+  `ACCESS_CODE_SEND_LIMITS` is VER-2's subject limit: 5 sends in 24 hours, 60 seconds apart. Until
+  VER-2 (#79) lands, `CodeStore`, `CodeSendKey`, `MemoryCodeStore` and this constant are a stand-in
+  copy of its shape; VER-2's per-number limit and destination allow-list are not applied to access
+  codes yet.

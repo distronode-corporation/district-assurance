@@ -70,8 +70,12 @@ selfie, which a stolen SIM alone does not pass. Contact and payout scopes defaul
 
 Repeated calls triggering texts to a real customer, or to premium numbers. **Controls:** texts go
 only to the number on file, only after a keypad match, and at most one photo ID link per call
-(tested). Planned: rate limits per subject and per calling number, and a destination country
-allow-list, before texted codes ship (VER-2).
+(tested). One-time access codes count against VER-2's per-subject send limit (5 texts in 24
+hours, 60 seconds apart) in VER-2's `CodeStore`, the one texted codes use, so the two share a
+budget; a limited request texts nothing (tested). Planned: VER-2's full limits (per calling
+number, and a destination country allow-list) with texted codes; until VER-2 lands, the store's
+interface here is a stand-in copy of its shape, and access codes do not yet apply the per-number
+limit or the allow-list.
 
 ### Replay
 
@@ -163,6 +167,35 @@ after one), a relay clock kept in sync with the engine's (a grant's expiry is st
 running behind accepts it that much longer), and the door's own safety
 (an unlock pulse, not a latch).
 
+### One-time access codes: stolen, guessed or reused
+
+Someone reads a code store, guesses a code at the keypad, uses a code twice or at another door, or
+has a code sent to a number they hold. **Controls:** a code is issued only through Gate's grant
+path, so every control above holds (`entry.open` at level 2 or more, checked again before the
+text, one in flight, the per-call limit, the ledger) and it lives no longer than its access grant
+(at most 15 minutes, never past the verification grant) (tested). It is texted only to the number
+on file of the subject Badge matched by keypad or PIN, never the calling number (tested). The
+engine stores only an HMAC of the code under the codes' own key, bound to the workspace, the
+controller and the door, with the unsigned grant body: a stolen store yields neither a code nor a
+grant a relay accepts (tested). Redeeming removes the code in the same step (single use), refuses
+it at another door, in another workspace, or after the grant's expiry, and answers the same for
+every refusal (tested); `revoke` removes a code early. The code is never in the ledger, an event,
+an error or the store (tested). A text that fails takes its code back, and its grant is `refused` only when that proves the
+code unused, else `unknown`, since the text may have arrived (tested). A signer that fails at
+redemption leaves the code redeemable, and a code is taken only after it is signed (tested). 8 digits give one
+chance in 100 million per live code per guess, and 5 wrong guesses at a door (configurable, 1 to
+10) spend every code live there, recorded as `access.code_spent` without the guess (tested). The
+trade-off: someone at the keypad can spend the codes of a door with a few wrong guesses, and the
+caller then asks for a new one. A `newCode` that is not exactly 8 digits fails the issue before
+anything is stored (tested). Left to the host: a keypad that slows after wrong entries, a durable
+`AccessCodeStore` whose `take` and `miss` are atomic across processes, and
+keeping the codes' key in a key store. A code's grant is `delivered` once texted, so the call can
+end and its receipt be issued while the code is still live: unlike a relay grant, it may open the
+door after the receipt, until its expiry, and that redemption is not in the call's ledger (the
+host revokes a code it no longer wants, and logs redemptions at the door). A code is texted only
+to the call whose in-flight grant has the digest the engine recorded, never one matched on its
+grant id alone (tested).
+
 ### Money on the wrong account
 
 A webhook from one account settles a payment taken on another, or a config sends money to the
@@ -220,8 +253,10 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
   speech-to-text and the model while `sensitive` is set.
-- Keeping the knowledge key, the receipt signing key and the access signing key in a key store, the access key
-  apart from the receipts'.
+- Keeping the knowledge key, the receipt signing key, the access signing key and the access code
+  key in a key store, the access key apart from the receipts'.
+- A door keypad that slows after wrong access codes, and a durable `AccessCodeStore` whose
+  `take` and `miss` are atomic across processes.
 - Calling `expirePaymentLinks` at each link's `expiresAt` (a timer or a sweep); until it does, a
   link lives as long as the provider keeps it.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
