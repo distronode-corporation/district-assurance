@@ -246,6 +246,19 @@ export function settleStepUpInFlight(draft: CallDraft): void {
  */
 export async function issueStepUpToken(rt: EngineRuntime, callId: string, input: { nonce: string; site?: string; lifetimeSeconds?: number }): Promise<StepUpToken> {
   rt.settings(STEP_UP);
+  // A token left reserved past its expiry (the process signing it stopped before its last write)
+  // is failed in a write of its own, so it never blocks the call's next request. One still within
+  // its life is a live signing, and keeps blocking.
+  const before = (await rt.read(callId)).modules[STEP_UP] as unknown as StepUpSlice | undefined;
+  const stale = (t: StepUpRecord) => t.status === "reserved" && Date.parse(t.expiresAt) <= Date.parse(rt.now());
+  if (before?.tokens.some(stale) === true) {
+    await rt.update(callId, (draft) => {
+      for (const t of draft.slice<StepUpSlice>(STEP_UP).tokens.filter(stale)) {
+        t.status = "failed";
+        draft.emit("stepup.failed", "system", { tokenId: t.tokenId, reason: "not_issued_in_time" });
+      }
+    });
+  }
   const { record, issuer } = await rt.update(callId, (draft) => reserve(rt, draft, input));
   const claims: StepUpClaims = {
     iss: issuer,
@@ -323,7 +336,8 @@ export async function exchangeStepUpToken(rt: EngineRuntime, token: unknown, exp
       const state = draft.record.state;
       const reason = state.tainted
         ? "tainted"
-        : state.phase !== "ended" && state.grant?.grantId !== record.verificationGrantId
+        : // A new verification running (maybe for another account), or a grant that changed: no longer the token's.
+          state.phase === "verifying" || (state.phase !== "ended" && state.grant?.grantId !== record.verificationGrantId)
           ? "not_authorized"
           : Date.parse(record.expiresAt) <= Date.parse(rt.now())
             ? "expired"

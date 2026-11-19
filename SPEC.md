@@ -635,6 +635,9 @@ host's code passes them.
    `scope_denied` is thrown. Otherwise it is `issued`, with the SHA-256 of the compact token and
    the `kid` kept on the call, and `{token, tokenId, expiresAt}` is returned.
 
+A token left `reserved` past its expiry (the process signing it stopped before its last write)
+is failed (`stepup.failed`, reason `not_issued_in_time`) in a write of its own before the call's
+next request, so it never blocks that call for good; one still within its life keeps blocking.
 Ending the call fails a token still being signed (`stepup.failed`, reason `call_ended`), in the
 write that ends it, so none is handed out after the end. A token already `issued` stays
 exchangeable after the call ended, until it expires (at most 5 minutes), so a sign-in that
@@ -666,9 +669,9 @@ for a bad token; a write that fails is thrown as it is.
   issued (its digest). Nothing is
   written, so a forged token never uses up the real one.
 - Each of these uses the token up (`refused`, `stepup.refused` with `digest` and `reason`):
-  `tainted` (the call was tainted since, at any time before the exchange); `not_authorized` (the
-  call has not ended and its verification grant is no longer the token's: verified again, or
-  dropped); `expired`; `mismatch` (another `audience`, a subject whose `stepUpSubject` is not the
+  `tainted` (the call was tainted since, at any time before the exchange); `not_authorized` (a
+  new verification is running on the call, or the call has not ended and its verification grant
+  is no longer the token's: verified again, or dropped); `expired`; `mismatch` (another `audience`, a subject whose `stepUpSubject` is not the
   token's `sub`, or another nonce, compared in constant time).
 - Otherwise `exchanged` (`stepup.exchanged`, with `digest` and `kid`), and the claims.
 

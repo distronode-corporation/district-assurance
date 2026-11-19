@@ -176,7 +176,7 @@ the subject the verification grant was issued for (never one the host or the mod
 none while a new verification runs), to the grant itself and to the nonce the site showed
 (tested). The web sign-in exchanges it through the engine, which accepts only the exact bytes the
 call issued, once: the exchange settles the token in the engine's own write, so a second one is
-refused, on any process (tested). An exchange after the call was tainted, after the call was verified again,
+refused, on any process (tested). An exchange after the call was tainted, while a new verification runs on it, after the call was verified again,
 after expiry, or for another site, subject or nonce is refused and uses the token up; a forged or
 altered token is refused without using up the real one (tested). The ledger holds the token's
 digest and outcome, never the token, the nonce or the subject handle, and the call record keeps

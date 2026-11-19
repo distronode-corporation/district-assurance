@@ -436,6 +436,41 @@ describe("step-up: tokens", () => {
     assert.equal((await t.engine.issueStepUpToken(callId, { nonce: NONCE, site: "portal" })).tokenId, "stu_2", "a new token, bound to the new grant");
   });
 
+  it("refuses an exchange while a new verification runs on the call, and that uses the token up", async () => {
+    const t = stepUpSetup();
+    const callId = await webVerified(t, null);
+    const { token } = await t.engine.issueStepUpToken(callId, { nonce: NONCE, site: "portal" });
+    // Another verification starts (maybe for another account): the old grant is still held while it runs.
+    await t.engine.beginVerification(callId, { accountNumber: "99999999" });
+    assert.equal((await t.engine.state(callId)).grant!.grantId, "grant_1");
+    assert.deepEqual(await t.engine.exchangeStepUpToken(token, portal), { ok: false, reason: "not_authorized" });
+    assert.deepEqual(await t.engine.exchangeStepUpToken(token, portal), { ok: false, reason: "unknown" });
+  });
+
+  it("fails a token left reserved past its expiry, so the call's next request is not blocked for good", async () => {
+    const signer = generateTestSigner("step-up-key-1");
+    let stop = true;
+    const t = stepUpSetup({
+      signer: {
+        ...signer,
+        sign: async (payload) => {
+          // The process stops right after signing, before the write that makes the token valid.
+          if (stop) t.sessions.stopWhen = () => true;
+          return signer.sign(payload);
+        },
+      },
+    });
+    const callId = await webVerified(t, null);
+    await assert.rejects(t.engine.issueStepUpToken(callId, { nonce: NONCE, site: "portal" }), /store down/);
+    stop = false;
+    assert.deepEqual((await stepUpTokens(t, callId)).map((r) => r.status), ["reserved"]);
+    await assert.rejects(t.engine.issueStepUpToken(callId, { nonce: NONCE, site: "portal" }), rejects("precondition_failed", /being issued/), "a live signing still blocks");
+    t.clock.advance(120_000);
+    assert.equal((await t.engine.issueStepUpToken(callId, { nonce: NONCE, site: "portal" })).tokenId, "stu_2");
+    assert.deepEqual((await stepUpTokens(t, callId)).map((r) => r.status), ["failed", "issued"]);
+    assert.deepEqual((await stepUpEvents(t)).find(([e]) => e === "stepup.failed")![1], { tokenId: "stu_1", reason: "not_issued_in_time" });
+  });
+
   it("answers unknown for a token naming a call that started with step-up off", async () => {
     const t = stepUpSetup();
     const { callId } = await t.engine.startCall();
