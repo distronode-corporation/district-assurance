@@ -8,6 +8,7 @@ from the repository root. Not hardened for production (ROADMAP.md, M5).
 npm run demo    # owner-command, deposit in each mode and entry, on fake adapters and loopback servers, then exits
 npm run ui      # the same scripted calls in a browser, one step at a time, on 127.0.0.1:8787
 npm run serve   # the server on 127.0.0.1:8787 until stopped, for your own Stripe test events
+npm run demo:e2e  # the UI with a real Stripe Checkout in test mode (STRIPE_TEST_SECRET_KEY=sk_test_...)
 ```
 
 ## The demo UI
@@ -65,11 +66,12 @@ How the page is kept small and safe:
 | `src/demo-runs.ts` | the UI's runs: one step per request, and the run's state, ledger and chain check |
 | `src/door-relay.ts` | an example door relay for Gate's `webhookRelay` adapter: checks the grant with Gate's public key, refuses replays, works the door |
 | `src/static.ts` | the UI's file allow-list and its headers |
-| `src/flows.ts` | the demo's FlowConfig: the `owner-command`, `deposit`, `deposit-connect` and `entry` flows |
+| `src/flows.ts` | the demo's FlowConfig: the `owner-command`, `deposit`, `deposit-connect`, `entry` and `visit` flows |
 | `src/main.ts` | `npm run serve`: reads the environment, starts the server |
 | `src/ui.ts` | `npm run ui`: the server with the demo UI |
 | `public/` | the page: `index.html`, `style.css`, `app.js`, and `receipt-check.js` (no DOM, tested in Node) |
-| `src/stripe-adapters.ts` | Stripe Identity and Checkout adapters, planned (VER-5, PAY-1) |
+| `src/e2e.ts` | `npm run demo:e2e`: the UI, the door relay and a real Stripe Checkout in test mode; `owner-command` and `visit` |
+| `src/stripe-adapters.ts` | `StripeCheckoutLinks`, a minimal PAY-1 Checkout adapter (test-mode keys only, platform mode, built-in fetch); Stripe Identity planned (VER-5) |
 
 ## Trying it with your own Stripe test account
 
@@ -87,7 +89,8 @@ How the page is kept small and safe:
 
 3. Trigger a test event (`stripe trigger checkout.session.completed`). The server checks the
    signature and answers `{"received": true, "applied": false}`: the signature is good, and the
-   session is unknown to this engine because the Stripe adapters are not built yet. A wrong secret
+   session is unknown to this engine because `npm run serve` runs on fake adapters (for a real
+   Checkout Session in test mode, use `npm run demo:e2e`). A wrong secret
    answers `400` with the reason.
 
 Use test-mode keys only. Never commit a secret; the server reads them from the environment.

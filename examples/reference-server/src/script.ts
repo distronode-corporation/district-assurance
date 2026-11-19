@@ -18,6 +18,8 @@ import {
   type AccessController,
   type Clock,
   type Engine,
+  type FlowConfig,
+  type IdGenerator,
   type GateModule,
   type PaymentLinks,
   type SignedAccessGrant,
@@ -51,6 +53,14 @@ export interface DemoWorldOptions {
   payments?: PaymentLinks;
   /** Default: the test engine's fixed clock. The live demo passes the system clock. */
   clock?: Clock;
+  /** Default: `demoConfig()`. */
+  config?: FlowConfig;
+  /**
+   * Default: the test engine's sequential ids. The live demo passes random ids: the engine's
+   * idempotency keys are built from them, and Stripe keeps a key for 24 hours, so ids that restart
+   * at `call_1` with every run would collide with the last run's requests.
+   */
+  ids?: IdGenerator;
 }
 
 /** One engine with the demo's records, a second engine on the same stores, Gate, and a signed-webhook poster. */
@@ -88,8 +98,10 @@ export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
     },
   };
   const gate = gateModule({ signer: generateTestSigner("demo-gate-key-1"), controllers: { lobby } });
-  const t = createTestEngine({ config: demoConfig(), modules: [gate], ...(options.clock === undefined ? {} : { clock: options.clock }) });
+  const config = options.config ?? demoConfig();
+  const t = createTestEngine({ config, modules: [gate], ...(options.clock === undefined ? {} : { clock: options.clock }) });
   const clock = options.clock ?? t.clock;
+  const ids = options.ids ?? t.ids;
   const inner = options.payments ?? t.payments;
   // Records what the adapter answered, so a step finds its own call's link whatever the adapter.
   const payments: PaymentLinks = {
@@ -108,7 +120,7 @@ export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
     expireLink: (input) => inner.expireLink(input),
   };
   const adapters = { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments, signer: generateTestSigner() };
-  const engine = createEngine({ workspaceId: DEMO_WORKSPACE, knowledgeKey: TEST_KNOWLEDGE_KEY, config: demoConfig(), modules: [gate], clock, ids: t.ids, adapters });
+  const engine = createEngine({ workspaceId: DEMO_WORKSPACE, knowledgeKey: TEST_KNOWLEDGE_KEY, config, modules: [gate], clock, ids, adapters });
   t.records.putSubject(DEMO_WORKSPACE, testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: OWNER_ACCOUNT, phoneOnFile: "+15555550101", knowledge: {}, pin: OWNER_PIN }));
   t.records.putSubject(
     DEMO_WORKSPACE,
@@ -119,10 +131,10 @@ export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
   const other = createEngine({
     workspaceId: DEMO_WORKSPACE,
     knowledgeKey: TEST_KNOWLEDGE_KEY,
-    config: demoConfig(),
+    config,
     modules: [gate],
     clock,
-    ids: t.ids,
+    ids,
     adapters: { ...adapters, signer: generateTestSigner() },
   });
   let n = 0;

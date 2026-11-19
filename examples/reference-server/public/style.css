@@ -258,6 +258,15 @@ button[aria-disabled="true"] {
   overflow-wrap: anywhere;
 }
 
+/* The live demo's Checkout page: a link that reads as the step's one action. */
+.step-link {
+  color: var(--accent);
+  font-weight: 600;
+  grid-column: 3;
+  justify-self: start;
+  margin-top: 0.25rem;
+}
+
 /* Read out, not shown: every message it carries is already on the page. */
 .announce {
   border: 0;
@@ -375,6 +384,10 @@ td.json {
 
   .step {
     grid-template-columns: 1fr;
+  }
+
+  .step-link {
+    grid-column: 1;
   }
 }
 

@@ -26,6 +26,10 @@ All notable changes to this project are documented here. The format follows
 - The reference server's Connect webhook route; the demo takes a deposit in each mode and opens a
   door through the relay.
 - ADR-21 to ADR-24.
+- `npm run demo:e2e`: the demo UI with a real Stripe Checkout Session in test mode, through a
+  minimal PAY-1 adapter (`StripeCheckoutLinks`: platform mode, built-in fetch, `sk_test_` keys
+  only, live and restricted keys refused). The payment is read back from Stripe; Gate's grant goes
+  to the example door relay; the call ends with a receipt the page verifies.
 
 - The modular core. A module registry and module interface (what a module provides, the scopes it
   grants or needs, the adapters it requires, its settings validator); Badge, Dossier, Paylink and

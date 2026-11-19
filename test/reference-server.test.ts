@@ -6,7 +6,7 @@ import { after, before, describe, it } from "node:test";
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { runDemo } from "../examples/reference-server/src/demo.ts";
 import { createDoorRelay } from "../examples/reference-server/src/door-relay.ts";
-import { StripeCheckoutLinks, StripeIdentityProvider } from "../examples/reference-server/src/stripe-adapters.ts";
+import { StripeIdentityProvider } from "../examples/reference-server/src/stripe-adapters.ts";
 import { NotImplementedError, canonicalJson, signDocument, signStripePayload, type Engine } from "../src/index.ts";
 import { createTestEngine, generateTestSigner, type TestEngine } from "../src/testing/index.ts";
 
@@ -152,26 +152,7 @@ describe("demo and Stripe adapters", () => {
     assert.equal(result.receipt.body.consents[0]!.purpose, "repair_texts");
   });
 
-  it("has Stripe adapters that are planned, not built", async () => {
+  it("has a Stripe Identity adapter that is planned, not built (the Checkout one is in stripe-adapters.test.ts)", async () => {
     await assert.rejects(new StripeIdentityProvider("rk_test").createDocumentCheck({ callId: "c", idempotencyKey: "k" }), (e: unknown) => e instanceof NotImplementedError && e.issue === "VER-5");
-    await assert.rejects(
-      new StripeCheckoutLinks("rk_test").createLink({
-        callId: "c",
-        paymentId: "p",
-        amountMinor: 1,
-        currency: "cad",
-        description: "d",
-        mode: "connect",
-        connectedAccountId: "acct_x",
-        paymentMethods: ["card"],
-        expiresAt: "2026-01-01T00:15:00.000Z",
-        idempotencyKey: "k",
-      }),
-      (e: unknown) => e instanceof NotImplementedError && e.issue === "PAY-1",
-    );
-    await assert.rejects(
-      new StripeCheckoutLinks("rk_test").expireLink({ linkId: "cs_x", mode: "platform", idempotencyKey: "k" }),
-      (e: unknown) => e instanceof NotImplementedError && e.issue === "PAY-1",
-    );
   });
 });

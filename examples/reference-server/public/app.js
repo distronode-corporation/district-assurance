@@ -96,6 +96,22 @@ async function loadFlows() {
   });
 }
 
+/**
+ * A step's link is shown only when it is Stripe's hosted Checkout page (the live demo's test-mode
+ * payment), so a step can never point the page anywhere else.
+ *
+ * @param {unknown} href
+ */
+function safeLink(href) {
+  if (typeof href !== "string") return false;
+  try {
+    const url = new URL(href);
+    return url.protocol === "https:" && url.hostname === "checkout.stripe.com" && url.username === "" && url.password === "";
+  } catch {
+    return false;
+  }
+}
+
 function renderSteps(view) {
   const list = $("steps");
   list.replaceChildren();
@@ -109,6 +125,11 @@ function renderSteps(view) {
     if (status === "next") item.setAttribute("aria-current", "step");
     item.append(el("span", status, "badge"), el("span", label, "label"));
     if (result !== undefined) item.append(el("span", result.detail, "detail"));
+    if (result !== undefined && result.link !== undefined && safeLink(result.link.href)) {
+      const a = /** @type {HTMLAnchorElement} */ (el("a", result.link.text, "step-link"));
+      Object.assign(a, { href: result.link.href, target: "_blank", rel: "noopener noreferrer" });
+      item.append(a);
+    }
     list.append(item);
   });
 }

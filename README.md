@@ -88,6 +88,7 @@ npm run typecheck
 npm run test:coverage # 100% lines, statements, functions and branches in every src/ file
 npm run demo          # four scripted calls, end to end, on fake adapters and loopback servers
 npm run ui            # the same calls in a browser, step by step, on http://127.0.0.1:8787/
+npm run demo:e2e      # the browser demo with a real Stripe Checkout in test mode (below)
 ```
 
 The demo runs `owner-command` first: the owner of a line keys a PIN, on two engines that share one
@@ -106,6 +107,26 @@ door; the same grant sent again, and a changed copy, are refused. Nothing leaves
 same script one step at a time and shows the session state, the ledger entries and the signed
 receipt, which the page verifies itself against the public key set
 ([examples/reference-server/README.md](examples/reference-server/README.md)).
+
+## Try the demo
+
+`npm run demo:e2e` is the browser demo with one real piece: a Stripe Checkout Session in test
+mode. Everything else stays on your machine and is made up (the caller, the carrier, the texts, the
+ledger, and an example door relay on another loopback port). It takes a payment in Stripe's test
+mode only and touches no production system.
+
+1. Set `STRIPE_TEST_SECRET_KEY` to a secret key from your own Stripe account in test mode (it
+   starts with `sk_test_`). The demo refuses any other key, live and restricted keys included,
+   reads it once at start-up, and never prints it.
+2. Run `npm run demo:e2e` and open `http://127.0.0.1:8787/`.
+3. Pick `owner-command` and run it (a keypad PIN to level 1). Then pick `visit` and run it step by
+   step: level 2, then "Open the Stripe Checkout page (test mode)" and pay with the test card
+   `4242 4242 4242 4242` (any future date, any CVC). The next step reads the session back from
+   Stripe until it is paid, then the door relay checks the signed grant and opens the pretend door,
+   and the call ends with a signed receipt the page verifies, with its ledger entries below.
+
+Payment completion is read back from Stripe (a read-only poll of the Checkout Session), not taken
+from a webhook, so there is nothing to forward and no `stripe listen` to run.
 
 ## Using the engine
 
@@ -155,8 +176,8 @@ state machine, the config, the events and the formats.
 
 `npm run ui` adds the demo page and its `/demo/*` routes. `npm run serve` starts the server alone on `127.0.0.1:8787`. With `STRIPE_IDENTITY_WEBHOOK_SECRET`,
 `STRIPE_PAYMENTS_WEBHOOK_SECRET` and `STRIPE_CONNECT_WEBHOOK_SECRET` set to your own test-mode endpoint secrets, `stripe listen` can
-forward real test events to it; their signatures are checked, and since the Stripe adapters are
-not built yet, the sessions they name are unknown to the engine. It is not hardened for
+forward real test events to it; their signatures are checked, and since that server runs on fake
+adapters, the sessions they name are unknown to the engine. It is not hardened for
 production.
 
 ## Design rules
