@@ -1302,19 +1302,20 @@ export class Engine {
   async sweepAlerts(): Promise<{ sent: string[]; failed: string[] }> {
     const list = this.#sessions.listCallsOwingAlerts?.bind(this.#sessions);
     if (list === undefined) throw new EngineError("precondition_failed", "the session store cannot list the calls that owe alerts (listCallsOwingAlerts)");
-    const result = { sent: [] as string[], failed: [] as string[] };
-    for (const callId of await list(this.workspaceId)) {
-      let owed: boolean;
-      try {
-        await this.#sendDuressAlerts(callId);
-        owed = badge.owedDuressAlerts(await this.#read(callId)).length > 0;
-      } catch {
-        // A call the store cannot read now, or no longer holds, is reported, and the sweep goes on.
-        owed = true;
-      }
-      (owed ? result.failed : result.sent).push(callId);
-    }
-    return result;
+    const callIds = await list(this.workspaceId);
+    // Every call's send starts at once, so a notifier that never answers for one does not hold up the rest.
+    const owed = await Promise.all(
+      callIds.map(async (callId) => {
+        try {
+          await this.#sendDuressAlerts(callId);
+          return badge.owedDuressAlerts(await this.#read(callId)).length > 0;
+        } catch {
+          // A call the store cannot read now, or no longer holds, is reported, and the sweep goes on.
+          return true;
+        }
+      }),
+    );
+    return { sent: callIds.filter((_, i) => !owed[i]), failed: callIds.filter((_, i) => owed[i]) };
   }
 
   /** Off the caller's response path: after the reply, so neither the notifier's time nor its failure reaches the caller. */

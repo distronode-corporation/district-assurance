@@ -85,4 +85,27 @@ describe("l2fx-e2: stalls stay local", () => {
     assert.equal(notifier.notices.length, 1);
   });
 
+  it("T19: a sweep sends a later call's alert while an earlier call's send never settles", async () => {
+    const hold: DuressNotifier = { notify: () => Promise.reject(new Error("down")) };
+    const counters = new MemoryAttemptCounters();
+    const t = setup({ config: duressConfig(), adapters: { duressNotifier: hold, counters } });
+    assert.deepEqual(await t.engine.enrolDuressPin(OWNER, DURESS), { enrolled: true });
+    const owing: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const { callId } = await t.engine.startCall();
+      await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+      await t.engine.submitPin(callId, DURESS);
+      owing.push(callId);
+    }
+    await tick();
+    const listed = await t.sessions.listCallsOwingAlerts!("ws_test");
+    assert.deepEqual([...listed].sort(), [...owing].sort(), "both calls owe an alert");
+    const n = new HangingNotifier();
+    n.hangFor.add(listed[0]!);
+    const restarted = createTestEngine({ config: t.engine.config, clock: t.clock, adapters: { duressNotifier: n, counters, sessions: t.sessions, records: t.records, ledger: t.ledger } });
+    void restarted.engine.sweepAlerts();
+    await tick(20);
+    assert.deepEqual(n.told.map((a) => a.callId), listed, "the second call was attempted");
+    assert.deepEqual(await t.sessions.listCallsOwingAlerts!("ws_test"), [listed[0]], "and its alert acknowledged");
+  });
 });
