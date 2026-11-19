@@ -427,6 +427,15 @@ describe("carrier adapters", () => {
       assert.deepEqual(requests, []);
       assert.deepEqual(new Set(failures.map((f) => f.reason)), new Set(["invalid_number"]));
     });
+
+    it("refuses an identity score that would match every answer, or none, when the adapter is built", async () => {
+      for (const bad of [0, -5, 0.5, 101, Number.NaN, "80" as unknown as number]) {
+        assert.throws(() => new TwilioLookupSignals(TWILIO, { countries: ["US"], identityMinScore: bad }), /identityMinScore/, String(bad));
+      }
+      replies.set("+15555550122", { body: twilioBody({ sim_swap: simSwap({ last_sim_swap_date: "2025-10-01T00:00:00Z" }), identity_match: identityMatch(0) }) });
+      assert.equal((await twilio({ identityFor: identity, identityMinScore: 1 }).check({ phoneNumber: "+15555550122" })).identityMatch, "no_match");
+      assert.equal((await twilio({ identityFor: identity, identityMinScore: 100 }).check({ phoneNumber: "+15555550122" })).identityMatch, "no_match");
+    });
   });
 
   describe("in the engine", () => {

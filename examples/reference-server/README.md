@@ -110,8 +110,8 @@ How the answers are read:
   when it is false, the length of `swapped_period` (an ISO 8601 duration) as a lower bound.
   `swapped_period` is the window Twilio looked at, not the age of a change, so it is never read as
   one when the change fell inside it. Anything else is no answer.
-- **Identity match:** `match` when `summary_score` is at least `identityMinScore` (80 by
-  default), else `no_match`. The identity comes from the host's `identityFor(phoneNumber)`;
+- **Identity match:** `match` when `summary_score` is at least `identityMinScore` (1 to 100, 80
+  by default; anything else throws when the adapter is built), else `no_match`. The identity comes from the host's `identityFor(phoneNumber)`;
   without it only SIM Swap is asked. Twilio takes the identity in the query string.
 - **Porting:** `N` is none known; `Y` gives the hours from the end of the port date (Telnyx gives
   a day, not a time), or 0 without a date; anything else is no answer.

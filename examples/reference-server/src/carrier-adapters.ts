@@ -69,7 +69,7 @@ export interface TwilioLookupOptions extends CarrierAdapterOptions {
    * answers null, Identity Match is not asked and is reported `unavailable`.
    */
   identityFor?: (phoneNumber: string) => Promise<IdentityOnFile | null>;
-  /** Twilio's `summary_score` (0 to 100) at or above which the identity is a match. Default 80. */
+  /** Twilio's `summary_score` (0 to 100) at or above which the identity is a match: 1 to 100, default 80. */
   identityMinScore?: number;
 }
 
@@ -244,7 +244,12 @@ export class TwilioLookupSignals extends LookupAdapter {
     super(options, "https://lookups.twilio.com");
     this.#authorization = `Basic ${Buffer.from(`${credentials.username}:${credentials.password}`).toString("base64")}`;
     this.#identityFor = options.identityFor;
-    this.#minScore = options.identityMinScore ?? 80;
+    const minScore = options.identityMinScore ?? 80;
+    // 0 or less would call a score of 0 a match, and a match is a factor that is not knowledge.
+    if (typeof minScore !== "number" || !(minScore >= 1 && minScore <= 100)) {
+      throw new Error("carrier adapter identityMinScore must be from 1 to 100");
+    }
+    this.#minScore = minScore;
   }
 
   async check(input: { phoneNumber: string }): Promise<CarrierSignalReport> {
