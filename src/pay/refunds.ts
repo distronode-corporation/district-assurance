@@ -121,14 +121,16 @@ function findPayment(draft: CallDraft, paymentId: string): Payment | undefined {
  * refused. Works after the call ended; the receipt is never changed.
  */
 export async function refundPayment(rt: EngineRuntime, input: RefundInput): Promise<RefundResult> {
-  if (!REFUND_REASONS.includes(input.reason)) throw new EngineError("invalid_input", `reason must be one of ${REFUND_REASONS.join(", ")}`);
-  if (input.amountMinor !== undefined && (!Number.isSafeInteger(input.amountMinor) || input.amountMinor <= 0)) {
+  // Read once: the amount and reason checked here are the ones refunded and recorded, so a getter
+  // (or a host changing the object while the update waits) cannot swap in a negative amount.
+  const { callId, paymentId, reason, amountMinor: asked } = input;
+  if (!REFUND_REASONS.includes(reason)) throw new EngineError("invalid_input", `reason must be one of ${REFUND_REASONS.join(", ")}`);
+  if (asked !== undefined && (!Number.isSafeInteger(asked) || asked <= 0)) {
     throw new EngineError("invalid_input", "amountMinor must be a positive integer");
   }
   const payments = rt.adapter("payments");
   // Optional for the adapter (no flow step needs it): a refund without it is refused here.
   if (payments.refund === undefined) throw new EngineError("precondition_failed", "the payments adapter cannot refund");
-  const { callId, paymentId } = input;
   const reserved = await rt.update(callId, (draft) => {
     const payment = findPayment(draft, paymentId);
     if (payment === undefined) throw new EngineError("invalid_input", "no such payment on this call");
@@ -140,7 +142,7 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
     // new refunds.
     const open = refunds.find((r) => r.status === "requested");
     if (open !== undefined) {
-      if (input.amountMinor !== undefined && input.amountMinor !== open.amountMinor) {
+      if (asked !== undefined && asked !== open.amountMinor) {
         throw new EngineError("invalid_input", "a refund of this payment is still being sent; resume it with the same amount");
       }
       return { refund: open, payment };
@@ -148,9 +150,9 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
     if ((payment.disputes ?? []).some(blocksRefund)) throw new EngineError("precondition_failed", "the payment is disputed: it cannot be refunded while its dispute is open or after it was lost");
     const left = payment.amountMinor - refunded(refunds);
     if (left === 0) throw new EngineError("precondition_failed", "the payment is refunded in full");
-    const amountMinor = input.amountMinor ?? left;
+    const amountMinor = asked ?? left;
     if (amountMinor > left) throw new EngineError("invalid_input", "the refunds would add up to more than was paid");
-    const refund: RefundRecord = { refundId: rt.ids.next("ref"), amountMinor, reason: input.reason, status: "requested", providerRef: null, requestedAt: rt.now(), settledAt: null };
+    const refund: RefundRecord = { refundId: rt.ids.next("ref"), amountMinor, reason, status: "requested", providerRef: null, requestedAt: rt.now(), settledAt: null };
     refunds.push(refund);
     return { refund, payment };
   });
@@ -195,27 +197,29 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
  * or lost is final; an event that changes nothing is not written again.
  */
 export async function applyDisputeOutcome(rt: EngineRuntime, outcome: DisputeOutcome): Promise<DisputeApplied> {
-  if (outcome.paymentIntentId === null) return { applied: false };
-  const callId = await rt.resolveRef(paymentIntentRef(outcome.paymentIntentId));
+  // Read once: the payment intent looked up is the one searched, and the status compared is the one recorded.
+  const { paymentIntentId, account, disputeId, status, amountMinor, currency } = outcome;
+  if (paymentIntentId === null) return { applied: false };
+  const callId = await rt.resolveRef(paymentIntentRef(paymentIntentId));
   // Not bound yet: the payment's own outcome may still be on its way (webhooks come in any order).
   // `unbound` tells the host to have the event delivered again rather than drop it.
   if (callId === null) return { applied: false, unbound: true };
   return rt.update(callId, (draft) => {
     const slice = draft.slice<PaylinkSlice>(PAYLINK);
-    const payment = slice.payments.find((p) => p.paymentIntentId === outcome.paymentIntentId)!;
-    if (outcome.account !== undefined) {
+    const payment = slice.payments.find((p) => p.paymentIntentId === paymentIntentId)!;
+    if (account !== undefined) {
       draft.emit("payment.outcome_ignored", "system", { paymentId: payment.paymentId, reason: "account" });
       return { applied: false } as const;
     }
     const disputes = (payment.disputes ??= []);
-    const known = disputes.find((d) => d.disputeId === outcome.disputeId);
-    if (known !== undefined && (known.status === "won" || known.status === "lost" || (known.status === outcome.status && known.amountMinor === outcome.amountMinor))) {
+    const known = disputes.find((d) => d.disputeId === disputeId);
+    if (known !== undefined && (known.status === "won" || known.status === "lost" || (known.status === status && known.amountMinor === amountMinor))) {
       return { applied: false } as const;
     }
-    const dispute: DisputeRecord = { disputeId: outcome.disputeId, status: outcome.status, amountMinor: outcome.amountMinor, currency: outcome.currency, updatedAt: rt.now() };
+    const dispute: DisputeRecord = { disputeId, status, amountMinor, currency, updatedAt: rt.now() };
     if (known === undefined) disputes.push(dispute);
     else Object.assign(known, dispute);
-    draft.emit("payment.disputed", "system", { paymentId: payment.paymentId, disputeId: outcome.disputeId, status: outcome.status, amountMinor: outcome.amountMinor, currency: outcome.currency });
-    return { applied: true, callId, status: outcome.status } as const;
+    draft.emit("payment.disputed", "system", { paymentId: payment.paymentId, disputeId, status, amountMinor, currency });
+    return { applied: true, callId, status } as const;
   });
 }
