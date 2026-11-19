@@ -152,6 +152,27 @@ export function attemptCountersContract(factory: () => AttemptCounters | Promise
       },
     ],
     [
+      "removes one failure by its time, keeps the others, and does nothing when there is none",
+      async (store) => {
+        for (const s of [1, 1, 5]) await store.recordFailure(counter(), at(s), T0);
+        await store.recordFailure(counter({ scope: "number" }), at(1), T0);
+        await store.removeFailure(counter(), at(1));
+        assert.deepEqual(await store.get(counter(), T0), [at(1), at(5)], "one of two at the same instant");
+        await store.removeFailure(counter(), at(9));
+        await store.removeFailure(counter({ key: "c".repeat(64) }), at(1));
+        assert.deepEqual(await store.get(counter(), T0), [at(1), at(5)]);
+        assert.deepEqual(await store.get(counter({ scope: "number" }), T0), [at(1)], "other keys keep theirs");
+      },
+    ],
+    [
+      "loses no failure recorded while one is being removed",
+      async (store) => {
+        await store.recordFailure(counter(), at(1), T0);
+        await Promise.all([store.removeFailure(counter(), at(1)), ...Array.from({ length: 5 }, () => store.recordFailure(counter(), at(2), T0))]);
+        assert.deepEqual(await store.get(counter(), T0), [at(2), at(2), at(2), at(2), at(2)]);
+      },
+    ],
+    [
       "returns copies",
       async (store) => {
         const list = await store.recordFailure(counter(), at(1), T0);

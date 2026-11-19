@@ -190,7 +190,8 @@ when there is a number.
 
 - `AttemptCounters`: `get(key, since)` returns the failure times at or after `since`, in the order
   recorded; `recordFailure(key, at, since)` adds one and returns the same list, this one last, in
-  one atomic step; `reset(key)` forgets them. `attemptCountersContract(factory)` in
+  one atomic step; `removeFailure(key, at)` forgets one failure recorded at `at` and keeps every
+  other, also in one atomic step (nothing when there is none); `reset(key)` forgets them all. `attemptCountersContract(factory)` in
   `district-assurance/testing` is the suite a store must pass; `MemoryAttemptCounters` is the
   reference.
 - Badge's `lockout` setting: `{backoffSeconds, lockAfterFailures, windowHours}`, defaults
@@ -208,8 +209,8 @@ when there is a number.
   that was not there when the counters were read (another attempt, on any call or engine, got in
   first), the attempt is refused the same way: no counter after that one is recorded, and the
   call's attempt is given back. A pass, once its result is accepted on the call, resets the
-  subject's counter and takes its own failure off the number's (`forgetPass`: the counter is reset
-  and the other failures written back with their times); the number's other failures stay until
+  subject's counter and takes its own failure off the number's (`forgetPass`, with `removeFailure`,
+  so a failure another call records meanwhile is kept); the number's other failures stay until
   they leave the window, so a pass on the caller's own account never clears failures the line ran
   up against others. A failure stands, and
   one that starts a hard lock returns `locked: true` and writes `verification.locked`. A judge or

@@ -18,7 +18,8 @@ All notable changes to this project are documented here. The format follows
   number (`beginVerification({ callingNumber })`, kept as a keyed hash), before judging; a wait of
   5, 15, 60, 300 and 900 seconds and a hard lock after 10 failures in 24 hours, in Badge's
   `lockout` setting as defaults and floors; a `verification.locked` event. Badge needs `counters`
-  when a factor the caller enters is on. `recordSubjectFailure` is gone.
+  when a factor the caller enters is on. A pass takes its own failure off the calling number with
+  `AttemptCounters.removeFailure`, one atomic step. `recordSubjectFailure` is gone.
 - The modular core. A module registry and module interface (what a module provides, the scopes it
   grants or needs, the adapters it requires, its settings validator); Badge, Dossier, Paylink and
   Trace as modules, switched on and off per workspace config; outside modules with `engine.use`.
