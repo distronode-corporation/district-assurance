@@ -136,6 +136,12 @@ byte fails verification (tested). Planned: key rotation and a published key set 
 A step's ledger entries are saved with the step itself (an outbox in the call record) and
 appended by event id, once each; a ledger that fails leaves them pending, and the next write or
 `flushLedger` appends them, so no saved step is ever missing from the ledger for good (tested).
+Monthly reports are signed with the receipt key under domain separation: the signed bytes start
+with a line naming the document type, so a signed report never verifies as a receipt, a receipt
+never as a report, and a JSON report never as a CSV one (tested). A report carries counts and
+totals only, and counts an entry for a workspace only when its `eventId` names that workspace;
+an entry without one is reported as unattributed, so one business never sees another's calls
+(tested).
 
 ### Breach of stored data
 

@@ -334,6 +334,38 @@ and returns false for any change, a wrong algorithm, a malformed signature or an
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
 `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
 
+### Monthly reports
+
+`monthlyReport({ledger, workspaceId, month, timeZone?})` reads the whole ledger and reports one
+workspace's calendar month. `month` is `YYYY-MM` read in `timeZone` (an IANA name, `UTC` by
+default); an entry belongs to the month its `at` falls in, in that zone. An entry belongs to the
+workspace named first in its `eventId` tuple; an entry with no `eventId`, or one that does not
+name a workspace, is counted only in `unattributed` (for its month), never anywhere else. A bad
+`workspaceId`, `month`, `timeZone` or entry time is refused with `invalid_input`.
+
+| Field | From |
+|---|---|
+| `calls.started`, `calls.ended` | `call.started`, `call.ended` |
+| `verifications.byLevel` | `verification.finished` by `level` (`0` to `3` always listed; 0 is a verification that reached no level) |
+| `verifications.failedFactors` | `verification.factor` with `passed: false` |
+| `payments.sent` | `payment.link_sent`: `count` and `totals` in minor units by currency |
+| `payments.paid`, `.failed`, `.expired` | `payment.settled` by `status`, with the amount of the call's `payment.link_sent` for that payment, which may be in an earlier month |
+| `payments.unmatched` | a settlement whose link the ledger does not show |
+| `consents` | `consent.recorded`, `{yes, no}` by `purpose` |
+| `lockouts` | `verification.locked` (VER-1), once written |
+| `access.granted`, `.refused`, `.revoked` | `gate.granted`, `gate.refused`, `gate.revoked` (GAT-1), once written |
+
+The report also names `workspaceId`, `month`, `timeZone` and `ledger` (the seq and hash of the
+last entry read). It holds counts and totals only. `reportCsv(report)` writes it as RFC 4180
+`metric,value` rows with CRLF line ends (`payments.paid.total.cad,15000`); a field with a comma, a
+quote or a line break is quoted, and one starting with `=`, `+`, `-`, `@`, a tab or a carriage
+return gets a leading `'`. `signReportJson(signer, report)` and `signReportCsv(signer, report)`
+sign with the receipt signer, over `"district-assurance signed document v1\n" + document + "\n" +
+content`, where `document` is `monthly_report.json` (content: `canonicalJson(report)`) or
+`monthly_report.csv` (content: the CSV). A receipt's signed bytes are canonical JSON and start
+with `{`, so neither verifies as the other. `verifyReport(signed, keys)` returns false for an
+unknown document type or key, a wrong algorithm, a malformed signature or any change.
+
 ## 13. Intake values
 
 | Type | Accepted | Stored as |
