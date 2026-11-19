@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Web sign-in step-up (GAT-4): the `step-up` module (`stepUpModule`, step `step-up.issue`, scope
+  `entry.sign_in`) issues a 2 to 5 minute ES256 JWT bound to the site's nonce, the verified
+  subject and the verification grant, with an OpenID Connect `acr` and a JWKS; the host's web
+  sign-in exchanges it once (`exchangeStepUpToken`), refused after the call is tainted. Outside
+  modules see `subjectKey`.
 - Gate, the fifth module (GAT-1): signed, time-limited access grants (ES256 over canonical JSON,
   like receipts) after verification to `entry.open` (level 2 or more), delivered once through an
   `AccessController`, every grant and outcome in the ledger. Installed with `engine.use`, on the

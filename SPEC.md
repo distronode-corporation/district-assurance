@@ -97,14 +97,17 @@ module the config has on.
 Gate (section 17) ships in the package but is installed like an outside module, with
 `engine.use(gateModule({ signer, controllers }))`: its step is `gate.grant`, it needs `entry.open`
 (class access, floor 2), and it holds its own signer and door controllers, so it needs no engine
-adapter.
+adapter. Web sign-in step-up (section 18) ships the same way, as its own module `step-up`
+(`engine.use(stepUpModule({ signer, issuer }))`): its step is `step-up.issue`, and it needs
+`entry.sign_in` (class access, floor 2).
 
 An outside module changes its part of a call with `updateModule(callId, name, fn)`: one
 compare-and-set write, refused once the flow has ended, refused while the flow is on another
 module's step, and held by the engine to the scope the current step needs. `fn` gets a copy of the
 module's part and a view: the session state, the current step (a copy, or null), the engine's
-clock (`now`), `newId(prefix)`, `authorized(scope)`, `emit(event, detail)` (a `module.event`
-ledger entry) and `reserve(ref)`, which opens a reservation in the call record for work whose
+clock (`now`), `newId(prefix)`, `authorized(scope)`, `subjectKey` (the subject the call's
+verification grant was issued for; null without a grant or while a verification runs),
+`emit(event, detail)` (a `module.event` ledger entry) and `reserve(ref)`, which opens a reservation in the call record for work whose
 outcome comes later. `recordModuleOutcome(callId, name, ref, fn)` is the write for that outcome (a
 provider's answer): refused unless `ref` is an open reservation of that module on that call, so it
 settles authorized work and never starts any; not held to the scope; allowed after the flow or the
@@ -230,6 +233,7 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 | `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
 | `trace.receipt` | none; needs the `signer` adapter |
 | `gate.grant` | `target`, a target id in Gate's settings; optional `lifetimeSeconds` (10 to 900, default 60) |
+| `step-up.issue` | `site`, a site id in step-up's settings; optional `lifetimeSeconds` (120 to 300, default 120) |
 
 Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
 until FIL-2); Paylink `{maxAmountMinor?, mode?, connectedAccountId?, linkLifeMinutes?, paymentMethods?}`
@@ -237,7 +241,8 @@ until FIL-2); Paylink `{maxAmountMinor?, mode?, connectedAccountId?, linkLifeMin
 `connectedAccountId`, 1 to 255 letters, digits, `-` or `_`; a `connectedAccountId` needs an
 explicit `mode`, so a business account never quietly defaults to the platform's; the other two are the defaults for steps
 that name none and for payments outside a flow, 15 minutes and card, Apple Pay, Google Pay and
-Link); Gate `{targets, maxGrantsPerCall?}` (section 17); Trace `{receipts?, wordings?}`
+Link); Gate `{targets, maxGrantsPerCall?}` (section 17); step-up `{sites, maxTokensPerCall?}`
+(section 18); Trace `{receipts?, wordings?}`
 (`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr}}`, purposes
 unique).
 
@@ -261,6 +266,7 @@ asks the current step's module for `stepStatus(step, {state, slice, mark})`:
 | `trace.consent` | a consent for `purpose` was recorded during the step: "yes", or any answer with `require: "answer"` | the answer was "no" (default `require: "yes"`) |
 | `trace.receipt` | at once | never |
 | `gate.grant` | an access grant issued during the step was delivered | every grant the call may have is used, none delivered and none in flight |
+| `step-up.issue` | a step-up token issued during the step became valid (whatever the site does with it later) | every token the call may have is used, none valid and none being signed |
 
 While a flow runs, work that is not the current step's is refused with `precondition_failed`:
 verification inputs outside a `badge.verify` step or for a factor it does not list, intake of a
@@ -546,5 +552,90 @@ including no answer, is `unknown`. A relay checks the grant with `verifyAccessGr
 `gate.keys()`, its own workspace and its own audience, and refuses a grant id it has seen.
 
 A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);
-revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS
-(GAT-4), a Seam adapter (GAT-5), direct vendor adapters (GAT-6).
+revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), a
+Seam adapter (GAT-5), direct vendor adapters (GAT-6). Web sign-in step-up is section 18.
+
+## 18. Web sign-in step-up
+
+Digital entry (GAT-4, ADR-24): a person signing in on the host's site is shown a nonce, calls,
+is verified, and keys the nonce; the call gets a step-up token, which the host's web sign-in
+exchanges once to raise that sign-in's authentication level. The module is `step-up`, installed
+with `engine.use(stepUpModule({ signer, issuer }))`: `signer` is its own ES256 key (its own `kid`,
+not the receipt or Gate key), `issuer` the https URL (no query, fragment or credentials) that is
+the tokens' `iss` and serves `keys()`, a JWKS document `{keys: [...]}`, at
+`/.well-known/jwks.json`.
+
+Settings: `sites`, at least one, each `{id, audience}`: `id` lower-case letters, digits and `-`
+(unique), `audience` the site's client id or origin, 1 to 200 characters without spaces, which
+is the tokens' `aud`; `maxTokensPerCall` 1 to 5, default 3. A call keeps the sites in force when
+it started.
+
+`issueStepUpToken(engine, callId, {nonce, site?, lifetimeSeconds?})`: `nonce` is what the caller
+keyed, 6 to 12 ASCII digits, passed by the host's code from the keypad. In a flow the
+`step-up.issue` step names the site and the lifetime (pass only the nonce); outside one the
+host's code passes them.
+
+1. **Reserve** (`updateModule`, held to `entry.sign_in`; the module also checks
+   `authorized("entry.sign_in")`), opening a reservation named by the token id (`jti`). Refused:
+   `scope_denied` without a verification grant covering `entry.sign_in` (none, expired, tainted,
+   below today's minimum); `precondition_failed` while a verification runs (its subject may not be
+   the grant's), while another token of the call is being signed, or once `maxTokensPerCall`
+   tokens were issued; `invalid_input` for a bad nonce (the message never repeats it), a missing
+   or unknown site, a bad lifetime, or a site or lifetime passed in a flow. The token lives
+   `lifetimeSeconds` (2 to 5 minutes), never past the verification grant, in whole seconds.
+   Ledger: `step_up.issued` (`tokenId`, `site`, `scope`, `level`, `verificationGrantId`,
+   `expiresAt`).
+2. **Sign** a compact JWS: header `{alg: "ES256", typ: "JWT", kid}`, payload below, the signature
+   the 64-byte r||s over `base64url(header) "." base64url(payload)` (RFC 7515), each part's JSON in
+   canonical form. A signing failure settles the token `failed` (`step_up.failed`, reason
+   `signing`) and throws.
+3. **Make it valid** (`recordModuleOutcome`): checked once more; if the call is no longer
+   authorized or a verification started, or the token expired while it was signed, it is settled
+   `failed` (`step_up.failed` with `digest`, `kid` and the reason `not_authorized` or `expired`),
+   and `scope_denied` is thrown. Otherwise it is `issued`, with the SHA-256 of the compact token
+   and the `kid` kept on the call, and `{token, tokenId, expiresAt}` is returned. The reservation
+   stays open for the exchange.
+
+```json
+{
+  "iss": "https://verify.example.test", "aud": "<the site's audience>",
+  "sub": "<stepUpSubject(subjectKey, aud)>", "iat": 1767225600, "exp": 1767225720,
+  "auth_time": 1767225600, "jti": "stu_...", "acr": "urn:district-assurance:level:2",
+  "nonce": "<the site's nonce>", "sid": "<the call id>", "grant": "<the verification grant id>"
+}
+```
+
+`sub` is `stepUpSubject(subjectKey, audience)`, the SHA-256 of the canonical JSON of
+`["step-up", audience, subjectKey]`, for the subject the call's verification grant was issued
+for: a handle per site, so two sites cannot link one person. `acr` is `stepUpAcr(level)`;
+`auth_time` is when the verification grant was issued; `grant` names it.
+
+`exchangeStepUpToken(engine, token, {audience, subjectKey, nonce})` is the host's web sign-in
+exchanging a token, once, on any process (`recordModuleOutcome` on the token's reservation, so it
+also works after the call ended). It returns `{ok: true, claims}` or `{ok: false, reason}` and
+never throws for a bad token; a write that fails is thrown as it is.
+
+- `malformed`: not three base64url parts with `sid`, `jti` and `nonce` claims.
+- `unknown`: not a token waiting on that call: no such call, no open reservation (never issued,
+  already exchanged or refused), or not the exact bytes the call issued (its digest). Nothing is
+  written, so a forged token never uses up the real one.
+- Each of these uses the token up (`refused`, `step_up.refused` with `digest` and `reason`):
+  `tainted` (the call was tainted since, at any time before the exchange); `not_authorized` (the
+  call has not ended and its verification grant is no longer the token's: verified again, or
+  dropped); `expired`; `mismatch` (another `audience`, a subject whose `stepUpSubject` is not the
+  token's `sub`, or another nonce, compared in constant time).
+- Otherwise `exchanged` (`step_up.exchanged`, with `digest` and `kid`), and the claims.
+
+The ledger never holds the token, its signature, the nonce or `sub`. The call record holds no
+nonce.
+
+**For an OpenID Connect `acr` step-up.** A relying party asks its OpenID Provider for a higher
+`acr` (`acr_values=urn:district-assurance:level:2`, or `claims` with an essential `acr`). The
+provider, which is the host's web sign-in, has already authenticated the person (first factor);
+it shows the nonce and the number to call, and its backend calls `exchangeStepUpToken` with the
+site's audience, that person's subject key and the nonce it showed. On `ok` it may issue an ID
+token with `acr` from the claims and `auth_time` from the claims; on anything else it refuses the
+step-up and starts again with a new nonce. A provider that only verifies the JWS against the
+JWKS (any JOSE library: ES256, `kid`, `iss`, `aud`, `exp`, `nonce`) gets authenticity but neither
+the single use nor the refusal after taint: those are the exchange's, so the exchange is
+required. There is no OpenID Provider in the engine (ADR-24).

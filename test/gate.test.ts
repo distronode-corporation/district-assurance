@@ -1,19 +1,20 @@
 // Gate (GAT-1): signed, time-limited access grants after verification, delivered once through an
 // AccessController, and every grant and outcome in the ledger.
 import { strict as assert } from "node:assert";
-import { generateKeyPairSync } from "node:crypto";
+import { createPublicKey, generateKeyPairSync, verify as cryptoVerify } from "node:crypto";
 import { describe, it } from "node:test";
 
 import type { FlowConfig } from "../src/core/config.ts";
 import { validateConfig } from "../src/core/config.ts";
 import { ModuleRegistry } from "../src/core/module.ts";
-import { sha256Hex } from "../src/core/hash.ts";
+import { hmacSha256Hex, sha256Hex } from "../src/core/hash.ts";
 import { canonicalJson } from "../src/core/canonical.ts";
 import { SeenGrants, accessGrantDigest, verifyAccessGrant, type AccessGrantBody, type SignedAccessGrant } from "../src/gate/access.ts";
 import { GateModule, gateModule, type GateHost, type GateSlice } from "../src/gate/gate.ts";
 import { builtInModules } from "../src/modules.ts";
 import { keyPairSigner } from "../src/prove/receipt.ts";
-import { FakeAccessController, generateTestSigner } from "../src/testing/index.ts";
+import { StepUpModule, stepUpAcr, stepUpModule, stepUpSubject, type StepUpHost, type StepUpSlice } from "../src/gate/step-up.ts";
+import { FakeAccessController, TEST_KNOWLEDGE_KEY, generateTestSigner } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig } from "./helpers.ts";
 
 const verify = { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["entry.open"] };
@@ -633,5 +634,368 @@ describe("access grants: the verifier and replay", () => {
 
   it("is the GateModule class gateModule builds", () => {
     assert.ok(gateModule({ signer, controllers: { lobby: new FakeAccessController() } }) instanceof GateModule);
+  });
+});
+
+// Web sign-in step-up (GAT-4): a short-lived ES256 JWT, bound to the site's nonce, the verified
+// subject and the call's verification grant, exchanged once by the host's web sign-in.
+const ISSUER = "https://verify.example.test";
+const PORTAL = "https://portal.example.test";
+const NONCE = "482913";
+const SUBJECT_KEY = hmacSha256Hex(TEST_KNOWLEDGE_KEY, `subject:${ACCOUNT}`);
+const webVerify = { ...verify, scopes: ["entry.sign_in"] };
+const sites = [
+  { id: "portal", audience: PORTAL },
+  { id: "shop", audience: "shop-client-1" },
+];
+
+function stepUpConfig(patch: (c: FlowConfig) => void = () => undefined): FlowConfig {
+  return testConfig((c) => {
+    c.policy.scopes["entry.sign_in"] = 2;
+    c.modules["step-up"] = { settings: { sites: structuredClone(sites) } };
+    c.flows = { web: { steps: [webVerify as never, { type: "step-up.issue", site: "portal" }] } };
+    patch(c);
+  });
+}
+
+function stepUpSetup(options: { patch?: (c: FlowConfig) => void; signer?: ReturnType<typeof generateTestSigner> } = {}) {
+  const stepUp = stepUpModule({ signer: options.signer ?? generateTestSigner("step-up-key-1"), issuer: ISSUER });
+  const t = setup({ modules: [stepUp], config: stepUpConfig(options.patch) });
+  t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+  return { ...t, stepUp };
+}
+
+async function webVerified(t: ReturnType<typeof stepUpSetup>, flow: string | null = "web"): Promise<string> {
+  const { callId } = await t.engine.startCall(flow === null ? {} : { flow });
+  await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+  await t.engine.submitKeypad(callId, { dob: DOB });
+  await t.engine.checkCarrier(callId);
+  assert.equal((await t.engine.finishVerification(callId)).level, 2);
+  return callId;
+}
+
+const decode = (part: string) => JSON.parse(Buffer.from(part, "base64url").toString("utf8")) as Record<string, unknown>;
+const stepUpSlice = async (t: ReturnType<typeof stepUpSetup>, callId: string) => (await t.engine.moduleState(callId, "step-up")) as unknown as StepUpSlice;
+const stepUpEvents = async (t: ReturnType<typeof stepUpSetup>) =>
+  (await t.ledger.list()).filter((e) => e.event === "module.event" && e.detail.module === "step-up").map((e) => [e.detail.event, e.detail.detail] as const);
+const portal = { audience: PORTAL, subjectKey: SUBJECT_KEY, nonce: NONCE };
+/** A compact token with these claims and a junk signature: the shape of a step-up token, never one the engine issued. */
+const forged = (claims: unknown) => `${Buffer.from(JSON.stringify({ alg: "ES256" })).toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.c2ln`;
+
+describe("step-up: config", () => {
+  const registry = (m: StepUpModule) => new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer"], modules: [...builtInModules(), m] });
+  const stepUp = stepUpModule({ signer: generateTestSigner(), issuer: ISSUER });
+
+  it("needs an https issuer", () => {
+    for (const issuer of ["http://verify.example.test", "https://verify.example.test/?x=1", "https://user@verify.example.test", "https://", 7]) {
+      assert.throws(() => stepUpModule({ signer: generateTestSigner(), issuer: issuer as never }), rejects("invalid_input", /https URL/), String(issuer));
+    }
+    assert.ok(stepUpModule({ signer: generateTestSigner(), issuer: "https://verify.example.test/ws_test" }) instanceof StepUpModule);
+  });
+
+  it("checks every step-up setting", () => {
+    assert.deepEqual(stepUp.validateSettings({ sites, maxTokensPerCall: 5 }), []);
+    assert.deepEqual(stepUp.validateSettings(null), ["must be an object with the sites"]);
+    assert.deepEqual(stepUp.validateSettings({ sites: [], maxTokensPerCall: 0, x: 1 }), [
+      "x is not a step-up setting",
+      "maxTokensPerCall must be an integer from 1 to 5",
+      "sites must list at least one site",
+    ]);
+    const sparse: unknown[] = [];
+    sparse[1] = sites[0];
+    assert.deepEqual(stepUp.validateSettings({ sites: sparse }), ["sites must list at least one site"], "a hole is not a site");
+    assert.deepEqual(stepUp.validateSettings({ sites: ["portal", { id: "Portal", audience: "a b", y: 1 }, { id: "a", audience: "x".repeat(201) }, { id: "a", audience: 1 }] }), [
+      "sites[0] must be { id, audience }",
+      "sites[1].y is not a site field",
+      "sites[1].id must be lower-case letters, digits and hyphens, at most 64",
+      "sites[1].audience must be 1 to 200 characters, no spaces",
+      "sites[2].audience must be 1 to 200 characters, no spaces",
+      "sites[3].audience must be 1 to 200 characters, no spaces",
+      "two sites have the same id",
+    ]);
+  });
+
+  it("checks step-up.issue steps, and holds them to entry.sign_in at level 2", () => {
+    const problems = (c: FlowConfig) => validateConfig(c, registry(stepUp));
+    assert.deepEqual(problems(stepUpConfig()), []);
+    const step = (s: Record<string, unknown>) => problems(stepUpConfig((c) => (c.flows = { web: { steps: [webVerify as never, s as never] } })));
+    assert.deepEqual(step({ type: "step-up.issue", site: "shop", lifetimeSeconds: 300 }), []);
+    assert.deepEqual(step({ type: "step-up.issue", site: "bank", lifetimeSeconds: 119, x: 1 }), [
+      "flows.web.steps[1] (step-up.issue): x is not a field of this step",
+      "flows.web.steps[1] (step-up.issue): lifetimeSeconds must be an integer from 120 to 300",
+      "flows.web.steps[1] (step-up.issue): no site bank in the step-up settings",
+    ]);
+    assert.deepEqual(step({ type: "step-up.issue", lifetimeSeconds: 301 }), [
+      "flows.web.steps[1] (step-up.issue): lifetimeSeconds must be an integer from 120 to 300",
+      "flows.web.steps[1] (step-up.issue): site must name a site in the step-up settings",
+    ]);
+    assert.deepEqual(problems(stepUpConfig((c) => (c.modules["step-up"] = { settings: { sites: [] } }))), ["modules.step-up.settings: sites must list at least one site"]);
+    assert.deepEqual(problems(stepUpConfig((c) => (c.policy.scopes["entry.sign_in"] = 1))), ["policy: scope entry.sign_in is access, and below its floor of level 2"]);
+    assert.deepEqual(
+      problems(stepUpConfig((c) => (c.flows = { web: { steps: [{ ...webVerify, scopes: ["payment.request"] } as never, { type: "step-up.issue", site: "portal" }] } }))),
+      ["flows.web.steps[1] (step-up.issue): needs the scope entry.sign_in, which the last verification step does not grant"],
+    );
+  });
+
+  it("keeps the sites a call started with when the config changes", async () => {
+    const t = stepUpSetup();
+    const { callId } = await t.engine.startCall();
+    t.engine.configure(
+      stepUpConfig((c) => {
+        c.modules["step-up"] = { settings: { sites: [{ id: "bank", audience: "bank-1" }] } };
+        c.flows = { bank: { steps: [webVerify as never, { type: "step-up.issue", site: "bank" }] } };
+      }),
+    );
+    await assert.rejects(t.engine.startFlow(callId, "bank"), rejects("precondition_failed", /no site bank/));
+  });
+});
+
+describe("step-up: tokens", () => {
+  it("runs a web flow: an ES256 JWT for an OpenID Connect acr step-up, checked against the JWKS, exchanged once", async () => {
+    const t = stepUpSetup();
+    const callId = await webVerified(t);
+    t.clock.advance(1_500);
+    const issued = await t.stepUp.issueStepUpToken(t.engine, callId, { nonce: NONCE });
+    assert.deepEqual({ ...issued, token: "" }, { token: "", tokenId: "stu_1", expiresAt: "2026-01-01T00:02:01.000Z" });
+    assert.equal((await t.engine.flowPosition(callId))!.status, "completed");
+
+    const [header, payload, signature] = issued.token.split(".") as [string, string, string];
+    assert.deepEqual(decode(header), { alg: "ES256", kid: "step-up-key-1", typ: "JWT" });
+    const claims = {
+      iss: ISSUER,
+      aud: PORTAL,
+      sub: stepUpSubject(SUBJECT_KEY, PORTAL),
+      iat: 1767225601,
+      exp: 1767225721,
+      auth_time: 1767225600,
+      jti: "stu_1",
+      acr: "urn:district-assurance:level:2",
+      nonce: NONCE,
+      sid: callId,
+      grant: "grant_1",
+    };
+    assert.deepEqual(decode(payload), claims);
+    assert.equal(claims.acr, stepUpAcr(2));
+    assert.notEqual(stepUpSubject(SUBJECT_KEY, "shop-client-1"), claims.sub, "a handle per site");
+    // What any JOSE library does with the JWKS: find the key by kid, check ES256 over header.payload.
+    const jwks = t.stepUp.keys();
+    assert.deepEqual(jwks.keys.map((k) => [k.kid, k.alg, k.use, k.kty, k.crv]), [["step-up-key-1", "ES256", "sig", "EC", "P-256"]]);
+    const key = createPublicKey({ key: jwks.keys.find((k) => k.kid === "step-up-key-1")!, format: "jwk" });
+    assert.ok(cryptoVerify("sha256", Buffer.from(`${header}.${payload}`), { key, dsaEncoding: "ieee-p1363" }, Buffer.from(signature, "base64url")));
+    assert.ok(!cryptoVerify("sha256", Buffer.from(`${header}.${payload}x`), { key, dsaEncoding: "ieee-p1363" }, Buffer.from(signature, "base64url")));
+
+    // The call ended before the web sign-in got there: the token is still exchanged, once.
+    await t.engine.endCall(callId);
+    assert.deepEqual(await t.stepUp.exchangeStepUpToken(t.engine, issued.token, portal), { ok: true, claims });
+    assert.deepEqual(await t.stepUp.exchangeStepUpToken(t.engine, issued.token, portal), { ok: false, reason: "unknown" }, "used once");
+
+    const digest = sha256Hex(issued.token);
+    assert.deepEqual(await stepUpEvents(t), [
+      ["step_up.issued", { tokenId: "stu_1", site: "portal", scope: "entry.sign_in", level: 2, verificationGrantId: "grant_1", expiresAt: "2026-01-01T00:02:01.000Z" }],
+      ["step_up.exchanged", { tokenId: "stu_1", digest, kid: "step-up-key-1" }],
+    ]);
+    const ledger = JSON.stringify(await t.ledger.list());
+    assert.ok(!ledger.includes(NONCE) && !ledger.includes(signature) && !ledger.includes(claims.sub), "never the nonce, the token or the subject");
+    assert.deepEqual((await stepUpSlice(t, callId)).tokens, [
+      {
+        tokenId: "stu_1",
+        site: "portal",
+        audience: PORTAL,
+        subject: claims.sub,
+        level: 2,
+        verificationGrantId: "grant_1",
+        authTime: "2026-01-01T00:00:00.000Z",
+        issuedAt: "2026-01-01T00:00:01.000Z",
+        expiresAt: "2026-01-01T00:02:01.000Z",
+        status: "exchanged",
+        digest,
+        kid: "step-up-key-1",
+      },
+    ]);
+    assert.ok(!JSON.stringify(await t.engine.moduleState(callId, "step-up")).includes(NONCE), "the call record keeps no nonce");
+  });
+
+  it("refuses without a verification grant covering entry.sign_in, or while a verification runs", async () => {
+    const t = stepUpSetup();
+    const { callId } = await t.engine.startCall({ flow: "web" });
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, callId, { nonce: NONCE }), rejects("precondition_failed", /on step badge.verify/));
+    const open = await t.engine.startCall();
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, open.callId, { nonce: NONCE, site: "portal" }), rejects("scope_denied", /entry.sign_in/));
+    const tainted = await webVerified(t, null);
+    await t.engine.markUntrusted(tainted, "crm_note");
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, tainted, { nonce: NONCE, site: "portal" }), rejects("scope_denied"));
+    const expired = await webVerified(t, null);
+    t.clock.advance(900_000);
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, expired, { nonce: NONCE, site: "portal" }), rejects("scope_denied"));
+    // Verified, then a new verification started (maybe for another account): its subject is not the grant's.
+    const again = await webVerified(t, null);
+    await t.engine.beginVerification(again, { accountNumber: "99999999" });
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, again, { nonce: NONCE, site: "portal" }), rejects("precondition_failed", /verification is running/));
+    assert.deepEqual(await stepUpEvents(t), []);
+  });
+
+  it("takes the site from the step in a flow and from the host outside one, and the nonce always from the keypad", async () => {
+    const t = stepUpSetup({ patch: (c) => (c.modules["step-up"]!.settings = { sites: structuredClone(sites), maxTokensPerCall: 2 }) });
+    const inFlow = await webVerified(t);
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, inFlow, { nonce: NONCE, site: "shop" }), rejects("invalid_input", /pass only the nonce/));
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, inFlow, { nonce: NONCE, lifetimeSeconds: 300 }), rejects("invalid_input", /pass only the nonce/));
+    for (const nonce of ["12345", "1234567890123", "48291a", 482913]) {
+      await assert.rejects(t.stepUp.issueStepUpToken(t.engine, inFlow, { nonce: nonce as never }), (e: unknown) => rejects("invalid_input", /6 to 12 digits/)(e) && !String(e).includes(String(nonce)));
+    }
+    const outside = await webVerified(t, null);
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, outside, { nonce: NONCE }), rejects("invalid_input", /site is required/));
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, outside, { nonce: NONCE, site: "bank" }), rejects("invalid_input", /no site bank/));
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, outside, { nonce: NONCE, site: "shop", lifetimeSeconds: 600 }), rejects("invalid_input", /lifetimeSeconds/));
+    const shop = await t.stepUp.issueStepUpToken(t.engine, outside, { nonce: "123456789012", site: "shop", lifetimeSeconds: 300 });
+    assert.equal(shop.expiresAt, "2026-01-01T00:05:00.000Z");
+    assert.equal(decode(shop.token.split(".")[1]!).aud, "shop-client-1");
+    await t.stepUp.issueStepUpToken(t.engine, outside, { nonce: NONCE, site: "portal" });
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, outside, { nonce: NONCE, site: "portal" }), rejects("precondition_failed", /every step-up token/));
+  });
+
+  it("never outlives the verification grant", async () => {
+    const t = stepUpSetup({ patch: (c) => (c.flows.web!.steps[1] = { type: "step-up.issue", site: "portal", lifetimeSeconds: 300 }) });
+    const callId = await webVerified(t);
+    t.clock.advance(800_500);
+    const issued = await t.stepUp.issueStepUpToken(t.engine, callId, { nonce: NONCE });
+    assert.equal(issued.expiresAt, "2026-01-01T00:15:00.000Z", "the verification grant's own expiry");
+    assert.equal(decode(issued.token.split(".")[1]!).exp, Date.parse("2026-01-01T00:15:00.000Z") / 1000);
+  });
+
+  it("refuses an exchange after the call is tainted, and that uses the token up", async () => {
+    const t = stepUpSetup();
+    const callId = await webVerified(t);
+    const { token } = await t.stepUp.issueStepUpToken(t.engine, callId, { nonce: NONCE });
+    await t.engine.markUntrusted(callId, "crm_note");
+    assert.deepEqual(await t.stepUp.exchangeStepUpToken(t.engine, token, portal), { ok: false, reason: "tainted" });
+    assert.deepEqual(await t.stepUp.exchangeStepUpToken(t.engine, token, portal), { ok: false, reason: "unknown" });
+    assert.deepEqual((await stepUpEvents(t)).at(-1), ["step_up.refused", { tokenId: "stu_1", digest: sha256Hex(token), reason: "tainted" }]);
+    assert.equal((await stepUpSlice(t, callId)).tokens[0]!.status, "refused");
+  });
+
+  it("refuses an expired token, and one for another site, subject or nonce, each using it up", async () => {
+    const t = stepUpSetup({ patch: (c) => (c.modules["step-up"]!.settings = { sites: structuredClone(sites), maxTokensPerCall: 5 }) });
+    const callId = await webVerified(t, null);
+    const issue = async () => (await t.stepUp.issueStepUpToken(t.engine, callId, { nonce: NONCE, site: "portal" })).token;
+    const expired = await issue();
+    t.clock.advance(119_000);
+    const live = [await issue(), await issue(), await issue()];
+    t.clock.advance(1_000);
+    assert.deepEqual(await t.stepUp.exchangeStepUpToken(t.engine, expired, portal), { ok: false, reason: "expired" });
+    for (const [i, wrong] of [{ audience: "shop-client-1" }, { subjectKey: "a".repeat(64) }, { nonce: "482914" }].entries()) {
+      assert.deepEqual(await t.stepUp.exchangeStepUpToken(t.engine, live[i]!, { ...portal, ...wrong }), { ok: false, reason: "mismatch" }, JSON.stringify(wrong));
+      assert.deepEqual(await t.stepUp.exchangeStepUpToken(t.engine, live[i]!, portal), { ok: false, reason: "unknown" }, "the first refusal used it up");
+    }
+    const fresh = await issue();
+    assert.equal((await t.stepUp.exchangeStepUpToken(t.engine, fresh, portal)).ok, true);
+    assert.deepEqual((await stepUpSlice(t, callId)).tokens.map((s) => s.status), ["refused", "refused", "refused", "refused", "exchanged"]);
+  });
+
+  it("refuses a token whose call was verified again since", async () => {
+    const t = stepUpSetup({ patch: (c) => (c.modules["step-up"]!.settings = { sites: structuredClone(sites), maxTokensPerCall: 5 }) });
+    const callId = await webVerified(t, null);
+    const first = (await t.stepUp.issueStepUpToken(t.engine, callId, { nonce: NONCE, site: "portal" })).token;
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.checkCarrier(callId);
+    await t.engine.finishVerification(callId);
+    assert.deepEqual(await t.stepUp.exchangeStepUpToken(t.engine, first, portal), { ok: false, reason: "not_authorized" }, "a new grant");
+    const second = (await t.stepUp.issueStepUpToken(t.engine, callId, { nonce: NONCE, site: "portal" })).token;
+    assert.equal(decode(second.split(".")[1]!).grant, "grant_2");
+    // Verified again and failed: the call holds no grant.
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.finishVerification(callId);
+    assert.deepEqual(await t.stepUp.exchangeStepUpToken(t.engine, second, portal), { ok: false, reason: "not_authorized" });
+  });
+
+  it("refuses anything that is not a token this call issued, without using up the real one", async () => {
+    const t = stepUpSetup();
+    const callId = await webVerified(t, null);
+    const { token } = await t.stepUp.issueStepUpToken(t.engine, callId, { nonce: NONCE, site: "portal" });
+    for (const bad of [null, 7, "a.b", "a.b.c.d", forged({ sid: callId, jti: "stu_1" }), forged({ sid: callId, jti: 1, nonce: NONCE }), forged([]), "a.bm90IGpzb24.c"]) {
+      assert.deepEqual(await t.stepUp.exchangeStepUpToken(t.engine, bad, portal), { ok: false, reason: "malformed" }, String(bad));
+    }
+    const claims = decode(token.split(".")[1]!);
+    for (const bad of [forged(claims), forged({ ...claims, sid: "call_unknown" }), forged({ ...claims, jti: "stu_9" }), `${token.slice(0, -2)}AA`]) {
+      assert.deepEqual(await t.stepUp.exchangeStepUpToken(t.engine, bad, portal), { ok: false, reason: "unknown" });
+    }
+    // A reservation the module never made a token for (a host's own write): still not a token.
+    await t.engine.updateModule(callId, "step-up", (s, call) => (call.reserve("stu_x"), s));
+    assert.deepEqual(await t.stepUp.exchangeStepUpToken(t.engine, forged({ ...claims, jti: "stu_x" }), portal), { ok: false, reason: "unknown" });
+    assert.deepEqual(await t.engine.moduleReservations(callId, "step-up"), ["stu_1", "stu_x"], "nothing was settled");
+    assert.equal((await t.stepUp.exchangeStepUpToken(t.engine, token, portal)).ok, true, "the real token was never used up");
+  });
+
+  it("throws a failed write as it is", async () => {
+    const t = stepUpSetup();
+    const callId = await webVerified(t);
+    const { token } = await t.stepUp.issueStepUpToken(t.engine, callId, { nonce: NONCE });
+    const down: StepUpHost = { updateModule: (c, n, fn) => t.engine.updateModule(c, n, fn), recordModuleOutcome: () => Promise.reject(new Error("store down")) };
+    await assert.rejects(t.stepUp.exchangeStepUpToken(down, token, portal), /store down/);
+    assert.equal((await t.stepUp.exchangeStepUpToken(t.engine, token, portal)).ok, true);
+  });
+
+  it("fails a token whose signing failed, hands out nothing, and fails the step at the limit", async () => {
+    const signer = generateTestSigner("step-up-key-1");
+    let broken = true;
+    const t = stepUpSetup({
+      signer: { ...signer, sign: (payload) => (broken ? Promise.reject(new Error("kms down")) : signer.sign(payload)) },
+      patch: (c) => (c.modules["step-up"]!.settings = { sites: structuredClone(sites), maxTokensPerCall: 2 }),
+    });
+    const callId = await webVerified(t);
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, callId, { nonce: NONCE }), /kms down/);
+    assert.equal((await t.engine.flowPosition(callId))!.status, "running");
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, callId, { nonce: NONCE }), /kms down/);
+    assert.equal((await t.engine.flowPosition(callId))!.status, "failed", "every token used, none valid");
+    assert.deepEqual(await t.engine.moduleReservations(callId, "step-up"), []);
+    assert.deepEqual((await stepUpEvents(t)).map(([e, d]) => [e, (d as { reason?: string }).reason ?? null]), [
+      ["step_up.issued", null],
+      ["step_up.failed", "signing"],
+      ["step_up.issued", null],
+      ["step_up.failed", "signing"],
+    ]);
+    broken = false;
+    const outside = await webVerified(t, null);
+    assert.equal((await t.stepUp.issueStepUpToken(t.engine, outside, { nonce: NONCE, site: "portal" })).tokenId, "stu_3");
+  });
+
+  it("issues nothing when the call was tainted, verified again or the token expired while it was signed", async () => {
+    const signer = generateTestSigner("step-up-key-1");
+    let during: () => Promise<unknown> = async () => undefined;
+    const t = stepUpSetup({ signer: { ...signer, sign: async (payload) => (await during(), signer.sign(payload)) } });
+    const tainted = await webVerified(t, null);
+    during = () => t.engine.markUntrusted(tainted, "crm_note");
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, tainted, { nonce: NONCE, site: "portal" }), rejects("scope_denied", /no longer authorized/));
+    const again = await webVerified(t, null);
+    during = () => t.engine.beginVerification(again, { accountNumber: ACCOUNT });
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, again, { nonce: NONCE, site: "portal" }), rejects("scope_denied", /no longer authorized/));
+    const slow = await webVerified(t, null);
+    during = async () => t.clock.advance(120_000);
+    await assert.rejects(t.stepUp.issueStepUpToken(t.engine, slow, { nonce: NONCE, site: "portal" }), rejects("scope_denied", /it expired/));
+    for (const callId of [tainted, again, slow]) {
+      assert.deepEqual((await stepUpSlice(t, callId)).tokens.map((s) => [s.status, s.digest]), [["failed", null]]);
+      assert.deepEqual(await t.engine.moduleReservations(callId, "step-up"), []);
+    }
+    const reasons = (await stepUpEvents(t)).filter(([e]) => e === "step_up.failed").map(([, d]) => (d as { reason: string }).reason);
+    assert.deepEqual(reasons, ["not_authorized", "not_authorized", "expired"]);
+  });
+
+  it("allows one token being signed per call", async () => {
+    const signer = generateTestSigner("step-up-key-1");
+    let nested: Promise<unknown> | null = null;
+    let call = { t: null as ReturnType<typeof stepUpSetup> | null, id: "" };
+    const t = stepUpSetup({
+      signer: {
+        ...signer,
+        sign: async (payload) => {
+          nested ??= call.t!.stepUp.issueStepUpToken(call.t!.engine, call.id, { nonce: NONCE, site: "shop" });
+          await assert.rejects(nested, rejects("precondition_failed", /being issued/));
+          return signer.sign(payload);
+        },
+      },
+    });
+    call = { t, id: await webVerified(t, null) };
+    assert.equal((await t.stepUp.issueStepUpToken(t.engine, call.id, { nonce: NONCE, site: "portal" })).tokenId, "stu_1");
+    assert.ok(nested !== null);
   });
 });

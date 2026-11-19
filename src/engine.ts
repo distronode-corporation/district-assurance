@@ -89,6 +89,11 @@ export interface ModuleCallView {
   /** `recordModuleOutcome` only: closes the reservation being settled, once its outcome is written. */
   release(): void;
   authorized(scope: string): boolean;
+  /**
+   * The subject key the call's verification grant was issued for, or null: no grant, or a
+   * verification is running (it may be for another subject). Never a factor or a value on file.
+   */
+  subjectKey: string | null;
   /** A ledger entry `module.event` with `{ module, event, detail }`. Never put a value the caller keyed in it. */
   emit(event: string, detail: { [key: string]: JsonValue }): void;
 }
@@ -518,6 +523,12 @@ export class Engine {
         else delete open[name];
       },
       authorized: (scope) => this.#authorized(draft.record, scope),
+      // Only Badge issues grants, so a call with a grant has Badge's part. In the verifying phase the
+      // grant is still the last one, while Badge's subject may already be the next verification's.
+      subjectKey:
+        draft.record.state.grant === null || draft.record.state.phase === "verifying"
+          ? null
+          : (draft.record.modules[badge.BADGE] as unknown as badge.BadgeSlice).subjectKey,
       emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
     };
     const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);

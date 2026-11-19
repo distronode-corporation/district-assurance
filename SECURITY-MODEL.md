@@ -11,6 +11,7 @@ claim.
   or payout details.
 - Card data, which the engine must never receive.
 - Doors and other access: what a verified caller may open, and when.
+- Web sign-ins a verified call steps up, and for whom.
 - Whose account a payment lands on (the business's, or the platform's).
 - The record of what happened on a call: the ledger and the receipts.
 - The workspace's FlowConfig: which modules run, which factors count, which scopes a flow grants.
@@ -21,7 +22,7 @@ claim.
 |---|---|
 | The host's code paths that call the engine | Everything the caller says |
 | The adapters the host plugs in | Everything the model says or proposes |
-| The knowledge key, the receipt signing key and Gate's signing key | Caller ID and any number given on the call |
+| The knowledge key, the receipt signing key, Gate's and step-up's signing keys | Caller ID and any number given on the call |
 | The clock and id source | Webhook bodies until their signature verifies |
 | The outside modules the host installs | Text from business endpoints, CRMs and documents |
 | The door controllers and relays the host configures | A door relay's answer, beyond "took it", "refused" or "lost" |
@@ -146,6 +147,29 @@ grant ids across restarts (or refuses every grant for 15 minutes plus twice the 
 skew after one), and the door's own safety
 (an unlock pulse, not a latch).
 
+### Web sign-in step-up: stolen, replayed or misdirected tokens
+
+Someone replays a step-up token, uses one meant for another person or site, or keeps using one
+after the call turned untrusted. **Controls:** a token is issued only with a verification grant
+covering `entry.sign_in` (level 2 or more), checked by the engine on the flow step and by the
+module, and once more after signing, so a call tainted, verified again or expired while it was
+signed gets nothing (tested). It is an ES256 JWT under the module's own key, lives 2 to 5
+minutes and never past the verification grant (tested). It is bound to the site's audience, to
+the subject the verification grant was issued for (never one the host or the model names, and
+none while a new verification runs), to the grant itself and to the nonce the site showed
+(tested). The web sign-in exchanges it through the engine, which accepts only the exact bytes the
+call issued, once: the exchange closes the token's reservation, so a second one is refused, on
+any process (tested). An exchange after the call was tainted, after the call was verified again,
+after expiry, or for another site, subject or nonce is refused and uses the token up; a forged or
+altered token is refused without using up the real one (tested). The ledger holds the token's
+digest and outcome, never the token, the nonce or the subject handle, and the call record keeps
+no nonce (tested). `sub` is a handle per site, so two sites cannot link one person (tested).
+Left to the host: exchanging every token through the engine (checking the JWS against the JWKS
+alone gives neither the single use nor the refusal after taint), handing the token only to the
+browser session that showed the nonce, a nonce of at least 6 digits that lives no longer than
+the token, and the words the caller hears before keying it ("you are signing in to ... on the
+web"), since a person can be talked into keying someone else's nonce.
+
 ### Money on the wrong account
 
 A webhook from one account settles a payment taken on another, or a config sends money to the
@@ -203,8 +227,10 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
   speech-to-text and the model while `sensitive` is set.
-- Keeping the knowledge key, the receipt signing key and Gate's signing key in a key store, Gate's
-  apart from the receipts'.
+- Keeping the knowledge key, the receipt signing key, Gate's and step-up's signing keys in a key
+  store, each apart from the others.
+- Exchanging each step-up token through the engine (`exchangeStepUpToken`), and only for the
+  browser session that showed its nonce.
 - Calling `expirePaymentLinks` at each link's `expiresAt` (a timer or a sweep); until it does, a
   link lives as long as the provider keeps it.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
