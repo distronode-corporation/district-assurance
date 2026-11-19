@@ -349,6 +349,7 @@ export async function requestPayment(
   // one already dead: the request is expired instead (at the provider too), and never sent.
   // The process that will text it holds a short lease, so a concurrent resume never expires the
   // link while it is being sent; once the lease lapses (that sender stopped), it may.
+  let claimedAt = "";
   const claim = await rt.update(callId, (draft): "sent" | "claimed" | "late" | "settled" => {
     const pending = find(draft, request.paymentId);
     pending.linkId = link.linkId;
@@ -360,7 +361,8 @@ export async function requestPayment(
     const now = rt.clock.now().getTime();
     const leased = pending.sendingSince !== null && now - Date.parse(pending.sendingSince) < SEND_LEASE_MS;
     if (Date.parse(request.providerExpiresAt) - now >= MIN_LINK_LIFE_MINUTES * 60_000) {
-      pending.sendingSince = rt.now();
+      claimedAt = rt.now();
+      pending.sendingSince = claimedAt;
       return "claimed";
     }
     if (leased) throw new EngineError("precondition_failed", "another process is texting this payment link");
@@ -382,6 +384,25 @@ export async function requestPayment(
       if (answer.state === "expired") settle(rt, draft, request.paymentId, "expired");
     });
     throw new EngineError("precondition_failed", "the payment link could not be texted in time and was expired; request a new payment");
+  }
+  if (claim === "claimed") {
+    // Binding the reference can stall past the lease, and then a cancel or the end of the call may
+    // have gone ahead (and failed to expire the link at the provider). So the claim is checked
+    // again, and renewed, in a write right before the text: a request closed, a call ended, or a
+    // lease another sender took since is never texted from here.
+    const still = await rt.update(callId, (draft): "ok" | "closed" | "taken" => {
+      const pending = find(draft, request.paymentId);
+      if (pending.status !== "open" || draft.record.state.phase === "ended") return "closed";
+      if (pending.textedAt !== null || pending.sendingSince !== claimedAt) return "taken";
+      claimedAt = rt.now();
+      pending.sendingSince = claimedAt;
+      return "ok";
+    });
+    if (still === "closed") {
+      await expireAtProvider(rt, callId, request, link.linkId);
+      throw new EngineError("precondition_failed", "the payment request was closed while its link was being sent; the link was expired and never texted");
+    }
+    if (still === "taken") throw new EngineError("precondition_failed", "another process took over texting this payment link");
   }
   await rt.adapter("messages").sendText({
     to: reserved.phone,

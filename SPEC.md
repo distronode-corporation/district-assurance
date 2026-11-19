@@ -446,7 +446,12 @@ then answers, `requestPayment` expires that link at the provider, never texts it
 the end closed its request. While a process is texting a link (it holds the send lease, 60
 seconds), `cancelPaymentLink` and `endCall` are refused with `precondition_failed`, so a link is
 never closed under its own text and no text goes out after the call ended; once the text is
-recorded, or the lease lapses (that sender stopped), they go ahead. A sender that comes back after
+recorded, or the lease lapses (that sender stopped), they go ahead. A sender checks and renews
+its lease in a write right before the text, so one that stalled past its lease (binding the
+link's reference) never texts a request that was closed or a call that ended meanwhile: it expires
+the link at the provider and throws `precondition_failed`; one whose lease another sender took
+stops too. `endCall` appends any ledger entries still pending before it takes the receipt's head,
+so the head covers every entry the end wrote. A sender that comes back after
 its request was closed records nothing, so no entry follows the close or the receipt. If the
 provider fails while the call ends, the call stays ended without its receipt, and `endCall` again
 expires what is left and issues it.

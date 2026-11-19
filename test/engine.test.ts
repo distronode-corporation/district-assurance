@@ -9,6 +9,7 @@ import { defaultVerificationPolicy } from "../src/core/policy.ts";
 import { createEngine } from "../src/engine.ts";
 import { defaultConfig } from "../src/modules.ts";
 import { formatAmount } from "../src/pay/paylink.ts";
+import { MemorySessionStore } from "../src/core/session-store.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import { verifyReceipt } from "../src/prove/receipt.ts";
 import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
@@ -664,6 +665,81 @@ describe("Engine pay", () => {
     assert.deepEqual(receipt!.body.payments.map((p) => p.status), ["expired"]);
     const events = (await t.ledger.list()).map((e) => e.event);
     assert.ok(events.indexOf("payment.link_sent") < events.indexOf("call.ended"));
+  });
+
+  /** A session store whose next payment binding waits until told. */
+  class StallingStore extends MemorySessionStore {
+    stall: Promise<void> | null = null;
+    reached: () => void = () => undefined;
+    override async bindRef(workspaceId: string, ref: string, callId: string): Promise<boolean> {
+      if (this.stall !== null && ref.startsWith("payment:")) {
+        const wait = this.stall;
+        this.stall = null;
+        this.reached();
+        await wait;
+      }
+      return super.bindRef(workspaceId, ref, callId);
+    }
+  }
+
+  it("never texts a link whose binding stalled past the lease while the call ended and its expiry failed", async () => {
+    const sessions = new StallingStore();
+    let release: () => void = () => undefined;
+    sessions.stall = new Promise<void>((resolve) => (release = resolve));
+    const reached = new Promise<void>((resolve) => (sessions.reached = resolve));
+    const t = setup({ adapters: { sessions } });
+    const callId = await verifiedCall(t);
+    const sending = t.engine.requestPayment(callId, request).catch((e: unknown) => e);
+    await reached;
+    t.clock.advance(60_000);
+    const expire = t.payments.expireLink.bind(t.payments);
+    t.payments.expireLink = async () => {
+      throw new Error("provider down");
+    };
+    await assert.rejects(t.engine.endCall(callId), /provider down/);
+    assert.equal((await t.engine.state(callId)).phase, "ended");
+    t.payments.expireLink = expire;
+    release();
+    assert.ok(rejects("precondition_failed", /closed while its link was being sent/)(await sending));
+    assert.equal(t.messages.sent.filter((m) => m.purpose === "payment_link").length, 0, "never texted after the call ended");
+    assert.deepEqual(t.payments.expired, [{ linkId: "cs_fake_1", mode: "platform" }], "expired at the provider by the sender");
+    const receipt = await t.engine.endCall(callId);
+    assert.deepEqual(receipt!.body.payments.map((p) => p.status), ["expired"]);
+  });
+
+  it("stops a sender whose binding stalled while another resumed the send and took the lease", async () => {
+    const sessions = new StallingStore();
+    let release: () => void = () => undefined;
+    sessions.stall = new Promise<void>((resolve) => (release = resolve));
+    const reached = new Promise<void>((resolve) => (sessions.reached = resolve));
+    const t = setup({ adapters: { sessions } });
+    const callId = await verifiedCall(t);
+    const first = t.engine.requestPayment(callId, request).catch((e: unknown) => e);
+    await reached;
+    t.clock.advance(60_000);
+    assert.equal((await t.engine.requestPayment(callId, request)).status, "open", "the resume texted it");
+    release();
+    assert.ok(rejects("precondition_failed", /another process took over/)(await first));
+    assert.equal(t.messages.sent.filter((m) => m.purpose === "payment_link").length, 1, "texted once");
+  });
+
+  it("appends entries a failed append left pending before it takes the receipt's ledger head", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.requestPayment(callId, request);
+    const append = t.ledger.append.bind(t.ledger);
+    let down = true;
+    t.ledger.append = async (...args: Parameters<typeof append>) => {
+      if (down && args[0].event === "payment.link_expired") throw new Error("ledger down");
+      return append(...args);
+    };
+    await assert.rejects(t.engine.endCall(callId), /ledger down/);
+    down = false;
+    const receipt = (await t.engine.endCall(callId))!;
+    const entries = await t.ledger.list();
+    const expired = entries.find((e) => e.event === "payment.link_expired")!;
+    assert.ok(expired.seq <= receipt.body.ledger.seq, "the head covers the expired link");
+    assert.equal(entries.at(-1)!.event, "receipt.issued");
   });
 
   it("ends the call once a stopped sender's lease lapsed, and that sender records nothing after the receipt", async () => {

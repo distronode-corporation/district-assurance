@@ -470,6 +470,9 @@ export class Engine {
     await paylink.expireOpenPayments(this.#rt, ended);
     const record = paylink.openPayments(ended).length === 0 ? ended : await this.#read(callId);
     if (!trace.wantsReceipt(this.#rt, record)) return null;
+    // The head must cover every entry the end wrote, an expired link's among them, even one left
+    // pending by an earlier append that failed: they are appended first, or the receipt waits.
+    await this.flushLedger(callId);
     const head = await trace.endedHead(this.#rt, record, () => this.#adapters.ledger.head());
     const parts: Pick<ReceiptBody, "verification" | "records" | "payments"> = { verification: { level: 0, methods: [] }, records: [], payments: [] };
     // The built-in contributors, not the registry: a module removed after this call filed or paid still appears on its receipt.
