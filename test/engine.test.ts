@@ -115,7 +115,7 @@ describe("Engine sessions", () => {
       events.map((e) => e.name),
       ["call.started", "session.tainted"],
     );
-    assert.deepEqual(events[0]!.detail, { locale: "en", revision: "default" });
+    assert.deepEqual(events[0]!.detail, { locale: "en", revision: "default", attestation: "none" });
     assert.deepEqual(events[1]!.detail, { source: "business_endpoint" });
     const entries = await t.ledger.list();
     assert.deepEqual(entries.map((e) => e.event), ["call.started", "session.tainted"]);

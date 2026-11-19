@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import {
+  capLevel,
   defaultVerificationPolicy,
   evaluateAssurance,
   scopeFloor,
@@ -147,6 +148,37 @@ describe("validatePolicy: the review's hostile cases", () => {
       "scope status.x has level of type null, not 0 to 3",
     ], "never coerced to a string");
     assert.deepEqual(validatePolicy({ ...defaultVerificationPolicy(), levels: "x", scopes: [] }), ["levels must be a list of { level, anyOf: [[factor, ...], ...] }", "scopes must map scope names to levels"]);
+  });
+});
+
+describe("attestationCaps", () => {
+  it("accepts caps from 0 to 3 for any attestation, and no caps at all", () => {
+    assert.deepEqual(validatePolicy(policy({ attestationCaps: { A: 3, B: 2, C: 2, none: 2, failed: 0 } })), []);
+    assert.deepEqual(validatePolicy(policy({ attestationCaps: {} })), []);
+    assert.equal(defaultVerificationPolicy().attestationCaps, undefined, "no caps by default");
+  });
+
+  it("refuses a cap outside 0 to 3, a value that is not an attestation, and a malformed map", () => {
+    const errors = validatePolicy(policy({ attestationCaps: { C: 4, none: -1, failed: 1.5, B: "2" as unknown as 2, D: 1 } as never }));
+    assert.deepEqual(errors, [
+      "attestationCaps.C must be a level from 0 to 3",
+      "attestationCaps.none must be a level from 0 to 3",
+      "attestationCaps.failed must be a level from 0 to 3",
+      "attestationCaps.B must be a level from 0 to 3",
+      "attestationCaps.D is not an attestation (A, B, C, failed or none)",
+    ]);
+    for (const caps of [null, [2], 2]) {
+      assert.deepEqual(validatePolicy(policy({ attestationCaps: caps as never })), ["attestationCaps must map A, B, C, failed or none to a level from 0 to 3"]);
+    }
+  });
+
+  it("only ever lowers a level", () => {
+    const p = policy({ attestationCaps: { C: 2, failed: 0 } });
+    assert.equal(capLevel(p, 3, "C"), 2);
+    assert.equal(capLevel(p, 1, "C"), 1, "a cap above the level never raises it");
+    assert.equal(capLevel(p, 2, "failed"), 0);
+    assert.equal(capLevel(p, 3, "A"), 3, "no cap for the value");
+    assert.equal(capLevel(defaultVerificationPolicy(), 2, "none"), 2, "no caps at all");
   });
 });
 

@@ -199,6 +199,7 @@ export async function issueReceipt(
     endedAt: record.state.endedAt!,
     issuedAt: rt.now(),
     verification: parts.verification,
+    attestation: record.attestation,
     records: parts.records,
     payments: parts.payments,
     consents: (record.modules[TRACE] as unknown as TraceSlice).consents.map((c) => ({

@@ -19,7 +19,7 @@ import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
 import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
 import { hmacSha256Hex } from "./core/hash.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
-import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
+import { ATTESTATIONS, capLevel, type AssuranceLevel, type Attestation, type VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
 import type { AdapterName, CallDraft, CallRecord, EngineAdapters, EngineRuntime, FlowStatus, Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
@@ -169,8 +169,14 @@ export class Engine {
 
   // ---- sessions ----------------------------------------------------------------------------
 
-  /** Opens a call. With `flow`, the call runs that flow from its first step. */
-  async startCall(input: { callId?: string; locale?: Locale; flow?: string } = {}): Promise<SessionState> {
+  /**
+   * Opens a call. With `flow`, the call runs that flow from its first step. `attestation` is the
+   * caller ID attestation the host's carrier reported (default `none`), set once here: it can only
+   * cap the call's level under the policy's `attestationCaps`, never raise it.
+   */
+  async startCall(input: { callId?: string; locale?: Locale; flow?: string; attestation?: Attestation } = {}): Promise<SessionState> {
+    const attestation = input.attestation ?? "none";
+    if (!(ATTESTATIONS as readonly unknown[]).includes(attestation)) throw new EngineError("invalid_input", "attestation must be A, B, C, failed or none");
     const callId = input.callId ?? this.#ids.next("call");
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
@@ -182,13 +188,14 @@ export class Engine {
       state: newSession(callId, this.workspaceId, this.#now()),
       locale: input.locale ?? "en",
       revision: this.#config.revision,
+      attestation,
       flow: null,
       modules,
       outbox: [],
     };
     // A call started with a flow is created with it attached, so no other process can start a
     // different flow on the same id in between.
-    const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
+    const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision, attestation } }];
     if (input.flow !== undefined) {
       const draft = this.#draft(record, events);
       this.#attachFlow(draft, input.flow, this.#flowDefinition(input.flow), this.#config.revision);
@@ -520,8 +527,14 @@ export class Engine {
     if (min === undefined || record.state.phase === "ended") return false;
     if (min === 0) return true;
     const grant = record.state.grant;
-    // The grant's level is checked against today's minimum too, so a stricter config applies to grants already issued.
-    return grant !== null && grant.scopes.includes(scope) && grant.level >= min && this.#clock.now().getTime() < Date.parse(grant.expiresAt);
+    // The grant's level is checked against today's minimum and today's attestation cap too, so a
+    // stricter config applies to grants already issued.
+    return (
+      grant !== null &&
+      grant.scopes.includes(scope) &&
+      capLevel(this.#config.policy, grant.level, record.attestation) >= min &&
+      this.#clock.now().getTime() < Date.parse(grant.expiresAt)
+    );
   }
 
   async #read(callId: string): Promise<CallRecord> {

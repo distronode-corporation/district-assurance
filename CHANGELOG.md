@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Caller ID attestation (VER-10): `startCall({ attestation })` records the call's STIR/SHAKEN
+  result (`A`, `B`, `C`, `failed`, default `none`) in `call.started` and the receipt (an optional
+  field, format version 1), and the policy's optional `attestationCaps` can only lower a level.
 
 ### Changed
 

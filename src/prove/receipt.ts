@@ -7,7 +7,7 @@ import { createPrivateKey, createPublicKey, sign, verify, type JsonWebKey, type 
 import type { ReceiptSigner } from "../core/adapters.ts";
 import { canonicalJson } from "../core/canonical.ts";
 import { sha256Hex } from "../core/hash.ts";
-import type { AssuranceLevel, FactorKind } from "../core/policy.ts";
+import type { AssuranceLevel, Attestation, FactorKind } from "../core/policy.ts";
 
 export interface ReceiptBody {
   v: 1;
@@ -18,6 +18,8 @@ export interface ReceiptBody {
   endedAt: string;
   issuedAt: string;
   verification: { level: AssuranceLevel; methods: FactorKind[] };
+  /** The caller ID attestation the call started with. Optional, so the format stays version 1; never a method. */
+  attestation?: Attestation;
   records: Array<{ recordId: string; formId: string; digest: string }>;
   payments: Array<{ paymentId: string; status: string; amountMinor: number; currency: string; providerRef: string }>;
   consents: Array<{ purpose: string; wordingVersion: string; wordingDigest: string; answer: "yes" | "no" }>;

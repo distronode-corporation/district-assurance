@@ -88,6 +88,33 @@ How the page is kept small and safe:
 
 Use test-mode keys only. Never commit a secret; the server reads them from the environment.
 
+## Caller ID attestation
+
+The host passes the call's STIR/SHAKEN result to `startCall({ attestation })` when the call
+starts. The engine never reads a carrier's value itself; the host maps it as below. A value this
+table does not list, a missing value and a value the host cannot read all map to `none`.
+
+| Carrier value | `attestation` |
+|---|---|
+| Twilio `StirVerstat`: `TN-Validation-Passed-A`, `-B`, `-C` | `A`, `B`, `C` |
+| Twilio `StirVerstat`: `TN-Validation-Failed-A`, `-B`, `-C`, `TN-Validation-Failed` | `failed` |
+| Twilio `StirVerstat`: `No-TN-Validation`, or no `StirVerstat` | `none` |
+| Telnyx SIP `verstat=TN-Validation-Passed`, with the attestation level from Telnyx's call record (`A`, `B` or `C`) | `A`, `B`, `C` |
+| Telnyx SIP `verstat=TN-Validation-Passed` with no level known | `none` |
+| Telnyx SIP `verstat=TN-Validation-Failed` | `failed` |
+| Telnyx SIP `verstat=No-TN-Validation`, or no `verstat` | `none` |
+
+`A`, `B` or `C` means the receiving carrier's check of the signature passed; never pass a level
+from a signature that was not checked, or whose check failed. Twilio documents `StirVerstat` for
+the United States and France. Coverage for Canadian numbers is checked per carrier before it is
+documented here.
+
+In Canada and the United States, `C` or no attestation is common for genuine callers: calls from
+abroad, and calls whose signature was lost on an older, non-IP part of the network. An attestation
+speaks to the calling number only, never to who is speaking. That is why it is never a factor, and
+why the policy has no `attestationCaps` by default (DECISIONS.md, ADR-21): a business that wants
+them sets them, for example `{ "C": 2, "none": 2, "failed": 1 }`.
+
 ## Carrier signals
 
 Planned (VER-4), Twilio and Telnyx. What each offers, to be confirmed per country when the adapters

@@ -228,3 +228,16 @@ calls) is a hard gate: no host runs it on a live line before VER-1 is merged.
 **Why.** It is the smallest flow that proves the engine on a real line: one factor, one scope, no
 money and no customer data, run across the host's processes. Its scopes stay below the floors, so
 an owner command can never move money or change contact details at level 1.
+
+## ADR-21. Caller ID attestation is a cap, off by default (VER-10)
+
+**Decided.** A call records, once when it starts, the STIR/SHAKEN attestation its host's carrier
+reported (`A`, `B`, `C`, `failed` or `none`). It is never a factor. The policy's optional
+`attestationCaps` sets, per value, the highest level a call with it can reach; a cap only lowers a
+level. By default there are no caps: the attestation is written to `call.started` and the receipt
+and changes nothing. A business turns caps on in its policy.
+**Why.** An attestation says how much the signing carrier knew about the calling number, never
+who is speaking, so it can make a call count for less but never for more. In Canada and the United
+States, `C` or no attestation is common for genuine callers (calls from abroad, and calls whose
+signature was lost on an older, non-IP network), so caps on by default would turn genuine callers
+away. **Revisit** if carriers' coverage makes a missing or `C` attestation rare for genuine callers.
