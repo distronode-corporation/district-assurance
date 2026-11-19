@@ -189,12 +189,14 @@ function callsOf(records: readonly IntakeRecord[]): string[] {
  * `signer` adapters. Reads the whole ledger once.
  */
 export async function exportSubject(rt: EngineRuntime, input: SubjectRequest & { kept?: KeptItem[] }): Promise<SignedSubjectExport> {
-  const records = checkRequest(rt, input);
-  const hostKept = checkKept(input.kept);
+  // Read once: the subject key checked is the one whose data is gathered and named in the export.
+  const { workspaceId, subjectKey, kept } = input;
+  const records = checkRequest(rt, { workspaceId, subjectKey });
+  const hostKept = checkKept(kept);
   const signer: ReceiptSigner | undefined = rt.adapter("signer");
   if (signer === undefined) throw new EngineError("precondition_failed", "an export is signed, and the engine has no signer adapter");
-  const intakeRecords = await records.listIntakeRecords(rt.workspaceId, input.subjectKey);
-  const subject = await records.getSubject(rt.workspaceId, input.subjectKey);
+  const intakeRecords = await records.listIntakeRecords(rt.workspaceId, subjectKey);
+  const subject = await records.getSubject(rt.workspaceId, subjectKey);
   const calls = callsOf(intakeRecords);
   const consents: ConsentRecord[] = [];
   const receipts: SubjectExportBody["receipts"] = [];
@@ -203,7 +205,7 @@ export async function exportSubject(rt: EngineRuntime, input: SubjectRequest & {
     if (call === null) continue;
     const trace = call.modules[TRACE] as unknown as TraceSlice;
     // Only the consents recorded under this subject: a call can match another subject later.
-    consents.push(...trace.consents.filter((c) => c.subjectKey === input.subjectKey));
+    consents.push(...trace.consents.filter((c) => c.subjectKey === subjectKey));
     if (trace.receipt !== null) receipts.push({ receiptId: trace.receipt.body.receiptId, callId });
   }
   // A ledger can be shared by several workspaces: an entry counts only when its event id (a JSON
@@ -218,7 +220,7 @@ export async function exportSubject(rt: EngineRuntime, input: SubjectRequest & {
     type: "subject_export",
     exportId: rt.ids.next("sxp"),
     workspaceId: rt.workspaceId,
-    subjectKey: input.subjectKey,
+    subjectKey,
     issuedAt: rt.now(),
     intakeRecords,
     pinDigestOnFile: subject?.pinDigest !== undefined,
@@ -274,31 +276,33 @@ export async function eraseSubject(
   input: SubjectRequest,
   forget: (callId: string, recordIds: readonly string[]) => Promise<void>,
 ): Promise<ErasureResult> {
-  const records = checkRequest(rt, input);
+  // Read once: the subject key checked is the one erased and named in the ledger.
+  const { workspaceId, subjectKey } = input;
+  const records = checkRequest(rt, { workspaceId, subjectKey });
   const ledger = rt.adapter("ledger");
   const appended = new Map((await ledger.list()).map((e) => [e.eventId, e]));
   let n = 0;
-  while (appended.has(erasureEventId(rt, input.subjectKey, n, "subject.erased"))) n++;
+  while (appended.has(erasureEventId(rt, subjectKey, n, "subject.erased"))) n++;
   // The last erasure, unfinished: carry out its plan before looking for anything filed since.
   let finished: ErasureResult | null = null;
-  if (n > 0 && !appended.has(erasureEventId(rt, input.subjectKey, n - 1, "subject.erasure_completed"))) {
-    finished = await carryOut(rt, records, input.subjectKey, n - 1, appended.get(erasureEventId(rt, input.subjectKey, n - 1, "subject.erased"))!);
+  if (n > 0 && !appended.has(erasureEventId(rt, subjectKey, n - 1, "subject.erasure_completed"))) {
+    finished = await carryOut(rt, records, subjectKey, n - 1, appended.get(erasureEventId(rt, subjectKey, n - 1, "subject.erased"))!);
   }
-  const found = await records.listIntakeRecords(rt.workspaceId, input.subjectKey);
-  const pinDigest = (await records.getSubject(rt.workspaceId, input.subjectKey))?.pinDigest !== undefined;
+  const found = await records.listIntakeRecords(rt.workspaceId, subjectKey);
+  const pinDigest = (await records.getSubject(rt.workspaceId, subjectKey))?.pinDigest !== undefined;
   const recordIds = found.map((r) => r.recordId);
   if (recordIds.length === 0 && !pinDigest) return finished ?? { erased: false, recordIds, pinDigest, entry: null };
   for (const callId of callsOf(found)) await unlessGone(forget(callId, recordIds));
   // Two erasures at once append the same id: the first plan appended is the one both carry out.
   const entry = await ledger.append({
-    eventId: erasureEventId(rt, input.subjectKey, n, "subject.erased"),
+    eventId: erasureEventId(rt, subjectKey, n, "subject.erased"),
     callId: null,
     actor: "member",
     event: "subject.erased",
     at: rt.now(),
     detail: { recordIds, pinDigest },
   });
-  const fresh = await carryOut(rt, records, input.subjectKey, n, entry);
+  const fresh = await carryOut(rt, records, subjectKey, n, entry);
   if (finished === null) return fresh;
   return { erased: true, recordIds: [...finished.recordIds, ...fresh.recordIds], pinDigest: finished.pinDigest || fresh.pinDigest, entry: fresh.entry };
 }
