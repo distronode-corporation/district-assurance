@@ -408,6 +408,27 @@ describe("carrier adapters", () => {
     });
   });
 
+  describe("what the host passes", () => {
+    it("refuses a timeout no deadline can take when the adapter is built, so a lookup never throws into the call", () => {
+      for (const bad of [-1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 60_001, "50" as unknown as number]) {
+        assert.throws(() => new TwilioLookupSignals(TWILIO, { countries: ["US"], timeoutMs: bad }), /timeoutMs/, String(bad));
+        assert.throws(() => new TelnyxNumberLookupSignals(TELNYX_KEY, { countries: ["US"], timeoutMs: bad }), /timeoutMs/, String(bad));
+      }
+      assert.ok(new TwilioLookupSignals(TWILIO, { countries: ["US"], timeoutMs: 1 }));
+      assert.ok(new TelnyxNumberLookupSignals(TELNYX_KEY, { countries: ["US"], timeoutMs: 60_000 }));
+    });
+
+    it("answers a number on file that is not a string as invalid, without throwing or asking", async () => {
+      const odd = [Symbol("n"), { toString: () => "+15555550100" }, 15555550100, null];
+      for (const phoneNumber of odd) {
+        assert.deepEqual(await twilio().check({ phoneNumber: phoneNumber as unknown as string }), uncheckedReport());
+        assert.deepEqual(await telnyx().check({ phoneNumber: phoneNumber as unknown as string }), uncheckedReport());
+      }
+      assert.deepEqual(requests, []);
+      assert.deepEqual(new Set(failures.map((f) => f.reason)), new Set(["invalid_number"]));
+    });
+  });
+
   describe("in the engine", () => {
     it("records the identity match and a recent SIM change, and writes no number to the ledger", async () => {
       replies.set(PHONE_ON_FILE, {

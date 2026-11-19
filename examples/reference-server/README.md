@@ -128,7 +128,8 @@ ignored without holding back the report.
 
 A `baseUrl` override must be `https:`; plain `http:` is accepted only on a loopback host (a local
 fake server), so credentials are never sent in clear text. Any other origin throws when the adapter
-is built, before a credential is used.
+is built, before a credential is used, and so does a `timeoutMs` that is not a whole number from 1
+to 60000. A number on file that is not a string is not E.164.
 
 Telnyx alone reports no SIM change, so its `checked: true` report has no SIM swap known, which the
 policy reads as no recent SIM change. Before texted codes (VER-2) go live, take SIM swap from

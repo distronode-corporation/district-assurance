@@ -37,7 +37,7 @@ export interface CarrierAdapterOptions {
   countries: readonly string[];
   /** The API origin. Tests point it at a local fake server. */
   baseUrl?: string;
-  /** Per lookup, connection and body included. Default 3000. */
+  /** Per lookup, connection and body included: a whole number from 1 to 60000. Default 3000. */
   timeoutMs?: number;
   clock?: Clock;
   /**
@@ -94,6 +94,7 @@ const UNCHECKED: CarrierSignalReport = { checked: false, lastSimSwapHoursAgo: nu
 const E164 = /^\+[1-9]\d{6,14}$/;
 const HOUR_MS = 3_600_000;
 const DEFAULT_TIMEOUT_MS = 3000;
+const MAX_TIMEOUT_MS = 60_000;
 
 /** A fresh report that says nothing is known. */
 export function uncheckedReport(): CarrierSignalReport {
@@ -157,7 +158,12 @@ abstract class LookupAdapter implements CarrierSignals {
     this.baseUrl = safeBaseUrl(options.baseUrl ?? defaultBaseUrl);
     this.clock = options.clock ?? systemClock;
     this.#countries = new Set(options.countries.map((c) => c.toUpperCase()));
-    this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    // AbortSignal.timeout throws on anything else, and it runs inside check, so refuse it here.
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
+      throw new Error(`carrier adapter timeoutMs must be a whole number from 1 to ${MAX_TIMEOUT_MS}`);
+    }
+    this.#timeoutMs = timeoutMs;
     this.#onUnavailable = options.onUnavailable;
   }
 
@@ -174,8 +180,9 @@ abstract class LookupAdapter implements CarrierSignals {
     return uncheckedReport();
   }
 
-  protected validNumber(phoneNumber: string): boolean {
-    return E164.test(phoneNumber);
+  /** E.164, and a string: RegExp.test would coerce anything else, and a Symbol makes it throw. */
+  protected validNumber(phoneNumber: unknown): boolean {
+    return typeof phoneNumber === "string" && E164.test(phoneNumber);
   }
 
   protected countryAllowed(country: unknown): boolean {

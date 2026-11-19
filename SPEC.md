@@ -152,7 +152,8 @@ date; no SIM swap, identity match `unavailable`). They round hours down and read
 a usable time as 0 hours ago (a Telnyx port date as the end of that day); a Twilio answer of no
 SIM change within its `swapped_period` window gives that window as a lower bound, and the window is
 never read as the age of a change. A `baseUrl` override must be https (plain http only on
-loopback). Any failure gives
+loopback), and `timeoutMs` a whole number from 1 to 60000; anything else throws when the adapter
+is built. Any failure gives
 `checked: false` with nothing known, and they never throw: a number that is not E.164, a country
 outside the adapter's allow-list, a timeout (3 seconds by default), a network or HTTP error, a
 feature the account is not approved for, or an answer they cannot read. A Twilio report is
