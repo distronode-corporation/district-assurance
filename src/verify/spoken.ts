@@ -44,7 +44,7 @@ const NATO: ReadonlyArray<readonly [string, string]> = [
 const ENGLISH: ReadonlyArray<readonly [string, string]> = [
   ["zero", "0"], ["one", "1"], ["two", "2"], ["three", "3"], ["four", "4"], ["five", "5"], ["six", "6"], ["seven", "7"],
   ["eight", "8"], ["nine", "9"], ["niner", "9"],
-  ["bee", "B"], ["be", "B"], ["cee", "C"], ["see", "C"], ["sea", "C"], ["dee", "D"], ["ef", "F"], ["eff", "F"], ["gee", "G"],
+  ["ay", "A"], ["bee", "B"], ["be", "B"], ["cee", "C"], ["see", "C"], ["sea", "C"], ["dee", "D"], ["ee", "E"], ["ef", "F"], ["eff", "F"], ["gee", "G"],
   ["aitch", "H"], ["haitch", "H"], ["eye", "I"], ["jay", "J"], ["kay", "K"], ["el", "L"], ["ell", "L"], ["em", "M"],
   ["en", "N"], ["oh", "O"], ["pee", "P"], ["cue", "Q"], ["queue", "Q"], ["ar", "R"], ["are", "R"], ["ess", "S"],
   ["tee", "T"], ["tea", "T"], ["you", "U"], ["yew", "U"], ["vee", "V"], ["double u", "W"], ["double you", "W"],
