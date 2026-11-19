@@ -192,18 +192,22 @@ the duress PIN is off unless it is set.
   same, a run up or down with 0 following 9, as in 1234, 4321 or 7890, or a PIN equal to the
   subject's account number or any keypad knowledge on file, compared as keyed hashes; `weak` does
   not say which), or `{enrolled: true}` once `RecordStore.putPinDigest(workspaceId, subjectKey,
-  digest)` stored it. Then `pin.enrolled`. The call records the digest as pending before the
-  store's write. `putPinDigest` stores a digest only if the subject has none, in one atomic step,
-  and answers whether it did; when it did not (another call enrolled first) the try is refused
-  (`precondition_failed`) and nothing is replaced. If the session write after a stored digest
-  fails, a retry on the same call with the same PIN finishes that enrolment (`{enrolled: true}`,
-  one `pin.enrolled`); any other PIN is refused as one on file.
+  digest)` stored it. Then `pin.enrolled`. Each try records its digest as pending on the call (one
+  entry per try, so two tries at once never overwrite each other's) before the store's write.
+  `putPinDigest` stores a digest only if the subject has none, in one atomic step, and answers
+  whether it did; when it did not (another call or try enrolled first) the try takes its own entry
+  back and is refused (`precondition_failed`), and nothing is replaced, so a retry of it is refused
+  too. The try that stored writes `pin.enrolled` and clears every pending entry for that digest. If
+  the session write after a stored digest fails, a retry on the same call with the same PIN finishes
+  that enrolment (`{enrolled: true}`, one `pin.enrolled`), even past `maxAttemptsPerCall` (such a
+  retry is not counted); any other PIN is refused as one on file, or `locked` past the limit.
 - Reset: `resetPin(subjectKey)` is a host call for the business's own staff tools, never on a
   caller's request, and needs the `pin` factor on. In `keyed_hash` mode it removes the digest
   (`putPinDigest` with null), so the subject has no PIN until they enrol again at level 2; in
   `verifier` mode the host's store resets its own PIN. Either way it clears the subject's PIN
-  failure counters when the engine has a `counters` adapter (VER-1; a stand-in with only `reset`
-  until VER-1 lands), and appends `pin.reset` to the ledger with no call. In `keyed_hash` mode it
+  failure counters when the engine has a `counters` adapter (VER-1; a stand-in with only `reset`,
+  in VER-1's shape `reset({workspaceId, factor: "pin", scope: "subject", key})`, until VER-1
+  lands), and appends `pin.reset` to the ledger with no call. In `keyed_hash` mode it
   also removes the duress PIN (`putDuressDigest` with null).
 
 ### Duress PIN (VER-12)

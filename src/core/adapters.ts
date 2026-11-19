@@ -144,12 +144,25 @@ export interface RecordStore {
 }
 
 /**
- * Failure counters across calls (VER-1). Stand-in: only `reset`, which a PIN reset needs, with the
- * keys VER-1 describes (workspace, factor kind, subject key or a hash of the calling number).
- * VER-1 brings `get` and `recordFailure`.
+ * Which failures a counter holds: one factor kind, in one workspace, for one subject (its subject
+ * key) or one calling number (`numberKeyFor`, a keyed hash: the store never sees the number).
+ */
+export interface AttemptCounterKey {
+  workspaceId: string;
+  /** The factor kind, for example `pin`. */
+  factor: string;
+  scope: "subject" | "number";
+  /** The subject key, or the keyed hash of the calling number. 64 lower-case hex characters. */
+  key: string;
+}
+
+/**
+ * Failure counters across calls (VER-1). Stand-in: only `reset`, which a PIN reset needs, with
+ * VER-1's own key and signature, so VER-1's full interface replaces it unchanged.
  */
 export interface AttemptCounters {
-  reset(input: { workspaceId: string; kind: string; key: { subject: string } | { number: string } }): Promise<void>;
+  /** Forgets every failure for the key: after a pass, or when the business lifts a lock. */
+  reset(key: AttemptCounterKey): Promise<void>;
 }
 
 export interface AuditInput {
