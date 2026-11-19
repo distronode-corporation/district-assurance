@@ -1,13 +1,15 @@
 // The flow simulator (MOD-4): every built-in script, script files, refused configs, the command line and the output format.
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
-import { BUILT_IN_SCRIPTS, USAGE, main, parseCallerScript } from "../src/cli/simulate.ts";
+import { BUILT_IN_SCRIPTS, USAGE, isEntryPoint, main, parseCallerScript } from "../src/cli/simulate.ts";
 import type { FlowConfig } from "../src/core/config.ts";
+import type { IntakeForm } from "../src/file/intake.ts";
 import { defaultConfig } from "../src/modules.ts";
 import { testConfig } from "./helpers.ts";
 
@@ -264,6 +266,26 @@ describe("simulate: refused configs", () => {
     assert.match((await simulate("owner", "pass", config)).join("\n"), /^flow: completed$/m);
   });
 
+  it("answers a text field within its maxLength, so the form can be filed", async () => {
+    const config = flows();
+    (config.modules.dossier!.settings as unknown as { forms: IntakeForm[] }).forms[0]!.fields[0]!.maxLength = 1;
+    const text = (await simulate("deposit", "pass", config)).join("\n");
+    assert.match(text, /decision: normalised: \{"ok":true,"value":"A"\}/);
+    assert.match(text, /^flow: completed$/m);
+  });
+
+  it("prints the flow's status after the call ends: a flow still running is abandoned", async () => {
+    const config = flows();
+    (config.modules.dossier!.settings as unknown as { forms: IntakeForm[] }).forms[0]!.fields[0]!.maxLength = 0;
+    const out = await simulate("deposit", "pass", config);
+    const text = out.join("\n");
+    assert.match(text, /^  refused: /m);
+    assert.match(text, /^    event flow\.abandoned /m);
+    assert.match(text, /^flow: abandoned$/m);
+    assert.doesNotMatch(text, /^flow: running$/m);
+    assert.ok(out.indexOf("call: ending") < out.indexOf("flow: abandoned"));
+  });
+
   it("refuses a config that is not an object, is not JSON or cannot be read", async () => {
     const notObject = await run(["simulate", file([]), "--flow", "deposit", "--script", "pass"]);
     assert.deepEqual(notObject.err, ["simulate: refused, 1 problem(s):", "  - the config must be an object"]);
@@ -310,7 +332,7 @@ describe("simulate: the command line", () => {
     const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
     assert.deepEqual(pkg.bin, { "district-assurance": "./dist/cli/simulate.js" });
     assert.equal(pkg.scripts.simulate, "node src/cli/simulate.ts simulate");
-    const program = new URL("../src/cli/simulate.ts", import.meta.url).pathname;
+    const program = fileURLToPath(new URL("../src/cli/simulate.ts", import.meta.url));
     const out = execFileSync(process.execPath, [program, "simulate", file(flows()), "--flow", "owner", "--script", "pass"], { encoding: "utf8" });
     assert.match(out, /^simulate: flow owner, steps: 1/);
     assert.match(out, /^flow: completed$/m);
@@ -318,5 +340,24 @@ describe("simulate: the command line", () => {
       () => execFileSync(process.execPath, [program], { encoding: "utf8", stdio: "pipe" }),
       (e: { status: number; stderr: string }) => e.status === 2 && e.stderr.includes(USAGE),
     );
+  });
+
+  it("knows it is the program from argv[1], through a symlink, and not when a test imports it", () => {
+    const moduleUrl = new URL("../src/cli/simulate.ts", import.meta.url).href;
+    const program = fileURLToPath(moduleUrl);
+    assert.equal(isEntryPoint(program, moduleUrl), true);
+    const link = join(dir, "district-assurance-link.ts");
+    let linked = true;
+    try {
+      symlinkSync(program, link);
+    } catch (e) {
+      // Windows refuses symlinks to an account without the privilege; the check is the same there.
+      if ((e as NodeJS.ErrnoException).code !== "EPERM") throw e;
+      linked = false;
+    }
+    if (linked) assert.equal(isEntryPoint(link, moduleUrl), true);
+    assert.equal(isEntryPoint(fileURLToPath(import.meta.url), moduleUrl), false);
+    assert.equal(isEntryPoint(join(dir, "missing.ts"), moduleUrl), false);
+    assert.equal(isEntryPoint(undefined, moduleUrl), false);
   });
 });

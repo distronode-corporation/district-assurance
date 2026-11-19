@@ -9,7 +9,9 @@
 // account, answers and a PIN chosen here), and nothing it keys is printed: events carry no values,
 // and decisions say "right" or "wrong", never the digits. Only the built-in modules run: a config
 // that turns on an outside module is refused, because its code is not here to run.
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { canonicalJson } from "../core/canonical.ts";
@@ -17,7 +19,7 @@ import { validateConfig, type FlowConfig } from "../core/config.ts";
 import type { EngineEvent } from "../core/events.ts";
 import type { FlowStep } from "../core/module.ts";
 import { isObject, unknownKeys } from "../core/shape.ts";
-import type { IntakeForm } from "../file/intake.ts";
+import type { IntakeField, IntakeForm } from "../file/intake.ts";
 import { BUILT_IN_MODULES } from "../modules.ts";
 import type { PaymentOutcome } from "../pay/payment.ts";
 import { verifyReceipt } from "../prove/receipt.ts";
@@ -115,7 +117,12 @@ const WRONG_ANSWER = "00000000";
 const PIN_DIGITS = "482601357913";
 const FACTOR_ORDER = ["keypad_knowledge", "pin", "carrier_identity_match", "photo_id"];
 const SAMPLE_VALUES: Readonly<Record<string, string>> = { text: "A simulated answer", number: "1", date: "2026-01-01", yes_no: "yes" };
-const OUTCOMES: Readonly<Record<CallerScript["payment"], ReadonlyArray<(linkId: string) => PaymentOutcome>>> = {
+/** A sample answer the field accepts: a text answer is cut to the field's `maxLength` (at least one character). */
+function sampleValue(field: IntakeField): string {
+  const sample = SAMPLE_VALUES[field.type]!;
+  return field.type === "text" ? sample.slice(0, Math.max(1, field.maxLength ?? sample.length)) : sample;
+}
+const OUTCOMES:Readonly<Record<CallerScript["payment"], ReadonlyArray<(linkId: string) => PaymentOutcome>>> = {
   paid: [(linkId) => ({ kind: "completed", linkId, paymentStatus: "paid" })],
   paid_later: [(linkId) => ({ kind: "completed", linkId, paymentStatus: "unpaid" }), (linkId) => ({ kind: "async_succeeded", linkId })],
   failed: [(linkId) => ({ kind: "async_failed", linkId })],
@@ -205,7 +212,7 @@ const STEP_ACTIONS: Readonly<Record<string, (run: Run, step: FlowStep) => Promis
     });
     for (const field of form.fields) {
       await act(run, `answers ${field.key} (${field.type})`, async () => {
-        const result = await engine.setIntakeField(run.callId, field.key, SAMPLE_VALUES[field.type]!);
+        const result = await engine.setIntakeField(run.callId, field.key, sampleValue(field));
         return `normalised: ${canonicalJson(result)}`;
       });
     }
@@ -277,9 +284,11 @@ export async function simulate(t: TestEngine, lines: string[], config: FlowConfi
     await STEP_ACTIONS[type]!(run, step);
     position = (await t.engine.flowPosition(callId))!;
   }
-  line(`flow: ${position.status}`);
   line("call: ending");
   const receipt = await t.engine.endCall(callId);
+  // Ending the call abandons a flow that is still running; completed and failed flows keep their status.
+  position = (await t.engine.flowPosition(callId))!;
+  line(`flow: ${position.status}`);
   if (receipt === null) {
     line("receipt: none (the flow has no trace.receipt step)");
   } else {
@@ -354,6 +363,20 @@ export async function main(args: readonly string[], output: Output): Promise<num
   return 0;
 }
 
-if (import.meta.main) {
+/**
+ * Whether the module at `moduleUrl` is the program node was started with (`entry`, its argv[1]).
+ * Not `import.meta.main`: on Node.js 24.2 it is false for a `.ts` entry. Both paths are resolved
+ * through symlinks, so the package's bin (a link in node_modules/.bin) counts as the program.
+ */
+export function isEntryPoint(entry: string | undefined, moduleUrl: string): boolean {
+  if (entry === undefined) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint(process.argv[1], import.meta.url)) {
   process.exitCode = await main(process.argv.slice(2), { out: (line) => console.log(line), err: (line) => console.error(line) });
 }

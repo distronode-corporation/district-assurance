@@ -418,10 +418,11 @@ is `src/cli/simulate.ts`.
   and a PIN of `minDigits` digits. It acts on whatever step the flow is on: at `badge.verify` it
   keys the account number, then each factor the step lists (keypad answers, the PIN, the carrier
   check, the photo ID link), then waits for the result; at `dossier.collect` it answers every field
-  of the step's form with a sample value and confirms; at `paylink.request` it asks to pay and the
-  provider reports the script's outcomes; at `trace.consent` it answers. A refusal by the engine is
-  printed and the caller goes on. After the last step the call ends, abandoning a flow still
-  running.
+  of the step's form with a sample value (a text answer cut to the field's `maxLength`) and
+  confirms; at `paylink.request` it asks to pay and the provider reports the script's outcomes; at
+  `trace.consent` it answers. A refusal by the engine is printed and the caller goes on. After the
+  last step the call ends, abandoning a flow still running, and `flow: <status>` gives the status
+  once the call has ended.
 - A script is `{summary, wrongKeypad, wrongPins, carrier, photoId, consent, payment}`: wrong
   keypad answers and wrong PINs before the right ones (0 to 5; the caller stops once locked out),
   the carrier's `identityMatch`, the photo ID outcome, the consent answer, and the payment outcome
