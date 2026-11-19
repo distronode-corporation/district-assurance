@@ -1066,9 +1066,13 @@ export class Engine {
     return subject.exportSubject(this.#rt, input);
   }
 
-  /** A deletion request: the subject's intake records and PIN digest go; the ledger and receipts stay whole. */
+  /**
+   * A deletion request: the subject's intake records, PIN and duress PIN digests and the counters
+   * kept under their key go; the ledger and receipts stay whole.
+   */
   eraseSubject(input: subject.SubjectRequest): Promise<subject.ErasureResult> {
-    return subject.eraseSubject(this.#rt, input, (callId, recordIds) => dossier.forgetRecords(this.#rt, callId, recordIds));
+    const counters = { counters: this.#adapters.counters, factors: this.#badge.manifest.provides.factors };
+    return subject.eraseSubject(this.#rt, input, (callId, recordIds) => dossier.forgetRecords(this.#rt, callId, recordIds), counters);
   }
 
   /** The key set for verifying this engine's receipts: with a key ring, the retired keys too (empty without a signer). */

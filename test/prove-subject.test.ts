@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import type { IntakeRecord } from "../src/core/adapters.ts";
+import type { AttemptCounterKey, IntakeRecord } from "../src/core/adapters.ts";
 import type { CallRecord } from "../src/core/runtime.ts";
 import type { DossierSlice } from "../src/file/dossier.ts";
 import { defaultConfig } from "../src/modules.ts";
@@ -10,6 +10,10 @@ import { receiptPayload, verifyReceipt, type SignedReceipt } from "../src/prove/
 import { SUBJECT_EXPORT_DOMAIN, subjectExportPayload, verifySubjectExport, type SignedSubjectExport } from "../src/prove/subject.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, recordStoreErasureContract, type TestEngine } from "../src/testing/index.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
+import { FACTOR_KINDS } from "../src/core/policy.ts";
+import { CALLBACKS_PLACED } from "../src/verify/callback.ts";
+import { FLOW_START, noticeKey } from "../src/verify/counters.ts";
+import { duressClearsKey, duressFlagKey, hiddenCounterKey } from "../src/verify/duress-flag.ts";
 import { MemoryRecordStore, testSubject } from "../src/testing/fakes.ts";
 import { ACCOUNT, DOB, heard, PIN, rejects, setup, testConfig, verifiedCall, wording } from "./helpers.ts";
 
@@ -371,6 +375,71 @@ describe("eraseSubject", () => {
     const t = setup();
     await t.records.deletePinDigest("ws_test", "b".repeat(64));
     assert.equal(await t.records.getSubject("ws_test", "b".repeat(64)), null);
+  });
+
+});
+
+describe("eraseSubject and the counters across calls (#105, #124)", () => {
+  const EVER = "1970-01-01T00:00:00.000Z";
+  const at = "2026-01-01T00:00:00.000Z";
+  const subject = (factor: string, key = SUBJECT): AttemptCounterKey => ({ workspaceId: "ws_test", factor, scope: "subject", key });
+  /** Every counter kept under a subject key: each factor kind's, its notices and hidden count, flow starts, callbacks placed, the duress flag. */
+  const subjectCounters = (key = SUBJECT): AttemptCounterKey[] => {
+    const keys = [duressFlagKey("ws_test", key), subject(FLOW_START, key), subject(CALLBACKS_PLACED, key), ...FACTOR_KINDS.flatMap((kind) => [subject(kind, key), hiddenCounterKey("ws_test", kind, key)])];
+    return [...keys, ...keys.map(noticeKey)];
+  };
+  const NUMBER: AttemptCounterKey = { workspaceId: "ws_test", factor: "pin", scope: "number", key: "c".repeat(64) };
+
+  async function seed(t: TestEngine, keys: AttemptCounterKey[]): Promise<void> {
+    for (const key of [...keys, NUMBER]) await t.counters.recordFailure(key, at, EVER);
+  }
+
+  it("resets every counter kept under the subject, keeps the calling number's, and counts a clearing of the duress flag", async () => {
+    const t = setup();
+    await filedCall(t);
+    await seed(t, subjectCounters());
+    const clears = (await t.counters.get(duressClearsKey("ws_test", SUBJECT), EVER)).length;
+    assert.equal((await t.engine.eraseSubject(request)).erased, true);
+    for (const key of subjectCounters()) assert.deepEqual(await t.counters.get(key, EVER), [], JSON.stringify(key));
+    assert.deepEqual(await t.counters.get(NUMBER, EVER), [at], "the calling number's counter is not the subject's");
+    assert.equal((await t.counters.get(duressClearsKey("ws_test", SUBJECT), EVER)).length, clears + 1, "an alert delivered later never sets the flag again");
+  });
+
+  it("resets them with nothing else on file, counts no clearing for a subject not under duress, and leaves other subjects alone", async () => {
+    const t = setup();
+    const other = subjectKeyFor(TEST_KNOWLEDGE_KEY, "87654321");
+    const keys = subjectCounters(other).filter((k) => k.factor !== "duress.flag");
+    await seed(t, [...keys, ...subjectCounters()]);
+    const result = await t.engine.eraseSubject({ workspaceId: "ws_test", subjectKey: other });
+    assert.deepEqual([result.erased, result.entry], [false, null], "nothing on file: no ledger entry");
+    for (const key of keys) assert.deepEqual(await t.counters.get(key, EVER), [], JSON.stringify(key));
+    assert.deepEqual(await t.counters.get(duressClearsKey("ws_test", other), EVER), [], "no clearing counted");
+    for (const key of subjectCounters()) assert.deepEqual(await t.counters.get(key, EVER), [at], "another subject's counter is kept");
+  });
+
+  it("lifts a lock across calls, so the subject is judged again from nothing", async () => {
+    const t = setup({ config: testConfig((c) => (c.modules.badge!.settings = { ...(c.modules.badge!.settings as object), lockout: { lockAfterFailures: 2 } })) });
+    for (let i = 0; i < 2; i++) {
+      const { callId } = await t.engine.startCall();
+      await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+      t.clock.advance(3_600_000);
+      assert.equal((await t.engine.submitKeypad(callId, { dob: "19000101" })).matched, false);
+    }
+    const locked = await t.engine.startCall();
+    await t.engine.beginVerification(locked.callId, { accountNumber: ACCOUNT });
+    assert.deepEqual(await t.engine.submitKeypad(locked.callId, { dob: DOB }), { matched: false, locked: true }, "locked across calls");
+    await t.engine.eraseSubject(request);
+    const again = await t.engine.startCall();
+    await t.engine.beginVerification(again.callId, { accountNumber: ACCOUNT });
+    assert.deepEqual(await t.engine.submitKeypad(again.callId, { dob: DOB }), { matched: true, locked: false }, "the erase lifted the lock");
+  });
+
+  it("erases on an engine without counters", async () => {
+    // No factor the caller enters, so Badge needs no counters.
+    const t = createTestEngine({ config: testConfig((c) => (c.modules.badge!.settings = { factors: ["photo_id"] })), adapters: { counters: undefined } });
+    t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: "+15555550100", knowledge: { dob: DOB }, pin: PIN }));
+    assert.deepEqual((await t.engine.eraseSubject(request)).pinDigest, true);
+    assert.equal((await t.records.getSubject("ws_test", SUBJECT))!.pinDigest, undefined);
   });
 });
 

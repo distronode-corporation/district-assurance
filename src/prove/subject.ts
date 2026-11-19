@@ -11,13 +11,16 @@
 // values, and changing them would break the chain or a signature.
 import { createPublicKey, verify, type JsonWebKey } from "node:crypto";
 
-import type { AuditEntry, IntakeRecord, ReceiptSigner, RecordStore } from "../core/adapters.ts";
+import type { AttemptCounterKey, AttemptCounters, AuditEntry, IntakeRecord, ReceiptSigner, RecordStore } from "../core/adapters.ts";
 import { canonicalJson } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import type { CallRecord, EngineRuntime } from "../core/runtime.ts";
 import { isObject, unknownKeys } from "../core/shape.ts";
 import type { ConsentRecord } from "./consent.ts";
 import { TRACE, type TraceSlice } from "./trace.ts";
+import { CALLBACKS_PLACED } from "../verify/callback.ts";
+import { FLOW_START, noticeKey } from "../verify/counters.ts";
+import { duressFlagKey, hiddenCounterKey, isUnderDuress, recordClear } from "../verify/duress-flag.ts";
 
 /** Named in the signed bytes, ahead of the body, so an export and a receipt never verify as each other. */
 export const SUBJECT_EXPORT_DOMAIN = "district-assurance/subject-export/v1";
@@ -98,7 +101,7 @@ const ENGINE_KEPT: readonly KeptItem[] = [
   {
     what: "consents",
     reason:
-      "Consents stay in their call records until PRV-3's ConsentStore, which they will join; a consent, or its refusal, can be the business's proof of what the caller agreed to.",
+      "Consents stay in their call records, and in the host's ConsentStore when the engine has one, where a later revocation finds them; a consent, or its refusal, can be the business's proof of what the caller agreed to.",
   },
 ];
 
@@ -106,7 +109,7 @@ const HELD_BY_HOST: readonly KeptItem[] = [
   {
     what: "subject record",
     reason:
-      "The subject record (the number on file and the keyed digests of the values on file) is the host's data, read through its RecordStore; the host answers for it. An erase removes only its PIN digest.",
+      "The subject record (the number on file and the keyed digests of the values on file) is the host's data, read through its RecordStore; the host answers for it. An erase removes only its PIN and duress PIN digests.",
   },
   {
     what: "PIN in the host's PIN store",
@@ -117,8 +120,8 @@ const HELD_BY_HOST: readonly KeptItem[] = [
 
 const LIMITS: readonly string[] = [
   "A record filed on a call with no matched subject (no keypad or PIN match before it was confirmed) is filed under no subject: this export cannot find it, and an erase cannot delete it.",
-  "Consents are found only on the calls listed here, until PRV-3's ConsentStore, and only those recorded once the call matched this subject: a consent recorded before any match, or under another subject, is not listed.",
-  "Attempts are counted per call, in the call record, until VER-1's counters across calls; there is no counter kept per subject to export or erase.",
+  "Consents are found only on the calls listed here (the ConsentStore is read by consent id, never by subject), and only those recorded once the call matched this subject: a consent recorded before any match, or under another subject, is not listed.",
+  "Attempts are counted across calls under the subject and under a keyed digest of the calling number. This export does not list them. An erase resets the subject's: each installed factor's failures and lock notices, its hidden duress count, flow starts, callbacks placed and the duress flag. The calling number's counters are not the subject's and stay until their window passes. A subject under duress gets one more entry in its count of duress clearings, which is kept (a time per clearing, under the subject key), so a duress alert delivered after the erase never sets the flag again.",
 ];
 
 /** The exact bytes that are signed: the domain, a newline, then the canonical body. */
@@ -274,9 +277,34 @@ async function carryOut(rt: EngineRuntime, records: RecordStore, subjectKey: str
   return { erased: true, recordIds, pinDigest, entry };
 }
 
+/** What an erase resets in the AttemptCounters store: the store, if the engine has one, and the installed factor kinds. */
+export interface ErasureCounters {
+  counters: AttemptCounters | undefined;
+  factors: readonly string[];
+}
+
+/**
+ * Resets every counter kept under the subject key (see LIMITS). A subject under duress is first
+ * counted as cleared, as `clearDuress` does, so an alert of an earlier entry, delivered later, never
+ * sets the flag again. Resets are idempotent, so a retry does them again harmlessly.
+ */
+async function forgetCounters(rt: EngineRuntime, { counters, factors }: ErasureCounters, subjectKey: string): Promise<void> {
+  if (counters === undefined) return;
+  const w = rt.workspaceId;
+  const subject = (factor: string): AttemptCounterKey => ({ workspaceId: w, factor, scope: "subject", key: subjectKey });
+  const flag = duressFlagKey(w, subjectKey);
+  if (await isUnderDuress(counters, flag)) await recordClear(counters, w, subjectKey, rt.clock.now());
+  const keys = [flag, subject(FLOW_START), subject(CALLBACKS_PLACED), ...factors.flatMap((kind) => [subject(kind), hiddenCounterKey(w, kind, subjectKey)])];
+  for (const key of keys) {
+    await counters.reset(key);
+    await counters.reset(noticeKey(key));
+  }
+}
+
 /**
  * Deletes what the engine stored about one subject: their intake records (and the copy a call
- * keeps of one), and their PIN digest. The `subject.erased` entry is appended first and holds the
+ * keeps of one), their PIN and duress PIN digests, and the counters kept under their key. The
+ * counters are reset on every request, with nothing else on file too. The `subject.erased` entry is appended first and holds the
  * plan (the record ids, and whether a PIN digest goes); `subject.erasure_completed` follows once
  * every delete is done. Each erasure of a subject is numbered, and its event ids are keyed on the
  * subject and that number: a retry after a failed delete finds the unfinished plan, carries it out
@@ -288,6 +316,7 @@ export async function eraseSubject(
   rt: EngineRuntime,
   input: SubjectRequest,
   forget: (callId: string, recordIds: readonly string[]) => Promise<void>,
+  counters: ErasureCounters,
 ): Promise<ErasureResult> {
   // Read once: the subject key checked is the one erased and named in the ledger.
   const { workspaceId, subjectKey: key } = readRequest(input);
@@ -310,6 +339,7 @@ export async function eraseSubject(
   // A duress PIN digest alone is a PIN digest to erase too (VER-12).
   const pinDigest = onFile?.pinDigest !== undefined || onFile?.duressDigest !== undefined;
   const recordIds = found.map((r) => r.recordId);
+  await forgetCounters(rt, counters, subjectKey);
   if (recordIds.length === 0 && !pinDigest) return finished ?? { erased: false, recordIds, pinDigest, entry: null };
   for (const callId of callsOf(found)) await unlessGone(forget(callId, recordIds));
   // Two erasures at once append the same id: the first plan appended is the one both carry out.
