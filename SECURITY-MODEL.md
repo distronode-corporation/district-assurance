@@ -145,8 +145,10 @@ fields are encrypted by the host's `FieldCipher` before the record reaches the `
 a config with one is refused without a cipher; an engine without one refuses to file such a
 record (tested). The record's digest, which receipts and the ledger carry, covers a sensitive
 value only as an HMAC under the knowledge key, so a receipt cannot be used to test guesses at a
-short value such as a SIN (tested, ADR-21). A cipher that answers with nothing or with the value
-itself is refused (tested). Left open: while a draft is open or being filed, its sensitive values
+short value such as a SIN (tested, ADR-21). A cipher that throws, or answers with nothing or with
+the value itself, is refused and never holds a call open: the filing is released as failed, the
+draft and its values are dropped, `record.filing_failed` names only the fields and a reason code,
+and the cipher's own error, which may quote the value, is never passed on (tested). Left open: while a draft is open or being filed, its sensitive values
 sit in the clear in the call record, so a durable `SessionStore` holds them until the record is
 filed or abandoned, or the call ends, which drops an open draft (tested). PINs on file are
 HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode).

@@ -545,7 +545,7 @@ describe("Engine file", () => {
         await t.engine.setIntakeField(callId, "issue", "Leak");
         await t.engine.setIntakeField(callId, "sin", SIN);
         await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), (e: unknown) => {
-          assert.ok(e instanceof Error && e.message.endsWith("no ciphertext for sin") && !e.message.includes(SIN), String(answer));
+          assert.ok(e instanceof Error && e.message.includes("(no_ciphertext)") && !e.message.includes(SIN), String(answer));
           return true;
         });
         assert.equal(await t.records.getIntakeRecord("ws_test", "rec_1"), null, "nothing stored");

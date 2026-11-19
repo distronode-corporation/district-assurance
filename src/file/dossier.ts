@@ -175,6 +175,18 @@ function digestValues(rt: EngineRuntime, recordId: string, form: IntakeForm, val
   return covered;
 }
 
+/** Why the host's cipher could not seal a record: it threw, or answered with no usable ciphertext. */
+export type FilingFailure = "cipher_error" | "no_ciphertext";
+
+/** The cipher failed: the reserved filing is released (`record.filing_failed`) and the draft dropped. */
+class CipherFailed extends Error {
+  readonly reason: FilingFailure;
+  constructor(reason: FilingFailure) {
+    super(reason);
+    this.reason = reason;
+  }
+}
+
 /** The record as it is stored: each sensitive value encrypted by the host's cipher, as text. */
 async function sealed(rt: EngineRuntime, record: IntakeRecord, form: IntakeForm): Promise<IntakeRecord> {
   const keys = form.fields.filter((f) => f.sensitive === true && Object.hasOwn(record.values, f.key)).map((f) => f.key);
@@ -186,12 +198,15 @@ async function sealed(rt: EngineRuntime, record: IntakeRecord, form: IntakeForm)
   const values = { ...record.values };
   for (const field of keys) {
     const plain = String(values[field]);
-    const sealedValue: unknown = await cipher.encrypt(plain, { workspaceId: record.workspaceId, recordId: record.recordId, field });
-    // Fail closed on a cipher that answers with nothing, or with the value itself: the record is not
-    // stored and the reservation waits. The message names the field, never the value.
-    if (typeof sealedValue !== "string" || sealedValue === "" || sealedValue === plain) {
-      throw new EngineError("precondition_failed", `the fieldCipher returned no ciphertext for ${field}`);
+    let sealedValue: unknown;
+    try {
+      sealedValue = await cipher.encrypt(plain, { workspaceId: record.workspaceId, recordId: record.recordId, field });
+    } catch {
+      // The cipher's own error is never passed on: it may quote the value.
+      throw new CipherFailed("cipher_error");
     }
+    // Fail closed on a cipher that answers with nothing, or with the value itself: the record is not stored.
+    if (typeof sealedValue !== "string" || sealedValue === "" || sealedValue === plain) throw new CipherFailed("no_ciphertext");
     values[field] = sealedValue;
   }
   return { ...record, values };
@@ -237,7 +252,16 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
   // retry writes this record again (RecordStore.putIntakeRecord is idempotent by recordId). Two
   // processes confirming at once write the same record, each sensitive value possibly under a
   // different ciphertext of the same value; the first to commit files it, the other finds it filed.
-  const record = await sealed(rt, reserved.record, reserved.form);
+  let record: IntakeRecord;
+  try {
+    record = await sealed(rt, reserved.record, reserved.form);
+  } catch (error) {
+    if (!(error instanceof CipherFailed)) throw error;
+    // Another process may have sealed and filed the same record meanwhile: then that record stands.
+    const filed = await releaseFailedFiling(rt, callId, reserved.record, reserved.form, error.reason);
+    if (filed !== null) return filed;
+    throw new EngineError("precondition_failed", `the fieldCipher could not seal the record (${error.reason}); nothing was filed and the draft is gone`);
+  }
   await rt.adapter("records").putIntakeRecord(record);
   await rt.update(callId, (draft) => {
     const s = draft.slice<DossierSlice>(DOSSIER);
@@ -249,6 +273,27 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
     draft.emit("intake.confirmed", "caller", { recordId: record.recordId, formId: record.formId, digest: record.digest, confirmedBy: record.confirmedBy });
   });
   return record;
+}
+
+/**
+ * A filing the cipher could not seal is released, so a failing cipher never holds a call open:
+ * the draft and its reservation are dropped (no plaintext is kept), and `record.filing_failed`
+ * names the record, the form, the sensitive fields and the reason, never a value. Nothing was
+ * stored: the cipher runs before the record store, so no record can exist for it. The host can
+ * collect the record again. A filing another process completed meanwhile is left as it is.
+ */
+async function releaseFailedFiling(rt: EngineRuntime, callId: string, record: IntakeRecord, form: IntakeForm, reason: FilingFailure): Promise<IntakeRecord | null> {
+  return rt.update(callId, (draft) => {
+    const s = draft.slice<DossierSlice>(DOSSIER);
+    // Filed by another process: its record is the answer. Abandoned meanwhile: nothing to release.
+    if (s.confirmed?.recordId === record.recordId) return s.confirmed;
+    if (s.intake?.filing?.recordId !== record.recordId) return null;
+    draft.apply({ type: "intake_abandoned" });
+    s.intake = null;
+    const fields = form.fields.filter((f) => f.sensitive === true).map((f) => f.key);
+    draft.emit("record.filing_failed", "code", { recordId: record.recordId, formId: record.formId, fields, reason });
+    return null;
+  });
 }
 
 export async function abandonIntake(rt: EngineRuntime, callId: string): Promise<void> {

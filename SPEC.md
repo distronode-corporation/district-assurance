@@ -273,6 +273,7 @@ answer on file, a phone number, a link or card data.
 | `intake.started` | `formId`, `version` |
 | `intake.confirmed` | `recordId`, `formId`, `digest`, `confirmedBy` |
 | `intake.abandoned` | none |
+| `record.filing_failed` | `recordId`, `formId`, `fields` (the form's sensitive field names), `reason` (`cipher_error` or `no_ciphertext`) |
 | `redaction.applied` | `kinds` (counts per kind) |
 | `payment.link_sent` | `paymentId`, `linkId`, `amountMinor`, `currency`, `amountSource` |
 | `payment.settled` | `paymentId`, `status` |
@@ -355,9 +356,16 @@ record, then, on every attempt to store it, asks `FieldCipher.encrypt(text, {wor
 recordId, field})` for each sensitive value given (a number or a yes/no as JSON writes it) and
 stores and returns the record with the ciphertext in its place; the engine never decrypts. The
 digest does not depend on the ciphertext, so it is the same when a retry encrypts again. An
-engine without a cipher (another process on the same SessionStore), or a cipher that answers with
-an empty string, a non-string or the value itself, refuses to file such a record
-(`precondition_failed`, naming the field, never the value) and leaves it reserved. Until the
+engine without a cipher (another process on the same SessionStore) refuses to file such a record
+(`precondition_failed`) and leaves it reserved for an engine that has one. A cipher that throws
+(`cipher_error`) or answers with an empty string, a non-string or the value itself
+(`no_ciphertext`) never holds the call open: the reserved filing is released as failed, the draft
+is dropped with its values (phase back to `open`, nothing kept in the clear), the ledger gets
+`record.filing_failed {recordId, formId, fields, reason}` (the form's sensitive field names and the
+reason code, never a value), and `confirmIntake` throws `precondition_failed` with the reason code;
+the cipher's own error is never passed on. Nothing was stored, since the cipher runs before the
+record store, so `endCall` can go ahead and the host collects the record again if it wants it. If
+another process sealed and filed the same record meanwhile, that record is returned instead. Until the
 record is filed, abandoned or the call ends (`endCall` drops an open draft, before `call.ended`
 and the receipt's ledger head, writing no event), the draft in the call record holds sensitive
 values in the clear; afterwards the call record keeps only the encrypted record.

@@ -21,6 +21,7 @@ export const ENGINE_EVENTS = [
   "intake.started",
   "intake.confirmed",
   "intake.abandoned",
+  "record.filing_failed",
   "redaction.applied",
   "payment.link_sent",
   "payment.settled",

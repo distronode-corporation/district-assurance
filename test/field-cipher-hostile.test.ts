@@ -122,4 +122,59 @@ describe("hostile #78: sensitive values", () => {
     assert.deepEqual(seen, [{ workspaceId: "ws_test", recordId: record.recordId, field: "sin" }]);
     assert.notEqual(record.recordId, "rec_other");
   });
+
+  it("G7: a failing cipher never holds the call open: the filing is released as failed, the draft dropped, no value kept", async () => {
+    const failures: Array<[string, (plain: string) => Promise<string>]> = [
+      ["cipher_error", async (plain) => Promise.reject(new Error(`KMS refused ${plain}`))],
+      ["no_ciphertext", async () => ""],
+    ];
+    for (const [reason, encrypt] of failures) {
+      const sessions = new MemorySessionStore();
+      const records = seeded(new MemoryRecordStore());
+      const t = setup({ config: config(), adapters: { fieldCipher: { encrypt }, sessions, records } });
+      const callId = await draftOn(t);
+      await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), (e: unknown) => e instanceof Error && e.message.includes(`(${reason})`) && !e.message.includes(SIN), reason);
+      const failed = (await t.ledger.list()).filter((e) => e.event === "record.filing_failed");
+      assert.deepEqual(failed.map((e) => e.detail), [{ recordId: "rec_1", formId: "secure", fields: ["sin"], reason }], reason);
+      assert.equal(JSON.stringify(await sessions.get("ws_test", callId)).includes(SIN), false, "no plaintext kept");
+      await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("invalid_transition"), "nothing left to retry");
+      const receipt = (await t.engine.endCall(callId))!;
+      assert.deepEqual(receipt.body.records, [], "nothing filed");
+      assert.equal(await records.getIntakeRecord("ws_test", "rec_1"), null);
+      assert.equal(JSON.stringify(await t.ledger.list()).includes(SIN), false, reason);
+    }
+  });
+
+  it("G8: a cipher that fails while another process files the same record, or after another released it", async () => {
+    let fail!: () => void;
+    const slow = { encrypt: () => new Promise<string>((_, reject) => (fail = () => reject(new Error("timeout")))) };
+    // Filed by the other process: the failing one returns that record, and no failure is ledgered.
+    const sessions = new MemorySessionStore();
+    const records = seeded(new MemoryRecordStore());
+    const a = setup({ config: config(), adapters: { fieldCipher: slow, sessions, records } });
+    const callId = await draftOn(a);
+    const failing = a.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const b = setup({ config: config(), adapters: { fieldCipher: new FakeFieldCipher(), sessions, records, ledger: a.ledger } });
+    const filed = await b.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    fail();
+    assert.deepEqual(await failing, filed);
+    assert.equal((await a.ledger.list()).some((e) => e.event === "record.filing_failed"), false);
+    // Two processes whose ciphers both fail: the first releases the filing, the second finds nothing
+    // left to release, and one failure is ledgered.
+    const shared = new MemorySessionStore();
+    const c = setup({ config: config(), adapters: { fieldCipher: slow, sessions: shared } });
+    const other = await draftOn(c);
+    const first = c.engine.confirmIntake(other, { confirmedBy: "voice" });
+    await new Promise((resolve) => setImmediate(resolve));
+    const failFirst = fail;
+    const d = setup({ config: config(), adapters: { fieldCipher: slow, sessions: shared, ledger: c.ledger } });
+    const second = d.engine.confirmIntake(other, { confirmedBy: "voice" });
+    await new Promise((resolve) => setImmediate(resolve));
+    failFirst();
+    await assert.rejects(first, rejects("precondition_failed", /nothing was filed/));
+    fail();
+    await assert.rejects(second, rejects("precondition_failed", /nothing was filed/));
+    assert.equal((await c.ledger.list()).filter((e) => e.event === "record.filing_failed").length, 1);
+  });
 });

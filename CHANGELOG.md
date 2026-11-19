@@ -27,9 +27,10 @@ All notable changes to this project are documented here. The format follows
   `npm run demo` and the UI.
 - Encrypted sensitive intake fields (FIL-2): a `fieldCipher` adapter (`FieldCipher`, now in the
   core, and `FakeFieldCipher`) that Dossier needs once a form has a sensitive field; values are
-  encrypted before `putIntakeRecord`, and the record digest keys them (ADR-21). A cipher answer
-  that is empty, not a string or the value itself is refused, and `endCall` drops an open draft,
-  so its values never outlive the call in the clear.
+  encrypted before `putIntakeRecord`, and the record digest keys them (ADR-21). A cipher that
+  throws, or answers empty, not a string or the value itself, releases the filing as failed
+  (`record.filing_failed`, field names and a reason code only) and drops the draft, so it never
+  holds a call open; `endCall` drops an open draft, so its values never outlive the call in the clear.
 
 ### Changed
 
