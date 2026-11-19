@@ -88,6 +88,9 @@ authorized, and can write `module.event` ledger entries; the engine holds every 
 module's scopes whatever `fn` does (the current step's in a flow, all its manifest's outside one).
 A running flow moves on when the module's `stepStatus` says its step is complete. Built-in modules'
 parts are never reachable this way.
+state, can ask whether a scope is authorized, can write `module.event` ledger entries, and says
+when its change changed contact details (`contactChanged`), so the call owes a security notice. A
+running flow moves on when the module's `stepStatus` says its step is complete.
 
 ## One call, step by step
 

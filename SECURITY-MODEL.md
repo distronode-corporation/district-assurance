@@ -272,11 +272,34 @@ older, non-IP network), and an attestation speaks to the calling number only, ne
 speaking. Left to the host: mapping its carrier's value faithfully (the reference server README),
 and reporting `none` when it has no result.
 
+### Account takeover by a contact change
+
+Someone who passed verification changes the phone number on file, so the real customer hears
+nothing from then on. **Controls:** each flow step that needs a contact-class scope, and each
+change an outside module marks with `contactChanged()` (in a flow or outside one), makes the call
+owe a security notice, saved in the same write as the change and sent right after it to the
+changed subject's number on file as Badge read it before the change, whatever the caller answered
+about receipt texts. A notice whose text failed stays owed and is retried by the call's next write,
+by `endCall`, and by `sweepAlerts()`, which the host runs on a schedule, so an attacker who changes
+the number and never lets the call end still triggers it (tested); a call that changes two
+subjects, or the same subject under two numbers, sends one to each, and never two to the same
+subject's same number. Nobody on the call can turn it off. The receipt link of that call goes to
+the earlier number only when it was kept for the subject the receipt link is for; a number kept
+for another subject is never used (tested in `prove-receipt-text.test.ts`). A notice texted but not
+yet logged (a ledger outage) is logged by the next `endCall`, which neither texts nor ends again. A config with such a step is refused without a `messages` adapter.
+The notice carries no values, not even which detail changed. Left to the host: an outside module
+must call `contactChanged()` in the change that changes contact details (the engine cannot see a
+change made in the host's own systems otherwise); running `sweepAlerts()` on a schedule; and
+keeping call records at least until their alerts are sent.
+
 ### Text flooding and SMS pumping
 
 Repeated calls triggering texts to a real customer, or to premium numbers. **Controls:** texts go
 only to the number on file, only after a keypad or PIN match, and at most one photo ID link per
-call (tested). Texted codes go only to the country calling codes the policy lists, none without a
+call (tested). A receipt link goes at most once per call, only after a money, contact or access step,
+with the caller's consent (the latest answer for the purpose: a later "no" withdraws a "yes") and
+a standing keypad or PIN match; a contact change notice at most once per subject and number
+(tested). Texted codes go only to the country calling codes the policy lists, none without a
 list (tested); at most 5 per subject and 10 per calling number in 24 hours, 60 seconds apart,
 counted across calls and engines in the shared `CodeStore` before the text goes out (tested). A
 refused send answers exactly like a sent one, with a code that never matches and the same tries
@@ -641,8 +664,9 @@ random bits issued for that call; it keeps only the token's SHA-256, so its stor
 working link (the demo UI's in-memory run state does hold its own run's token, to show the
 link; a host would send it and drop it); an unknown, malformed or not yet usable token gives the same `404`; there is no
 route by call id (tested). The page carries no script, is never cached or indexed, and sends no
-Referer, so the token does not leak to another site (tested). Left to the host: sending the link
-only to the number on file, rate limits on `/r/` (SRV-2), a durable store for the hashes (SRV-4),
+Referer, so the token does not leak to another site (tested). `textReceiptLink` sends the host's
+link only to the number on file and never writes the link to the ledger (tested). Left to the
+host: issuing the token and building the link, rate limits on `/r/` (SRV-2), a durable store for the hashes (SRV-4),
 and expiry or revocation of a link, which are not built.
 
 ### Breach of stored data

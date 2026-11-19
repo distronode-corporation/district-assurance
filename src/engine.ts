@@ -114,6 +114,13 @@ export interface ModuleCallView {
   authorized(scope: string): boolean;
   /** A ledger entry `module.event` with `{ module, event, detail }`. Never put a value the caller keyed in it. */
   emit(event: string, detail: { [key: string]: JsonValue }): void;
+  /**
+   * Call this in the same change that changes the matched subject's contact details, in a flow or
+   * outside one: the call then owes the security notice (PRV-10) to the number on file before the
+   * change, saved by this same write and sent right after it. Refused (`precondition_failed`, the
+   * whole change with it) when no keypad or PIN match stands, since there is no number to alert.
+   */
+  contactChanged(): void;
 }
 
 interface QueuedEvent {
@@ -913,13 +920,17 @@ export class Engine {
   /**
    * Ends the call. A running flow is abandoned, and every payment link still open is expired, at
    * the provider first, so the receipt shows it `expired`. Returns the signed receipt when the call
-   * gets one, else null.
+   * gets one, else null. A call that changed contact details first texts its security notice to the
+   * number on file before the change; if that text fails, `endCall` again sends it, without ending again.
    */
   async endCall(callId: string): Promise<SignedReceipt | null> {
-    // A call that ended without its receipt (the signer failed) or with a link left open (the
-    // provider failed) gets them now, without ending again.
+    // A call that ended without its receipt (the signer failed), with a link left open (the provider
+    // failed) or with its notice owed gets them now, without ending again.
     const before = await this.#read(callId);
-    const pending = before.state.phase === "ended" && ((trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null) || paylink.openPayments(before).length > 0);
+    const receiptPending = trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null;
+    // Ledger entries a failed append left behind (a notice or receipt saved, then not logged) count too.
+    const pending = before.state.phase === "ended" && (receiptPending || paylink.openPayments(before).length > 0 || trace.noticeDue(before) || before.outbox.length > 0);
+    if (pending) await this.flushLedger(callId);
     const ended = pending ? before : await this.#update(callId, (draft) => {
       // The built-in modules' guards run even after a module was removed, as their receipt parts do.
       const guards = [...this.#receiptModules, ...this.registry.list().filter((m) => !this.#receiptModules.includes(m))];
@@ -946,10 +957,13 @@ export class Engine {
       draft.emit("call.ended", "system", {});
       return structuredClone(draft.record);
     });
+    await this.#deliverAlerts(callId);
     // No new payment can start once the call ended, so this closes every link the call will have.
     await paylink.expireOpenPayments(this.#rt, ended);
     const record = paylink.openPayments(ended).length === 0 ? ended : await this.#read(callId);
     if (!trace.wantsReceipt(this.#rt, record)) return null;
+    const issued = trace.receiptOf(record);
+    if (issued !== null) return structuredClone(issued);
     // The head must cover every entry the end wrote, an expired link's among them, even one left
     // pending by an earlier append that failed: they are appended first, or the receipt waits.
     await this.flushLedger(callId);
@@ -961,6 +975,15 @@ export class Engine {
       if (module.receiptPart !== undefined && slice !== undefined) Object.assign(parts, module.receiptPart(slice, record.state));
     }
     return trace.issueReceipt(this.#rt, record, head, parts);
+  }
+
+  /**
+   * Texts the link to an ended call's receipt (`url`: the host's capability link, SRV-3) to the
+   * number on file, when the flow's `trace.receipt` step has `textLink`, a money, contact or access
+   * step completed, the caller consented and a keypad or PIN factor matched. At most once per call.
+   */
+  textReceiptLink(callId: string, url: string): Promise<{ texted: boolean }> {
+    return trace.textReceiptLink(this.#rt, callId, url, (record) => this.#currentSubject(record));
   }
 
   async receipt(callId: string): Promise<SignedReceipt | null> {
@@ -1017,6 +1040,7 @@ export class Engine {
       newId: (prefix) => this.#ids.next(prefix),
       authorized: (scope) => this.#authorized(draft.record, scope),
       emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
+      contactChanged: () => trace.noteAction(draft, "contact", badge.matchedSubject(draft.record)),
     };
     const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);
     draft.record.modules[name] = structuredClone(next);
@@ -1147,6 +1171,9 @@ export class Engine {
           // Saved, so owed duress alerts go out even if the ledger is down.
           this.#sendDuressAlertsSoon(callId, record);
         }
+        // An alert owed (a contact change notice) is sent once its debt is saved, on this write or
+        // the next one on the call; a failure leaves it owed for the next write, endCall or sweepAlerts.
+        if (trace.noticeDue(record)) await this.#deliverAlerts(callId).catch(() => false);
         return result;
       }
     }
@@ -1200,6 +1227,11 @@ export class Engine {
         return;
       }
       draft.emit("flow.step_completed", "code", detail);
+      // A money, contact or access step is what a receipt text names, and a contact one owes a notice.
+      // Such a step follows a level 2 verification, which a keypad or PIN match always unlocked:
+      // matchedSubject fails closed if that ever did not hold.
+      const action = this.#actionClass(owner!, step.type);
+      if (action !== null) trace.noteAction(draft, action, badge.matchedSubject(record));
       flow.index++;
       const next = flow.steps[flow.index];
       if (next === undefined) {
@@ -1210,6 +1242,40 @@ export class Engine {
       const nextOwner = this.registry.stepOwner(next.type);
       flow.mark = nextOwner === undefined ? null : nextOwner.enterStep(next, record.modules[nextOwner.manifest.name]!);
     }
+  }
+
+  /** Calls whose alerts are being sent by this engine now, so sending (which writes) does not send again. */
+  readonly #delivering = new Set<string>();
+
+  /** Sends the call's owed alerts; false when this engine is already sending them (that send finishes them). */
+  async #deliverAlerts(callId: string): Promise<boolean> {
+    if (this.#delivering.has(callId)) return false;
+    this.#delivering.add(callId);
+    try {
+      await trace.sendContactNotice(this.#rt, callId);
+      return true;
+    } finally {
+      this.#delivering.delete(callId);
+    }
+  }
+
+  /** The class of the scope a step needs when it is money, contact or access, else null. */
+  #actionClass(owner: AssuranceModule, type: string): trace.ActionClass | null {
+    const scope = owner.manifest.scopes.needs[type];
+    if (scope === undefined) return null;
+    const cls = scopeClass(scope, this.#config.policy.scopeClasses, this.registry.scopeClasses());
+    return cls === "none" || cls === null ? null : cls;
+  }
+
+  /**
+   * The subject Badge holds now, and the number texts may go to: its number on file, as Badge read
+   * it when verification started, or null when no keypad or PIN match stands (a later verification
+   * started from nothing). Only asked about a call whose flow completed a scoped step, so Badge's
+   * part exists.
+   */
+  #currentSubject(record: CallRecord): { subjectKey: string | null; numberOnFile: string | null } {
+    const s = record.modules[badge.BADGE] as unknown as badge.BadgeSlice;
+    return { subjectKey: s.subject?.subjectKey ?? null, numberOnFile: s.knowledgeMatched ? s.subject!.phoneOnFile : null };
   }
 
   /**
@@ -1308,8 +1374,9 @@ export class Engine {
   }
 
   /**
-   * Sends the alerts every call of this workspace still owes (VER-12), for a host after a crash or
-   * on a schedule, without knowing the call ids: the session store lists them
+   * Sends the alerts every call of this workspace still owes (VER-12 duress alerts, PRV-10 contact
+   * change notices), ended or not, for a host after a crash or on a schedule, without knowing the
+   * call ids: the session store lists them
    * (`listCallsOwingAlerts`). `sent`: calls that owe nothing now; `failed`: calls that still owe one.
    */
   async sweepAlerts(): Promise<{ sent: string[]; failed: string[] }> {
@@ -1319,8 +1386,12 @@ export class Engine {
     for (const callId of await list(this.workspaceId)) {
       let owed: boolean;
       try {
+        // One outbox for both kinds (#112's contact notices, #124's duress alerts): the index lists a
+        // call while it owes either (decision 8).
+        await this.#deliverAlerts(callId);
         await this.#sendDuressAlerts(callId);
-        owed = badge.owedDuressAlerts(await this.#read(callId)).length > 0;
+        const now = await this.#read(callId);
+        owed = badge.owedDuressAlerts(now).length > 0 || trace.noticeDue(now);
       } catch {
         // A call the store cannot read now, or no longer holds, is reported, and the sweep goes on.
         owed = true;
@@ -1461,6 +1532,6 @@ function untrustedLabel(source: unknown): string {
 
 /** Marks a record that owes an alert, so a session store can list it for a sweep, and unmarks one that does not. */
 function markOwedAlerts(record: CallRecord): void {
-  if (badge.owedDuressAlerts(record).length > 0) record.owesAlerts = true;
+  if (badge.owedDuressAlerts(record).length > 0 || trace.noticeDue(record)) record.owesAlerts = true;
   else delete record.owesAlerts;
 }

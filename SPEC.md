@@ -708,8 +708,9 @@ unknown fields at every level, the policy's shape and then its rules against the
 factors, every module's switch and settings, every adapter an enabled module's settings need,
 every step's module (installed and on) and the step itself, and, walking each flow in order, that
 every step needing a scope comes after a `badge.verify` step whose level reaches that scope's
-minimum and whose `scopes`, if listed, include it, and that no flow has more `step-up.issue` steps
-than step-up's `maxTokensPerCall` (each completes only on a token of its own, so such a flow could
+minimum and whose `scopes`, if listed, include it, that the engine has the `messages` adapter when
+a step needs a contact-class scope (its security notice, section 16), and that no flow has more
+`step-up.issue` steps than step-up's `maxTokensPerCall` (each completes only on a token of its own, so such a flow could
 never finish; a module's optional `validateFlow` makes such whole-flow checks). Cross-checks against a module's settings or the
 policy are skipped when those did not validate (their own problems are reported). The engine
 refuses a config with any problem (`ConfigError`, code `invalid_input`, with `problems`).
@@ -720,21 +721,23 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 | `dossier.collect` | `form`, a form id in Dossier's settings |
 | `paylink.request` | `amountMinor` and `currency`, or instead `amountRef` (1 to 64 of letters, digits, `.`, `:`, `-`, `_`; needs the `amounts` adapter), never both; `description`, `amountSource` (section 14); optional `mode` (`connect` or `platform`; connect needs Paylink's `connectedAccountId`), `linkLifeMinutes` (5 to 60), `paymentMethods` (instant methods only) |
 | `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
-| `trace.receipt` | none; needs the `signer` adapter |
+| `trace.receipt` | optional `textLink: {consent}`, a wording purpose in Trace's settings, which also needs Trace's `businessName` and the `messages` adapter (section 16); needs the `signer` adapter |
 | `gate.grant` | `target`, a target id in Gate's settings; optional `lifetimeSeconds` (10 to 900, default 60) |
 | `step-up.issue` | `site`, a site id in step-up's settings; optional `lifetimeSeconds` (120 to 300, default 120) |
 
 Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
-until FIL-2); Paylink `{maxAmountMinor?, mode?, connectedAccountId?, linkLifeMinutes?, paymentMethods?}`
+until FIL-2, field rules as section 13 lists); Paylink `{maxAmountMinor?, mode?, connectedAccountId?, linkLifeMinutes?, paymentMethods?}`
 (`maxAmountMinor` 1 to 1,000,000; `mode` default `platform`, and `connect` needs
 `connectedAccountId`, 1 to 255 letters, digits, `-` or `_`; a `connectedAccountId` needs an
 explicit `mode`, so a business account never quietly defaults to the platform's; the other two are the defaults for steps
 that name none and for payments outside a flow, 15 minutes and card, Apple Pay, Google Pay and
 Link); Gate `{targets, maxGrantsPerCall?}` (section 17); step-up `{issuer, sites, maxTokensPerCall?}`
-(section 18); Trace `{receipts?, wordings?}`
-until FIL-2, field rules as section 13 lists); Paylink `{maxAmountMinor?}` (1 to 1,000,000); Trace `{receipts?, wordings?}`
-(`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr, es?}}`, purposes
-unique, `en` and `fr` non-empty, `es` optional and non-empty when given, no other key in `text`).
+(section 18); Trace `{receipts?, wordings?, businessName?}` (`receipts` default true; wordings
+`{purpose (snake_case), version, text: {en, fr, es?}}`, purposes unique, `en` and `fr` non-empty,
+`es` optional and non-empty when given, no other key in `text`; `businessName` 1 to 64 characters
+on one line, with no lone surrogate and no bidirectional embedding, override or isolate, kept by a
+call when it starts, like the wordings, so a flow with `textLink` cannot be attached to a call that
+kept none).
 
 **Spanish is optional** (FIL-6). Forms and wordings always have English and French; Spanish only
 where the workspace wrote it. A call in `es` is refused (`precondition_failed`) when its flow, at
@@ -837,6 +840,9 @@ answer on file, a phone number, a link or card data.
 | `access.code_spent` | `grantId`, `reason` (`wrong_guesses`), `guesses`: a one-time code spent by wrong guesses at its door, never the guess |
 | `stepup.issued` | `tokenId`, `site`, `scope`, `level`, `verificationGrantId`, `expiresAt` (section 18) |
 | `stepup.exchanged` / `stepup.refused` / `stepup.failed` | `tokenId`, `digest` (and `kid` when signed), `reason` when refused or failed (written by the engine only) |
+| `receipt.link_texted` | `actions` (the classes: `money`, `contact`, `access`) |
+| `contact.notice_owed` | none: saved in the same write as the contact change that owes it |
+| `contact.notice_sent` | none |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
@@ -1394,6 +1400,52 @@ minutes. Do not share it." / "Votre code de vérification à usage unique : CODE
 minutes. Ne le communiquez à personne." Access code (section 17): "Your one-time door code: CODE. It works
 once, within N min." / "Votre code de porte, à usage unique : CODE. Valable une fois, dans les N
 min.", N being the minutes left on the access grant, rounded up, at least 1.
+
+**Actions.** When a flow step whose needed scope is of class money, contact or access completes
+(section 4), the call notes the class, once each. An outside module that changes contact details,
+in a flow or outside one, calls `contactChanged()` on its `ModuleCallView` in that same
+`updateModule` change, which notes a contact action the same way; with no keypad or PIN match
+standing it is refused (`precondition_failed`) and the module's change is not saved, since there
+is no number to alert. Each contact action also keeps the matched subject and its number on file
+as Badge read it when verification started, before the change, unless the call already kept that
+same subject with that same number; Badge's keypad or PIN match always stands then, since such a
+step follows a level 2 verification. Keeping one writes `contact.notice_owed` in the same write.
+
+**Receipt link** (purpose `receipt_link`). `textReceiptLink(callId, url)` texts the host's
+capability link to an ended call's receipt (section 12, an `https` URL of at most 512 characters
+with no whitespace, no control or format character (such as NEL, a zero-width space or a bidi
+override) and no lone surrogate, else `invalid_input`; a call not ended or without its receipt yet: `precondition_failed`). It
+returns `{texted: true}` only when the flow's `trace.receipt` step has `textLink`, an action was
+noted, the caller's latest answer to `textLink.consent` is "yes" (a later "no" withdraws an
+earlier "yes"), a keypad or PIN match still stands (or the call kept a number for Badge's current
+subject before a contact change), and no link was texted on this call yet; otherwise
+`{texted: false}` and nothing is sent. It goes to the first number kept for Badge's current subject
+before a contact change, else that subject's number on file; a number kept for another subject is
+never used. "Receipt from BUSINESS for ACTIONS on your call: URL" / "Reçu de BUSINESS
+pour ACTIONS lors de votre appel : URL", where ACTIONS lists, in order, "a payment", "a change to
+your contact details", "an access request" / "un paiement", "une modification de vos coordonnées",
+"une demande d'accès". No amount, code or personal value. A retry after a failure sends with the
+same idempotency key; the ledger gets one `receipt.link_texted`.
+
+**Contact change notice** (purpose `contact_changed`). Each subject and number a contact step kept
+is owed a security notice, whatever the caller answered about receipts: it is not a receipt and
+has no setting. Each is sent, in order, to the number kept before the change, with one
+idempotency key per notice, as soon as the write that owes it is saved; a failed text leaves it
+owed (the change itself still succeeds), and the call's next write, `endCall` or `sweepAlerts()`
+sends it. `endCall` sends any still owed before signing the receipt; if a text fails there,
+`endCall` throws, and calling it again sends the notices still owed (and the receipt) without
+ending the call again. `sweepAlerts()` (the host runs it on a schedule) is the one sweep for
+contact notices and duress alerts (section 6): a call that owes either is stored with `owesAlerts:
+true`, the session store lists those calls (`listCallsOwingAlerts`, required by the sweep), and it
+sends what each still owes, ended or not, so a call that is never ended still alerts; it returns
+`{sent, failed}` (call ids; a failed one stays owed, and a call the host's session retention
+removed is reported as failed). A
+call that ended with ledger entries still pending (a notice or receipt saved, then not appended)
+is finished the same way: `endCall` appends them and returns the kept receipt, or null. "BUSINESS: the contact details on your account were changed during a call.
+If it was not you, contact us right away." / "BUSINESS : les coordonnées de votre compte ont été
+modifiées pendant un appel. Si ce n'était pas vous, communiquez avec nous sans tarder.", with
+"Security notice" / "Avis de sécurité" in place of BUSINESS when Trace has no `businessName`. It
+never says which detail changed or to what. The ledger gets one `contact.notice_sent` per notice.
 
 ## 17. Gate and access grants
 
