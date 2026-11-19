@@ -79,7 +79,12 @@ then throws `EngineError("conflict")`. Ledger entries and listener events for a 
 only after its write succeeded. Steps with side effects use two writes or more: an attempt is
 counted before it is judged; a photo ID link and a payment link are reserved before the provider
 is called. `sessionStoreContract(factory)` in `district-assurance/testing` is the suite a store
-must pass; `MemorySessionStore` is the reference.
+must pass; `MemorySessionStore` is the reference. It also checks that every write copies its
+record in, that two creates of one id or two binds of one reference at once leave exactly one
+winner, and that a reference bound in one workspace never blocks the same reference in another.
+Every keyed store's contract (session, ledger,
+record) includes keys that differ only in a lone UTF-16 surrogate, and the replacement character
+U+FFFD: a store that encodes keys as UTF-8 (SQLite with a TEXT key) collapses them, and must not.
 
 ## 3. Modules
 
@@ -844,7 +849,23 @@ Entry: `{seq, prevHash, eventId?, callId, actor, event, at, detail, hash}`. `seq
 `prevHash` is 64 zeros; `hash` is SHA-256 over the canonical JSON of every other field.
 `verifyChain(entries, from?)` reports the first entry whose `seq`, `prevHash` or `hash` is wrong.
 `chainEntry` refuses a detail in which any string (other than a 64-character hex digest) contains
-a card number.
+a card number. An `AuditLedger` lists `list(fromSeq?, limit?)`: the entries with `seq` at or after
+`fromSeq`, in order, at most `limit` (an integer of 1 or more) when it is given, read as one page,
+so a large ledger is walked page by page; `MemoryAuditLedger` throws a TypeError for any other
+`limit`.
+
+`auditLedgerContract(factory)` in `district-assurance/testing` is the suite a ledger must pass:
+it starts at seq 0 and the genesis hash, appends one seq at a time with each entry exactly as
+`chainEntry` builds it, `list(fromSeq)` returns entries in order as a slice that continues the
+chain, `list(fromSeq, limit)` returns at most `limit` of them as one page and refuses a `limit`
+that is not an integer of 1 or more, entries are copied in and out and never change once appended, an `eventId` is appended
+once (a second append, concurrent or not, returns a copy of the first entry, and eventIds that differ only
+in a lone surrogate are distinct), a detail carrying a card number
+is refused with nothing stored, and concurrent appends stay one valid chain.
+`recordStoreContract(factory)` is the suite a `RecordStore` must pass: subjects (seeded by the
+factory, since the engine only reads them) and intake records are copied in and out, workspaces
+never share a key, keys that differ only in a lone surrogate stay apart, and `putIntakeRecord` is idempotent by `recordId`, also concurrently.
+`MemoryAuditLedger` and `MemoryRecordStore` pass both.
 
 ## 11. Canonical JSON
 
@@ -1710,3 +1731,30 @@ holds a grant, or when a text-flooding script never sends a text (so "no text be
 never vacuous). Every built factor has scripts in both languages: a texted code in text flooding
 (it reaches a text and nothing else), a callback in authority (only a keypad or PIN match rings,
 and only the number on file), and a spoken answer in partial answers (its match opens no text).
+
+## 20. Keypad collector
+
+`KeypadCollector` is a helper for the host's keypad path (INT-1): it buffers the tones of one entry
+outside the model and hands them to the engine. It is pure: no timers and no I/O, time from the
+injected clock. Options: `maxDigits` (1 to 32), `idleTimeoutMs` (1 to 600,000), `onDigits` (the one
+callback) and an optional `clock` (an object with `now()`); anything else is refused with `EngineError("invalid_input")`.
+`press(tone)` returns a status and never a digit:
+
+| Tone | Status | Effect |
+|---|---|---|
+| `0` to `9`, under `maxDigits` buffered | `buffering` | appended; the idle timeout restarts |
+| `0` to `9`, `maxDigits` already buffered | `overflow` | the entry is discarded |
+| anything but `#` or `*`, after `overflow` or `rejected` in the same entry | `discarding` | ignored; the idle timeout restarts |
+| `#`, digits buffered | `submitted` | the buffer is emptied, then `onDigits(digits)` runs once; its return value is `result` |
+| `#`, nothing buffered | `empty` | none |
+| `*` | `cleared` | the entry is discarded |
+| anything else (`A` to `D`, several characters, not a string) | `rejected` | the entry is discarded |
+
+Before each tone, an entry whose last tone is `idleTimeoutMs` old or older, or later than now (a
+clock set back), is discarded, and the result says `timedOut: true`; the tone is then taken as the
+first of a new entry. A discarded entry
+(after `overflow` or `rejected`) lasts until `#` (`empty`), `*`, `clear()` or the idle timeout ends
+it, so no tail of it is ever submitted: with `maxDigits` 4, `123456#` submits nothing. `expire()` does
+the same from the host's own timer and says whether it discarded anything; `clear()` discards the
+entry at once. A discarded entry never reaches the callback. `toString`, `toJSON` and
+`util.inspect` show no digit and not how many are buffered.

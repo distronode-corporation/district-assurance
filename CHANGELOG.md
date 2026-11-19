@@ -137,6 +137,17 @@ All notable changes to this project are documented here. The format follows
   result (`A`, `B`, `C`, `failed`, default `none`) in `call.started` and the receipt (an optional
   field, format version 1), and the policy's optional `attestationCaps` can only lower a level. A
   callback call, which the engine dialled, is never capped.
+- `KeypadCollector` (INT-1): a pure buffer for keypad tones until `#`, with a maximum length and an
+  idle timeout, that shows no digit through `toString`, JSON or `util.inspect` and hands each entry
+  to one callback. An overflowed or rejected entry is ignored to its end, and unknown options are
+  refused.
+- `auditLedgerContract` and `recordStoreContract` in `district-assurance/testing` (PRV-5), which
+  the memory adapters pass; `MemoryRecordStore` now keys by JSON tuples, so two workspace and id
+  pairs can no longer share a key. The session, ledger and record contracts keep keys that differ
+  only in a lone UTF-16 surrogate apart, which a store encoding keys as UTF-8 would collapse.
+  `AuditLedger.list(fromSeq?, limit?)` reads one page of at most `limit` entries, and the ledger
+  contract checks it: a ledger that ignores `limit`, or takes one that is not an integer of 1 or
+  more, now fails `auditLedgerContract`.
 
 ### Changed
 

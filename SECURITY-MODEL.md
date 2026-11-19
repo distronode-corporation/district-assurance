@@ -596,6 +596,9 @@ invalid (tested).
 A step's ledger entries are saved with the step itself (an outbox in the call record) and
 appended by event id, once each; a ledger that fails leaves them pending, and the next write or
 `flushLedger` appends them, so no saved step is ever missing from the ledger for good (tested).
+A durable ledger must pass `auditLedgerContract`: append-only, one valid chain under concurrent
+appends, each `eventId` once, copies in and out, and card data refused (tested on
+`MemoryAuditLedger`).
 
 ### Breach of stored data
 
@@ -636,6 +639,13 @@ the key set URL or refreshes the copy.
 
 ## Left to the host
 
+- Routing keypad tones to a buffer outside the model, never logging them or the string its
+  callback receives, and cutting audio to speech-to-text and the model while `sensitive` is set.
+  `KeypadCollector` is that buffer (SPEC.md, section 20): it shows no digit, nor how many, through
+  `toString`, JSON or `util.inspect`, discards an entry that is too long, idle or ends in an
+  unexpected tone (ignoring the rest of it until `#` or `*`, so no tail is submitted), and gives
+  the digits only to its one callback (tested). JavaScript cannot wipe a string, so the buffer is
+  dropped, not overwritten.
 - Authorizing the member behind `clearDuress` and `resetPin`: the engine takes the member id as
   given, so only the host's staff tools, after their own sign-in, may call them.
 - Repeating a `clearDuress` that raced an alert's delivery: the counters store has no
@@ -660,9 +670,10 @@ the key set URL or refreshes the copy.
 - Rotating receipt keys (publish the next key, then switch, then retire), keeping retired public
   keys as long as their receipts matter, and removing a key that leaked.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
-  guarantees (`sessionStoreContract` today; PRV-5 for the others), one durable `AttemptCounters`
-  store shared by every process of a workspace (`attemptCountersContract`), and a durable
-  `CodeStore` shared by every engine of a workspace that passes `codeStoreContract`.
+  guarantees: they must pass `sessionStoreContract`, `recordStoreContract` and
+  `auditLedgerContract` from `district-assurance/testing`, as the memory adapters do (tested); one
+  durable `AttemptCounters` store shared by every process of a workspace
+  (`attemptCountersContract`), and a durable `CodeStore` shared by every engine of a workspace that passes `codeStoreContract`.
 - Passing the calling number from the carrier to `beginVerification`, never one the caller or the
   model gives, so the per-number limits apply. Caller ID can be spoofed, so the number's counter is
   a brake on one line, not a control; the subject's counter is what bounds guessing, and a withheld

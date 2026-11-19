@@ -416,8 +416,12 @@ export interface AuditEntry extends AuditInput {
 export interface AuditLedger {
   append(input: AuditInput): Promise<AuditEntry>;
   head(): Promise<{ seq: number; hash: string }>;
-  /** Entries with seq >= fromSeq, in order. */
-  list(fromSeq?: number): Promise<AuditEntry[]>;
+  /**
+   * Entries with seq >= fromSeq, in order, at most `limit` of them (an integer of 1 or more) when
+   * it is given. A durable ledger reads only that page, so an export or an audit tool can walk a
+   * large ledger page by page.
+   */
+  list(fromSeq?: number, limit?: number): Promise<AuditEntry[]>;
 }
 
 /** Signs receipt payloads. The private key stays with the host (a KMS, an HSM, a file). */

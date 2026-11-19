@@ -50,6 +50,7 @@ describe("entry points", () => {
       "duressFlagKey",
       "PAYMENT_MODES",
       "formatAmount",
+      "KeypadCollector",
     ]) {
       assert.ok(name in root, name);
     }
@@ -70,6 +71,8 @@ describe("entry points", () => {
       "TEST_KNOWLEDGE_KEY",
       "FakePinVerifier",
       "sessionStoreContract",
+      "auditLedgerContract",
+      "recordStoreContract",
     ]) {
       assert.ok(name in testing, name);
     }
