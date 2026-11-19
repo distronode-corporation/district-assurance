@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Ledger export (PRV-4): `exportLedger` yields the ledger as NDJSON from a `fromSeq` or a cursor,
+  closed by an ES256-signed trailer with the run's start, end and the head; `verifyLedgerExport`
+  checks a run and that it continues the previous one.
 
 ### Changed
 
