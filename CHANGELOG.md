@@ -28,9 +28,12 @@ All notable changes to this project are documented here. The format follows
 - Amounts from code, read back first (PAY-2): an `AmountSource` adapter (`amounts`, reference
   `PriceListAmounts`) resolves a `paylink.request` step's `amountRef`; `readBackPayment` builds the
   amount read-back in English or French and `confirmPaymentAmount` records the caller's yes before
-  the link is texted. The `AmountSource` string type is renamed `AmountSourceKind`.
+  the link is texted.
 
 ### Changed
+
+- Breaking: the `AmountSource` string type (`intake_record`, `business_endpoint`, `price_list`) is
+  renamed `AmountSourceKind`, and `AmountSource` is now the adapter interface (PAY-2).
 
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
