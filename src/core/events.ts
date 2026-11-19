@@ -53,6 +53,8 @@ export const ENGINE_EVENTS = [
   "stepup.exchanged",
   "stepup.refused",
   "stepup.failed",
+  "consent.revoked",
+  "consent.unrecorded",
   "call.ended",
   "receipt.issued",
   "receipt.link_texted",

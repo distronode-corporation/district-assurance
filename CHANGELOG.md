@@ -173,6 +173,12 @@ All notable changes to this project are documented here. The format follows
   throws, or answers empty, not a string or the value itself, releases the filing as failed
   (`record.filing_failed`, field names and a reason code only) and drops the draft, so it never
   holds a call open; `endCall` drops an open draft, so its values never outlive the call in the clear.
+- Consent revocation (PRV-3): `Engine.revokeConsent` by voice, text or dashboard through a new
+  `ConsentStore` adapter (`consents`; `MemoryConsentStore` in the fakes), a `consent.revoked`
+  ledger event written once per consent and never before its `consent.recorded`, and
+  `isStopRequest` for STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT, ARRÊT, ARRÊTE and ARRÊTER. A
+  consent still being stored when its call ends settles as not recorded (no consent):
+  `consent.unrecorded` in the ledger, `answer: "not_recorded"` on the receipt.
 
 ### Changed
 
@@ -208,6 +214,8 @@ All notable changes to this project are documented here. The format follows
 - A text field value holding a lone surrogate is refused with the new normalise reason `not_text`
   (`NormaliseResult`), since no record, digest or read-back can hold it faithfully: a host that
   switches over the reasons must add it.
+- The `revokeConsent` stub in `prove/consent.ts` is replaced by `Engine.revokeConsent`, and
+  `ConsentRecord` moves to the adapter types (still exported from the root).
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

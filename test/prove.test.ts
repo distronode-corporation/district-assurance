@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { generateKeyPairSync, sign, verify, type JsonWebKey } from "node:crypto";
 import { describe, it } from "node:test";
 
-import type { AuditInput, ReceiptSigner } from "../src/core/adapters.ts";
+import type { AuditInput, ConsentRecord, ReceiptSigner } from "../src/core/adapters.ts";
 import { EngineError } from "../src/core/errors.ts";
 import { wordingDigest } from "../src/prove/consent.ts";
 import { GENESIS_HASH, MemoryAuditLedger, chainEntry, detailCarriesCardNumber, hashEntry, verifyChain } from "../src/prove/ledger.ts";
@@ -19,7 +19,7 @@ import {
   type ReceiptBody,
   type ReceiptKeyRingOptions,
 } from "../src/prove/receipt.ts";
-import { generateTestSigner } from "../src/testing/fakes.ts";
+import { MemoryConsentStore, generateTestSigner } from "../src/testing/fakes.ts";
 import { createTestEngine } from "../src/testing/index.ts";
 
 /** When k1 stopped signing: after the test clock's receipts (2026-01-01), so they predate it. */
@@ -343,5 +343,27 @@ describe("consent wording", () => {
     const es = { ...w, text: { ...w.text, es: "¿Podemos enviarle mensajes de texto?" } };
     assert.notEqual(wordingDigest(es), wordingDigest(w));
     assert.notEqual(wordingDigest(es), wordingDigest({ ...es, text: { ...es.text, es: "Otro" } }));
+  });
+});
+
+describe("memory consent store", () => {
+  it("keeps workspace and consent apart, whatever slashes they hold", async () => {
+    const store = new MemoryConsentStore();
+    const consent = (consentId: string, purpose: string): ConsentRecord => ({
+      consentId,
+      callId: "call_1",
+      purpose,
+      wordingVersion: "1",
+      wordingDigest: "0".repeat(64),
+      locale: "en",
+      answer: "yes",
+      channel: "call",
+      at: "2026-01-01T00:00:00.000Z",
+    });
+    await store.putConsent("a/b", consent("c", "first"));
+    await store.putConsent("a", consent("b/c", "second"));
+    assert.equal((await store.getConsent("a", "b/c"))?.consent.purpose, "second");
+    await store.revokeConsent("a", { consentId: "b/c", via: "text", at: "2026-01-02T00:00:00.000Z" });
+    assert.equal((await store.getConsent("a/b", "c"))?.revoked, null);
   });
 });

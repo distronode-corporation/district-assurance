@@ -7,9 +7,11 @@ import type {
   AttemptCounterKey,
   AttemptCounters,
   AuditLedger,
+  AuditInput,
   CallbackDialer,
   CarrierSignals,
   CodeStore,
+  ConsentStore,
   DuressNotifier,
   IdentityProvider,
   MessageSender,
@@ -100,6 +102,8 @@ export interface EngineAdapters {
   duressNotifier?: DuressNotifier;
   /** Needed by Dossier once a form has a sensitive field. */
   fieldCipher?: FieldCipher;
+  /** Where consents are kept so they can be revoked after the call. Without it, `revokeConsent` is refused. */
+  consents?: ConsentStore;
 }
 
 export type AdapterName = keyof EngineAdapters;
@@ -192,6 +196,13 @@ export interface EngineRuntime {
   /** One step: read the call, change it with `fn`, write it with compare-and-set, retrying from a fresh read on conflict. */
   update<R>(callId: string, fn: (draft: CallDraft) => R): Promise<R>;
   read(callId: string): Promise<CallRecord>;
+  /**
+   * Appends one ledger entry that belongs to no write of a call record (a consent revoked after
+   * the call), then tells the listener. Idempotent by `eventId`, like every append.
+   */
+  append(entry: AuditInput & { eventId: string; callId: string }): Promise<void>;
+  /** Appends a call's pending ledger entries, in order. */
+  flushLedger(callId: string): Promise<void>;
   /** Whether the call's grant covers a scope now. */
   authorized(record: CallRecord, scope: string): boolean;
   bindRef(ref: string, callId: string): Promise<void>;

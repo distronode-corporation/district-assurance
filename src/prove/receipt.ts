@@ -28,7 +28,7 @@ export interface ReceiptBody {
   attestation?: Attestation;
   records: Array<{ recordId: string; formId: string; digest: string }>;
   payments: Array<{ paymentId: string; status: string; amountMinor: number; currency: string; mode: string; providerRef: string }>;
-  consents: Array<{ purpose: string; wordingVersion: string; wordingDigest: string; answer: "yes" | "no" }>;
+  consents: Array<{ purpose: string; wordingVersion: string; wordingDigest: string; answer: "yes" | "no" | "not_recorded" }>;
   /**
    * The call's web sign-in step-up tokens as the call ended: `issued` ones may still be exchanged
    * until `expiresAt`, so a later `stepup.exchanged` or `stepup.refused` entry names one of these.

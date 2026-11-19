@@ -10,7 +10,7 @@
 // throws NotImplementedError. SPEC.md describes the flow.
 import { createPublicKey, type JsonWebKey } from "node:crypto";
 
-import type { AttemptCounterKey, AuditEntry, IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
+import type { AttemptCounterKey, AuditEntry, AuditInput, ConsentChannel, ConsentRecord, ConsentRevocation, IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
 import { canonicalJson, hasLoneSurrogate, type JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
@@ -33,7 +33,6 @@ import type { AmountReadBack } from "./pay/amount.ts";
 import * as paylink from "./pay/paylink.ts";
 import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
 import * as refunds from "./pay/refunds.ts";
-import type { ConsentRecord } from "./prove/consent.ts";
 import { detailCarriesCardNumber } from "./prove/ledger.ts";
 import { receiptKeySet, type ReceiptBody, type SignedReceipt } from "./prove/receipt.ts";
 import * as trace from "./prove/trace.ts";
@@ -913,8 +912,16 @@ export class Engine {
 
   // ---- Trace (prove) -----------------------------------------------------------------------
 
-  recordConsent(callId: string, input: { purpose: string; answer: "yes" | "no"; channel?: ConsentRecord["channel"] }): Promise<ConsentRecord> {
+  recordConsent(callId: string, input: { purpose: string; answer: "yes" | "no"; channel?: ConsentChannel }): Promise<ConsentRecord> {
     return trace.recordConsent(this.#rt, callId, input);
+  }
+
+  /**
+   * Revokes a consent by voice (`call`), text or dashboard (`web`), during its call or after it.
+   * Needs the `consents` adapter. Returns the revocation in force: a second one changes nothing.
+   */
+  revokeConsent(input: { consentId: string; via: ConsentChannel }): Promise<ConsentRevocation> {
+    return trace.revokeConsent(this.#rt, input);
   }
 
   /**
@@ -953,6 +960,8 @@ export class Engine {
       // head is taken, and writes no event and no outcome.
       const files = draft.record.modules[dossier.DOSSIER];
       if (files !== undefined) draft.record.modules[dossier.DOSSIER] = dossier.withoutOpenDraft(files);
+      // A consent whose store write is still reserved is settled as not recorded, before call.ended.
+      trace.settleUnrecorded(draft);
       draft.apply({ type: "call_ended", at: this.#now() });
       const flow = draft.record.flow;
       if (flow !== null && flow.status === "running") {
@@ -1076,6 +1085,8 @@ export class Engine {
       adapter: <K extends AdapterName>(name: K) => this.#adapters[name]!,
       update: (callId, fn) => this.#update(callId, fn),
       read: (callId) => this.#read(callId),
+      append: (entry) => this.#append(entry),
+      flushLedger: (callId) => this.flushLedger(callId),
       authorized: (record, scope) => this.#authorized(record, scope),
       bindRef: async (ref, callId) => {
         await this.#sessions.bindRef(this.workspaceId, ref, callId);
@@ -1291,17 +1302,22 @@ export class Engine {
   async #flush(callId: string, version: number, record: CallRecord): Promise<void> {
     if (record.outbox.length === 0) return;
     for (const queued of record.outbox) {
-      await this.#adapters.ledger.append({ eventId: queued.eventId, callId, actor: queued.actor, event: queued.name, at: queued.at, detail: queued.detail });
-        // A listener is told, at least once and best effort; its failure, thrown or rejected, never stops the ledger (INT-5).
-      try {
-        const told: unknown = this.#onEvent?.({ name: queued.name, callId, actor: queued.actor, at: queued.at, detail: queued.detail });
-        if (told instanceof Promise) told.catch(() => undefined);
-      } catch {
-        // Ignored by design: the ledger is the record.
-      }
+      await this.#append({ eventId: queued.eventId, callId, actor: queued.actor, event: queued.name, at: queued.at, detail: queued.detail });
       if (queued.counter !== undefined) await this.#notifyLock(queued.counter, queued.detail);
     }
     await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue);
+  }
+
+  /** Appends one entry, then tells the listener. */
+  async #append(entry: AuditInput & { callId: string }): Promise<void> {
+    await this.#adapters.ledger.append(entry);
+    // A listener is told, at least once and best effort; its failure, thrown or rejected, never stops the ledger (INT-5).
+    try {
+      const told: unknown = this.#onEvent?.({ name: entry.event, callId: entry.callId, actor: entry.actor, at: entry.at, detail: entry.detail });
+      if (told instanceof Promise) told.catch(() => undefined);
+    } catch {
+      // Ignored by design: the ledger is the record.
+    }
   }
 
   /**

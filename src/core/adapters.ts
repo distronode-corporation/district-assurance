@@ -1,6 +1,8 @@
 // The adapter interfaces: everything the engine needs from the outside world. A host plugs in its
 // own (a carrier, Stripe, its database, its key store); `district-assurance/testing` has
 // in-memory and fake versions for tests and the demo. None of these ever carries card data.
+// Records that a core adapter carries (intake records, consents) are defined here, since the core
+// imports no module.
 import type { JsonWebKey } from "node:crypto";
 
 import type { JsonValue } from "./canonical.ts";
@@ -405,6 +407,44 @@ export interface RecordStore {
    * `putIntakeRecord` of it stores nothing. Idempotent: an id already gone is skipped.
    */
   deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void>;
+}
+
+/** How a consent was given or revoked: on the call, by text, or on the host's dashboard. */
+export type ConsentChannel = "call" | "text" | "web";
+
+/** A consent as code captured it: the wording read (by version and digest, never the words), the answer, when. */
+export interface ConsentRecord {
+  consentId: string;
+  callId: string;
+  purpose: string;
+  wordingVersion: string;
+  wordingDigest: string;
+  locale: Locale;
+  answer: "yes" | "no";
+  channel: ConsentChannel;
+  at: string;
+}
+
+export interface ConsentRevocation {
+  consentId: string;
+  via: ConsentChannel;
+  /** ISO 8601. */
+  at: string;
+}
+
+/**
+ * The host's consent records, so a consent given on a call can be revoked later by voice, text or
+ * dashboard, after the call is gone. Revocations are kept beside the consent, never in place of it.
+ */
+export interface ConsentStore {
+  /** Idempotent by `consentId`: the engine retries a write whose outcome it could not see, with the same record. */
+  putConsent(workspaceId: string, record: ConsentRecord): Promise<void>;
+  getConsent(workspaceId: string, consentId: string): Promise<{ consent: ConsentRecord; revoked: ConsentRevocation | null } | null>;
+  /**
+   * Records a revocation of a stored consent, unless it has one: the first revocation wins and is
+   * returned to every later call, so a retry never moves its time or channel.
+   */
+  revokeConsent(workspaceId: string, revocation: ConsentRevocation): Promise<ConsentRevocation>;
 }
 
 export interface AuditInput {

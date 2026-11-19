@@ -11,6 +11,9 @@ import type {
   CodeStore,
   DuressAlert,
   DuressNotifier,
+  ConsentRecord,
+  ConsentRevocation,
+  ConsentStore,
   IdentityProvider,
   IntakeRecord,
   LockNotice,
@@ -278,6 +281,28 @@ export class MemoryRecordStore implements RecordStore {
     else if (subject.pinDigest !== ifPinDigest) return false;
     else subject.duressDigest = digest;
     return true;
+  }
+}
+
+/** Consents and their revocations, in memory. The first revocation of a consent wins. */
+export class MemoryConsentStore implements ConsentStore {
+  readonly #consents = new Map<string, { consent: ConsentRecord; revoked: ConsentRevocation | null }>();
+
+  async putConsent(workspaceId: string, record: ConsentRecord): Promise<void> {
+    const key = JSON.stringify([workspaceId, record.consentId]);
+    if (!this.#consents.has(key)) this.#consents.set(key, { consent: structuredClone(record), revoked: null });
+  }
+
+  async getConsent(workspaceId: string, consentId: string): Promise<{ consent: ConsentRecord; revoked: ConsentRevocation | null } | null> {
+    const stored = this.#consents.get(JSON.stringify([workspaceId, consentId]));
+    return stored === undefined ? null : structuredClone(stored);
+  }
+
+  async revokeConsent(workspaceId: string, revocation: ConsentRevocation): Promise<ConsentRevocation> {
+    const stored = this.#consents.get(JSON.stringify([workspaceId, revocation.consentId]));
+    if (stored === undefined) throw new Error("no such consent");
+    stored.revoked ??= structuredClone(revocation);
+    return structuredClone(stored.revoked);
   }
 }
 

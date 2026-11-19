@@ -669,6 +669,24 @@ link only to the number on file and never writes the link to the ledger (tested)
 host: issuing the token and building the link, rate limits on `/r/` (SRV-2), a durable store for the hashes (SRV-4),
 and expiry or revocation of a link, which are not built.
 
+### Consent that outlives its withdrawal
+
+A caller who said yes to texts later says STOP, or asks staff to remove it, and the business
+keeps relying on the old yes. **Controls:** `revokeConsent` takes a revocation by voice, text or
+dashboard, during the call or after it, keeps it in the host's `ConsentStore` and writes
+`consent.revoked` to the ledger, once per consent however often it is retried, with the channel
+and time of the first revocation, never before the consent's own `consent.recorded` (tested). The
+standard opt-out words (STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT) and the French ARRÊT, ARRÊTE
+and ARRÊTER map to revocation; a longer message that only contains one does not (tested). With a
+store, a consent is written to it before it is recorded on the call, so no recorded consent is
+missing from the store; one still being written when the call ends counts as no consent, is noted
+as `consent.unrecorded` and shows as `not_recorded` on the receipt, so a store outage never keeps
+a call from ending and never leaves a yes behind (tested). The ledger
+detail names the consent and the channel, never a phone number or the message. Left to the host:
+plugging in a `ConsentStore` wherever consents are recorded (without one, consents cannot be
+revoked through the engine), deciding which consents an inbound STOP revokes, checking the store
+before every text it sends on a consent, and who may revoke from a dashboard.
+
 ### Breach of stored data
 
 **Controls:** reference values are HMACs under a per-workspace key, because a plain hash of a date

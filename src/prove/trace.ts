@@ -5,6 +5,7 @@
 // Trace also sends the two texts that follow a money, contact or access step: a link to the call's
 // receipt, when the flow asks for it and the caller consented, and the security notice after a
 // contact change, which always goes. Code builds both, and neither carries a value.
+import type { ConsentChannel, ConsentRecord, ConsentRevocation, ConsentStore } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
@@ -12,7 +13,8 @@ import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } fro
 import type { ScopeClass } from "../core/policy.ts";
 import { LOCALES, type CallDraft, type CallRecord, type EngineRuntime, type Locale } from "../core/runtime.ts";
 import { isObject, unknownKeys } from "../core/shape.ts";
-import { wordingDigest, type ConsentRecord, type ConsentWording } from "./consent.ts";
+import { wordingDigest, type ConsentWording } from "./consent.ts";
+import { detailCarriesCardNumber } from "./ledger.ts";
 import { receiptDigest, signReceipt, type ReceiptBody, type SignedReceipt } from "./receipt.ts";
 
 export const TRACE = "trace";
@@ -63,6 +65,10 @@ export interface TraceSlice {
   /** The wordings in force when the call started: a config change never strands a consent step. */
   wordings: ConsentWording[];
   consents: ConsentRecord[];
+  /** A consent reserved and being written to the ConsentStore: recorded on the call once stored. */
+  storing: ConsentRecord | null;
+  /** Consents still being stored when the call ended: never recorded, so no consent (fail closed). */
+  unrecorded: ConsentRecord[];
   /** The ledger head after `call.ended`, kept so a retried receipt carries the same one. */
   endedHead: { seq: number; hash: string } | null;
   receipt: SignedReceipt | null;
@@ -79,6 +85,9 @@ function wordingErrors(wording: unknown, index: number): string[] {
   const errors: string[] = [];
   if (!/^[a-z][a-z0-9_]{0,63}$/.test(wording.purpose)) errors.push(`${at}: purpose must be snake_case`);
   if (wording.version === "") errors.push(`${at}: version is empty`);
+  // Both go into the ledger's consent.recorded detail, which refuses a card number: caught here,
+  // before a call can reserve a consent the ledger would then never accept.
+  if (detailCarriesCardNumber([wording.purpose, wording.version])) errors.push(`${at}: purpose and version must not look like a card number`);
   const text = wording.text;
   if (typeof text.en !== "string" || text.en.trim() === "" || typeof text.fr !== "string" || text.fr.trim() === "") errors.push(`${at}: needs an English and a French text`);
   // Spanish is optional; when given it is a text like the others.
@@ -161,7 +170,7 @@ export const traceModule: AssuranceModule = {
     const wordings = (settings as TraceSettings | undefined)?.wordings ?? [];
     const businessName = (settings as TraceSettings | undefined)?.businessName ?? null;
     const texts: TraceTexts = { actions: [], notices: [], receiptLink: "none" };
-    return { wordings: structuredClone(wordings), consents: [], endedHead: null, receipt: null, businessName, texts } as unknown as JsonValue;
+    return { wordings: structuredClone(wordings), consents: [], storing: null, unrecorded: [], endedHead: null, receipt: null, businessName, texts } as unknown as JsonValue;
   },
 
   enterStep(_step: FlowStep, s: JsonValue): JsonValue {
@@ -188,18 +197,34 @@ export const traceModule: AssuranceModule = {
 
 // ---- runtime -------------------------------------------------------------------------------
 
-/** Records a consent: the wording read (fingerprinted, from the settings) and the caller's answer. */
+/**
+ * Records a consent: the wording read (fingerprinted, from the settings) and the caller's answer.
+ * With a `consents` adapter, the consent is reserved on the call, written to the ConsentStore and
+ * then recorded, so every consent on the record can be revoked later. A store write that failed
+ * stays reserved: the next `recordConsent` with the same purpose and answer resumes it with the
+ * same record. A call that ends first settles it as not recorded (`settleUnrecorded`): no consent.
+ */
 export async function recordConsent(
   rt: EngineRuntime,
   callId: string,
-  input: { purpose: string; answer: "yes" | "no"; channel?: ConsentRecord["channel"] },
+  input: { purpose: string; answer: "yes" | "no"; channel?: ConsentChannel },
 ): Promise<ConsentRecord> {
-  // Read once: the purpose a wording was found for is the one the flow step is checked against.
+  // Read once: the purpose a wording was found for is the one checked against the step and stored.
   const { purpose, answer, channel } = input;
-  // The answer goes into the record, the receipt and the ledger as it is: refused before any write.
+  // Both go into the consent record, the store and the ledger as they are: only the values a consent
+  // can hold (a host passing a transcript or a phone number by mistake is refused, not recorded).
   if (answer !== "yes" && answer !== "no") throw new EngineError("invalid_input", "answer must be yes or no");
-  return rt.update(callId, (draft) => {
-    const wording = draft.slice<TraceSlice>(TRACE).wordings.find((w) => w.purpose === purpose);
+  if (channel !== undefined && !CHANNELS.includes(channel)) throw new EngineError("invalid_input", "channel must be call, text or web");
+  const store = consentStore(rt);
+  const reserved = await rt.update(callId, (draft): ConsentRecord => {
+    const s = draft.slice<TraceSlice>(TRACE);
+    if (s.storing !== null) {
+      if (s.storing.purpose !== purpose || s.storing.answer !== answer) {
+        throw new EngineError("precondition_failed", `a consent to ${s.storing.purpose} is being stored; record it again first`);
+      }
+      return s.storing;
+    }
+    const wording = s.wordings.find((w) => w.purpose === purpose);
     if (wording === undefined) throw new EngineError("invalid_input", `no wording for ${purpose} in this call's trace settings`);
     if (draft.record.state.phase === "ended") throw new EngineError("invalid_transition", "the call has ended");
     // The caller cannot have heard a wording that has no text in the call's language.
@@ -217,17 +242,105 @@ export async function recordConsent(
       channel: channel ?? "call",
       at: rt.now(),
     };
-    draft.slice<TraceSlice>(TRACE).consents.push(record);
-    draft.emit("consent.recorded", "caller", {
-      consentId: record.consentId,
-      purpose: record.purpose,
-      wordingVersion: record.wordingVersion,
-      wordingDigest: record.wordingDigest,
-      answer: record.answer,
-      locale: record.locale,
-    });
-    return structuredClone(record);
+    if (store === null) commitConsent(draft, record);
+    else s.storing = record;
+    return record;
   });
+  if (store !== null) {
+    // A rejected write may still have been stored, so the reservation is kept until the consent is
+    // recorded, and a retry writes this same record again. Two processes resuming at once both
+    // write it; the first to commit records it, and the other finds it recorded.
+    await store.putConsent(rt.workspaceId, reserved);
+    await rt.update(callId, (draft) => {
+      const s = draft.slice<TraceSlice>(TRACE);
+      if (s.storing?.consentId !== reserved.consentId) {
+        // Another process recorded it first, or the call ended first and settled it as not recorded.
+        if (s.consents.some((c) => c.consentId === reserved.consentId)) return;
+        throw new EngineError("precondition_failed", "the call ended before the consent was stored: it was not recorded");
+      }
+      s.storing = null;
+      commitConsent(draft, reserved);
+    });
+  }
+  return structuredClone(reserved);
+}
+
+/**
+ * At the end of a call, a consent still being stored settles as not recorded, which counts as no
+ * consent: a store outage never keeps a call from ending, and never leaves a yes behind. The
+ * ledger notes the purpose only, and the receipt lists it as `not_recorded`. A later write of the
+ * reservation finds it gone and records nothing; a revocation of it is refused.
+ */
+export function settleUnrecorded(draft: CallDraft): void {
+  const s = draft.slice<TraceSlice>(TRACE);
+  if (s.storing === null) return;
+  s.unrecorded.push(s.storing);
+  draft.emit("consent.unrecorded", "system", { purpose: s.storing.purpose });
+  s.storing = null;
+}
+
+function commitConsent(draft: CallDraft, record: ConsentRecord): void {
+  draft.slice<TraceSlice>(TRACE).consents.push(record);
+  draft.emit("consent.recorded", "caller", {
+    consentId: record.consentId,
+    purpose: record.purpose,
+    wordingVersion: record.wordingVersion,
+    wordingDigest: record.wordingDigest,
+    answer: record.answer,
+    locale: record.locale,
+  });
+}
+
+/** The host's ConsentStore, or null without one: consents then live on the call record only, and cannot be revoked. */
+function consentStore(rt: EngineRuntime): ConsentStore | null {
+  return (rt.adapter("consents") as ConsentStore | undefined) ?? null;
+}
+
+const CHANNELS: readonly ConsentChannel[] = ["call", "text", "web"];
+
+/**
+ * Revokes a consent by voice (`call`), text or dashboard (`web`), during its call or long after:
+ * the revocation is kept in the ConsentStore and written to the ledger as `consent.revoked`. A
+ * retry, or a second revocation, returns the first one and appends nothing twice. A text or a
+ * spoken answer that `isStopRequest` matches is the host's cue to call this.
+ */
+export async function revokeConsent(rt: EngineRuntime, input: { consentId: string; via: ConsentChannel }): Promise<ConsentRevocation> {
+  if (!isObject(input)) throw new EngineError("invalid_input", "consentId is empty");
+  // Read once: the id looked up and the channel checked are the ones the revocation records.
+  const { consentId, via } = input;
+  if (typeof consentId !== "string" || consentId === "") throw new EngineError("invalid_input", "consentId is empty");
+  if (!CHANNELS.includes(via)) throw new EngineError("invalid_input", "via must be call, text or web");
+  const store = consentStore(rt);
+  if (store === null) throw new EngineError("precondition_failed", "revoking a consent needs the consents adapter, which the engine does not have");
+  const stored = await store.getConsent(rt.workspaceId, consentId);
+  if (stored === null) throw new EngineError("invalid_input", "no such consent");
+  const consent = stored.consent;
+  if (consent.answer !== "yes") throw new EngineError("precondition_failed", "the answer was no: there is nothing to revoke");
+  // consent.revoked never precedes consent.recorded: the consent must be recorded on its call (not
+  // still being stored, nor settled as not recorded), and the call's pending ledger entries are
+  // appended first. A call record the host has since removed leaves only the store to go by.
+  const call = await rt.read(consent.callId).catch((error: unknown) => {
+    if (error instanceof EngineError && error.code === "unknown_call") return null;
+    throw error;
+  });
+  if (call !== null) {
+    if (!(call.modules[TRACE] as unknown as TraceSlice).consents.some((c) => c.consentId === consent.consentId)) {
+      throw new EngineError("precondition_failed", "the consent is not recorded on its call: there is nothing to revoke yet");
+    }
+    await rt.flushLedger(consent.callId);
+  }
+  const revoked = stored.revoked ?? (await store.revokeConsent(rt.workspaceId, { consentId: consent.consentId, via, at: rt.now() }));
+  // One entry per consent, however often it is revoked: the event id names the consent, and a
+  // ledger appends an id once, so a retry after a failed append completes it.
+  await rt.append({
+    eventId: JSON.stringify([rt.workspaceId, consent.callId, "consent.revoked", consent.consentId]),
+    callId: consent.callId,
+    actor: revoked.via === "web" ? "member" : "caller",
+    event: "consent.revoked",
+    at: revoked.at,
+    detail: { consentId: consent.consentId, purpose: consent.purpose, wordingVersion: consent.wordingVersion, via: revoked.via },
+  });
+  return structuredClone(revoked);
 }
 
 /** Whether a call ends with a receipt: its flow has a `trace.receipt` step, or it ran no flow and receipts are on. */
@@ -262,6 +375,7 @@ export async function issueReceipt(
   parts: Pick<ReceiptBody, "verification" | "records" | "payments" | "stepUp">,
 ): Promise<SignedReceipt> {
   const callId = record.state.callId;
+  const slice = record.modules[TRACE] as unknown as TraceSlice;
   const body: ReceiptBody = {
     v: 1,
     receiptId: rt.ids.next("rcpt"),
@@ -274,12 +388,10 @@ export async function issueReceipt(
     attestation: record.attestation ?? "none",
     records: parts.records,
     payments: parts.payments,
-    consents: (record.modules[TRACE] as unknown as TraceSlice).consents.map((c) => ({
-      purpose: c.purpose,
-      wordingVersion: c.wordingVersion,
-      wordingDigest: c.wordingDigest,
-      answer: c.answer,
-    })),
+    consents: [
+      ...slice.consents.map((c) => ({ purpose: c.purpose, wordingVersion: c.wordingVersion, wordingDigest: c.wordingDigest, answer: c.answer })),
+      ...slice.unrecorded.map((c) => ({ purpose: c.purpose, wordingVersion: c.wordingVersion, wordingDigest: c.wordingDigest, answer: "not_recorded" as const })),
+    ],
     ...(parts.stepUp === undefined || parts.stepUp.length === 0 ? {} : { stepUp: parts.stepUp }),
     ledger: head,
   };

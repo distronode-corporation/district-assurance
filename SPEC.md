@@ -115,7 +115,7 @@ factor the config in force names (in the policy or Badge's `factors`).
 | `badge` | `badge.verify` | | `records`; `counters` with any factor the caller enters (`keypad_knowledge`, `pin`, plug-ins); `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `messages`, `codes` with `text_code`; `dialer`, `counters` with `callback`; `pinVerifier` with `pin` in verifier mode; `duressNotifier` with `pin.duress` |
 | `dossier` | `dossier.collect` | `intake.file` | `records`; `fieldCipher` once a form has a sensitive field |
 | `paylink` | `paylink.request` | `payment.request` | `payments`, `messages`; `amounts` for a step with `amountRef` |
-| `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
+| `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false; `consents` (optional) to revoke consents (section 21) |
 | `gate` | `gate.grant` | `entry.open` | `access` (door controllers by name), `accessSigner` |
 
 Gate (section 17) is off in `defaultConfig()`: it needs doors in its settings and the two access
@@ -734,7 +734,8 @@ that name none and for payments outside a flow, 15 minutes and card, Apple Pay, 
 Link); Gate `{targets, maxGrantsPerCall?}` (section 17); step-up `{issuer, sites, maxTokensPerCall?}`
 (section 18); Trace `{receipts?, wordings?, businessName?}` (`receipts` default true; wordings
 `{purpose (snake_case), version, text: {en, fr, es?}}`, purposes unique, `en` and `fr` non-empty,
-`es` optional and non-empty when given, no other key in `text`; `businessName` 1 to 64 characters
+`es` optional and non-empty when given, no other key in `text`, no purpose or version that reads
+as a card number, since both go into the ledger; `businessName` 1 to 64 characters
 on one line, with no lone surrogate and no bidirectional embedding, override or isolate, kept by a
 call when it starts, like the wordings, so a flow with `textLink` cannot be attached to a call that
 kept none).
@@ -834,6 +835,8 @@ answer on file, a phone number, a link or card data.
 | `payment.refunded` | `paymentId`, `refundId`, `providerRef`, `amountMinor`, `currency`, `reason`, `status` (`pending`, `succeeded` or `failed`) |
 | `payment.disputed` | `paymentId`, `disputeId`, `status`, `amountMinor`, `currency` |
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
+| `consent.revoked` | `consentId`, `purpose`, `wordingVersion`, `via` (`call`, `text` or `web`) |
+| `consent.unrecorded` | `purpose` (a consent still being stored when the call ended: no consent) |
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
 | `access.issued` | `grantId`, `target`, `controller`, `scope`, `level`, `verificationGrantId`, `expiresAt` (section 17) |
@@ -860,7 +863,9 @@ surrogate) is refused before it is saved, so it can never block a call's ledger;
 a further write if nobody wrote since. A failed append leaves them pending, and the next write or
 `flushLedger(callId)` appends them. A ledger appends an `eventId` once (a second append returns the
 first entry), so nothing is lost or doubled. The listener is told after each append, at least once
-and best effort.
+and best effort. `consent.revoked` is the one entry written outside a call's write, since a consent
+can be revoked after its call: its `eventId` is `[workspaceId, callId, "consent.revoked",
+consentId]`, so a consent is revoked in the ledger once (section 17).
 
 ## 10. Audit ledger
 
@@ -924,8 +929,9 @@ lone surrogate in any string or key.
 A call gets a receipt when its flow has a `trace.receipt` step (wherever it is, and whether
 or not the flow finished), or, for a call that ran no flow, when Trace's `receipts` setting is not
 false. `endCall` returns it, or null. `verification` comes from Badge, `records` from Dossier,
-`payments` from Paylink and `consents` from Trace; a module that is off contributes an empty
-part. `verification.policyVersion` and `verification.configRevision` name the policy and the
+`payments` from Paylink and `consents` from Trace (`answer` is `yes`, `no`, or `not_recorded` for
+a consent still being stored when the call ended, section 21); a module that is off contributes an
+empty part. `verification.policyVersion` and `verification.configRevision` name the policy and the
 FlowConfig revision that judged the call's last finished verification (whatever level it reached);
 both are absent when no verification finished on the call. They are optional, so the format stays
 at `v: 1`, and a reader that does not know them still checks the signature over the whole body.
@@ -1939,3 +1945,47 @@ it, so no tail of it is ever submitted: with `maxDigits` 4, `123456#` submits no
 the same from the host's own timer and says whether it discarded anything; `clear()` discards the
 entry at once. A discarded entry never reaches the callback. `toString`, `toJSON` and
 `util.inspect` show no digit and not how many are buffered.
+
+## 21. Consent revocation
+
+A consent is revoked by voice, text or dashboard with `revokeConsent({consentId, via})`, where
+`via` is `call`, `text` or `web`, during its call or after it. It needs the host's `ConsentStore`
+(the `consents` adapter):
+
+- `putConsent(workspaceId, record)` keeps a `ConsentRecord`; idempotent by `consentId`.
+- `getConsent(workspaceId, consentId)` returns `{consent, revoked}` (`revoked` is null or the
+  revocation), or null.
+- `revokeConsent(workspaceId, {consentId, via, at})` keeps a revocation beside the consent; the
+  first one wins and is returned to every later call.
+
+`recordConsent` takes `answer` `yes` or `no` and `channel` `call`, `text` or `web` (default `call`)
+only: anything else is `invalid_input`, before anything is reserved, stored or ledgered.
+With the adapter, `recordConsent` reserves the consent on the call, writes it to the store and
+then records it (`consent.recorded`, and the flow step judged). If the store write fails the
+consent stays reserved: a consent with another purpose or answer is refused
+(`precondition_failed`), and the next `recordConsent` with the same purpose and answer resumes it
+with the same record. A store outage never keeps the call from ending: at `endCall` a consent
+still reserved settles as not recorded, which is no consent (fail closed). The ledger gets
+`consent.unrecorded` with the purpose only, before `call.ended`, and the receipt lists it with
+`answer: "not_recorded"`. A `recordConsent` still writing it when the call ended records nothing
+and throws `precondition_failed`; one after the end is refused (`invalid_transition`). Without the adapter, consents live on the call record only and
+`revokeConsent` is refused (`precondition_failed`).
+
+`revokeConsent` refuses an empty id or an unknown `via` (`invalid_input`), a consent the store does
+not have for this workspace (`invalid_input`), a consent answered "no", and a consent that is not
+recorded on its call, still being stored or settled as not recorded (`precondition_failed`). So
+that `consent.revoked` never precedes `consent.recorded`, it appends the call's pending ledger
+entries first; when the host has removed the call record, the store alone decides. Otherwise it
+stores the revocation, appends `consent.revoked` (actor `member` for `web`, else
+`caller`) at the revocation's time, tells the listener, and returns the revocation. A second
+revocation, or a retry after the ledger failed, returns the first one and completes its entry
+without writing a second. Revoking does not change the call record or a receipt already signed:
+the receipt proves what was answered then, and the ledger proves the revocation.
+
+`isStopRequest(text)` is true when a text or a spoken answer, apart from spaces and a closing `.`
+or `!`, is one of the standard carrier opt-out words STOP, STOPALL, UNSUBSCRIBE, CANCEL, END and
+QUIT, or the French ARRÊT, ARRÊTE, ARRÊTER, in any case, with or without accents. A word inside a
+longer message ("don't stop", "cancel my order") is not a match, and a value that is not a string
+is false. A host may treat more words as a stop on its own. The host decides which consents a
+match revokes (for example every consent texted to that number) and calls `revokeConsent` for
+each.

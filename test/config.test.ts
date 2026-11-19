@@ -392,6 +392,7 @@ describe("validateConfig: modules", () => {
           { purpose: "b", version: "1", text: { en: "x", fr: "y", es: " " } },
           { purpose: "c", version: "1", text: { en: "x", fr: "y", es: 1, de: "z" } },
           { purpose: "d", version: "1", text: { en: "x", fr: "y", es: "z" } },
+          { purpose: "b", version: "4111 1111 1111 1111", text: { en: "x", fr: "y" } },
         ],
       }),
       [
@@ -403,6 +404,7 @@ describe("validateConfig: modules", () => {
         "modules.trace.settings: wordings[4]: the Spanish text (es), when given, must not be empty",
         "modules.trace.settings: wordings[5]: the Spanish text (es), when given, must not be empty",
         "modules.trace.settings: wordings[5]: de is not a locale (en, fr or es)",
+        "modules.trace.settings: wordings[7]: purpose and version must not look like a card number",
         "modules.trace.settings: two wordings have the same purpose",
       ],
     );
