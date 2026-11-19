@@ -87,7 +87,7 @@ describe("exportSubject", () => {
     ], "this workspace's entries only");
     const all = await t.ledger.list();
     for (const e of body.ledgerEntries) assert.equal(all.find((a) => a.seq === e.seq)!.hash, e.hash);
-    assert.deepEqual(body.heldByHost.map((h) => h.what), ["subject record"]);
+    assert.deepEqual(body.heldByHost.map((h) => h.what), ["subject record", "PIN in the host's PIN store"]);
     assert.deepEqual(body.kept.map((k) => k.what), ["ledger entries", "receipts", "call records", "consents", "repair records"]);
     assert.match(body.kept[0]!.reason, /append-only/);
     assert.match(body.kept[0]!.reason, /unkeyed SHA-256 of a short value can be confirmed/);
@@ -370,5 +370,6 @@ describe("eraseSubject", () => {
   it("deleting a PIN digest of an unknown subject does nothing", async () => {
     const t = setup();
     await t.records.deletePinDigest("ws_test", "b".repeat(64));
-    assert.equal(await t.records.getSubject("ws_test", "b".repeat(64)), null);  });
+    assert.equal(await t.records.getSubject("ws_test", "b".repeat(64)), null);
+  });
 });

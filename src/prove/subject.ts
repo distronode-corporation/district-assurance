@@ -108,6 +108,11 @@ const HELD_BY_HOST: readonly KeptItem[] = [
     reason:
       "The subject record (the number on file and the keyed digests of the values on file) is the host's data, read through its RecordStore; the host answers for it. An erase removes only its PIN digest.",
   },
+  {
+    what: "PIN in the host's PIN store",
+    reason:
+      "With the PIN factor in verifier mode, the PIN stays in the host's own PIN store, which the engine never reads: pinDigestOnFile says nothing about it, and an erase cannot delete it.",
+  },
 ];
 
 const LIMITS: readonly string[] = [

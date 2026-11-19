@@ -450,7 +450,8 @@ back.
   once it exists.
 - `ledgerEntries` are this workspace's entries (by the workspace in their `eventId`) whose
   `detail.recordId`, `detail.consentId` or `detail.receiptId` names one of the above: ids only.
-- `heldByHost` lists the subject record, which is the host's data. `kept` lists, with the reason,
+- `heldByHost` lists the subject record, which is the host's data, and a PIN in the host's own
+  PIN store (`verifier` mode), which the engine never reads or deletes. `kept` lists, with the reason,
   what an erase keeps: ledger entries and receipts (append-only and signed; they hold ids and
   digests, kept as integrity records for the retention period; an unkeyed SHA-256 of a short value
   can be confirmed by guessing), call records and consents, then each `{what, reason}` the business
