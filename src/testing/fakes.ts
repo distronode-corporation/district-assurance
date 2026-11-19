@@ -5,6 +5,7 @@ import { generateKeyPairSync } from "node:crypto";
 import type {
   AttemptCounterKey,
   AttemptCounters,
+  CallbackDialer,
   CarrierSignals,
   CodeSendKey,
   CodeStore,
@@ -24,6 +25,7 @@ import type {
 } from "../core/adapters.ts";
 import type { Clock, IdGenerator } from "../core/clock.ts";
 import type { CarrierSignalReport } from "../core/policy.ts";
+import type { Locale } from "../core/runtime.ts";
 import type { AccessController, SignedAccessGrant, UnlockResult } from "../gate/access.ts";
 import { keyPairSigner } from "../prove/receipt.ts";
 import { knowledgeDigest, pinDigest, subjectKeyFor, type KnowledgeKeyBytes } from "../verify/knowledge.ts";
@@ -89,6 +91,24 @@ export class FakeCarrierSignals implements CarrierSignals {
   async check(input: { phoneNumber: string }): Promise<CarrierSignalReport> {
     this.checked.push(input.phoneNumber);
     return structuredClone(this.#byNumber.get(input.phoneNumber) ?? this.#fallback);
+  }
+}
+
+/**
+ * Rings nothing: records each callback and hands out one reference per idempotency key, like a
+ * dialer that honours idempotency keys. The test reports the outcome with `applyCallbackOutcome`.
+ */
+export class FakeCallbackDialer implements CallbackDialer {
+  readonly dialed: Array<{ callId: string; to: string; locale: Locale; ref: string }> = [];
+  readonly #byKey = new Map<string, string>();
+
+  async dial(input: { callId: string; to: string; locale: Locale; idempotencyKey: string }): Promise<{ ref: string }> {
+    const existing = this.#byKey.get(input.idempotencyKey);
+    if (existing !== undefined) return { ref: existing };
+    const ref = `cb_fake_${this.dialed.length + 1}`;
+    this.#byKey.set(input.idempotencyKey, ref);
+    this.dialed.push({ callId: input.callId, to: input.to, locale: input.locale, ref });
+    return { ref };
   }
 }
 

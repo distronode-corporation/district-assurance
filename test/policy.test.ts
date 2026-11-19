@@ -41,7 +41,7 @@ describe("validatePolicy", () => {
     assert.deepEqual(errors, [
       "level 4 is not 1, 2 or 3",
       "level 4 set [keypad_knowledge]: level 2 and above need two different factors",
-      "level 4 set [keypad_knowledge]: level 2 and above need a factor that is not something the caller knows (text_code, carrier_identity_match, photo_id)",
+      "level 4 set [keypad_knowledge]: level 2 and above need a factor that is not something the caller knows (text_code, carrier_identity_match, photo_id, callback)",
       "level 1 is defined twice",
       "level 1 has no factor sets",
       "level 2 has an empty factor set",
@@ -59,11 +59,11 @@ describe("validatePolicy", () => {
       }),
     );
     assert.deepEqual(errors, [
-      "level 1 set [text_code]: a texted code is never a factor on its own",
+      "level 1 set [text_code]: possession of the number on file (text_code, callback) is never a factor on its own",
       "level 1 set [caller_id]: unknown factor caller_id",
       "level 2 set [keypad_knowledge, keypad_knowledge]: a factor is repeated",
       "level 2 set [keypad_knowledge, keypad_knowledge]: level 2 and above need two different factors",
-      "level 2 set [keypad_knowledge, keypad_knowledge]: level 2 and above need a factor that is not something the caller knows (text_code, carrier_identity_match, photo_id)",
+      "level 2 set [keypad_knowledge, keypad_knowledge]: level 2 and above need a factor that is not something the caller knows (text_code, carrier_identity_match, photo_id, callback)",
       "level 2 set [photo_id]: level 2 and above need two different factors",
       "level 3 set [keypad_knowledge, text_code]: level 3 needs photo_id",
     ]);
@@ -95,7 +95,7 @@ describe("validatePolicy", () => {
 describe("validatePolicy: the review's hostile cases", () => {
   it("refuses level 2 from two things the caller knows (keypad and PIN)", () => {
     assert.deepEqual(validatePolicy(policy({ levels: [{ level: 1, anyOf: [["keypad_knowledge"]] }, { level: 2, anyOf: [["keypad_knowledge", "pin"]] }] })), [
-      "level 2 set [keypad_knowledge, pin]: level 2 and above need a factor that is not something the caller knows (text_code, carrier_identity_match, photo_id)",
+      "level 2 set [keypad_knowledge, pin]: level 2 and above need a factor that is not something the caller knows (text_code, carrier_identity_match, photo_id, callback)",
     ]);
   });
 
@@ -120,6 +120,16 @@ describe("validatePolicy: the review's hostile cases", () => {
     assert.deepEqual(validatePolicy(policy({ scopeClasses: { x: "cash" } as never })), ["scopeClasses.x must be money, contact, access or none"]);
   });
 
+  it("refuses a callback alone, or with only a texted code, and holds level 3 to photo ID (VER-9)", () => {
+    const levels = (anyOf: FactorKind[][], level: 1 | 2 | 3 = 1) => policy({ levels: [{ level, anyOf }] });
+    assert.deepEqual(validatePolicy(levels([["callback"]])), ["level 1 set [callback]: possession of the number on file (text_code, callback) is never a factor on its own"]);
+    assert.deepEqual(validatePolicy(levels([["callback", "text_code"]], 2)), [
+      "level 2 set [callback, text_code]: possession of the number on file (text_code, callback) is never a factor on its own",
+    ]);
+    assert.deepEqual(validatePolicy(levels([["pin", "callback"]], 3)), ["level 3 set [pin, callback]: level 3 needs photo_id"]);
+    assert.deepEqual(validatePolicy(levels([["pin", "callback"], ["keypad_knowledge", "callback"]], 2)), [], "possession plus knowledge is level 2");
+  });
+
   it("caps keypad attempts like the PIN", () => {
     assert.deepEqual(validatePolicy(policy({ maxKeypadAttemptsPerCall: 1_000_000 })), ["maxKeypadAttemptsPerCall must be an integer from 1 to 5"]);
     assert.deepEqual(validatePolicy(policy({ maxKeypadAttemptsPerCall: 5 })), []);
@@ -134,7 +144,7 @@ describe("validatePolicy: the review's hostile cases", () => {
         "levels[0] must be { level, anyOf: [[factor, ...], ...] }",
         "levels[1] must be { level, anyOf: [[factor, ...], ...] }",
         "level 2 set [pin]: level 2 and above need two different factors",
-        "level 2 set [pin]: level 2 and above need a factor that is not something the caller knows (text_code, carrier_identity_match, photo_id)",
+        "level 2 set [pin]: level 2 and above need a factor that is not something the caller knows (text_code, carrier_identity_match, photo_id, callback)",
         "scope payment.request is money, and below its floor of level 2",
         "keypadFields must be a list of field names",
         "maxKeypadAttemptsPerCall must be an integer from 1 to 5",
@@ -199,6 +209,18 @@ describe("evaluateAssurance", () => {
   it("does not count a texted code the carrier signals discredit", () => {
     const result = evaluateAssurance(p, pass("keypad_knowledge", "text_code"), { ...clean, lastSimSwapHoursAgo: 2 });
     assert.deepEqual(result, { level: 1, counted: ["keypad_knowledge"], discounted: [{ kind: "text_code", reason: "carrier_signal" }] });
+  });
+
+  it("does not count a callback the carrier signals discredit, like a texted code (VER-9)", () => {
+    const withCallback = policy({ levels: [...p.levels, { level: 2, anyOf: [["pin", "callback"]] }] });
+    assert.equal(evaluateAssurance(withCallback, pass("pin", "callback"), clean).level, 2);
+    for (const report of [{ ...clean, lastSimSwapHoursAgo: 2 }, { ...clean, lastPortHoursAgo: 72 }, { ...clean, checked: false }, null]) {
+      assert.deepEqual(evaluateAssurance(withCallback, pass("pin", "callback"), report), { level: 0, counted: ["pin"], discounted: [{ kind: "callback", reason: "carrier_signal" }] });
+    }
+    const both = evaluateAssurance(withCallback, pass("keypad_knowledge", "text_code", "callback"), { ...clean, lastPortHoursAgo: 1 });
+    assert.deepEqual(both.discounted.map((d) => d.kind), ["text_code", "callback"]);
+    assert.equal(both.level, 1);
+    assert.equal(evaluateAssurance({ ...withCallback, trustTextCodeWithoutCarrierCheck: true }, pass("pin", "callback"), null).level, 2, "only when the policy opts in");
   });
 
   it("ignores rule order", () => {

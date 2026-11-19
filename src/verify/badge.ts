@@ -94,12 +94,41 @@ export interface BadgeSlice {
    * call to `submitFactor` or the call's next. Absent when nothing is owed.
    */
   forgetOwed?: { keys: AttemptCounterKey[]; at: string };
+  /** The callback this call asked for, or the one it is (callback.ts). */
+  callback: CallbackState;
 }
 
 /** Which policy and which FlowConfig revision judged a verification. */
 export interface JudgedBy {
   policyVersion: string;
   configRevision: string;
+}
+
+/** A call's part in a callback (VER-9). One per call. */
+export interface CallbackState {
+  /**
+   * On the call that asks: `none`, `requested` while it is decided, then `placed` or `refused`.
+   * On the callback call: `dialing`, `dialed` once the dialer's reference is kept, then `passed` or
+   * `failed`; `void` if untrusted content entered it or its subject changed before the outcome.
+   */
+  status: "none" | "requested" | "placed" | "refused" | "dialing" | "dialed" | "passed" | "failed" | "void";
+  /** The other call: the callback call, on the call that asked; the call that asked, on the callback call. */
+  callId: string | null;
+  /** The dialer's reference, on the callback call. */
+  ref: string | null;
+  /** The counters a failed callback stays counted under, and a pass forgets. */
+  keys: AttemptCounterKey[];
+  /** The hard lock this callback's failure starts, written to the ledger if it fails. */
+  lock: Lock | null;
+  /** The subject the callback is for, kept from the request, so a restart for another subject cannot take it over. */
+  subjectKey: string | null;
+  subject: SubjectRecord | null;
+  /** On the call that asks: its verification (`BadgeSlice.epoch`) when it asked. */
+  epoch: number | null;
+  /** ISO 8601. When the callback is counted, toward the daily limit and as a failure. A resumed request counts at the same time, and a pass forgets that failure. */
+  at: string | null;
+  /** On a passed callback call: its failure is still to be forgotten. A replayed outcome retries that. */
+  forgetPending: boolean;
 }
 
 export interface KeypadResult {
@@ -258,6 +287,7 @@ export class BadgeModule implements AssuranceModule {
       lastLevel: 0,
       lastMethods: [],
       lastJudgedBy: null,
+      callback: { status: "none", callId: null, ref: null, keys: [], lock: null, subjectKey: null, subject: null, epoch: null, at: null, forgetPending: false },
     };
     return initial as unknown as JsonValue;
   }
@@ -273,11 +303,11 @@ export class BadgeModule implements AssuranceModule {
   }
 
   onUntrusted(s: JsonValue): JsonValue {
-    // A photo ID link sent before the taint no longer counts. One link per call still holds.
+    // A photo ID link sent before the taint no longer counts, nor does a callback still ringing. One link per call still holds.
     // The verification open now (or the last one) is void: it never grants a level. The next
     // beginVerification bumps the epoch, so a new verification counts as usual.
     const badge = s as unknown as BadgeSlice;
-    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink), voidedEpoch: badge.epoch } as unknown as JsonValue;
+    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink), callback: voidedCallback(badge.callback), voidedEpoch: badge.epoch } as unknown as JsonValue;
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
@@ -302,6 +332,11 @@ function voided(link: BadgeSlice["identityLink"]): BadgeSlice["identityLink"] {
   return link === "reserved" || link === "sent" ? "void" : link;
 }
 
+/** A callback whose outcome has not arrived, or whose request is still being decided, can no longer count: it is void. */
+function voidedCallback(callback: CallbackState): CallbackState {
+  return callback.status === "requested" || callback.status === "dialing" || callback.status === "dialed" ? { ...callback, status: "void" } : callback;
+}
+
 /** Refuses to apply a result judged for an earlier verification of this call. */
 function assertSameVerification(s: BadgeSlice, epoch: number): void {
   if (s.epoch !== epoch) throw new EngineError("precondition_failed", "verification restarted while this result was on its way; it does not count");
@@ -320,7 +355,7 @@ function pinSettingsErrors(pin: unknown): string[] {
 // ---- runtime -------------------------------------------------------------------------------
 
 /** Refuses a factor that is off, or that the current flow step does not allow. */
-function allowFactor(rt: EngineRuntime, record: CallRecord, kind: string): void {
+export function allowFactor(rt: EngineRuntime, record: CallRecord, kind: string): void {
   const settings = rt.settings<BadgeSettings>(BADGE);
   if (!settings.factors.includes(kind)) throw new EngineError("precondition_failed", `the ${kind} factor is turned off`);
   const step = stepOfType<BadgeVerifyStep>(record, "badge.verify");
@@ -370,6 +405,7 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
       // Another subject: nothing collected for the previous one can count for this one.
       s.identitySessions = [];
       s.identityLink = voided(s.identityLink);
+      s.callback = voidedCallback(s.callback);
     }
     if (draft.record.state.factors.length === 0) {
       s.knowledgeMatched = false;

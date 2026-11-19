@@ -137,22 +137,37 @@ export async function currentLock(counters: AttemptCounters, lockout: Lockout, k
  * another attempt put in place since the counters were read (this one must not be judged); no
  * counter after it is recorded, so two racing attempts do not also lock each other out on the
  * next counter. `hard` is the hard lock this failure starts if the entry fails.
+ *
+ * With `resume`, this is a retry of an attempt counted at `now` that may have failed part way: a
+ * counter that already holds a failure at `now` is taken as this attempt's, and not counted again.
  */
 export async function recordFailures(
   counters: AttemptCounters,
   lockout: Lockout,
   keys: readonly AttemptCounterKey[],
   now: Date,
+  resume = false,
 ): Promise<{ raced: Lock | null; hard: Lock | null }> {
   let hard: Lock | null = null;
+  const at = now.toISOString();
+  const since = windowStart(lockout, now);
   for (const key of keys) {
-    const failures = await counters.recordFailure(key, now.toISOString(), windowStart(lockout, now));
+    const failures = (resume ? recordedAt(await counters.get(key, since), at) : null) ?? (await counters.recordFailure(key, at, since));
     const before = lockState(lockout, failures.slice(0, -1), now);
     if (before !== null) return { raced: { scope: key.scope, ...before }, hard: null };
     const after = lockState(lockout, failures, now);
     if (hard === null && after?.hard === true) hard = { scope: key.scope, ...after };
   }
   return { raced: null, hard };
+}
+
+/**
+ * The failures as `recordFailure` returned them when the one at `at` was recorded: up to and
+ * including it, in the order they were recorded. Null when none was recorded at `at`.
+ */
+export function recordedAt(failures: readonly string[], at: string): string[] | null {
+  const own = failures.lastIndexOf(at);
+  return own === -1 ? null : failures.slice(0, own + 1);
 }
 
 /**

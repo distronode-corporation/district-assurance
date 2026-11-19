@@ -6,6 +6,7 @@ import type {
   AmountSource,
   AttemptCounters,
   AuditLedger,
+  CallbackDialer,
   CarrierSignals,
   IdentityProvider,
   MessageSender,
@@ -61,6 +62,8 @@ export interface EngineAdapters {
   stepUpSigner?: ReceiptSigner;
   /** Failures across calls, shared by every engine of the workspace. Badge needs it when a factor the caller enters is on; a PIN reset clears the subject's PIN counters. */
   counters?: AttemptCounters;
+  /** Places callbacks to the number on file. Badge needs it when the `callback` factor is on. */
+  dialer?: CallbackDialer;
 }
 
 export type AdapterName = keyof EngineAdapters;

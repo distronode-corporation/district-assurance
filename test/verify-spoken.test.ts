@@ -124,8 +124,8 @@ describe("the policy's spoken fields", () => {
     assert.deepEqual(validatePolicy(policy({ levels: [{ level: 2, anyOf: [["spoken_knowledge", "carrier_identity_match"]] }] })), []);
     assert.deepEqual(validatePolicy(policy({ levels: [{ level: 2, anyOf: [["spoken_knowledge"], ["spoken_knowledge", "keypad_knowledge"]] }] })), [
       "level 2 set [spoken_knowledge]: level 2 and above need two different factors",
-      "level 2 set [spoken_knowledge]: level 2 and above need a factor that is not something the caller knows (text_code, carrier_identity_match, photo_id)",
-      "level 2 set [spoken_knowledge, keypad_knowledge]: level 2 and above need a factor that is not something the caller knows (text_code, carrier_identity_match, photo_id)",
+      "level 2 set [spoken_knowledge]: level 2 and above need a factor that is not something the caller knows (text_code, carrier_identity_match, photo_id, callback)",
+      "level 2 set [spoken_knowledge, keypad_knowledge]: level 2 and above need a factor that is not something the caller knows (text_code, carrier_identity_match, photo_id, callback)",
     ]);
     assert.deepEqual(validatePolicy(policy({ levels: [{ level: 3, anyOf: [["spoken_knowledge", "photo_id"]] }] })), []);
   });

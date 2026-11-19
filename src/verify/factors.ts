@@ -71,12 +71,16 @@ export const BUILT_IN_FACTORS: Readonly<Record<(typeof FACTOR_KINDS)[number], { 
   carrier_identity_match: { entered: false, adapters: ["carrier"] },
   photo_id: { entered: false, adapters: ["identity", "messages"] },
   text_code: { entered: false, adapters: ["messages"], planned: "VER-2" },
+  // Built in, not a plug-in: a plug-in is entered by the caller and counts as knowledge. Failed
+  // callbacks and the daily limit are counted across calls.
+  callback: { entered: false, adapters: ["dialer", "counters"] },
   spoken_knowledge: { entered: true, adapters: [] },
 };
 
 /**
- * Factors whose match lets the engine text the number on file (a link only goes out after one). A
- * spoken answer does not: speech-to-text hears it, and a postal code is known to more people.
+ * Factors whose match lets the engine text or call back the number on file (a link or a callback
+ * only goes out after one). A spoken answer does not: speech-to-text hears it, and a postal code is
+ * known to more people.
  */
 export const KNOWLEDGE_FACTORS: readonly string[] = ["keypad_knowledge", "pin"];
 

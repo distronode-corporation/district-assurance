@@ -37,6 +37,8 @@ import { detailCarriesCardNumber } from "./prove/ledger.ts";
 import { receiptKeySet, type ReceiptBody, type SignedReceipt } from "./prove/receipt.ts";
 import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
+import * as callback from "./verify/callback.ts";
+import type { CallbackOutcome } from "./verify/callback.ts";
 import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
 import { knowledgeHmac, type KnowledgeHmac, type KnowledgeKey } from "./verify/knowledge.ts";
 import * as pin from "./verify/pin.ts";
@@ -247,6 +249,18 @@ export class Engine {
     if (locale !== undefined && !isSupportedLocale(locale)) throw new EngineError("invalid_input", `locale must be one of ${SUPPORTED_LOCALES.join(", ")}`);
     if (flow !== undefined && typeof flow !== "string") throw new EngineError("invalid_input", "flow must name a flow");
     const callId = (givenId as string | undefined) ?? this.#ids.next("call");
+    const flowName = flow as string | undefined;
+    const attached = flowName === undefined ? null : { name: flowName, steps: this.#flowDefinition(flowName).steps, revision: this.#config.revision };
+    const created = await this.#create(callId, (locale as Locale | undefined) ?? "en", this.#config.revision, attached, () => undefined);
+    if (!created) throw new EngineError("invalid_input", "a call with that id exists");
+    return this.state(callId);
+  }
+
+  /**
+   * Creates a call at version 1, with its flow attached and `then` applied in the same write, so no
+   * other process can change it in between. False, and nothing written, when the id exists.
+   */
+  async #create(callId: string, locale: Locale, revision: string, flow: { name: string; steps: FlowStep[]; revision: string } | null, then: (draft: CallDraft) => void): Promise<boolean> {
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
       const name = module.manifest.name;
@@ -255,25 +269,21 @@ export class Engine {
     const record: CallRecord = {
       v: 1,
       state: newSession(callId, this.workspaceId, this.#now()),
-      locale: (locale as Locale | undefined) ?? "en",
-      revision: this.#config.revision,
+      locale,
+      revision,
       flow: null,
       modules,
       outbox: [],
     };
-    // A call started with a flow is created with it attached, so no other process can start a
-    // different flow on the same id in between.
     const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
-    if (flow !== undefined) {
-      const draft = this.#draft(record, events);
-      this.#attachFlow(draft, flow as string, this.#flowDefinition(flow as string), this.#config.revision);
-      this.#advance(draft);
-    }
+    const draft = this.#draft(record, events);
+    if (flow !== null) this.#attachFlow(draft, flow.name, { steps: flow.steps }, flow.revision);
+    then(draft);
+    this.#advance(draft);
     record.outbox = events.map((event, i) => ({ eventId: this.#eventId(callId, 1, i), ...event }));
     const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
-    if (!created) throw new EngineError("invalid_input", "a call with that id exists");
-    await this.#flush(callId, 1, record);
-    return this.state(callId);
+    if (created) await this.#flush(callId, 1, record);
+    return created;
   }
 
   async state(callId: string): Promise<SessionState> {
@@ -341,7 +351,7 @@ export class Engine {
     return (await this.flowPosition(callId))!;
   }
 
-  #attachFlow(draft: CallDraft, name: string, definition: FlowConfig["flows"][string], revision: string): void {
+  #attachFlow(draft: CallDraft, name: string, definition: Pick<FlowConfig["flows"][string], "steps">, revision: string): void {
     {
       const record = draft.record;
       if (record.flow !== null) throw new EngineError("precondition_failed", "this call already ran a flow");
@@ -425,6 +435,43 @@ export class Engine {
 
   applyIdentityOutcome(outcome: IdentityOutcome): Promise<badge.OutcomeResult> {
     return badge.applyIdentityOutcome(this.#rt, outcome);
+  }
+
+  /**
+   * Asks for a callback to the number on file (VER-9) and ends this call, which never gains a
+   * level from it. When the request is allowed, the engine creates the callback call for the
+   * subject this call matched, in verification, and has the `dialer` ring the number on file; the
+   * dialer's outcome arrives at `applyCallbackOutcome`. A refused request (no keypad or PIN match,
+   * no number on file, a lock, the daily limit) returns the same, so the caller hears the same.
+   * Calling it again after a failure resumes a placed callback without ringing twice.
+   */
+  async requestCallback(callId: string): Promise<void> {
+    const plan = await callback.requestCallback(this.#rt, callId);
+    const first = await this.#read(callId);
+    if (first.state.phase !== "ended") {
+      try {
+        await this.endCall(callId);
+      } catch (e) {
+        // Two requests at once both reach here: the one that ended the call second is not an error.
+        if (!(e instanceof EngineError && e.code === "invalid_transition" && (await this.#read(callId)).state.phase === "ended")) throw e;
+      }
+    }
+    if (plan === null) return;
+    const flow = first.flow === null ? null : { name: first.flow.name, steps: first.flow.steps, revision: first.flow.revision };
+    // Already created when this resumes: then only the dial is retried.
+    await this.#create(plan.callbackCallId, first.locale, first.revision, flow, (draft) => callback.beginCallbackCall(draft, plan, callId));
+    try {
+      await callback.dialCallback(this.#rt, plan.callbackCallId);
+    } catch {
+      // A dial that failed answers as a refusal does, so the result never says whether the subject
+      // has a number on file. The callback stays dialing, never passed (fail closed); requesting
+      // again resumes it, and the dialer, the host's own adapter, reports its failure to the host.
+    }
+  }
+
+  /** The dialer's outcome for a callback. Unknown, late, repeated or voided outcomes are ignored. */
+  applyCallbackOutcome(outcome: CallbackOutcome): Promise<badge.OutcomeResult> {
+    return callback.applyCallbackOutcome(this.#rt, outcome);
   }
 
   finishVerification(callId: string): Promise<badge.VerificationResult> {

@@ -21,6 +21,11 @@ export const FACTOR_KINDS = [
   "pin",
   /** A government photo ID plus a selfie, checked by an identity provider through a texted link. */
   "photo_id",
+  /**
+   * The business calls back the number on file and the person who answers keys a confirmation. It
+   * proves possession of that line, like a texted code, and is recorded on the callback call only.
+   */
+  "callback",
 ] as const;
 
 export type BuiltInFactorKind = (typeof FACTOR_KINDS)[number];
@@ -114,7 +119,14 @@ export const SCOPE_PREFIX_CLASSES: ReadonlyArray<readonly [prefix: string, cls: 
 ];
 
 /** Factors that are not something the caller knows. Level 2 and above need one of them. */
-export const NON_KNOWLEDGE_FACTORS: readonly string[] = ["text_code", "carrier_identity_match", "photo_id"];
+export const NON_KNOWLEDGE_FACTORS: readonly string[] = ["text_code", "carrier_identity_match", "photo_id", "callback"];
+
+/**
+ * Factors that prove possession of the number on file, and share its weaknesses (a SIM swap, a
+ * port-out, call forwarding, someone else answering). Never a set on their own, and discounted by
+ * the carrier rule (`textCodeTrusted`).
+ */
+export const NUMBER_POSSESSION_FACTORS: readonly string[] = ["text_code", "callback"];
 
 /** The policy's limit on keypad attempts per call, like the PIN's. */
 export const MAX_KEYPAD_ATTEMPTS = 5;
@@ -248,7 +260,9 @@ function checkFactorSet(level: number, set: string[], knownFactors: readonly str
   if (level >= 2 && !set.some((kind) => NON_KNOWLEDGE_FACTORS.includes(kind))) {
     errors.push(`${label}: level 2 and above need a factor that is not something the caller knows (${NON_KNOWLEDGE_FACTORS.join(", ")})`);
   }
-  if (set.length === 1 && set[0] === "text_code") errors.push(`${label}: a texted code is never a factor on its own`);
+  if (set.every((kind) => NUMBER_POSSESSION_FACTORS.includes(kind))) {
+    errors.push(`${label}: possession of the number on file (${NUMBER_POSSESSION_FACTORS.join(", ")}) is never a factor on its own`);
+  }
   // A spoken answer counts on its own only at level 1: above it, the rules before this one need a
   // second factor, and one that is not something the caller knows.
   if (set.includes("spoken_knowledge") && !hasSpoken) errors.push(`${label}: spoken_knowledge needs the policy's spoken fields`);
@@ -282,7 +296,11 @@ export function scopeFloor(scope: string): AssuranceLevel {
   return cls === null ? 0 : CLASS_FLOORS[cls];
 }
 
-/** Whether a texted code can be trusted, given what the carrier said about the number on file. */
+/**
+ * Whether possession of the number on file (a texted code, a callback) can be trusted, given what
+ * the carrier said about that number: not after a SIM change or a port inside the window, and not
+ * without an answer unless the policy says so.
+ */
 export function textCodeTrusted(policy: VerificationPolicy, report: CarrierSignalReport | null): boolean {
   if (report === null || !report.checked) return policy.trustTextCodeWithoutCarrierCheck;
   const recent = (hours: number | null) => hours !== null && hours <= policy.simSwapWindowHours;
@@ -305,9 +323,12 @@ export function evaluateAssurance(
 ): AssuranceResult {
   const passed = new Set(factors.filter((f) => f.passed).map((f) => f.kind));
   const discounted: AssuranceResult["discounted"] = [];
-  if (passed.has("text_code") && !textCodeTrusted(policy, carrier)) {
-    passed.delete("text_code");
-    discounted.push({ kind: "text_code", reason: "carrier_signal" });
+  const trusted = textCodeTrusted(policy, carrier);
+  for (const kind of NUMBER_POSSESSION_FACTORS) {
+    if (passed.has(kind) && !trusted) {
+      passed.delete(kind);
+      discounted.push({ kind, reason: "carrier_signal" });
+    }
   }
   let level: AssuranceLevel = 0;
   for (const rule of policy.levels) {

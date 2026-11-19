@@ -6,6 +6,7 @@ import { createEngine, type Engine, type EngineOptions } from "../engine.ts";
 import { MemoryAuditLedger } from "../prove/ledger.ts";
 import {
   FakeAccessController,
+  FakeCallbackDialer,
   FakeCarrierSignals,
   FakeIdentityProvider,
   FakeMessageSender,
@@ -41,6 +42,7 @@ export interface TestEngine {
    */
   door: FakeAccessController;
   counters: AttemptCounters;
+  dialer: FakeCallbackDialer;
 }
 
 export type TestEngineOptions = Partial<Omit<EngineOptions, "adapters">> & {
@@ -66,6 +68,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     pinVerifier: new FakePinVerifier(),
     door: new FakeAccessController(),
     counters: new MemoryAttemptCounters() as AttemptCounters,
+    dialer: new FakeCallbackDialer(),
   };
   const { adapters: overrides = {}, ...rest } = options;
   const adapters = {
@@ -78,6 +81,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     sessions: parts.sessions,
     pinVerifier: parts.pinVerifier,
     counters: parts.counters,
+    dialer: parts.dialer,
     signer: generateTestSigner(),
     access: { door: parts.door },
     accessSigner: generateTestSigner("test-access-key-1"),
