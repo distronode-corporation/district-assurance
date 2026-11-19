@@ -106,8 +106,10 @@ as its own adapter.
 
 How the answers are read:
 
-- **SIM swap:** hours since `last_sim_swap_date`; else 0 when `swapped_in_period` is true; else,
-  when it is false, the length of `swapped_period` (an ISO 8601 duration) as a lower bound.
+- **SIM swap:** hours since `last_sim_swap_date` (an ISO 8601 time only; anything else is no
+  date), but when `swapped_in_period` is true never older than `swapped_period`, and 0 without a
+  date that fits it; else, when it is false, the length of `swapped_period` (an ISO 8601 duration,
+  refused when too long to be a number) as a lower bound.
   `swapped_period` is the window Twilio looked at, not the age of a change, so it is never read as
   one when the change fell inside it. Anything else is no answer.
 - **Identity match:** `match` when `summary_score` is at least `identityMinScore` (1 to 100, 80

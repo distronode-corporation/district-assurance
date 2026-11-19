@@ -93,6 +93,8 @@ type Fetched = { ok: true; body: Json } | { ok: false; failure: Omit<CarrierLook
 const UNCHECKED: CarrierSignalReport = { checked: false, simSwapChecked: false, lastSimSwapHoursAgo: null, lastPortHoursAgo: null, identityMatch: "unavailable" };
 const E164 = /^\+[1-9]\d{6,14}$/;
 const HOUR_MS = 3_600_000;
+/** A date and time with a zone, as Twilio writes `last_sim_swap_date`. */
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
 const DEFAULT_TIMEOUT_MS = 3000;
 const MAX_TIMEOUT_MS = 60_000;
 
@@ -114,7 +116,9 @@ export function durationHours(value: string): number | null {
   if (m === null || value === "P" || value.endsWith("T")) return null;
   const [, d, h, min, s] = m;
   const hours = Number(d ?? 0) * 24 + Number(h ?? 0) + Number(min ?? 0) / 60 + Number(s ?? 0) / 3600;
-  return Math.floor(hours);
+  // A period too long for a number (hundreds of digits) is not an answer: Infinity hours would
+  // trust a texted code on a SIM swap of any age.
+  return Number.isFinite(hours) ? Math.floor(hours) : null;
 }
 
 function countryList(raw: string | undefined, fallback: readonly string[]): string[] {
@@ -286,8 +290,9 @@ export class TwilioLookupSignals extends LookupAdapter {
   }
 
   /**
-   * Hours since the last SIM change: from its date; else 0 when Twilio says it changed within the
-   * period it looked at; else, when Twilio says it did not, the length of that period as a lower
+   * Hours since the last SIM change: from its date (ISO 8601 only), but when Twilio says it changed
+   * within the period it looked at, never older than that period (0 without a date that fits it);
+   * else, when Twilio says it did not, the length of that period as a lower
    * bound (the change is at least that old). `swapped_period` is the window Twilio looked at, never
    * the age of a change. Anything else is not an answer.
    */
@@ -296,15 +301,15 @@ export class TwilioLookupSignals extends LookupAdapter {
     if (field.error_code !== null && field.error_code !== undefined) return { reason: "feature_unavailable", code: String(field.error_code) };
     const last = field.last_sim_swap;
     if (!isObject(last)) return { reason: "bad_response" };
-    if (typeof last.last_sim_swap_date === "string") {
-      const at = Date.parse(last.last_sim_swap_date);
-      if (!Number.isNaN(at)) return hoursSince(at, this.clock.now());
-    }
-    if (last.swapped_in_period === true) return 0;
-    if (last.swapped_in_period === false && typeof last.swapped_period === "string") {
-      const hours = durationHours(last.swapped_period);
-      if (hours !== null) return hours;
-    }
+    // Only an ISO 8601 time is a date: Date.parse also reads "1" or "Jan 1" as a year long ago.
+    const at = typeof last.last_sim_swap_date === "string" && ISO_TIME.test(last.last_sim_swap_date) ? Date.parse(last.last_sim_swap_date) : Number.NaN;
+    const dated = Number.isNaN(at) ? null : hoursSince(at, this.clock.now());
+    const period = typeof last.swapped_period === "string" ? durationHours(last.swapped_period) : null;
+    // A change Twilio flags in its period is at most that old: a date older than the period beside
+    // it (or no period to check it against) never outweighs the flag, and the change reads as now.
+    if (last.swapped_in_period === true) return dated !== null && period !== null && dated <= period ? dated : 0;
+    if (dated !== null) return dated;
+    if (last.swapped_in_period === false && period !== null) return period;
     return { reason: "bad_response" };
   }
 
