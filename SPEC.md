@@ -151,6 +151,10 @@ level and the grant are lowered to what the last verification's counted methods 
 band (re-judged under the policy only when a method stops counting), and a grant lowered to 0 is
 dropped. A score never raises a level, never counts as a factor, and without a score there is no
 cap. The score is not stored: the call record keeps the band, the ledger the vendor and the band.
+The receipt keeps neither, and a call a band holds below what its counted methods reach shows on
+its receipt the level it holds with only the methods that support it (those in a policy set at
+that level or below that the call passed in full), so it reads exactly like a call that honestly
+reached that level; `verification.finished` in the ledger keeps every counted method.
 
 A **grant** carries the level, the scopes at or below it (narrowed to the verify step's `scopes`
 when the step lists them), and an expiry. `authorize(callId, scope)` is true only for a scope the

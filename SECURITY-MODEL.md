@@ -74,7 +74,10 @@ held to level 1, so no money, contact or access scope is reachable. The cap appl
 grant already issued too; the call keeps its highest band, so a later, lower score lifts nothing;
 and a score can only lower a level, never raise one or stand in for a factor (tested). The ledger
 records the vendor and the band, never the audio or the score; the receipt records neither,
-because a receipt can reach the caller and would tell an attacker their voice was caught (tested).
+because a receipt can reach the caller and would tell an attacker their voice was caught, and a
+capped call's receipt lists only the methods that support the level it shows, so it reads like an
+honestly lower-level one; the ledger, which the business sees and the caller does not, keeps every
+counted method (tested). A caller who remembers doing more can still tell the receipt shows less.
 **Left to the host:** choosing a vendor, its thresholds, and scoring the audio; no score means no
 cap. A host that refuses an action should speak the same fixed line whatever the reason, though a
 caller can still see that a capped grant does less than the factors they gave would reach.

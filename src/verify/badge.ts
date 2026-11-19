@@ -18,6 +18,7 @@ import {
   type AssuranceLevel,
   type CarrierSignalReport,
   type FactorKind,
+  type VerificationPolicy,
 } from "../core/policy.ts";
 import type { CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
 import { canApply, higherBand, type SessionState, type SyntheticVoiceBand } from "../core/session.ts";
@@ -69,6 +70,12 @@ export interface BadgeSlice {
   finished: number;
   lastLevel: AssuranceLevel;
   lastMethods: FactorKind[];
+  /**
+   * The methods the receipt shows when a synthetic voice band holds the call below what its counted
+   * methods reach (VER-14): only those that support the level shown, so a capped receipt reads like
+   * an honestly lower one. Null (or absent) otherwise. The ledger keeps every counted method.
+   */
+  receiptMethods?: FactorKind[] | null;
 }
 
 export interface KeypadResult {
@@ -251,7 +258,8 @@ export class BadgeModule implements AssuranceModule {
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
-    return { verification: { level: state.level, methods: state.level === 0 ? [] : (s as unknown as BadgeSlice).lastMethods } };
+    const slice = s as unknown as BadgeSlice;
+    return { verification: { level: state.level, methods: state.level === 0 ? [] : (slice.receiptMethods ?? slice.lastMethods) } };
   }
 }
 
@@ -308,6 +316,19 @@ function bandOf(state: SessionState): SyntheticVoiceBand {
 /** Whether a factor kind still counts toward a level under a call's synthetic voice band. */
 function countsUnder(kind: string, band: SyntheticVoiceBand): boolean {
   return kind !== "spoken_knowledge" || band === "clear";
+}
+
+/**
+ * The methods that support a level: those in a set of the policy, at that level or below, whose
+ * every factor is among `methods`. A receipt held below its methods' level lists only these.
+ */
+function supportingMethods(policy: VerificationPolicy, methods: readonly FactorKind[], level: AssuranceLevel): FactorKind[] {
+  const support = new Set<FactorKind>();
+  for (const rule of policy.levels) {
+    if (rule.level > level) continue;
+    for (const set of rule.anyOf) if (set.every((kind) => methods.includes(kind))) for (const kind of set) support.add(kind);
+  }
+  return methods.filter((kind) => support.has(kind));
 }
 
 /** A level held to a band: at most 1 in `level_1`. */
@@ -520,6 +541,8 @@ export async function reportSyntheticVoice(rt: EngineRuntime, callId: string, in
     const reached = kept.length === s.lastMethods.length ? 3 : evaluateAssurance(rt.policy, kept.map((kind) => ({ kind, passed: true, at: rt.now() })), s.carrier).level;
     const ceiling = heldLevel(reached, highest);
     draft.apply({ type: "synthetic_voice_scored", band, ceiling, scopes: scopesForLevel(rt.policy, ceiling) });
+    // Held below what the last verification's methods reach: the receipt shows only those that support the level it shows.
+    if (draft.record.state.level < s.lastLevel) s.receiptMethods = supportingMethods(rt.policy, s.lastMethods, draft.record.state.level);
     draft.emit("verification.synthetic_voice", "system", { vendor, band });
   });
 }
@@ -550,6 +573,7 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
     s.finished++;
     s.lastLevel = level;
     s.lastMethods = result.counted;
+    s.receiptMethods = level < result.level ? supportingMethods(rt.policy, result.counted, level) : null;
     draft.emit("verification.finished", "code", { level, methods: result.counted, discounted: result.discounted.map((d) => d.kind) });
     if (grant !== null) draft.emit("grant.issued", "code", { grantId: grant.grantId, level: grant.level, scopes, expiresAt: grant.expiresAt });
     return { level, scopes: grant === null ? [] : scopes };

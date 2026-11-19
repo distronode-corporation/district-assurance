@@ -184,6 +184,36 @@ describe("synthetic voice: nothing lifts or raises", () => {
 });
 
 describe("synthetic voice: the ledger and the receipt", () => {
+  it("shows a capped call on its receipt exactly as an honestly lower one, and keeps every method in the ledger", async () => {
+    // Capped after it finished: level 2 by keypad and carrier, held to 1 by a score.
+    const late = setup({ config: voiceConfig() });
+    const lateCall = await levelTwoCall(late);
+    assert.equal((await late.engine.finishVerification(lateCall)).level, 2);
+    await late.engine.reportSyntheticVoice(lateCall, { score: 0.9, vendor: "acme" });
+    // Capped before it finished: the same factors, the score first.
+    const early = setup({ config: voiceConfig() });
+    const earlyCall = await levelTwoCall(early);
+    await early.engine.reportSyntheticVoice(earlyCall, { score: 0.9, vendor: "acme" });
+    assert.equal((await early.engine.finishVerification(earlyCall)).level, 1);
+    // Honestly level 1: the keypad alone, no score.
+    const honest = setup({ config: voiceConfig() });
+    const { callId: honestCall } = await honest.engine.startCall();
+    await honest.engine.beginVerification(honestCall, { accountNumber: ACCOUNT });
+    await honest.engine.submitKeypad(honestCall, { dob: DOB });
+    assert.equal((await honest.engine.finishVerification(honestCall)).level, 1);
+
+    const shown = async (t: TestEngine, callId: string) => (await t.engine.endCall(callId))!.body.verification;
+    const expected = await shown(honest, honestCall);
+    assert.deepEqual(expected, { level: 1, methods: ["keypad_knowledge"] });
+    assert.deepEqual(await shown(late, lateCall), expected, "capped after finishing");
+    assert.deepEqual(await shown(early, earlyCall), expected, "capped before finishing");
+    for (const t of [late, early]) {
+      const finished = (await t.ledger.list()).filter((e) => e.event === "verification.finished").at(-1)!.detail;
+      assert.deepEqual(finished.methods, ["carrier_identity_match", "keypad_knowledge"], "the ledger keeps every counted method");
+    }
+  });
+
+
   it("records the vendor and the band, never the score, and the receipt carries neither", async () => {
     const t = setup({ config: voiceConfig() });
     const callId = await verifiedCall(t);
