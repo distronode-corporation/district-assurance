@@ -574,9 +574,13 @@ async function closePayment(rt: EngineRuntime, callId: string, paymentId: string
   const links = rt.adapter("payments");
   const answer =
     reason === "cancelled" && links.cancel !== undefined ? await links.cancel(closeInput(rt, callId, seen, seen.linkId, "cancel")) : await expireAtProvider(rt, callId, seen, seen.linkId);
+  // The provider's answer goes into the ledger: anything but its two answers is a provider fault,
+  // like one that throws, so the payment stays open and the next cancel or endCall closes it.
+  const state: unknown = isObject(answer) ? answer.state : undefined;
+  if (state !== "expired" && state !== "not_open") throw new EngineError("precondition_failed", "the payment provider answered neither expired nor not_open; the link is still open");
   return rt.update(callId, (draft) => {
     const request = find(draft, paymentId);
-    return request.status === "open" ? close(draft, answer.state) : request.status;
+    return request.status === "open" ? close(draft, state) : request.status;
   });
 }
 
