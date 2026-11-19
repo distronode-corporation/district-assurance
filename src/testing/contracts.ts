@@ -5,7 +5,8 @@
 //   for (const c of sessionStoreContract(() => new MyDatabaseSessionStore(...))) it(c.name, c.run);
 import { strict as assert } from "node:assert";
 
-import type { SessionStore } from "../core/adapters.ts";
+import type { AuditEntry, AuditInput, AuditLedger, SessionStore } from "../core/adapters.ts";
+import { verifyChain } from "../prove/ledger.ts";
 
 export interface ContractCase {
   name: string;
@@ -87,6 +88,66 @@ export function sessionStoreContract(factory: () => SessionStore | Promise<Sessi
         assert.equal(await store.bindRef("w", "payment:cs_1", "c2"), false);
         assert.equal(await store.resolveRef("w", "payment:cs_1"), "c1");
         assert.equal(await store.resolveRef("w2", "payment:cs_1"), null);
+      },
+    ],
+    [
+      "keeps a call's pending ledger mark with its writes, per workspace, if it lists pending calls",
+      async (store) => {
+        // `pendingCalls` is optional (INT-5); a store without it has nothing more to keep here.
+        if (store.pendingCalls === undefined) return;
+        const pending = async (w: string) => (await store.pendingCalls!(w, 10)).sort();
+        await store.create("w", "c1", { n: 1 }, { ledgerPending: true });
+        await store.create("w", "c2", { n: 1 }, { ledgerPending: false });
+        await store.create("w", "c3", { n: 1 }, { ledgerPending: true });
+        await store.create("w2", "c4", { n: 1 }, { ledgerPending: true });
+        assert.deepEqual(await pending("w"), ["c1", "c3"]);
+        assert.equal((await store.pendingCalls("w", 1)).length, 1, "at most `limit` ids");
+        assert.deepEqual(await pending("w3"), []);
+        await store.compareAndSet("w", "c1", 1, { n: 2 }, { ledgerPending: false });
+        await store.compareAndSet("w", "c2", 1, { n: 2 }, { ledgerPending: true });
+        assert.deepEqual(await store.compareAndSet("w", "c3", 9, { n: 2 }, { ledgerPending: false }), { ok: false });
+        assert.equal(await store.create("w", "c3", { n: 9 }, { ledgerPending: false }), false);
+        await store.compareAndSet("w", "c3", 1, { n: 2 });
+        assert.deepEqual(await pending("w"), ["c2", "c3"], "a lost write, a refused create and a write without a hint change no mark");
+        assert.deepEqual(await pending("w2"), ["c4"]);
+      },
+    ],
+  ];
+  return cases.map(([name, body]) => ({ name, run: async () => body(await factory()) }));
+}
+
+const replayEntry = (n: number): AuditInput => ({
+  eventId: JSON.stringify(["w", "c1", 2, n]),
+  callId: "c1",
+  actor: "code",
+  event: "module.event",
+  at: `2026-01-01T00:00:0${n}.000Z`,
+  detail: { n },
+});
+
+/**
+ * The AuditLedger contract (PRV-5). `factory` returns a new, empty ledger for each case.
+ *
+ * INT-5 stand-in: this holds only the case the engine's outbox relies on. PRV-5 (wp-c) brings the
+ * full `auditLedgerContract`; when both land, this case joins that suite's list.
+ */
+export function auditLedgerContract(factory: () => AuditLedger | Promise<AuditLedger>): ContractCase[] {
+  const cases: Array<[string, (ledger: AuditLedger) => Promise<void>]> = [
+    [
+      "appends a replayed run of eventIds once, as a retried flush does: only the new ones append",
+      async (ledger) => {
+        const first: AuditEntry[] = [];
+        for (const n of [0, 1]) first.push(await ledger.append(replayEntry(n)));
+        const replayed: AuditEntry[] = [];
+        for (const n of [0, 1, 2, 3]) replayed.push(await ledger.append(replayEntry(n)));
+        assert.deepEqual(replayed.slice(0, 2), first, "a replayed id returns its first entry");
+        assert.deepEqual(
+          replayed.map((e) => e.seq),
+          [1, 2, 3, 4],
+        );
+        const stored = await ledger.list();
+        assert.deepEqual(stored, replayed);
+        assert.deepEqual(verifyChain(stored), { ok: true, head: await ledger.head() });
       },
     ],
   ];

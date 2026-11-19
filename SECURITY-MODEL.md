@@ -136,6 +136,11 @@ byte fails verification (tested). Planned: key rotation and a published key set 
 A step's ledger entries are saved with the step itself (an outbox in the call record) and
 appended by event id, once each; a ledger that fails leaves them pending, and the next write or
 `flushLedger` appends them, so no saved step is ever missing from the ledger for good (tested).
+A call nobody writes again is caught up by `flushPending`, a background flush the host schedules,
+over the calls its session store lists as pending (tested). The ledger is the record, never the
+`onEvent` listener: the listener hears of an entry only after the ledger has it, may hear of it
+twice (same `eventId`) or not at all, and its failures go to `onListenerError` without stopping
+the call or the ledger (tested). A listener gets the same detail as the ledger, never a value.
 
 ### Breach of stored data
 
@@ -150,7 +155,8 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
   speech-to-text and the model while `sensitive` is set.
 - Keeping the knowledge key and the receipt signing key in a key store.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
-  guarantees (`sessionStoreContract` today; PRV-5 for the others).
+  guarantees (`sessionStoreContract` today; PRV-5 for the others), and scheduling
+  `flushPending` on a store with `pendingCalls`.
 - Choosing the subject when it starts verification with a subject key (for example the owner of
   the line it was called on). That choice is not a factor: the PIN or other factors still decide.
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.

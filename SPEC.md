@@ -55,12 +55,16 @@ that call (`module_disabled`).
 
 The record lives in a `SessionStore`:
 
-- `create(workspaceId, callId, record)` stores it at version 1, or answers false if the id exists.
+- `create(workspaceId, callId, record, hint?)` stores it at version 1, or answers false if the id exists.
 - `get` returns `{version, record}` or null.
-- `compareAndSet(workspaceId, callId, expectedVersion, record)` writes only if the stored version is
+- `compareAndSet(workspaceId, callId, expectedVersion, record, hint?)` writes only if the stored version is
   `expectedVersion`, and the new version is `expectedVersion + 1`; otherwise `{ok: false}`.
 - `bindRef(workspaceId, ref, callId)` points a provider reference (`identity:<session id>`,
   `payment:<link id>`) at a call, first binding wins; `resolveRef` reads it.
+- Optional: `pendingCalls(workspaceId, limit)` lists up to `limit` calls whose latest write had the
+  hint `{ledgerPending: true}` (its outbox is not empty, section 9). The engine sends the hint with
+  every write; a store that lists keeps the mark in the same write as the record, and a write
+  without a hint leaves the mark as it was.
 
 Every engine step reads the record, applies one pure change, and writes it with compare-and-set.
 On `{ok: false}` the step starts again from a fresh read, up to 5 attempts (`MAX_WRITE_ATTEMPTS`),
@@ -288,8 +292,23 @@ several workspaces share), then appended in order; an entry the ledger would ref
 refused before it is saved; the outbox is cleared by
 a further write if nobody wrote since. A failed append leaves them pending, and the next write or
 `flushLedger(callId)` appends them. A ledger appends an `eventId` once (a second append returns the
-first entry), so nothing is lost or doubled. The listener is told after each append, at least once
-and best effort.
+first entry), so nothing is lost or doubled.
+
+`flushPending(limit = 100)` is the background flush a host schedules (for example every minute, in
+any process): it asks the store's `pendingCalls` for up to `limit` calls and flushes each in turn,
+returning `{flushed, failed}` (call ids); a call that fails stays pending for the next run, and
+the others go on. Two runs at once append nothing twice. It throws `invalid_input` for a limit
+that is not a positive integer, and `precondition_failed` when the store has no `pendingCalls`.
+`auditLedgerContract(factory)` in `district-assurance/testing` checks that a ledger appends a
+replayed run of event ids once, as a retried flush sends it.
+
+The ledger is the source of truth; the `onEvent` listener is a notification. It is told of an entry
+after the ledger has it, with the entry's `eventId` and `seq`, at least once and best effort: the
+same event comes again, with the same `eventId`, when a flush replays it (after a lost clear, or
+from another process), and one is missed when the process stops between the append and the call.
+The engine calls the listener inline and never awaits it; a listener with slow work returns a
+promise. A throw or a rejection is passed to `onListenerError(error, event)`, and a failure of
+that hook is ignored: nothing the listener does stops the call, the write or the ledger.
 
 ## 10. Audit ledger
 

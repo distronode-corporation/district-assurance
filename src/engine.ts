@@ -16,7 +16,7 @@ import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clo
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
 import { EngineError, NotImplementedError } from "./core/errors.ts";
 import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
-import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
+import type { Actor, DeliveredEvent, EngineEventName, EventListener, ListenerErrorHandler } from "./core/events.ts";
 import { hmacSha256Hex } from "./core/hash.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
 import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
@@ -59,8 +59,20 @@ export interface EngineOptions {
   ids?: IdGenerator;
   /** Default: card numbers. */
   redactor?: Redactor;
+  /** Told of each event after its ledger entry is appended: at least once, best effort, never awaited (INT-5). */
   onEvent?: EventListener;
+  /** Told when `onEvent` throws or rejects. Without it the failure is dropped; the ledger has the event. */
+  onListenerError?: ListenerErrorHandler;
 }
+
+/** What `flushPending` did: the calls whose pending ledger entries are now appended, and those still pending. */
+export interface FlushReport {
+  flushed: string[];
+  failed: string[];
+}
+
+/** Calls per `flushPending` run unless the host says otherwise. */
+export const DEFAULT_FLUSH_LIMIT = 100;
 
 export interface FlowPosition {
   flow: string;
@@ -97,6 +109,7 @@ export class Engine {
   readonly #ids: IdGenerator;
   readonly #redactor: Redactor;
   readonly #onEvent: EventListener | undefined;
+  readonly #onListenerError: ListenerErrorHandler | undefined;
   readonly #badge: badge.BadgeModule;
   readonly #rt: EngineRuntime;
   readonly #receiptModules: readonly AssuranceModule[];
@@ -117,6 +130,7 @@ export class Engine {
     this.#ids = options.ids ?? randomIds;
     this.#redactor = options.redactor ?? cardNumberRedactor;
     this.#onEvent = options.onEvent;
+    this.#onListenerError = options.onListenerError;
     this.#badge = options.badge ?? badge.badgeModule();
     const present = Object.entries(this.#adapters).filter(([, value]) => value !== undefined).map(([name]) => name);
     this.#receiptModules = builtInModules(this.#badge);
@@ -195,7 +209,7 @@ export class Engine {
       this.#advance(draft);
     }
     record.outbox = events.map((event, i) => ({ eventId: this.#eventId(callId, 1, i), ...event }));
-    const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
+    const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue, { ledgerPending: record.outbox.length > 0 });
     if (!created) throw new EngineError("invalid_input", "a call with that id exists");
     await this.#flush(callId, 1, record);
     return this.state(callId);
@@ -543,7 +557,9 @@ export class Engine {
       // leaves them in the record, and the next write (or flushLedger) appends them, once each.
       const version = stored.version + 1;
       events.forEach((event, i) => record.outbox.push({ eventId: this.#eventId(callId, version, i), ...event }));
-      const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
+      const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue, {
+        ledgerPending: record.outbox.length > 0,
+      });
       if (saved.ok) {
         await this.#flush(callId, version, record);
         return result;
@@ -606,20 +622,36 @@ export class Engine {
    * Appends a call's pending ledger entries in order, each with its event id (a ledger appends an
    * id once), then clears them from the record if nobody wrote since. A failed append throws and
    * leaves the rest pending; a lost clear leaves them for the next write, which appends nothing twice.
+   * The listener is told after each append, so it never hears of an entry the ledger does not have.
    */
   async #flush(callId: string, version: number, record: CallRecord): Promise<void> {
     if (record.outbox.length === 0) return;
     for (const queued of record.outbox) {
-      await this.#adapters.ledger.append({ eventId: queued.eventId, callId, actor: queued.actor, event: queued.name, at: queued.at, detail: queued.detail });
-        // A listener is told, at least once and best effort; its failure, thrown or rejected, never stops the ledger (INT-5).
-      try {
-        const told: unknown = this.#onEvent?.({ name: queued.name, callId, actor: queued.actor, at: queued.at, detail: queued.detail });
-        if (told instanceof Promise) told.catch(() => undefined);
-      } catch {
-        // Ignored by design: the ledger is the record.
-      }
+      const entry = await this.#adapters.ledger.append({ eventId: queued.eventId, callId, actor: queued.actor, event: queued.name, at: queued.at, detail: queued.detail });
+      this.#tell({ name: queued.name, callId, actor: queued.actor, at: queued.at, detail: queued.detail, eventId: queued.eventId, seq: entry.seq });
     }
-    await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue);
+    await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue, { ledgerPending: false });
+  }
+
+  /**
+   * Tells the listener, inline and never awaited (INT-5). A throw or a rejection goes to
+   * `onListenerError`; nothing the listener or that hook does stops the call or the ledger.
+   */
+  #tell(event: DeliveredEvent): void {
+    if (this.#onEvent === undefined) return;
+    const report = (error: unknown): void => {
+      try {
+        this.#onListenerError?.(error, event);
+      } catch {
+        // Ignored by design: the ledger is the record, and a failing hook has nowhere left to report.
+      }
+    };
+    try {
+      const told: unknown = this.#onEvent(event);
+      if (told instanceof Promise) told.catch(report);
+    } catch (error) {
+      report(error);
+    }
   }
 
   /** A ledger event id, unique across workspaces sharing one ledger: a JSON tuple, so no two ids collide. */
@@ -632,6 +664,29 @@ export class Engine {
     const stored = await this.#sessions.get(this.workspaceId, callId);
     if (stored === null) throw new EngineError("unknown_call", "no such call");
     await this.#flush(callId, stored.version, structuredClone(stored.record) as unknown as CallRecord);
+  }
+
+  /**
+   * The background flush a host schedules (for example every minute): appends the pending ledger
+   * entries of up to `limit` calls the session store lists as pending, one call at a time. A call
+   * that fails stays pending for the next run, and the others go on. Needs a store with
+   * `pendingCalls`. Two runs at once, in one process or two, append nothing twice.
+   */
+  async flushPending(limit: number = DEFAULT_FLUSH_LIMIT): Promise<FlushReport> {
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new EngineError("invalid_input", "limit must be a positive integer");
+    if (this.#sessions.pendingCalls === undefined) {
+      throw new EngineError("precondition_failed", "the session store cannot list calls with pending ledger entries (pendingCalls)");
+    }
+    const report: FlushReport = { flushed: [], failed: [] };
+    for (const callId of await this.#sessions.pendingCalls(this.workspaceId, limit)) {
+      try {
+        await this.flushLedger(callId);
+        report.flushed.push(callId);
+      } catch {
+        report.failed.push(callId);
+      }
+    }
+    return report;
   }
 }
 
