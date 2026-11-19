@@ -50,6 +50,8 @@ export interface StepContext {
   policy: VerificationPolicy | null;
   /** The adapters the engine has. */
   adapters: ReadonlySet<string>;
+  /** What adapters declare they can do (`capabilities` on the adapter), by adapter name, when known. */
+  capabilities: Readonly<Record<string, unknown>>;
 }
 
 /** What a module sees of a call when it judges its current step. */
@@ -69,6 +71,8 @@ export interface AssuranceModule {
   validateSettings(settings: unknown): string[];
   /** Every adapter valid settings need, the manifest's included. */
   requiredAdapters(settings: unknown): string[];
+  /** Every problem between valid settings and what the adapters declare they can do. */
+  checkAdapters?(settings: unknown, capabilities: Readonly<Record<string, unknown>>): string[];
   /** Every problem with one flow step whose type this module provides. */
   validateStep(step: FlowStep, ctx: StepContext): string[];
   /** The level a step verifies to, so later steps can be checked against their scope floors. */
@@ -136,15 +140,24 @@ export function checkManifest(manifest: ModuleManifest, installed: readonly Assu
  */
 export class ModuleRegistry {
   readonly adapters: ReadonlySet<string>;
+  /** Adapter name to what that adapter declares it can do (its `capabilities`), for the validator. */
+  readonly capabilities: Readonly<Record<string, unknown>>;
   readonly #modules = new Map<string, AssuranceModule>();
+  /** Names only the constructor may install (an engine's built-in modules): refused later, even after a removal. */
+  readonly #reserved: ReadonlySet<string>;
+  #sealed = false;
 
-  constructor(options: { adapters?: Iterable<string>; modules?: readonly AssuranceModule[] } = {}) {
+  constructor(options: { adapters?: Iterable<string>; capabilities?: Readonly<Record<string, unknown>>; modules?: readonly AssuranceModule[]; reserved?: readonly string[] } = {}) {
     this.adapters = new Set(options.adapters ?? []);
+    this.capabilities = structuredClone(options.capabilities ?? {});
+    this.#reserved = new Set(options.reserved ?? []);
     for (const module of options.modules ?? []) this.use(module);
+    this.#sealed = true;
   }
 
   /** Installs a module. Refuses a bad or clashing manifest with every problem. */
   use(module: AssuranceModule): this {
+    if (this.#sealed && this.#reserved.has(module.manifest.name)) throw new EngineError("invalid_input", `${module.manifest.name} is the name of a built-in module`);
     const errors = checkManifest(module.manifest, this.list());
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     this.#modules.set(module.manifest.name, module);

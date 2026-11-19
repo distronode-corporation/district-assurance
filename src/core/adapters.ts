@@ -5,7 +5,7 @@ import type { JsonWebKey } from "node:crypto";
 
 import type { JsonValue } from "./canonical.ts";
 import type { Actor, EngineEventName } from "./events.ts";
-import type { CarrierSignalReport } from "./policy.ts";
+import type { AssuranceLevel, CarrierSignalReport } from "./policy.ts";
 
 /** Photo ID plus selfie by a link the caller opens on their phone (for example Stripe Identity). */
 export interface IdentityProvider {
@@ -24,25 +24,71 @@ export interface CarrierSignals {
 
 export type MessagePurpose = "identity_link" | "payment_link" | "one_time_code" | "reference";
 
-/** Texts sent by code. The destination is always the number on file, resolved by the engine. */
+/**
+ * Texts sent by code. The destination is always the number on file, resolved by the engine.
+ * `sendText` must settle (sent or failed) within 60 seconds: Paylink holds a payment link against a
+ * concurrent expiry for that long while it is being texted (its send lease).
+ */
 export interface MessageSender {
   sendText(input: { to: string; body: string; purpose: MessagePurpose; idempotencyKey: string }): Promise<{
     messageId: string;
   }>;
 }
 
-/** Hosted payment pages (for example Stripe Checkout on the business's own account). */
+/**
+ * Whose account takes the money. `connect`: the business's own account at the provider (for
+ * example a Stripe direct charge on a connected account); the business is the merchant.
+ * `platform`: the platform's own account; the platform is the merchant.
+ */
+export type PaymentMode = "connect" | "platform";
+
+/** Payment methods that settle while the caller is still on the call. Nothing else may be offered. */
+export type InstantPaymentMethod = "card" | "apple_pay" | "google_pay" | "link";
+
+export interface PaymentLinkRequest {
+  callId: string;
+  paymentId: string;
+  /** Integer, in the currency's minor unit (cents). */
+  amountMinor: number;
+  /** ISO 4217, lower case. */
+  currency: string;
+  description: string;
+  mode: PaymentMode;
+  /** The business's account at the provider. Present exactly when `mode` is `connect`. */
+  connectedAccountId?: string;
+  /** What the page may offer: only methods that settle at once. How a provider names them is the adapter's. */
+  paymentMethods: readonly InstantPaymentMethod[];
+  /**
+   * The latest the link may live (ISO 8601): twice the flow's link life from the request, kept
+   * within the adapter's declared `minLinkMinutes` and `maxLinkMinutes`, so a text sent late still
+   * gets its full life and the provider never refuses the time. The engine closes the link earlier,
+   * at its own deadline (the text plus the link life), by calling `expireLink`.
+   */
+  expiresAt: string;
+  idempotencyKey: string;
+}
+
+/**
+ * What a payment link adapter can do, declared by the adapter and checked when a config is saved.
+ * Stripe Checkout: both modes, and `expires_at` from 30 minutes to 24 hours after creation.
+ */
+export interface PaymentLinkCapabilities {
+  modes: readonly PaymentMode[];
+  /** The shortest link life the provider allows, in minutes. The engine expires links sooner itself. */
+  minLinkMinutes: number;
+  /** The longest link life the provider allows, in minutes. */
+  maxLinkMinutes: number;
+}
+
+/** Hosted payment pages (for example Stripe Checkout, on the business's account or the platform's). */
 export interface PaymentLinks {
-  createLink(input: {
-    callId: string;
-    paymentId: string;
-    /** Integer, in the currency's minor unit (cents). */
-    amountMinor: number;
-    /** ISO 4217, lower case. */
-    currency: string;
-    description: string;
-    idempotencyKey: string;
-  }): Promise<{ linkId: string; url: string }>;
+  readonly capabilities: PaymentLinkCapabilities;
+  createLink(input: PaymentLinkRequest): Promise<{ linkId: string; url: string }>;
+  /**
+   * Expires an open link now. `expired` when it was open and is closed; `not_open` when the
+   * provider says it already completed or expired, in which case its webhook settles it.
+   */
+  expireLink(input: { linkId: string; mode: PaymentMode; connectedAccountId?: string; idempotencyKey: string }): Promise<{ state: "expired" | "not_open" }>;
 }
 
 /** The person on record, as the engine sees them: keyed digests, never the values. */
@@ -150,4 +196,52 @@ export interface ReceiptSigner {
   sign(payload: Uint8Array): Promise<Uint8Array>;
   /** The public key, for publishing in a key set. */
   publicJwk(): JsonWebKey;
+}
+
+/** An access grant's signed body (Gate): what a door's relay checks. SPEC.md, section 17. */
+export interface AccessGrantBody {
+  v: 1;
+  kind: "access";
+  /** Unique per grant. A relay refuses an id it has seen until the grant expires. */
+  grantId: string;
+  /** The workspace that issued it. A relay checks it is its own. */
+  workspaceId: string;
+  /** The controller it is for: its name in the engine's `access` adapters. A relay checks it is its own. */
+  audience: string;
+  /** The door, lock or access point, as the controller names it. Set in config, never by the model. */
+  target: string;
+  action: "unlock";
+  /** The scope the call's verification grant covered. */
+  scope: string;
+  /** The level the caller was verified to. */
+  level: AssuranceLevel;
+  /** ISO 8601. */
+  issuedAt: string;
+  /** ISO 8601. Never later than the call's verification grant. */
+  expiresAt: string;
+}
+
+/** ES256 over the body's canonical JSON, the receipts' format. */
+export interface SignedAccessGrant {
+  body: AccessGrantBody;
+  alg: "ES256";
+  kid: string;
+  /** base64url of the 64-byte P1363 signature. */
+  signature: string;
+}
+
+/** What a door controller answered. A lost answer is a thrown error, never a value. */
+export type UnlockResult =
+  /** The controller took the request. `confirmed` only when it reports that the door actually moved. */
+  | { outcome: "delivered"; providerRef: string; confirmed: boolean }
+  /** The controller certainly did not act (it refused the grant, the door is offline). */
+  | { outcome: "refused"; reason: string };
+
+/**
+ * A door controller, lock or access system (Gate). The engine calls `unlock` once per grant and
+ * never retries: if the call throws or times out, the engine records "unknown", and opening again
+ * needs a fresh request (a new grant). An adapter must not retry on its own either.
+ */
+export interface AccessController {
+  unlock(input: { grant: SignedAccessGrant; target: string; idempotencyKey: string }): Promise<UnlockResult>;
 }

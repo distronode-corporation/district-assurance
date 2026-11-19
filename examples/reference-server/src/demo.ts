@@ -1,16 +1,23 @@
-// `npm run demo`: two scripted calls, end to end, on fake adapters and a server on 127.0.0.1.
+// `npm run demo`: four scripted calls, end to end, on fake adapters and servers on 127.0.0.1.
 // No network beyond the loopback, no keys, no real people (script.ts holds the script).
 //
 // 1. `owner-command`: the owner's PIN only, on two engines that share one session store (as two
 //    processes of a host would). One wrong PIN, then the right one.
 // 2. `deposit`: keypad knowledge and a carrier match to level 2, a repair form, a deposit by link
 //    settled by a signed webhook, a consent, and a signed receipt checked with the public key.
+//    The money goes to the platform's own account (`platform` mode).
+// 3. `deposit-connect`: a deposit on the business's own account (`connect` mode). A webhook on
+//    the platform endpoint, without the connected account, is ignored; the Connect one settles it.
+// 4. `entry`: verification to level 2, then Gate signs a 30-second access grant and the
+//    signed-webhook relay adapter posts it to an example door relay on the loopback, which checks
+//    it with Gate's public key and opens the (pretend) door. The same grant again, and a changed
+//    copy, are refused.
 import type { JsonWebKey } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 import { verifyChain, verifyReceipt, type SignedReceipt } from "../../../src/index.ts";
 import { createReferenceServer } from "./app.ts";
-import { DEMO_SECRET, SCRIPTS, createDemoWorld, type DemoFlow, type ScriptRun } from "./script.ts";
+import { DEMO_CONNECT_SECRET, DEMO_SECRET, SCRIPTS, createDemoWorld, type DemoFlow, type ScriptRun } from "./script.ts";
 
 const log = (step: string, detail = "") => console.log(`  ${step.padEnd(36)} ${detail}`);
 
@@ -21,12 +28,16 @@ export interface DemoResult {
   receipt: SignedReceipt;
   tamperedFails: boolean;
   chainOk: boolean;
+  /** The connect-mode deposit's receipt. */
+  connectReceipt: SignedReceipt;
+  /** Every door the example relay opened. */
+  doorOpened: string[];
 }
 
 export async function runDemo(print = true): Promise<DemoResult> {
   const say = print ? log : () => undefined;
   const world = createDemoWorld();
-  const server = createReferenceServer({ engine: world.engine, stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET] }, clock: world.t.clock });
+  const server = createReferenceServer({ engine: world.engine, stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET], connect: [DEMO_CONNECT_SECRET] }, clock: world.t.clock });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   world.base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   let allOk = true;
@@ -52,12 +63,15 @@ export async function runDemo(print = true): Promise<DemoResult> {
     const tamperedFails = !verifyReceipt(tampered, keys);
     say("prove: receipt signature", valid ? "valid" : "INVALID");
     say("prove: receipt with one change", tamperedFails ? "rejected" : "ACCEPTED");
+    const connect = await play("deposit-connect");
+    await play("entry");
     const chain = verifyChain(await world.t.ledger.list());
-    say("prove: audit ledger (both calls)", chain.ok ? `${chain.head.seq} entries, hash chain intact` : "BROKEN");
+    say("prove: audit ledger (all calls)", chain.ok ? `${chain.head.seq} entries, hash chain intact` : "BROKEN");
     if (!allOk || !valid || !tamperedFails || !chain.ok) throw new Error("the demo's checks failed");
-    return { checksOk: allOk, ownerReceipt: owner.receipt, receipt, tamperedFails, chainOk: chain.ok };
+    return { checksOk: allOk, ownerReceipt: owner.receipt, receipt, tamperedFails, chainOk: chain.ok, connectReceipt: connect.receipt!, doorOpened: [...world.doorsOpened] };
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    await world.close();
   }
 }
 

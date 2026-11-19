@@ -12,14 +12,14 @@ import type { AddressInfo } from "node:net";
 
 import { createReferenceServer } from "./app.ts";
 import { DemoRuns } from "./demo-runs.ts";
-import { DEMO_SECRET, createDemoWorld } from "./script.ts";
+import { DEMO_CONNECT_SECRET, DEMO_SECRET, createDemoWorld } from "./script.ts";
 
 const port = Number(process.env.PORT ?? 8787);
 const world = createDemoWorld();
 const server = createReferenceServer({
   engine: world.engine,
   clock: world.t.clock,
-  stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET] },
+  stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET], connect: [DEMO_CONNECT_SECRET] },
   ui: new DemoRuns(world),
 });
 server.listen(port, "127.0.0.1", () => {

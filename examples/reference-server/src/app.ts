@@ -1,8 +1,10 @@
 // The reference server: a small node:http server around one Engine. It receives the Stripe
-// webhooks that finish a photo ID check and a payment, serves receipts and the receipt key set,
-// and answers 501 on the carrier webhooks that are not built yet. With `ui`, it also serves the
-// demo's browser UI and the routes that run the scripted demo one step at a time. Not hardened
-// for production; ROADMAP.md, "Reference server", lists what that takes.
+// webhooks that finish a photo ID check and a payment (platform-mode payments on the account
+// endpoint, connect-mode payments on the Connect endpoint, each with its own signing secret),
+// serves receipts and the receipt key set, and answers 501 on the carrier webhooks that are not
+// built yet. With `ui`, it also serves the demo's browser UI and the routes that run the scripted
+// demo one step at a time. Not hardened for production; ROADMAP.md, "Reference server", lists
+// what that takes.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { EngineError, parseStripeEvent, verifyStripeSignature, type Clock, type Engine } from "../../../src/index.ts";
@@ -12,8 +14,11 @@ import { UI_HEADERS, loadStaticFiles, type StaticFile } from "./static.ts";
 
 export interface ReferenceServerOptions {
   engine: Engine;
-  /** Signing secrets per Stripe endpoint. Empty means the endpoint refuses everything. */
-  stripeSecrets: { identity: readonly string[]; payments: readonly string[] };
+  /**
+   * Signing secrets per Stripe endpoint. Empty means the endpoint refuses everything. `connect` is
+   * the Connect endpoint ("Events from: Connected accounts"), which has its own secret.
+   */
+  stripeSecrets: { identity: readonly string[]; payments: readonly string[]; connect?: readonly string[] };
   clock: Clock;
   /** Default 64 KiB. */
   maxBodyBytes?: number;
@@ -55,22 +60,33 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   const maxBody = options.maxBodyBytes ?? 64 * 1024;
   const files = options.ui === undefined ? new Map<string, StaticFile>() : loadStaticFiles();
 
-  async function stripeWebhook(req: IncomingMessage, route: "identity" | "payments"): Promise<[number, Json]> {
+  async function stripeWebhook(req: IncomingMessage, route: "identity" | "payments" | "connect"): Promise<[number, Json]> {
     const payload = await readBody(req, maxBody);
     const header = req.headers["stripe-signature"];
     const check = verifyStripeSignature({
       payload,
       header: Array.isArray(header) ? header[0] : header,
-      secrets: options.stripeSecrets[route],
+      secrets: options.stripeSecrets[route] ?? [],
       now: options.clock.now(),
     });
     if (!check.ok) return [400, { error: "signature", reason: check.reason }];
     const event = parseStripeEvent(payload);
     if (event === null) return [400, { error: "malformed_event" }];
+    // Only an event this endpoint handles is applied and remembered: one that reached the wrong
+    // endpoint (an unfiltered listener) is acknowledged and left for its own endpoint.
+    let apply: (() => Promise<boolean>) | null = null;
+    if (route === "identity" && event.kind === "identity") {
+      const outcome = event.outcome;
+      apply = async () => (await options.engine.applyIdentityOutcome(outcome)).applied;
+    }
+    // The endpoint fixes the mode: Connect events always name a connected account, account events never do.
+    if (event.kind === "payment" && (route === "connect" ? event.outcome.account !== undefined : route === "payments" && event.outcome.account === undefined)) {
+      const outcome = event.outcome;
+      apply = async () => (await options.engine.applyPaymentOutcome(outcome)).applied;
+    }
+    if (apply === null) return [200, { received: true, applied: false, handled: false }];
     if (processed.has(event.eventId)) return [200, { received: true, duplicate: true }];
-    let applied = false;
-    if (route === "identity" && event.kind === "identity") applied = (await options.engine.applyIdentityOutcome(event.outcome)).applied;
-    if (route === "payments" && event.kind === "payment") applied = (await options.engine.applyPaymentOutcome(event.outcome)).applied;
+    const applied = await apply();
     processed.add(event.eventId);
     return [200, { received: true, applied }];
   }
@@ -128,9 +144,10 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       expect("GET");
       return [200, { keys: options.engine.receiptKeys() }];
     }
-    if (path === "/webhooks/stripe/identity" || path === "/webhooks/stripe/payments") {
+    const stripe = /^\/webhooks\/stripe\/(identity|payments|connect)$/.exec(path);
+    if (stripe !== null) {
       expect("POST");
-      return stripeWebhook(req, path.endsWith("identity") ? "identity" : "payments");
+      return stripeWebhook(req, stripe[1] as "identity" | "payments" | "connect");
     }
     const carrier = /^\/webhooks\/(twilio|telnyx)$/.exec(path);
     if (carrier !== null) {

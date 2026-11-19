@@ -2,6 +2,7 @@
 // change it (one compare-and-set write per change), the adapters and the clock. This is internal
 // to the package; outside modules use `Engine.updateModule` and `Engine.moduleState` instead.
 import type {
+  AccessController,
   AuditLedger,
   CarrierSignals,
   IdentityProvider,
@@ -19,7 +20,19 @@ import type { FlowStep } from "./module.ts";
 import type { VerificationPolicy } from "./policy.ts";
 import type { SessionEvent, SessionState } from "./session.ts";
 
-export type Locale = "en" | "fr";
+/**
+ * The languages a call can run in. Every catalog of text the engine builds (the texts it sends,
+ * the amounts it formats, the spoken digits it redacts) is a `Record<Locale, ...>` with one entry
+ * for each, and a test checks it: adding a locale here makes every catalog grow with it.
+ */
+export const SUPPORTED_LOCALES = Object.freeze(["en", "fr"] as const);
+
+export type Locale = (typeof SUPPORTED_LOCALES)[number];
+
+/** Whether a host's value is a supported locale. */
+export function isSupportedLocale(value: unknown): value is Locale {
+  return (SUPPORTED_LOCALES as readonly unknown[]).includes(value);
+}
 
 /**
  * Everything the engine can be given. Only `ledger` is always required (the ledger is always on);
@@ -36,6 +49,10 @@ export interface EngineAdapters {
   payments?: PaymentLinks;
   signer?: ReceiptSigner;
   pinVerifier?: PinVerifier;
+  /** Gate's door controllers, by name. Targets in Gate's settings name one of these. */
+  access?: Readonly<Record<string, AccessController>>;
+  /** Signs Gate's access grants. Its own key (its own `kid`), not the receipt key. */
+  accessSigner?: ReceiptSigner;
 }
 
 export type AdapterName = keyof EngineAdapters;

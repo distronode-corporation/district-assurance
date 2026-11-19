@@ -5,7 +5,7 @@ imports the package sources directly and has no dependencies or `package.json` o
 from the repository root. Not hardened for production (ROADMAP.md, M5).
 
 ```sh
-npm run demo    # owner-command and deposit, on fake adapters and a loopback server, then exits
+npm run demo    # owner-command, deposit in each mode and entry, on fake adapters and loopback servers, then exits
 npm run ui      # the same scripted calls in a browser, one step at a time, on 127.0.0.1:8787
 npm run serve   # the server on 127.0.0.1:8787 until stopped, for your own Stripe test events
 ```
@@ -30,7 +30,7 @@ The routes, on this server only (not on `npm run serve`):
 | Route | |
 |---|---|
 | `GET /`, `/app.js`, `/receipt-check.js`, `/style.css` | the page, from a fixed allow-list |
-| `GET /demo/flows` | the two flows and their step names |
+| `GET /demo/flows` | the four flows and their step names |
 | `POST /demo/runs` | `{"flow": "deposit"}` starts a run (`201`); nothing runs yet |
 | `GET /demo/runs/:runId` | the run: its step results, session state, flow position, ledger entries |
 | `POST /demo/runs/:runId/next` | runs the next step and answers the run (`409` when done or busy) |
@@ -60,11 +60,12 @@ How the page is kept small and safe:
 | File | |
 |---|---|
 | `src/app.ts` | `createReferenceServer({ engine, stripeSecrets, clock })`: the routes |
-| `src/script.ts` | the scripted calls, one step at a time, and the demo's records and engines |
+| `src/script.ts` | the scripted calls, one step at a time, and the demo's records, engines and door relay |
 | `src/demo.ts` | `npm run demo`: every step in a row; `runDemo(false)` is also run by the test suite |
 | `src/demo-runs.ts` | the UI's runs: one step per request, and the run's state, ledger and chain check |
 | `src/static.ts` | the UI's file allow-list and its headers |
-| `src/flows.ts` | the demo's FlowConfig: the `owner-command` and `deposit` flows |
+| `src/door-relay.ts` | an example door relay for Gate's `webhookRelay` adapter: checks the grant with Gate's public key and its workspace, refuses replays, works the door |
+| `src/flows.ts` | the demo's FlowConfig: the `owner-command`, `deposit`, `deposit-connect` and `entry` flows |
 | `src/main.ts` | `npm run serve`: reads the environment, starts the server |
 | `src/ui.ts` | `npm run ui`: the server with the demo UI |
 | `public/` | the page: `index.html`, `style.css`, `app.js`, and `receipt-check.js` (no DOM, tested in Node) |
@@ -73,18 +74,25 @@ How the page is kept small and safe:
 ## Trying it with your own Stripe test account
 
 1. In the Stripe dashboard (test mode), or with `stripe listen`, get a signing secret for an
-   endpoint that receives `identity.verification_session.*` events and one for `checkout.session.*`.
+   endpoint that receives `identity.verification_session.*` events and one for `checkout.session.*`;
+   for connect mode, also a Connect endpoint ("Events from: Connected accounts"), which has its
+   own secret (`stripe listen --forward-connect-to localhost:8787/webhooks/stripe/connect`).
 2. Start the server with them:
 
    ```sh
-   STRIPE_IDENTITY_WEBHOOK_SECRET=whsec_... STRIPE_PAYMENTS_WEBHOOK_SECRET=whsec_... npm run serve
+   STRIPE_IDENTITY_WEBHOOK_SECRET=whsec_... STRIPE_PAYMENTS_WEBHOOK_SECRET=whsec_... STRIPE_CONNECT_WEBHOOK_SECRET=whsec_... npm run serve
    stripe listen --forward-to localhost:8787/webhooks/stripe/payments
+   stripe listen --forward-to localhost:8787/webhooks/stripe/identity   # in a second terminal, its own secret
    ```
 
 3. Trigger a test event (`stripe trigger checkout.session.completed`). The server checks the
    signature and answers `{"received": true, "applied": false}`: the signature is good, and the
    session is unknown to this engine because the Stripe adapters are not built yet. A wrong secret
-   answers `400` with the reason.
+   answers `400` with the reason. Then prove the Connect side the same way, with a test connected
+   account: `stripe trigger checkout.session.completed --stripe-account acct_...`, and check that
+   `/webhooks/stripe/connect` (not `/payments`) answered it. Filter each listener to its own event
+   types (`--events checkout.session.completed,...`), so an event never reaches an endpoint that
+   does not handle it.
 
 Use test-mode keys only. Never commit a secret; the server reads them from the environment.
 

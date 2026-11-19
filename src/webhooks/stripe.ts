@@ -86,6 +86,10 @@ export function parseStripeEvent(body: string): ParsedStripeEvent | null {
   const object = isRecord(event.data) ? event.data.object : undefined;
   if (!isRecord(object) || typeof object.id !== "string") return null;
   const base = { eventId: event.id, livemode: event.livemode === true };
+  // A Connect event names the connected account it came from; the engine checks it against the payment's.
+  // One that is present but not a name is not a well-formed event: never read as "no account".
+  if (event.account !== undefined && typeof event.account !== "string") return null;
+  const account = typeof event.account === "string" ? { account: event.account } : {};
   const linkId = object.id;
   const identity = IDENTITY_TYPES[event.type];
   if (identity !== undefined) return { ...base, kind: "identity", outcome: { sessionId: linkId, status: identity } };
@@ -94,14 +98,14 @@ export function parseStripeEvent(body: string): ParsedStripeEvent | null {
       const status = object.payment_status;
       if (typeof status !== "string" || !PAYMENT_STATUSES.has(status)) return null;
       const paymentStatus = status as "paid" | "unpaid" | "no_payment_required";
-      return { ...base, kind: "payment", outcome: { kind: "completed", linkId, paymentStatus } };
+      return { ...base, kind: "payment", outcome: { kind: "completed", linkId, paymentStatus, ...account } };
     }
     case "checkout.session.async_payment_succeeded":
-      return { ...base, kind: "payment", outcome: { kind: "async_succeeded", linkId } };
+      return { ...base, kind: "payment", outcome: { kind: "async_succeeded", linkId, ...account } };
     case "checkout.session.async_payment_failed":
-      return { ...base, kind: "payment", outcome: { kind: "async_failed", linkId } };
+      return { ...base, kind: "payment", outcome: { kind: "async_failed", linkId, ...account } };
     case "checkout.session.expired":
-      return { ...base, kind: "payment", outcome: { kind: "expired", linkId } };
+      return { ...base, kind: "payment", outcome: { kind: "expired", linkId, ...account } };
     default:
       return { ...base, kind: "ignored", type: event.type };
   }

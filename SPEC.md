@@ -93,6 +93,21 @@ module the config has on.
 | `dossier` | `dossier.collect` | `intake.file` | `records` |
 | `paylink` | `paylink.request` | `payment.request` | `payments`, `messages` |
 | `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
+| `gate` | `gate.grant` | `entry.open` | `access` (door controllers by name), `accessSigner` |
+
+Gate (section 17) is off in `defaultConfig()`: it needs doors in its settings and the two access
+adapters. Built-in modules' parts of a call are written only by the engine's own code: no outside
+code reaches them (`updateModule` and `moduleState` refuse a built-in module).
+
+An outside module changes its part of a call with `updateModule(callId, name, fn)`: one
+compare-and-set write, refused once the flow has ended and while the flow is on another module's
+step. The engine holds every call to the module's scopes, so a module that never asks still fails
+closed: in a flow, the scope the current step needs; outside a flow, every scope the module's
+manifest names (`scope_denied`). `fn` gets a copy of the module's part and a view: the session
+state, the current step (a copy, or null), the engine's clock (`now`), `newId(prefix)`,
+`authorized(scope)` and `emit(event, detail)` (a `module.event` ledger entry). There is no way for
+an outside module to write an outcome for work the engine holds: outcomes the engine must vouch
+for (an access grant's) are the engine's own (ADR-25).
 
 ## 4. Factors, levels and scopes
 
@@ -209,18 +224,28 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 |---|---|
 | `badge.verify` | `level` 1 to 3; `factors`, at least one, each on in Badge's settings, together reaching `level` under the policy; optional `scopes`, each in the policy at or below `level` |
 | `dossier.collect` | `form`, a form id in Dossier's settings |
-| `paylink.request` | `amountMinor`, `currency`, `description`, `amountSource` (section 14); `mode` is refused until PAY-7 |
+| `paylink.request` | `amountMinor`, `currency`, `description`, `amountSource` (section 14); optional `mode` (`connect` or `platform`; connect needs Paylink's `connectedAccountId`), `linkLifeMinutes` (5 to 60), `paymentMethods` (instant methods only) |
 | `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
 | `trace.receipt` | none; needs the `signer` adapter |
+| `gate.grant` | `target`, a target id in Gate's settings; optional `lifetimeSeconds` (10 to 900, default 60) |
 
 Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
-until FIL-2); Paylink `{maxAmountMinor?}` (1 to 1,000,000); Trace `{receipts?, wordings?}`
+until FIL-2); Paylink `{maxAmountMinor?, mode?, connectedAccountId?, linkLifeMinutes?, paymentMethods?}`
+(`maxAmountMinor` 1 to 1,000,000; `mode` default `platform`, and `connect` needs
+`connectedAccountId`, 1 to 255 letters, digits, `-` or `_`; a `connectedAccountId` needs an
+explicit `mode`, so a business account never quietly defaults to the platform's; the other two are the defaults for steps
+that name none and for payments outside a flow, 15 minutes and card, Apple Pay, Google Pay and
+Link); Gate `{targets, maxGrantsPerCall?}` (section 17); Trace `{receipts?, wordings?}`
 (`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr}}`, purposes
 unique).
 
 ## 8. Flow execution
 
-`startCall({flow})` or `startFlow(callId, name)`, on an open call that has not run a flow, copies
+`startCall` refuses (`invalid_input`, nothing saved) a `callId` that is not 1 to 200 characters the
+ledger can carry (no lone surrogate), a `locale` not in `SUPPORTED_LOCALES` (`en`, `fr`), and a `flow` that is not a
+name; the engine refuses a `workspaceId` with a lone surrogate. These enter the ledger directly, so
+no host value can block a call's ledger. `startCall({flow})` or `startFlow(callId, name)`, on an
+open call that has not run a flow, copies
 the flow's steps into the call record, so a later config change never moves a call. The first step
 is entered: its module's `enterStep` returns a mark. After every change to the call, the engine
 asks the current step's module for `stepStatus(step, {state, slice, mark})`:
@@ -237,6 +262,7 @@ asks the current step's module for `stepStatus(step, {state, slice, mark})`:
 | `paylink.request` | the step's payment settled `paid` | it settled `failed` or `expired` |
 | `trace.consent` | a consent for `purpose` was recorded during the step: "yes", or any answer with `require: "answer"` | the answer was "no" (default `require: "yes"`) |
 | `trace.receipt` | at once | never |
+| `gate.grant` | an access grant issued during the step was delivered | every grant the call may have is used, none delivered and none in flight |
 
 While a flow runs, work that is not the current step's is refused with `precondition_failed`:
 verification inputs outside a `badge.verify` step or for a factor it does not list, intake of a
@@ -274,18 +300,23 @@ answer on file, a phone number, a link or card data.
 | `intake.confirmed` | `recordId`, `formId`, `digest`, `confirmedBy` |
 | `intake.abandoned` | none |
 | `redaction.applied` | `kinds` (counts per kind) |
-| `payment.link_sent` | `paymentId`, `linkId`, `amountMinor`, `currency`, `amountSource` |
+| `payment.link_sent` | `paymentId`, `linkId`, `amountMinor`, `currency`, `amountSource`, `mode`, `expiresAt` |
+| `payment.link_expired` | `paymentId`, `provider` (`expired`, `not_open` or `not_created`), and `reason` (`not_sent_in_time`, `not_created_in_time`) when it was never texted: the engine's deadline came |
+| `payment.outcome_ignored` | `paymentId`, `reason` (`account`): an outcome from another account |
 | `payment.settled` | `paymentId`, `status` |
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
+| `access.issued` | `grantId`, `target`, `controller`, `scope`, `level`, `verificationGrantId`, `expiresAt` (section 17) |
+| `access.delivered` / `access.refused` / `access.unknown` / `access.failed` | `grantId`, `digest` and `kid` once signed, `confirmed` or `reason` (written by the engine only) |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
 A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
 with an `eventId` (the JSON tuple `[workspaceId, callId, version, index]`, unique on a ledger that
-several workspaces share), then appended in order; an entry the ledger would refuse (card data) is
-refused before it is saved; the outbox is cleared by
+several workspaces share), then appended in order; an entry the ledger would refuse (card data, or detail
+that is not canonical JSON, such as a lone surrogate) is refused before it is saved, so it can never
+block a call's ledger; the outbox is cleared by
 a further write if nobody wrote since. A failed append leaves them pending, and the next write or
 `flushLedger(callId)` appends them. A ledger appends an `eventId` once (a second append returns the
 first entry), so nothing is lost or doubled. The listener is told after each append, at least once
@@ -303,7 +334,8 @@ a card number.
 
 Object keys sorted by UTF-16 code units, no whitespace, strings and numbers as ECMAScript
 `JSON.stringify` writes them. Refused: `undefined`, functions, symbols, bigints, non-finite
-numbers, sparse array holes, and objects whose prototype is not `Object.prototype` or `null`.
+numbers, sparse array holes, strings or keys with a lone UTF-16 surrogate (RFC 8785 says these
+must fail), and objects whose prototype is not `Object.prototype` or `null`.
 
 ## 12. Receipts
 
@@ -314,7 +346,7 @@ numbers, sparse array holes, and objects whose prototype is not `Object.prototyp
     "startedAt": "...", "endedAt": "...", "issuedAt": "...",
     "verification": { "level": 3, "methods": ["keypad_knowledge", "photo_id"] },
     "records":  [{ "recordId": "...", "formId": "...", "digest": "<sha256 hex>" }],
-    "payments": [{ "paymentId": "...", "status": "paid", "amountMinor": 15000, "currency": "cad", "providerRef": "cs_..." }],
+    "payments": [{ "paymentId": "...", "status": "paid", "amountMinor": 15000, "currency": "cad", "mode": "platform", "providerRef": "cs_..." }],
     "consents": [{ "purpose": "...", "wordingVersion": "1", "wordingDigest": "<sha256 hex>", "answer": "yes" }],
     "ledger":   { "seq": 17, "hash": "<sha256 hex>" }
   },
@@ -346,7 +378,9 @@ Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording 
 Forms live in Dossier's settings: a `formId` (lower case, digits, `-`, `_`), a `version` and
 fields with snake_case unique keys, a known type and an English and a French label.
 `validateConfig` refuses fields marked `sensitive` until field encryption exists (FIL-2).
-`startIntake(callId, formId)` names the form, and the draft keeps the form as it was then, so a
+`setIntakeField` refuses (`invalid_input`) a value with a lone surrogate, which speech-to-text or a
+model can produce and a record's digest cannot hash. `startIntake(callId, formId)` names the form,
+and the draft keeps the form as it was then, so a
 config change mid-intake never changes what is filed; a call also keeps the forms (and Trace the
 wordings) in force when it started. A draft being filed refuses changes. A filing that failed
 after its reservation (the store refused it, or the last write was lost) stays reserved and
@@ -366,9 +400,60 @@ character description and an `amountSource` (`intake_record`, `business_endpoint
 outside a flow the host's code passes them. One link at a time per call. If creating or texting the
 link fails, the request stays open (a provider can create a link and still fail to answer), and
 calling `requestPayment` again resumes it with the same payment id and idempotency keys; a
-different amount is refused. Only the provider settles a request. `requestPayment` returns the
-status it saw last. Whose
-account takes the money (`connect` or `platform`) is planned (PAY-7). Settlement:
+different amount is refused. `requestPayment` returns the status it saw last and `expiresAt`.
+
+**Modes.** `connect` takes the money on the business's own account at the provider (a direct
+charge; the business is the merchant), `platform` on the platform's own account (the platform is
+the merchant). The step's `mode`, else Paylink's `mode`, else `platform`. The request to
+`PaymentLinks.createLink` carries `mode`, `connectedAccountId` (exactly in connect mode, from
+Paylink's settings), `paymentMethods` and `expiresAt`, and its idempotency key is the JSON tuple
+`[workspaceId, callId, paymentId, "link", mode]`. A provider outcome carries `account` when it
+came from a connected account; it must equal the payment's `connectedAccountId` in connect mode
+and be absent in platform mode, or it is ignored (`payment.outcome_ignored`). Refunds and
+disputes are not handled by the engine (SECURITY-MODEL.md, open questions).
+
+**Link life.** A link lives `linkLifeMinutes` (step, else settings, else 15; 5 to 60) from the
+moment it was texted, but never past what the provider was asked for: `expiresAt`. The provider is
+asked for twice the link life from the request (so a text resumed late still gets its full life),
+and at least the payments adapter's `capabilities.minLinkMinutes` plus 5 minutes (so the create
+that follows is never under the minimum), at most its `maxLinkMinutes` (Stripe Checkout: 30
+minutes to 24 hours). A request whose link is not known to exist and has less than the provider's
+minimum left is expired before any create (`payment.link_expired`, provider `not_created`), unless
+another process recorded a link for it in the meantime, which that process then decides about
+(`precondition_failed` here). The adapter's `maxLinkMinutes` must be at least its `minLinkMinutes`
+plus 5, or the config is refused. A link
+is never texted with less than 5 minutes of the provider's life left: it is expired at the provider
+(`payment.link_expired`, reason `not_sent_in_time`) and the request settles `expired` when the
+provider confirms, or waits for its webhook when the provider says `not_open`. Either way
+`requestPayment` throws `precondition_failed`. A process about to text a link holds a 60 second
+lease on it, so a concurrent resume refuses (`precondition_failed`) rather than expiring a link
+being sent; once the lease lapses, it may, and a sender stalled past it then texts a link the
+provider has already closed (so it cannot be paid). A process whose request another process
+settled while its create was slow never texts the link it got: it expires it at the provider and
+throws `precondition_failed`. The create guard keeps a minute over the provider's minimum for its
+latency; a create the provider still refuses leaves the request to the next resume, which expires
+it. `expirePaymentLinks(callId)`, which the host
+calls at `expiresAt` or later, asks the provider to expire each texted link still open past its
+deadline (`expireLink`): on `expired` the request settles `expired` (and its flow step fails); on
+`not_open` it is left for the provider's webhook, which may still say paid. A link that was never
+texted never expires this way; it stays open to resume.
+
+**Adapter capabilities.** `PaymentLinks.capabilities` declares `{modes, minLinkMinutes,
+maxLinkMinutes}`. When the config is saved, a step's mode (and Paylink's default mode) must be one
+the adapter takes, and the link life no longer than its maximum; malformed capabilities are a
+problem too, and so is an engine's payments adapter that declares no capabilities at all (a plain
+JavaScript adapter). Adapters are given when the engine is built, so these checks run when the
+engine is built (`createEngine`) and when a config is saved (`configure`), not at `engine.use`,
+which installs modules; a refused adapter never fails mid-call. A registry built without capabilities (only adapter names) skips these checks; an engine
+always has them.
+
+**Methods.** `paymentMethods` lists only methods that settle during the call: `card` (credit, and
+Visa and Mastercard debit), `apple_pay`, `google_pay`, `link`; the default is all four. Anything
+else is refused when the config is saved, with the reason for `acss_debit` and `us_bank_account`
+(they settle in days) and Interac (not offered for online payments). How a provider names them is
+the adapter's.
+
+Settlement:
 
 | Provider outcome | Status |
 |---|---|
@@ -379,7 +464,11 @@ account takes the money (`connect` or `platform`) is planned (PAY-7). Settlement
 | async payment failed | failed |
 | expired | expired |
 
-A request settles once; later outcomes are ignored.
+A payment recorded before modes existed (no `mode`) appears on its receipt as `platform`: it was
+taken on the host's own account. A request settles once; later outcomes are ignored, with one exception: money that moved is
+always recorded. A request the engine expired (its own deadline, a link too late to text, or a race
+with a slow create) that the provider then reports paid becomes `paid`, and `payment.settled`
+carries `late: true`.
 
 ## 15. Stripe webhooks
 
@@ -389,12 +478,140 @@ body)`. The check passes if any `v1` matches any configured secret and `t` is wi
 of now, either way. `parseStripeEvent` maps
 `identity.verification_session.{verified,requires_input,canceled}` and
 `checkout.session.{completed,async_payment_succeeded,async_payment_failed,expired}`; other types
-are reported as ignored, and a body that is not a well-formed event is `null`.
+are reported as ignored, and a body that is not a well-formed event is `null`, including one whose
+`account` is present but not a string (never read as "no account").
 
 ## 16. Texts
 
-Code builds every text, in the call's locale (English or French). The destination is always the
+Code builds every text, in the call's locale, one of `SUPPORTED_LOCALES` (exported, a frozen
+`["en", "fr"]` whose members are the `Locale` type; `isSupportedLocale` checks a host's value).
+Each catalog of code-built words is a `Record<Locale, ...>`: `IDENTITY_TEXT`, `PAYMENT_TEXT`,
+`AMOUNT_REGION` (where amounts are formatted) and `DIGIT_WORDS_BY_LOCALE` (the spoken digits the
+card-number detector reads, every locale's always on). A test fails when a catalog lacks a
+supported locale, when a `Record<Locale, ...>` in `src/` is not one it checks, or when code picks
+words by comparing a locale instead, so a new locale grows every catalog. The destination is always the
 subject's number on file. Identity link: "Your one-time identity check link: URL" / "Votre lien
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
 the currency's own decimals.
+
+## 17. Gate and access grants
+
+Gate's settings: `targets`, at least one, each `{id, controller, ref}`: `id` lower-case letters,
+digits and `-` (unique), `controller` the name of one of the engine's `access` adapters that has an
+`unlock` function, own or from its class (checked when the engine is built and when a config is
+saved), `ref` the controller's own name for the
+door, 1 to 200 characters; `maxGrantsPerCall` 1 to 5, default 3. A call keeps the targets in force
+when it started; a flow attached later is refused when a step names a target the call did not keep.
+
+The engine owns every access grant (ADR-25): it reserves it, signs it, computes its digest, calls
+the controller and records the controller's answer, in its own writes. Module code never writes a
+grant or its outcome. `engine.grantAccess(callId, input?)`: in a flow the `gate.grant` step names
+the target and the lifetime (pass no input); outside one the host's code passes `{target,
+lifetimeSeconds?}` (anything else is `invalid_input`; other fields are ignored, never applied).
+`engine.accessGrants(callId)` lists a call's grants as recorded; `engine.accessKeys()` is the
+access signer's public key set. The access signer must be its own key: an engine whose
+`accessSigner` has the receipt signer's key id or public key is refused when it is built, so a
+receipt never verifies as an access grant. A host's module can never take a built-in module's name
+(`engine.use` and `modules` refuse it, even after the built-in module was removed).
+
+1. **Settle stale grants**, in a write of their own (so it holds even when the request is then
+   refused): a grant still reserved past its expiry (its process stopped before recording the
+   answer) becomes `unknown` (`access.unknown`, reason `no_answer_recorded`, with its digest and key
+   id when it was signed). At the grant limit, that fails the step.
+2. **Reserve**: refused with `precondition_failed` off the flow's current step, `scope_denied`
+   without a verification grant covering `entry.open` (checked on every request, in a flow or
+   not: none, expired, tainted, or below today's minimum), `invalid_input` for a missing or unknown
+   target or a bad lifetime, and `precondition_failed` while another grant of the call is in flight
+   or once `maxGrantsPerCall` grants were issued, and `precondition_failed` when the engine has no
+   access controller by the target's name (own adapter entries with an `unlock` function only), and
+   `conflict` when the id generator gives a grant id the call already used (nothing is reserved; a
+   retry draws a new one). The grant's expiry is the earlier of now plus its
+   lifetime and the verification grant's expiry. Ledger: `access.issued`.
+3. **Sign**: ES256 over the canonical JSON of the body below, with the `accessSigner`. The engine
+   computes the digest (SHA-256 of those bytes) itself. A signing failure settles the grant
+   `failed` (`access.failed`, reason `not_signed`; nothing sent) and throws.
+4. **Check again**, in a write: if the grant was settled meanwhile (the call ended), the call is no
+   longer authorized for `entry.open`, or the grant expired while it was signed, nothing is sent
+   and `scope_denied` is thrown (the last two settle it `failed`, reason `not_authorized` or
+   `expired`). The digest and key id are written to the grant.
+5. **Send once** to the target's controller (if it was removed from the adapters meanwhile, the
+   grant is settled `failed`, reason `not_sent`, and `precondition_failed` is thrown: nothing was
+   sent, so it is never recorded as `unknown`): `unlock({grant, target, idempotencyKey})`, the key
+   being `[workspaceId, callId, grantId, "unlock"]`. Never retried. Right before it, with nothing in
+   between, the call is checked once more against the config in force, so a config that raised
+   `entry.open`'s floor after step 4 settles the grant `failed` (`not_authorized`) and nothing is
+   sent. A config changed by another process is seen at its next write, not here.
+6. **Record the answer**, in the engine's write: `delivered` (with `confirmed` when the controller
+   reported the door moved), `refused` (the controller certainly did not act; its reason as a short
+   code), or `unknown` (reason `answer_lost`) when the call threw or timed out. A grant settled
+   meanwhile stays as it is. `grantAccess` returns what the call holds. A failure to write the
+   answer is thrown as it is; the grant then settles as stale (step 1). Every outcome entry carries
+   `grantId`, `digest` and `kid`, never the grant or its signature. A fresh request after `unknown`
+   is a new grant.
+
+**Ending a call** is refused (`precondition_failed`) while a signed grant may still be acted on: at
+its door (step 4 passed, its answer not yet recorded) or sent with its answer lost (`unknown`, the
+controller may still be working on it), and not yet expired. A definitive answer (`delivered`,
+`refused`) lets the call end at once. The end waits for an answer still due, bounded by the
+controller's timeout, or for the grant's expiry if the answer was lost or its process stopped. A grant reserved but not yet
+signed is settled `unknown` (reason `call_ended`) in the same write that ends the call, and is then
+never sent (step 4 finds it settled); one that expired is settled `unknown` (reason
+`no_answer_recorded`). All of it happens before the receipt's ledger head is taken, so no access
+outcome ever follows `receipt.issued`, and no grant reaches a door after the receipt while it can
+still open it: once it expires, a relay refuses it (`verifyAccessGrant`). A controller that does not
+check a grant's expiry could still act on a request delayed past it; the relay contract requires the
+check.
+
+```json
+{
+  "body": {
+    "v": 1, "kind": "access", "grantId": "acc_...", "workspaceId": "...",
+    "audience": "<controller name>", "target": "<controller's door ref>", "action": "unlock",
+    "scope": "entry.open", "level": 2,
+    "issuedAt": "2026-01-01T00:00:00.000Z", "expiresAt": "2026-01-01T00:01:00.000Z"
+  },
+  "alg": "ES256", "kid": "...", "signature": "<base64url of the 64-byte r||s signature over canonicalJson(body)>"
+}
+```
+
+`verifyAccessGrant(grant, keys, {workspaceId, audience, now, clockSkewSeconds?})` returns `{ok:
+true, body}` or `{ok: false, reason}`: `invalid_options` (a `clockSkewSeconds` that is not a
+finite, non-negative number, or a `now` that is not a valid date: refused, so neither time check
+ever turns off), `malformed` (not
+this shape), `signature` (unknown `kid`,
+another algorithm, any change), `workspace` (issued by another workspace, or no `workspaceId`
+given: it is required, so workspaces sharing a key and a controller name never open each other's
+doors), `audience`, `not_yet_valid` (with `clockSkewSeconds` of allowance, default 30, for a
+grant issued a little ahead of the relay's clock), `expired` (strict: from `expiresAt` on, whatever
+the skew, because the engine ends a call only once every grant at a door has answered or expired),
+and `lifetime` (longer than 900 seconds, or ending before it starts). This assumes the engine's and
+the relay's clocks agree (NTP): a relay whose clock runs behind by some seconds accepts a grant for
+that much longer. `new SeenGrants()`: `accept(body, now)` is true once per grant id (false for an
+expiry it cannot parse or a `now` that is not a valid time), and keeps the
+id until the grant expires, when the verifier refuses it anyway. It keeps a forget point: ids are
+forgotten only once their grant expired at or before it, and any grant expiring at or before it is
+refused, so a grant accepted once is never accepted again, under any sequence of clock jumps and
+rollbacks. The forget point follows the relay's clock but never passes the latest expiry it has
+accepted, so a clock that jumped forward refuses no fresh grant beyond one grant lifetime (at most
+15 minutes) of grants it has really seen. It knows a grant by its id alone, so grant ids must be
+unique per workspace: the default generator is random (96 bits); a host's own `ids` that repeats
+across calls or processes makes a relay refuse a fresh grant as a replay. `engine.accessKeys()` is the public key set.
+It, and `engine.receiptKeys()`, publish only a key's public members (`kty`, `crv`, `x`, `y`, `kid`,
+`alg`, `use`), whatever a signer's `publicJwk` returns, so a signer that hands back its private `d`
+never has it published.
+
+**The relay contract, version 1** (`webhookRelay({url, timeoutMs?})`): `POST <url>` with
+`content-type: application/json`, `idempotency-key: <the key above>` (as printable ASCII: any
+other character is written as a JSON `\uXXXX` escape, so the header parses to the same tuple; a
+header cannot carry a character past U+00FF) and the signed grant as canonical JSON. HTTPS only, or HTTP to `127.0.0.1`, `localhost` or `[::1]`; no credentials in the
+URL; redirects are not followed; the timeout is 100 to 30,000 ms (default 5,000). The relay
+answers 2xx after it worked the door, optionally `{"state": "confirmed", "ref": "<its id>"}`; 4xx
+when it did not act, optionally `{"error": "<code>"}` (`signature`, `workspace`, ...). A 409
+(`replay`) is not a refusal: an earlier request with this grant was accepted and may have opened
+the door, so it is `unknown`. Anything else, including no answer, is `unknown` too. A relay checks the grant with `verifyAccessGrant` against
+`engine.accessKeys()`, its own workspace and its own audience, and refuses a grant id it has seen.
+
+A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);
+revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS
+(GAT-4), a Seam adapter (GAT-5), direct vendor adapters (GAT-6).

@@ -1,10 +1,30 @@
-// Gate (entry): planned, the fifth built-in module. After verification it produces a signed,
-// time-limited access grant (ES256 over canonical JSON, like receipts), delivers it through an
-// `AccessController` adapter (a door controller webhook, a one-time access code, a web sign-in
-// step-up), refuses without a valid verification grant, and writes every grant to the ledger.
+// Gate pieces that are planned and not built. Each throws NotImplementedError naming its issue.
 import { NotImplementedError } from "../core/errors.ts";
+import type { AccessController } from "./access.ts";
 
-/** The Gate module, to install with `engine.use(...)` and turn on in the config. */
-export function gateModule(): never {
-  throw new NotImplementedError("gateModule", "GAT-1");
+/** A one-time access code texted to the number on file, for a keypad at the door (GAT-3, after VER-2's send limits). */
+export function issueAccessCode(_input: { callId: string; target: string }): never {
+  throw new NotImplementedError("issueAccessCode", "GAT-3");
+}
+
+/**
+ * Web sign-in step-up: an ES256 JWT bound to the site's nonce, checked by the site against the
+ * engine's published JWKS (GAT-4).
+ */
+export function issueStepUpToken(_input: { callId: string; audience: string; nonce: string }): never {
+  throw new NotImplementedError("issueStepUpToken", "GAT-4");
+}
+
+/** Seam, one API for August, Yale, Nuki, Salto KS, Kisi, Brivo and Avigilon Alta (GAT-5, after its pricing and data handling are checked). */
+export function seamAccessController(_options: { apiKey: string }): AccessController {
+  return {
+    unlock: () => {
+      throw new NotImplementedError("seamAccessController.unlock", "GAT-5");
+    },
+  };
+}
+
+/** Direct vendor adapters, one per brand, for systems no aggregator reaches (GAT-6). */
+export function vendorAccessController(_options: { vendor: "kisi" | "verkada"; apiKey: string }): never {
+  throw new NotImplementedError("vendorAccessController", "GAT-6");
 }

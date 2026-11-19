@@ -203,8 +203,8 @@ verification it produces a signed, time-limited access grant (ES256 over canonic
 receipts), delivered through an `AccessController` adapter (a door controller webhook, a one-time
 access code, a web sign-in step-up). It refuses without a valid verification grant, and every
 grant goes to the ledger. The real adapters stay `NotImplementedError` with their ids; a fake
-ships first. Badge stays identity only. It is built in the second pull request of the modular
-core; `gateModule()` throws `NotImplementedError` until then.
+ships first. Badge stays identity only. Built in the second pull request of the modular core
+(ADR-21, ADR-22).
 **Why.** Access is an outcome, like a record or a payment, with its own format, adapter and
 failure modes; folding it into Badge would make identity code decide about doors.
 
@@ -213,8 +213,7 @@ failure modes; folding it into Badge would make identity code decide about doors
 **Decided.** Per flow step, `connect` (the business's own Stripe account, direct charges; the
 business is the merchant) or `platform` (the platform's account; the platform is the merchant).
 One `PaymentLinks` adapter shape, with the mode and an optional connected account on the request.
-The engine still never sees card data. Built with PAY-7 in the second pull request; until then
-`validateConfig` refuses a step with a `mode`, citing PAY-7, so no config can reach it mid-call.
+The engine still never sees card data. Built with PAY-7 in the second pull request (ADR-23).
 **Why.** Both kinds of host exist: a business that takes its own money, and a platform that sells
 on its own account. One adapter shape keeps the engine's payment rules the same for both.
 
@@ -228,3 +227,117 @@ calls) is a hard gate: no host runs it on a live line before VER-1 is merged.
 **Why.** It is the smallest flow that proves the engine on a real line: one factor, one scope, no
 money and no customer data, run across the host's processes. Its scopes stay below the floors, so
 an owner command can never move money or change contact details at level 1.
+
+## ADR-21. Access grants are signed like receipts
+
+**Decided.** An access grant is a small body (grant id, workspace, audience, target, action, scope,
+level, issued and expiry times) signed with ES256 over its canonical JSON (`signDocument`, the
+receipt code generalised), under the access signer's own `kid`. It never outlives the call's
+verification grant and lives 10 to 900 seconds, 60 by default. The ledger gets `access.issued` and
+the outcome with the grant's digest, never the grant. A verifier must name the workspace it serves:
+grants are bound to their workspace as well as their audience. Outside modules see the current
+step, the engine's clock and an id source.
+**Why.** One signing format for receipts and grants means one verifier in every language.
+**Superseded in part by ADR-25:** Gate first ran on the outside module path, with its answers
+written through `recordModuleOutcome` and judged by the module's own `checkOutcome`. Four rounds of
+hostile review broke that design, and Gate is now built in (ADR-25).
+**Revisit** when Gate needs a receipt part (access on the call's receipt).
+
+## ADR-22. The signed-webhook relay first; an unlock is never retried
+
+**Decided.** The first real `AccessController` is `webhookRelay`: it POSTs the signed grant to a
+small relay on the site's network, which verifies it with the public key (`verifyAccessGrant`),
+refuses a grant id it has seen (`SeenGrants`) and works the door. The grant's ES256 signature is
+the webhook's signature; there is no shared HMAC secret, so a relay that is taken over cannot
+mint grants. HTTPS only (HTTP to the loopback for tests and the demo), no redirects, a 5 second
+timeout, one request. A 2xx is delivered, a 4xx refused, anything else unknown. Gate never retries
+an unlock: one grant in flight per call, a lost answer recorded as `unknown`, and opening again is
+a fresh request with a new grant, up to `maxGrantsPerCall` (default 3). Seam (GAT-5) and direct
+vendor adapters (GAT-6) are `NotImplementedError`; one-time codes (GAT-3) and web step-up (GAT-4)
+too.
+**Why.** The maintainers' decisions of 2026-11-18: the relay first (no vendor account, testable in CI, the
+escape hatch for any door system), Seam after its pricing and Canadian data handling are
+checked, and a lost unlock never retried, because a retry can open a door twice for a caller who
+is no longer there. GAT-2's original text asked for an HMAC header and one retry; both are
+superseded by this record. GAT-1's original `revoke` and `gate.revoked` are dropped by design: a
+momentary unlock that lives at most 15 minutes has nothing to revoke once sent, and revoking an
+issued code is part of one-time codes (GAT-3). **Revisit** if a relay needs to refuse junk before parsing (an
+optional HMAC header could be added without changing the grant).
+
+## ADR-23. Two payment modes, a link life the engine enforces, instant methods only
+
+**Decided.** Each `paylink.request` step chooses `connect` (the business's own account at the
+provider, a direct charge, the business is the merchant) or `platform` (the platform's account,
+the platform is the merchant); Paylink's settings give the default (`platform`) and the
+`connectedAccountId` that connect mode needs, and the validator refuses connect without it. The
+request to the one `PaymentLinks` adapter carries the mode, the account in connect mode, the
+payment methods and the engine's deadline; the idempotency key includes the mode. A link lives
+`linkLifeMinutes` (5 to 60, default 15) from when it was texted, and the engine expires it itself
+at that deadline (`expirePaymentLinks`, through the new `PaymentLinks.expireLink`), because
+Stripe Checkout's shortest `expires_at` is 30 minutes. Two times are kept apart: the provider
+expiry (`providerExpiresAt`, set when the request is reserved, from twice the link life within the
+adapter's declared range, plus a margin over its minimum) is what `createLink` receives as
+`expiresAt`; the engine's deadline (the text plus the link life, never past the provider expiry) is
+what `requestPayment` returns and `expirePaymentLinks` enforces. The engine has no timer: the host
+must call `expirePaymentLinks` at `expiresAt` (a timer or a sweep), or the link stays payable until
+the provider expiry, and a payment in that window is still recorded. A link may offer only methods that settle
+during the call: card (credit, and Visa and Mastercard debit), Apple Pay, Google Pay and Link, the
+default; the validator refuses anything else, pre-authorized debit and Interac by name. A
+provider outcome whose connected account is not the payment's is ignored and written to the
+ledger. Receipts and `payment.link_sent` carry the mode. **Amended (hostile review of PR 2):** the
+payments adapter declares its capabilities (modes, shortest and longest link life), the validator
+holds steps and settings to them, and the provider is asked for a life inside them; a link with
+less than 5 minutes of the provider's life left is expired, never texted; a `connectedAccountId`
+needs an explicit mode.
+**Why.** The maintainers' decisions of 2026-11-18: both modes, chosen per flow; the engine expires links at 15
+minutes by default, configurable from 5 to 60; any popular method that settles while the person
+is on the call. Stripe documents Interac only in person and pre-authorized debit settles in days.
+Checking the account stops an event from one business settling another's payment. **Revisit**
+when Stripe offers Interac in online Checkout, or a provider's methods need mapping the validator
+cannot see (how wallets map to Checkout's parameters is PAY-1's to prove in test mode).
+
+## ADR-24. Web step-up will be an ES256 JWT checked against a JWKS
+
+**Decided.** GAT-4 (not built) issues a compact JWS (`alg: ES256`) bound to a nonce the site
+showed and the caller keyed, checked by the site with any JOSE library against a published JWKS.
+Receipts and access grants keep canonical JSON. No OpenID Provider (CIBA) for now.
+**Why.** Sites already verify JWTs against a JWKS (sign-in with large identity providers works the
+same way); running a full OpenID Provider is too heavy for a small business. node:crypto signs
+ES256 in the JWS format already, so this needs no runtime dependency (ADR-3). **Revisit** for
+enterprise hosts that want CIBA.
+
+## ADR-25. The engine owns access outcomes; Gate is built in
+
+**Decided.** Gate is a built-in module, like Paylink. Its door controllers (`access`, by name) and
+its grant signer (`accessSigner`) are engine adapters, and the config turns it on. The engine
+itself reserves each grant, signs it, computes its digest from the frozen grant it signed, calls the
+controller once, and records the controller's actual answer (`delivered`, `refused` or `unknown`)
+with its ledger entry, all in its own writes. The module only proposes the intent: the targets
+(door, controller) in its settings, and the step's lifetime; level, workspace and expiry come from
+the call. No module code can write a grant or its outcome: `updateModule` and `moduleState`
+refuse every built-in module, and the outside-module outcome API of earlier drafts
+(`recordModuleOutcome`, reservations, `outcomeRecord`, `checkOutcome`) is removed. An outside
+module's `updateModule` is held by the engine to its manifest's scopes on every call: in a flow,
+the current step's; outside a flow, all of them. Ending a call settles a grant still in flight as
+`unknown` if it was not yet signed, and is refused while a signed grant is at its door (until its
+answer is recorded or it expires, after which a relay refuses it), so no access outcome ever
+follows `receipt.issued` (re-issuing a receipt is not supported, so nothing is ever appended under
+one). No door acts on a grant after the receipt only while the relay keeps accurate time: the
+relay judges the expiry by its own clock, so a relay whose clock runs behind the engine's accepts
+a grant for that much longer (SPEC.md, section 17). Holding the end, rather than a lock across
+the unlock, keeps the engine free of locks: the wait is bounded by the controller's timeout, or by
+the grant's lifetime (at most 15 minutes) if its process stopped. Built-in module names are the
+engine's for good, and the access signer must be a key of its own.
+**Why.** Four rounds of hostile review on PR 2 each found a new way for a module's own code to
+write an outcome the controller never gave: a forged grant beside a pending one, a reserved grant
+re-pointed or lowered, the same reservation settled again, a digest the engine never signed, a
+write through `updateModule` that skipped the outcome checks entirely, and a late answer landing
+after the receipt. Each patch closed one path while the root cause stayed: the module could write
+outcome state, and the engine trusted the module's judgement of it, while the controller's real
+answer lived only in the module's memory. Moving the outcome into the engine removes that trust
+instead of policing it: there is no write path left to attack. A late door answer recorded as
+`unknown` when the call ends is honest (the engine does not know), and keeps the receipt final.
+**Revisit** if a host needs its own access module with engine-held outcomes: that would be a
+generic "held work" contract in the core (the engine calls an adapter the module names and records
+its answer), designed once, not per module.
+

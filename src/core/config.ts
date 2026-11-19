@@ -115,6 +115,7 @@ export function validateConfig(config: unknown, registry: ModuleRegistry): strin
     for (const adapter of module.requiredAdapters(settings)) {
       if (!registry.adapters.has(adapter)) problems.push(`modules.${name}: needs the ${adapter} adapter, which the engine does not have`);
     }
+    problems.push(...(module.checkAdapters?.(settings, registry.capabilities) ?? []).map((e) => `modules.${name}: ${e}`));
   }
 
   // Flows: every step's module on, every step valid, and every scope a step needs reached before it.
@@ -148,7 +149,7 @@ export function validateConfig(config: unknown, registry: ModuleRegistry): strin
         problems.push(`${stepAt} (${type}): the ${ownerName} module is turned off`);
         return;
       }
-      const ctx: StepContext = { settings: validSettings.has(ownerName) ? validSettings.get(ownerName) : null, policy, adapters: registry.adapters };
+      const ctx: StepContext = { settings: validSettings.has(ownerName) ? validSettings.get(ownerName) : null, policy, adapters: registry.adapters, capabilities: registry.capabilities };
       problems.push(...owner.validateStep(step as FlowStep, ctx).map((e) => `${stepAt} (${type}): ${e}`));
       const scope = owner.manifest.scopes.needs[type];
       if (scope !== undefined && policy !== null) {

@@ -84,7 +84,7 @@ function body(patch: Partial<ReceiptBody> = {}): ReceiptBody {
     issuedAt: at,
     verification: { level: 3, methods: ["keypad_knowledge", "photo_id"] },
     records: [{ recordId: "rec_1", formId: "repair", digest: "ab".repeat(32) }],
-    payments: [{ paymentId: "pay_1", status: "paid", amountMinor: 15000, currency: "cad", providerRef: "cs_1" }],
+    payments: [{ paymentId: "pay_1", status: "paid", amountMinor: 15000, currency: "cad", mode: "platform", providerRef: "cs_1" }],
     consents: [{ purpose: "texts", wordingVersion: "1", wordingDigest: "cd".repeat(32), answer: "yes" }],
     ledger: { seq: 9, hash: "ef".repeat(32) },
     ...patch,
@@ -101,6 +101,7 @@ describe("receipts", () => {
     const keys = [signer.publicJwk()];
     assert.equal("d" in keys[0]!, false, "the published key has no private part");
     assert.equal(verifyReceipt(receipt, keys), true);
+    for (const bad of [null, "x", 7, { ...receipt, signature: 1 }]) assert.equal(verifyReceipt(bad as never, keys), false, "never throws on a malformed envelope");
     assert.equal(new TextDecoder().decode(receiptPayload(body())).startsWith('{"callId":"c1","consents":'), true);
     assert.match(receiptDigest(body()), /^[0-9a-f]{64}$/);
   });

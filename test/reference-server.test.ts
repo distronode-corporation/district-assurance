@@ -5,9 +5,10 @@ import { after, before, describe, it } from "node:test";
 
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { runDemo } from "../examples/reference-server/src/demo.ts";
+import { createDoorRelay } from "../examples/reference-server/src/door-relay.ts";
 import { StripeCheckoutLinks, StripeIdentityProvider } from "../examples/reference-server/src/stripe-adapters.ts";
-import { NotImplementedError, signStripePayload, type Engine } from "../src/index.ts";
-import { createTestEngine, type TestEngine } from "../src/testing/index.ts";
+import { NotImplementedError, canonicalJson, signDocument, signStripePayload, type Engine } from "../src/index.ts";
+import { createTestEngine, generateTestSigner, type TestEngine } from "../src/testing/index.ts";
 
 const SECRET = "whsec_test_not_a_secret";
 
@@ -27,7 +28,7 @@ describe("reference server", () => {
 
   const post = (path: string, body: string, headers: Record<string, string> = {}) => fetch(`${base}${path}`, { method: "POST", body, headers });
   const signed = (body: string) => ({ "stripe-signature": signStripePayload(body, SECRET, Math.floor(t.clock.now().getTime() / 1000)) });
-  const event = (id: string, type: string, object: Record<string, unknown>) => JSON.stringify({ id, type, data: { object } });
+  const event = (id: string, type: string, object: Record<string, unknown>, extra: Record<string, unknown> = {}) => JSON.stringify({ id, type, data: { object }, ...extra });
 
   it("answers health, the key set, and 404 for anything else", async () => {
     assert.deepEqual(await (await fetch(`${base}/healthz`)).json(), { ok: true });
@@ -48,6 +49,8 @@ describe("reference server", () => {
     assert.deepEqual(await res.json(), { error: "signature", reason: "no_matching_signature" });
     res = await post("/webhooks/stripe/payments", body, signed(body));
     assert.deepEqual(await res.json(), { error: "signature", reason: "no_secret" }, "an endpoint without a secret refuses everything");
+    res = await post("/webhooks/stripe/connect", body, signed(body));
+    assert.deepEqual(await res.json(), { error: "signature", reason: "no_secret" }, "the Connect endpoint has its own secret, unset here");
     res = await post("/webhooks/stripe/identity", "{}", signed("{}"));
     assert.deepEqual([res.status, await res.json()], [400, { error: "malformed_event" }]);
   });
@@ -57,7 +60,30 @@ describe("reference server", () => {
     assert.deepEqual(await (await post("/webhooks/stripe/identity", body, signed(body))).json(), { received: true, applied: false });
     assert.deepEqual(await (await post("/webhooks/stripe/identity", body, signed(body))).json(), { received: true, duplicate: true });
     const pay = event("evt_3", "checkout.session.expired", { id: "cs_x" });
-    assert.deepEqual(await (await post("/webhooks/stripe/identity", pay, signed(pay))).json(), { received: true, applied: false });
+    assert.deepEqual(await (await post("/webhooks/stripe/identity", pay, signed(pay))).json(), { received: true, applied: false, handled: false });
+  });
+
+  it("applies an event only on its own endpoint, never remembering one that went to the wrong one", async () => {
+    const both = createTestEngine();
+    const server = createReferenceServer({ engine: both.engine, stripeSecrets: { identity: [SECRET], payments: [SECRET], connect: [SECRET] }, clock: both.clock });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const send = async (path: string, body: string) => (await fetch(`${url}${path}`, { method: "POST", headers: signed(body), body })).json();
+    try {
+      // An identity event that an unfiltered listener sent to the payments endpoint first.
+      const id = event("evt_10", "identity.verification_session.verified", { id: "vs_unknown" });
+      assert.deepEqual(await send("/webhooks/stripe/payments", id), { received: true, applied: false, handled: false });
+      assert.deepEqual(await send("/webhooks/stripe/identity", id), { received: true, applied: false }, "applied where it belongs, not a duplicate");
+      // The endpoint fixes the payment mode: a Connect event names an account, an account event does not.
+      const platform = event("evt_11", "checkout.session.expired", { id: "cs_x" });
+      assert.deepEqual(await send("/webhooks/stripe/connect", platform), { received: true, applied: false, handled: false });
+      assert.deepEqual(await send("/webhooks/stripe/payments", platform), { received: true, applied: false });
+      const connect = event("evt_12", "checkout.session.expired", { id: "cs_y" }, { account: "acct_1" });
+      assert.deepEqual(await send("/webhooks/stripe/payments", connect), { received: true, applied: false, handled: false });
+      assert.deepEqual(await send("/webhooks/stripe/connect", connect), { received: true, applied: false });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("refuses a body over the limit", async () => {
@@ -90,10 +116,67 @@ describe("reference server", () => {
   });
 });
 
+describe("example door relay", () => {
+  it("refuses an oversized body without keeping it, and a body that is not JSON", async () => {
+    const opened: string[] = [];
+    const relay = createDoorRelay({ workspaceId: "w", audience: "lobby", keys: [], clock: { now: () => new Date(0) }, open: async (target) => void opened.push(target) });
+    await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(relay.address() as AddressInfo).port}`;
+    try {
+      // The cutoff can land before the headers or while the body is read: either is "cut off".
+      const big = await (async () => {
+        try {
+          const r = await fetch(`${url}/unlock`, { method: "POST", body: "x".repeat(64 * 1024) });
+          return { status: r.status, text: await r.text() };
+        } catch {
+          return "cut off";
+        }
+      })();
+      // Only a transport failure counts as cut off: a complete answer that is not JSON fails here.
+      // Answered at once and the upload cut off: the client sees the 413, or the connection close.
+      if (big !== "cut off") assert.deepEqual([big.status, JSON.parse(big.text)], [413, { error: "body_too_large" }]);
+      const junk = await fetch(`${url}/unlock`, { method: "POST", body: "{" });
+      assert.deepEqual([junk.status, await junk.json()], [400, { error: "malformed" }]);
+      assert.equal((await fetch(`${url}/other`)).status, 404);
+      assert.deepEqual(opened, []);
+    } finally {
+      await new Promise<void>((resolve) => relay.close(() => resolve()));
+    }
+  });
+
+  it("answers 502 when the door callback throws, without stopping the relay", async () => {
+    const signer = generateTestSigner("g1");
+    const body = { v: 1, kind: "access", grantId: "acc_1", workspaceId: "w", audience: "lobby", target: "door-1", action: "unlock", scope: "entry.open", level: 2, issuedAt: "1970-01-01T00:00:00.000Z", expiresAt: "1970-01-01T00:01:00.000Z" } as const;
+    const grant = await signDocument(signer, body);
+    const relay = createDoorRelay({
+      workspaceId: "w",
+      audience: "lobby",
+      keys: [signer.publicJwk()],
+      clock: { now: () => new Date(0) },
+      open: () => {
+        throw new Error("relay board unplugged");
+      },
+    });
+    await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(relay.address() as AddressInfo).port}/unlock`;
+    try {
+      const res = await fetch(url, { method: "POST", body: canonicalJson(grant) });
+      assert.deepEqual([res.status, await res.json()], [502, { error: "door" }]);
+      assert.equal((await fetch(url, { method: "POST", body: canonicalJson(grant) })).status, 409, "still running, and the grant stays seen");
+    } finally {
+      await new Promise<void>((resolve) => relay.close(() => resolve()));
+    }
+  });
+});
+
 describe("demo and Stripe adapters", () => {
-  it("runs the owner-command and deposit flows end to end", async () => {
+  it("runs the owner-command, deposit (both modes) and entry flows end to end", async () => {
     const result = await runDemo(false);
     assert.equal(result.checksOk, true);
+    assert.equal(result.receipt.body.payments[0]!.mode, "platform");
+    assert.equal(result.connectReceipt.body.payments[0]!.mode, "connect");
+    assert.equal(result.connectReceipt.body.payments[0]!.status, "paid");
+    assert.deepEqual(result.doorOpened, ["door-1"], "opened once, the replay and the changed grant refused");
     assert.equal(result.ownerReceipt, null, "owner-command has no receipt step");
     assert.equal(result.tamperedFails, true);
     assert.equal(result.chainOk, true);
@@ -105,7 +188,22 @@ describe("demo and Stripe adapters", () => {
   it("has Stripe adapters that are planned, not built", async () => {
     await assert.rejects(new StripeIdentityProvider("rk_test").createDocumentCheck({ callId: "c", idempotencyKey: "k" }), (e: unknown) => e instanceof NotImplementedError && e.issue === "VER-5");
     await assert.rejects(
-      new StripeCheckoutLinks("rk_test").createLink({ callId: "c", paymentId: "p", amountMinor: 1, currency: "cad", description: "d", idempotencyKey: "k" }),
+      new StripeCheckoutLinks("rk_test").createLink({
+        callId: "c",
+        paymentId: "p",
+        amountMinor: 1,
+        currency: "cad",
+        description: "d",
+        mode: "connect",
+        connectedAccountId: "acct_x",
+        paymentMethods: ["card"],
+        expiresAt: "2026-01-01T00:15:00.000Z",
+        idempotencyKey: "k",
+      }),
+      (e: unknown) => e instanceof NotImplementedError && e.issue === "PAY-1",
+    );
+    await assert.rejects(
+      new StripeCheckoutLinks("rk_test").expireLink({ linkId: "cs_x", mode: "platform", idempotencyKey: "k" }),
       (e: unknown) => e instanceof NotImplementedError && e.issue === "PAY-1",
     );
   });

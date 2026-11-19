@@ -1,17 +1,36 @@
-// The demo's scripted calls, one step at a time. `npm run demo` runs every step of both flows in a
-// row and prints a line per step; the browser UI (`npm run ui`) runs the same steps one click at a
+// The demo's scripted calls, one step at a time. `npm run demo` runs every step of the four flows
+// in a row and prints a line per step; the browser UI (`npm run ui`) runs the same steps one click at a
 // time. A step takes no input: what the caller keys is fixed here, so the UI can only replay the
 // script, never drive the engine with values of its own.
 //
 // Everything is made up: the accounts, the PIN, the date of birth and the phone numbers (555
 // numbers). The Stripe webhooks are signed here with a demo secret and posted to the reference
-// server over the loopback.
-import { createEngine, signStripePayload, subjectKeyFor, type Engine, type SignedReceipt } from "../../../src/index.ts";
+// server over the loopback. Gate's door is an example relay on the loopback that checks each grant
+// with the engine's access key before it "opens" (it only records the door's name).
+import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
+
+import {
+  canonicalJson,
+  createEngine,
+  signStripePayload,
+  subjectKeyFor,
+  webhookRelay,
+  type AccessController,
+  type Engine,
+  type SignedAccessGrant,
+  type SignedReceipt,
+} from "../../../src/index.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, generateTestSigner, testSubject, type TestEngine } from "../../../src/testing/index.ts";
+import { createDoorRelay } from "./door-relay.ts";
 import { demoConfig } from "./flows.ts";
 
 /** The demo's webhook signing secret. Not a secret: it is published here on purpose. */
 export const DEMO_SECRET = "whsec_demo_not_a_secret";
+/** The demo's Connect endpoint secret (connect-mode payments), published on purpose too. */
+export const DEMO_CONNECT_SECRET = "whsec_demo_connect_not_a_secret";
+/** The made-up business account connect-mode deposits are taken on. */
+export const DEMO_ACCOUNT = "acct_demo_business";
 const OWNER_ACCOUNT = "10000001";
 const OWNER_PIN = "4826";
 
@@ -24,12 +43,40 @@ export interface DemoWorld {
   other: Engine;
   /** The reference server's base URL, set once it listens. */
   base: string;
-  /** Signs a Stripe event with the demo secret and posts it to the server. */
-  stripe(path: string, type: string, object: Record<string, unknown>): Promise<Record<string, unknown>>;
+  /** Signs a Stripe event with the demo secret (the Connect one on the Connect route) and posts it. */
+  stripe(path: string, type: string, object: Record<string, unknown>, account?: string): Promise<Record<string, unknown>>;
+  /** Gate's one door controller, the relay adapter to the example door relay, on both engines. */
+  lobby: AccessController;
+  /** Every door the example relay opened, in order (for display). */
+  doorsOpened: string[];
+  /** The grant ids the example relay opened a door for: each run checks its own. */
+  openedFor: Set<string>;
+  /** Each grant Gate sent, by grant id, so a step can try to replay it. */
+  sentGrants: Map<string, SignedAccessGrant>;
+  /** The example door relay's unlock URL; starts the relay on the loopback the first time. */
+  relayUrl(): Promise<string>;
+  /** Stops the door relay, if it was started. */
+  close(): Promise<void>;
 }
 
 export function createDemoWorld(): DemoWorld {
-  const t = createTestEngine({ config: demoConfig() });
+  const doorsOpened: string[] = [];
+  const openedFor = new Set<string>();
+  const sentGrants = new Map<string, SignedAccessGrant>();
+  let relay: Server | null = null;
+  let starting: Promise<string> | null = null;
+  let closed = false;
+  // The relay adapter needs the relay's port, known once it listens: built per unlock.
+  // Gate's adapters: its own signing key, and one controller, the relay adapter, whose URL is known
+  // once the example relay listens (so it is built per unlock).
+  const accessSigner = generateTestSigner("demo-gate-key-1");
+  const lobby: AccessController = {
+    unlock: async (input) => {
+      sentGrants.set(input.grant.body.grantId, input.grant);
+      return webhookRelay({ url: await world.relayUrl() }).unlock(input);
+    },
+  };
+  const t = createTestEngine({ config: demoConfig(), adapters: { access: { lobby }, accessSigner } });
   t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: OWNER_ACCOUNT, phoneOnFile: "+15555550101", knowledge: {}, pin: OWNER_PIN }));
   t.records.putSubject(
     "ws_test",
@@ -42,7 +89,7 @@ export function createDemoWorld(): DemoWorld {
     config: demoConfig(),
     clock: t.clock,
     ids: t.ids,
-    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments: t.payments, signer: generateTestSigner() },
+    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments: t.payments, signer: generateTestSigner(), access: { lobby }, accessSigner },
   });
   let n = 0;
   const world: DemoWorld = {
@@ -50,9 +97,48 @@ export function createDemoWorld(): DemoWorld {
     engine: t.engine,
     other,
     base: "",
-    async stripe(path, type, object) {
-      const payload = JSON.stringify({ id: `evt_demo_${++n}`, type, livemode: false, data: { object } });
-      const header = signStripePayload(payload, DEMO_SECRET, Math.floor(t.clock.now().getTime() / 1000));
+    lobby,
+    doorsOpened,
+    openedFor,
+    sentGrants,
+    relayUrl() {
+      // A closed world starts nothing: a start after close() would listen with no one to stop it.
+      if (closed) return Promise.reject(new Error("the demo world is closed"));
+      // One startup shared by every caller, so two runs that begin together both wait for it.
+      starting ??= (async () => {
+        relay = createDoorRelay({
+          workspaceId: "ws_test",
+          audience: "lobby",
+          keys: t.engine.accessKeys(),
+          clock: t.clock,
+          open: async (target, grant) => {
+            doorsOpened.push(target);
+            openedFor.add(grant.grantId);
+          },
+        });
+        const started = relay;
+        await new Promise<void>((resolve) => started.listen(0, "127.0.0.1", resolve));
+        // Never keeps a process alive on its own: the demo, the UI and the tests decide when to stop.
+        started.unref();
+        return `http://127.0.0.1:${(started.address() as AddressInfo).port}/unlock`;
+      })();
+      return starting;
+    },
+    async close() {
+      // A relay still starting is waited for, then stopped: closing a server before it listens
+      // leaves its listen pending forever, so relayUrl() and every unlock behind it would hang.
+      if (closed) return;
+      closed = true;
+      const pending = starting;
+      if (pending === null) return;
+      await pending;
+      const running = relay!;
+      await new Promise<void>((resolve) => running.close(() => resolve()));
+    },
+    async stripe(path, type, object, account) {
+      const payload = JSON.stringify({ id: `evt_demo_${++n}`, type, livemode: false, data: { object }, ...(account === undefined ? {} : { account }) });
+      const secret = path.endsWith("/connect") ? DEMO_CONNECT_SECRET : DEMO_SECRET;
+      const header = signStripePayload(payload, secret, Math.floor(t.clock.now().getTime() / 1000));
       const res = await fetch(`${world.base}${path}`, { method: "POST", headers: { "stripe-signature": header }, body: payload });
       return (await res.json()) as Record<string, unknown>;
     },
@@ -66,6 +152,8 @@ export interface ScriptRun {
   /** This call's payment link, once requested: runs share the fakes, so never "the latest link". */
   linkId: string;
   receipt: SignedReceipt | null;
+  /** This call's access grant, once Gate sent one (entry). */
+  grantId?: string;
 }
 
 /** What a step did, in one line, and whether the demo's check on it held. */
@@ -79,7 +167,7 @@ export interface ScriptStep {
   run(world: DemoWorld, call: ScriptRun): Promise<StepOutcome>;
 }
 
-export type DemoFlow = "owner-command" | "deposit";
+export type DemoFlow = "owner-command" | "deposit" | "deposit-connect" | "entry";
 
 const pass = (detail: string): StepOutcome => ({ detail, ok: true });
 
@@ -227,8 +315,123 @@ const deposit: ScriptStep[] = [
   },
 ];
 
-export const SCRIPTS: Readonly<Record<DemoFlow, readonly ScriptStep[]>> = { "owner-command": ownerCommand, deposit };
+/** Keypad and carrier to level 2, the scopes the flow's verify step names. */
+async function verifyToLevel2(w: DemoWorld, call: ScriptRun, scope: string): Promise<StepOutcome> {
+  await w.engine.beginVerification(call.callId, { accountNumber: "12345678" });
+  await w.engine.submitKeypad(call.callId, { dob: "19850214" });
+  await w.engine.checkCarrier(call.callId);
+  const verified = await w.engine.finishVerification(call.callId);
+  return { detail: `level ${verified.level}, scopes ${verified.scopes.join(", ")}`, ok: verified.level === 2 && verified.scopes.includes(scope) };
+}
+
+/** A deposit on the business's own account (connect mode), settled by the Connect webhook only. */
+const depositConnect: ScriptStep[] = [
+  {
+    label: "deposit-connect: call started",
+    async run(w, call) {
+      call.callId = (await w.engine.startCall({ locale: "fr", flow: "deposit-connect" })).callId;
+      return pass(call.callId);
+    },
+  },
+  { label: "verify: level 2", run: (w, call) => verifyToLevel2(w, call, "payment.request") },
+  {
+    label: "pay: connect mode",
+    async run(w, call) {
+      const payment = await w.engine.requestPayment(call.callId);
+      const asked = w.t.payments.created.find((link) => link.paymentId === payment.paymentId)!;
+      call.linkId = asked.linkId;
+      return {
+        detail: `account ${asked.connectedAccountId}, methods ${asked.paymentMethods.join(", ")}, the engine expires it at ${payment.expiresAt}`,
+        ok: asked.mode === "connect" && asked.connectedAccountId === DEMO_ACCOUNT,
+      };
+    },
+  },
+  {
+    label: "webhook: on the platform endpoint",
+    async run(w, call) {
+      const hook = await w.stripe("/webhooks/stripe/payments", "checkout.session.completed", { id: call.linkId, payment_status: "paid" });
+      return { detail: `applied: ${String(hook.applied)} (no connected account: ignored)`, ok: hook.applied === false };
+    },
+  },
+  {
+    label: "webhook: on the Connect endpoint",
+    async run(w, call) {
+      const hook = await w.stripe("/webhooks/stripe/connect", "checkout.session.completed", { id: call.linkId, payment_status: "paid" }, DEMO_ACCOUNT);
+      return { detail: `signed with its own secret, applied: ${String(hook.applied)}`, ok: hook.applied === true };
+    },
+  },
+  {
+    label: "deposit-connect: call ended",
+    async run(w, call) {
+      call.receipt = await w.engine.endCall(call.callId);
+      const mode = call.receipt?.body.payments[0]?.mode;
+      return { detail: `receipt ${call.receipt === null ? "MISSING" : "signed"}, payment mode ${String(mode)}`, ok: mode === "connect" };
+    },
+  },
+];
+
+/** Posts a body to the door relay, within 5 seconds; an answer that is not JSON reads as an error. */
+async function postToRelay(w: DemoWorld, body: string): Promise<{ status: number; error: string }> {
+  try {
+    const res = await fetch(await w.relayUrl(), { method: "POST", body, signal: AbortSignal.timeout(5000) });
+    const answer = (await res.json().catch(() => null)) as { error?: unknown } | null;
+    return { status: res.status, error: typeof answer?.error === "string" ? answer.error : "no_answer" };
+  } catch {
+    return { status: 0, error: "unreachable" };
+  }
+}
+
+/** Verification to level 2 for entry.open, then a signed 30-second grant, checked by the door relay. */
+const entry: ScriptStep[] = [
+  {
+    label: "entry: call started",
+    async run(w, call) {
+      call.callId = (await w.engine.startCall({ flow: "entry" })).callId;
+      return pass(call.callId);
+    },
+  },
+  { label: "verify: level 2", run: (w, call) => verifyToLevel2(w, call, "entry.open") },
+  {
+    label: "gate: access grant delivered",
+    async run(w, call) {
+      const access = await w.engine.grantAccess(call.callId);
+      call.grantId = access.grantId;
+      // This run's own grant opened the door: other runs' openings never count here.
+      const opened = w.openedFor.has(access.grantId);
+      return {
+        detail: `${access.grantId}, ${access.status}, door moved: ${access.confirmed}, ${opened ? "the door opened for it" : "NO door opened for it"}`,
+        ok: access.status === "delivered" && opened,
+      };
+    },
+  },
+  {
+    label: "gate: same grant sent again",
+    async run(w, call) {
+      const res = await postToRelay(w, canonicalJson(w.sentGrants.get(call.grantId!)!));
+      return { detail: `${res.status} ${res.error}`, ok: res.status === 409 };
+    },
+  },
+  {
+    label: "gate: a changed grant",
+    async run(w, call) {
+      const forged = structuredClone(w.sentGrants.get(call.grantId!)!);
+      forged.body.target = "door-2";
+      const res = await postToRelay(w, canonicalJson(forged));
+      return { detail: `${res.status} ${res.error}, the door stays shut`, ok: res.status === 401 };
+    },
+  },
+  {
+    label: "entry: call ended",
+    async run(w, call) {
+      const done = await w.engine.flowPosition(call.callId);
+      call.receipt = await w.engine.endCall(call.callId);
+      return { detail: `flow ${done!.status}; the ledger holds the grant's digest, never the grant`, ok: done!.status === "completed" };
+    },
+  },
+];
+
+export const SCRIPTS: Readonly<Record<DemoFlow, readonly ScriptStep[]>> = { "owner-command": ownerCommand, deposit, "deposit-connect": depositConnect, entry };
 
 export function isDemoFlow(name: unknown): name is DemoFlow {
-  return name === "owner-command" || name === "deposit";
+  return name === "owner-command" || name === "deposit" || name === "deposit-connect" || name === "entry";
 }
