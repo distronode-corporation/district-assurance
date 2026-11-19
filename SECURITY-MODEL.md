@@ -128,9 +128,14 @@ must pass `sessionStoreContract`. Failure counters across calls are recorded in 
 that returns what came before, so of two attempts racing on one subject only one is judged
 (tested); a durable counter store must pass `attemptCountersContract`. This holds for two genuine
 callers too: when two entries for one account arrive at once, the second meets the first's
-provisional failure and waits, unjudged, even with the right answer, and there is no skip while
-the first is being judged (decision 1: a skip would be a free try). A pass by the first lifts the
-wait at once; a failure makes it the wait after two failures (tested). Two callers for one
+provisional failure and waits, unjudged, even with the right answer, for the timed wait that
+failure sets (5 seconds by default; decision 1: no skip). The wait is timed, not held for the
+whole judgment: if the first is still being judged when it ends (a verifier slower than the
+wait), the second is judged too. That is never a free guess, since every entry records its own
+failure before it is judged, and only a pass takes it back. A pass by the first lifts the wait at
+once; a failure makes it the wait after two failures (tested). A pass that was saved owes its
+counters cleanup with it, so a correct entry whose ledger write then fails still has its
+provisional failures taken back (tested). Two callers for one
 account at the same moment are rare, and the cost is a wait of seconds and the second caller
 entering the answer again.
 

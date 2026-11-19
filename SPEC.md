@@ -219,10 +219,15 @@ when there is a number.
 - Two entries for one subject at once (two callers for one account, on any calls or engines)
   meet this rule too: the first's failure is recorded before it is judged, so it is provisional,
   but the second sees it as a failure and waits (`locked: true`, unjudged, the call's attempt
-  given back, `verification.locked` with `hard: false`). The wait is never skipped while the other
-  entry is still being judged, since a provisional failure that let an entry through would be a
-  free try. If the first passes, its pass resets the subject's counter and the second may enter
-  again at once; if it fails, both failures stand and the second waits the longer wait for two.
+  given back, `verification.locked` with `hard: false`) for the timed wait that failure sets; the
+  wait is never skipped. It is timed, not held for the whole judgment: an entry that arrives after
+  it ends is judged even if the first is still being judged. There is no free guess either way,
+  since every entry records its own failure before it is judged, and only a pass takes it back. If
+  the first passes, its pass resets the subject's counter and the second may enter again at once;
+  if it fails, both failures stand and the second waits the longer wait for two.
+- The cleanup a pass owes (`forgetPass`) is saved with the pass, on the call, so a write that
+  fails after the pass was saved (its ledger entry) still gets it, in the same `submitKeypad` or
+  `submitPin` or before the call's next factor; a pass refused before it was saved owes none.
 - Lifting a lock early is the host's: `AttemptCounters.reset` with the keys (`counterKeys`).
 
 ## 7. FlowConfig

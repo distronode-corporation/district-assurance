@@ -254,6 +254,48 @@ describe("lockouts across calls", () => {
     assert.deepEqual((await t.ledger.list()).at(-1)!.detail, { kind: "keypad_knowledge", scope: "number", hard: true, until: iso(T0 + 900_000 + 24 * HOUR) });
   });
 
+  it("cleans up a correct entry's counters even when its ledger entry fails after the pass was saved", async () => {
+    const t = setup({ config: testConfig((c) => ((c.modules.badge!.settings as { lockout?: unknown }).lockout = { lockAfterFailures: 1 })) });
+    const line = { callingNumber: "+15555550142" };
+    const callId = await call(t, line);
+    const append = t.ledger.append.bind(t.ledger);
+    let down = 2;
+    t.ledger.append = async (input) => {
+      if (input.event === "verification.factor" && down > 0) {
+        down--;
+        throw new Error("ledger down");
+      }
+      return append(input);
+    };
+    await assert.rejects(t.engine.submitKeypad(callId, { dob: DOB }), /ledger down/);
+    assert.equal((await t.engine.state(callId)).factors.at(-1)!.passed, true, "the pass was saved");
+    assert.deepEqual(await t.counters.get(subjectCounter("keypad_knowledge"), LONG_AGO), [], "the subject's provisional failure is gone");
+    const numberKey = counterKeys("ws_test", "keypad_knowledge", { numberKey: numberKeyFor(TEST_KNOWLEDGE_KEY, line.callingNumber) })[0]!;
+    assert.deepEqual(await t.counters.get(numberKey, LONG_AGO), [], "and the number's");
+    // The cleanup is still owed on the call (its clearing write failed too), and is harmless to run again.
+    await t.engine.flushLedger(callId);
+    assert.deepEqual(await t.engine.submitKeypad(await call(t, line), { dob: DOB }), { matched: true, locked: false }, "no lock on the next call");
+  });
+
+  it("runs a cleanup a call still owes before its next factor, after the cleanup itself failed", async () => {
+    let fail = true;
+    class Flaky extends MemoryAttemptCounters {
+      override async reset(key: AttemptCounterKey): Promise<void> {
+        if (fail) {
+          fail = false;
+          throw new Error("counters down");
+        }
+        return super.reset(key);
+      }
+    }
+    const t = setup({ adapters: { counters: new Flaky() }, config: testConfig((c) => ((c.modules.badge!.settings as { lockout?: unknown }).lockout = { lockAfterFailures: 1 })) });
+    const callId = await call(t);
+    await assert.rejects(t.engine.submitKeypad(callId, { dob: DOB }), /counters down/);
+    assert.equal((await t.counters.get(subjectCounter("keypad_knowledge"), LONG_AGO)).length, 1, "still counted");
+    await t.engine.submitPin(callId, "0000").catch(() => undefined);
+    assert.equal((await t.counters.get(subjectCounter("keypad_knowledge"), LONG_AGO)).length, 0, "cleaned up before the next factor");
+  });
+
   it("counts a call saved before calling numbers were kept by its subject only", async () => {
     const seen: AttemptCounterKey[] = [];
     class Spy extends MemoryAttemptCounters {

@@ -4,7 +4,7 @@
 // Every runtime function takes the engine's runtime and works in compare-and-set steps: an attempt
 // is counted in one write before it is judged, and a link is reserved in one write before it is
 // sent, so two processes running the same call can never get two attempts or two links for one.
-import type { SubjectRecord } from "../core/adapters.ts";
+import type { AttemptCounterKey, SubjectRecord } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError, NotImplementedError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
@@ -72,6 +72,12 @@ export interface BadgeSlice {
   finished: number;
   lastLevel: AssuranceLevel;
   lastMethods: FactorKind[];
+  /**
+   * An accepted pass whose counters are not yet cleaned up (`forgetPass`): saved with the pass, so a
+   * write that fails after the pass was saved (its ledger entry) still gets the cleanup, in the same
+   * call to `submitFactor` or the call's next. Absent when nothing is owed.
+   */
+  forgetOwed?: { keys: AttemptCounterKey[]; at: string };
 }
 
 export interface KeypadResult {
@@ -369,6 +375,8 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   const current = before.modules[BADGE] as unknown as BadgeSlice | undefined;
   if (current === undefined) throw new EngineError("module_disabled", `${BADGE} was off when this call started`);
   const counters = rt.adapter("counters");
+  // A pass this call saved earlier whose cleanup did not run (its write failed after saving it).
+  if (current.forgetOwed !== undefined) await settleForget(rt, callId, current.forgetOwed.at);
   const lockout = lockoutOf(rt.settings<BadgeSettings>(BADGE).lockout);
   const keys = counterKeys(rt.workspaceId, kind, current);
   const lock = await currentLock(counters, lockout, keys, rt.clock.now());
@@ -401,18 +409,45 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
         ? await judgePin(rt, rt.settings<BadgeSettings>(BADGE).pin as PinSettings, input)
         : (await plugin!.judge(input)) === true;
   const hard = passed ? null : recorded.hard;
-  await rt.update(callId, (draft) => {
-    assertSameVerification(draft.slice<BadgeSlice>(BADGE), reserved.epoch);
-    const factor = { kind, passed, at: rt.now() };
-    draft.apply({ type: "factor_recorded", factor });
-    if (passed && KNOWLEDGE_FACTORS.includes(kind)) draft.slice<BadgeSlice>(BADGE).knowledgeMatched = true;
-    draft.emit("verification.factor", "code", { kind, passed });
-    if (hard !== null) draft.emit("verification.locked", "code", { kind, scope: hard.scope, hard: true, until: hard.until });
-  });
-  // Only once the result is accepted. The number keeps its failures but this attempt's own: they
-  // may be against other accounts, so a pass on this one must not clear them.
-  if (passed) await forgetPass(counters, keys, at);
+  let failed: { error: unknown } | null = null;
+  try {
+    await rt.update(callId, (draft) => {
+      const s = draft.slice<BadgeSlice>(BADGE);
+      assertSameVerification(s, reserved.epoch);
+      const factor = { kind, passed, at: rt.now() };
+      draft.apply({ type: "factor_recorded", factor });
+      if (passed && KNOWLEDGE_FACTORS.includes(kind)) s.knowledgeMatched = true;
+      // The cleanup is owed with the pass, in the same write: never for a pass that was not saved.
+      if (passed) s.forgetOwed = { keys: structuredClone(keys), at: at.toISOString() };
+      draft.emit("verification.factor", "code", { kind, passed });
+      if (hard !== null) draft.emit("verification.locked", "code", { kind, scope: hard.scope, hard: true, until: hard.until });
+    });
+  } catch (error) {
+    failed = { error };
+  }
+  // Only once the result is saved: a write that failed after saving it (the ledger) still owes the
+  // cleanup, a stale pass refused before saving owes none. The number keeps its failures but this
+  // attempt's own: they may be against other accounts, so a pass on this one must not clear them.
+  if (passed) await settleForget(rt, callId, at.toISOString());
+  if (failed !== null) throw failed.error;
   return { matched: passed, locked: !passed && (reserved.last || hard !== null) };
+}
+
+/**
+ * Runs the counters cleanup a saved pass owes, if the call still owes the one made at `at`, then
+ * takes it off the call. The cleanup is idempotent, so running it again after a lost write is safe;
+ * a failure to take it off leaves it owed for the call's next factor.
+ */
+async function settleForget(rt: EngineRuntime, callId: string, at: string): Promise<void> {
+  const owed = (await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice;
+  if (owed.forgetOwed?.at !== at) return;
+  await forgetPass(rt.adapter("counters"), owed.forgetOwed.keys, new Date(at));
+  await rt
+    .update(callId, (draft) => {
+      const s = draft.slice<BadgeSlice>(BADGE);
+      if (s.forgetOwed?.at === at) delete s.forgetOwed;
+    })
+    .catch(() => undefined);
 }
 
 /** Asks the carrier about the number on file, never the calling number. Only after a keypad or PIN match. */
