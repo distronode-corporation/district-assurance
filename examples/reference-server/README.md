@@ -57,6 +57,10 @@ How the page is kept small and safe:
   only the demo's published secret, so point `stripe listen` at `npm run serve` instead.
 - The server keeps the newest 20 runs. Like the rest of this server it is a local demo, not hardened
   for production.
+- The sample receiver of record deliveries (`POST /webhooks/records`) keeps the idempotency keys it
+  has received in memory only, so a restart forgets them and a redelivered record is applied again.
+  A real receiver must store them durably, and mark a key received in the same transaction that
+  applies the record.
 
 ## Files
 

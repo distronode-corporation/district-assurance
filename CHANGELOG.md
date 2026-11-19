@@ -179,6 +179,11 @@ All notable changes to this project are documented here. The format follows
   `isStopRequest` for STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT, ARRÊT, ARRÊTE and ARRÊTER. A
   consent still being stored when its call ends settles as not recorded (no consent):
   `consent.unrecorded` in the ledger, `answer: "not_recorded"` on the receipt.
+- Record delivery (FIL-3): `deliverRecord` posts a confirmed record through a `RecordDelivery`
+  adapter, signed in the `t=,v1=` HMAC scheme used for Stripe, retried with capped exponential
+  backoff under one idempotency key per record and destination, with a `delivery.attempted` ledger
+  entry per attempt and no payload in it; `FakeRecordDelivery` in `district-assurance/testing`;
+  a sample receiver on the reference server at `POST /webhooks/records`.
 
 ### Changed
 
@@ -216,6 +221,9 @@ All notable changes to this project are documented here. The format follows
   switches over the reasons must add it.
 - The `revokeConsent` stub in `prove/consent.ts` is replaced by `Engine.revokeConsent`, and
   `ConsentRecord` moves to the adapter types (still exported from the root).
+- The `deliverRecord` stub in `file/later.ts` is replaced by `deliverRecord` in `file/delivery.ts`,
+  which takes the destination, the stores, the clock and the retry settings (SPEC.md, Record
+  delivery).
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

@@ -824,6 +824,7 @@ answer on file, a phone number, a link or card data.
 | `intake.confirmed` | `recordId`, `formId`, `digest`, `confirmedBy` |
 | `intake.abandoned` | none |
 | `record.filing_failed` | `recordId`, `formId`, `fields` (the form's sensitive field names), `reason` (`cipher_error` or `no_ciphertext`) |
+| `delivery.attempted` | `recordId`, `destination` (the destination's id), `attempt`, `outcome` (`delivered`, `retry`, `failed`), `status` (HTTP, an integer from 100 to 599, or null for no answer, which is also what an adapter answer without such a status counts as); actor `system` |
 | `redaction.applied` | `kinds` (counts per kind) |
 | `payment.amount_read_back` | `amountMinor`, `currency`, `amountSource`, `digest` (never the `amountRef`) |
 | `payment.amount_confirmed` | `digest`, `confirmedBy` |
@@ -1989,3 +1990,33 @@ longer message ("don't stop", "cancel my order") is not a match, and a value tha
 is false. A host may treat more words as a stop on its own. The host decides which consents a
 match revokes (for example every consent texted to that number) and calls `revokeConsent` for
 each.
+
+## 22. Record delivery
+
+`deliverRecord({ workspaceId, recordId, destination, records, delivery, ledger, clock, sleep?,
+retry? })` posts a confirmed record, read from the `RecordStore`, to one destination through the
+host's `RecordDelivery` adapter, which makes one HTTP request per call and never retries itself.
+It is a library call the host makes after `confirmIntake` (for example from a job queue), not a
+flow step. A destination is `{ destinationId, url, secret }` from the host's own configuration:
+the id is lower case, digits, `-` and `_` (it goes in the ledger, the URL never does), the URL is
+`https:`, or `http:` on `localhost`, `127.0.0.1` or `[::1]`, without credentials, and the secret
+is a string of at least 16 characters; a destination that is not an object, or a field of the
+wrong type, is refused like a bad value.
+
+The body is the canonical JSON of `{ v: 1, type: "record.confirmed", idempotencyKey,
+destinationId, record }`, the same bytes on every attempt. The idempotency key is
+`SHA-256(JSON.stringify([workspaceId, "delivery", recordId, destinationId]))` in hex: one key per
+record and destination, the same however often the record is delivered. Headers:
+`content-type: application/json`, `idempotency-key`, and `district-signature:
+t=<unix seconds>,v1=<HMAC-SHA256(secret, t + "." + body)>`, the scheme of section 15, so
+`verifyStripeSignature` checks it; each attempt is signed with its own time. A receiver checks the
+signature, then reads the key from the signed body and applies it once.
+
+Retries: a 2xx delivers; no answer (the adapter rejects), 408, 429 or 5xx waits
+`min(maxDelayMs, baseDelayMs * 2^(attempt - 1))` and tries again, up to `maxAttempts`; any other
+status fails at once. Defaults: 5 attempts, 1 second, 60 seconds; allowed: 1 to 10 attempts, a
+base from 0 to 600,000 ms and a cap from the base to 3,600,000 ms. Each attempt appends one
+`delivery.attempted` entry on the record's call, after the post, straight to the `ledger` it is
+given: no engine is involved, so an engine's `onEvent` listener does not see these entries. `deliverRecord` returns
+`{ delivered, attempts, status, idempotencyKey }`; it throws `invalid_input` for a bad destination
+or retry setting or an unknown record, before posting, and passes a ledger failure through.

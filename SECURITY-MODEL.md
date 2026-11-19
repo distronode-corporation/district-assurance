@@ -327,6 +327,9 @@ Replayed webhooks, reused links, replayed tones. **Controls:** Stripe signatures
 300-second window and constant-time comparison (tested); the reference server applies each event
 id once while it remembers it, 4 days and 10,000 ids at most so a flood of events cannot exhaust
 its memory (tested); the engine applies each identity session and each payment settlement once (tested).
+Record deliveries are signed in the same scheme, each attempt with its own time, and carry one
+idempotency key per record and destination inside the signed body; the reference server's sample
+receiver checks the signature first and applies each key once (tested).
 Identity links are single-use by the provider. The reference server's Stripe Identity adapter
 sends the engine's idempotency key with every create, so a retried `startPhotoId` gets the same
 session and link, never a second one (tested against a local fake). It never logs the link, and its
@@ -701,7 +704,11 @@ draft and its values are dropped, `record.filing_failed` names only the fields a
 and the cipher's own error, which may quote the value, is never passed on (tested). Left open: while a draft is open or being filed, its sensitive values
 sit in the clear in the call record, so a durable `SessionStore` holds them until the record is
 filed or abandoned, or the call ends, which drops an open draft (tested). PINs on file are
-HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode). A texted code
+HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode). A delivered
+record goes only to a destination in the host's configuration, over `https:` (or `http:` to a
+loopback host) and never to a URL with credentials in it; its `delivery.attempted` ledger entries
+carry the record id, the destination's id, the attempt, the outcome and the status, never a field
+value, the URL or the secret (tested). A texted code
 is kept only as an HMAC bound to its call, and a calling number only as an HMAC.
 
 ### Theft of the keys
@@ -806,6 +813,10 @@ the key set URL or refreshes the copy.
 - Who may edit a workspace's FlowConfig, and keeping its revisions.
 - Keeping `refundPayment` on the business's side (a back office, staff tools), never on a tool the
   model can call, and deciding who in the business may ask for a refund.
+- Record delivery: keeping each destination's signing secret in a key store, a `RecordDelivery`
+  adapter with a timeout that does not follow redirects, calling `deliverRecord` again (from a
+  durable queue) for a record that was not delivered, and a receiver that checks the signature and
+  applies each idempotency key once.
 - Outside modules: their code runs inside the engine's writes and is part of the host's security
   model. So do factor judges, the host's plug-ins and those an outside module supplies: the
   engine counts and limits their attempts, but whether a judge answers the same way for an unknown

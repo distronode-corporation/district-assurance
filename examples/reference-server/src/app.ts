@@ -1,13 +1,15 @@
 // The reference server: a small node:http server around one Engine. It receives the Stripe
 // webhooks that finish a photo ID check and a payment (platform-mode payments on the account
 // endpoint, connect-mode payments on the Connect endpoint, each with its own signing secret),
-// serves receipts by capability link with a small receipt page, serves the receipt key set, and
-// answers 501 on the carrier webhooks that are not built yet. With `ui`, it also serves the demo's
-// browser UI and the routes that run the scripted demo one step at a time. Not hardened for
-// production; ROADMAP.md, "Reference server", lists what that takes.
+// serves receipts by capability link with a small receipt page, serves the receipt key set, runs
+// a sample receiver for signed record deliveries, and answers 501 on the carrier webhooks that are
+// not built yet. With `ui`, it also serves the demo's browser UI and the routes that run the
+// scripted demo one step at a time. Not hardened for production; ROADMAP.md, "Reference server",
+// lists what that takes.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import {
+  DELIVERY_SIGNATURE_HEADER,
   EngineError,
   formatAmount,
   newReceiptLinkToken,
@@ -17,6 +19,7 @@ import {
   verifyStripeSignature,
   type Clock,
   type Engine,
+  type RecordDeliveryBody,
   type SignedReceipt,
 } from "../../../src/index.ts";
 import type { DemoRuns, RunAnswer } from "./demo-runs.ts";
@@ -30,6 +33,21 @@ export interface ReferenceServerOptions {
    */
   stripeSecrets: { identity: readonly string[]; payments: readonly string[]; connect?: readonly string[] };
   clock: Clock;
+  /**
+   * The sample receiver of record deliveries (`POST /webhooks/records`): the signing secrets it
+   * accepts, and what it does with a record. Without secrets it refuses everything. The receiver
+   * awaits `onRecord` and records the key only once it succeeds; when it throws or rejects, the
+   * answer is 500 and the sender's retry applies the record again.
+   */
+  records?: {
+    secrets: readonly string[];
+    onRecord?: (delivery: RecordDeliveryBody) => void | Promise<void>;
+    /**
+     * Told of each duplicate, before it is answered: `pending` while the first delivery's
+     * `onRecord` still runs (the duplicate waits for it), `received` once it has succeeded.
+     */
+    onDuplicate?: (idempotencyKey: string, state: "pending" | "received") => void;
+  };
   /** Default 64 KiB. */
   maxBodyBytes?: number;
   /** How long and how many Stripe event ids are remembered (`SeenEvents`). Defaults: 4 days, 10,000. */
@@ -167,6 +185,9 @@ class HttpError extends Error {
 
 export function createReferenceServer(options: ReferenceServerOptions): Server {
   const processed = new SeenEvents(options.clock, options.seenEvents?.ttlMs, options.seenEvents?.max);
+  const receivedRecords = new Set<string>();
+  /** Deliveries whose `onRecord` is still running; a concurrent duplicate waits on the same one. */
+  const pendingRecords = new Map<string, Promise<void>>();
   const maxBody = options.maxBodyBytes ?? 64 * 1024;
   const files = options.ui === undefined ? new Map<string, StaticFile>() : loadStaticFiles();
 
@@ -220,6 +241,50 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       if (error instanceof EngineError && error.code === "unknown_call") return null;
       throw error;
     }
+  }
+
+  /**
+   * A sample receiver for `deliverRecord`, as a business's own system would run it: the signature
+   * first (the same scheme as Stripe's, so the same check), then the body, then each idempotency
+   * key once. The key is read from the signed body, not from the unsigned header. A duplicate
+   * answers 200, so the sender stops retrying. The key counts as received only after `onRecord`
+   * succeeds, so a failed handler answers 500 and the retry is applied, not skipped.
+   */
+  async function recordWebhook(req: IncomingMessage): Promise<[number, Json]> {
+    const payload = await readBody(req, maxBody);
+    const header = req.headers[DELIVERY_SIGNATURE_HEADER];
+    const check = verifyStripeSignature({
+      payload,
+      header: Array.isArray(header) ? header[0] : header,
+      secrets: options.records?.secrets ?? [],
+      now: options.clock.now(),
+    });
+    if (!check.ok) return [400, { error: "signature", reason: check.reason }];
+    const delivery = parseRecordDelivery(payload);
+    if (delivery === null) return [400, { error: "malformed_delivery" }];
+    const key = delivery.idempotencyKey;
+    if (receivedRecords.has(key)) {
+      options.records?.onDuplicate?.(key, "received");
+      return [200, { received: true, duplicate: true }];
+    }
+    const pending = pendingRecords.get(key);
+    if (pending !== undefined) {
+      options.records?.onDuplicate?.(key, "pending");
+      await pending;
+      return [200, { received: true, duplicate: true }];
+    }
+    const handler = options.records?.onRecord;
+    const applying = (async () => {
+      await handler?.(delivery);
+    })();
+    pendingRecords.set(key, applying);
+    try {
+      await applying;
+    } finally {
+      pendingRecords.delete(key);
+    }
+    receivedRecords.add(key);
+    return [200, { received: true, recordId: delivery.record.recordId }];
   }
 
   async function demoRoute(req: IncomingMessage, runs: DemoRuns, path: string, method: string): Promise<Answer> {
@@ -280,6 +345,10 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     if (stripe !== null) {
       expect("POST");
       return stripeWebhook(req, stripe[1] as "identity" | "payments" | "connect");
+    }
+    if (path === "/webhooks/records") {
+      expect("POST");
+      return recordWebhook(req);
     }
     const carrier = /^\/webhooks\/(twilio|telnyx)$/.exec(path);
     if (carrier !== null) {
@@ -447,6 +516,21 @@ function receiptPage(receipt: SignedReceipt, keys: Parameters<typeof verifyRecei
     "</main></body></html>",
     "",
   ].join("\n");
+}
+
+/** A verified delivery body, or null when it is not one. */
+function parseRecordDelivery(payload: string): RecordDeliveryBody | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(payload);
+  } catch {
+    return null;
+  }
+  if (typeof body !== "object" || body === null) return null;
+  const { v, type, idempotencyKey, destinationId, record } = body as Record<string, unknown>;
+  if (v !== 1 || type !== "record.confirmed" || typeof idempotencyKey !== "string" || typeof destinationId !== "string") return null;
+  if (typeof record !== "object" || record === null || typeof (record as { recordId?: unknown }).recordId !== "string") return null;
+  return body as RecordDeliveryBody;
 }
 
 function readBody(req: IncomingMessage, max: number): Promise<string> {
