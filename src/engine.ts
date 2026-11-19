@@ -51,7 +51,10 @@ export const MAX_WRITE_ATTEMPTS = 5;
 /** The scope classes whose flows are limited per hour (VER-15). */
 const LIMITED_CLASSES: ReadonlyArray<ScopeClass | null> = ["money", "contact", "access"];
 
-type FlowStart = { over: AttemptCounterKey["scope"] | null; counted: string[] | null };
+/** A flow start's count: the limit it hit, the counters it is on, and the starts it recorded (keys and time), to take back if the call then refuses it. */
+type FlowStart = { over: AttemptCounterKey["scope"] | null; counted: string[] | null; recorded: { keys: readonly AttemptCounterKey[]; at: string } | null };
+
+const UNCOUNTED: FlowStart = { over: null, counted: null, recorded: null };
 
 const counterId = (key: AttemptCounterKey): string => `${key.scope}:${key.key}`;
 
@@ -221,7 +224,7 @@ export class Engine {
     // A call started with a flow is created with it attached, so no other process can start a
     // different flow on the same id in between.
     const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
-    let start: FlowStart = { over: null, counted: null };
+    let start: FlowStart = UNCOUNTED;
     if (input.flow !== undefined) {
       const definition = this.#flowDefinition(input.flow);
       if (await this.#sessions.get(this.workspaceId, callId) !== null) throw new EngineError("invalid_input", "a call with that id exists");
@@ -232,7 +235,11 @@ export class Engine {
     }
     record.outbox = events.map((event, i) => ({ eventId: this.#eventId(callId, 1, i), ...event }));
     const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
-    if (!created) throw new EngineError("invalid_input", "a call with that id exists");
+    if (!created) {
+      // Another start took the id first (a duplicate delivery racing this one): this start is not counted.
+      await this.#uncount(start);
+      throw new EngineError("invalid_input", "a call with that id exists");
+    }
     await this.#flush(callId, 1, record);
     // With the call's id: the call is open, its flow failed, and the host ends it.
     if (start.over !== null) throw new RateLimitedError(callId);
@@ -318,10 +325,24 @@ export class Engine {
     const before = await this.#read(callId);
     this.#keepNumber(before, numberKey);
     const start = await this.#countFlowStart(before, name, definition);
-    await this.#update(callId, (draft) => {
-      this.#keepNumber(draft.record, numberKey);
-      this.#attachFlow(draft, name, definition, revision, start);
-    });
+    // Set when the write's own check refused the flow (a concurrent start attached one first), so
+    // nothing was written: only then is the start taken back. A write that saved and then failed
+    // (the ledger down) keeps its count.
+    let refused = false;
+    try {
+      await this.#update(callId, (draft) => {
+        this.#keepNumber(draft.record, numberKey);
+        try {
+          this.#attachFlow(draft, name, definition, revision, start);
+        } catch (error) {
+          refused = true;
+          throw error;
+        }
+      });
+    } catch (error) {
+      if (refused) await this.#uncount(start);
+      throw error;
+    }
     if (start.over !== null) throw new RateLimitedError(callId);
     return (await this.flowPosition(callId))!;
   }
@@ -333,18 +354,30 @@ export class Engine {
    */
   async #countFlowStart(record: CallRecord, name: string, definition: FlowConfig["flows"][string]): Promise<FlowStart> {
     // Checked first on a copy, so a start the call would refuse anyway is never counted.
-    this.#attachFlow(this.#draft(structuredClone(record), []), name, definition, this.#config.revision, { over: null, counted: null });
-    if (!this.#limited(definition.steps, this.#config.policy)) return { over: null, counted: null };
+    this.#attachFlow(this.#draft(structuredClone(record), []), name, definition, this.#config.revision, UNCOUNTED);
+    if (!this.#limited(definition.steps, this.#config.policy)) return UNCOUNTED;
     const keys = counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice);
-    return { over: await this.#countStarts(keys), counted: keys.map(counterId) };
+    const { over, at } = await this.#countStarts(keys);
+    return { over, counted: keys.map(counterId), recorded: at === null ? null : { keys, at } };
   }
 
-  /** Counts one flow start on each counter, unless one is already at its limit. The scope of the limit hit, or null. */
-  async #countStarts(keys: readonly AttemptCounterKey[]): Promise<AttemptCounterKey["scope"] | null> {
+  /** Takes back the starts a start recorded, once the call refused it: one entry per counter, at the time it was recorded. */
+  async #uncount(start: FlowStart): Promise<void> {
+    if (start.recorded === null) return;
+    for (const key of start.recorded.keys) await this.#adapters.counters!.removeFailure(key, start.recorded.at);
+  }
+
+  /**
+   * Counts one flow start on each counter, unless one is already at its limit. `over`: the scope of
+   * the limit hit, or null; `at`: when the starts were recorded, or null when none was.
+   */
+  async #countStarts(keys: readonly AttemptCounterKey[]): Promise<{ over: AttemptCounterKey["scope"] | null; at: string | null }> {
     const limits = lockoutOf(this.#rt.settings<BadgeSettings>(badge.BADGE).lockout).flowStartsPerHour;
     const counters = this.#adapters.counters!;
     const now = this.#clock.now();
-    return (await flowStartLimited(counters, limits, keys, now)) ?? (await recordFlowStarts(counters, limits, keys, now));
+    const limited = await flowStartLimited(counters, limits, keys, now);
+    if (limited !== null) return { over: limited, at: null };
+    return { over: await recordFlowStarts(counters, limits, keys, now), at: now.toISOString() };
   }
 
   /**
@@ -419,7 +452,7 @@ export class Engine {
     if (flow === null || flow.counted === null) return;
     const keys = counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice).filter((key) => !flow.counted!.includes(counterId(key)));
     if (keys.length === 0) return;
-    const over = await this.#countStarts(keys);
+    const { over } = await this.#countStarts(keys);
     await this.#update(callId, (draft) => {
       const current = draft.record.flow!;
       if (over === null) {

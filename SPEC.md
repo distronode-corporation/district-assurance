@@ -237,7 +237,11 @@ it), per calling number and per subject.
   the `counters` adapter (`ConfigError` otherwise).
 - The counters are read first: a counter already at its limit refuses the start without counting
   it. Otherwise the start is counted on each counter, and one that a concurrent start took over the
-  limit refuses it too (that start stays counted).
+  limit refuses it too (that start stays counted). A start the call itself then refuses, because a
+  concurrent `startFlow` attached a flow first or a concurrent `startCall` took the id first, is
+  taken back off each counter (`removeFailure` at the time it was recorded); one whose write saved
+  and then failed (the ledger down) stays counted. A `callingNumber` that is not a string is
+  `invalid_input`, like one that is not E.164.
 - A refused start throws `RateLimitedError` (an `EngineError` with code `rate_limited`) with one
   message, whichever limit was hit, and the `callId` of the call it was refused on, so a host that
   let `startCall` choose the id can still end the call it opened.
