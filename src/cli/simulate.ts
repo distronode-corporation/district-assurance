@@ -122,7 +122,7 @@ function sampleValue(field: IntakeField): string {
   const sample = SAMPLE_VALUES[field.type]!;
   return field.type === "text" ? sample.slice(0, Math.max(1, field.maxLength ?? sample.length)) : sample;
 }
-const OUTCOMES:Readonly<Record<CallerScript["payment"], ReadonlyArray<(linkId: string) => PaymentOutcome>>> = {
+const OUTCOMES: Readonly<Record<CallerScript["payment"], ReadonlyArray<(linkId: string) => PaymentOutcome>>> = {
   paid: [(linkId) => ({ kind: "completed", linkId, paymentStatus: "paid" })],
   paid_later: [(linkId) => ({ kind: "completed", linkId, paymentStatus: "unpaid" }), (linkId) => ({ kind: "async_succeeded", linkId })],
   failed: [(linkId) => ({ kind: "async_failed", linkId })],
