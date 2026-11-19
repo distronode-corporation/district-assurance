@@ -297,19 +297,33 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   `AttemptCounters` store every engine shares (kind `duress.flag`), after the call's write and
   before the counters' visible reset, even when the entry was stale. A pass that is a duress entry
   only because the flag was set never writes the flag again, so a `clearDuress` that lands while it
-  is judged stays cleared, and the pass does the same store work as a pass on a subject not flagged. While the flag is set, every
-  later pass on the subject, on any call and by any entered factor, is a duress entry: alerted, its
-  scopes refused, and the same to the caller as any pass. A duress entry resets the visible
+  is judged stays cleared, and the pass does the same store work as a pass on a subject not flagged.
+  While the flag is set, every later pass on the subject, on any call and by any entered factor, is
+  a duress entry: its scopes refused, and the same to the caller as any pass. The flag is read for
+  every subject, whether or not `pin.duress` is on: a subject flagged before a config turned the
+  duress PIN off stays under duress, and with no `refuseScopes` left to read, its calls refuse every
+  scope of the policy. Alerts are coalesced: every entry of the duress PIN alerts, and a pass that
+  is a duress entry only by the flag alerts once a call (the first), so a flagged subject's call
+  always raises one, and repeated passes on it do not flood the business. Delivering an owed alert
+  sets the flag again first (`duress.flag`), in case the entry's own write of it was lost, unless the
+  subject was cleared after the entry: each alert records the subject's count of clearings
+  (`duress.clears`, one more per `clearDuress`, never reset) as it was read before the flag, and the
+  flag is set again only while that count is unchanged. A failure to set it leaves the alert owed. A duress entry resets the visible
   counters as a pass does, so it looks like one; every entered factor's failures on the subject are
   also counted in a hidden counter (kind `duress.hidden.<kind>`) that only a pass not under duress
   resets (a duress entry takes off only its own failure), and that counter's hard lock (not its
   waits) refuses like any lock. So a caller who knows the duress PIN gets no more guesses at the
-  real PIN than one who does not. `clearDuress(subjectKey, memberId)` is the business's host call
-  (never a caller's) once it knows the subject is safe: `memberId` 1 to 128 of letters, digits, `.`,
-  `_`, `:`, `@`, `-` (`invalid_input` otherwise), `duress.cleared` written to the ledger first, then
-  the flag and the hidden counters cleared.
+  real PIN than one who does not. `clearDuress(subjectKey, memberId)` is a host-privileged call,
+  like `resetPin`: the business's own tools, never a caller's request, once it knows the subject is
+  safe. The engine does not authenticate the member: the host must authorize them before it calls.
+  `memberId` is an opaque id, 1 to 64 of letters, digits, `.`, `_`, `-` (no `@` and no space, so
+  no email address or name reaches the ledger; `invalid_input` otherwise). `duress.cleared` is
+  written to the ledger first, naming the subject only by `duressClearedSubject(knowledgeKey,
+  subjectKey)` = `HMAC-SHA256(knowledgeKey, "duress.cleared:" + subjectKey)`, which the business can
+  match and a reader of the ledger or an export cannot; then the count of clearings goes up, and the
+  flag and the hidden counters are cleared.
 - Every duress entry owes an alert: in the same write, Badge's part of the call record gets
-  `duressAlerts` `{alertId, subjectKey, at}` and `duress`, and the record `owesAlerts: true` until
+  `duressAlerts` `{alertId, subjectKey, at, clears}` and `duress`, and the record `owesAlerts: true` until
   none is owed; `alertId` is `JSON.stringify(["duress", workspaceId, callId, n])` for the call's `n`th duress
   entry, unique across engines whatever their id generators, even when verification restarted or the
   call ended while the entry was judged (the entry is then not a factor, and `submitPin` throws the
@@ -426,7 +440,7 @@ answer on file, a phone number, a link or card data.
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt` |
 | `pin.enrolled` | none (never the digits, the digest or their length) |
 | `pin.reset` | `subjectKey`; actor `member`, `callId` null |
-| `duress.cleared` | `subjectKey`, `memberId`; actor `member`, `callId` null |
+| `duress.cleared` | `subject` (a keyed digest, never the subject key), `memberId` (an opaque id); actor `member`, `callId` null |
 | `session.tainted` | `source` |
 | `sensitive.opened` / `sensitive.closed` | `reason` / none |
 | `intake.started` | `formId`, `version` |

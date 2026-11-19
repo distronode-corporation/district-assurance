@@ -35,6 +35,7 @@ import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
 import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
 import { pinTag, type FactorEntry, type FactorPlugin, type PinOutcome } from "./verify/factors.ts";
+import { clearsSoFar, duressFlagKey, flagDuress } from "./verify/duress-flag.ts";
 import * as pin from "./verify/pin.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
@@ -769,6 +770,14 @@ export class Engine {
       if (notifier === undefined || (since !== undefined && now - since < 30_000)) continue;
       this.#sending.set(alert.alertId, now);
       try {
+        // The flag goes with the alert: set again here, before the notifier, in case the entry's own
+        // write of it was lost (a failed store, a crash), unless the business cleared the subject
+        // after the entry was judged. An engine that judged an entry has counters (Badge requires
+        // them for every entered factor), and one without them fails here, leaving the alert owed.
+        const counters = this.#adapters.counters!;
+        if ((await clearsSoFar(counters, this.workspaceId, alert.subjectKey)) === alert.clears) {
+          await flagDuress(counters, duressFlagKey(this.workspaceId, alert.subjectKey), new Date(alert.at));
+        }
         await notifier.notify({ alertId: alert.alertId, workspaceId: this.workspaceId, subjectKey: alert.subjectKey, callId, at: alert.at });
         await this.#acknowledgeDuressAlert(callId, alert.alertId);
         delivered++;

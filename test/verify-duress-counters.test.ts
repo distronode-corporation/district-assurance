@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 
 import type { FlowConfig } from "../src/core/config.ts";
 import type { PinSettings } from "../src/verify/factors.ts";
+import { duressClearedSubject } from "../src/verify/duress-flag.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { FakeDuressNotifier, TEST_KNOWLEDGE_KEY, type TestEngine } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig } from "./helpers.ts";
@@ -120,7 +121,7 @@ describe("duress and the counters across calls (flag until cleared)", () => {
     await assert.rejects(t.engine.clearDuress(OWNER, "bad member"), rejects("invalid_input", /memberId/));
     await t.engine.clearDuress(OWNER, "member_1");
     const cleared = (await t.ledger.list()).find((e) => e.event === "duress.cleared")!;
-    assert.deepEqual([cleared.actor, cleared.callId, cleared.detail], ["member", null, { subjectKey: OWNER, memberId: "member_1" }]);
+    assert.deepEqual([cleared.actor, cleared.callId, cleared.detail], ["member", null, { subject: duressClearedSubject(TEST_KNOWLEDGE_KEY, OWNER), memberId: "member_1" }]);
     const after = await call(t);
     assert.equal((await t.engine.submitPin(after, PIN)).matched, true);
     assert.deepEqual(await asDuress(t, n, after), { alerted: false, refused: false });

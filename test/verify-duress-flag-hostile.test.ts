@@ -8,6 +8,8 @@ import type { FlowConfig } from "../src/core/config.ts";
 import type { PinSettings } from "../src/verify/factors.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { FakeDuressNotifier, MemoryAttemptCounters, TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../src/testing/index.ts";
+import { badgeModule } from "../src/verify/badge.ts";
+import { duressClearedSubject } from "../src/verify/duress-flag.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig } from "./helpers.ts";
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
@@ -62,11 +64,12 @@ async function visible(t: TestEngine, callId: string, pin: string) {
 
 /** Counters that let a test fail or hold one call on one key. */
 class FaultyCounters extends MemoryAttemptCounters {
-  failNext: { op: "get" | "recordFailure" | "reset"; factor: string } | null = null;
+  failNext: { op: "get" | "recordFailure" | "reset"; factor: string; times?: number } | null = null;
   holdGet: { factor: string; gate: Promise<void>; reached: () => void } | null = null;
   #maybeFail(op: "get" | "recordFailure" | "reset", key: AttemptCounterKey): void {
     if (this.failNext?.op === op && this.failNext.factor === key.factor) {
-      this.failNext = null;
+      const times = (this.failNext.times ?? 1) - 1;
+      this.failNext = times > 0 ? { ...this.failNext, times } : null;
       throw new Error(`counters ${op} 503`);
     }
   }
@@ -208,7 +211,7 @@ describe("#124 hostile: store faults on the flag", () => {
     assert.ok((await counters.get({ workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER }, "1970-01-01T00:00:00.000Z")).length > 0, "the attempt stays counted");
   });
 
-  it("C2 the flag write fails after the call's write: the subject still ends up flagged", { todo: "BREAKS: a decision for Sean (flag first, or flag on alert delivery)" }, async () => {
+  it("C2 the flag write fails after the call's write: the alert's delivery sets it, so the subject still ends up flagged", async () => {
     const counters = new FaultyCounters();
     const { t, n } = await mk({ counters });
     counters.failNext = { op: "recordFailure", factor: "duress.flag" };
@@ -221,6 +224,109 @@ describe("#124 hostile: store faults on the flag", () => {
     await t.engine.finishVerification(owner);
     await tick();
     assert.equal(n.told.length, 2, "the next pass is still under duress");
+  });
+
+  it("C2b ...but a clearing between the entry and its alert's delivery is never undone", async () => {
+    const counters = new FaultyCounters();
+    const { t, n } = await mk({ counters });
+    // The entry's own write of the flag fails, and so does the first delivery's: the alert stays owed.
+    counters.failNext = { op: "recordFailure", factor: "duress.flag", times: 2 };
+    await assert.rejects(t.engine.submitPin(await call(t), DURESS), /counters recordFailure 503/);
+    await tick();
+    assert.equal(n.told.length, 0, "still owed");
+    await t.engine.clearDuress(OWNER, "member-7");
+    const owing = (await t.sessions.listCallsOwingAlerts!("ws_test"))[0]!;
+    assert.equal(await t.engine.deliverDuressAlerts(owing), 1, "the alert itself still goes out");
+    const owner = await call(t);
+    assert.equal((await t.engine.submitPin(owner, PIN)).matched, true);
+    await t.engine.finishVerification(owner);
+    await tick();
+    assert.equal(n.told.length, 1, "cleared stays cleared: no alert for the owner's pass");
+    assert.equal(await t.engine.authorize(owner, "owner.command"), true);
+  });
+});
+
+describe("#124 hostile: the coordinator's calls on the decisions", () => {
+  it("G2 duress.cleared never names the subject: a keyed digest only the business can match", async () => {
+    const { t } = await mk();
+    await t.engine.submitPin(await call(t), DURESS);
+    await tick();
+    await t.engine.clearDuress(OWNER, "member-7");
+    const entries = await t.ledger.list();
+    const cleared = entries.find((e) => e.event === "duress.cleared")!;
+    assert.deepEqual(cleared.detail, { subject: duressClearedSubject(TEST_KNOWLEDGE_KEY, OWNER), memberId: "member-7" });
+    assert.notEqual(cleared.detail.subject, OWNER);
+    const otherPin = entries.filter((e) => e.event !== "pin.reset");
+    assert.equal(JSON.stringify(otherPin).includes(OWNER), false, "no entry but a business's own PIN reset names a subject");
+  });
+
+  it("G3 memberId is an opaque id: no email address, no whitespace, at most 64 characters", async () => {
+    const { t } = await mk();
+    for (const memberId of ["jane@example.com", "jane doe", "a\tb", "a\nb", "x".repeat(65), "role:admin", "é"]) {
+      await assert.rejects(t.engine.clearDuress(OWNER, memberId), rejects("invalid_input", /opaque id/), memberId);
+    }
+    await t.engine.clearDuress(OWNER, "x".repeat(64));
+    await t.engine.clearDuress(OWNER, "m.7_a-b");
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "duress.cleared").length, 2);
+  });
+
+  it("G5 a flag set while the duress PIN was on holds after the config turns it off: alerted, every scope refused", async () => {
+    const { t, n } = await mk();
+    await t.engine.submitPin(await call(t), DURESS);
+    await tick();
+    t.engine.configure(cfg((c) => delete badge(c).pin.duress));
+    const owner = await call(t);
+    assert.equal((await t.engine.submitPin(owner, PIN)).matched, true, "the same answer as any pass");
+    await t.engine.finishVerification(owner);
+    await tick();
+    assert.equal(n.told.length, 2, "still alerted");
+    for (const scope of ["owner.command", "status.read", "intake.file"]) assert.equal(await t.engine.authorize(owner, scope), false, scope);
+    // An unflagged subject on the same config is untouched.
+    const plain = setup({ config: cfg((c) => delete badge(c).pin.duress) });
+    const { callId } = await plain.engine.startCall();
+    await plain.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await plain.engine.submitPin(callId, PIN);
+    await plain.engine.finishVerification(callId);
+    assert.equal(await plain.engine.authorize(callId, "owner.command"), true);
+  });
+
+  it("G1 a flagged subject's passes alert once a call, the first, while every duress PIN entry alerts", async () => {
+    const { t, n } = await mk();
+    await t.engine.submitPin(await call(t), DURESS);
+    await tick();
+    assert.equal(n.told.length, 1);
+    const owner = await call(t);
+    await t.engine.submitPin(owner, PIN);
+    await t.engine.finishVerification(owner);
+    await t.engine.beginVerification(owner, { accountNumber: ACCOUNT });
+    await t.engine.submitPin(owner, PIN);
+    await t.engine.submitKeypad(owner, { dob: DOB });
+    await t.engine.finishVerification(owner);
+    await tick();
+    assert.equal(n.told.length, 2, "three passes on one call: one alert");
+    await t.engine.beginVerification(owner, { accountNumber: ACCOUNT });
+    await t.engine.submitPin(owner, DURESS);
+    await tick();
+    assert.equal(n.told.length, 3, "a duress PIN entry on the same call alerts again");
+    const next = await call(t);
+    await t.engine.submitPin(next, PIN);
+    await tick();
+    assert.equal(n.told.length, 4, "a new call: one more");
+    assert.equal(new Set(n.told.map((a) => a.alertId)).size, 4);
+  });
+
+  it("G0 a plug-in that passes a subject the line could not name reads no flag and no clearing", async () => {
+    const t = setup({
+      config: cfg((c) => {
+        c.policy.levels[0] = { level: 1, anyOf: [["pin"], ["any_check"]] };
+        (c.modules.badge!.settings as { factors: string[] }).factors.push("any_check");
+      }),
+      adapters: { duressNotifier: new FakeDuressNotifier() },
+      badge: badgeModule({ factors: [{ kind: "any_check", summary: "passes anything", maxAttemptsPerCall: 1, adapters: [], judge: async () => true }] }),
+    });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: "not digits" });
+    assert.deepEqual(await t.engine.submitFactor(callId, "any_check", "x"), { matched: true, locked: false });
   });
 });
 
@@ -255,6 +361,9 @@ describe("#124 hostile: clearDuress", () => {
     const before = (await t.ledger.list()).length;
     for (const memberId of ["", "a b", "\ud800", "x".repeat(129), "‮member", 7, null]) {
       await assert.rejects(t.engine.clearDuress(OWNER, memberId as string), rejects("invalid_input", /memberId/), String(memberId));
+    }
+    for (const memberId of ["x".repeat(65)]) {
+      await assert.rejects(t.engine.clearDuress(OWNER, memberId), rejects("invalid_input", /memberId/), memberId);
     }
     for (const subjectKey of ["", OWNER.toUpperCase(), "__proto__", 1]) {
       await assert.rejects(t.engine.clearDuress(subjectKey as string, "m1"), rejects("invalid_input", /subjectKey/), String(subjectKey));

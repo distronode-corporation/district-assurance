@@ -9,6 +9,7 @@
 // refused, and the same to the caller as any pass. Both live in the AttemptCounters store every
 // engine shares, under kinds no factor kind can be (factor kinds are snake_case).
 import type { AttemptCounterKey, AttemptCounters } from "../core/adapters.ts";
+import { hmacSha256Hex } from "../core/hash.ts";
 import { lockState, type Lock, type Lockout } from "./counters.ts";
 
 /** The flag's counter kind: one entry while the subject is under duress. */
@@ -19,6 +20,32 @@ const FOREVER = "1970-01-01T00:00:00.000Z";
 
 export function duressFlagKey(workspaceId: string, subjectKey: string): AttemptCounterKey {
   return { workspaceId, factor: DURESS_FLAG, scope: "subject", key: subjectKey };
+}
+
+/**
+ * The subject's clearings so far, one entry per `clearDuress`, never reset: a position in the
+ * sequence of clearings that a duress entry records, so the flag set again for it on delivery of
+ * its alert is never set again over a clearing that came after the entry.
+ */
+export function duressClearsKey(workspaceId: string, subjectKey: string): AttemptCounterKey {
+  return { workspaceId, factor: "duress.clears", scope: "subject", key: subjectKey };
+}
+
+export async function clearsSoFar(counters: AttemptCounters, workspaceId: string, subjectKey: string): Promise<number> {
+  return (await counters.get(duressClearsKey(workspaceId, subjectKey), FOREVER)).length;
+}
+
+export async function recordClear(counters: AttemptCounters, workspaceId: string, subjectKey: string, at: Date): Promise<void> {
+  await counters.recordFailure(duressClearsKey(workspaceId, subjectKey), at.toISOString(), FOREVER);
+}
+
+/** What the ledger's `duress.cleared` names: a keyed digest of the subject, which the business can match with its knowledge key, and no one else can. */
+export function duressClearedSubject(knowledgeKey: string | Uint8Array, subjectKey: string): string {
+  return hmacSha256Hex(knowledgeKey, duressClearedData(subjectKey));
+}
+
+export function duressClearedData(subjectKey: string): string {
+  return `duress.cleared:${subjectKey}`;
 }
 
 /** The hidden counter of one factor kind's failures on a subject, which a duress entry never resets. */

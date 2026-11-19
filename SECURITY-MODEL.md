@@ -117,8 +117,13 @@ reset removes the PIN and the duress PIN in one store step, so it never removes 
 enrolled against a newer PIN (tested); and an entry that matches both, on an imported subject or in
 the host's verifier's answer, or any entry on a subject whose two digests are equal, is refused like
 a wrong PIN, neither a login nor an alarm (tested). A duress entry flags its subject until the
-business clears it (`clearDuress`, written to the ledger with the member): every later pass on the
-subject, on any call, is a duress entry, alerted and refused the same scopes (tested). A duress
+business clears it (`clearDuress`, written to the ledger with an opaque member id and a keyed
+digest of the subject, so neither the ledger nor an export shows who was under duress): every
+later pass on the subject, on any call, is a duress entry, refused the same scopes, and alerted
+once a call (tested). The flag holds after a config turns the duress PIN off, refusing every scope
+(tested); a lost write of the flag is made good when the entry's alert is delivered, never over a
+clearing that came after the entry (tested); a clearing that lands while a pass is judged stays
+cleared (tested). A duress
 entry resets the visible counters as any pass does, but the subject's failures are also counted
 where only a pass not under duress resets them, and their hard lock holds: an attacker who knows
 the duress PIN gets no more guesses at the real PIN than one who does not, and the real PIN, when
@@ -227,6 +232,8 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 
 ## Left to the host
 
+- Authorizing the member behind `clearDuress` and `resetPin`: the engine takes the member id as
+  given, so only the host's staff tools, after their own sign-in, may call them.
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
   speech-to-text and the model while `sensitive` is set.
 - Keeping the knowledge key and the receipt signing key in a key store.
