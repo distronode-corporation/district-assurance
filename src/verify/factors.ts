@@ -59,6 +59,20 @@ export interface BadgeSettings {
   grantTtlSeconds?: number;
   /** Required when `pin` is on. */
   pin?: PinSettings;
+  /** The accessible path (VER-11): keypad fields said instead of keyed, and keypad timeouts. */
+  accessibility?: AccessibilitySettings;
+}
+
+export interface AccessibilitySettings {
+  /**
+   * Keypad fields a caller may say instead of key. They are judged in the spoken_knowledge factor,
+   * with the policy's spoken fields, under its spoken attempt limit. Never the PIN.
+   */
+  spokenKeypadFields?: string[];
+  /** The keypad idle timeout a call starts with, 5 to 60 seconds. Default 10. */
+  keypadIdleSeconds?: number;
+  /** The longest a call's idle timeout may be lengthened to, `keypadIdleSeconds` to 300. A relay or TTY call starts at it. Default: `keypadIdleSeconds`. */
+  maxKeypadIdleSeconds?: number;
 }
 
 /** How each built-in factor reaches the engine. Planned factors cannot be turned on yet. */

@@ -21,6 +21,9 @@ import type { SessionEvent, SessionState } from "./session.ts";
 
 export type Locale = "en" | "fr";
 
+/** A call the host marked at its start: a relay service, or a TTY. */
+export type CallAccess = "relay" | "tty";
+
 /**
  * Everything the engine can be given. Only `ledger` is always required (the ledger is always on);
  * `sessions` defaults to a `MemorySessionStore`. Each module says which of the others it needs, and
@@ -59,6 +62,11 @@ export interface CallRecord {
   locale: Locale;
   /** The config revision the call started under. */
   revision: string;
+  /**
+   * Set when the host marked the call as relay or TTY at its start. It lengthens timeouts and
+   * nothing else, and it is never written to the ledger or a receipt: it can reveal a disability.
+   */
+  access?: CallAccess;
   flow: FlowCursor | null;
   /** Each module's own part, by module name. */
   modules: Record<string, JsonValue>;

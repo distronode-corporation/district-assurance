@@ -47,7 +47,8 @@ enforces it.
 
 ## 2. The call record and the SessionStore
 
-A call is one JSON record: `{v: 1, state, locale, revision, flow, modules}`, where `state` is the
+A call is one JSON record: `{v: 1, state, locale, revision, access?, flow, modules}`, where
+`access` is the host's relay or TTY mark (section 5a), `state` is the
 session above, `revision` the FlowConfig revision the call started under, `flow` the cursor of the
 flow it runs (or null), and `modules` each enabled module's own part, created by its `initCall`
 when the call starts. A module turned on after a call started has no part in it and is refused on
@@ -135,8 +136,9 @@ Scopes: `status.read` 1, `intake.file` 1, `payment.request` 2, `contact.update` 
 no SIM change or port in the last 72 hours.
 
 Badge's settings turn factors on (`factors`, at least one), set the grant lifetime
-(`grantTtlSeconds`, default 900, at most 3600) and, when `pin` is on, the PIN settings (section 6).
-A factor that is off is refused at every entry point. A planned factor cannot be turned on.
+(`grantTtlSeconds`, default 900, at most 3600), when `pin` is on, the PIN settings (section 6), and
+optionally the accessible path (`accessibility`, section 5a). A factor that is off is refused at
+every entry point. A planned factor cannot be turned on.
 
 A **grant** carries the level, the scopes at or below it (narrowed to the verify step's `scopes`
 when the step lists them), and an expiry. `authorize(callId, scope)` is true only for a scope the
@@ -185,6 +187,51 @@ transcript per field in the policy's `spoken.fields`: `submitFactor(callId, "spo
   the policy, every submission is `locked` and nothing is judged. A host can call
   `normaliseSpokenAnswer` itself first to ask again before an attempt is used.
 - A spoken match does not unlock texts to the number on file (section 4).
+- A spoken entry with a `pin` field is refused (`invalid_input`) before it is counted or judged:
+  a PIN is only ever keyed.
+
+## 5a. The accessible path
+
+Badge's optional `accessibility` settings: `{spokenKeypadFields?, keypadIdleSeconds?,
+maxKeypadIdleSeconds?}`.
+
+- `spokenKeypadFields`: keypad fields a caller may say instead of key. At least one, no
+  duplicates, never `pin`, and only with the `spoken_knowledge` factor on; a `badge.verify` step
+  that lists `spoken_knowledge` refuses a field that is not one of the policy's `keypadFields`.
+  These fields join the policy's spoken fields in the `spoken_knowledge` factor: one answer gives
+  all of them, judged together as in section 5. A keypad field is read as the `reference` format
+  (4 to 12 letters and digits) and compared as `HMAC-SHA256(knowledgeKey, "field:" + field + ":"
+  + value)`, so only the digits on file match. The factor recorded is `spoken_knowledge`, never
+  `keypad_knowledge`: it reaches only what the policy's sets give `spoken_knowledge`, under
+  `spoken.maxAttemptsPerCall`, and without `spoken` in the policy it is never judged.
+- `keypadIdleSeconds` (5 to 60, default 10) is a call's keypad idle timeout;
+  `maxKeypadIdleSeconds` (`keypadIdleSeconds` to 300, default `keypadIdleSeconds`) is the most it
+  may be lengthened to. `keypadTiming(callId)` returns `{idleTimeoutMs, maxIdleTimeoutMs}` for
+  the call: the idle timeout, or the maximum on a call marked relay or TTY.
+- `startCall({access: "relay" | "tty"})` marks the call. The mark is kept in the call record
+  (`access`) and does one thing: the longer timeout above. Every step, factor, attempt limit and
+  level is the same as on any call, and the mark is never in an event, the ledger, the session
+  state or the receipt. Any other value is refused (`invalid_input`).
+
+**The keypad collector** (`KeypadCollector`, `src/core/keypad.ts`; a stand-in for INT-1). Pure:
+the host passes the time with each tone and calls `tick(nowMs)` from its own timer. Options:
+`maxLength` 1 to 32, `idleTimeoutMs` (1000 or more), `maxIdleTimeoutMs` (at least
+`idleTimeoutMs`, default it), `requestKeys` (`*`, `A` to `D`, each `repeat` or `slower`),
+`onDigits`, `onRequest` (required with `requestKeys`), `onTimeout`.
+
+- Digits are buffered; `#` hands a non-empty buffer to `onDigits`. A digit past `maxLength`
+  drops the buffer. Other keys are ignored.
+- A request key drops the buffer and hands its request to `onRequest` instead of digits. The
+  host replays its fixed line (slower for `slower`). A request is never an attempt: nothing
+  reaches the engine, so no attempt is used, added or given back.
+- A partial entry idle for the timeout is dropped (on `tick` or the next tone) and `onTimeout`
+  is told. `lengthenIdleTimeout(ms)` lengthens it for the rest of the call, never past the
+  maximum, and touches nothing else.
+- `toString`, JSON and `util.inspect` give `[KeypadCollector]`; `collecting` says only whether
+  an entry is buffered.
+
+A caller who asks aloud to repeat or slow down is the host's: it replays its fixed line, and
+nothing reaches the engine.
 
 ## 6. PIN
 
@@ -246,7 +293,7 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 | `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
 | `trace.receipt` | none; needs the `signer` adapter |
 
-Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
+Settings: Badge (sections 4, 5a and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
 until FIL-2); Paylink `{maxAmountMinor?}` (1 to 1,000,000); Trace `{receipts?, wordings?}`
 (`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr}}`, purposes
 unique).

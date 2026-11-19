@@ -21,7 +21,7 @@ import { hmacSha256Hex } from "./core/hash.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
 import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
-import type { AdapterName, CallDraft, CallRecord, EngineAdapters, EngineRuntime, FlowStatus, Locale } from "./core/runtime.ts";
+import type { AdapterName, CallAccess, CallDraft, CallRecord, EngineAdapters, EngineRuntime, FlowStatus, Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
 import * as dossier from "./file/dossier.ts";
@@ -169,8 +169,13 @@ export class Engine {
 
   // ---- sessions ----------------------------------------------------------------------------
 
-  /** Opens a call. With `flow`, the call runs that flow from its first step. */
-  async startCall(input: { callId?: string; locale?: Locale; flow?: string } = {}): Promise<SessionState> {
+  /**
+   * Opens a call. With `flow`, the call runs that flow from its first step. With `access`, the host
+   * marks a relay or TTY call: its keypad timeouts are longer (`keypadTiming`), and nothing else
+   * changes. The mark is kept in the call record only, never in the ledger or a receipt.
+   */
+  async startCall(input: { callId?: string; locale?: Locale; flow?: string; access?: CallAccess } = {}): Promise<SessionState> {
+    if (input.access !== undefined && input.access !== "relay" && input.access !== "tty") throw new EngineError("invalid_input", "access must be relay or tty");
     const callId = input.callId ?? this.#ids.next("call");
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
@@ -186,6 +191,7 @@ export class Engine {
       modules,
       outbox: [],
     };
+    if (input.access !== undefined) record.access = input.access;
     // A call started with a flow is created with it attached, so no other process can start a
     // different flow on the same id in between.
     const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
@@ -318,6 +324,14 @@ export class Engine {
   /** Judges an entry for any factor the caller enters, a host's plug-in included. */
   submitFactor(callId: string, kind: string, entry: FactorEntry): Promise<badge.KeypadResult> {
     return badge.submitFactor(this.#rt, this.#badge, callId, kind, entry);
+  }
+
+  /**
+   * The call's keypad timeouts, for a `KeypadCollector`: longer on a call marked relay or TTY, and
+   * the limit to which the host may lengthen them when the caller asks to slow down.
+   */
+  keypadTiming(callId: string): Promise<badge.KeypadTiming> {
+    return badge.keypadTiming(this.#rt, callId);
   }
 
   checkCarrier(callId: string): Promise<{ textCodeTrusted: boolean }> {

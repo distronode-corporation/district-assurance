@@ -9,6 +9,7 @@ import type { JsonValue } from "../core/canonical.ts";
 import { EngineError, NotImplementedError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import { isStepLevel } from "../core/config.ts";
+import { DEFAULT_KEYPAD_IDLE_SECONDS } from "../core/keypad.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
 import {
   FACTOR_KINDS,
@@ -18,6 +19,7 @@ import {
   type AssuranceLevel,
   type CarrierSignalReport,
   type FactorKind,
+  type SpokenPolicy,
 } from "../core/policy.ts";
 import type { CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
 import { canApply, type SessionState } from "../core/session.ts";
@@ -86,8 +88,15 @@ export interface VerificationResult {
 
 export type OutcomeResult = { applied: false } | { applied: true; callId: string };
 
-const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin"];
+/** The keypad timeouts of one call, for the host's `KeypadCollector`. */
+export interface KeypadTiming {
+  idleTimeoutMs: number;
+  maxIdleTimeoutMs: number;
+}
+
+const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin", "accessibility"];
 const PIN_KEYS = ["mode", "minDigits", "maxDigits", "maxAttemptsPerCall"];
+const ACCESSIBILITY_KEYS = ["spokenKeypadFields", "keypadIdleSeconds", "maxKeypadIdleSeconds"];
 
 /** The subject whose number links may go to: only once a keypad or PIN factor matched. */
 export function matchedSubject(record: CallRecord): SubjectRecord {
@@ -144,6 +153,7 @@ export class BadgeModule implements AssuranceModule {
       }
       if (settings.factors.includes("pin")) errors.push(...pinSettingsErrors(settings.pin));
     }
+    if (settings.accessibility !== undefined) errors.push(...accessibilityErrors(settings.accessibility, settings.factors));
     if (settings.grantTtlSeconds !== undefined && !isIntegerIn(settings.grantTtlSeconds, 1, 3600)) {
       errors.push("grantTtlSeconds must be an integer from 1 to 3600");
     }
@@ -172,6 +182,12 @@ export class BadgeModule implements AssuranceModule {
     const settings = ctx.settings as BadgeSettings | null;
     if (settings !== null) {
       for (const kind of step.factors) if (!settings.factors.includes(kind)) errors.push(`factor ${kind} is turned off in the badge settings`);
+      if (ctx.policy !== null && step.factors.includes("spoken_knowledge")) {
+        const keypadFields = ctx.policy.keypadFields;
+        for (const field of settings.accessibility?.spokenKeypadFields ?? []) {
+          if (!keypadFields.includes(field)) errors.push(`spoken keypad field ${field} is not one of the policy's keypad fields`);
+        }
+      }
     }
     if (ctx.policy !== null && isStepLevel(step.level)) {
       const factors = step.factors;
@@ -260,6 +276,28 @@ function pinSettingsErrors(pin: unknown): string[] {
   return errors;
 }
 
+function accessibilityErrors(a: unknown, factors: unknown): string[] {
+  if (!isObject(a)) return ["accessibility must be an object"];
+  const errors = unknownKeys(a, ACCESSIBILITY_KEYS).map((k) => `accessibility.${k} is not an accessibility setting`);
+  if (a.spokenKeypadFields !== undefined) {
+    const fields = a.spokenKeypadFields;
+    if (!isStringArray(fields) || fields.length === 0) {
+      errors.push("accessibility.spokenKeypadFields must list at least one keypad field");
+    } else {
+      if (new Set(fields).size !== fields.length) errors.push("accessibility.spokenKeypadFields has duplicates");
+      // A spoken PIN reaches speech-to-text, so the PIN is only ever keyed.
+      if (fields.includes("pin")) errors.push("accessibility.spokenKeypadFields cannot hold the PIN: a PIN is never taken by speech");
+      if (!isStringArray(factors) || !factors.includes("spoken_knowledge")) errors.push("accessibility.spokenKeypadFields needs the spoken_knowledge factor on");
+    }
+  }
+  const idle = a.keypadIdleSeconds ?? DEFAULT_KEYPAD_IDLE_SECONDS;
+  if (!isIntegerIn(idle, 5, 60)) errors.push("accessibility.keypadIdleSeconds must be an integer from 5 to 60");
+  else if (a.maxKeypadIdleSeconds !== undefined && !isIntegerIn(a.maxKeypadIdleSeconds, idle, 300)) {
+    errors.push("accessibility.maxKeypadIdleSeconds must be an integer from keypadIdleSeconds to 300");
+  }
+  return errors;
+}
+
 // ---- runtime -------------------------------------------------------------------------------
 
 /** Refuses a factor that is off, or that the current flow step does not allow. */
@@ -322,6 +360,10 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   const builtIn = BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS];
   const plugin = module.plugin(kind);
   if (builtIn?.entered !== true && plugin === undefined) throw new EngineError("invalid_input", `${kind} is not a factor the caller enters`);
+  // A spoken PIN has already reached speech-to-text. It is refused before it is counted or judged.
+  if (kind === "spoken_knowledge" && typeof entry !== "string" && Object.hasOwn(entry, "pin")) {
+    throw new EngineError("invalid_input", "a PIN is never taken by speech: it is keyed, with submitPin");
+  }
   const reserved = await rt.update(callId, (draft) => {
     allowFactor(rt, draft.record, kind);
     draft.assertCan({ type: "factor_recorded", factor: { kind, passed: false, at: rt.now() } });
@@ -340,7 +382,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
       : kind === "pin"
         ? await judgePin(rt, rt.settings<BadgeSettings>(BADGE).pin as PinSettings, input)
         : kind === "spoken_knowledge"
-          ? await judgeSpoken(rt.policy.spoken!, input)
+          ? await judgeSpoken(spokenFields(rt), input)
           : (await plugin!.judge(input)) === true;
   await rt.update(callId, (draft) => {
     assertSameVerification(draft.slice<BadgeSlice>(BADGE), reserved.epoch);
@@ -350,6 +392,32 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     draft.emit("verification.factor", "code", { kind, passed });
   });
   return { matched: passed, locked: !passed && reserved.last };
+}
+
+/**
+ * The fields one spoken_knowledge answer must give: the policy's spoken fields, plus the keypad
+ * fields Badge's settings let a caller say instead of key, read as `reference` (4 to 12 letters
+ * and digits; a keypad value on file is digits) and compared like the keypad field they are. The
+ * attempt limit stays the policy's.
+ */
+function spokenFields(rt: EngineRuntime): SpokenPolicy {
+  const spoken = rt.policy.spoken!;
+  const keypadFields = rt.policy.keypadFields;
+  const said = (rt.settings<BadgeSettings>(BADGE).accessibility?.spokenKeypadFields ?? []).filter((f) => keypadFields.includes(f));
+  return { ...spoken, fields: { ...spoken.fields, ...Object.fromEntries(said.map((f) => [f, "reference" as const])) } };
+}
+
+/**
+ * The keypad timeouts of a call, for the host's `KeypadCollector`: Badge's `keypadIdleSeconds`, or
+ * its `maxKeypadIdleSeconds` on a call marked relay or TTY, and that maximum as the limit a call
+ * may lengthen its timeout to. Timeouts only: the mark changes no step, factor or attempt.
+ */
+export async function keypadTiming(rt: EngineRuntime, callId: string): Promise<KeypadTiming> {
+  const a = rt.settings<BadgeSettings>(BADGE).accessibility;
+  const idle = a?.keypadIdleSeconds ?? DEFAULT_KEYPAD_IDLE_SECONDS;
+  const max = a?.maxKeypadIdleSeconds ?? idle;
+  const record = await rt.read(callId);
+  return { idleTimeoutMs: (record.access === undefined ? idle : max) * 1000, maxIdleTimeoutMs: max * 1000 };
 }
 
 /** Asks the carrier about the number on file, never the calling number. Only after a keypad or PIN match. */
