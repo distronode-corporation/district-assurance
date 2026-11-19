@@ -143,20 +143,22 @@ export async function recordConsent(
   callId: string,
   input: { purpose: string; answer: "yes" | "no"; channel?: ConsentChannel },
 ): Promise<ConsentRecord> {
+  // Read once: the purpose a wording was found for is the one checked against the step and stored.
+  const { purpose, answer, channel } = input;
   const store = consentStore(rt);
   const reserved = await rt.update(callId, (draft): ConsentRecord => {
     const s = draft.slice<TraceSlice>(TRACE);
     if (s.storing !== null) {
-      if (s.storing.purpose !== input.purpose || s.storing.answer !== input.answer) {
+      if (s.storing.purpose !== purpose || s.storing.answer !== answer) {
         throw new EngineError("precondition_failed", `a consent to ${s.storing.purpose} is being stored; record it again first`);
       }
       return s.storing;
     }
-    const wording = s.wordings.find((w) => w.purpose === input.purpose);
-    if (wording === undefined) throw new EngineError("invalid_input", `no wording for ${input.purpose} in this call's trace settings`);
+    const wording = s.wordings.find((w) => w.purpose === purpose);
+    if (wording === undefined) throw new EngineError("invalid_input", `no wording for ${purpose} in this call's trace settings`);
     if (draft.record.state.phase === "ended") throw new EngineError("invalid_transition", "the call has ended");
     const step = stepOfType<TraceConsentStep>(draft.record, "trace.consent");
-    if (step !== null && step.purpose !== input.purpose) throw new EngineError("precondition_failed", `the flow step asks for consent to ${step.purpose}`);
+    if (step !== null && step.purpose !== purpose) throw new EngineError("precondition_failed", `the flow step asks for consent to ${step.purpose}`);
     const record: ConsentRecord = {
       consentId: rt.ids.next("cns"),
       callId,
@@ -164,8 +166,8 @@ export async function recordConsent(
       wordingVersion: wording.version,
       wordingDigest: wordingDigest(wording),
       locale: draft.record.locale,
-      answer: input.answer,
-      channel: input.channel ?? "call",
+      answer,
+      channel: channel ?? "call",
       at: rt.now(),
     };
     if (store === null) commitConsent(draft, record);
@@ -231,11 +233,14 @@ const CHANNELS: readonly ConsentChannel[] = ["call", "text", "web"];
  * spoken answer that `isStopRequest` matches is the host's cue to call this.
  */
 export async function revokeConsent(rt: EngineRuntime, input: { consentId: string; via: ConsentChannel }): Promise<ConsentRevocation> {
-  if (!isObject(input) || typeof input.consentId !== "string" || input.consentId === "") throw new EngineError("invalid_input", "consentId is empty");
-  if (!CHANNELS.includes(input.via)) throw new EngineError("invalid_input", "via must be call, text or web");
+  if (!isObject(input)) throw new EngineError("invalid_input", "consentId is empty");
+  // Read once: the id looked up and the channel checked are the ones the revocation records.
+  const { consentId, via } = input;
+  if (typeof consentId !== "string" || consentId === "") throw new EngineError("invalid_input", "consentId is empty");
+  if (!CHANNELS.includes(via)) throw new EngineError("invalid_input", "via must be call, text or web");
   const store = consentStore(rt);
   if (store === null) throw new EngineError("precondition_failed", "revoking a consent needs the consents adapter, which the engine does not have");
-  const stored = await store.getConsent(rt.workspaceId, input.consentId);
+  const stored = await store.getConsent(rt.workspaceId, consentId);
   if (stored === null) throw new EngineError("invalid_input", "no such consent");
   const consent = stored.consent;
   if (consent.answer !== "yes") throw new EngineError("precondition_failed", "the answer was no: there is nothing to revoke");
@@ -252,7 +257,7 @@ export async function revokeConsent(rt: EngineRuntime, input: { consentId: strin
     }
     await rt.flushLedger(consent.callId);
   }
-  const revoked = stored.revoked ?? (await store.revokeConsent(rt.workspaceId, { consentId: consent.consentId, via: input.via, at: rt.now() }));
+  const revoked = stored.revoked ?? (await store.revokeConsent(rt.workspaceId, { consentId: consent.consentId, via, at: rt.now() }));
   // One entry per consent, however often it is revoked: the event id names the consent, and a
   // ledger appends an id once, so a retry after a failed append completes it.
   await rt.append({
