@@ -65,6 +65,19 @@ export function stripeIdempotencyKey(engineKey: string): string {
   return PLAIN_IDEMPOTENCY_KEY.test(engineKey) ? engineKey : `sha256:${createHash("sha256").update(engineKey, "utf8").digest("hex")}`;
 }
 
+/** Stripe's limit on a metadata value, in characters. */
+const METADATA_VALUE_LIMIT = 500;
+
+/**
+ * The call id as Stripe metadata: as is when it fits Stripe's 500-character limit, else `sha256:`
+ * and its hex SHA-256, so a long host call id still gets a check (Stripe refuses the whole request
+ * with a 400 otherwise) and the same call id always sends the same value. It is measured in UTF-8
+ * bytes, which is never fewer than characters, so the value fits however Stripe counts.
+ */
+export function stripeMetadataCallId(callId: string): string {
+  return Buffer.byteLength(callId, "utf8") <= METADATA_VALUE_LIMIT ? callId : `sha256:${createHash("sha256").update(callId, "utf8").digest("hex")}`;
+}
+
 /** Hosts that never leave the machine, the only ones a key may reach over plain `http:`. */
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
@@ -140,7 +153,8 @@ export class StripeIdentityProvider implements IdentityProvider {
   }
 
   /**
-   * Creates the check, with the call id in its metadata and the engine's idempotency key, so a
+   * Creates the check, with the call id in its metadata (hashed when over Stripe's limit,
+   * `stripeMetadataCallId`) and the engine's idempotency key, so a
    * retry after a failure returns the same session and the same link. Answers the session id,
    * which the outcome webhook names, and the single-use URL.
    */
@@ -148,7 +162,7 @@ export class StripeIdentityProvider implements IdentityProvider {
     const form = new URLSearchParams();
     form.set("type", "document");
     form.set("options[document][require_matching_selfie]", "true");
-    form.set("metadata[call_id]", input.callId);
+    form.set("metadata[call_id]", stripeMetadataCallId(input.callId));
     const session = await stripePost(this.#apiKey, this.#options, "/v1/identity/verification_sessions", form, input.idempotencyKey);
     const { id, url } = session;
     // The URL goes into a text message as is: an https link of printable ASCII and nothing else (no

@@ -396,7 +396,9 @@ are reported as ignored, and a body that is not a well-formed event is `null`.
 The reference server's `StripeIdentityProvider` (an example, not part of the package) is an
 `IdentityProvider` that calls Stripe with `fetch`. `createDocumentCheck` sends one
 `POST /v1/identity/verification_sessions`, form-encoded, with exactly `type=document`,
-`options[document][require_matching_selfie]=true` and `metadata[call_id]=<call id>`, and the
+`options[document][require_matching_selfie]=true` and `metadata[call_id]=<call id>` (the call id
+as is when it is at most 500 UTF-8 bytes, Stripe's metadata value limit, and otherwise `sha256:`
+and its hex SHA-256, the same every time, so a long call id still gets a check), and the
 headers `Authorization: Bearer <restricted key>`, `Idempotency-Key`, and a pinned
 `Stripe-Version` (`2025-03-31.basil`). The `Idempotency-Key` is the engine's key as is when it is
 1 to 255 printable ASCII characters without spaces, and otherwise `sha256:` and the hex SHA-256 of

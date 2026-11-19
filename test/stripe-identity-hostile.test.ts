@@ -2,7 +2,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { StripeApiError, StripeIdentityProvider, stripeIdempotencyKey } from "../examples/reference-server/src/stripe-adapters.ts";
+import { StripeApiError, StripeIdentityProvider, stripeIdempotencyKey, stripeMetadataCallId } from "../examples/reference-server/src/stripe-adapters.ts";
 
 const KEY = "rk_test_fixtureNotASecret";
 
@@ -50,5 +50,40 @@ describe("#77 hostile: the adapter's own options", () => {
     assert.equal(stripeIdempotencyKey(hashed), hashed, "the hash text itself is sent as is");
     assert.notEqual(hashed, odd);
     assert.equal(stripeIdempotencyKey(odd), stripeIdempotencyKey(odd), "stable across retries");
+  });
+});
+
+describe("#77 hostile: a call id longer than Stripe's metadata limit", () => {
+  /** A fetch that answers like Stripe: 400 for a metadata value over 500 characters, else a session. */
+  function stripeLike() {
+    const sent: string[] = [];
+    const fetch = (async (_url: string | URL, init?: RequestInit) => {
+      const value = new URLSearchParams(String(init?.body)).get("metadata[call_id]") ?? "";
+      sent.push(value);
+      if ([...value].length > 500) {
+        return new Response(JSON.stringify({ error: { type: "invalid_request_error", code: "parameter_invalid_string_length", param: "metadata[call_id]" } }), { status: 400, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ id: "vs_1", url: "https://verify.stripe.com/start/test_abc" }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof globalThis.fetch;
+    return { fetch, sent };
+  }
+
+  it("I5 a call id over 500 characters goes as sha256: and its hex SHA-256, the same every time; one of 500 goes as is", async () => {
+    const { createHash } = await import("node:crypto");
+    const { fetch, sent } = stripeLike();
+    const provider = new StripeIdentityProvider(KEY, { fetch });
+    for (const callId of ["c".repeat(501), "c".repeat(5000), "é".repeat(400), "😀".repeat(300)]) {
+      const hashed = `sha256:${createHash("sha256").update(callId, "utf8").digest("hex")}`;
+      assert.equal(stripeMetadataCallId(callId), hashed);
+      assert.deepEqual(await provider.createDocumentCheck({ callId, idempotencyKey: "k" }), { sessionId: "vs_1", url: "https://verify.stripe.com/start/test_abc" }, `${callId.length} long`);
+      await provider.createDocumentCheck({ callId, idempotencyKey: "k" });
+      assert.deepEqual(sent.slice(-2), [hashed, hashed], "the same value on a retry");
+    }
+    assert.notEqual(stripeMetadataCallId("c".repeat(501)), stripeMetadataCallId("c".repeat(502)));
+    for (const callId of ["call_1", "c".repeat(500), "é".repeat(250)]) {
+      assert.equal(stripeMetadataCallId(callId), callId);
+      await provider.createDocumentCheck({ callId, idempotencyKey: "k" });
+      assert.equal(sent.at(-1), callId);
+    }
   });
 });
