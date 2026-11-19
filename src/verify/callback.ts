@@ -166,7 +166,8 @@ function placedKey(rt: EngineRuntime, subjectKey: string): AttemptCounterKey {
  * day. A placed callback whose dial is resumed later is counted again now, or refused (null) when
  * the subject is at the limit, so a resumed dial never rings past it. Only the try whose claim is
  * saved on the call (`admitting`) counts it: another try at once counts nothing, and dials with
- * that count once it is in the store, or leaves the dial to the claiming try (undefined).
+ * that count once it is in the store, or leaves the dial to the claiming try (undefined). A claim
+ * whose daily-limit read failed counted nothing and is taken back.
  */
 async function countDial(rt: EngineRuntime, callId: string, callback: CallbackState): Promise<string | null | undefined> {
   const counted = callback.countedAt ?? callback.at!;
@@ -186,7 +187,21 @@ async function countDial(rt: EngineRuntime, callId: string, callback: CallbackSt
     const other = callbackOf((await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice).admitting;
     return today(other) && recordedAt(await counters.get(placed, since), other) !== null ? other : undefined;
   }
-  if ((await counters.get(placed, since)).length >= MAX_CALLBACKS_PER_DAY) return null;
+  let soFar: string[];
+  try {
+    soFar = await counters.get(placed, since);
+  } catch (error) {
+    // Nothing counted: the claim is taken back, so the next try counts it within the day. A count
+    // that fails below may have saved, so its claim stays (no ring, fail closed).
+    await rt
+      .update(callId, (draft) => {
+        const callback = draft.slice<BadgeSlice>(BADGE).callback;
+        if (callback.admitting === at) delete callback.admitting;
+      })
+      .catch(() => undefined);
+    throw error;
+  }
+  if (soFar.length >= MAX_CALLBACKS_PER_DAY) return null;
   // Another request got in first: the list this one returned is over the limit.
   return (await counters.recordFailure(placed, at, since)).length > MAX_CALLBACKS_PER_DAY ? null : at;
 }
