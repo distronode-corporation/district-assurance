@@ -477,7 +477,10 @@ export class Engine {
 
   /** The key set door relays verify access grants with (empty without an access signer). */
   accessKeys(): JsonWebKey[] {
-    return this.#adapters.accessSigner === undefined ? [] : [publicMembers(this.#adapters.accessSigner.publicJwk())];
+    const signer = this.#adapters.accessSigner;
+    // The published `kid` is the one every grant carries (the signer's keyId), whatever its JWK says:
+    // relays select the key by it, so a JWK without one would leave every grant unverifiable.
+    return signer === undefined ? [] : [{ ...publicMembers(signer.publicJwk()), kid: signer.keyId } as JsonWebKey];
   }
 
   // ---- Step-up (web sign-in) ---------------------------------------------------------------
@@ -571,7 +574,9 @@ export class Engine {
 
   /** The key set for verifying this engine's receipts (empty without a signer). */
   receiptKeys(): JsonWebKey[] {
-    return this.#adapters.signer === undefined ? [] : [publicMembers(this.#adapters.signer.publicJwk())];
+    const signer = this.#adapters.signer;
+    // The published `kid` is the one every receipt carries (the signer's keyId), whatever its JWK says.
+    return signer === undefined ? [] : [{ ...publicMembers(signer.publicJwk()), kid: signer.keyId } as JsonWebKey];
   }
 
   // ---- outside modules ---------------------------------------------------------------------
