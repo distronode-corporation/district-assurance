@@ -53,13 +53,21 @@ async function call(t: TestEngine): Promise<string> {
 
 /** Everything a caller (or the host speaking for them) can see of a passing PIN call. */
 async function visible(t: TestEngine, callId: string, pin: string) {
+  const from = (await t.ledger.list()).length;
   const answer = await t.engine.submitPin(callId, pin);
   const finished = await t.engine.finishVerification(callId);
   const state = await t.engine.state(callId);
   await tick();
   const receipt = await t.engine.endCall(callId);
-  const events = (await t.ledger.list()).filter((e) => e.callId === callId).map((e) => [e.event, e.actor, e.detail]);
-  return { answer, finished, state: { ...state, callId: "x", startedAt: "x", endedAt: "x" }, events, receipt: receipt === null ? null : { ...receipt.body, receiptId: "x", callId: "x", ledger: null, startedAt: "x", endedAt: "x", issuedAt: "x" } };
+  // Every entry the run added, the workspace's own (callId null) too.
+  const events = (await t.ledger.list()).slice(from).map((e) => [e.event, e.actor, e.callId === callId ? "x" : e.callId, e.detail]);
+  return {
+    answer,
+    finished,
+    state: { ...state, callId: "x", startedAt: "x", endedAt: "x" },
+    events,
+    receipt: receipt === null ? null : { ...receipt.body, receiptId: "x", callId: "x", ledger: { ...receipt.body.ledger, hash: "" }, startedAt: "x", endedAt: "x", issuedAt: "x" },
+  };
 }
 
 /** Counters that let a test fail or hold one call on one key. */
@@ -155,6 +163,7 @@ describe("#124 hostile: can anyone learn that the flag is set?", () => {
     await tick();
     const a = await visible(plain.t, await call(plain.t), PIN);
     const b = await visible(flagged.t, await call(flagged.t), PIN);
+    assert.ok(a.receipt !== null, "the control issues a receipt");
     assert.deepEqual(b.answer, a.answer);
     assert.deepEqual(b.finished, a.finished);
     assert.deepEqual(b.state, a.state);
@@ -316,17 +325,29 @@ describe("#124 hostile: the coordinator's calls on the decisions", () => {
   });
 
   it("G0 a plug-in that passes a subject the line could not name reads no flag and no clearing", async () => {
+    const duressReads: string[] = [];
+    class Watched extends MemoryAttemptCounters {
+      override async get(key: AttemptCounterKey, since: string): Promise<string[]> {
+        if (key.factor === "duress.flag" || key.factor === "duress.clears") duressReads.push(key.factor);
+        return super.get(key, since);
+      }
+      override async recordFailure(key: AttemptCounterKey, at: string, since: string): Promise<string[]> {
+        if (key.factor === "duress.flag" || key.factor === "duress.clears") duressReads.push(key.factor);
+        return super.recordFailure(key, at, since);
+      }
+    }
     const t = setup({
       config: cfg((c) => {
         c.policy.levels[0] = { level: 1, anyOf: [["pin"], ["any_check"]] };
         (c.modules.badge!.settings as { factors: string[] }).factors.push("any_check");
       }),
-      adapters: { duressNotifier: new FakeDuressNotifier() },
+      adapters: { duressNotifier: new FakeDuressNotifier(), counters: new Watched() },
       badge: badgeModule({ factors: [{ kind: "any_check", summary: "passes anything", maxAttemptsPerCall: 1, adapters: [], judge: async () => true }] }),
     });
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: "not digits" });
     assert.deepEqual(await t.engine.submitFactor(callId, "any_check", "x"), { matched: true, locked: false });
+    assert.deepEqual(duressReads, [], "no flag or clearing read for a subject the line could not name");
   });
 });
 

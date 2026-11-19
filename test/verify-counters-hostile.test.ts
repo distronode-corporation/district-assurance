@@ -32,8 +32,9 @@ describe("wp-a: two engines, one counter store", () => {
     // Both at the FixedClock's same instant.
     const [ra, rb] = await Promise.all([a.engine.submitKeypad(own, { dob: DOB }), b.engine.submitKeypad(other, { dob: "1" })]);
     assert.equal(ra.matched, true);
+    assert.equal(rb.matched, false, "the wrong answer for the unknown account fails");
     const left = await counters.get(numKey("keypad_knowledge"), LONG_AGO);
-    assert.equal(left.length, rb.matched ? 0 : 1, `failures on the number: ${JSON.stringify(left)}`);
+    assert.deepEqual(left, [a.clock.now().toISOString()], `failures on the number: ${JSON.stringify(left)}`);
   });
 
   it("pass cannot lift a hard lock others put on the number", async () => {
@@ -73,11 +74,16 @@ describe("wp-a: two engines, one counter store", () => {
     const own = await call(a);
     const { callId: attacker } = await b.engine.startCall();
     await b.engine.beginVerification(attacker, { accountNumber: ACCOUNT, callingNumber: "+15555550199" });
+    let before: string[] | null = null;
+    let judged: unknown = null;
     counters.during = async () => {
       waitOut(a);
-      await b.engine.submitKeypad(attacker, { dob: "1" });
+      judged = await b.engine.submitKeypad(attacker, { dob: "1" });
+      before = await counters.get(subjKey("keypad_knowledge"), LONG_AGO);
     };
     assert.equal((await a.engine.submitKeypad(own, { dob: DOB })).matched, true);
+    assert.deepEqual(judged, { matched: false, locked: false }, "the hook ran and the attacker's submit was judged and failed");
+    assert.ok(before !== null && (before as string[]).includes(a.clock.now().toISOString()), `the attacker's failure is on the subject before reset: ${JSON.stringify(before)}`);
     const left = await counters.get(subjKey("keypad_knowledge"), LONG_AGO);
     assert.equal(left.length, 0, "the attacker's concurrent failure on the subject is gone");
   });
@@ -170,7 +176,7 @@ describe("wp-a: PIN path", () => {
     waitOut(a);
     const own = await call(a);
     assert.equal((await a.engine.submitPin(own, PIN)).matched, true);
-    assert.equal((await counters.get(numKey("pin"), LONG_AGO)).length, 1);
+    assert.deepEqual(await counters.get(numKey("pin"), LONG_AGO), ["2026-01-01T00:00:00.000Z"], "the seeded failure survives, the pass's own is gone");
   });
 });
 

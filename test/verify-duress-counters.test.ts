@@ -8,7 +8,7 @@ import type { FlowConfig } from "../src/core/config.ts";
 import type { PinSettings } from "../src/verify/factors.ts";
 import { duressClearedSubject, hiddenCounterKey } from "../src/verify/duress-flag.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
-import { FakeDuressNotifier, FakeNotifier, TEST_KNOWLEDGE_KEY, type TestEngine } from "../src/testing/index.ts";
+import { FakeDuressNotifier, FakeNotifier, TEST_KNOWLEDGE_KEY, testSubject, type TestEngine } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig } from "./helpers.ts";
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
@@ -99,6 +99,11 @@ describe("duress and the counters across calls (flag until cleared)", () => {
       out.push(JSON.stringify(await t.engine.submitPin(callId, DURESS)));
     }
     assert.ok(out.some((o) => o.includes('"locked":true')));
+    // The lock is the number's: another subject, with no failures of its own, is refused from it.
+    t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: "87654321", phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB }, pin: PIN }));
+    const { callId: other } = await t.engine.startCall();
+    await t.engine.beginVerification(other, { accountNumber: "87654321", callingNumber: "+15555550199" });
+    assert.deepEqual(await t.engine.submitPin(other, PIN), { matched: false, locked: true }, "the number blocks an unlocked subject");
   });
 
   it("keeps every later pass on the subject a duress pass, the keypad's too, until the business clears it, with a ledger entry", async () => {

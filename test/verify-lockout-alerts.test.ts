@@ -122,13 +122,22 @@ describe("lock notices", () => {
     assert.equal(t.notifier.notices.length, NOTICES_PER_HOUR);
     assert.deepEqual(t.notifier.notices.map((n) => n.capped), [...Array.from({ length: NOTICES_PER_HOUR - 1 }, () => false), true]);
     assert.deepEqual(t.notifier.notices.map((n) => n.key), subjects.slice(0, NOTICES_PER_HOUR));
+    // Another workspace on the same counters store and clock, inside the same hour: its own cap.
+    const notifier = new FakeNotifier();
+    const config = testConfig((c) => ((c.modules.badge!.settings as { lockout?: unknown }).lockout = { lockAfterFailures: 1 }));
+    const elsewhere = createTestEngine({ workspaceId: "ws_other", config, clock: t.clock, adapters: { notifier, counters: t.counters } });
+    const { callId: other } = await elsewhere.engine.startCall();
+    await elsewhere.engine.beginVerification(other, { subjectKey: "c".repeat(64) });
+    assert.deepEqual(await elsewhere.engine.submitPin(other, "0000"), { matched: false, locked: true });
+    assert.deepEqual(
+      notifier.notices.map((n) => [n.workspaceId, n.key, n.capped]),
+      [["ws_other", "c".repeat(64), false]],
+      "another workspace has its own cap",
+    );
     t.clock.advance(HOUR);
     await t.engine.submitPin(await call(t, { subjectKey: "b".repeat(64) }), "0000");
     assert.equal(t.notifier.notices.at(-1)!.key, "b".repeat(64), "an hour later, notices resume");
     assert.equal(t.notifier.notices.at(-1)!.capped, false);
-    const elsewhere = alerted(1);
-    await elsewhere.engine.submitPin(await call(elsewhere, { subjectKey: "c".repeat(64) }), "0000");
-    assert.equal(elsewhere.notifier.notices.length, 1, "another workspace has its own cap");
   });
 
   it("keep the hard locks' notices apart from the waits', so waits an attacker runs up never hide a hard lock (review)", async () => {
@@ -201,6 +210,23 @@ describe("unlock", () => {
     await t.engine.unlock({ workspaceId: "ws_test", factor: "pin", scope: "subject", key: SUBJECT, memberId: "member_42" });
     await t.engine.submitPin(await call(t), "0000");
     assert.equal(t.notifier.notices.length, told + 1, "a new lock after an unlock is told");
+  });
+
+  it("lets a new lock with the same end, at the same instant, be told again", async () => {
+    const t = alerted(1);
+    const unlock = { workspaceId: "ws_test", factor: "pin", scope: "subject" as const, key: SUBJECT, memberId: "member_42" };
+    assert.deepEqual(await t.engine.submitPin(await call(t), "0000"), { matched: false, locked: true });
+    await t.engine.unlock(unlock);
+    assert.deepEqual(await t.engine.submitPin(await call(t), "0000"), { matched: false, locked: true });
+    const until = iso(T0 + 24 * HOUR);
+    assert.deepEqual(
+      t.notifier.notices.map((n) => [n.key, n.hard, n.until]),
+      [
+        [SUBJECT, true, until],
+        [SUBJECT, true, until],
+      ],
+      "the unlock cleared the notice marker, so the same end is told again",
+    );
   });
 
   it("refuses another workspace, an unknown factor or scope, a malformed key or member, and card data", async () => {

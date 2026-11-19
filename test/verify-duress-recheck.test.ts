@@ -140,6 +140,7 @@ describe("duress: the re-check of fb25a75", () => {
     const { callId: c1 } = await t.engine.startCall();
     await t.engine.beginVerification(c1, { accountNumber: ACCOUNT });
     const pass = await t.engine.submitPin(c1, PIN);
+    assert.deepEqual(pass, { matched: true, locked: false }, "the normal PIN matches: the control is a real pass");
     const { callId: c2 } = await t.engine.startCall();
     await t.engine.beginVerification(c2, { accountNumber: ACCOUNT });
     const dur = await t.engine.submitPin(c2, DURESS);
@@ -148,7 +149,8 @@ describe("duress: the re-check of fb25a75", () => {
     assert.equal(n.told.length, 1);
     const f1 = await t.engine.finishVerification(c1);
     const f2 = await t.engine.finishVerification(c2);
-    assert.deepEqual({ ...f2, }, { ...f1 }, "finishVerification looks the same");
+    assert.equal(f1.level, 1, "the normal pass reaches level 1");
+    assert.deepEqual(f2, f1, "finishVerification looks the same");
   });
 
   it("every duress entry alerts: three entries on one call, three alerts, none suppressed", async () => {

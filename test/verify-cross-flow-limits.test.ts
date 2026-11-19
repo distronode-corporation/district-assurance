@@ -268,7 +268,9 @@ describe("the hourly limit on flow starts (VER-15)", () => {
     const t = limitsSetup(withLimits({ number: 1 }));
     const results = await Promise.allSettled([1, 2].map(() => t.engine.startCall({ flow: "deposit", callingNumber: number(1) })));
     assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
-    assert.ok((results.find((r) => r.status === "rejected") as PromiseRejectedResult).reason instanceof EngineError);
+    assert.ok((results.find((r) => r.status === "rejected") as PromiseRejectedResult).reason instanceof RateLimitedError, "the loser hit the limit");
+    // SPEC VER-15: a start a concurrent one took over the limit is refused and stays counted.
+    assert.equal((await t.counters.get(startCounter("number", numberKeyFor(TEST_KNOWLEDGE_KEY, number(1))), LONG_AGO)).length, 2, "both starts counted, the loser's too");
   });
 
   it("counts nothing for a start the call refuses anyway, and refuses a calling number that is not E.164", async () => {
