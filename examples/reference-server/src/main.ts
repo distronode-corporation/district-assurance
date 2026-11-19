@@ -17,7 +17,7 @@
 // applied outcome shows as a `verification.factor` line. Everything else runs on fake adapters until its Stripe adapter is built (PAY-1).
 import type { Server } from "node:http";
 
-import { systemClock, type MessagePurpose, type MessageSender } from "../../../src/index.ts";
+import { systemClock, type Clock, type MessagePurpose, type MessageSender } from "../../../src/index.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine, type TestEngineOptions } from "../../../src/testing/index.ts";
 
 import { createReferenceServer } from "./app.ts";
@@ -48,6 +48,8 @@ export interface ServeOptions {
   print?: (line: string) => void;
   /** For tests: a local fake in place of api.stripe.com. */
   stripe?: StripeAdapterOptions;
+  /** For tests: the clock for the engine and the webhook signature window. Default the system clock. */
+  clock?: Clock;
 }
 
 export interface Serve {
@@ -84,10 +86,11 @@ export function createServe(options: ServeOptions): Serve {
       onEvent: (event) => print(`${event.callId} ${event.name} ${JSON.stringify(event.detail)}`),
     };
   }
-  const t = createTestEngine({ clock: systemClock, ...trial });
+  const clock = options.clock ?? systemClock;
+  const t = createTestEngine({ clock, ...trial });
   const server = createReferenceServer({
     engine: t.engine,
-    clock: systemClock,
+    clock,
     stripeSecrets: { identity: secret("STRIPE_IDENTITY_WEBHOOK_SECRET"), payments: secret("STRIPE_PAYMENTS_WEBHOOK_SECRET") },
   });
   const startTrialCall = async () => {

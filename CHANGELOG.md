@@ -25,7 +25,10 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
-- The Stripe Identity adapter for the reference server (VER-5): `StripeIdentityProvider` creates a document VerificationSession with a matching selfie by `fetch` and a restricted key, and `npm run serve` with `STRIPE_IDENTITY_KEY` runs a trial call whose check comes back through the identity webhook.
+- The Stripe Identity adapter for the reference server (VER-5): `StripeIdentityProvider` creates a
+  document VerificationSession with a matching selfie by `fetch` and a restricted key, and
+  `npm run serve` with `STRIPE_IDENTITY_KEY` runs a trial call whose check comes back through the
+  identity webhook.
 
 ### Changed
 

@@ -17,7 +17,7 @@ import {
   stripeIdempotencyKey,
 } from "../examples/reference-server/src/stripe-adapters.ts";
 import { NotImplementedError, signStripePayload } from "../src/index.ts";
-import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject } from "../src/testing/index.ts";
+import { FixedClock, TEST_KNOWLEDGE_KEY, createTestEngine, testSubject } from "../src/testing/index.ts";
 
 const KEY = "rk_test_fixtureNotASecret";
 const WEBHOOK_SECRET = "whsec_test_not_a_secret";
@@ -280,7 +280,8 @@ describe("the reference server with Stripe Identity (npm run serve)", () => {
   it("creates the trial call's check in Stripe and applies the signed verified event end to end", async () => {
     const printed: string[] = [];
     const env = { STRIPE_IDENTITY_KEY: KEY, STRIPE_IDENTITY_WEBHOOK_SECRET: WEBHOOK_SECRET };
-    const serve = createServe({ env, print: (line) => printed.push(line), stripe: { apiBase: stripe.base } });
+    const clock = new FixedClock();
+    const serve = createServe({ env, print: (line) => printed.push(line), stripe: { apiBase: stripe.base }, clock });
     const { base, close } = await listen(serve.server);
     try {
       const { callId, sessionId } = await serve.startTrialCall!();
@@ -298,7 +299,7 @@ describe("the reference server with Stripe Identity (npm run serve)", () => {
         fetch(`${base}/webhooks/stripe/identity`, {
           method: "POST",
           body: payload,
-          headers: { "stripe-signature": signStripePayload(payload, WEBHOOK_SECRET, Math.floor(Date.now() / 1000)) },
+          headers: { "stripe-signature": signStripePayload(payload, WEBHOOK_SECRET, Math.floor(clock.now().getTime() / 1000)) },
         }).then((r) => r.json());
       assert.deepEqual(await post(), { received: true, applied: true });
       assert.deepEqual(await post(), { received: true, duplicate: true });
