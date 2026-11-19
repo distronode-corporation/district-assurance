@@ -159,6 +159,17 @@ describe("the module contract catches", () => {
       broken({ validateSettings: (s) => ((s as { windows: unknown[] }).windows.length === 0 ? ["empty"] : []) }),
       /^validateSettings never throws.*validateSettings with settings spoiled, as undefined, threw/,
     ],
+    [
+      "settings validation that throws on a lone surrogate",
+      broken({
+        validateSettings: (s) => {
+          const windows = (s as { windows?: unknown } | null | undefined)?.windows;
+          if (Array.isArray(windows)) for (const w of windows) if (typeof (w as { id?: unknown })?.id === "string") encodeURIComponent((w as { id: string }).id);
+          return callbackModule.validateSettings(s);
+        },
+      }),
+      /validateSettings with settings\.windows\[0\]\.id spoiled, as .*\\ud800.* threw: URI malformed/i,
+    ],
     ["settings validation that throws something that is not an Error", broken({ validateSettings: (s) => { if (s === null) throw "nope"; return []; } }), /threw: 'nope'/],
     ["settings validation that answers with something else", broken({ validateSettings: (s) => (s === null ? (true as unknown as string[]) : []) }), /validateSettings with settings spoiled, as null, must return a list of strings/],
     ["settings validation that changes the settings", broken({ validateSettings: (s) => { (s as { windows: unknown[] }).windows.push(1); return []; } }), /Cannot add property|object is not extensible/],

@@ -115,8 +115,9 @@ export interface ModuleContractOptions {
 
 /**
  * Values settings and steps can hold when they come from storage or an operator's editor: every
- * JSON type, keys that read as JavaScript internals, keys named like methods, a long string, deep
- * nesting, and a missing value. A validator answers each with sentences, never a crash.
+ * JSON type, keys that read as JavaScript internals, keys named like methods, a long string, lone
+ * UTF-16 surrogates (JSON can carry them, and `encodeURIComponent` or a strict decoder throws on
+ * them), deep nesting, and a missing value. A validator answers each with sentences, never a crash.
  */
 function garbage(): unknown[] {
   const sparse: unknown[] = [];
@@ -136,6 +137,8 @@ function garbage(): unknown[] {
     " ",
     "x",
     "x".repeat(100_000),
+    "\uD800",
+    "a\uDFFFb",
     "__proto__",
     "constructor",
     [],

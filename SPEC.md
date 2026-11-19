@@ -93,7 +93,7 @@ it provides. It checks that the manifest passes `checkManifest` against `install
 built-in modules) and is JSON; that the sample settings and steps validate and `requiredAdapters`
 includes the manifest's adapters; that `validateSettings`, `validateStep`, `stepLevel` and
 `stepGrants` never throw on garbage (every JSON type, `__proto__` and method-named keys, a long
-string, deep nesting, a sparse array, a missing value, at every path of the samples) and answer
+string, lone UTF-16 surrogates, deep nesting, a sparse array, a missing value, at every path of the samples) and answer
 with the right types; that `initCall` and `enterStep` return canonical JSON, the same each time;
 that `stepStatus` answers the same for the same view, in any order; and that none of these, nor
 `cannotRunStep`, `blocksEnd`, `onUntrusted` or `receiptPart`, changes a (frozen) input.
