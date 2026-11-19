@@ -66,12 +66,30 @@ looser (tested). The failure is recorded before the entry is judged, like the ca
 crash, a failing verifier or a second process never gives a free try; the counters are read before
 the attempt, and an attempt that finds a lock another engine just set is refused unjudged (tested,
 two engines racing). A locked line answers `locked` even to the right PIN, on any call and either
-engine, until the window passes or the business resets the counter (tested). A pass resets the
-subject's counter but takes only its own failure off the number's: a line's failures against other
-accounts stay through a pass on its own account, so alternating with that pass does not escape
-the lock per calling number (tested). Taking it off is one atomic step of the store
+engine, until the window passes or a member of the business lifts the lock with `unlock`
+(INT-7, below), which clears that one counter entirely (tested). A pass resets the subject's
+counter but takes only its own failure off the number's: a line's failures against other accounts
+stay through a pass on its own account, so alternating with that pass does not escape the lock per
+calling number (tested). Taking it off is one atomic step of the store
 (`removeFailure`), so a failure another call records on the same number meanwhile is never lost
-(tested, two engines). Without this, a
+(tested, two engines). Only a member's `unlock`
+clears a number's counter outright, failures against other accounts included, so that is the
+business's deliberate act, recorded in the ledger.
+
+Lockout alerts (INT-7): after a `verification.locked` entry is written, the host's `Notifier` is
+told the counter (the subject key, or the keyed hash of the calling number), the factor kind and
+when the lock ends, never a value or a phone number (tested). A notice is told once per lock,
+across engines, and a workspace gets at most 20 an hour of hard locks and, apart, 20 of waits
+after a failure, the last of each marked `capped`, so an attack locking subject after subject cannot
+flood the owner, and waits, which come cheap, cannot use up the hard locks' notices to hide one
+(tested); every lock stays in the ledger (tested). The
+notifier is best effort and never awaited: one that throws, rejects or hangs never blocks the call
+or the ledger (tested). `unlock` is a host call with no call id, so no call path reaches it; it
+clears one counter (one factor kind, one scope, one key) and nothing else, writes
+`verification.unlocked` with the member's opaque id and the counter as a keyed digest (never the
+key) before clearing, and grants nothing: the caller still
+verifies from no factors (tested). An unlock gives whoever is calling a fresh set of tries on
+that counter, so who may make it is the host's. Without this, a
 4-digit PIN with 3 attempts per call fell within about 3,300 calls; now an attacker gets at most
 10 guesses per subject per 24 hours, about 3,650 a year against 10,000 PINs, so a 4-digit PIN
 still needs watching (`verification.locked` in the ledger) and a longer PIN where the risk is
@@ -511,8 +529,10 @@ the key set URL or refreshes the copy.
   control; the subject's counter is what bounds guessing, and a withheld number skips the
   number's counter.
 - A lockout is also a way to lock someone out: anyone who knows a subject (the owner of a line)
-  can spend its 10 failures. Watching `verification.locked`, the person path for a locked caller,
-  and who may lift a lock (`AttemptCounters.reset`) are the host's.
+  can spend its 10 failures. The engine tells a `Notifier` of each lock (INT-7, below); acting on
+  notices, the person path for a locked caller, who among the business's members may call
+  `unlock`, and checking that the caller is real before doing so are the host's. `unlock` must be
+  reachable only from the business's own tools, never from a call's tool paths.
 - A `CallbackDialer` that dials only the number the engine gives, honours the idempotency key,
   plays a fixed prompt, and reports `confirmed` only for the confirmation key, never for speech or
   a machine. Speaking the same "we will call you back" line and hanging up whatever

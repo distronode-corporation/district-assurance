@@ -346,7 +346,38 @@ when there is a number.
 - The cleanup a pass owes (`forgetPass`) is saved with the pass, on the call, so a write that
   fails after the pass was saved (its ledger entry) still gets it, in the same `submitKeypad` or
   `submitPin` or before the call's next factor; a pass refused before it was saved owes none.
-- Lifting a lock early is the host's: `AttemptCounters.reset` with the keys (`counterKeys`).
+- **Lock notices (INT-7).** With a `notifier` adapter, after a `verification.locked` entry is
+  appended (by the step's write, or later by `flushLedger`), the engine calls
+  `Notifier.lockout({workspaceId, factor, scope, key, hard, until, capped})`: the counter that
+  locked (`key` is the subject key, or the number's keyed hash), the factor kind, and when the lock
+  ends; never a value, an account number or a phone number. The call's write reads the key from
+  Badge's part of the call as the entry is saved, and keeps it beside the entry in the outbox, never
+  in the ledger. A lock is told once, on whichever engine refuses it first: its counter's
+  `notice:<kind>` counter in the `AttemptCounters` store records the lock's end, and a lock ending
+  no later than one already told is not told again. A workspace gets at most 20 notices an hour of
+  hard locks (`NOTICES_PER_HOUR`, counted under `notice:*`) and, apart, 20 of waits after a failure
+  (under `notice:*wait`), so waits, which come cheap, never use up the hard locks' notices; the 20th
+  of each has `capped: true`, and later locks of that kind in the hour are in the ledger only. Best effort, like the listener: the notifier is not awaited,
+  and a notifier or a notice count that throws, rejects or hangs never fails the call or the ledger.
+- **Unlock (INT-7).** `unlock({workspaceId, factor, scope, key, memberId})`, a host call for a
+  member of the business, takes no call, so nothing on a call reaches it. It refuses
+  (`invalid_input`) another workspace, a factor kind that is not installed, a scope other than
+  `subject` or `number`, a key that is not 64 lower-case hex, and a `memberId` that is not an opaque
+  id, 1 to 64 of letters, digits, `.`, `_`, `-` (no `@` and no space, so no email address or name
+  reaches the ledger, as for `clearDuress`), or that carries a card number; an engine without
+  `counters` refuses with `precondition_failed`; anything but a string key or member id is
+  `invalid_input` too. It appends `verification.unlocked` (call id null, actor `member`, no event
+  id, so every unlock is its own entry whatever the host's id generator repeats; the listener,
+  which hears of calls, is not told), naming the counter only by `unlockedCounter(knowledgeKey,
+  {factor, scope, key})` = `HMAC-SHA256(knowledgeKey, JSON.stringify(["verification.unlocked",
+  factor, scope, key]))`, which the business can match and a reader of the ledger or an export
+  cannot; then it clears that one counter
+  and its notices, and nothing else: the other scope, other factor kinds and other subjects stay
+  locked. Unlike a pass, which takes only its own failure off a number's counter, an unlock clears
+  the whole counter it names, a number's failures against other accounts included: the business's
+  deliberate act, in the ledger. It grants nothing: no call changes, and the
+  caller verifies from no factors like anyone else. It never lifts a duress PIN's hidden lock
+  (VER-12): only `clearDuress` does, as the flag stays until the business clears it.
 
 **Callback (VER-9).** A built-in factor, not a plug-in: the business calls back the number on
 file, which proves possession of that line whatever number the first call came from. Badge needs
@@ -508,6 +539,7 @@ answer on file, a phone number, a link or card data.
 | `verification.locked` | `kind`, `scope` (`subject` or `number`), `hard`, `until`: never the subject key, the number or its hash |
 | `verification.callback_started` | `callbackCallId`, on the call that asked, when a callback is placed |
 | `verification.callback_finished` | `outcome`: `refused` on the call that asked; `passed`, `no_answer` or `no_confirmation` on the callback call, with `requestedOn`. Never the number |
+| `verification.unlocked` | `kind`, `scope`, `counter` (a keyed digest, `unlockedCounter`), `memberId`; call id null, actor `member`: never the key (section 6) |
 | `identity.link_sent` | none |
 | `verification.finished` | `level`, `methods`, `discounted`, `policyVersion`, `configRevision`; `voidedByTaint: true` when a taint landed in that verification |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt`, `policyVersion`, `configRevision` |

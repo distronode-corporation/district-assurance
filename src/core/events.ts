@@ -16,6 +16,7 @@ export const ENGINE_EVENTS = [
   "verification.locked",
   "verification.callback_started",
   "verification.callback_finished",
+  "verification.unlocked",
   "verification.finished",
   "identity.link_sent",
   "grant.issued",

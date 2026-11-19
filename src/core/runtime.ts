@@ -4,12 +4,14 @@
 import type {
   AccessController,
   AmountSource,
+  AttemptCounterKey,
   AttemptCounters,
   AuditLedger,
   CallbackDialer,
   CarrierSignals,
   IdentityProvider,
   MessageSender,
+  Notifier,
   PaymentLinks,
   PinVerifier,
   ReceiptSigner,
@@ -64,6 +66,8 @@ export interface EngineAdapters {
   counters?: AttemptCounters;
   /** Places callbacks to the number on file. Badge needs it when the `callback` factor is on. */
   dialer?: CallbackDialer;
+  /** Told of each lock, so the business knows someone is locked out (INT-7). Optional, best effort. */
+  notifier?: Notifier;
 }
 
 export type AdapterName = keyof EngineAdapters;
@@ -91,7 +95,15 @@ export interface CallRecord {
   /** Each module's own part, by module name. */
   modules: Record<string, JsonValue>;
   /** Ledger entries saved with a change and not yet known to be appended. */
-  outbox: Array<{ eventId: string; name: EngineEventName; actor: Actor; at: string; detail: { [key: string]: JsonValue } }>;
+  outbox: Array<{
+    eventId: string;
+    name: EngineEventName;
+    actor: Actor;
+    at: string;
+    detail: { [key: string]: JsonValue };
+    /** On a `verification.locked` entry, the counter that locked, for the lock notice (INT-7). Never in the ledger. */
+    counter?: AttemptCounterKey;
+  }>;
 }
 
 /** A call being changed inside one compare-and-set attempt. Everything here is synchronous and pure. */

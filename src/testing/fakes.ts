@@ -11,10 +11,12 @@ import type {
   CodeStore,
   IdentityProvider,
   IntakeRecord,
+  LockNotice,
   MessagePurpose,
   MessageSender,
   PaymentLinkCapabilities,
   PaymentLinkRequest,
+  Notifier,
   PaymentLinks,
   PaymentMode,
   PaymentRefundRequest,
@@ -321,6 +323,23 @@ export class MemoryAttemptCounters implements AttemptCounters {
   #since(times: readonly number[], since: string): string[] {
     const from = Date.parse(since);
     return times.filter((t) => t >= from).map((t) => new Date(t).toISOString());
+  }
+}
+
+/**
+ * Keeps the lock notices it is told of, as a host's email or dashboard would show them. `fail`
+ * makes it throw at once (`"throws"`), reject (`"rejects"`) or never answer (`"hangs"`).
+ */
+export class FakeNotifier implements Notifier {
+  readonly notices: LockNotice[] = [];
+  fail: "throws" | "rejects" | "hangs" | null = null;
+
+  lockout(notice: LockNotice): Promise<void> {
+    this.notices.push(structuredClone(notice));
+    if (this.fail === "throws") throw new Error("notifier down");
+    if (this.fail === "rejects") return Promise.reject(new Error("notifier down"));
+    if (this.fail === "hangs") return new Promise(() => undefined);
+    return Promise.resolve();
   }
 }
 
