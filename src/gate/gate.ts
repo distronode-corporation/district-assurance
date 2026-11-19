@@ -183,6 +183,15 @@ export class GateModule implements AssuranceModule {
     return (s as unknown as GateSlice).grants.length;
   }
 
+  /** A reservation names one grant, by its id: an outcome write may settle that grant and nothing else. */
+  outcomeRecord(s: JsonValue, reservation: string): { record: JsonValue; rest: JsonValue } | null {
+    const slice = s as unknown as GateSlice;
+    const index = slice.grants.findIndex((g) => g.grantId === reservation);
+    if (index < 0) return null;
+    const rest = { ...slice, grants: slice.grants.filter((_, i) => i !== index) };
+    return { record: slice.grants[index] as unknown as JsonValue, rest: rest as unknown as JsonValue };
+  }
+
   cannotRunStep(step: FlowStep, s: JsonValue): string | null {
     return (s as unknown as GateSlice).targets.some((t) => t.id === step.target) ? null : `the call has no target ${String(step.target)}`;
   }

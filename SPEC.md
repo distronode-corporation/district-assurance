@@ -108,7 +108,11 @@ ledger entry) and `reserve(ref)`, which opens a reservation in the call record f
 outcome comes later. `recordModuleOutcome(callId, name, ref, fn)` is the write for that outcome (a
 provider's answer): refused unless `ref` is an open reservation of that module on that call, so it
 settles authorized work and never starts any; not held to the scope; allowed after the flow or the
-call ended while the reservation is open; `call.release()` closes it. `moduleReservations(callId,
+call ended while the reservation is open; `call.release()` closes it. The module must say which
+record a reservation names (`outcomeRecord(slice, ref)`, which splits that record from the rest),
+and the write may change that record only: one that adds a record, drops it, or touches anything
+else in the module's part is refused (`precondition_failed`). Gate's record is the grant with that
+id. `moduleReservations(callId,
 name)` lists the open ones.
 
 ## 4. Factors, levels and scopes
@@ -433,8 +437,10 @@ texted never expires this way; it stays open to resume.
 **Adapter capabilities.** `PaymentLinks.capabilities` declares `{modes, minLinkMinutes,
 maxLinkMinutes}`. When the config is saved, a step's mode (and Paylink's default mode) must be one
 the adapter takes, and the link life no longer than its maximum; malformed capabilities are a
-problem too. A registry built without capabilities (only adapter names) skips these checks; an
-engine always has them.
+problem too, and so is an engine's payments adapter that declares no capabilities at all (a plain
+JavaScript adapter), refused when the engine is built or a config is saved rather than failing
+mid-call. A registry built without capabilities (only adapter names) skips these checks; an engine
+always has them.
 
 **Methods.** `paymentMethods` lists only methods that settle during the call: `card` (credit, and
 Visa and Mastercard debit), `apple_pay`, `google_pay`, `link`; the default is all four. Anything

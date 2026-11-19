@@ -249,8 +249,10 @@ answer. One signing format for receipts and grants means one verifier in every l
 **Amended (hostile review of PR 2):** an outcome write needs a reservation that `updateModule`
 opened (`call.reserve(ref)`), names it, and closes it (`call.release()`), so it can settle
 authorized work but never mark a door delivered on its own or write to the ledger after a call
-ended with nothing in flight. A verifier must name the workspace it serves: grants are bound to
-their workspace as well as their audience.
+ended with nothing in flight. A reservation names one record (the module's `outcomeRecord`
+finds it), and the engine refuses an outcome write that changes anything but that record, so a
+pending grant's reservation cannot be used to write another, forged one. A verifier must name the
+workspace it serves: grants are bound to their workspace as well as their audience.
 **Revisit** when Gate needs a receipt part (access on the call's receipt).
 
 ## ADR-22. The signed-webhook relay first; an unlock is never retried

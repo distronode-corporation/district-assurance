@@ -93,6 +93,12 @@ export interface AssuranceModule {
    * wording it does not have), or null. Checked when a flow is attached to a running call.
    */
   cannotRunStep?(step: FlowStep, slice: JsonValue): string | null;
+  /**
+   * The one record a reservation names, split from the rest of the module's part of the call, or
+   * null when there is no such record. Required for `Engine.recordModuleOutcome`: an outcome write
+   * may change that record and nothing else, so it can never add a record or touch another one.
+   */
+  outcomeRecord?(slice: JsonValue, reservation: string): { record: JsonValue; rest: JsonValue } | null;
   /** Why the call cannot end now (work in progress that would be lost), or null. */
   blocksEnd?(slice: JsonValue): string | null;
   /** Untrusted text entered the call: drop anything that relied on trust. Returns the new slice. */

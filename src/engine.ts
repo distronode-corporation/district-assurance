@@ -11,7 +11,7 @@
 import type { JsonWebKey } from "node:crypto";
 
 import type { IntakeRecord, SessionStore } from "./core/adapters.ts";
-import type { JsonValue } from "./core/canonical.ts";
+import { canonicalJson, type JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
 import { EngineError, NotImplementedError } from "./core/errors.ts";
@@ -134,9 +134,10 @@ export class Engine {
     const present = Object.entries(this.#adapters).filter(([, value]) => value !== undefined).map(([name]) => name);
     // What each adapter declares it can do, so a config it cannot serve is refused when saved.
     const capabilities: Record<string, unknown> = {};
+    // Every adapter the engine has gets an entry, undefined when it declares nothing, so the
+    // validator can tell "declared nothing" (refused where capabilities are required) from "unknown".
     for (const [name, value] of Object.entries(this.#adapters)) {
-      const declared = (value as { capabilities?: unknown } | undefined)?.capabilities;
-      if (declared !== undefined) capabilities[name] = declared;
+      if (value !== undefined) capabilities[name] = (value as { capabilities?: unknown }).capabilities;
     }
     this.#receiptModules = builtInModules(this.#badge);
     this.registry = new ModuleRegistry({ adapters: present, capabilities, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
@@ -482,12 +483,23 @@ export class Engine {
    */
   async recordModuleOutcome(callId: string, name: string, reservation: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): Promise<JsonValue> {
     if ((BUILT_IN_MODULES as readonly string[]).includes(name)) throw new EngineError("precondition_failed", `${name} is built in; use its own methods`);
-    if (this.registry.get(name) === undefined) throw new EngineError("module_disabled", `no module named ${name} is installed`);
+    const module = this.registry.get(name);
+    if (module === undefined) throw new EngineError("module_disabled", `no module named ${name} is installed`);
+    const split = module.outcomeRecord?.bind(module);
+    if (split === undefined) throw new EngineError("precondition_failed", `${name} does not say which record a reservation names (outcomeRecord)`);
     return this.#update(callId, (draft) => {
       if (!openReservations(draft.record, name).includes(reservation)) {
         throw new EngineError("precondition_failed", `${name} has no open reservation ${reservation} on this call; an outcome settles only work updateModule reserved`);
       }
-      return this.#applyModule(draft, name, fn, { reserve: false, settling: reservation });
+      const before = split(this.#slice(draft.record.modules, name), reservation);
+      if (before === null) throw new EngineError("precondition_failed", `${name} has no record for its reservation ${reservation}`);
+      const next = this.#applyModule(draft, name, fn, { reserve: false, settling: reservation });
+      // The write may settle the reserved record only: everything else must be byte for byte as it was.
+      const after = split(next, reservation);
+      if (after === null || canonicalJson(after.rest) !== canonicalJson(before.rest)) {
+        throw new EngineError("precondition_failed", `an outcome write for ${reservation} may change that record only`);
+      }
+      return next;
     });
   }
 

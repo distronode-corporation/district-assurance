@@ -645,6 +645,18 @@ describe("paylink: the engine's own deadline", () => {
     assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" }), { applied: true, callId, status: "paid" });
   });
 
+  it("refuses a payments adapter that declares no capabilities when the engine is built and when a config is saved", async () => {
+    // A plain JavaScript adapter: no types to make it declare anything.
+    const bare = { createLink: async () => ({ linkId: "cs_1", url: "https://pay.example.test/c/cs_1" }), expireLink: async () => ({ state: "expired" as const }) };
+    const refused = /modules\.paylink: the payments adapter declares no capabilities \(\{ modes, minLinkMinutes, maxLinkMinutes \}\)/;
+    assert.throws(() => setup({ adapters: { payments: bare as never } }), refused);
+    // Built with paylink off, then a config turning it on: refused at save, never a TypeError mid-call.
+    const off = setup({ adapters: { payments: bare as never }, config: testConfig((c) => delete (c.modules as Record<string, unknown>).paylink) });
+    assert.throws(() => off.engine.configure(testConfig()), refused);
+    // A registry that only knows adapter names cannot tell, and does not refuse.
+    assert.deepEqual(validateConfig(testConfig(), new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "pinVerifier"], modules: builtInModules() })), []);
+  });
+
   it("refuses on a call that started with paylink off", async () => {
     const t = setup({ config: testConfig((c) => delete (c.modules as Record<string, unknown>).paylink) });
     const { callId } = await t.engine.startCall();

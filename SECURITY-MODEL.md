@@ -135,7 +135,9 @@ public key, so taking a relay over does not let anyone mint grants, and one chan
 (tested). A grant is bound to its workspace: a verifier must name the workspace it serves, so
 workspaces that share a key and a controller name never open each other's doors (tested). The
 example relay refuses a grant id it has seen (`SeenGrants`, tested in the demo). An outcome write
-settles only a grant Gate reserved under its scope check, so no write marks a door delivered
+settles only the one grant its reservation names, and the engine refuses any other change, so a
+pending grant's reservation cannot write a forged one (tested). It settles only a grant Gate
+reserved under its scope check, so no write marks a door delivered
 without a grant, and none reaches the ledger after a call ended with nothing in flight (tested).
 **An unlock is never retried:** one grant in flight per call, sent once, no redirects followed;
 a lost answer (a timeout, a dropped connection, a 5xx) is recorded as `unknown`, and opening again

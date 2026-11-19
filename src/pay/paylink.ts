@@ -187,6 +187,10 @@ export const paylinkModule: AssuranceModule = {
 
   checkAdapters(settings: unknown, capabilities: Readonly<Record<string, unknown>>): string[] {
     const s = (settings ?? {}) as PaylinkSettings;
+    // Known to be absent (an engine's adapter declared nothing): refused. Not known at all: skipped.
+    if (Object.hasOwn(capabilities, "payments") && capabilities.payments === undefined) {
+      return ["the payments adapter declares no capabilities ({ modes, minLinkMinutes, maxLinkMinutes })"];
+    }
     const caps = capabilities.payments;
     if (caps === undefined) return [];
     if (!isCapabilities(caps)) return ["the payments adapter's capabilities must be { modes, minLinkMinutes, maxLinkMinutes }"];

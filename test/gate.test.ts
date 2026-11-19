@@ -4,12 +4,13 @@ import { strict as assert } from "node:assert";
 import { generateKeyPairSync } from "node:crypto";
 import { describe, it } from "node:test";
 
+import type { JsonValue } from "../src/core/canonical.ts";
 import type { FlowConfig } from "../src/core/config.ts";
 import { validateConfig } from "../src/core/config.ts";
 import { ModuleRegistry } from "../src/core/module.ts";
 import { sha256Hex } from "../src/core/hash.ts";
 import { canonicalJson } from "../src/core/canonical.ts";
-import { SeenGrants, accessGrantDigest, verifyAccessGrant, type AccessGrantBody, type SignedAccessGrant } from "../src/gate/access.ts";
+import { SeenGrants, accessGrantDigest, verifyAccessGrant, type AccessGrantBody, type SignedAccessGrant, type UnlockResult } from "../src/gate/access.ts";
 import { GateModule, gateModule, type GateHost, type GateSlice } from "../src/gate/gate.ts";
 import { builtInModules } from "../src/modules.ts";
 import { keyPairSigner } from "../src/prove/receipt.ts";
@@ -51,6 +52,25 @@ async function verified(t: ReturnType<typeof gateSetup>, flow: string | null = "
 const slice = async (t: ReturnType<typeof gateSetup>, callId: string) => (await t.engine.moduleState(callId, "gate")) as unknown as GateSlice;
 const gateEvents = async (t: ReturnType<typeof gateSetup>) =>
   (await t.ledger.list()).filter((e) => e.event === "module.event" && e.detail.module === "gate").map((e) => [e.detail.event, e.detail.detail] as const);
+
+/** A test module whose records are named by their reservation: `{ records: { [ref]: status } }`. */
+function recordsModule(name: string) {
+  return {
+    manifest: { name, version: "1", summary: "x", provides: { factors: [], steps: [], outcomes: [] }, scopes: { grants: [], needs: {} }, adapters: [] },
+    validateSettings: () => [],
+    requiredAdapters: () => [],
+    validateStep: () => [],
+    initCall: () => ({ records: {} }),
+    enterStep: () => null,
+    stepStatus: () => "pending" as const,
+    outcomeRecord(slice: JsonValue, ref: string) {
+      const { records, ...other } = slice as { records: Record<string, JsonValue> };
+      if (!Object.hasOwn(records, ref)) return null;
+      const { [ref]: record, ...rest } = records;
+      return { record: record!, rest: { ...other, records: rest } as JsonValue };
+    },
+  };
+}
 
 describe("gate: config", () => {
   const registry = (gate: GateModule) => new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer"], modules: [...builtInModules(), gate] });
@@ -509,40 +529,92 @@ describe("gate: grants", () => {
 
   it("keeps reservations for a module named constructor (own properties only)", async () => {
     const t = setup();
-    const constructorModule = {
-      manifest: { name: "constructor", version: "1", summary: "x", provides: { factors: [], steps: [], outcomes: [] }, scopes: { grants: [], needs: {} }, adapters: [] },
-      validateSettings: () => [],
-      requiredAdapters: () => [],
-      validateStep: () => [],
-      initCall: () => ({}),
-      enterStep: () => null,
-      stepStatus: () => "pending" as const,
-    };
     // Not a reserved name (only core, engine, flow and module are), and an inherited property of every object.
-    t.engine.use(constructorModule);
+    t.engine.use(recordsModule("constructor"));
     t.engine.configure(testConfig((c) => ((c.modules as Record<string, unknown>)["constructor"] = {})));
     const { callId } = await t.engine.startCall();
     assert.deepEqual(await t.engine.moduleReservations(callId, "constructor"), []);
     await assert.rejects(t.engine.recordModuleOutcome(callId, "constructor", "r1", (s) => s), rejects("precondition_failed"));
-    await t.engine.updateModule(callId, "constructor", (s, call) => (call.reserve("r1"), s));
+    await t.engine.updateModule(callId, "constructor", (_s, call) => (call.reserve("r1"), { records: { r1: "open" } }));
     assert.deepEqual(await t.engine.moduleReservations(callId, "constructor"), ["r1"]);
     await t.engine.recordModuleOutcome(callId, "constructor", "r1", (s, call) => (call.release(), s));
     assert.deepEqual(await t.engine.moduleReservations(callId, "constructor"), []);
   });
 
   it("opens reservations only in updateModule and closes them only in recordModuleOutcome", async () => {
+    const t = setup();
+    t.engine.use(recordsModule("ledger-test"));
+    t.engine.configure(testConfig((c) => (c.modules["ledger-test"] = {})));
+    const { callId } = await t.engine.startCall();
+    const name = "ledger-test";
+    await assert.rejects(t.engine.updateModule(callId, name, (s, call) => (call.release(), s)), rejects("precondition_failed", /only recordModuleOutcome/));
+    await assert.rejects(t.engine.updateModule(callId, name, (s, call) => (call.reserve(""), s)), rejects("invalid_input"));
+    await t.engine.updateModule(callId, name, (_s, call) => (call.reserve("r1"), call.reserve("r1"), call.reserve("r2"), { records: { r1: "open", r2: "open" } }));
+    assert.deepEqual(await t.engine.moduleReservations(callId, name), ["r1", "r2"]);
+    await assert.rejects(t.engine.recordModuleOutcome(callId, name, "r1", (s, call) => (call.reserve("r3"), s)), rejects("precondition_failed", /only updateModule/));
+    await t.engine.recordModuleOutcome(callId, name, "r1", (_s, call) => (call.release(), { records: { r1: "done", r2: "open" } }));
+    assert.deepEqual(await t.engine.moduleReservations(callId, name), ["r2"]);
+    await t.engine.recordModuleOutcome(callId, name, "r2", (_s, call) => (call.release(), { records: { r1: "done", r2: "done" } }));
+    assert.deepEqual(await t.engine.moduleReservations(callId, name), []);
+    await assert.rejects(t.engine.recordModuleOutcome(callId, name, "r2", (s) => s), rejects("precondition_failed"), "closed: refused");
+  });
+
+  it("lets an outcome write change only the record its reservation names (review A3)", async () => {
+    const t = setup();
+    const name = "ledger-test";
+    t.engine.use(recordsModule(name));
+    t.engine.configure(testConfig((c) => (c.modules[name] = {})));
+    const { callId } = await t.engine.startCall();
+    await t.engine.updateModule(callId, name, (_s, call) => (call.reserve("r1"), call.reserve("r2"), { records: { r1: "open", r2: "open" } }));
+    const refused = rejects("precondition_failed", /may change that record only/);
+    await assert.rejects(t.engine.recordModuleOutcome(callId, name, "r1", () => ({ records: { r1: "done", r2: "done" } })), refused, "touches another record");
+    await assert.rejects(t.engine.recordModuleOutcome(callId, name, "r1", () => ({ records: { r1: "done", r2: "open", forged: "done" } })), refused, "adds a record");
+    await assert.rejects(t.engine.recordModuleOutcome(callId, name, "r1", () => ({ records: { r2: "open" } })), refused, "drops its own record");
+    await assert.rejects(t.engine.recordModuleOutcome(callId, name, "r1", () => ({ records: { r1: "done", r2: "open" }, extra: 1 })), refused, "changes the rest");
+    assert.deepEqual(await t.engine.moduleState(callId, name), { records: { r1: "open", r2: "open" } }, "nothing was written");
+    await t.engine.updateModule(callId, name, (_s, call) => (call.reserve("r3"), { records: { r1: "open", r2: "open" } }));
+    await assert.rejects(t.engine.recordModuleOutcome(callId, name, "r3", (s) => s), rejects("precondition_failed", /no record for its reservation r3/));
+    const bare = { ...recordsModule("bare"), outcomeRecord: undefined };
+    t.engine.use(bare as never);
+    await assert.rejects(t.engine.recordModuleOutcome(callId, "bare", "r1", (s) => s), rejects("precondition_failed", /does not say which record/));
+  });
+
+  it("never lets a pending grant's reservation write a forged delivered grant (review A3)", async () => {
     const t = gateSetup();
-    const callId = await verified(t, null);
-    await assert.rejects(t.engine.updateModule(callId, "gate", (s, call) => (call.release(), s)), rejects("precondition_failed", /only recordModuleOutcome/));
-    await assert.rejects(t.engine.updateModule(callId, "gate", (s, call) => (call.reserve(""), s)), rejects("invalid_input"));
-    await t.engine.updateModule(callId, "gate", (s, call) => (call.reserve("r1"), call.reserve("r1"), call.reserve("r2"), s));
-    assert.deepEqual(await t.engine.moduleReservations(callId, "gate"), ["r1", "r2"]);
-    await assert.rejects(t.engine.recordModuleOutcome(callId, "gate", "r1", (s, call) => (call.reserve("r3"), s)), rejects("precondition_failed", /only updateModule/));
-    await t.engine.recordModuleOutcome(callId, "gate", "r1", (s, call) => (call.release(), s));
-    assert.deepEqual(await t.engine.moduleReservations(callId, "gate"), ["r2"]);
-    await t.engine.recordModuleOutcome(callId, "gate", "r2", (s, call) => (call.release(), s));
-    assert.deepEqual(await t.engine.moduleReservations(callId, "gate"), []);
-    await assert.rejects(t.engine.recordModuleOutcome(callId, "gate", "r2", (s) => s), rejects("precondition_failed"), "closed: refused");
+    const callId = await verified(t);
+    // The real grant waits on the door; meanwhile the verification grant expires.
+    let answer: (r: UnlockResult) => void = () => undefined;
+    let reached: () => void = () => undefined;
+    const atDoor = new Promise<void>((resolve) => (reached = resolve));
+    t.door.unlock = (input) => {
+      t.door.received.push(structuredClone(input));
+      reached();
+      return new Promise<UnlockResult>((resolve) => (answer = resolve));
+    };
+    const pending = t.gate.grantAccess(t.engine, callId);
+    await atDoor;
+    const [open] = await t.engine.moduleReservations(callId, "gate");
+    t.clock.advance(900_000);
+    await assert.rejects(
+      t.engine.recordModuleOutcome(callId, "gate", open!, (s, call) => {
+        const slice = s as unknown as GateSlice;
+        slice.grants.push({ ...structuredClone(slice.grants[0]!), grantId: call.newId("acc"), status: "delivered", confirmed: true });
+        return slice as never;
+      }),
+      rejects("precondition_failed", /may change that record only/),
+    );
+    await assert.rejects(
+      t.engine.recordModuleOutcome(callId, "gate", open!, (s) => {
+        (s as unknown as GateSlice).grants[0]!.grantId = "acc_forged";
+        return s;
+      }),
+      rejects("precondition_failed", /may change that record only/),
+      "renaming its own grant leaves no record under the reservation",
+    );
+    assert.equal((await t.engine.flowPosition(callId))!.status, "running", "the flow did not complete");
+    answer({ outcome: "refused", reason: "door_offline" });
+    assert.equal((await pending).status, "refused", "the real grant still settles, and only it");
+    assert.deepEqual((await slice(t, callId)).grants.map((g) => g.status), ["refused"]);
   });
 
   it("records outcomes only for installed outside modules", async () => {
