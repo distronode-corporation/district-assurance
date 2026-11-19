@@ -84,6 +84,11 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       const outcome = event.outcome;
       apply = async () => (await options.engine.applyPaymentOutcome(outcome)).applied;
     }
+    // Disputes of platform payments come to the platform's own endpoint; a connect payment's are the business's.
+    if (route === "payments" && event.kind === "dispute") {
+      const outcome = event.outcome;
+      apply = async () => (await options.engine.applyDisputeOutcome(outcome)).applied;
+    }
     if (apply === null) return [200, { received: true, applied: false, handled: false }];
     if (processed.has(event.eventId)) return [200, { received: true, duplicate: true }];
     const applied = await apply();

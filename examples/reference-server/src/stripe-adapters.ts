@@ -1,7 +1,7 @@
 // Stripe adapters for the reference server, so people can try it with their OWN Stripe test-mode
 // keys. Not built yet: each method throws NotImplementedError naming its roadmap issue. They will
 // call Stripe's REST API with fetch (no SDK dependency) and a restricted key from the environment.
-import { NotImplementedError, type IdentityProvider, type PaymentLinkCapabilities, type PaymentLinkRequest, type PaymentLinks, type PaymentMode } from "../../../src/index.ts";
+import { NotImplementedError, type IdentityProvider, type PaymentLinkCapabilities, type PaymentLinkRequest, type PaymentLinks, type PaymentMode, type PaymentRefundRequest } from "../../../src/index.ts";
 
 /** Stripe Identity: a VerificationSession of type document with a selfie check. */
 export class StripeIdentityProvider implements IdentityProvider {
@@ -41,5 +41,11 @@ export class StripeCheckoutLinks implements PaymentLinks {
   async expireLink(_input: { linkId: string; mode: PaymentMode; connectedAccountId?: string; idempotencyKey: string }): Promise<{ state: "expired" | "not_open" }> {
     void this.#apiKey;
     throw new NotImplementedError("StripeCheckoutLinks.expireLink", "PAY-1");
+  }
+
+  /** A platform payment's refund: `/v1/refunds` on the payment intent, on the platform's own account. */
+  async refund(_input: PaymentRefundRequest): Promise<{ refundId: string; status: "pending" | "succeeded" | "failed" }> {
+    void this.#apiKey;
+    throw new NotImplementedError("StripeCheckoutLinks.refund", "PAY-1");
   }
 }

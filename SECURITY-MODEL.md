@@ -175,6 +175,25 @@ platform payment, is ignored and written to the ledger (tested). The reference s
 connect-mode events on their own endpoint with their own signing secret. The idempotency key of a
 link includes the mode.
 
+### Refunds and disputes in platform mode
+
+Money sent back twice or to no one, a refund started from a call, a refund on a disputed payment,
+or a dispute lost without the business hearing of it. **Controls:** in platform mode the platform
+is the merchant, so `validateConfig` refuses a platform step (and platform settings) unless the
+payments adapter has `refund`, read from the adapter itself (tested). `refundPayment` is a host
+call made for the business: no grant reaches it and no flow step runs it, so neither the caller nor
+the model has a path to it; the host keeps it off every tool the model can call (left to the host).
+It refunds only a paid platform payment, never more in total than was paid, one refund in flight
+per payment, each with its own idempotency key; a refund whose answer was lost resumes with the
+same key, so the provider refunds once (tested). A refund is refused while a dispute is open or
+after it was lost (tested). Dispute events come only through the signed payments webhook, are found
+by the payment intent bound when the payment was paid, and a connected account's is ignored and
+written down (tested). Refunds and disputes are ledger entries with amounts and statuses, never
+card data or dispute evidence, the listener hears both, and the receipt issued at the end of the
+call never changes (tested). Connect payments are the business's, refunded and disputed on its own
+account: the engine refuses to refund one and never binds its disputes (tested). Left to the host:
+who in the business may ask for a refund, and answering a dispute with evidence at the provider.
+
 ### Card data and PCI DSS scope
 
 **Controls:** Pay is by a hosted payment page; the engine sees a link id and a status, never a card
@@ -206,10 +225,11 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 
 ## Open questions
 
-- **Refunds and disputes in platform mode.** In `platform` mode the platform is the merchant of
-  record, so a refund or a dispute lands on the platform's account, not the business's. Who
-  carries them, and on what terms, is a legal and payment provider question that is not decided.
-  The engine has no refund or dispute code in either mode; a host handles both at the provider.
+- **Who carries refunds and disputes in platform mode.** The engine now refunds platform payments
+  and records their disputes (above), but who bears a lost dispute, and on what terms between the
+  platform and the business, is a legal and payment provider question that is not decided.
+  Refund status changes after the provider's first answer (`charge.refund.updated`) are not
+  followed yet.
 - **Seam in the door path.** A paid third party between the engine and a door (GAT-5) waits on its
   pricing and its handling of Canadian data being checked.
 
@@ -227,6 +247,8 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
   the line it was called on). That choice is not a factor: the PIN or other factors still decide.
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.
 - Who may edit a workspace's FlowConfig, and keeping its revisions.
+- Keeping `refundPayment` on the business's side (a back office, staff tools), never on a tool the
+  model can call, and deciding who in the business may ask for a refund.
 - Outside modules: their code runs inside the engine's writes and is part of the host's security
   model.
 - The person path: a caller who fails or cannot use a keypad reaches someone who can help.

@@ -79,6 +79,55 @@ describe("parseStripeEvent", () => {
     }
   });
 
+  it("carries a Checkout Session's payment intent, which disputes name", () => {
+    assert.deepEqual(parseStripeEvent(event("checkout.session.completed", { id: "cs_1", payment_status: "paid", payment_intent: "pi_1" }))!, {
+      eventId: "evt_1",
+      livemode: false,
+      kind: "payment",
+      outcome: { kind: "completed", linkId: "cs_1", paymentStatus: "paid", paymentIntentId: "pi_1" },
+    });
+    assert.deepEqual(parseStripeEvent(event("checkout.session.async_payment_succeeded", { id: "cs_1", payment_intent: null }))!, {
+      eventId: "evt_1",
+      livemode: false,
+      kind: "payment",
+      outcome: { kind: "async_succeeded", linkId: "cs_1" },
+    });
+  });
+
+  it("maps dispute events: the dispute, its charge and payment intent, status and amount, never its evidence", () => {
+    const object = { id: "dp_1", object: "dispute", charge: "ch_1", payment_intent: "pi_1", status: "needs_response", amount: 15000, currency: "cad", reason: "fraudulent", evidence: { customer_name: "x" } };
+    for (const type of ["charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed", "charge.dispute.funds_withdrawn", "charge.dispute.funds_reinstated"]) {
+      assert.deepEqual(parseStripeEvent(event(type, object)), {
+        eventId: "evt_1",
+        livemode: false,
+        kind: "dispute",
+        outcome: { disputeId: "dp_1", chargeId: "ch_1", paymentIntentId: "pi_1", status: "needs_response", amountMinor: 15000, currency: "cad" },
+      });
+    }
+    assert.deepEqual(parseStripeEvent(event("charge.dispute.closed", { ...object, status: "won", payment_intent: null }, { account: "acct_1" }))!, {
+      eventId: "evt_1",
+      livemode: false,
+      kind: "dispute",
+      outcome: { disputeId: "dp_1", chargeId: "ch_1", paymentIntentId: null, status: "won", amountMinor: 15000, currency: "cad", account: "acct_1" },
+    });
+    for (const bad of [
+      { charge: undefined },
+      { charge: 7 },
+      { payment_intent: undefined },
+      { payment_intent: 7 },
+      { status: "maybe" },
+      { status: undefined },
+      { amount: -1 },
+      { amount: 1.5 },
+      { amount: "15000" },
+      { currency: "CAD" },
+      { currency: undefined },
+    ]) {
+      assert.equal(parseStripeEvent(event("charge.dispute.created", { ...object, ...bad })), null, JSON.stringify(bad));
+    }
+    assert.equal(parseStripeEvent(event("charge.dispute.something_new", object))!.kind, "ignored");
+  });
+
   it("names other event types as ignored", () => {
     assert.deepEqual(parseStripeEvent(event("charge.refunded", { id: "ch_1" })), { eventId: "evt_1", livemode: false, kind: "ignored", type: "charge.refunded" });
   });

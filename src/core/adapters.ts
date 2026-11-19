@@ -85,6 +85,29 @@ export interface PaymentLinks {
    * provider says it already completed or expired, in which case its webhook settles it.
    */
   expireLink(input: { linkId: string; mode: PaymentMode; connectedAccountId?: string; idempotencyKey: string }): Promise<{ state: "expired" | "not_open" }>;
+  /**
+   * Refunds a paid platform payment on the platform's own account, in full or in part. Required
+   * when any payment can be taken in `platform` mode (`validateConfig` refuses the config
+   * otherwise); connect payments are refunded by the business on its own account, never here.
+   * A refund the provider refuses answers `failed`; only an answer that was lost (a timeout, a
+   * dropped connection) may throw, since the engine keeps a refund that threw in flight and resumes
+   * it, with the same key, until it gets an answer.
+   */
+  refund?(input: PaymentRefundRequest): Promise<{ refundId: string; status: "pending" | "succeeded" | "failed" }>;
+}
+
+export interface PaymentRefundRequest {
+  /** The hosted page the payment was taken on (for example a Checkout Session id). */
+  linkId: string;
+  /** The provider's payment intent, when the outcome named it. */
+  paymentIntentId?: string;
+  mode: "platform";
+  /** Integer, in the currency's minor unit; never more than is left of the payment. */
+  amountMinor: number;
+  currency: string;
+  reason: "requested_by_customer" | "duplicate" | "fraudulent";
+  /** One per refund: a resumed refund replays the first answer. */
+  idempotencyKey: string;
 }
 
 /** The person on record, as the engine sees them: keyed digests, never the values. */

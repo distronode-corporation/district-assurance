@@ -24,12 +24,14 @@ import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core
 import type { AdapterName, CallDraft, CallRecord, EngineAdapters, EngineRuntime, FlowStatus, Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
+import { isObject } from "./core/shape.ts";
 import * as dossier from "./file/dossier.ts";
 import * as gate from "./gate/gate.ts";
 import type { NormaliseResult } from "./file/intake.ts";
 import { BUILT_IN_MODULES, builtInModules, defaultConfig } from "./modules.ts";
 import * as paylink from "./pay/paylink.ts";
 import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
+import * as refunds from "./pay/refunds.ts";
 import type { ConsentRecord } from "./prove/consent.ts";
 import { detailCarriesCardNumber } from "./prove/ledger.ts";
 import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
@@ -143,6 +145,8 @@ export class Engine {
           ? { controllers: Object.entries(value as Record<string, { unlock?: unknown } | undefined>).filter(([, c]) => typeof c?.unlock === "function").map(([n]) => n) }
           : (value as { capabilities?: unknown }).capabilities;
     }
+    // Whether the payments adapter can refund is read from the adapter, never taken from a declaration.
+    if (isObject(capabilities.payments)) capabilities.payments = { ...capabilities.payments, refund: typeof this.#adapters.payments!.refund === "function" };
     this.#receiptModules = builtInModules(this.#badge);
     this.registry = new ModuleRegistry({ adapters: present, capabilities, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
     this.#config = this.#prepare(options.config === undefined ? defaultConfig() : options.config);
@@ -399,8 +403,23 @@ export class Engine {
     return paylink.expirePaymentLinks(this.#rt, callId);
   }
 
-  applyPaymentOutcome(outcome: PaymentOutcome): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
+  /** A verified payment outcome. A platform payment's `paymentIntentId` is bound to the call, for its disputes. */
+  applyPaymentOutcome(outcome: PaymentOutcome & { paymentIntentId?: string }): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
     return paylink.applyPaymentOutcome(this.#rt, outcome);
+  }
+
+  /**
+   * Refunds a paid platform payment, in full or in part, for the business. A host call from the
+   * business's side (its back office or staff), never from a call's tool path: no grant reaches
+   * it, and the model must never be given it. Works after the call ended.
+   */
+  refundPayment(input: refunds.RefundInput): Promise<refunds.RefundResult> {
+    return refunds.refundPayment(this.#rt, input);
+  }
+
+  /** A verified dispute event (`charge.dispute.*`), recorded against the platform payment it names. */
+  applyDisputeOutcome(outcome: refunds.DisputeOutcome): Promise<{ applied: false } | { applied: true; callId: string; status: refunds.DisputeStatus }> {
+    return refunds.applyDisputeOutcome(this.#rt, outcome);
   }
 
   // ---- Gate (entry) ------------------------------------------------------------------------
