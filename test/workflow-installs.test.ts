@@ -12,7 +12,7 @@ const INSTALL = /\bnpm\s+(ci|cit|i|install|install-test|install-ci-test|add)\b/;
 /** Each non-comment line of a workflow that runs an npm install without `--ignore-scripts`. */
 function bareInstalls(text: string): string[] {
   return text
-    .split("\n")
+    .split(/\r?\n/)
     .map((line) => line.replace(/(^|\s)#.*$/, ""))
     .filter((line) => INSTALL.test(line) && !/--ignore-scripts\b/.test(line))
     .map((line) => line.trim());
@@ -36,5 +36,10 @@ describe("dependency installs in the workflows", () => {
     for (const line of ["      - run: npm ci --ignore-scripts", "      # No `npm ci`, on purpose", "      - run: npm run lint # not npm ci", "npm audit"]) {
       assert.deepEqual(bareInstalls(line), [], line);
     }
+  });
+
+  it("reads CRLF line endings, as a Windows checkout may hold a workflow: comments still skipped", () => {
+    assert.deepEqual(bareInstalls("      # No `npm ci`, on purpose\r\n      - run: npm ci --ignore-scripts # not npm ci\r\n"), []);
+    assert.deepEqual(bareInstalls("      - run: npm ci\r\n      # npm install\r\n"), ["- run: npm ci"]);
   });
 });
