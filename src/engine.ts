@@ -175,8 +175,10 @@ export class Engine {
    * changes. The mark is kept in the call record only, never in the ledger or a receipt.
    */
   async startCall(input: { callId?: string; locale?: Locale; flow?: string; access?: CallAccess } = {}): Promise<SessionState> {
-    if (input.access !== undefined && input.access !== "relay" && input.access !== "tty") throw new EngineError("invalid_input", "access must be relay or tty");
-    const callId = input.callId ?? this.#ids.next("call");
+    // Read once: the access checked is the access stored, and the flow named is the flow attached.
+    const { callId: givenId, locale, flow, access } = input;
+    if (access !== undefined && access !== "relay" && access !== "tty") throw new EngineError("invalid_input", "access must be relay or tty");
+    const callId = givenId ?? this.#ids.next("call");
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
       const name = module.manifest.name;
@@ -185,19 +187,19 @@ export class Engine {
     const record: CallRecord = {
       v: 1,
       state: newSession(callId, this.workspaceId, this.#now()),
-      locale: input.locale ?? "en",
+      locale: locale ?? "en",
       revision: this.#config.revision,
       flow: null,
       modules,
       outbox: [],
     };
-    if (input.access !== undefined) record.access = input.access;
+    if (access !== undefined) record.access = access;
     // A call started with a flow is created with it attached, so no other process can start a
     // different flow on the same id in between.
     const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
-    if (input.flow !== undefined) {
+    if (flow !== undefined) {
       const draft = this.#draft(record, events);
-      this.#attachFlow(draft, input.flow, this.#flowDefinition(input.flow), this.#config.revision);
+      this.#attachFlow(draft, flow, this.#flowDefinition(flow), this.#config.revision);
       this.#advance(draft);
     }
     record.outbox = events.map((event, i) => ({ eventId: this.#eventId(callId, 1, i), ...event }));
