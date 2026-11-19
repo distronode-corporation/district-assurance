@@ -397,13 +397,17 @@ recordIds})` returns `{amountMinor, currency}` or null. `source` is the step's `
   DESCRIPTION. Is that correct?" / "Le montant à payer est de AMOUNT, pour DESCRIPTION. Est-ce
   exact ?"; `digest` is `SHA-256(canonicalJson({amountMinor, currency, description, locale,
   text}))`. The call keeps the read-back (one at a time; a new one replaces it) until a link uses
-  it. Untrusted content drops it.
+  it. Untrusted content drops it. The read-back is for the subject matched when the amount was
+  looked up: if another subject is matched by the time it is stored, it is refused
+  (`precondition_failed`).
 - `confirmPaymentAmount(callId, {digest, confirmedBy})` records that the caller said yes. A digest
   that is not the last read-back's is refused (`precondition_failed`); confirming twice is harmless.
 - `requestPayment`: with a read-back on the call, the request must be the one read back (or none,
   outside a flow) and confirmed, else `precondition_failed`, and the link is for the amount the
   caller heard, checked again against the limit in force. An `amountRef` without a confirmed
-  read-back is always refused. A fixed amount with no read-back on the call is sent as before.
+  read-back is always refused. A read-back for another subject than the one matched now is
+  refused. A fixed amount with no read-back on the call is sent as before. A request still being
+  sent resumes with no input, the same amount, or the same `amountRef` request it was made for.
 
 ## 15. Stripe webhooks
 

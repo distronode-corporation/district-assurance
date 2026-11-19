@@ -218,9 +218,13 @@ export async function readBackPayment(rt: EngineRuntime, callId: string, input?:
   const readBack = buildAmountReadBack(before.locale, { ...amount, description: spec.description.trim() });
   return rt.update(callId, (draft) => {
     // Checked again: the call can have moved on while the amount was looked up.
-    readBackSpec(rt, draft.record, input, settings.maxAmountMinor);
+    const now = readBackSpec(rt, draft.record, input, settings.maxAmountMinor);
+    if (now.subject.subjectKey !== subject.subjectKey) {
+      throw new EngineError("precondition_failed", "the matched subject changed while the amount was looked up; read it back again");
+    }
     draft.slice<PaylinkSlice>(PAYLINK).quote = {
       spec: specKey(spec),
+      subjectKey: subject.subjectKey,
       amountMinor: readBack.amountMinor,
       currency: readBack.currency,
       description: readBack.description,
@@ -243,7 +247,8 @@ export async function confirmPaymentAmount(rt: EngineRuntime, callId: string, in
   rt.settings(PAYLINK);
   await rt.update(callId, (draft) => {
     requestContext(rt, draft.record, undefined);
-    const quote = draft.slice<PaylinkSlice>(PAYLINK).quote;
+    // A call saved before PAY-2 has no quote field: the same as no read-back.
+    const quote = draft.slice<PaylinkSlice>(PAYLINK).quote ?? null;
     if (quote === null) throw new EngineError("precondition_failed", "no amount was read back on this call");
     if (!hexDigestsEqual(input.digest, quote.digest)) throw new EngineError("precondition_failed", "this is not the amount last read back; read it back again");
     if (quote.confirmedAt !== null) return;
@@ -256,8 +261,9 @@ export async function confirmPaymentAmount(rt: EngineRuntime, callId: string, in
  * The amount a new link is for. A read-back on the call must be confirmed and match the request;
  * an amount from the AmountSource is never sent without one.
  */
-function confirmedAmount(quote: AmountQuote | null, spec: PaymentInput | undefined): FixedPaymentInput {
+function confirmedAmount(quote: AmountQuote | null, spec: PaymentInput | undefined, subject: SubjectRecord): FixedPaymentInput {
   if (quote !== null) {
+    if (quote.subjectKey !== subject.subjectKey) throw new EngineError("precondition_failed", "the amount was read back for another subject; read it back again");
     if (spec !== undefined && specKey(spec) !== quote.spec) throw new EngineError("precondition_failed", "this request is not the amount read back; read it back again");
     if (quote.confirmedAt === null) throw new EngineError("precondition_failed", "the caller has not confirmed the amount read back");
     return { amountMinor: quote.amountMinor, currency: quote.currency, description: quote.description, amountSource: quote.amountSource };
@@ -288,13 +294,19 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
     const slice = draft.slice<PaylinkSlice>(PAYLINK);
     const last = slice.payments.at(-1);
     if (draft.record.state.phase === "paying" && last !== undefined && last.status === "open" && last.textedAt === null) {
-      const fixed = input as Partial<FixedPaymentInput> | undefined;
-      if (fixed !== undefined && (fixed.amountMinor !== last.amountMinor || fixed.currency !== last.currency)) {
-        throw new EngineError("invalid_input", "a payment link is still being sent on this call; resume it with the same amount, or none");
+      const fixed = input as Partial<FixedPaymentInput & ReferencedPaymentInput> | undefined;
+      // A resume names nothing, the same amount, or the same amountRef request it was made for.
+      const same =
+        fixed === undefined ||
+        (fixed.amountRef !== undefined ? last.requestKey === specKey(fixed as PaymentInput) : fixed.amountMinor === last.amountMinor && fixed.currency === last.currency);
+      if (!same) {
+        throw new EngineError("invalid_input", "a payment link is still being sent on this call; resume it with the same amount or amountRef, or none");
       }
       return { request: last, ...where };
     }
-    const chosen = confirmedAmount(slice.quote, step ?? input);
+    const spec = step ?? input;
+    const quote = slice.quote ?? null;
+    const chosen = confirmedAmount(quote, spec, subject);
     const errors = requestErrors({ ...chosen }, settings.maxAmountMinor);
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     slice.quote = null;
@@ -312,6 +324,8 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
       requestedAt: rt.now(),
       settledAt: null,
       textedAt: null,
+      // Without a spec, confirmedAmount used the read-back, so the quote is there.
+      requestKey: spec === undefined ? quote!.spec : specKey(spec),
     };
     draft.slice<PaylinkSlice>(PAYLINK).payments.push(request);
     return { request, ...where };

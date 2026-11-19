@@ -21,6 +21,8 @@ export interface PaymentRequest {
   settledAt: string | null;
   /** When the link was texted; null while it is still being created or sent (and can be resumed). */
   textedAt: string | null;
+  /** What the request was made for (PAY-2), so a resume can name the same amountRef. Absent on older calls. */
+  requestKey?: string;
 }
 
 /** What the provider reported, already parsed from a verified webhook. */

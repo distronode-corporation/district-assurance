@@ -13,7 +13,7 @@ import { formatAmount, type PaylinkSlice } from "../src/pay/paylink.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import { verifyReceipt } from "../src/prove/receipt.ts";
 import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
-import { TEST_KNOWLEDGE_KEY, createTestEngine, type TestEngine } from "../src/testing/index.ts";
+import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../src/testing/index.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
@@ -718,6 +718,82 @@ describe("Engine pay: amounts from code, read back first (PAY-2)", () => {
     ending = true;
     await assert.rejects(t.engine.readBackPayment(other, byRef), rejects("scope_denied"), "the call ended while the amount was looked up");
     assert.equal((await t.ledger.list()).filter((e) => e.event === "payment.amount_read_back").length, 1);
+  });
+
+  it("binds a read-back to the subject the lookup was for", async () => {
+    const OTHER = "87654321";
+    const reverify = async (t: TestEngine, callId: string) => {
+      await t.engine.beginVerification(callId, { accountNumber: OTHER });
+      await t.engine.submitKeypad(callId, { dob: "19900101" });
+      await t.engine.checkCarrier(callId);
+      assert.equal((await t.engine.finishVerification(callId)).scopes.includes("payment.request"), true);
+    };
+    let t: TestEngine;
+    let switching = false;
+    t = setup({
+      adapters: {
+        amounts: {
+          resolve: async (input) => {
+            if (switching) await reverify(t, input.callId);
+            return prices().resolve(input);
+          },
+        },
+      },
+    });
+    t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: OTHER, phoneOnFile: "+15555550199", knowledge: { dob: "19900101" }, pin: "1111" }));
+    t.carrier.set("+15555550199", { identityMatch: "match" });
+    const raced = await verifiedCall(t);
+    switching = true;
+    await assert.rejects(t.engine.readBackPayment(raced, byRef), rejects("precondition_failed", /subject changed while the amount was looked up/));
+    switching = false;
+    assert.equal((await t.ledger.list()).some((e) => e.event === "payment.amount_read_back"), false);
+
+    const later = await verifiedCall(t);
+    const back = await t.engine.readBackPayment(later, byRef);
+    await t.engine.confirmPaymentAmount(later, { digest: back.digest, confirmedBy: "keypad" });
+    await reverify(t, later);
+    await assert.rejects(t.engine.requestPayment(later, byRef), rejects("precondition_failed", /read back for another subject/));
+    assert.equal(t.payments.created.length, 0);
+  });
+
+  it("treats a call saved without a quote as one with no read-back", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const stored = (await t.sessions.get("ws_test", callId))!;
+    const record = structuredClone(stored.record) as unknown as { modules: { paylink: Partial<PaylinkSlice> } };
+    delete record.modules.paylink.quote;
+    assert.equal((await t.sessions.compareAndSet("ws_test", callId, stored.version, record as never)).ok, true);
+    await assert.rejects(t.engine.confirmPaymentAmount(callId, { digest: "0".repeat(64), confirmedBy: "voice" }), rejects("precondition_failed", /no amount was read back/));
+    assert.deepEqual(await t.engine.requestPayment(callId, request), { paymentId: "pay_1", status: "open" }, "a fixed amount still goes without a read-back");
+  });
+
+  it("resumes a referenced payment with the same amountRef", async () => {
+    const t = setup({ adapters: { amounts: prices() } });
+    const callId = await verifiedCall(t);
+    const back = await t.engine.readBackPayment(callId, byRef);
+    await t.engine.confirmPaymentAmount(callId, { digest: back.digest, confirmedBy: "voice" });
+    const send = t.messages.sendText.bind(t.messages);
+    t.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, byRef), /carrier down/);
+    await assert.rejects(t.engine.requestPayment(callId, { ...byRef, amountRef: "deposit.other" }), rejects("invalid_input", /same amount or amountRef/));
+    t.messages.sendText = send;
+    assert.deepEqual(await t.engine.requestPayment(callId, byRef), { paymentId: "pay_1", status: "open" });
+    assert.equal(t.payments.created.length, 1);
+    assert.equal(t.payments.created[0]!.amountMinor, 12500);
+
+    // A read-back confirmed and sent without input: the read-back's request is the one to resume.
+    const plain = setup({ adapters: { amounts: prices() } });
+    const call = await verifiedCall(plain);
+    const heard = await plain.engine.readBackPayment(call, byRef);
+    await plain.engine.confirmPaymentAmount(call, { digest: heard.digest, confirmedBy: "voice" });
+    plain.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(plain.engine.requestPayment(call), /carrier down/);
+    plain.messages.sendText = send;
+    assert.equal((await plain.engine.requestPayment(call, byRef)).paymentId, "pay_1");
   });
 });
 

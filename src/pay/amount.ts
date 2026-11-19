@@ -14,6 +14,8 @@ export const AMOUNT_REF = /^[A-Za-z0-9.:_-]{1,64}$/;
 export interface AmountQuote {
   /** What the amount was read back for (the step's or the host's request), so a different request cannot use it. */
   spec: string;
+  /** The subject matched when the amount was looked up; the link goes only to that subject. */
+  subjectKey: string;
   amountMinor: number;
   currency: string;
   description: string;

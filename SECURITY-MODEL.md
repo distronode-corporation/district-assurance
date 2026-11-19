@@ -129,7 +129,9 @@ currency, under the limit) and is never texted until code has read it back in th
 language and the caller confirmed that exact read-back, bound by its digest (tested). Once an
 amount is read back on a call, the next link must be for that request and confirmed, and is for the
 amount the caller heard; a different request, a stale digest or an unconfirmed read-back is
-refused (tested). The ledger records the read-back and the confirmation, with the amount and the
+refused (tested). A read-back is bound to the subject the lookup was for: a lookup that finishes
+after another subject was matched is refused, and so is a link for a read-back made for another
+subject (tested). The ledger records the read-back and the confirmation, with the amount and the
 digest but never the reference. Left to the host: speaking the read-back as built, and taking the
 caller's yes by keypad or voice outside the model. A fixed amount in the config or the host's
 code can still be sent without a read-back.
