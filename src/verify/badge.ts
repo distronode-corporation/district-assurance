@@ -117,9 +117,11 @@ export interface BadgeSlice {
   /**
    * An accepted pass whose counters are not yet cleaned up (`forgetPass`): saved with the pass, so a
    * write that fails after the pass was saved (its ledger entry) still gets the cleanup, in the same
-   * call to `submitFactor` or the call's next. Absent when nothing is owed.
+   * call to `submitFactor` or the call's next. Absent when nothing is owed. `hidden` is the duress
+   * PIN's hidden counter (VER-12), when it is on: a pass not under duress resets it, a duress entry
+   * takes off only its own failure. Absent on a pass saved before it was kept here.
    */
-  forgetOwed?: { keys: AttemptCounterKey[]; at: string };
+  forgetOwed?: { keys: AttemptCounterKey[]; at: string; hidden?: { key: AttemptCounterKey; duress: boolean } };
   /** The callback this call asked for, or the one it is (callback.ts). Absent on calls saved before: read it with `callbackOf`. */
   callback: CallbackState;
   /** Untrusted content seen on this call so far (onUntrusted counts it), so an entry judged across one is known. Absent on calls saved before. */
@@ -683,7 +685,10 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
       draft.apply({ type: "factor_recorded", factor });
       if (passed && KNOWLEDGE_FACTORS.includes(kind)) s.knowledgeMatched = true;
       // The cleanup is owed with the pass, in the same write: never for a pass that was not saved.
-      if (passed) s.forgetOwed = { keys: structuredClone(keys), at: at.toISOString() };
+      if (passed) {
+        s.forgetOwed = { keys: structuredClone(keys), at: at.toISOString() };
+        if (hidden !== null) s.forgetOwed.hidden = { key: structuredClone(hidden), duress: outcome === "duress" };
+      }
       draft.emit("verification.factor", "code", { kind, passed }, kind === "pin" ? outcome : undefined);
       if (hard !== null) draft.emit("verification.locked", "code", { kind, scope: hard.scope, hard: true, until: hard.until });
       return null;
@@ -702,12 +707,6 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   // attempt's own: they may be against other accounts, so a pass on this one must not clear them.
   if (passed) await settleForget(rt, callId, at.toISOString());
   if (failed !== null) throw failed.error;
-  // The hidden counter forgets only on a pass that is not under duress; a duress entry takes off its
-  // own failure, as a pass does, and keeps the rest.
-  if (passed && hidden !== null) {
-    if (outcome === "duress") await counters.removeFailure(hidden, at.toISOString());
-    else await counters.reset(hidden);
-  }
   return { matched: passed, locked: !passed && (reserved.last || hard !== null) };
 }
 
@@ -719,7 +718,14 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
 async function settleForget(rt: EngineRuntime, callId: string, at: string): Promise<void> {
   const owed = (await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice;
   if (owed.forgetOwed?.at !== at) return;
-  await forgetPass(rt.adapter("counters"), owed.forgetOwed.keys, new Date(at));
+  const counters = rt.adapter("counters");
+  await forgetPass(counters, owed.forgetOwed.keys, new Date(at));
+  // The hidden counter forgets only on a pass that is not under duress; a duress entry takes off its
+  // own failure, as a pass does, and keeps the rest. One write either way, so the round trips never
+  // tell a duress pass from another.
+  const hidden = owed.forgetOwed.hidden;
+  if (hidden?.duress === true) await counters.removeFailure(hidden.key, at);
+  else if (hidden !== undefined) await counters.reset(hidden.key);
   await rt
     .update(callId, (draft) => {
       const s = draft.slice<BadgeSlice>(BADGE);
