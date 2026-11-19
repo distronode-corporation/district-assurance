@@ -127,6 +127,9 @@ All notable changes to this project are documented here. The format follows
 - Carrier signal adapters for the reference server (VER-4): Twilio Lookup (SIM Swap, Identity
   Match) and Telnyx Number Lookup (porting status and date, the carrier), credentials from the
   environment, failing closed with `checked: false`; tested against a local fake server.
+- An adversarial suite in English and Canadian French (VER-7): scripted dialogues run through a
+  scripted host, checking no grant without factors, no text before a match, identical answers for
+  unknown and wrong, and no grant after a taint.
 
 ### Changed
 
@@ -134,9 +137,6 @@ All notable changes to this project are documented here. The format follows
   asked about SIM changes and answered, and `textCodeTrusted` never trusts a texted code on a
   report without it, whatever the policy says (VER-4). The Telnyx adapter answers false; every
   `CarrierSignals` adapter has to set it.
-
-### Changed
-
 - `PaymentLinks.createLink` takes a `PaymentLinkRequest` (mode, connected account, payment methods,
   expiry); `requestPayment` also returns `expiresAt`; receipts' payments carry `mode`.
 - `confirmIntake` refuses a `confirmedBy` other than `voice` or `keypad` (`invalid_input`) before
@@ -157,7 +157,8 @@ All notable changes to this project are documented here. The format follows
   refused as `not_text`. A step whose ledger detail canonical JSON refuses (a lone surrogate, a
   `Date`) is refused before it is saved, `markUntrusted` repairs a lone surrogate in its label, and
   `validateConfig` refuses a config holding one.
-
+- A taint now voids the keypad or PIN match made before it: `startPhotoId`, `checkCarrier` and a
+  payment link refuse until a fresh verification matches (found by the adversarial suite).
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

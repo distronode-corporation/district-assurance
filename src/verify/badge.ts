@@ -120,6 +120,8 @@ export interface BadgeSlice {
   forgetOwed?: { keys: AttemptCounterKey[]; at: string };
   /** The callback this call asked for, or the one it is (callback.ts). */
   callback: CallbackState;
+  /** Untrusted content seen on this call so far (onUntrusted counts it), so an entry judged across one is known. Absent on calls saved before. */
+  taints?: number;
 }
 
 /** Which policy and which FlowConfig revision judged a verification. */
@@ -317,6 +319,7 @@ export class BadgeModule implements AssuranceModule {
       lastMethods: [],
       lastJudgedBy: null,
       callback: { status: "none", callId: null, ref: null, keys: [], lock: null, subjectKey: null, subject: null, epoch: null, at: null, forgetPending: false },
+      taints: 0,
     };
     return initial as unknown as JsonValue;
   }
@@ -338,12 +341,13 @@ export class BadgeModule implements AssuranceModule {
 
   onUntrusted(s: JsonValue): JsonValue {
     // A photo ID link or a texted code sent before the taint no longer counts, nor does a callback
-    // still ringing. One link per call still holds. The epoch moves on too, so a result or a send
+    // still ringing, nor the keypad or PIN match made before it (it unlocks nothing until a fresh
+    // verification matches). One link per call still holds. The epoch moves on too, so a result or a send
     // decided before the taint is not applied after it, and the verification open now (or the last
     // one) is void: it never grants a level. The next beginVerification moves it on again, so a new
     // verification counts as usual.
     const badge = s as unknown as BadgeSlice;
-    return { ...badge, epoch: badge.epoch + 1, identitySessions: [], identityLink: voided(badge.identityLink), textCode: null, callback: voidedCallback(badge.callback), voidedEpoch: badge.epoch + 1 } as unknown as JsonValue;
+    return { ...badge, epoch: badge.epoch + 1, knowledgeMatched: false, identitySessions: [], identityLink: voided(badge.identityLink), textCode: null, callback: voidedCallback(badge.callback), voidedEpoch: badge.epoch + 1, taints: (badge.taints ?? 0) + 1 } as unknown as JsonValue;
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
@@ -548,7 +552,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     const used = s.attempts[kind] ?? 0;
     if (used >= max) return null;
     s.attempts[kind] = used + 1;
-    return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch, locale: draft.record.locale };
+    return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch, locale: draft.record.locale, taints: s.taints };
   });
   if (reserved === null) return { matched: false, locked: true };
   const at = rt.clock.now();
@@ -630,6 +634,10 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
           s.duressAlerts = [...(s.duressAlerts ?? []), alert];
         }
       }
+      // Untrusted content that entered the call while this entry was judged (any taint, the first or
+      // a later one): a pass from before it neither counts toward a grant nor restores the match. The
+      // attempt stays used, so this is no free guess; a failure is recorded as any failure is.
+      if (passed && s.taints !== reserved.taints) return new EngineError("precondition_failed", "untrusted content entered the call while this entry was judged, so it does not count; verify again");
       // Otherwise the result is applied only to the verification it was judged for, as for any factor;
       // a stale one is refused with the same error either way, after the write.
       if (s.epoch !== reserved.epoch) return new EngineError("precondition_failed", "verification restarted while this result was on its way; it does not count");

@@ -479,6 +479,22 @@ describe("Engine authorize", () => {
     await assert.rejects(t.engine.startPhotoId(callId), rejects("precondition_failed"), "the match before the taint no longer counts");
   });
 
+  it("sends nothing out on a match made before the taint, until a fresh verification matches", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.markUntrusted(callId, "crm_note");
+    await assert.rejects(t.engine.startPhotoId(callId), rejects("precondition_failed"), "no identity link on the old match");
+    await assert.rejects(t.engine.checkCarrier(callId), rejects("precondition_failed"), "no carrier check on the old match");
+    assert.equal(t.messages.sent.length, 0);
+    await t.engine.finishVerification(callId);
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.startPhotoId(callId);
+    assert.equal(t.messages.sent.length, 1, "a fresh match unlocks the link again");
+  });
+
   it("ignores a photo ID outcome for a link sent before the taint", async () => {
     const t = setup();
     const other = await t.engine.startCall();

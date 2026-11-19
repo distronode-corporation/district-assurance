@@ -225,11 +225,11 @@ describe("texted codes", () => {
       taint = async () => undefined;
       await t.engine.markUntrusted(callId, "crm_note");
     };
-    await assert.rejects(t.engine.sendTextCode(callId), rejects("precondition_failed", /verification restarted/));
+    await assert.rejects(t.engine.sendTextCode(callId), rejects("precondition_failed", /verification restarted|have not matched/));
     assert.equal(t.messages.sent.length, 0);
     const slice = ((await t.sessions.get("ws_test", callId))!.record as { modules: { badge: { textCode: unknown } } }).modules.badge;
     assert.equal(slice.textCode, null, "no code was stored");
-    await assert.rejects(t.engine.checkTextCode(callId, "123456"), rejects("precondition_failed", /no code was sent/));
+    await assert.rejects(t.engine.checkTextCode(callId, "123456"), rejects("precondition_failed", /no code was sent|have not matched/));
   });
 
   it("judges expiry by the clock when the check is written, not when it started", async () => {
