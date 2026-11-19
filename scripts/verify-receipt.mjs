@@ -1,0 +1,120 @@
+#!/usr/bin/env node
+// Checks a District Assurance receipt against a key set, without this package: Node 24.2 or later
+// and nothing else. SPEC.md, section 12, describes the format; this file repeats only what a
+// verifier needs (canonical JSON and ES256 over it), so it can be copied out on its own.
+//
+//   node verify-receipt.mjs <receipt.json | -> <keys.json | https://host/.well-known/receipt-keys.json>
+//
+// Prints `valid` and exits 0, or `invalid: <reason>` and exits 1. Exits 2 when it cannot run the
+// check at all (a missing argument, an unreadable file, a key set it cannot fetch). A key set URL
+// must be https, or http on this machine (127.0.0.1, localhost, [::1]): a key set fetched in the
+// clear could be swapped for one that makes a forged receipt look valid.
+import { createPublicKey, verify } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+const MAX_BYTES = 1024 * 1024;
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+class Usage extends Error {}
+
+/** RFC 8785 canonical JSON for plain JSON values: sorted keys, no whitespace, JSON.stringify scalars. */
+function canonicalJson(value) {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new TypeError("not JSON");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  throw new TypeError("not JSON");
+}
+
+/** The reason a receipt fails against the keys, or null when it verifies. */
+function check(receipt, keys) {
+  if (receipt === null || typeof receipt !== "object" || receipt.body === null || typeof receipt.body !== "object") return "not a receipt";
+  if (receipt.body.v !== 1) return "an unknown receipt version";
+  if (receipt.alg !== "ES256") return "an algorithm other than ES256";
+  if (typeof receipt.kid !== "string" || typeof receipt.signature !== "string") return "not a receipt";
+  const jwk = keys.find((k) => k !== null && typeof k === "object" && k.kid === receipt.kid);
+  if (jwk === undefined) return `no key with kid ${JSON.stringify(receipt.kid)} in the key set`;
+  if (jwk.kty !== "EC" || jwk.crv !== "P-256" || jwk.d !== undefined) return "the key is not a public P-256 key";
+  let key;
+  try {
+    key = createPublicKey({ key: { kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y }, format: "jwk" });
+  } catch {
+    return "the key is not a public P-256 key";
+  }
+  // Strict base64url: 64 bytes are exactly 86 characters, without padding.
+  if (!/^[A-Za-z0-9_-]{85}[AQgw]$/.test(receipt.signature)) return "a malformed signature";
+  const payload = new TextEncoder().encode(canonicalJson(receipt.body));
+  const signature = Buffer.from(receipt.signature, "base64url");
+  return verify("sha256", payload, { key, dsaEncoding: "ieee-p1363" }, signature) ? null : "the signature does not match the body";
+}
+
+function parse(text, what) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Usage(`${what} is not JSON`);
+  }
+}
+
+function readSource(source, what) {
+  try {
+    const bytes = readFileSync(source === "-" ? 0 : source);
+    if (bytes.length > MAX_BYTES) throw new Usage(`${what} is larger than 1 MiB`);
+    return bytes.toString("utf8");
+  } catch (error) {
+    if (error instanceof Usage) throw error;
+    throw new Usage(`cannot read ${what} from ${source}`);
+  }
+}
+
+async function fetchKeySet(source) {
+  let url;
+  try {
+    url = new URL(source);
+  } catch {
+    throw new Usage("the key set URL is not a URL");
+  }
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK.has(url.hostname))) {
+    throw new Usage("a key set URL must be https (or http on 127.0.0.1, localhost or [::1])");
+  }
+  let response;
+  try {
+    // No redirects: a redirect could leave https.
+    response = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(10_000), headers: { accept: "application/json" } });
+  } catch {
+    throw new Usage(`cannot fetch the key set from ${url.href}`);
+  }
+  if (!response.ok) throw new Usage(`the key set URL answered ${response.status}`);
+  const text = await response.text();
+  if (text.length > MAX_BYTES) throw new Usage("the key set is larger than 1 MiB");
+  return text;
+}
+
+async function main(args) {
+  if (args.length !== 2) throw new Usage("usage: node verify-receipt.mjs <receipt.json | -> <keys.json | https://.../receipt-keys.json>");
+  const [receiptSource, keysSource] = args;
+  const receipt = parse(readSource(receiptSource, "the receipt"), "the receipt");
+  const isUrl = /^https?:\/\//i.test(keysSource);
+  const keySet = parse(isUrl ? await fetchKeySet(keysSource) : readSource(keysSource, "the key set"), "the key set");
+  // A JWK set (`{"keys": [...]}`, what the reference server serves) or a bare list of keys.
+  const keys = Array.isArray(keySet) ? keySet : keySet?.keys;
+  if (!Array.isArray(keys)) throw new Usage('the key set must be {"keys": [...]} or a list of keys');
+  return check(receipt, keys);
+}
+
+if (import.meta.main) {
+  try {
+    const reason = await main(process.argv.slice(2));
+    process.stdout.write(reason === null ? "valid\n" : `invalid: ${reason}\n`);
+    process.exitCode = reason === null ? 0 : 1;
+  } catch (error) {
+    process.stderr.write(`verify-receipt: ${error instanceof Usage ? error.message : "unexpected error"}\n`);
+    process.exitCode = 2;
+  }
+}

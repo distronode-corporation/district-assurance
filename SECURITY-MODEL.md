@@ -135,7 +135,10 @@ depends on its whole call path.
 byte fails verification (tested). Signing keys rotate with a key ring: one key signs, and the
 published key set keeps the public keys that signed before, so a receipt signed before a rotation
 still verifies after it (tested). The ring publishes only public P-256 members and refuses a key
-with a private part, two keys with one kid, or a kid that matches no signer (tested).
+with a private part, two keys with one kid, or a kid that matches no signer (tested). Anyone can
+check a receipt without this package with `scripts/verify-receipt.mjs`, which has no dependencies,
+refuses a key set fetched over plain http from another machine, and reports a tampered receipt as
+invalid (tested).
 A step's ledger entries are saved with the step itself (an outbox in the call record) and
 appended by event id, once each; a ledger that fails leaves them pending, and the next write or
 `flushLedger` appends them, so no saved step is ever missing from the ledger for good (tested).

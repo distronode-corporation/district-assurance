@@ -371,6 +371,42 @@ A retired key stays in the key set for as long as receipts it signed must verify
 leaked is removed, not retired: every receipt it signed then fails to verify, as it should, since
 anyone holding the key could have signed it.
 
+### Checking a receipt without this package
+
+`scripts/verify-receipt.mjs` is one file with no dependencies beyond Node 24.2 or later; it can be
+copied out of the repository on its own. It takes a receipt (a file, or `-` for standard input) and
+a key set (a file, or a URL), and repeats only what a verifier needs: the canonical JSON of
+section 11 and ES256 over it.
+
+```sh
+node scripts/verify-receipt.mjs <receipt.json | -> <keys.json | https://host/.well-known/receipt-keys.json>
+```
+
+| Exit | Output | When |
+|---|---|---|
+| 0 | `valid` | the key named by `kid` verifies the signature over `canonicalJson(body)` |
+| 1 | `invalid: <reason>` | `body.v` is not 1, `alg` is not `ES256`, no key has the `kid`, the key is not a public P-256 key, the signature is not 86 base64url characters (64 bytes), or it does not match the body |
+| 2 | a message on standard error | it could not check: wrong arguments, an unreadable or non-JSON file, a key set that is not `{"keys": [...]}` or a list, more than 1 MiB, or a URL it may not or cannot fetch |
+
+A key set URL must be `https`, or `http` on `127.0.0.1`, `localhost` or `[::1]`, because a key set
+fetched in the clear could be swapped for one that makes a forged receipt look valid. Redirects are
+refused. A worked example, against the demo server on this machine (`npm run ui`, after the
+`deposit` flow has run to its end in the page, which makes `call_1` with a payment of 15000):
+
+```sh
+$ curl -s http://127.0.0.1:8787/receipts/call_1 > receipt.json
+$ node scripts/verify-receipt.mjs receipt.json http://127.0.0.1:8787/.well-known/receipt-keys.json
+valid
+$ curl -s http://127.0.0.1:8787/.well-known/receipt-keys.json > keys.json   # or keep a copy
+$ sed 's/"amountMinor":15000/"amountMinor":1500/' receipt.json | node scripts/verify-receipt.mjs - keys.json
+invalid: the signature does not match the body
+$ echo $?
+1
+```
+
+The key set can be fetched once and kept: since retired keys stay in it, a copy taken after a
+receipt was issued verifies that receipt for as long as its key is not removed.
+
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
 `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
 
