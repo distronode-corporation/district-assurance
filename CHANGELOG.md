@@ -27,7 +27,8 @@ All notable changes to this project are documented here. The format follows
   `npm run demo` and the UI.
 - Key store contracts (INT-4): the knowledge key can be an opaque HMAC function that the engine and
   every factor hash through, `signReceipt` refuses a signature that is not 64-byte P1363, and
-  `derToP1363` converts a key store's DER signature.
+  `derToP1363` converts a key store's DER signature. A factor judge that throws (a key store
+  outage) records no factor and writes `verification.factor_error`; the attempt stays counted.
 
 ### Changed
 

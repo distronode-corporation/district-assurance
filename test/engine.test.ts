@@ -54,6 +54,33 @@ describe("Engine construction", () => {
     assert.equal(JSON.stringify(await t.ledger.list()).includes(DOB), false);
   });
 
+  it("passes a key store failure to the host as an error, not a wrong answer, and keeps the attempt counted", async () => {
+    let down = false;
+    const keyStore = (data: string): string => {
+      if (down && data.startsWith("field:")) throw new Error("key store unavailable");
+      return createHmac("sha256", TEST_KNOWLEDGE_KEY).update(data).digest("hex");
+    };
+    const t = setup({ knowledgeKey: keyStore });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    down = true;
+    await assert.rejects(t.engine.submitKeypad(callId, { dob: DOB }), /key store unavailable/);
+    const events = (await t.ledger.list()).map((e) => e.event);
+    assert.equal(events.at(-1), "verification.factor_error");
+    assert.equal(events.includes("verification.factor"), false, "no factor is recorded for a failure");
+    // The failed attempt is not refunded: one of the two is left, and it judges once the store is back.
+    down = false;
+    assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: true, locked: false });
+
+    // An outage that uses up every attempt locks the call, even after the store recovers.
+    const second = await t.engine.startCall();
+    await t.engine.beginVerification(second.callId, { accountNumber: ACCOUNT });
+    down = true;
+    for (let i = 0; i < 2; i++) await assert.rejects(t.engine.submitKeypad(second.callId, { dob: DOB }), /key store unavailable/);
+    down = false;
+    assert.deepEqual(await t.engine.submitKeypad(second.callId, { dob: DOB }), { matched: false, locked: true });
+  });
+
   it("refuses an HMAC function whose answer is not 64 lower-case hex characters", async () => {
     for (const answer of ["AB".repeat(32), "ab".repeat(31), 42 as unknown as string]) {
       const t = setup({ knowledgeKey: () => answer });

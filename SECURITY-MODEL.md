@@ -47,7 +47,8 @@ text never confirms an account. Planned: per-subject and per-number counters acr
 **Controls:** a per-call limit on judged attempts for every factor the caller enters (keypad
 knowledge, the PIN at 1 to 5, plug-ins at 1 to 5), after which the line stops judging, even the
 right answer (tested). Each attempt is counted in its own write before it is judged, so a crash, a
-failing PIN verifier or a second process never gives a free try (tested, two engines on one
+failing PIN verifier or knowledge key store, an entry crafted to make a judge throw, or a second
+process never gives a free try (tested, two engines on one
 store). PINs are at least 4 digits, and keypad attempts are capped at 5 per call like the PIN's.
 **Hard gate:** durable lockout across calls (VER-1) must be merged before any host runs the
 owner-command flow, or any PIN factor, on a live line. Without it, a 4-digit PIN with 3 attempts

@@ -175,7 +175,11 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   PIN is passed once and kept nowhere. It is asked for every attempt: for a malformed entry or an
   account a keypad cannot produce, with a stand-in (`minDigits` zeros, an HMAC subject key) whose
   answer is ignored. A subject the `RecordStore` does not have never passes, whatever it says.
-- Each attempt is counted in its own write before it is judged. Every `beginVerification` starts a
+- Each attempt is counted in its own write before it is judged. A judge that throws (the knowledge
+  key store, a `PinVerifier`, a plug-in) records no factor, writes `verification.factor_error` and
+  passes the error to the host. The attempt is not refunded, so an entry crafted to make a judge
+  throw never gives a free try; a key store outage can use up the call's attempts. Every
+  `beginVerification` starts a
   new epoch; a factor result, a carrier report or a photo ID check from an earlier epoch is never
   applied (`precondition_failed`), and a change of subject drops pending photo ID checks.
 - The photo ID link is reserved, created, enrolled and texted in turn; after a failure,
@@ -271,6 +275,7 @@ answer on file, a phone number, a link or card data.
 | `flow.abandoned` | `flow`, `step` |
 | `verification.started` | `subject`: `account` or `host` |
 | `verification.factor` | `kind`, `passed` (and `status` for photo ID) |
+| `verification.factor_error` | `kind` (the judge threw; no factor recorded, the attempt stays counted) |
 | `verification.carrier_checked` | `checked`, `textCodeTrusted`, `identityMatch` |
 | `identity.link_sent` | none |
 | `verification.finished` | `level`, `methods`, `discounted` |
