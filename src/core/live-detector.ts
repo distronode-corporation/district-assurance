@@ -14,7 +14,7 @@
 // long the run grows.
 
 import { EngineError } from "./errors.ts";
-import { digitRuns, LEXEME, NUMBER_LANGUAGES, SEPARATOR_CLASS, type NumberLanguage } from "./redaction.ts";
+import { digitRuns, LEXEME, NUMBER_LANGUAGES, numberLanguagesFor, SEPARATOR_CLASS, type NumberLanguage } from "./redaction.ts";
 import { isIntegerIn } from "./shape.ts";
 
 export const LIVE_DETECTOR_MIN_DIGITS = 8;
@@ -22,7 +22,7 @@ export const LIVE_DETECTOR_MIN_DIGITS = 8;
 export interface LiveDetectorOptions {
   /** Digits in one run that trigger an interrupt: an integer from 4 to 19, 8 by default. */
   minDigits?: number;
-  /** The call's language: only its number words are read. Absent: every language's. */
+  /** The call's language: English and French words are read on every call, Spanish on a Spanish one. Absent: every language's. */
   locale?: NumberLanguage;
 }
 
@@ -67,7 +67,7 @@ export class LiveCardNumberDetector {
     if (options.locale !== undefined && !NUMBER_LANGUAGES.includes(options.locale)) {
       throw new EngineError("invalid_input", `locale must be one of ${NUMBER_LANGUAGES.join(", ")}`);
     }
-    this.#languages = options.locale === undefined ? NUMBER_LANGUAGES : [options.locale];
+    this.#languages = numberLanguagesFor(options.locale);
   }
 
   /**

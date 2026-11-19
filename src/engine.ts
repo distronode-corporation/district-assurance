@@ -238,7 +238,8 @@ export class Engine {
    * fixed "please don't read card numbers" line.
    */
   async redact(callId: string, text: string): Promise<{ text: string; findings: RedactionFinding[]; interrupt: boolean }> {
-    // The call's language decides whose number words are read: "once" is a number only in Spanish.
+    // The call's language decides whose number words are read: English and French always, Spanish
+    // only on a Spanish call ("once" is a number only in Spanish).
     const { locale } = await this.#read(callId);
     const result = this.#redactor.redact(text, { locale });
     if (result.findings.length > 0) {

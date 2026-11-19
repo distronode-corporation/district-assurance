@@ -3,7 +3,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import { LiveCardNumberDetector } from "../src/core/live-detector.ts";
-import { NUMBER_LANGUAGES, REDACTION_MARKERS, applyFindings, digitRuns, findCardNumbers } from "../src/core/redaction.ts";
+import { NUMBER_LANGUAGES, REDACTION_MARKERS, applyFindings, cardNumberRedactor, digitRuns, findCardNumbers, numberLanguagesFor } from "../src/core/redaction.ts";
 import { setup } from "./helpers.ts";
 
 const PAN = "4111111111111111";
@@ -159,5 +159,30 @@ describe("hostile #89: each call reads its own language's number words", () => {
     assert.deepEqual(runsIn("cuarenta y uno", NUMBER_LANGUAGES as Array<"en" | "fr" | "es">), ["41"], "with no call, Spanish too");
     assert.equal(redacted("4111 1111 1111 11 once"), MARKER, "the standalone redactor reads every language: the safe side");
     assert.throws(() => new LiveCardNumberDetector({ locale: "pt" as never }), /locale must be one of/);
+  });
+});
+
+describe("hostile #89: English and French on every call, Spanish on a Spanish call", () => {
+  const FR = ["zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf"];
+  const EN = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+
+  it("an English call redacts a card number read in French digit words, and a French call one read in English", async () => {
+    const t = setup();
+    const en = await t.engine.startCall({ locale: "en" });
+    const fr = await t.engine.startCall({ locale: "fr" });
+    const inFrench = `it is ${Array.from(PAN, (d) => FR[Number(d)]).join(" ")}`;
+    const inEnglish = `c'est ${Array.from(PAN, (d) => EN[Number(d)]).join(" ")}`;
+    assert.equal((await t.engine.redact(en.callId, inFrench)).text, `it is ${MARKER}`);
+    assert.equal((await t.engine.redact(fr.callId, inEnglish)).text, `c'est ${MARKER}`);
+    assert.equal(new LiveCardNumberDetector({ locale: "en" }).push(FR.slice(1, 9).join(" ")).interrupt, true);
+  });
+
+  it("reads Spanish words, with English and French, only on a Spanish call", () => {
+    const spanish = cardNumberRedactor.redact("cuarenta y uno once once once once once once once", { locale: "es" });
+    assert.equal(spanish.findings.length, 1);
+    assert.equal(cardNumberRedactor.redact("cuarenta y uno once once once once once once once", { locale: "fr" }).findings.length, 0);
+    assert.deepEqual(numberLanguagesFor("es"), ["en", "fr", "es"]);
+    assert.deepEqual(numberLanguagesFor("en"), ["en", "fr"]);
+    assert.deepEqual(numberLanguagesFor(undefined), ["en", "fr", "es"]);
   });
 });

@@ -59,12 +59,18 @@ interface NumberWord {
 }
 
 /**
- * The languages number words are read in. A call reads only its own language's words (`once`, `dos`
- * and `y` are Spanish numbers but English words); text redacted with no call reads every language,
- * the safe side.
+ * The languages number words are read in. English and French are read on every call, since callers
+ * switch between them and redaction errs towards removing more; Spanish words only on a Spanish call
+ * (`once`, `dos` and `y` are Spanish numbers but English words). Text redacted with no call reads
+ * every language, the safe side.
  */
 export type NumberLanguage = "en" | "fr" | "es";
 export const NUMBER_LANGUAGES: readonly NumberLanguage[] = ["en", "fr", "es"];
+
+/** The languages whose number words are read on a call in `locale`; every language with none. */
+export function numberLanguagesFor(locale: NumberLanguage | undefined): readonly NumberLanguage[] {
+  return locale === undefined || locale === "es" ? NUMBER_LANGUAGES : ["en", "fr"];
+}
 
 type WordList = ReadonlyArray<readonly [NumberWordKind, string, number]>;
 const each = (kind: NumberWordKind, list: ReadonlyArray<readonly [string, number]>): WordList => list.map(([w, v]) => [kind, w, v] as const);
@@ -401,7 +407,7 @@ export function applyFindings(text: string, findings: readonly RedactionFinding[
 
 export const cardNumberRedactor: Redactor = {
   redact(text, context) {
-    const findings = findCardNumbers(text, context?.locale === undefined ? NUMBER_LANGUAGES : [context.locale]);
+    const findings = findCardNumbers(text, numberLanguagesFor(context?.locale));
     return { text: applyFindings(text, findings), findings };
   },
 };
