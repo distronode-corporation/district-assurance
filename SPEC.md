@@ -410,7 +410,10 @@ asked for twice the link life from the request (so a text resumed late still get
 and at least the payments adapter's `capabilities.minLinkMinutes` plus 5 minutes (so the create
 that follows is never under the minimum), at most its `maxLinkMinutes` (Stripe Checkout: 30
 minutes to 24 hours). A request whose link is not known to exist and has less than the provider's
-minimum left is expired before any create (`payment.link_expired`, provider `not_created`). A link
+minimum left is expired before any create (`payment.link_expired`, provider `not_created`), unless
+another process recorded a link for it in the meantime, which that process then decides about
+(`precondition_failed` here). The adapter's `maxLinkMinutes` must be at least its `minLinkMinutes`
+plus 5, or the config is refused. A link
 is never texted with less than 5 minutes of the provider's life left: it is expired at the provider
 (`payment.link_expired`, reason `not_sent_in_time`) and the request settles `expired` when the
 provider confirms, or waits for its webhook when the provider says `not_open`. Either way

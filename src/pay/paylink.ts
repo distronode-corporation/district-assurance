@@ -190,6 +190,10 @@ export const paylinkModule: AssuranceModule = {
     const caps = capabilities.payments;
     if (caps === undefined) return [];
     if (!isCapabilities(caps)) return ["the payments adapter's capabilities must be { modes, minLinkMinutes, maxLinkMinutes }"];
+    // The provider is asked for at least its minimum plus 5 minutes, so a narrower range could never create a link.
+    if (caps.maxLinkMinutes < caps.minLinkMinutes + MIN_LINK_LIFE_MINUTES) {
+      return [`the payments adapter's maxLinkMinutes must be at least its minLinkMinutes plus ${MIN_LINK_LIFE_MINUTES}`];
+    }
     return adapterErrors(caps, s.mode ?? "platform", s.linkLifeMinutes ?? DEFAULT_LINK_LIFE_MINUTES);
   },
 
@@ -312,7 +316,11 @@ export async function requestPayment(
   // One minute over the minimum, for the provider's own latency on the create.
   if (request.linkId === "" && Date.parse(request.providerExpiresAt) - rt.clock.now().getTime() < (caps.minLinkMinutes + 1) * 60_000) {
     await rt.update(callId, (draft) => {
-      if (find(draft, request.paymentId).status !== "open") return;
+      const current = find(draft, request.paymentId);
+      if (current.status !== "open") return;
+      // Checked again in this write: another process may have created the link meanwhile, and only
+      // it may decide about a link that exists (it expires it at the provider if it is too late).
+      if (current.linkId !== "") throw new EngineError("precondition_failed", "another process created this payment link meanwhile");
       draft.emit("payment.link_expired", "code", { paymentId: request.paymentId, provider: "not_created", reason: "not_created_in_time" });
       settle(rt, draft, request.paymentId, "expired");
     });

@@ -10,6 +10,8 @@ import { builtInModules } from "../src/modules.ts";
 import { paylinkModule } from "../src/pay/paylink.ts";
 import { INSTANT_PAYMENT_METHODS, outcomeAccountMatches, paymentMethodErrors } from "../src/pay/payment.ts";
 import { parseStripeEvent } from "../src/webhooks/stripe.ts";
+import type { JsonValue } from "../src/core/canonical.ts";
+import { MemorySessionStore } from "../src/core/session-store.ts";
 import { FakePaymentLinks } from "../src/testing/fakes.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
@@ -371,7 +373,10 @@ describe("paylink: the engine's own deadline", () => {
       engineWith(platformOnly, testConfig((c) => (c.modules.paylink = { settings: { mode: "connect", connectedAccountId: ACCT } }))),
       /modules\.paylink: the payments adapter does not take connect payments/,
     );
-    assert.throws(engineWith({ modes: [], minLinkMinutes: 0, maxLinkMinutes: 1 }, testConfig()), /does not take platform payments \(it takes: none\)/);
+    assert.throws(engineWith({ modes: [], minLinkMinutes: 0, maxLinkMinutes: 10 }, testConfig()), /does not take platform payments \(it takes: none\)/);
+    // A range the engine's ask (the minimum plus 5 minutes) can never fit in is refused when saved.
+    assert.throws(engineWith({ modes: ["platform", "connect"], minLinkMinutes: 30, maxLinkMinutes: 30 }, testConfig()), /maxLinkMinutes must be at least its minLinkMinutes plus 5/);
+    assert.doesNotThrow(engineWith({ modes: ["platform", "connect"], minLinkMinutes: 30, maxLinkMinutes: 35 }, testConfig()));
     assert.throws(
       engineWith({ modes: ["platform", "connect"], minLinkMinutes: 0, maxLinkMinutes: 10 }, withFlow({ ...pay, linkLifeMinutes: 15 })),
       /linkLifeMinutes 15 is longer than the payments adapter keeps a link \(10 minutes\)/,
@@ -585,6 +590,59 @@ describe("paylink: the engine's own deadline", () => {
     await t.engine.requestPayment(callId, request);
     assert.deepEqual(payments.expired.map((e) => e.linkId), ["cs_fake_1"], "the provider closed it before A's text went out");
     assert.equal(await payments.expireLink({ linkId: "cs_fake_1", mode: "platform", idempotencyKey: "k" }).then((r) => r.state), "not_open", "so it cannot be paid");
+  });
+
+  it("never expires a request whose link another process created between the check and the write", async () => {
+    // A store that runs a hook once, right after the write it is armed for.
+    class HookedStore extends MemorySessionStore {
+      hook: (() => Promise<void>) | null = null;
+      override async compareAndSet(w: string, c: string, v: number, r: JsonValue) {
+        const result = await super.compareAndSet(w, c, v, r);
+        const run = this.hook;
+        if (result.ok && run !== null) {
+          this.hook = null;
+          await run();
+        }
+        return result;
+      }
+    }
+    const sessions = new HookedStore();
+    const t = setup({ adapters: { sessions } });
+    const callId = await verifiedCall(t);
+    const create = t.payments.createLink.bind(t.payments);
+    t.payments.createLink = async () => {
+      throw new Error("provider timed out");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /provider timed out/);
+    // A, at 00:03:50, still has time to create (31:10 left) and its create is slow.
+    t.clock.advance(230_000);
+    let release: () => void = () => undefined;
+    const slow = new Promise<void>((resolve) => (release = resolve));
+    t.payments.createLink = async (input) => {
+      await slow;
+      return create(input);
+    };
+    const a = t.engine.requestPayment(callId, request);
+    await new Promise((resolve) => setImmediate(resolve));
+    // B, at 00:04:10, reads the request with no link yet. Right after B's first write, A's create
+    // answers and A records the link; B then finds it too old from what it read.
+    t.clock.advance(20_000);
+    let linked: () => void = () => undefined;
+    const aLinked = new Promise<void>((resolve) => (linked = resolve));
+    const send = t.messages.sendText.bind(t.messages);
+    t.messages.sendText = async (input) => {
+      linked();
+      return send(input);
+    };
+    sessions.hook = async () => {
+      release();
+      await aLinked;
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /another process created this payment link meanwhile/));
+    assert.equal((await a).status, "open", "A texted its link");
+    assert.equal(t.payments.expired.length, 0);
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "payment.link_expired").length, 0, "B expired nothing");
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" }), { applied: true, callId, status: "paid" });
   });
 
   it("refuses on a call that started with paylink off", async () => {
