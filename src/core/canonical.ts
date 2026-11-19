@@ -30,8 +30,8 @@ function serialise(value: unknown, path: string): string {
   }
 }
 
-/** A string as JSON, refusing a lone UTF-16 surrogate, which RFC 8785 says must fail. */
-function jsonString(value: string, path: string): string {
+/** Whether a string holds a lone UTF-16 surrogate: one canonical JSON (RFC 8785) cannot carry. */
+export function hasLoneSurrogate(value: string): boolean {
   for (let i = 0; i < value.length; i++) {
     const unit = value.charCodeAt(i);
     if (unit >= 0xd800 && unit <= 0xdbff) {
@@ -41,8 +41,14 @@ function jsonString(value: string, path: string): string {
         continue;
       }
     }
-    if (unit >= 0xd800 && unit <= 0xdfff) throw new TypeError(`canonicalJson: lone surrogate in a string at ${path}`);
+    if (unit >= 0xd800 && unit <= 0xdfff) return true;
   }
+  return false;
+}
+
+/** A string as JSON, refusing a lone UTF-16 surrogate, which RFC 8785 says must fail. */
+function jsonString(value: string, path: string): string {
+  if (hasLoneSurrogate(value)) throw new TypeError(`canonicalJson: lone surrogate in a string at ${path}`);
   return JSON.stringify(value);
 }
 
