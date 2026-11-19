@@ -328,9 +328,9 @@ order, then one signed trailer line.
 The payload is the bytes of `district-assurance ledger export v1\n` followed by
 `canonicalJson(trailer)`, so a trailer signature and a receipt signature can never stand in for each
 other. The signer is a `ReceiptSigner`, and the receipt key set verifies trailers by `kid`. The
-trailer is signed before the first line is yielded, and a signature that is not 64 bytes (P1363)
-is refused with `invalid_input`, so a failing signer never leaves a consumer with entries and no
-valid trailer.
+trailer is signed before the first line is yielded, and a signature that is not 64 bytes (P1363),
+or that does not verify against the signer's own `publicJwk()`, is refused with `invalid_input`, so
+a failing signer never leaves a consumer with entries and no valid trailer. Each input is read once.
 
 A run starts at `fromSeq` (1 or more, at most the head plus one) or right after `cursor`
 (`<seq>.<hash>` of a previous trailer's `through`), never both, and stops at the head read when the

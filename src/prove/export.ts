@@ -95,7 +95,7 @@ async function pointAt(ledger: AuditLedger, seq: number): Promise<ChainPoint | n
 }
 
 /** Where a run starts, from `fromSeq` or a cursor, checked against the ledger. */
-async function startPoint(input: LedgerExportInput, head: ChainPoint): Promise<ChainPoint> {
+async function startPoint(input: { ledger: AuditLedger; fromSeq?: number | undefined; cursor?: string | undefined }, head: ChainPoint): Promise<ChainPoint> {
   if (input.cursor !== undefined) {
     const point = decodeCursor(input.cursor);
     if (point === null || point.seq > head.seq) throw new EngineError("invalid_input", "exportLedger: the cursor is not a cursor of this ledger");
@@ -118,20 +118,22 @@ async function startPoint(input: LedgerExportInput, head: ChainPoint): Promise<C
  * before the trailer is signed, so a ledger that was tampered with is refused, never vouched for.
  */
 export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<string, void, undefined> {
-  if ((input.fromSeq === undefined) === (input.cursor === undefined)) {
+  // Each read once: a getter read again could pass a check with one value and run with another.
+  const { ledger, signer, clock, ledgerId, fromSeq, cursor, limit } = input;
+  if ((fromSeq === undefined) === (cursor === undefined)) {
     throw new EngineError("invalid_input", "exportLedger: give fromSeq or cursor, exactly one");
   }
-  if (input.fromSeq !== undefined && !isPositiveInteger(input.fromSeq)) throw new EngineError("invalid_input", "exportLedger: fromSeq must be an integer of 1 or more");
-  if (input.limit !== undefined && !isPositiveInteger(input.limit)) throw new EngineError("invalid_input", "exportLedger: limit must be an integer of 1 or more");
-  if (typeof input.ledgerId !== "string" || input.ledgerId === "") throw new EngineError("invalid_input", "exportLedger: ledgerId must be a non-empty string");
+  if (fromSeq !== undefined && !isPositiveInteger(fromSeq)) throw new EngineError("invalid_input", "exportLedger: fromSeq must be an integer of 1 or more");
+  if (limit !== undefined && !isPositiveInteger(limit)) throw new EngineError("invalid_input", "exportLedger: limit must be an integer of 1 or more");
+  if (typeof ledgerId !== "string" || ledgerId === "") throw new EngineError("invalid_input", "exportLedger: ledgerId must be a non-empty string");
 
-  const head = await input.ledger.head();
+  const head = await ledger.head();
   // The trailer signs the head, so it must be an entry the ledger holds, even on a page short of it.
-  if ((await pointAt(input.ledger, head.seq))?.hash !== head.hash) throw new EngineError("precondition_failed", "exportLedger: the ledger head does not match its last entry");
-  const from = await startPoint(input, head);
-  const last = Math.min(head.seq, from.seq + (input.limit ?? Number.MAX_SAFE_INTEGER));
+  if ((await pointAt(ledger, head.seq))?.hash !== head.hash) throw new EngineError("precondition_failed", "exportLedger: the ledger head does not match its last entry");
+  const from = await startPoint(cursor === undefined ? { ledger, fromSeq } : { ledger, cursor }, head);
+  const last = Math.min(head.seq, from.seq + (limit ?? Number.MAX_SAFE_INTEGER));
   // One page of exactly the run's entries; an adapter that hands back more is cut to the run.
-  const entries = last === from.seq ? [] : (await input.ledger.list(from.seq + 1, last - from.seq)).filter((e) => e.seq <= last);
+  const entries = last === from.seq ? [] : (await ledger.list(from.seq + 1, last - from.seq)).filter((e) => e.seq <= last);
   const check = verifyChain(entries, from);
   if (!check.ok) throw new EngineError("precondition_failed", `exportLedger: the ledger chain does not verify at seq ${check.seq}`);
   // A verified prefix is not enough: the run must reach the end it was meant to, and at the head
@@ -143,19 +145,24 @@ export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<st
   const trailer: LedgerExportTrailerBody = {
     v: 1,
     type: "ledger_export",
-    ledgerId: input.ledgerId,
+    ledgerId,
     from,
     through: check.head,
     count: entries.length,
     head,
-    exportedAt: input.clock.now().toISOString(),
+    exportedAt: clock.now().toISOString(),
     cursor: encodeCursor(check.head),
   };
-  // Signed before any line is handed out, so a signer that fails, or answers anything but a 64-byte
-  // P1363 signature (a key store's DER), never leaves a consumer with entries and no valid trailer.
-  const signature = await input.signer.sign(ledgerExportPayload(trailer));
+  // Signed before any line is handed out, so a signer that fails, answers anything but a 64-byte
+  // P1363 signature (a key store's DER), or signs with another key than the one it publishes, never
+  // leaves a consumer with entries and no valid trailer: the signature is checked against the
+  // signer's own public key as an auditor would check it.
+  const signature = await signer.sign(ledgerExportPayload(trailer));
   if (signature.byteLength !== 64) throw new EngineError("invalid_input", `exportLedger: the signer returned ${signature.byteLength} bytes, not a 64-byte P1363 signature`);
-  const signed: LedgerExportTrailer = { trailer, alg: input.signer.algorithm, kid: input.signer.keyId, signature: Buffer.from(signature).toString("base64url") };
+  const signed: LedgerExportTrailer = { trailer, alg: signer.algorithm, kid: signer.keyId, signature: Buffer.from(signature).toString("base64url") };
+  if (!signatureValid(signed, [{ ...signer.publicJwk(), kid: signer.keyId }])) {
+    throw new EngineError("invalid_input", "exportLedger: the signer's signature does not verify against its own public key");
+  }
   for (const entry of entries) yield `${canonicalJson(entry)}\n`;
   yield `${canonicalJson(signed)}\n`;
 }
