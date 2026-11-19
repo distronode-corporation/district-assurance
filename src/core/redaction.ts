@@ -109,11 +109,22 @@ export function findCardNumbers(text: string): RedactionFinding[] {
   return findings;
 }
 
-/** Replaces each finding with its marker. Findings must be sorted and must not overlap. */
+/**
+ * Replaces each finding with its marker, in any order: the findings are sorted by position first,
+ * and overlapping ones are merged into one span, marked with the kind of the one that starts first
+ * (the longer at a tie), so no part of any finding is left in the text.
+ */
 export function applyFindings(text: string, findings: readonly RedactionFinding[]): string {
+  const sorted = [...findings].sort((a, b) => a.start - b.start || b.end - a.end);
+  const spans: RedactionFinding[] = [];
+  for (const f of sorted) {
+    const last = spans.at(-1);
+    if (last !== undefined && f.start < last.end) last.end = Math.max(last.end, f.end);
+    else spans.push({ ...f });
+  }
   let out = "";
   let at = 0;
-  for (const f of findings) {
+  for (const f of spans) {
     out += text.slice(at, f.start) + REDACTION_MARKERS[f.kind];
     at = f.end;
   }

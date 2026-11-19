@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import { SeenEvents, createReferenceServer } from "../examples/reference-server/src/app.ts";
 import type { Engine } from "../src/index.ts";
 import { FixedClock, createTestEngine } from "../src/testing/index.ts";
+import { REDACTION_MARKERS, applyFindings, findCardNumbers } from "../src/core/redaction.ts";
 import { signStripePayload, verifyStripeSignature } from "../src/webhooks/stripe.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup } from "./helpers.ts";
 
@@ -210,5 +211,21 @@ describe("hostile: reference server webhooks", () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+});
+
+describe("hostile: applyFindings takes findings in any order", () => {
+  it("applies findings out of order, and merges overlapping ones, so no part of any is left", () => {
+    const text = "first 4111 1111 1111 1111 then 4111111111111111 end";
+    const found = findCardNumbers(text);
+    assert.equal(found.length, 2);
+    const M = REDACTION_MARKERS.card_number;
+    assert.equal(applyFindings(text, [...found].reverse()), `first ${M} then ${M} end`, "reversed");
+    const overlapping = [found[1]!, { kind: "card_number" as const, start: found[0]!.start + 3, end: found[1]!.start + 2 }, found[0]!];
+    assert.equal(applyFindings(text, overlapping), `first ${M} end`, "one span over all three");
+    const tie = [{ kind: "card_number" as const, start: found[0]!.start, end: found[0]!.start + 4 }, found[0]!];
+    assert.equal(applyFindings(text, tie), applyFindings(text, [found[0]!]), "the same start: the longer one decides the span");
+    assert.equal(applyFindings(text, []), text);
+    assert.deepEqual(found[0], findCardNumbers(text)[0], "the caller's findings are left as they were");
   });
 });
