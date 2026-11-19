@@ -571,6 +571,9 @@ and `lifetime` (longer than 900 seconds, or ending before it starts). This assum
 the relay's clocks agree (NTP): a relay whose clock runs behind by some seconds accepts a grant for
 that much longer. `new SeenGrants()`: `accept(body, now)` is true once per grant id, and keeps the
 id until the grant expires, when the verifier refuses it anyway. `engine.accessKeys()` is the public key set.
+It, and `engine.receiptKeys()`, publish only a key's public members (`kty`, `crv`, `x`, `y`, `kid`,
+`alg`, `use`), whatever a signer's `publicJwk` returns, so a signer that hands back its private `d`
+never has it published.
 
 **The relay contract, version 1** (`webhookRelay({url, timeoutMs?})`): `POST <url>` with
 `content-type: application/json`, `idempotency-key: <the key above>` and the signed grant as

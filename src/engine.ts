@@ -429,7 +429,7 @@ export class Engine {
 
   /** The key set door relays verify access grants with (empty without an access signer). */
   accessKeys(): JsonWebKey[] {
-    return this.#adapters.accessSigner === undefined ? [] : [this.#adapters.accessSigner.publicJwk()];
+    return this.#adapters.accessSigner === undefined ? [] : [publicMembers(this.#adapters.accessSigner.publicJwk())];
   }
 
   // ---- Trace (prove) -----------------------------------------------------------------------
@@ -481,7 +481,7 @@ export class Engine {
 
   /** The key set for verifying this engine's receipts (empty without a signer). */
   receiptKeys(): JsonWebKey[] {
-    return this.#adapters.signer === undefined ? [] : [this.#adapters.signer.publicJwk()];
+    return this.#adapters.signer === undefined ? [] : [publicMembers(this.#adapters.signer.publicJwk())];
   }
 
   // ---- outside modules ---------------------------------------------------------------------
@@ -731,6 +731,18 @@ function distinctSigners(adapters: EngineAdapters): string[] {
   const a = der(signer.publicJwk());
   const b = der(accessSigner.publicJwk());
   return a !== null && b !== null && a.equals(b) ? ["accessSigner must be its own key, not the receipt signer's"] : [];
+}
+
+/**
+ * Only the public members of an EC key, whatever a signer's `publicJwk` returns: a signer that
+ * hands back its private `d` (or anything else) never has it published in a key set.
+ */
+function publicMembers(jwk: JsonWebKey & { kid?: string }): JsonWebKey {
+  const kept: Record<string, unknown> = {};
+  for (const name of ["kty", "crv", "x", "y", "kid", "alg", "use"] as const) {
+    if (jwk[name as keyof typeof jwk] !== undefined) kept[name] = jwk[name as keyof typeof jwk];
+  }
+  return kept as JsonWebKey;
 }
 
 export function createEngine(options: EngineOptions): Engine {

@@ -661,6 +661,19 @@ describe("gate: the engine owns every outcome (ADR-25)", () => {
     assert.doesNotThrow(() => setup({ config: noReceipts, adapters: { signer: undefined, accessSigner: shared } }), "no receipts: nothing to clash with");
   });
 
+  it("publishes only public key members, whatever a signer's publicJwk returns", () => {
+    const leaky = (kid: string) => {
+      const s = generateTestSigner(kid);
+      return { ...s, publicJwk: () => ({ ...s.publicJwk(), d: "SECRET", p: "x", k: "y" }) };
+    };
+    const t = setup({ adapters: { signer: leaky("r-1"), accessSigner: leaky("a-1") } });
+    for (const key of [...t.engine.receiptKeys(), ...t.engine.accessKeys()]) {
+      assert.deepEqual(Object.keys(key).sort(), ["alg", "crv", "kid", "kty", "use", "x", "y"].filter((k) => k in key).sort());
+      assert.ok(!("d" in key) && !JSON.stringify(key).includes("SECRET"));
+    }
+    assert.deepEqual([...t.engine.receiptKeys(), ...t.engine.accessKeys()].map((k) => (k as { kid?: string }).kid), ["r-1", "a-1"]);
+  });
+
   it("uses an access controller only by the name a target gives", async () => {
     const side: AccessController = { unlock: async () => ({ outcome: "delivered", providerRef: "side-1", confirmed: true }) };
     const lobby = new FakeAccessController();
