@@ -237,7 +237,9 @@ it), per calling number and per subject.
 - The counters are read first: a counter already at its limit refuses the start without counting
   it. Otherwise the start is counted on each counter, and one that a concurrent start took over the
   limit refuses it too (that start stays counted).
-- A refused start throws `EngineError("rate_limited")` with one message, whichever limit was hit.
+- A refused start throws `RateLimitedError` (an `EngineError` with code `rate_limited`) with one
+  message, whichever limit was hit, and the `callId` of the call it was refused on, so a host that
+  let `startCall` choose the id can still end the call it opened.
   The call keeps the flow, `failed` (on `startCall`, the call is still created), so no step runs and
   no other flow starts on it; the host speaks its fixed line and ends the call. It writes
   `flow.rate_limited` with the flow and the `scope` (`subject` or `number`), never a value.

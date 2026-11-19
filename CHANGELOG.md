@@ -11,7 +11,7 @@ All notable changes to this project are documented here. The format follows
 - Limits across flows (VER-15): failure counters are pinned to subject or number and factor kind,
   never flow or call; flows that need a money, contact or access scope are limited per hour (10
   per calling number, 5 per subject, Badge's `lockout.flowStartsPerHour`, defaults as ceilings),
-  refused with one `rate_limited` answer and a `flow.rate_limited` event; `startCall` and
+  refused with one `rate_limited` answer (`RateLimitedError`, with the call's id) and a `flow.rate_limited` event; `startCall` and
   `startFlow` take `callingNumber`.
 - Lockouts across calls (VER-1): an `AttemptCounters` adapter (`MemoryAttemptCounters`,
   `attemptCountersContract`) counts failures of every entered factor per subject and per calling

@@ -45,3 +45,17 @@ export class EngineError extends Error {
     this.code = code;
   }
 }
+
+/**
+ * A flow start refused by its hourly limit (VER-15), with the call it was refused on: `startCall`
+ * still opens the call, with the flow failed, so the host needs its id to end it. The message is the
+ * same whichever limit was hit.
+ */
+export class RateLimitedError extends EngineError {
+  readonly callId: string;
+
+  constructor(callId: string) {
+    super("rate_limited", "too many flows of this kind started in the last hour; try again later");
+    this.callId = callId;
+  }
+}

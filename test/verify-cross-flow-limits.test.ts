@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 
 import type { AttemptCounterKey, AttemptCounters } from "../src/core/adapters.ts";
 import { ConfigError, validateConfig, type FlowConfig } from "../src/core/config.ts";
-import { EngineError } from "../src/core/errors.ts";
+import { EngineError, RateLimitedError } from "../src/core/errors.ts";
 import { ModuleRegistry } from "../src/core/module.ts";
 import { builtInModules } from "../src/modules.ts";
 import { FLOW_START, numberKeyFor } from "../src/verify/counters.ts";
@@ -164,6 +164,13 @@ describe("the hourly limit on flow starts (VER-15)", () => {
     }
     const refused = await thrown(t.engine.startCall({ callId: "call_refused", flow: "deposit", callingNumber }));
     assert.equal(refused.code, "rate_limited");
+    // Without a callId from the host, the error names the call the engine opened, so the host can end it (review).
+    const unnamed = await thrown(t.engine.startCall({ flow: "deposit", callingNumber }));
+    assert.ok(unnamed instanceof RateLimitedError);
+    assert.equal(unnamed.message, refused.message);
+    assert.equal((await t.engine.flowPosition(unnamed.callId))!.status, "failed");
+    await t.engine.endCall(unnamed.callId);
+    assert.equal((await t.engine.state(unnamed.callId)).phase, "ended");
     assert.deepEqual(await t.engine.flowPosition("call_refused"), { flow: "deposit", revision: "default", status: "failed", index: 0, step: null });
     assert.deepEqual(await lastEvent(t, "flow.rate_limited"), { flow: "deposit", scope: "number" });
     await assert.rejects(t.engine.beginVerification("call_refused", { accountNumber: ACCOUNT }), rejects("precondition_failed", /has failed/));

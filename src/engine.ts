@@ -14,7 +14,7 @@ import type { AttemptCounterKey, IntakeRecord, SessionStore } from "./core/adapt
 import type { JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
-import { EngineError, NotImplementedError } from "./core/errors.ts";
+import { EngineError, NotImplementedError, RateLimitedError } from "./core/errors.ts";
 import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
 import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
 import { hmacSha256Hex } from "./core/hash.ts";
@@ -47,9 +47,6 @@ export const MAX_WRITE_ATTEMPTS = 5;
 
 /** The scope classes whose flows are limited per hour (VER-15). */
 const LIMITED_CLASSES: ReadonlyArray<ScopeClass | null> = ["money", "contact", "access"];
-
-/** The one answer to a refused flow start, whichever limit was hit: it never says which. */
-const RATE_LIMITED = "too many flows of this kind started in the last hour; try again later";
 
 type FlowStart = { over: AttemptCounterKey["scope"] | null; counted: string[] | null };
 
@@ -220,7 +217,8 @@ export class Engine {
     const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
     if (!created) throw new EngineError("invalid_input", "a call with that id exists");
     await this.#flush(callId, 1, record);
-    if (start.over !== null) throw new EngineError("rate_limited", RATE_LIMITED);
+    // With the call's id: the call is open, its flow failed, and the host ends it.
+    if (start.over !== null) throw new RateLimitedError(callId);
     return this.state(callId);
   }
 
@@ -307,7 +305,7 @@ export class Engine {
       this.#keepNumber(draft.record, numberKey);
       this.#attachFlow(draft, name, definition, revision, start);
     });
-    if (start.over !== null) throw new EngineError("rate_limited", RATE_LIMITED);
+    if (start.over !== null) throw new RateLimitedError(callId);
     return (await this.flowPosition(callId))!;
   }
 
@@ -415,7 +413,7 @@ export class Engine {
       current.status = "failed";
       draft.emit("flow.rate_limited", "code", { flow: current.name, scope: over });
     });
-    if (over !== null) throw new EngineError("rate_limited", RATE_LIMITED);
+    if (over !== null) throw new RateLimitedError(callId);
   }
 
   /** Judges every keypad field at once. The answer is the same for an unknown account and a wrong value. */
