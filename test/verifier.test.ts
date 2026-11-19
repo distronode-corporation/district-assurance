@@ -145,4 +145,17 @@ describe("stand-alone receipt verifier (PRV-2)", () => {
       }),
     );
   });
+
+  it("stops reading standard input past 1 MiB, without waiting for it to end", { timeout: 30_000 }, async () => {
+    // A stream that never ends (a pipe left open, /dev/zero): the limit must cut it off while reading.
+    const child = spawn(process.execPath, [SCRIPT, "-", keysFile]);
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    child.stdin.on("error", () => undefined);
+    child.stdin.write(Buffer.alloc(2 * 1024 * 1024, 0x20));
+    const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
+    child.stdin.destroy();
+    assert.equal(code, 2);
+    assert.match(stderr, /the receipt is larger than 1 MiB/);
+  });
 });

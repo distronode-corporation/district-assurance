@@ -10,7 +10,7 @@
 // must be https, or http on this machine (127.0.0.1, localhost, [::1]): a key set fetched in the
 // clear could be swapped for one that makes a forged receipt look valid.
 import { createPublicKey, verify } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { createReadStream } from "node:fs";
 
 const MAX_BYTES = 1024 * 1024;
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
@@ -75,11 +75,17 @@ function parse(text, what) {
   }
 }
 
-function readSource(source, what) {
+/** Reads a file or standard input, stopping as soon as it passes 1 MiB (a pipe or device may never end). */
+async function readSource(source, what) {
   try {
-    const bytes = readFileSync(source === "-" ? 0 : source);
-    if (bytes.length > MAX_BYTES) throw new Usage(`${what} is larger than 1 MiB`);
-    return bytes.toString("utf8");
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of source === "-" ? process.stdin : createReadStream(source)) {
+      total += chunk.byteLength;
+      if (total > MAX_BYTES) throw new Usage(`${what} is larger than 1 MiB`);
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks).toString("utf8");
   } catch (error) {
     if (error instanceof Usage) throw error;
     throw new Usage(`cannot read ${what} from ${source}`);
@@ -124,9 +130,9 @@ async function fetchKeySet(source) {
 async function main(args) {
   if (args.length !== 2) throw new Usage("usage: node verify-receipt.mjs <receipt.json | -> <keys.json | https://.../receipt-keys.json>");
   const [receiptSource, keysSource] = args;
-  const receipt = parse(readSource(receiptSource, "the receipt"), "the receipt");
+  const receipt = parse(await readSource(receiptSource, "the receipt"), "the receipt");
   const isUrl = /^https?:\/\//i.test(keysSource);
-  const keySet = parse(isUrl ? await fetchKeySet(keysSource) : readSource(keysSource, "the key set"), "the key set");
+  const keySet = parse(isUrl ? await fetchKeySet(keysSource) : await readSource(keysSource, "the key set"), "the key set");
   // A JWK set (`{"keys": [...]}`, what the reference server serves) or a bare list of keys.
   const keys = Array.isArray(keySet) ? keySet : keySet?.keys;
   if (!Array.isArray(keys)) throw new Usage('the key set must be {"keys": [...]} or a list of keys');
