@@ -434,7 +434,8 @@ export class Engine {
       at: this.#now(),
       detail: { seq: head.seq, proof },
     });
-    this.#notify({ name: "ledger.anchored", callId: null, actor: entry.actor, at: entry.at, detail: entry.detail });
+    // A copy for the listener, so what it does to the event never reaches the entry returned here.
+    this.#notify({ name: "ledger.anchored", callId: null, actor: entry.actor, at: entry.at, detail: structuredClone(entry.detail) });
     return entry;
   }
 
