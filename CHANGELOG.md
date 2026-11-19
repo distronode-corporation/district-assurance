@@ -104,6 +104,7 @@ All notable changes to this project are documented here. The format follows
   factor judge that throws or rejects (a key store outage) records no factor and writes
   `verification.factor_error`; the attempt stays counted.
 - Spoken answers (VER-3): `normaliseSpokenAnswer` reads Canadian postal codes, US ZIP codes and short references spoken in English or French, exactly or `unusable`, and the `spoken_knowledge` factor compares them like keypad fields under the policy's new `spoken` fields.
+- PIN enrolment and reset (VER-6): `enrolPin` lets a caller verified to level 2 on the call choose a PIN, keyed twice, weak PINs refused, stored through the new `RecordStore.putPinDigest`; `resetPin` is the business's host call; `pin.enrolled` and `pin.reset` events.
 
 ### Changed
 

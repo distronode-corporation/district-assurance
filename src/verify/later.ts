@@ -13,11 +13,3 @@ export function sendTextCode(_input: { callId: string }): never {
 export function checkTextCode(_input: { callId: string; code: string }): never {
   throw new NotImplementedError("checkTextCode", "VER-2");
 }
-
-/**
- * Lets a caller who verified to level 2 or above on this call choose a PIN, stored as the keyed
- * hash the PIN factor compares against. Checking a PIN is built (the `pin` factor); enrolment is not.
- */
-export function enrolPin(_input: { callId: string }): never {
-  throw new NotImplementedError("enrolPin", "VER-6");
-}

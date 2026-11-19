@@ -162,6 +162,11 @@ export interface SubjectRecord {
   knowledge: Record<string, string>;
   /** The HMAC of the subject's PIN (`pinDigest`), for the PIN factor in `keyed_hash` mode. */
   pinDigest?: string;
+  /**
+   * Which enrolment stored `pinDigest` (VER-6): written with it by `putPinDigest`, so a call
+   * finishing an enrolment whose last write failed can tell its own from another's. Opaque.
+   */
+  pinEnrolmentId?: string;
 }
 
 /** What the engine asks an `AmountSource` for: the reference a step or the host's code named, and whose call it is. */
@@ -282,6 +287,14 @@ export interface RecordStore {
   /** Idempotent by `recordId`: the engine retries a write whose outcome it could not see, with the same record. */
   putIntakeRecord(record: IntakeRecord): Promise<void>;
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
+  /**
+   * Stores a subject's PIN digest (`pinDigest`) with the id of the enrolment that chose it
+   * (`pinEnrolmentId`), or removes both with null (a reset by the business). Never given the PIN
+   * itself. A digest is stored only if the subject has none, as one atomic step (of two enrolments at
+   * once, one wins and the other replaces nothing); the answer says whether it was stored. Null always
+   * removes and answers true. A subject the store does not have is left alone, and the answer is false.
+   */
+  putPinDigest(workspaceId: string, subjectKey: string, digest: string | null, enrolmentId?: string): Promise<boolean>;
 }
 
 export interface AuditInput {

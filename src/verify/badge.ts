@@ -56,6 +56,13 @@ export interface BadgeSlice {
   numberKey: string | null;
   /** Judged attempts per factor kind on this call. */
   attempts: Record<string, number>;
+  /** Tries at choosing a PIN on this call (`enrolPin`), counted before each is judged. Absent until the first. */
+  pinEnrolments?: number;
+  /**
+   * The PIN digests this call's tries are storing and have not yet recorded as enrolled
+   * (`pin.enrolled`), one entry per try. Never the digits. At most `maxAttemptsPerCall` entries.
+   */
+  pinPending?: Array<{ subjectKey: string; digest: string; enrolmentId: string }>;
   /** A keypad or PIN factor matched since verification last started from nothing. */
   knowledgeMatched: boolean;
   carrier: CarrierSignalReport | null;

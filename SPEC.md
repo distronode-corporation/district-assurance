@@ -236,8 +236,9 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
 - An entry is well formed when it is ASCII digits with a length from `minDigits` to `maxDigits`.
   A malformed entry is still an attempt, and fails.
 - `keyed_hash` mode: the stored digest is `pinDigest(knowledgeKey, subjectKey, pin)` =
-  `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`, in `SubjectRecord.pinDigest`. The
-  entry is hashed the same way and compared in constant time; an unknown subject, a subject without
+  `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`, in `SubjectRecord.pinDigest`,
+  read from the `RecordStore` at every attempt (not from the call's copy of the subject), so a
+  reset or an enrolment since verification began counts. The entry is hashed the same way and compared in constant time; an unknown subject, a subject without
   a digest and a malformed entry do the same work and give the same answer.
 - `verifier` mode: the host's `PinVerifier.verify({workspaceId, subjectKey, pin})` decides; the
   PIN is passed once and kept nowhere. It is asked for every attempt: for a malformed entry or an
@@ -254,8 +255,39 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   `startPhotoId` resumes with the same idempotency keys, so a call never has two links. If the
   provider answers a resume with a new session (it pruned the key), that session is enrolled before
   its link is texted, so its outcome applies; a repeated session is enrolled once. After `maxAttemptsPerCall`,
-  `submitPin` returns `locked` without judging. Across calls: below. Enrolment: planned
-  (VER-6).
+  `submitPin` returns `locked` without judging. Across calls: below.
+- Enrolment: `enrolPin(callId, {pin, confirm})` lets a caller choose a PIN, keyed twice (each
+  read once; a value that is not a string is `malformed`). It needs
+  the `pin` factor on in `keyed_hash` mode (in `verifier` mode the host's own store enrols, and
+  `enrolPin` refuses with `precondition_failed`), a call with no running or ended flow
+  (`precondition_failed`), an open call (`invalid_transition`) and an unexpired grant at level 2 or
+  above from this call (`scope_denied`). Each try is counted in its own write before it is judged,
+  up to `maxAttemptsPerCall`; after that it answers `{enrolled: false, reason: "locked"}` without
+  judging. The subject is read from the `RecordStore`; one not on file, or one that already has a
+  PIN, is refused (`precondition_failed`): only the business changes a PIN on file. Both entries
+  are hashed as `pinDigest` and compared in constant time. Answers: `malformed` (either entry is
+  not digits of a length from `minDigits` to `maxDigits`), `mismatch`, `weak` (every digit the
+  same, a run up or down with 0 following 9, as in 1234, 4321 or 7890, or a PIN equal to the
+  subject's account number or any keypad knowledge on file, compared as keyed hashes; `weak` does
+  not say which), or `{enrolled: true}` once `RecordStore.putPinDigest(workspaceId, subjectKey,
+  digest, enrolmentId)` stored it. Then `pin.enrolled`. Each try has its own enrolment id (the call
+  id and the try's number) and records its digest and id as pending on the call (one entry per try,
+  so two tries at once never overwrite each other's) before the store's write; the store keeps the
+  id with the digest (`SubjectRecord.pinEnrolmentId`), and a reset removes both.
+  `putPinDigest` stores a digest only if the subject has none, in one atomic step, and answers
+  whether it did; when it did not (another call or try enrolled first) the try takes its own entry
+  back and is refused (`precondition_failed`), and nothing is replaced, so a retry of it is refused
+  too. The try that stored writes `pin.enrolled` and clears every pending entry for that digest. If
+  the session write after a stored digest fails, a retry on the same call with the same PIN finishes
+  that enrolment only when the id on file is one of this call's own pending tries (so another
+  call's enrolment of the same PIN, or one after a reset, never passes for it), checked in the write
+  that records it (`{enrolled: true}`, one `pin.enrolled`), even past `maxAttemptsPerCall` (such a
+  retry is not counted); any other PIN is refused as one on file, or `locked` past the limit.
+- Reset: `resetPin(subjectKey)` is a host call for the business's own staff tools, never on a
+  caller's request, and needs the `pin` factor on (and a string subject key: `invalid_input` otherwise). In `keyed_hash` mode it removes the digest
+  (`putPinDigest` with null), so the subject has no PIN until they enrol again at level 2; in
+  `verifier` mode the host's store resets its own PIN. Either way it clears the subject's PIN
+  failure counters when the engine has a `counters` adapter (VER-1), and appends `pin.reset` to the ledger with no call.
 
 **Lockouts across calls (VER-1).** Every factor the caller enters (keypad knowledge, the PIN,
 plug-ins) is also counted across calls, in an `AttemptCounters` store every engine of the
@@ -422,6 +454,8 @@ answer on file, a phone number, a link or card data.
 | `identity.link_sent` | none |
 | `verification.finished` | `level`, `methods`, `discounted`, `policyVersion`, `configRevision`; `voidedByTaint: true` when a taint landed in that verification |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt`, `policyVersion`, `configRevision` |
+| `pin.enrolled` | none (never the digits, the digest or their length) |
+| `pin.reset` | `subjectKey`; actor `member`, `callId` null |
 | `session.tainted` | `source` |
 | `sensitive.opened` / `sensitive.closed` | `reason` / none |
 | `intake.started` | `formId`, `version` |

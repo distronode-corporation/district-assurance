@@ -76,7 +76,28 @@ the lock per calling number (tested). Taking it off is one atomic step of the st
 10 guesses per subject per 24 hours, about 3,650 a year against 10,000 PINs, so a 4-digit PIN
 still needs watching (`verification.locked` in the ledger) and a longer PIN where the risk is
 high. In `verifier` mode the host's PIN store is asked for every attempt, with a stand-in for a
-malformed entry, so timing does not tell them apart.
+malformed entry, so timing does not tell them apart. A PIN a caller chooses (`enrolPin`) is refused when every digit is the same, when it is
+a run (1234, 4321, 7890), or when it equals the account number or any keypad knowledge on file,
+with one answer (`weak`) for all three, so a try never says which value is on file (tested).
+
+### PIN enrolment and reset
+
+A caller who passed weaker checks choosing or replacing a PIN, which would then stand for them on
+every later call. **Controls:** `enrolPin` needs a grant at level 2 or above from the same call,
+which always includes a factor that is not knowledge, on an open call outside any flow; tries are
+counted before they are judged and limited to the PIN's attempts per call; the PIN is keyed twice
+and the two digests compared in constant time; only a subject with no PIN on file can enrol, so a
+caller can never replace a PIN: changing one is `resetPin`, a host call from the business's own
+tools (tested). The store writes a digest only if none is on file, in one atomic step, so of two
+enrolments at once one wins and the other is refused without replacing it, and a retry of the loser
+is refused too, even when its take-back write failed, because a retry finishes only an enrolment
+whose id, stored with the digest, is the retrying call's own; whichever try stored the PIN writes
+`pin.enrolled`, once, even when two tries on one
+call race or the session write after the store's fails on the call's last try (tested). The PIN factor
+reads the digest from the store on every attempt, so after a reset the old PIN fails even on a call
+that began verification before it (tested). In `verifier` mode the engine never enrols. `pin.enrolled` and `pin.reset` carry no
+digits (tested). Who may call `resetPin`, and how the business confirms the request first, is the
+host's (left to the host).
 
 ### Spoken answers
 
@@ -457,6 +478,9 @@ computing digests, so who may call the key store remains the host's control.
 - Choosing the subject when it starts verification with a subject key (for example the owner of
   the line it was called on). That choice is not a factor: the PIN or other factors still decide.
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.
+- Calling `resetPin` only from the business's own staff tools, after the business has confirmed
+  the request, never from a path a caller or the model can reach; and a `RecordStore.putPinDigest`
+  that stores only the digest it is given, and only if the subject has none, atomically.
 - Who may edit a workspace's FlowConfig, and keeping its revisions.
 - Keeping `refundPayment` on the business's side (a back office, staff tools), never on a tool the
   model can call, and deciding who in the business may ask for a refund.
