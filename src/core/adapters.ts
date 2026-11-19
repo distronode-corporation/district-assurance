@@ -95,6 +95,12 @@ export interface AttemptCounters {
    * the first. The store may forget failures before `since`.
    */
   recordFailure(key: AttemptCounterKey, at: string, since: string): Promise<string[]>;
+  /**
+   * Forgets one failure recorded at `at` and keeps every other, in one atomic step, so a failure
+   * another attempt records meanwhile is never lost; nothing when there is none. After a pass, it
+   * takes the passing attempt's own failure off the calling number.
+   */
+  removeFailure(key: AttemptCounterKey, at: string): Promise<void>;
   /** Forgets every failure for the key: after a pass, or when the business lifts a lock. */
   reset(key: AttemptCounterKey): Promise<void>;
 }
