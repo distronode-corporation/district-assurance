@@ -661,9 +661,25 @@ export class Engine {
 
   /** Appends any ledger entries a call still has pending (after a ledger outage). Every write does this too. */
   async flushLedger(callId: string): Promise<void> {
+    await this.#flushStored(callId, false);
+  }
+
+  /**
+   * flushLedger, and for a call the store listed as pending (`unmark`), a write that clears the
+   * mark when nothing is pending: a write that sent no hint (an engine from before INT-5) can empty
+   * the outbox and leave the mark, and `#flush` writes nothing on an empty outbox, so the call would
+   * be listed for ever. A host's own flushLedger never writes on an empty outbox.
+   */
+  async #flushStored(callId: string, unmark: boolean): Promise<void> {
     const stored = await this.#sessions.get(this.workspaceId, callId);
     if (stored === null) throw new EngineError("unknown_call", "no such call");
-    await this.#flush(callId, stored.version, structuredClone(stored.record) as unknown as CallRecord);
+    const record = structuredClone(stored.record) as unknown as CallRecord;
+    if (unmark && record.outbox.length === 0) {
+      // A lost write here is fine: the write that won sent its own hint.
+      await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, stored.record, { ledgerPending: false });
+      return;
+    }
+    await this.#flush(callId, stored.version, record);
   }
 
   /**
@@ -680,7 +696,7 @@ export class Engine {
     const report: FlushReport = { flushed: [], failed: [] };
     for (const callId of await this.#sessions.pendingCalls(this.workspaceId, limit)) {
       try {
-        await this.flushLedger(callId);
+        await this.#flushStored(callId, true);
         report.flushed.push(callId);
       } catch {
         report.failed.push(callId);

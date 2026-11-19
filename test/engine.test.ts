@@ -885,6 +885,28 @@ describe("Engine event delivery (INT-5)", () => {
     assert.equal(verifyChain(entries).ok, true);
   });
 
+  it("unmarks a call whose outbox a write without a hint emptied, so it is not listed for ever", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    const stored = (await t.sessions.get("ws_test", callId))!;
+    const record = stored.record as unknown as { outbox: unknown[] };
+    // An engine from before INT-5 (a rolling deploy) writes pending entries with the hint, then
+    // clears them with a write that sends none, so the store keeps the call marked.
+    assert.equal(record.outbox.length, 0);
+    await t.sessions.compareAndSet("ws_test", callId, stored.version, { ...record, outbox: [{ eventId: "x" }] } as never, { ledgerPending: true });
+    await t.sessions.compareAndSet("ws_test", callId, stored.version + 1, { ...record, outbox: [] } as never);
+    assert.deepEqual(await t.sessions.pendingCalls!("ws_test", 10), [callId], "marked, with nothing pending");
+    assert.deepEqual(await t.engine.flushPending(), { flushed: [callId], failed: [] });
+    assert.deepEqual(await t.sessions.pendingCalls!("ws_test", 10), [], "unmarked");
+    assert.deepEqual(await t.engine.flushPending(), { flushed: [], failed: [] });
+    const entries = await t.ledger.list();
+    assert.deepEqual(entries.map((e) => e.event), ["call.started"], "nothing appended for it");
+    // flushLedger itself, which a host may call at any time, writes nothing on an empty outbox.
+    const { version } = (await t.sessions.get("ws_test", callId))!;
+    await t.engine.flushLedger(callId);
+    assert.equal((await t.sessions.get("ws_test", callId))!.version, version);
+  });
+
   it("rotates the pending calls, so one that keeps failing does not starve the rest", async () => {
     const ledger = new BlockingLedger();
     const t = setup({ adapters: { ledger } });

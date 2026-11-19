@@ -300,7 +300,10 @@ first entry), so nothing is lost or doubled.
 `flushPending(limit = 100)` is the background flush a host schedules (for example every minute, in
 any process): it asks the store's `pendingCalls` for up to `limit` calls and flushes each in turn,
 returning `{flushed, failed}` (call ids); a call that fails stays pending for the next run, and
-the others go on. Two runs at once append nothing twice. It throws `invalid_input` for a limit
+the others go on. A listed call with nothing pending (a write that sent no hint, from an engine
+before INT-5, emptied its outbox and left the mark) is unmarked by a write with
+`{ledgerPending: false}`; `flushLedger` itself writes nothing on an empty outbox. Two runs at once
+append nothing twice. It throws `invalid_input` for a limit
 that is not a positive integer, and `precondition_failed` when the store has no `pendingCalls`.
 `auditLedgerContract(factory)` in `district-assurance/testing` checks that a ledger appends a
 replayed run of event ids once, as a retried flush sends it.
