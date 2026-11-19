@@ -24,7 +24,7 @@ describe("MemoryAttemptCounters passes the AttemptCounters contract", () => {
 /** A store with one flaw at a time, to show the contract suite catches it. */
 class FlawedCounters implements AttemptCounters {
   readonly #failures = new Map<string, string[]>();
-  readonly flaw: "racy" | "ignores_since" | "shares_keys" | "keeps_after_reset";
+  readonly flaw: "racy" | "ignores_since" | "shares_keys" | "keeps_after_reset" | "removes_by_rewrite" | "removes_all";
 
   constructor(flaw: FlawedCounters["flaw"]) {
     this.flaw = flaw;
@@ -51,14 +51,24 @@ class FlawedCounters implements AttemptCounters {
     return this.#read(key, since);
   }
 
+  /** Atomic except in the rewrite mode, which reads, yields and writes back, as a reset and a rewrite would. */
+  async removeFailure(key: AttemptCounterKey, at: string): Promise<void> {
+    const before = this.#read(key, LONG_AGO);
+    if (this.flaw === "removes_by_rewrite") await new Promise((resolve) => setImmediate(resolve));
+    const i = before.lastIndexOf(at);
+    if (i !== -1) before.splice(i, 1);
+    if (this.flaw === "removes_by_rewrite") this.#failures.set(this.#id(key), before);
+    else this.#failures.set(this.#id(key), this.flaw === "removes_all" && i !== -1 ? [] : this.#read(key, LONG_AGO).filter((_, j) => j !== i));
+  }
+
   async reset(key: AttemptCounterKey): Promise<void> {
     if (this.flaw !== "keeps_after_reset") this.#failures.delete(this.#id(key));
   }
 }
 
 describe("the counters contract suite", () => {
-  for (const flaw of ["racy", "ignores_since", "shares_keys", "keeps_after_reset"] as const) {
-    it(`catches a store that is ${flaw.replaceAll("_", " ")}`, async () => {
+  for (const flaw of ["racy", "ignores_since", "shares_keys", "keeps_after_reset", "removes_by_rewrite", "removes_all"] as const) {
+    it(`catches a store that ${flaw.startsWith("removes") ? "" : "is "}${flaw.replaceAll("_", " ")}`, async () => {
       const failed: string[] = [];
       for (const c of attemptCountersContract(() => new FlawedCounters(flaw))) await c.run().catch(() => failed.push(c.name));
       assert.ok(failed.length > 0, flaw);
@@ -278,6 +288,42 @@ describe("lockouts across calls", () => {
     assert.deepEqual(await t.engine.submitPin(await call(t), "0000"), { matched: false, locked: true });
     t.clock.advance(30 * HOUR);
     assert.deepEqual(await t.engine.submitPin(await call(t), "4826"), { matched: false, locked: true }, "48 hours, not 24");
+  });
+
+  it("keeps a failure another engine records on the line while a pass is being forgotten (CodeRabbit, PR 71)", async () => {
+    /** Lets a second engine fail on the same line just as the pass starts taking its own failure off the number. */
+    class Interleave extends MemoryAttemptCounters {
+      during: (() => Promise<unknown>) | null = null;
+      async #once(key: AttemptCounterKey): Promise<void> {
+        const run = this.during;
+        if (key.scope !== "number" || run === null) return;
+        this.during = null;
+        await run();
+      }
+      override async removeFailure(key: AttemptCounterKey, at: string): Promise<void> {
+        await this.#once(key);
+        return super.removeFailure(key, at);
+      }
+      override async reset(key: AttemptCounterKey): Promise<void> {
+        await this.#once(key);
+        return super.reset(key);
+      }
+    }
+    const counters = new Interleave();
+    const a = setup({ adapters: { counters } });
+    const b = createTestEngine({ config: testConfig(), clock: a.clock, ids: a.ids, adapters: { records: a.records, ledger: a.ledger, counters } });
+    const line = { callingNumber: "+15555550142" };
+    const own = await call(a, line);
+    const { callId: other } = await b.engine.startCall();
+    await b.engine.beginVerification(other, { ...line, accountNumber: "99999990" });
+    counters.during = async () => {
+      waitOut(a);
+      assert.deepEqual(await b.engine.submitKeypad(other, { dob: "1" }), { matched: false, locked: false });
+    };
+    assert.deepEqual(await a.engine.submitKeypad(own, { dob: DOB }), { matched: true, locked: false });
+    assert.equal(counters.during, null, "the second engine failed during the pass's cleanup");
+    const numberCounter: AttemptCounterKey = { workspaceId: "ws_test", factor: "keypad_knowledge", scope: "number", key: numberKeyFor(TEST_KNOWLEDGE_KEY, line.callingNumber) };
+    assert.deepEqual(await counters.get(numberCounter, LONG_AGO), [iso(T0 + 900_000)], "only the pass's own failure came off the line");
   });
 
   it("lets one of two attempts racing on two engines be judged, and refuses the other as locked", async () => {

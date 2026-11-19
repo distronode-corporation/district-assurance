@@ -62,8 +62,9 @@ engine, until the window passes or a member of the business lifts the lock with 
 (INT-7, below), which clears that one counter entirely (tested). A pass resets the subject's
 counter but takes only its own failure off the number's: a line's failures against other accounts
 stay through a pass on its own account, so alternating with that pass does not escape the lock per
-calling number (tested). Taking it off is a reset and a rewrite, not one atomic step, so a failure
-another call records on the same number in that instant may be lost. Only a member's `unlock`
+calling number (tested). Taking it off is one atomic step of the store
+(`removeFailure`), so a failure another call records on the same number meanwhile is never lost
+(tested, two engines). Only a member's `unlock`
 clears a number's counter outright, failures against other accounts included, so that is the
 business's deliberate act, recorded in the ledger.
 
