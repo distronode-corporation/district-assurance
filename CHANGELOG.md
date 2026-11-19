@@ -148,6 +148,12 @@ All notable changes to this project are documented here. The format follows
   `AuditLedger.list(fromSeq?, limit?)` reads one page of at most `limit` entries, and the ledger
   contract checks it: a ledger that ignores `limit`, or takes one that is not an integer of 1 or
   more, now fails `auditLedgerContract`.
+- Read-backs in English and French (FIL-1): `buildReadBack` and `engine.intakeReadBack` speak each
+  field by type (dates in full, yes and no, numbers) with a fixed confirm prompt and never read a
+  sensitive value; `confirmIntake` refuses a draft changed since the caller heard it.
+- Conditional fields and validation rules (FIL-4): `showIf` (asked, read back and filed only while
+  another field holds a value), `min` and `max` for numbers and dates, and a bounded `pattern` for
+  text; `validateConfig` refuses unknown field settings, `showIf` cycles, and fields that name a card or a SIN.
 
 ### Changed
 
@@ -177,6 +183,12 @@ All notable changes to this project are documented here. The format follows
   `validateConfig` refuses a config holding one.
 - A taint now voids the keypad or PIN match made before it: `startPhotoId`, `checkCarrier` and a
   payment link refuse until a fresh verification matches (found by the adversarial suite).
+- `confirmIntake` requires `readBack`, the digest of the read-back the caller heard (FIL-1), and
+  the `buildReadBack` stub in `file/later.ts` is replaced by `file/readback.ts`. A host that
+  confirmed without a read-back must call `intakeReadBack` first.
+- A text field value holding a lone surrogate is refused with the new normalise reason `not_text`
+  (`NormaliseResult`), since no record, digest or read-back can hold it faithfully: a host that
+  switches over the reasons must add it.
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

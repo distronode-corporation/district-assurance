@@ -333,6 +333,18 @@ scope has a class (by its name, a module's manifest, or the policy's `scopeClass
 winning), money, contact and access are never below level 2, and a scope with no class is refused
 (tested). Level 2 and above need a factor that is not something the caller knows (tested).
 
+### Filing what the caller did not hear
+
+A model that paraphrases a value, or a host path that changes the draft after the caller agreed,
+so the record filed is not the one confirmed. **Controls:** the read-back is built by code from the
+draft, in the call's language (`buildReadBack`, SPEC.md section 13), never by the model.
+`confirmIntake` takes the digest of the read-back the caller heard, which covers the spoken text
+and the record digest of every value, and refuses a draft that no longer reads back to it, so a
+value changed since, a sensitive one included, is never filed on an old yes (tested). A sensitive
+value is never read back: its line says only that it was given, so it does not reach the
+transcript, the model or anyone listening in (tested). The digest says no more about the values
+than the record digest the ledger and the receipt already carry.
+
 ### Config tampering
 
 Someone who can edit a workspace's FlowConfig. **Controls:** the engine refuses any config with a
@@ -343,6 +355,11 @@ account, and every call's ledger entries carry the config revision
 it ran under. Every grant, its `verification.finished` and `grant.issued` entries and the signed
 receipt name the policy version and the config revision that judged the caller, so a verification
 judged under a config changed mid-call is told apart from one judged under the call's own (tested).
+A form's text `pattern` cannot stall the engine on a caller's value: a
+backreference, a repeated group that repeats or alternates, and a pattern with more than 100,000
+ways to try a value are refused (tested). A `showIf` cycle is refused, and a `showIf` cannot
+depend on a sensitive field, whose value the questions asked would otherwise tell (tested); a
+hidden field's value is never read back or filed (tested).
 Who may edit a config, and how its history is kept, is the host's (left to the host).
 A factor added after the engine was built (`engine.useFactor`, or an outside module's factor and
 judge with `engine.use`) is off until a config turns it on in Badge's settings; adding one never
@@ -577,7 +594,12 @@ and neither a cancel nor the end of the call closes a link while it is being tex
 after the engine closed a link is still recorded as paid and flagged `late` in the ledger, so a
 late payment is never lost (tested). Card numbers in transcripts are detected (Luhn, digits and English or French digit words)
 and replaced, and the host is told to interrupt (tested). Intake refuses a value carrying a card
-number, and the ledger refuses detail carrying one (tested). Keypad card capture is planned only
+number, and the ledger refuses detail carrying one (tested). A form cannot ask for a card or a
+Social Insurance Number at all: `validateConfig` refuses a field whose key or label, in English or
+French, names one (`card`, `carte`, `cvv`, `PAN`, `cc`, `SIN`, `NAS`, `SSN`, `assurance sociale`
+and so on, as a whole part of the name or run into one word as in `creditcard` or `ssnumber`), with
+case, accents and dots ignored (tested). The check reads names, not intent: a field named to slip past it
+is still caught by the card-number check on its value, but a SIN under another name is not. Keypad card capture is planned only
 through a PCI-certified carrier service on a call path where tones never reach this engine
 (PAY-6), after an assessor's scoping. Nothing here is a PCI DSS attestation; a host's scope
 depends on its whole call path.

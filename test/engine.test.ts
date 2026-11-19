@@ -8,6 +8,7 @@ import { ConfigError } from "../src/core/config.ts";
 import type { EngineEvent } from "../src/core/events.ts";
 import { defaultVerificationPolicy } from "../src/core/policy.ts";
 import { createEngine } from "../src/engine.ts";
+import { intakeDigest, type IntakeForm } from "../src/file/intake.ts";
 import { defaultConfig } from "../src/modules.ts";
 import { formatAmount } from "../src/pay/paylink.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
@@ -15,7 +16,7 @@ import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import { verifyReceipt } from "../src/prove/receipt.ts";
 import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryAttemptCounters, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine } from "../src/testing/index.ts";
-import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig, verifiedCall, waitOut } from "./helpers.ts";
+import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, form, heard, rejects, setup, testConfig, verifiedCall, waitOut } from "./helpers.ts";
 
 describe("Engine construction", () => {
   it("refuses a short key, an empty workspace, a missing ledger and a bad config", () => {
@@ -550,16 +551,73 @@ describe("Engine file", () => {
     const callId = await verifiedCall(t);
     await t.engine.startIntake(callId, "repair");
     assert.deepEqual(await t.engine.setIntakeField(callId, "issue", "4242 4242 4242 4242"), { ok: false, reason: "card_number" });
-    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /required fields missing: issue/);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), /required fields missing: issue/);
     assert.deepEqual(await t.engine.setIntakeField(callId, "issue", " Leak under sink "), { ok: true, value: "Leak under sink" });
     await t.engine.setIntakeField(callId, "urgent", "yes");
     await assert.rejects(t.engine.setIntakeField(callId, "nope", "x"), rejects("invalid_input"));
-    const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack: await heard(t, callId) });
     assert.deepEqual(record.values, { issue: "Leak under sink", urgent: true });
     assert.deepEqual(await t.records.getIntakeRecord("ws_test", record.recordId), record);
     assert.equal(await t.records.getIntakeRecord("ws_test", "rec_404"), null);
     assert.deepEqual((await t.engine.state(callId)).recordIds, [record.recordId]);
     await assert.rejects(t.engine.setIntakeField(callId, "issue", "x"), rejects("invalid_transition"));
+  });
+
+  it("reads the draft back in the call's locale, and refuses a confirmation of a draft changed since", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t, "fr");
+    await assert.rejects(t.engine.intakeReadBack(callId), rejects("invalid_transition"));
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "Fuite");
+    const before = await t.engine.intakeReadBack(callId);
+    assert.equal(before.text, "Voici ce que nous allons enregistrer. Problème : Fuite. Est-ce exact? Dites oui ou appuyez sur le 1 pour confirmer.");
+    await t.engine.setIntakeField(callId, "urgent", "oui");
+    const changed = rejects("precondition_failed", /changed since the caller heard its read-back/);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: before.digest }), changed);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: before.digest.toUpperCase() }), changed);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: undefined as unknown as string }), changed);
+    assert.deepEqual((await t.engine.state(callId)).recordIds, [], "nothing filed");
+    assert.equal((await t.ledger.list()).some((e) => e.event === "intake.confirmed"), false);
+    const after = await t.engine.intakeReadBack(callId);
+    assert.match(after.text, /Urgent : oui\./);
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: after.digest });
+    assert.deepEqual(record.values, { issue: "Fuite", urgent: true });
+    assert.equal(record.digest, intakeDigest(form, record.values));
+  });
+
+  it("asks, reads back and files a conditional field only while its showIf holds", async () => {
+    const branching: IntakeForm = {
+      formId: "repair",
+      version: "1",
+      fields: [
+        ...form.fields,
+        { key: "since", label: { en: "Since", fr: "Depuis" }, type: "date", required: true, showIf: { field: "urgent", equals: true }, min: "2026-01-01" },
+      ],
+    };
+    const t = setup({ config: testConfig((c) => (c.modules.dossier = { settings: { forms: [branching] } as unknown as JsonValue })) });
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    await assert.rejects(t.engine.setIntakeField(callId, "since", "2026-09-01"), rejects("precondition_failed", /since is not asked/));
+    await t.engine.setIntakeField(callId, "urgent", "yes");
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), rejects("invalid_input", /required fields missing: since/));
+    assert.deepEqual(await t.engine.setIntakeField(callId, "since", "2025-12-31"), { ok: false, reason: "below_min" });
+    await t.engine.setIntakeField(callId, "since", "2026-09-01");
+    assert.match((await t.engine.intakeReadBack(callId)).text, /Since: Tuesday, September 1, 2026\./);
+    await t.engine.setIntakeField(callId, "urgent", "no");
+    const readBack = await t.engine.intakeReadBack(callId);
+    assert.doesNotMatch(readBack.text, /Since/, "a hidden field is not read back");
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: readBack.digest });
+    assert.deepEqual(record.values, { issue: "leak", urgent: false }, "nor filed");
+    assert.equal(record.digest, intakeDigest(branching, record.values));
+  });
+
+  it("refuses a read-back on a call that started without Dossier", async () => {
+    const t = setup({ config: testConfig((c) => (c.modules.dossier = { enabled: false })) });
+    const { callId } = await t.engine.startCall();
+    await assert.rejects(t.engine.intakeReadBack(callId), rejects("module_disabled", /turned off/));
+    t.engine.configure(testConfig());
+    await assert.rejects(t.engine.intakeReadBack(callId), rejects("module_disabled", /was off when this call started/));
   });
 
   it("refuses intake without the scope, an unknown form, and abandons", async () => {
@@ -572,7 +630,7 @@ describe("Engine file", () => {
     await t.engine.startIntake(verified, "repair");
     await t.engine.abandonIntake(verified);
     assert.equal((await t.engine.state(verified)).phase, "open");
-    await assert.rejects(t.engine.confirmIntake(verified, { confirmedBy: "voice" }), rejects("invalid_transition"));
+    await assert.rejects(t.engine.confirmIntake(verified, { confirmedBy: "voice", readBack: "0".repeat(64) }), rejects("invalid_transition"));
   });
 
   it("files one record when two confirmations of the same draft run at once", async () => {
@@ -586,12 +644,12 @@ describe("Engine file", () => {
     t.records.putIntakeRecord = async (record) => {
       // The first write waits for a second confirmation, which resumes the same record and files it first.
       if (++calls === 1) {
-        second = t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
+        second = t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack: await heard(t, callId) });
         await second;
       }
       return put(record);
     };
-    const first = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    const first = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     assert.deepEqual(await second, first, "the second one resumed the same record");
     assert.deepEqual((await t.engine.state(callId)).recordIds, ["rec_1"]);
     assert.equal((await t.ledger.list()).filter((e) => e.event === "intake.confirmed").length, 1);
@@ -603,7 +661,7 @@ describe("Engine file", () => {
     await t.engine.startIntake(callId, "repair");
     await t.engine.setIntakeField(callId, "issue", "leak");
     t.clock.advance(15 * 60_000);
-    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("scope_denied"));
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), rejects("scope_denied"));
   });
 
   it("holds the draft while it is filed, and keeps it reserved for the same record when the store fails", async () => {
@@ -617,11 +675,11 @@ describe("Engine file", () => {
       during = await Promise.allSettled([t.engine.setIntakeField(callId, "issue", "x"), t.engine.abandonIntake(callId)]);
       throw new Error("database down");
     };
-    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /database down/);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), /database down/);
     assert.ok(during.every((r) => (r as PromiseSettledResult<unknown>).status === "rejected" && rejects("precondition_failed")((r as PromiseRejectedResult).reason)));
     t.records.putIntakeRecord = put;
     await assert.rejects(t.engine.setIntakeField(callId, "issue", "changed"), rejects("precondition_failed"), "still reserved after the failed write");
-    const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack: await heard(t, callId) });
     assert.deepEqual([record.recordId, record.values.issue, record.confirmedBy], ["rec_1", "leak", "voice"], "the same record, written again");
   });
 });

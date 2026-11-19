@@ -731,6 +731,7 @@ explicit `mode`, so a business account never quietly defaults to the platform's;
 that name none and for payments outside a flow, 15 minutes and card, Apple Pay, Google Pay and
 Link); Gate `{targets, maxGrantsPerCall?}` (section 17); step-up `{issuer, sites, maxTokensPerCall?}`
 (section 18); Trace `{receipts?, wordings?}`
+until FIL-2, field rules as section 13 lists); Paylink `{maxAmountMinor?}` (1 to 1,000,000); Trace `{receipts?, wordings?}`
 (`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr}}`, purposes
 unique).
 
@@ -1019,6 +1020,9 @@ Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording 
 | `text` | trimmed, non-empty, well-formed Unicode (no lone surrogate), at most `maxLength` (500), and no card number | string |
 | `number` | `-?\d+(\.\d+)?` | number |
 | `date` | `YYYY-MM-DD` naming a real day | string |
+| `text` | trimmed, non-empty, Unicode text (a lone surrogate is `not_text`), at most `maxLength` (500), no card number, and matching `pattern` whole if set (`no_match`) | string |
+| `number` | `-?\d+(\.\d+)?`, from `min` to `max` if set (`below_min`, `above_max`) | number |
+| `date` | `YYYY-MM-DD` naming a real day, from `min` to `max` if set | string |
 | `yes_no` | `yes`, `y`, `oui` / `no`, `n`, `non`, any case | boolean |
 
 Forms live in Dossier's settings: a `formId` (lower case, digits, `-`, `_`), a `version` and
@@ -1027,6 +1031,59 @@ fields with snake_case unique keys, a known type and an English and a French lab
 `setIntakeField` refuses (`invalid_input`) a value with a lone surrogate, which speech-to-text or a
 model can produce and a record's digest cannot hash. `startIntake(callId, formId)` names the form,
 and the draft keeps the form as it was then, so a
+
+Field rules (FIL-4), each checked by `validateConfig`, which reports every bad one:
+
+- A field has only `key`, `label`, `type`, `required`, `sensitive`, `maxLength`, `showIf`, `min`,
+  `max` and `pattern`.
+- No field's key or label (either language; case, accents and dots ignored) names a card, its
+  number or a national identity number: the words `card`, `carte`, `cardholder`, `cvv`, `cvc`,
+  `pan`, `cc`, `sin`, `nas`, `ssn`, `social insurance`, `assurance sociale` or `social security`,
+  each a whole part of the name split at spaces, `_`, `-` and camelCase humps (`panNumber`), never a
+  piece of a longer word (`account`, `pancake`, `nasal` pass), or one of them run into one word
+  with a number or kind (`creditcard`, `cardno`, `numerocarte`, `sinnumber`, `ssnumber`,
+  `pannumber`, `ccno`). The card-number check on values still applies whatever a field is called.
+- `min` and `max` only on number fields (finite numbers) and date fields (`YYYY-MM-DD` dates),
+  inclusive, with `min` at most `max`.
+- `pattern` only on text fields: a regular expression of 1 to 200 characters, valid in Unicode
+  mode, matched against the whole value. It must not use a backreference or repeat a group that
+  repeats or alternates, and the product of the choices its repetitions and alternatives give
+  (`?` and `|` count 2, `*` and `+` the field's `maxLength` plus 1, `{m,n}` `n - m + 1`) must be
+  at most 100,000, so no pattern can stall the engine on a caller's value.
+- `showIf: {field, equals}` names another field of the form, not a sensitive one, and a value that
+  field can hold. A field is **shown** while that field's value equals `equals` and that field is
+  shown itself; one without `showIf` always is. A chain of `showIf` that comes back to a field is
+  refused.
+
+Only shown fields are asked: `setIntakeField` on a hidden one is refused (`precondition_failed`).
+Only shown fields are required, read back and filed: a value given while a field was shown stays in
+the draft but out of the record, its digest and the read-back if the field is hidden again.
+
+**Read-back** (FIL-1). `buildReadBack(form, values, locale)` builds, in English or French, what the
+host speaks before the caller confirms: an opening, one sentence per shown field with a value, in
+form order, and the fixed confirm prompt. `text` is all three, one space apart; `lines` and `prompt`
+are its parts.
+
+| Type | English | French |
+|---|---|---|
+| `text` | `Issue: Leak.` (as given; a full stop unless it ends in `.`, `!` or `?`) | `Problème : Leak.` |
+| `number` | `1,234.5`, `minus 2` (never in exponent form) | `1 234,5` (a non-breaking space), `moins 2` |
+| `date` | `Tuesday, September 1, 2026` | `le mardi 1er septembre 2026` |
+| `yes_no` | `yes` / `no` | `oui` / `non` |
+| sensitive | `Label: given, and not read aloud for your security.` | `Libellé : fourni, mais pas lu à voix haute, pour votre sécurité.` |
+
+Opening: "Here is what will be filed." / "Voici ce que nous allons enregistrer." Prompt: "Is that
+correct? Say yes or press 1 to confirm." / "Est-ce exact? Dites oui ou appuyez sur le 1 pour
+confirmer." A sensitive field's value is never in the read-back, its text or its lines. The
+`digest` is `SHA-256(canonicalJson({v: 1, locale, text, record}))`, where `record` is the record
+digest of the values that would be filed (section 12), so a change to any of them, a sensitive one
+included, changes it.
+`intakeReadBack(callId)` builds the read-back of the open draft in the call's locale.
+`confirmIntake(callId, {confirmedBy, readBack})` takes the digest of the read-back the caller
+heard, and refuses with `precondition_failed` unless the draft reads back to that digest now; a
+confirmation retried after its record was filed returns that record.
+
+`startIntake(callId, formId)` names the form, and the draft keeps the form as it was then, so a
 config change mid-intake never changes what is filed; a call also keeps the forms (and Trace the
 wordings) in force when it started. A draft being filed refuses changes. A filing that failed
 after its reservation (the store refused it, or the last write was lost) stays reserved and

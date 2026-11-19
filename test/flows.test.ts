@@ -8,7 +8,7 @@ import { ConfigError, validateConfig, type FlowConfig } from "../src/core/config
 import type { AssuranceModule } from "../src/core/module.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { TEST_KNOWLEDGE_KEY } from "../src/testing/index.ts";
-import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig, verifiedCall, waitOut } from "./helpers.ts";
+import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, heard, rejects, setup, testConfig, verifiedCall, waitOut } from "./helpers.ts";
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const pay = { type: "paylink.request", amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" } as const;
@@ -186,7 +186,7 @@ describe("flows", () => {
     await assert.rejects(t.engine.requestPayment(callId), rejects("precondition_failed", /on step dossier.collect/));
     await t.engine.startIntake(callId, "repair");
     await t.engine.setIntakeField(callId, "issue", "leak");
-    await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     assert.equal((await t.engine.flowPosition(callId))!.step!.type, "paylink.request");
     await assert.rejects(t.engine.requestPayment(callId, { amountMinor: 1, currency: "cad", description: "x", amountSource: "price_list" }), rejects("invalid_input", /flow step sets the amount/));
     await confirmAmount(t.engine, callId);
@@ -222,7 +222,7 @@ describe("flows", () => {
     await assert.rejects(t.engine.startIntake(callId, "other"), rejects("precondition_failed", /collects repair/));
     await t.engine.startIntake(callId, "repair");
     await t.engine.setIntakeField(callId, "issue", "leak");
-    await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     await assert.rejects(t.engine.recordConsent(callId, { purpose: "calls", answer: "yes" }), rejects("precondition_failed", /consent to texts/));
     await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
     await confirmAmount(t.engine, callId);
@@ -262,7 +262,7 @@ describe("flows", () => {
     await t.engine.startIntake(callId, "repair");
     await t.engine.setIntakeField(callId, "issue", "leak");
     t.engine.configure(testConfig((c) => (c.modules.dossier = { settings: { forms: [{ formId: "repair", version: "2", fields: [{ key: "other", label: { en: "O", fr: "O" }, type: "text", required: true }] }] } })));
-    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     assert.deepEqual([record.formVersion, record.values], ["1", { issue: "leak" }]);
   });
 
@@ -432,7 +432,7 @@ describe("module switches", () => {
     await assert.rejects(off.engine.beginVerification(call.callId, { accountNumber: ACCOUNT }), rejects("module_disabled"));
     await assert.rejects(off.engine.finishVerification(call.callId), rejects("module_disabled"));
     await assert.rejects(off.engine.setIntakeField(call.callId, "a", "b"), rejects("module_disabled"));
-    await assert.rejects(off.engine.confirmIntake(call.callId, { confirmedBy: "voice" }), rejects("module_disabled"));
+    await assert.rejects(off.engine.confirmIntake(call.callId, { confirmedBy: "voice", readBack: "0".repeat(64) }), rejects("module_disabled"));
     await assert.rejects(off.engine.abandonIntake(call.callId), rejects("module_disabled"));
   });
 });
