@@ -2,6 +2,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
+import type { PaymentLinks } from "../src/core/adapters.ts";
 import { rejects, setup, verifiedCall } from "./helpers.ts";
 
 const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
@@ -48,6 +49,16 @@ describe("hostile #114: closing links", () => {
       assert.equal((await t.engine.state(callId)).phase, "paying", "left open, like a provider that threw");
       t.payments.expireLink = expire;
       assert.deepEqual(await t.engine.cancelPaymentLink(callId, paymentId), { paymentId, status: "expired" }, "the next cancel closes it");
+    }
+    // The same through the adapter's own cancel method, when it has one.
+    for (const answer of [{ state: "paid" }, {}, null, "expired", 1]) {
+      const c = setup();
+      const id = await verifiedCall(c);
+      const { paymentId } = await c.engine.requestPayment(id, request);
+      (c.payments as PaymentLinks).cancel = async () => answer as never;
+      await assert.rejects(c.engine.cancelPaymentLink(id, paymentId), rejects("precondition_failed", /neither expired nor not_open/), JSON.stringify(answer));
+      assert.equal((await c.ledger.list()).some((e) => e.event === "payment.link_expired"), false, `${JSON.stringify(answer)} reached the ledger`);
+      assert.equal((await c.engine.state(id)).phase, "paying", "left open");
     }
     const t = setup();
     const callId = await verifiedCall(t);
