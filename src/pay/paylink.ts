@@ -187,9 +187,17 @@ export async function requestPayment(rt: EngineRuntime, callId: string, input?: 
     description: request.description,
     idempotencyKey: rt.idempotencyKey(callId, request.paymentId, "link"),
   });
-  await rt.update(callId, (draft) => {
+  const held = await rt.update(callId, (draft) => {
     find(draft, request.paymentId).linkId = link.linkId;
+    // Checked again before the text: a signal raised, or a time window opened, while the link was
+    // being created holds the request (VER-13). The link id is kept, so a resume finds the same link.
+    try {
+      return rt.requireScope(draft, "payment.request", request);
+    } catch (e) {
+      return e as EngineError;
+    }
   });
+  if (held !== null) throw held;
   await rt.bindRef(`payment:${link.linkId}`, callId);
   await rt.adapter("messages").sendText({
     to: reserved.phone,

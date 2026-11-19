@@ -115,18 +115,22 @@ export const dossierModule: AssuranceModule = {
 
 export async function startIntake(rt: EngineRuntime, callId: string, formId: string): Promise<void> {
   rt.settings(DOSSIER);
-  await rt.update(callId, (draft) => {
+  const refused = await rt.update(callId, (draft) => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     const chosen = s.forms.find((f) => f.formId === formId);
     if (chosen === undefined) throw new EngineError("invalid_input", `no form ${formId} in this call's dossier settings`);
     const step = stepOfType<DossierCollectStep>(draft.record, "dossier.collect");
     if (step !== null && step.form !== formId) throw new EngineError("precondition_failed", `the flow step collects ${step.form}`);
-    if (!rt.authorized(draft.record, "intake.file")) throw new EngineError("scope_denied", "the grant does not cover intake.file");
+    // Returned, not thrown, when a step-up rule is why: the change keeps the rule on the ledger (VER-13).
+    const denied = rt.requireScope(draft, "intake.file", undefined);
+    if (denied !== null) return denied;
     draft.apply({ type: "intake_started" });
     s.intake = { form: structuredClone(chosen), values: {}, filing: null };
     s.confirmed = null;
     draft.emit("intake.started", "code", { formId, version: chosen.version });
+    return null;
   });
+  if (refused !== null) throw refused;
 }
 
 function openIntake(s: DossierSlice): NonNullable<DossierSlice["intake"]> {
@@ -155,7 +159,7 @@ export async function setIntakeField(rt: EngineRuntime, callId: string, key: str
  */
 export async function confirmIntake(rt: EngineRuntime, callId: string, input: { confirmedBy: "voice" | "keypad" }): Promise<IntakeRecord> {
   rt.settings(DOSSIER);
-  const reserved = await rt.update(callId, (draft): { record: IntakeRecord; filed: boolean } => {
+  const reserved = await rt.update(callId, (draft): { record: IntakeRecord; filed: boolean } | { refused: EngineError } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     const intake = s.intake;
     // Filed already (a retry after the last write's ledger entry failed): this write appends that
@@ -163,7 +167,8 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
     if (intake === null && s.confirmed !== null) return { record: s.confirmed, filed: true };
     if (intake === null) throw new EngineError("invalid_transition", "no intake is open on this call");
     if (intake.filing !== null) return { record: intake.filing, filed: false };
-    if (!rt.authorized(draft.record, "intake.file")) throw new EngineError("scope_denied", "the grant does not cover intake.file");
+    const refused = rt.requireScope(draft, "intake.file", undefined);
+    if (refused !== null) return { refused };
     const missing = missingRequired(intake.form, intake.values);
     if (missing.length > 0) throw new EngineError("invalid_input", `required fields missing: ${missing.join(", ")}`);
     const built: IntakeRecord = {
@@ -180,6 +185,7 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
     intake.filing = built;
     return { record: built, filed: false };
   });
+  if ("refused" in reserved) throw reserved.refused;
   const { record } = reserved;
   if (reserved.filed) return record;
   // A rejected write may still have been stored, so the reservation is kept and any retry writes

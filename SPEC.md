@@ -278,7 +278,8 @@ grants the flow issued stand, and a payment link already sent can still settle. 
 module's step is held by the engine to the scope its manifest needs. A flow cannot branch to ask
 for more (ADR-14): a step whose scope step-up rules raise above the level the call's verification
 reached fails (`flow.failed` with `rules`, the rules' names). This is checked when the step is
-entered, when a signal is raised, and by the step's own work (`requestPayment`, `updateModule`),
+entered, when a signal is raised, and by the step's own work (`requestPayment`, `startIntake`,
+`confirmIntake`, `updateModule`),
 which then also throws `scope_denied` naming the rules. Asking for an extra factor mid-flow waits
 for FlowConfig version 2. A step whose module was
 removed while the call ran fails. `endCall` abandons a running
@@ -404,7 +405,10 @@ character description and an `amountSource` (`intake_record`, `business_endpoint
 outside a flow the host's code passes them. One link at a time per call. If creating or texting the
 link fails, the request stays open (a provider can create a link and still fail to answer), and
 calling `requestPayment` again resumes it with the same payment id and idempotency keys; a
-different amount is refused. Only the provider settles a request. `requestPayment` returns the
+different amount is refused. The scope is checked again once the link is created and before it is
+texted, so a signal raised, a window opened, a taint or the end of the call while the link was
+being created means the link is never texted (`scope_denied`; the link id is kept, and a resume is
+checked the same way). Only the provider settles a request. `requestPayment` returns the
 status it saw last. Whose
 account takes the money (`connect` or `platform`) is planned (PAY-7). Settlement:
 

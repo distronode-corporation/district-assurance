@@ -88,6 +88,10 @@ describe("step-up on the amount", () => {
     const callId = await level2Call(t);
     assert.equal(await t.engine.authorize(callId, "payment.request", { amountMinor: 100, currency: "usd" }), false);
     assert.equal(await t.engine.authorize(callId, "payment.request"), false, "outside a flow, no amount counts as over");
+    // A host passing something that is not an amount gets a refusal, never a TypeError or a coerced string.
+    for (const bad of [null, "100", { amountMinor: "100", currency: "cad" }, { amountMinor: 100, currency: 1 }]) {
+      assert.equal(await t.engine.authorize(callId, "payment.request", bad as never), false, JSON.stringify(bad));
+    }
     await assert.rejects(t.engine.requestPayment(callId, payment(100, "usd")), rejects("scope_denied", /large_payment/));
     // The authorize read wrote the rule once; a scope with no rule writes nothing.
     assert.deepEqual(await entries(t, "policy.step_up"), [{ rule: "large_payment", scope: "payment.request", level: 3 }]);
@@ -160,6 +164,44 @@ describe("step-up on a host signal", () => {
     assert.equal((await t.engine.finishVerification(callId)).level, 1);
     assert.equal(await t.engine.authorize(callId, "intake.file"), false, "level 1 no longer files once the signal is up");
   });
+
+  it("records the rule when it is why an intake is refused", async () => {
+    const t = stepUpSetup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    assert.equal((await t.engine.finishVerification(callId)).level, 1);
+    await t.engine.raiseSignal(callId, "intake_flagged");
+    await assert.rejects(t.engine.startIntake(callId, "repair"), rejects("scope_denied", /intake_flagged/));
+    assert.deepEqual(await entries(t, "policy.step_up"), [{ rule: "intake_flagged", scope: "intake.file", level: 2 }], "on the ledger without an authorize call");
+  });
+
+  for (const [name, interrupt, why] of [
+    ["a signal is raised", (t: TestEngine, callId: string) => t.engine.raiseSignal(callId, "caller_flagged"), /caller_flagged/],
+    ["the call is tainted", (t: TestEngine, callId: string) => t.engine.markUntrusted(callId, "crm note"), /does not cover payment.request$/],
+  ] as const) {
+    it(`never texts a payment link when ${name} while the link is being created`, async () => {
+      const t = stepUpSetup();
+      const callId = await level2Call(t);
+      const create = t.payments.createLink.bind(t.payments);
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let calls = 0;
+      t.payments.createLink = async (input) => {
+        calls++;
+        await held;
+        return create(input);
+      };
+      const pending = t.engine.requestPayment(callId, payment(100));
+      while (calls === 0) await new Promise((resolve) => setImmediate(resolve));
+      await interrupt(t, callId);
+      release();
+      await assert.rejects(pending, rejects("scope_denied", why));
+      assert.equal(t.messages.sent.filter((m) => m.purpose === "payment_link").length, 0, "no link texted");
+      assert.deepEqual(await entries(t, "payment.link_sent"), []);
+      assert.equal(t.payments.created.length, 1, "the link exists, and its id is kept for a resume");
+    });
+  }
 
   it("refuses a signal no rule uses, and a signal on an ended call", async () => {
     const t = stepUpSetup();

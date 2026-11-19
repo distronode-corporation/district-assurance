@@ -378,9 +378,13 @@ function ruleHolds(policy: VerificationPolicy, rule: StepUpRule, facts: StepUpFa
   return facts.signals.includes(rule.signal!);
 }
 
-/** Whether an amount is over a rule's threshold. A currency the rule does not list, or an amount not known, counts as over. */
+/**
+ * Whether an amount is over a rule's threshold. A currency the rule does not list, or an amount not
+ * known, counts as over, and so does anything a host passes that is not `{ amountMinor, currency }`
+ * with a number and a string.
+ */
 export function amountOver(limits: Readonly<Record<string, number>>, amount: StepUpAmount | undefined): boolean {
-  if (amount === undefined || !Object.hasOwn(limits, amount.currency)) return true;
+  if (!isObject(amount) || typeof amount.amountMinor !== "number" || typeof amount.currency !== "string" || !Object.hasOwn(limits, amount.currency)) return true;
   return !(amount.amountMinor <= limits[amount.currency]!);
 }
 
