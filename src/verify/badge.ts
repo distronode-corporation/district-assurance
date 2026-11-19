@@ -329,7 +329,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     const used = s.attempts[kind] ?? 0;
     if (used >= max) return null;
     s.attempts[kind] = used + 1;
-    return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch };
+    return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch, tainted: draft.record.state.tainted };
   });
   if (reserved === null) return { matched: false, locked: true };
   const input = { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey, subject: reserved.subject, entry, hmac: (d: string) => rt.hmac(d) };
@@ -343,7 +343,10 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     assertSameVerification(draft.slice<BadgeSlice>(BADGE), reserved.epoch);
     const factor = { kind, passed, at: rt.now() };
     draft.apply({ type: "factor_recorded", factor });
-    if (passed && KNOWLEDGE_FACTORS.includes(kind)) draft.slice<BadgeSlice>(BADGE).knowledgeMatched = true;
+    // An entry made before a taint that landed while it was judged is a match from before the taint:
+    // it never unlocks anything sent out (onUntrusted cleared the match, and this must not restore it).
+    const taintedSince = draft.record.state.tainted && !reserved.tainted;
+    if (passed && KNOWLEDGE_FACTORS.includes(kind) && !taintedSince) draft.slice<BadgeSlice>(BADGE).knowledgeMatched = true;
     draft.emit("verification.factor", "code", { kind, passed });
   });
   return { matched: passed, locked: !passed && reserved.last };
