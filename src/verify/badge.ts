@@ -603,7 +603,14 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   // A pass this call saved earlier whose cleanup did not run (its write failed after saving it).
   if (current.forgetOwed !== undefined) await settleForget(rt, callId, current.forgetOwed.at);
   const lockout = lockoutOf(rt.settings<BadgeSettings>(BADGE).lockout);
-  const keys = counterKeys(rt.workspaceId, kind, current);
+  // A spoken answer that carries keypad fields (VER-11) is a guess at those fields too: it also
+  // uses a keypad_knowledge attempt, so the keypad and the voice share one budget per call, and
+  // across calls it is counted, locked and forgiven under both factors, so alternating keyed and
+  // spoken entries never doubles the guesses before a lock.
+  const shared = kind === "spoken_knowledge" && spokenKeypadFields(rt).length > 0;
+  const keys = shared
+    ? [...counterKeys(rt.workspaceId, kind, current), ...counterKeys(rt.workspaceId, "keypad_knowledge", current)]
+    : counterKeys(rt.workspaceId, kind, current);
   const settings = rt.settings<BadgeSettings>(BADGE);
   // With the duress PIN on, a subject's failures are also counted where a duress entry never
   // resets them, and the hard lock they reach holds (duress-flag.ts).
@@ -621,9 +628,6 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     const max = maxAttempts(rt, module, kind);
     // Own keys only: an inherited one (`constructor`) must never stand in for a count.
     const used = Object.hasOwn(s.attempts, kind) ? s.attempts[kind]! : 0;
-    // A spoken answer that carries keypad fields (VER-11) is a guess at those fields too: it also
-    // uses a keypad_knowledge attempt, so the keypad and the voice share one budget per call.
-    const shared = kind === "spoken_knowledge" && spokenKeypadFields(rt).length > 0;
     const keypadMax = rt.policy.maxKeypadAttemptsPerCall;
     const keypadUsed = Object.hasOwn(s.attempts, "keypad_knowledge") ? s.attempts.keypad_knowledge! : 0;
     if (used >= max || (shared && keypadUsed >= keypadMax)) return null;

@@ -417,7 +417,8 @@ maxKeypadIdleSeconds?}`.
   keypad fields, so it uses a `keypad_knowledge` attempt too (`maxKeypadAttemptsPerCall`): the
   keypad and the voice share one budget per call, and a spoken answer is refused, even the right
   one, once either limit is used up. The cross-call counters (section 5, VER-1) count it under
-  `spoken_knowledge`.
+  both `spoken_knowledge` and `keypad_knowledge`: a lock or wait on either refuses it, a failure
+  counts toward both, and a pass forgets both.
 - `keypadIdleSeconds` (5 to 60, default 10) is a call's keypad idle timeout;
   `maxKeypadIdleSeconds` (`keypadIdleSeconds` to 300, default `keypadIdleSeconds`) is the most it
   may be lengthened to. `keypadTiming(callId)` returns `{idleTimeoutMs, maxIdleTimeoutMs}` for

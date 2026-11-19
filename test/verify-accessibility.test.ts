@@ -85,10 +85,38 @@ describe("a keypad field said instead of keyed", () => {
     assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: false, locked: true });
   });
 
+  it("counts a failed answer under keypad_knowledge too across calls, so alternating keyed and spoken guesses reach the same lock", async () => {
+    const t = accessibleSetup(accessibleConfig(undefined, (c) => ((c.modules.badge!.settings as Record<string, unknown>).lockout = { lockAfterFailures: 3 })));
+    const wrong = { postal_code: "K1A 0B1", dob: "11111111" };
+    const first = await verifying(t);
+    assert.deepEqual(await t.engine.submitFactor(first, "spoken_knowledge", wrong), { matched: false, locked: false });
+    const subject = { workspaceId: "ws_test", factor: "keypad_knowledge", scope: "subject" as const, key: (await attempts(t, first)).subjectKey as unknown as string };
+    assert.equal((await t.counters.get(subject, "2000-01-01T00:00:00.000Z")).length, 1, "a spoken guess at the date of birth is a keypad failure across calls");
+    waitOut(t);
+    assert.deepEqual(await t.engine.submitKeypad(await verifying(t), { dob: "11111111" }), { matched: false, locked: false });
+    waitOut(t);
+    assert.deepEqual(await t.engine.submitFactor(await verifying(t), "spoken_knowledge", wrong), { matched: false, locked: true }, "the third guess, keyed or said, locks");
+    waitOut(t);
+    assert.deepEqual(await t.engine.submitKeypad(await verifying(t), { dob: DOB }), { matched: false, locked: true }, "the keypad is locked by guesses that were mostly spoken");
+    assert.deepEqual(await t.engine.submitFactor(await verifying(t), "spoken_knowledge", { postal_code: "K1A 0B1", dob: DOB }), { matched: false, locked: true }, "and so is the voice");
+  });
+
+  it("forgets the subject's keypad failures on a spoken pass, as a keyed pass does", async () => {
+    const t = accessibleSetup();
+    const callId = await verifying(t);
+    assert.deepEqual(await t.engine.submitKeypad(callId, { dob: "11111111" }), { matched: false, locked: false });
+    waitOut(t);
+    assert.deepEqual(await t.engine.submitFactor(callId, "spoken_knowledge", { postal_code: "K1A 0B1", dob: DOB }), { matched: true, locked: false });
+    const subject = { workspaceId: "ws_test", factor: "keypad_knowledge", scope: "subject" as const, key: (await attempts(t, callId)).subjectKey as unknown as string };
+    assert.deepEqual(await t.counters.get(subject, "2000-01-01T00:00:00.000Z"), []);
+  });
+
   it("is refused once the keypad used up the budget it shares, and counts only the spoken limit without keypad fields", async () => {
     const t = accessibleSetup(accessibleConfig(undefined, (c) => (c.policy.maxKeypadAttemptsPerCall = 2)));
     const callId = await verifying(t);
     assert.deepEqual(await t.engine.submitKeypad(callId, { dob: "11111111" }), { matched: false, locked: false });
+    // The keypad failure's wait (#71) holds the spoken answer too, which shares its counter.
+    waitOut(t);
     assert.deepEqual(await t.engine.submitFactor(callId, "spoken_knowledge", { postal_code: "K1A 0B1", dob: "11111111" }), { matched: false, locked: true }, "the last shared guess");
     assert.deepEqual(await t.engine.submitFactor(callId, "spoken_knowledge", { postal_code: "K1A 0B1", dob: DOB }), { matched: false, locked: true }, "spoken limit left, keypad budget gone");
     assert.deepEqual((await attempts(t, callId)).attempts, { keypad_knowledge: 2, spoken_knowledge: 1 });
