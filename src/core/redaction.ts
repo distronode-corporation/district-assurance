@@ -1,8 +1,8 @@
 // Redaction of transcripts and any other text before it is stored or sent on.
 //
 // The first detector is card numbers (PANs): 13 to 19 digits that pass the Luhn check, written as
-// digits or spoken as single digit words in English or French, with spaces, hyphens, dots or
-// commas between groups. A match is replaced by a fixed marker. Over-redaction is accepted; the
+// digits or spoken as single digit words in English or French, with separators between groups:
+// spaces, dashes, dots, commas and invisible characters (SEPARATOR_CLASS). A match is replaced by a fixed marker. Over-redaction is accepted; the
 // risk this guards against is a card number reaching storage.
 //
 // Further detectors, each its own `Redactor` over the same digit runs (PRV-6): Canadian social
@@ -97,7 +97,13 @@ interface Token {
 }
 
 const TOKEN = /\d+|\p{L}+/gu;
-const SEPARATOR = /^[\s\-.,]*$/u;
+/**
+ * What may lie between the groups of one number: spaces, any dash (the hyphen-minus, en and em
+ * dashes, the non-breaking hyphen), the minus sign, dots and commas, and what a reader never sees:
+ * format characters (zero-width spaces and joiners, soft hyphens, bidi controls) and combining marks.
+ */
+export const SEPARATOR_CLASS = String.raw`[\s\p{Pd}\u2212\p{Cf}\p{M}.,]`;
+const SEPARATOR = new RegExp(`^${SEPARATOR_CLASS}*$`, "u");
 
 /** Runs of digit tokens with only separators between them. */
 function digitRuns(text: string): Token[][] {
@@ -198,7 +204,7 @@ function groupedAs(run: readonly Token[], i: number, j: number, breaks: readonly
 
 // Four letters, each gap and the gap before the digits at most 8 separators, so a match is at most
 // 40 UTF-16 code units (astral letters included) and only a short window before a run is read.
-const FOUR_LETTERS_BEFORE = /(?<!\p{L})(?:\p{L}{4}|\p{L}(?:[\s\-.,]{1,8}\p{L}){3})[\s\-.,]{0,8}$/u;
+const FOUR_LETTERS_BEFORE = new RegExp(String.raw`(?<!\p{L})(?:\p{L}{4}|\p{L}(?:${SEPARATOR_CLASS}{1,8}\p{L}){3})${SEPARATOR_CLASS}{0,8}$`, "u");
 /**
  * The look-back window, longer than any match (40), so a match never starts at the window's first
  * character and its letter check always sees the real character before it.

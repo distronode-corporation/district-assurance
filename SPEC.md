@@ -412,7 +412,9 @@ nothing was found). Only the card number line offers a payment link. A match is 
 kind's marker; `redaction.applied` counts findings per kind.
 
 Digits are read in runs: digit groups or single digit words (English and French) with only
-spaces, hyphens, dots or commas between them. In each run, matches are taken leftmost first,
+separators between them: spaces, any dash, the minus sign, dots, commas, and the characters a
+reader never sees (zero-width spaces and joiners, soft hyphens, bidi controls, combining marks:
+`SEPARATOR_CLASS`). In each run, matches are taken leftmost first,
 longest at each position, never overlapping. A format with groups accepts a written number only
 when its groups break where the format's do, or not at all; single digits (spoken digit words, or
 digits read one by one) may break anywhere.
