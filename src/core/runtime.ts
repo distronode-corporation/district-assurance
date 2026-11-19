@@ -62,6 +62,11 @@ export interface CallRecord {
   flow: FlowCursor | null;
   /** Each module's own part, by module name. */
   modules: Record<string, JsonValue>;
+  /**
+   * Outside modules' open reservations, by module name: work started in `updateModule` whose
+   * outcome may still be written with `recordModuleOutcome`. Absent on a record that has none.
+   */
+  reservations?: Record<string, string[]>;
   /** Ledger entries saved with a change and not yet known to be appended. */
   outbox: Array<{ eventId: string; name: EngineEventName; actor: Actor; at: string; detail: { [key: string]: JsonValue } }>;
 }

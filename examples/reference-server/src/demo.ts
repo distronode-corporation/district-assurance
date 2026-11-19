@@ -87,6 +87,7 @@ export async function runDemo(print = true): Promise<DemoResult> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const relay = createDoorRelay({
+    workspaceId: "ws_test",
     audience: "lobby",
     keys: gate.keys(),
     clock: t.clock,

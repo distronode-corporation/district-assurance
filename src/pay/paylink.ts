@@ -14,7 +14,7 @@
 // default): the engine expires it itself at that deadline (`expirePaymentLinks`), because a
 // provider's shortest link life can be longer than a call. A failed create leaves the request open
 // to resume; once a link exists, only the provider's outcome or the engine's deadline settles it.
-import type { InstantPaymentMethod, PaymentMode } from "../core/adapters.ts";
+import type { InstantPaymentMethod, PaymentLinkCapabilities, PaymentMode } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
@@ -127,6 +127,30 @@ function termsFor(settings: PaylinkSettings, step: PaylinkRequestStep | null): P
 
 const CONNECT_NEEDS_ACCOUNT = "connect mode needs connectedAccountId in the paylink settings";
 
+function isCapabilities(value: unknown): value is PaymentLinkCapabilities {
+  if (!isObject(value)) return false;
+  const { modes, minLinkMinutes: min, maxLinkMinutes: max } = value;
+  return Array.isArray(modes) && modes.every((m) => (PAYMENT_MODES as readonly unknown[]).includes(m)) && isIntegerIn(min, 0, 100_000) && isIntegerIn(max, 1, 100_000) && min <= max;
+}
+
+/** Problems between a mode and a link life and what the payments adapter declares it can do. */
+function adapterErrors(caps: PaymentLinkCapabilities, mode: PaymentMode, lifeMinutes: number): string[] {
+  const errors: string[] = [];
+  if (!caps.modes.includes(mode)) errors.push(`the payments adapter does not take ${mode} payments (it takes: ${caps.modes.join(", ") || "none"})`);
+  if (lifeMinutes > caps.maxLinkMinutes) errors.push(`linkLifeMinutes ${lifeMinutes} is longer than the payments adapter keeps a link (${caps.maxLinkMinutes} minutes)`);
+  return errors;
+}
+
+/**
+ * What the provider is asked for: twice the link life from the request, so a text that goes out
+ * late (a resumed request) still gets its full life after it is sent, kept within what the adapter
+ * declares (Stripe Checkout: 30 minutes to 24 hours), so the provider never refuses the time.
+ */
+function providerExpiry(requestedAt: string, lifeMinutes: number, caps: PaymentLinkCapabilities): string {
+  const minutes = Math.min(Math.max(2 * lifeMinutes, caps.minLinkMinutes), caps.maxLinkMinutes);
+  return deadline(requestedAt, minutes);
+}
+
 export const paylinkModule: AssuranceModule = {
   manifest: {
     name: PAYLINK,
@@ -150,8 +174,19 @@ export const paylinkModule: AssuranceModule = {
       errors.push("connectedAccountId must be 1 to 255 letters, digits, hyphens or underscores");
     } else if (settings.mode === "connect" && account === undefined) {
       errors.push(CONNECT_NEEDS_ACCOUNT);
+    } else if (account !== undefined && settings.mode === undefined) {
+      // A business account with the default mode would quietly take the money on the platform's.
+      errors.push("connectedAccountId needs an explicit mode: connect, or platform with connect chosen per step");
     }
     return errors;
+  },
+
+  checkAdapters(settings: unknown, capabilities: Readonly<Record<string, unknown>>): string[] {
+    const s = (settings ?? {}) as PaylinkSettings;
+    const caps = capabilities.payments;
+    if (caps === undefined) return [];
+    if (!isCapabilities(caps)) return ["the payments adapter's capabilities must be { modes, minLinkMinutes, maxLinkMinutes }"];
+    return adapterErrors(caps, s.mode ?? "platform", s.linkLifeMinutes ?? DEFAULT_LINK_LIFE_MINUTES);
   },
 
   requiredAdapters(): string[] {
@@ -167,6 +202,11 @@ export const paylinkModule: AssuranceModule = {
     errors.push(...termErrors(step));
     // Settings that did not validate are reported on their own; the cross-check needs good ones.
     if (settings !== null && (step.mode ?? settings?.mode) === "connect" && settings?.connectedAccountId === undefined) errors.push(CONNECT_NEEDS_ACCOUNT);
+    const caps = ctx.capabilities.payments;
+    if (settings !== null && isCapabilities(caps) && (PAYMENT_MODES as readonly unknown[]).includes(step.mode ?? settings?.mode ?? "platform")) {
+      const life = isIntegerIn(step.linkLifeMinutes, MIN_LINK_LIFE_MINUTES, MAX_LINK_LIFE_MINUTES) ? step.linkLifeMinutes : (settings?.linkLifeMinutes ?? DEFAULT_LINK_LIFE_MINUTES);
+      errors.push(...adapterErrors(caps, (step.mode ?? settings?.mode ?? "platform") as PaymentMode, life));
+    }
     return errors;
   },
 
@@ -238,6 +278,7 @@ export async function requestPayment(
     if (terms.mode === "connect" && terms.connectedAccountId === null) errors.push(CONNECT_NEEDS_ACCOUNT);
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     const paymentId = rt.ids.next("pay");
+    const requestedAt = rt.now();
     draft.apply({ type: "payment_requested", paymentId });
     const request: PaymentRequest = {
       paymentId,
@@ -248,11 +289,12 @@ export async function requestPayment(
       amountSource: chosen.amountSource,
       linkId: "",
       status: "open",
-      requestedAt: rt.now(),
+      requestedAt,
       settledAt: null,
       textedAt: null,
       ...terms,
       expiresAt: null,
+      providerExpiresAt: providerExpiry(requestedAt, terms.linkLifeMinutes, rt.adapter("payments").capabilities),
     };
     draft.slice<PaylinkSlice>(PAYLINK).payments.push(request);
     return { request, ...where };
@@ -267,14 +309,32 @@ export async function requestPayment(
     mode: request.mode,
     ...(request.connectedAccountId === null ? {} : { connectedAccountId: request.connectedAccountId }),
     paymentMethods: request.paymentMethods,
-    expiresAt: providerExpiry(request),
+    expiresAt: request.providerExpiresAt,
     // The mode is part of the key, so a request resumed under another mode can never replay the first.
     idempotencyKey: rt.idempotencyKey(callId, request.paymentId, "link", request.mode),
   });
-  await rt.update(callId, (draft) => {
-    find(draft, request.paymentId).linkId = link.linkId;
+  // A text that goes out this late would carry a link with less than the shortest life left, or
+  // one already dead: the request is expired instead (at the provider too), and never sent.
+  const tooLate = await rt.update(callId, (draft) => {
+    const pending = find(draft, request.paymentId);
+    pending.linkId = link.linkId;
+    return pending.textedAt === null && Date.parse(request.providerExpiresAt) - rt.clock.now().getTime() < MIN_LINK_LIFE_MINUTES * 60_000;
   });
   await rt.bindRef(`payment:${link.linkId}`, callId);
+  if (tooLate) {
+    const answer = await rt.adapter("payments").expireLink({
+      linkId: link.linkId,
+      mode: request.mode,
+      ...(request.connectedAccountId === null ? {} : { connectedAccountId: request.connectedAccountId }),
+      idempotencyKey: rt.idempotencyKey(callId, request.paymentId, "expire", request.mode),
+    });
+    await rt.update(callId, (draft) => {
+      if (find(draft, request.paymentId).status !== "open") return;
+      draft.emit("payment.link_expired", "code", { paymentId: request.paymentId, provider: answer.state, reason: "not_sent_in_time" });
+      settle(rt, draft, request.paymentId, "expired");
+    });
+    throw new EngineError("precondition_failed", "the payment link could not be texted in time and was expired; request a new payment");
+  }
   await rt.adapter("messages").sendText({
     to: reserved.phone,
     body: paymentText(reserved.locale, link.url, request.amountMinor, request.currency),
@@ -288,7 +348,7 @@ export async function requestPayment(
     sent.textedAt = rt.now();
     // The link life counts from the text, but never past what the provider was asked for when the
     // link was created, so the engine never promises a deadline the link itself would not reach.
-    sent.expiresAt = new Date(Math.min(Date.parse(deadline(sent.textedAt, sent.linkLifeMinutes)), Date.parse(providerExpiry(sent)))).toISOString();
+    sent.expiresAt = new Date(Math.min(Date.parse(deadline(sent.textedAt, sent.linkLifeMinutes)), Date.parse(sent.providerExpiresAt))).toISOString();
     draft.emit("payment.link_sent", "code", {
       paymentId: request.paymentId,
       linkId: link.linkId,
@@ -300,15 +360,6 @@ export async function requestPayment(
     });
     return { paymentId: request.paymentId, status: sent.status, expiresAt: sent.expiresAt };
   });
-}
-
-/**
- * What the provider is asked for: twice the link life from the request, so a text that goes out
- * late (a resumed request) still gets its full life after it is sent. The engine's own deadline,
- * the text plus the life, is what closes the link.
- */
-function providerExpiry(request: PaymentRequest): string {
-  return deadline(request.requestedAt, 2 * request.linkLifeMinutes);
 }
 
 function deadline(from: string, minutes: number): string {

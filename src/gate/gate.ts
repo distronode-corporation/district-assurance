@@ -266,26 +266,19 @@ export class GateModule implements AssuranceModule {
   /** Settles the reservation as failed and returns why, when the grant may no longer be sent; null when it may. */
   async #stillAuthorized(engine: GateHost, callId: string, grantId: string, digest: string, kid: string): Promise<string | null> {
     // Set by each attempt of the write; the attempt that was saved is the last one to run.
-    let lapsed: string | null = null;
-    await engine.recordModuleOutcome(callId, GATE, (s, call) => {
+    let lapsed: string | null = "it was settled meanwhile";
+    await outcome(engine, callId, grantId, (s, call) => {
       const slice = s as unknown as GateSlice;
       const record = slice.grants.find((g) => g.grantId === grantId)!;
-      lapsed =
-        record.status !== "reserved"
-          ? "it was settled meanwhile"
-          : !call.authorized(ENTRY_SCOPE)
-            ? "the call is no longer authorized"
-            : Date.parse(record.expiresAt) <= Date.parse(call.now)
-              ? "it expired"
-              : null;
-      if (record.status === "reserved") {
-        // Written before the send, so a reservation that never gets its answer still names its grant.
-        record.digest = digest;
-        record.kid = kid;
-        if (lapsed !== null) {
-          record.status = "failed";
-          call.emit("access.failed", { grantId, digest, kid, reason: lapsed === "it expired" ? "expired" : "not_authorized" });
-        }
+      // The reservation is open, and Gate closes it whenever it settles a grant: this grant is still reserved.
+      lapsed = !call.authorized(ENTRY_SCOPE) ? "the call is no longer authorized" : Date.parse(record.expiresAt) <= Date.parse(call.now) ? "it expired" : null;
+      // Written before the send, so a reservation that never gets its answer still names its grant.
+      record.digest = digest;
+      record.kid = kid;
+      if (lapsed !== null) {
+        record.status = "failed";
+        call.release();
+        call.emit("access.failed", { grantId, digest, kid, reason: lapsed === "it expired" ? "expired" : "not_authorized" });
       }
       return slice as unknown as JsonValue;
     });
@@ -326,6 +319,8 @@ function reserve(slice: GateSlice, call: ModuleCallView, input: { target: string
     kid: null,
   };
   slice.grants.push(record);
+  // The only thing an outcome write may settle later: this grant, by its id.
+  call.reserve(record.grantId);
   call.emit("access.issued", {
     grantId: record.grantId,
     target: record.target,
@@ -345,13 +340,14 @@ function reserve(slice: GateSlice, call: ModuleCallView, input: { target: string
  */
 async function settleStale(engine: GateHost, callId: string): Promise<void> {
   const before = (await engine.moduleState(callId, GATE)) as unknown as GateSlice;
-  if (!before.grants.some((g) => g.status === "reserved")) return;
-  await engine.recordModuleOutcome(callId, GATE, (s, call) => {
-    const slice = s as unknown as GateSlice;
-    const now = Date.parse(call.now);
-    for (const g of slice.grants) {
-      if (g.status === "reserved" && Date.parse(g.expiresAt) <= now) {
+  // One write per stale reservation, each settling only the grant it reserved.
+  for (const stale of before.grants.filter((g) => g.status === "reserved")) {
+    await outcome(engine, callId, stale.grantId, (s, call) => {
+      const slice = s as unknown as GateSlice;
+      const g = slice.grants.find((r) => r.grantId === stale.grantId)!;
+      if (g.status === "reserved" && Date.parse(g.expiresAt) <= Date.parse(call.now)) {
         g.status = "unknown";
+        call.release();
         call.emit("access.unknown", {
           grantId: g.grantId,
           ...(g.digest === null ? {} : { digest: g.digest }),
@@ -359,25 +355,42 @@ async function settleStale(engine: GateHost, callId: string): Promise<void> {
           reason: "no_answer_recorded",
         });
       }
+      return slice as unknown as JsonValue;
+    });
+  }
+}
+
+/**
+ * An outcome write for one grant. If another process settled that grant first (and so closed its
+ * reservation), the write is refused; the call's part is read back instead, unchanged.
+ */
+async function outcome(engine: GateHost, callId: string, grantId: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): Promise<JsonValue> {
+  try {
+    return await engine.recordModuleOutcome(callId, GATE, grantId, fn);
+  } catch (error) {
+    const now = (await engine.moduleState(callId, GATE)) as unknown as GateSlice;
+    if (error instanceof EngineError && error.code === "precondition_failed" && now.grants.some((g) => g.grantId === grantId && g.status !== "reserved")) {
+      return now as unknown as JsonValue;
     }
-    return slice as unknown as JsonValue;
-  });
+    throw error;
+  }
 }
 
 async function commit(
   engine: GateHost,
   callId: string,
   grantId: string,
-  outcome: Pick<AccessRecord, "status" | "confirmed" | "providerRef">,
+  result: Pick<AccessRecord, "status" | "confirmed" | "providerRef">,
   event: string,
   detail: { [key: string]: JsonValue },
 ): Promise<AccessRecord> {
-  const after = (await engine.recordModuleOutcome(callId, GATE, (s, call) => {
+  const after = (await outcome(engine, callId, grantId, (s, call) => {
     const slice = s as unknown as GateSlice;
     const record = slice.grants.find((g) => g.grantId === grantId)!;
     // Only a reservation takes an outcome: one settled as unknown meanwhile stays unknown.
     if (record.status === "reserved") {
-      Object.assign(record, outcome);
+      Object.assign(record, result);
+      call.release();
       call.emit(event, { grantId, ...detail });
     }
     return slice as unknown as JsonValue;

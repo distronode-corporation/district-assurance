@@ -1,7 +1,7 @@
 // Stripe adapters for the reference server, so people can try it with their OWN Stripe test-mode
 // keys. Not built yet: each method throws NotImplementedError naming its roadmap issue. They will
 // call Stripe's REST API with fetch (no SDK dependency) and a restricted key from the environment.
-import { NotImplementedError, type IdentityProvider, type PaymentLinkRequest, type PaymentLinks, type PaymentMode } from "../../../src/index.ts";
+import { NotImplementedError, type IdentityProvider, type PaymentLinkCapabilities, type PaymentLinkRequest, type PaymentLinks, type PaymentMode } from "../../../src/index.ts";
 
 /** Stripe Identity: a VerificationSession of type document with a selfie check. */
 export class StripeIdentityProvider implements IdentityProvider {
@@ -25,6 +25,8 @@ export class StripeIdentityProvider implements IdentityProvider {
  * `/v1/checkout/sessions/{id}/expire` when the engine's own deadline comes.
  */
 export class StripeCheckoutLinks implements PaymentLinks {
+  /** Checkout Sessions: both modes; `expires_at` from 30 minutes to 24 hours after creation. */
+  readonly capabilities: PaymentLinkCapabilities = { modes: ["connect", "platform"], minLinkMinutes: 30, maxLinkMinutes: 1440 };
   readonly #apiKey: string;
 
   constructor(apiKey: string) {

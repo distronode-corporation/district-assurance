@@ -50,6 +50,8 @@ export interface StepContext {
   policy: VerificationPolicy | null;
   /** The adapters the engine has. */
   adapters: ReadonlySet<string>;
+  /** What adapters declare they can do (`capabilities` on the adapter), by adapter name, when known. */
+  capabilities: Readonly<Record<string, unknown>>;
 }
 
 /** What a module sees of a call when it judges its current step. */
@@ -69,6 +71,8 @@ export interface AssuranceModule {
   validateSettings(settings: unknown): string[];
   /** Every adapter valid settings need, the manifest's included. */
   requiredAdapters(settings: unknown): string[];
+  /** Every problem between valid settings and what the adapters declare they can do. */
+  checkAdapters?(settings: unknown, capabilities: Readonly<Record<string, unknown>>): string[];
   /** Every problem with one flow step whose type this module provides. */
   validateStep(step: FlowStep, ctx: StepContext): string[];
   /** The level a step verifies to, so later steps can be checked against their scope floors. */
@@ -136,10 +140,13 @@ export function checkManifest(manifest: ModuleManifest, installed: readonly Assu
  */
 export class ModuleRegistry {
   readonly adapters: ReadonlySet<string>;
+  /** Adapter name to what that adapter declares it can do (its `capabilities`), for the validator. */
+  readonly capabilities: Readonly<Record<string, unknown>>;
   readonly #modules = new Map<string, AssuranceModule>();
 
-  constructor(options: { adapters?: Iterable<string>; modules?: readonly AssuranceModule[] } = {}) {
+  constructor(options: { adapters?: Iterable<string>; capabilities?: Readonly<Record<string, unknown>>; modules?: readonly AssuranceModule[] } = {}) {
     this.adapters = new Set(options.adapters ?? []);
+    this.capabilities = structuredClone(options.capabilities ?? {});
     for (const module of options.modules ?? []) this.use(module);
   }
 

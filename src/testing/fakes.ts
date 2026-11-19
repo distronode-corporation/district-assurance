@@ -8,6 +8,7 @@ import type {
   IntakeRecord,
   MessagePurpose,
   MessageSender,
+  PaymentLinkCapabilities,
   PaymentLinkRequest,
   PaymentLinks,
   PaymentMode,
@@ -102,10 +103,16 @@ export class FakeMessageSender implements MessageSender {
  * was asked for; `settle(linkId)` marks one as no longer open (paid or expired at the provider).
  */
 export class FakePaymentLinks implements PaymentLinks {
+  /** Stripe Checkout's by default: both modes, 30 minutes to 24 hours. */
+  readonly capabilities: PaymentLinkCapabilities;
   readonly created: Array<Omit<PaymentLinkRequest, "callId" | "description" | "idempotencyKey"> & { linkId: string }> = [];
   readonly expired: Array<{ linkId: string; mode: PaymentMode; connectedAccountId?: string }> = [];
   readonly #byKey = new Map<string, { linkId: string; url: string }>();
   readonly #closed = new Set<string>();
+
+  constructor(capabilities: Partial<PaymentLinkCapabilities> = {}) {
+    this.capabilities = { modes: ["connect", "platform"], minLinkMinutes: 30, maxLinkMinutes: 1440, ...capabilities };
+  }
 
   async createLink(input: PaymentLinkRequest): Promise<{ linkId: string; url: string }> {
     const existing = this.#byKey.get(input.idempotencyKey);

@@ -55,17 +55,30 @@ export interface PaymentLinkRequest {
   /** What the page may offer: only methods that settle at once. How a provider names them is the adapter's. */
   paymentMethods: readonly InstantPaymentMethod[];
   /**
-   * The latest the link may live (ISO 8601): twice the flow's link life from the request, so a
-   * text sent late still gets its full life. The engine closes it earlier, at its own deadline (the
-   * text plus the link life), by calling `expireLink`. A provider whose shortest link life is longer
-   * (Stripe Checkout: 30 minutes) sets its own minimum.
+   * The latest the link may live (ISO 8601): twice the flow's link life from the request, kept
+   * within the adapter's declared `minLinkMinutes` and `maxLinkMinutes`, so a text sent late still
+   * gets its full life and the provider never refuses the time. The engine closes the link earlier,
+   * at its own deadline (the text plus the link life), by calling `expireLink`.
    */
   expiresAt: string;
   idempotencyKey: string;
 }
 
+/**
+ * What a payment link adapter can do, declared by the adapter and checked when a config is saved.
+ * Stripe Checkout: both modes, and `expires_at` from 30 minutes to 24 hours after creation.
+ */
+export interface PaymentLinkCapabilities {
+  modes: readonly PaymentMode[];
+  /** The shortest link life the provider allows, in minutes. The engine expires links sooner itself. */
+  minLinkMinutes: number;
+  /** The longest link life the provider allows, in minutes. */
+  maxLinkMinutes: number;
+}
+
 /** Hosted payment pages (for example Stripe Checkout, on the business's account or the platform's). */
 export interface PaymentLinks {
+  readonly capabilities: PaymentLinkCapabilities;
   createLink(input: PaymentLinkRequest): Promise<{ linkId: string; url: string }>;
   /**
    * Expires an open link now. `expired` when it was open and is closed; `not_open` when the

@@ -57,7 +57,7 @@ export interface AccessController {
 
 export type AccessGrantCheck =
   | { ok: true; body: AccessGrantBody }
-  | { ok: false; reason: "malformed" | "signature" | "audience" | "not_yet_valid" | "expired" | "lifetime" };
+  | { ok: false; reason: "malformed" | "signature" | "workspace" | "audience" | "not_yet_valid" | "expired" | "lifetime" };
 
 /** The longest an access grant may live, in seconds: 15 minutes. */
 export const MAX_ACCESS_GRANT_SECONDS = 900;
@@ -81,20 +81,22 @@ function isAccessGrantBody(value: unknown): value is AccessGrantBody {
 
 /**
  * Checks an access grant for one controller: its shape, the ES256 signature against the key set,
- * that it is addressed to `audience`, that `now` is inside its validity (with `clockSkewSeconds`,
+ * that it was issued by `workspaceId` (required: workspaces that share a signing key and a
+ * controller name must never open each other's doors), that it is addressed to `audience`, that `now` is inside its validity (with `clockSkewSeconds`,
  * default 30, either way) and that it lives no longer than 15 minutes. Never throws. Replay is the
  * caller's to refuse, with `SeenGrants`.
  */
 export function verifyAccessGrant(
   grant: unknown,
   keys: ReadonlyArray<JsonWebKey & { kid?: string }>,
-  expect: { audience: string; now: Date; clockSkewSeconds?: number },
+  expect: { workspaceId: string; audience: string; now: Date; clockSkewSeconds?: number },
 ): AccessGrantCheck {
   if (typeof grant !== "object" || grant === null) return { ok: false, reason: "malformed" };
   const g = grant as Record<string, unknown>;
   if (typeof g.kid !== "string" || typeof g.signature !== "string" || !isAccessGrantBody(g.body)) return { ok: false, reason: "malformed" };
   if (!verifyDocument(grant as SignedAccessGrant, keys)) return { ok: false, reason: "signature" };
   const body = g.body;
+  if (typeof expect.workspaceId !== "string" || expect.workspaceId === "" || body.workspaceId !== expect.workspaceId) return { ok: false, reason: "workspace" };
   if (body.audience !== expect.audience) return { ok: false, reason: "audience" };
   const skew = (expect.clockSkewSeconds ?? 30) * 1000;
   const now = expect.now.getTime();

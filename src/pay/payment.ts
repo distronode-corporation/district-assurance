@@ -30,6 +30,8 @@ export interface PaymentRequest {
   linkLifeMinutes: number;
   /** The engine's deadline: `linkLifeMinutes` after the link was texted. Null until it is texted. */
   expiresAt: string | null;
+  /** What the provider was asked for when the link was created; the engine's deadline never passes it. */
+  providerExpiresAt: string;
 }
 
 /** Whose account takes the money, per flow step. */

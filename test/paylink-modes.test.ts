@@ -10,6 +10,7 @@ import { builtInModules } from "../src/modules.ts";
 import { paylinkModule } from "../src/pay/paylink.ts";
 import { INSTANT_PAYMENT_METHODS, outcomeAccountMatches, paymentMethodErrors } from "../src/pay/payment.ts";
 import { parseStripeEvent } from "../src/webhooks/stripe.ts";
+import { FakePaymentLinks } from "../src/testing/fakes.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
 const ACCT = "acct_business_1";
@@ -17,7 +18,7 @@ const request = { amountMinor: 15000, currency: "cad", description: "Deposit", a
 const pay = { type: "paylink.request", amountMinor: 5000, currency: "cad", description: "Deposit", amountSource: "price_list" };
 const verify = { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["payment.request"] };
 
-function withFlow(step: Record<string, unknown>, settings: Record<string, unknown> = { connectedAccountId: ACCT }): FlowConfig {
+function withFlow(step: Record<string, unknown>, settings: Record<string, unknown> = { mode: "platform", connectedAccountId: ACCT }): FlowConfig {
   return testConfig((c) => {
     c.modules.paylink = { settings: settings as never };
     c.flows = { deposit: { steps: [verify as never, step as never] } };
@@ -93,12 +94,16 @@ describe("paylink modes: config", () => {
     );
     // The settings' own mode applies to a step that names none.
     assert.deepEqual(problems(withFlow(pay, { mode: "connect", connectedAccountId: ACCT })), []);
+    // A business account with no mode would quietly charge the platform: refused (review R7).
+    assert.deepEqual(problems(withFlow({ ...pay, mode: "connect" }, { connectedAccountId: ACCT })), [
+      "connectedAccountId needs an explicit mode: connect, or platform with connect chosen per step",
+    ]);
     assert.deepEqual(problems(withFlow({ ...pay, linkLifeMinutes: 0, paymentMethods: ["interac"] })), [
       "linkLifeMinutes must be an integer from 5 to 60",
       "payment method interac is refused: Interac is not offered for online payments (allowed: card, apple_pay, google_pay, link)",
     ]);
     // Settings that did not validate are reported once, and the step is not cross-checked against them.
-    assert.deepEqual(problems(withFlow({ ...pay, mode: "connect" }, { connectedAccountId: 1 })), ["connectedAccountId must be 1 to 255 letters, digits, hyphens or underscores"]);
+    assert.deepEqual(problems(withFlow({ ...pay, mode: "connect" }, { mode: "platform", connectedAccountId: 1 })), ["connectedAccountId must be 1 to 255 letters, digits, hyphens or underscores"]);
   });
 });
 
@@ -134,7 +139,7 @@ describe("paylink modes: running", () => {
       mode: "connect",
       connectedAccountId: ACCT,
       paymentMethods: ["card"],
-      expiresAt: "2026-01-01T00:10:00.000Z",
+      expiresAt: "2026-01-01T00:30:00.000Z",
       linkId: "cs_fake_1",
     });
     assert.deepEqual(JSON.parse(keys[0]!), ["ws_test", callId, "pay_1", "link", "connect"], "the mode is part of the key");
@@ -282,7 +287,108 @@ describe("paylink: the engine's own deadline", () => {
     await assert.rejects(late.engine.requestPayment(lateCall, request), /carrier down/);
     late.clock.advance(7 * 60_000);
     late.messages.sendText = lateSend;
-    assert.equal((await late.engine.requestPayment(lateCall, request)).expiresAt, "2026-01-01T00:10:00.000Z", "what is left of the provider's link, not 00:12");
+    assert.equal(late.payments.created[0]!.expiresAt, "2026-01-01T00:30:00.000Z", "never under the adapter's 30 minutes (review R8)");
+    assert.equal((await late.engine.requestPayment(lateCall, request)).expiresAt, "2026-01-01T00:12:00.000Z", "5 minutes after the text");
+  });
+
+  it("never texts a link the provider has, or nearly has, let die: it expires the request instead (review R6)", async () => {
+    // An adapter with no minimum of its own: the provider is asked for exactly twice the link life.
+    const payments = new FakePaymentLinks({ minLinkMinutes: 0 });
+    const t = setup({ adapters: { payments }, config: testConfig((c) => (c.modules.paylink = { settings: { linkLifeMinutes: 5 } })) });
+    const callId = await verifiedCall(t);
+    const send = t.messages.sendText.bind(t.messages);
+    t.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
+    assert.equal(payments.created[0]!.expiresAt, "2026-01-01T00:10:00.000Z");
+    t.clock.advance(12 * 60_000);
+    t.messages.sendText = send;
+    await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /could not be texted in time/));
+    assert.equal(t.messages.sent.filter((m) => m.purpose === "payment_link").length, 0, "the dead link was never texted");
+    assert.deepEqual(payments.expired, [{ linkId: "cs_fake_1", mode: "platform" }], "and it was expired at the provider");
+    const state = await t.engine.state(callId);
+    assert.equal(state.phase, "open", "the request settled; a new one may follow");
+    const ledger = (await t.ledger.list()).find((e) => e.event === "payment.link_expired")!;
+    assert.deepEqual(ledger.detail, { paymentId: "pay_1", provider: "expired", reason: "not_sent_in_time" });
+    assert.equal((await t.engine.endCall(callId))!.body.payments[0]!.status, "expired");
+
+    // With less than the shortest link life left (6 of 10 minutes gone, 4 left): refused too.
+    // In connect mode, so the expiry goes to the business's own account.
+    const uPayments = new FakePaymentLinks({ minLinkMinutes: 0 });
+    const u = setup({ adapters: { payments: uPayments }, config: testConfig((c) => (c.modules.paylink = { settings: { linkLifeMinutes: 5, mode: "connect", connectedAccountId: ACCT } })) });
+    const c2 = await verifiedCall(u);
+    const send2 = u.messages.sendText.bind(u.messages);
+    u.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(u.engine.requestPayment(c2, request), /carrier down/);
+    u.clock.advance(6 * 60_000);
+    u.messages.sendText = send2;
+    await assert.rejects(u.engine.requestPayment(c2, request), rejects("precondition_failed"));
+    assert.deepEqual(uPayments.expired, [{ linkId: "cs_fake_1", mode: "connect", connectedAccountId: ACCT }]);
+    // A payment the provider settled first (it answers not_open) is left as it is.
+    const vPayments = new FakePaymentLinks({ minLinkMinutes: 0 });
+    const v = setup({ adapters: { payments: vPayments }, config: testConfig((c) => (c.modules.paylink = { settings: { linkLifeMinutes: 5 } })) });
+    const c3 = await verifiedCall(v);
+    const send3 = v.messages.sendText.bind(v.messages);
+    v.messages.sendText = async () => {
+      throw new Error("carrier down");
+    };
+    await assert.rejects(v.engine.requestPayment(c3, request), /carrier down/);
+    v.clock.advance(12 * 60_000);
+    v.messages.sendText = send3;
+    const expire = vPayments.expireLink.bind(vPayments);
+    vPayments.expireLink = async (input) => {
+      await v.engine.applyPaymentOutcome({ kind: "expired", linkId: input.linkId });
+      return expire(input);
+    };
+    await assert.rejects(v.engine.requestPayment(c3, request), rejects("precondition_failed"));
+    assert.equal((await v.ledger.list()).filter((e) => e.event === "payment.link_expired").length, 0, "already settled by the provider");
+  });
+
+  it("asks the provider for at least its minimum and at most its maximum link life (review R8)", async () => {
+    const t = setup({ config: testConfig((c) => (c.modules.paylink = { settings: { linkLifeMinutes: 5 } })) });
+    const callId = await verifiedCall(t);
+    const { expiresAt } = await t.engine.requestPayment(callId, request);
+    assert.equal(t.payments.created[0]!.expiresAt, "2026-01-01T00:30:00.000Z", "Stripe Checkout's 30 minutes, not 10");
+    assert.equal(expiresAt, "2026-01-01T00:05:00.000Z", "the engine still closes it at 5");
+    const shortPayments = new FakePaymentLinks({ minLinkMinutes: 0, maxLinkMinutes: 20 });
+    const short = setup({ adapters: { payments: shortPayments } });
+    const c2 = await verifiedCall(short);
+    await short.engine.requestPayment(c2, request);
+    assert.equal(shortPayments.created[0]!.expiresAt, "2026-01-01T00:20:00.000Z", "twice 15 minutes, held to the adapter's 20");
+  });
+
+  it("refuses at save time what the payments adapter declares it cannot do (decision 7)", () => {
+    const engineWith = (caps: Record<string, unknown>, config: FlowConfig) => () =>
+      setup({ adapters: { payments: Object.assign(new FakePaymentLinks(), { capabilities: caps }) }, config });
+    const platformOnly = { modes: ["platform"], minLinkMinutes: 30, maxLinkMinutes: 1440 };
+    assert.throws(engineWith(platformOnly, withFlow({ ...pay, mode: "connect" })), (e: unknown) =>
+      e instanceof Error && /flows\.deposit\.steps\[1\] \(paylink\.request\): the payments adapter does not take connect payments \(it takes: platform\)/.test(e.message),
+    );
+    assert.throws(
+      engineWith(platformOnly, testConfig((c) => (c.modules.paylink = { settings: { mode: "connect", connectedAccountId: ACCT } }))),
+      /modules\.paylink: the payments adapter does not take connect payments/,
+    );
+    assert.throws(engineWith({ modes: [], minLinkMinutes: 0, maxLinkMinutes: 1 }, testConfig()), /does not take platform payments \(it takes: none\)/);
+    assert.throws(
+      engineWith({ modes: ["platform", "connect"], minLinkMinutes: 0, maxLinkMinutes: 10 }, withFlow({ ...pay, linkLifeMinutes: 15 })),
+      /linkLifeMinutes 15 is longer than the payments adapter keeps a link \(10 minutes\)/,
+    );
+    assert.throws(
+      engineWith({ modes: ["platform", "connect"], minLinkMinutes: 0, maxLinkMinutes: 10 }, testConfig()),
+      /modules\.paylink: linkLifeMinutes 15 is longer/,
+      "the default link life against the adapter too",
+    );
+    for (const bad of [null, { modes: "platform", minLinkMinutes: 0, maxLinkMinutes: 1 }, { modes: ["cash"], minLinkMinutes: 0, maxLinkMinutes: 1 }, { modes: [], minLinkMinutes: 5, maxLinkMinutes: 1 }, { modes: [], minLinkMinutes: -1, maxLinkMinutes: 1 }]) {
+      assert.throws(engineWith(bad as never, testConfig()), /capabilities must be \{ modes, minLinkMinutes, maxLinkMinutes \}/, JSON.stringify(bad));
+    }
+    // A step whose own mode is invalid is reported for that, not checked against the adapter.
+    assert.deepEqual(
+      validateConfig(withFlow({ ...pay, mode: "cash" }), new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer"], capabilities: { payments: platformOnly }, modules: builtInModules() })),
+      ["flows.deposit.steps[1] (paylink.request): mode must be connect or platform"],
+    );
   });
 
   it("refuses on a call that started with paylink off", async () => {

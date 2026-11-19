@@ -81,6 +81,13 @@ export interface ModuleCallView {
   now: string;
   /** A new id from the engine's id source, `prefix_...`. A retried attempt draws a new one. */
   newId(prefix: string): string;
+  /**
+   * `updateModule` only: opens a reservation (work whose outcome comes later, such as an unlock),
+   * the one thing `recordModuleOutcome` may later settle. Ids are the module's own.
+   */
+  reserve(ref: string): void;
+  /** `recordModuleOutcome` only: closes the reservation being settled, once its outcome is written. */
+  release(): void;
   authorized(scope: string): boolean;
   /** A ledger entry `module.event` with `{ module, event, detail }`. Never put a value the caller keyed in it. */
   emit(event: string, detail: { [key: string]: JsonValue }): void;
@@ -125,8 +132,14 @@ export class Engine {
     this.#onEvent = options.onEvent;
     this.#badge = options.badge ?? badge.badgeModule();
     const present = Object.entries(this.#adapters).filter(([, value]) => value !== undefined).map(([name]) => name);
+    // What each adapter declares it can do, so a config it cannot serve is refused when saved.
+    const capabilities: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(this.#adapters)) {
+      const declared = (value as { capabilities?: unknown } | undefined)?.capabilities;
+      if (declared !== undefined) capabilities[name] = declared;
+    }
     this.#receiptModules = builtInModules(this.#badge);
-    this.registry = new ModuleRegistry({ adapters: present, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
+    this.registry = new ModuleRegistry({ adapters: present, capabilities, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
     this.#config = this.#prepare(options.config === undefined ? defaultConfig() : options.config);
     this.#rt = this.#runtime();
   }
@@ -454,30 +467,56 @@ export class Engine {
         const scope = module.manifest.scopes.needs[step.type];
         if (scope !== undefined && !this.#authorized(draft.record, scope)) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
       }
-      return this.#applyModule(draft, name, fn);
+      return this.#applyModule(draft, name, fn, { reserve: true, settling: null });
     });
   }
 
   /**
-   * Records the outcome of work an outside module started in `updateModule` (a provider's
-   * answer), in one compare-and-set write. Unlike `updateModule` it is not held to the step's
-   * scope and runs after the flow or the call ended, because the work was authorized when it
-   * started and its result must still be written: Gate records an unlock's answer this way even
-   * if the caller's grant expired while the door controller answered. Never use it for the work.
+   * Records the outcome of work an outside module started, and reserved, in `updateModule` (a
+   * provider's answer), in one compare-and-set write. It is refused unless `reservation` is open
+   * for this module on this call, so it can settle work that was authorized when it started, never
+   * start any. Unlike `updateModule` it is not held to the step's scope and runs after the flow or
+   * the call ended, because that result must still be written: Gate records an unlock's answer this
+   * way even if the caller's grant expired while the door answered. `call.release()` closes the
+   * reservation.
    */
-  async recordModuleOutcome(callId: string, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): Promise<JsonValue> {
+  async recordModuleOutcome(callId: string, name: string, reservation: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): Promise<JsonValue> {
     if ((BUILT_IN_MODULES as readonly string[]).includes(name)) throw new EngineError("precondition_failed", `${name} is built in; use its own methods`);
     if (this.registry.get(name) === undefined) throw new EngineError("module_disabled", `no module named ${name} is installed`);
-    return this.#update(callId, (draft) => this.#applyModule(draft, name, fn));
+    return this.#update(callId, (draft) => {
+      if (!(draft.record.reservations?.[name] ?? []).includes(reservation)) {
+        throw new EngineError("precondition_failed", `${name} has no open reservation ${reservation} on this call; an outcome settles only work updateModule reserved`);
+      }
+      return this.#applyModule(draft, name, fn, { reserve: false, settling: reservation });
+    });
   }
 
-  #applyModule(draft: CallDraft, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): JsonValue {
+  /** Every open reservation an outside module has on a call. */
+  async moduleReservations(callId: string, name: string): Promise<string[]> {
+    this.#outsideModule(name);
+    return [...((await this.#read(callId)).reservations?.[name] ?? [])];
+  }
+
+  #applyModule(draft: CallDraft, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue, mode: { reserve: boolean; settling: string | null }): JsonValue {
     const step = draft.step();
+    const open = (draft.record.reservations ??= {});
     const view: ModuleCallView = {
       state: snapshot(draft.record.state),
       step: step === null ? null : structuredClone(step),
       now: this.#now(),
       newId: (prefix) => this.#ids.next(prefix),
+      reserve: (ref) => {
+        if (!mode.reserve) throw new EngineError("precondition_failed", "only updateModule opens a reservation");
+        if (typeof ref !== "string" || ref === "") throw new EngineError("invalid_input", "a reservation is a non-empty string");
+        open[name] = [...new Set([...(open[name] ?? []), ref])];
+      },
+      release: () => {
+        if (mode.settling === null) throw new EngineError("precondition_failed", "only recordModuleOutcome closes a reservation");
+        // recordModuleOutcome checked that the reservation being settled is open, so the list exists.
+        const left = open[name]!.filter((r) => r !== mode.settling);
+        if (left.length > 0) open[name] = left;
+        else delete open[name];
+      },
       authorized: (scope) => this.#authorized(draft.record, scope),
       emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
     };

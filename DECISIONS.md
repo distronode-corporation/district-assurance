@@ -246,6 +246,11 @@ grant. Outside modules also see the current step, the engine's clock and an id s
 core): if Gate can be built on it, so can a host's module, and the scope check lives in one place.
 Recording outcomes on a separate path keeps that check strict while never losing a door's
 answer. One signing format for receipts and grants means one verifier in every language.
+**Amended (hostile review of PR 2):** an outcome write needs a reservation that `updateModule`
+opened (`call.reserve(ref)`), names it, and closes it (`call.release()`), so it can settle
+authorized work but never mark a door delivered on its own or write to the ledger after a call
+ended with nothing in flight. A verifier must name the workspace it serves: grants are bound to
+their workspace as well as their audience.
 **Revisit** when Gate needs a receipt part (access on the call's receipt).
 
 ## ADR-22. The signed-webhook relay first; an unlock is never retried
@@ -283,7 +288,11 @@ Stripe Checkout's shortest `expires_at` is 30 minutes. A link may offer only met
 during the call: card (credit, and Visa and Mastercard debit), Apple Pay, Google Pay and Link, the
 default; the validator refuses anything else, pre-authorized debit and Interac by name. A
 provider outcome whose connected account is not the payment's is ignored and written to the
-ledger. Receipts and `payment.link_sent` carry the mode.
+ledger. Receipts and `payment.link_sent` carry the mode. **Amended (hostile review of PR 2):** the
+payments adapter declares its capabilities (modes, shortest and longest link life), the validator
+holds steps and settings to them, and the provider is asked for a life inside them; a link with
+less than 5 minutes of the provider's life left is expired, never texted; a `connectedAccountId`
+needs an explicit mode.
 **Why.** The maintainers' decisions of 2026-11-18: both modes, chosen per flow; the engine expires links at 15
 minutes by default, configurable from 5 to 60; any popular method that settles while the person
 is on the call. Stripe documents Interac only in person and pre-authorized debit settles in days.

@@ -47,7 +47,7 @@ export function demoConfig(): FlowConfig {
           ],
         },
       },
-      paylink: { settings: { maxAmountMinor: 50000, connectedAccountId: "acct_demo_business" } },
+      paylink: { settings: { maxAmountMinor: 50000, mode: "platform", connectedAccountId: "acct_demo_business" } },
       gate: { settings: { targets: [{ id: "front-door", controller: "lobby", ref: "door-1" }] } },
       trace: {
         settings: {

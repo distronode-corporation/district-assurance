@@ -9,6 +9,8 @@ import { createServer, type Server } from "node:http";
 import { SeenGrants, verifyAccessGrant, type AccessGrantBody, type Clock } from "../../../src/index.ts";
 
 export interface DoorRelayOptions {
+  /** The workspace whose doors this relay works: a grant issued by any other is refused. */
+  workspaceId: string;
   /** This relay's id: the controller name grants must be addressed to. */
   audience: string;
   /** Gate's public key set (`gate.keys()`). */
@@ -43,7 +45,7 @@ export function createDoorRelay(options: DoorRelayOptions): Server {
         return void answer(400, { error: "malformed" });
       }
       const now = options.clock.now();
-      const check = verifyAccessGrant(grant, options.keys, { audience: options.audience, now });
+      const check = verifyAccessGrant(grant, options.keys, { workspaceId: options.workspaceId, audience: options.audience, now });
       if (!check.ok) return void answer(401, { error: check.reason });
       if (!seen.accept(check.body, now)) return void answer(409, { error: "replay" });
       // A door callback that throws before it returns a promise is a door failure too, never a crash.

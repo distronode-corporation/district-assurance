@@ -19,7 +19,10 @@ All notable changes to this project are documented here. The format follows
   default 15) with the engine expiring links itself (`expirePaymentLinks`, `PaymentLinks.expireLink`);
   an allow-list of instant payment methods (card, Apple Pay, Google Pay, Link). Outcomes from
   another account than the payment's are ignored.
-- `Engine.recordModuleOutcome`; outside modules see the current step, the clock and an id source.
+- `Engine.recordModuleOutcome` (settles only a reservation `updateModule` opened) and
+  `Engine.moduleReservations`; outside modules see the current step, the clock and an id source.
+- `PaymentLinks.capabilities` (modes, shortest and longest link life), checked when a config is
+  saved; `verifyAccessGrant` requires the workspace.
 - The reference server's Connect webhook route; the demo takes a deposit in each mode and opens a
   door through the relay.
 - ADR-21 to ADR-24.

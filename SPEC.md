@@ -103,10 +103,13 @@ An outside module changes its part of a call with `updateModule(callId, name, fn
 compare-and-set write, refused once the flow has ended, refused while the flow is on another
 module's step, and held by the engine to the scope the current step needs. `fn` gets a copy of the
 module's part and a view: the session state, the current step (a copy, or null), the engine's
-clock (`now`), `newId(prefix)`, `authorized(scope)` and `emit(event, detail)` (a `module.event`
-ledger entry). `recordModuleOutcome(callId, name, fn)` is the same write for the result of work
-started in `updateModule` (a provider's answer): not held to the scope, and allowed after the flow
-or the call ended.
+clock (`now`), `newId(prefix)`, `authorized(scope)`, `emit(event, detail)` (a `module.event`
+ledger entry) and `reserve(ref)`, which opens a reservation in the call record for work whose
+outcome comes later. `recordModuleOutcome(callId, name, ref, fn)` is the write for that outcome (a
+provider's answer): refused unless `ref` is an open reservation of that module on that call, so it
+settles authorized work and never starts any; not held to the scope; allowed after the flow or the
+call ended while the reservation is open; `call.release()` closes it. `moduleReservations(callId,
+name)` lists the open ones.
 
 ## 4. Factors, levels and scopes
 
@@ -231,7 +234,8 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
 until FIL-2); Paylink `{maxAmountMinor?, mode?, connectedAccountId?, linkLifeMinutes?, paymentMethods?}`
 (`maxAmountMinor` 1 to 1,000,000; `mode` default `platform`, and `connect` needs
-`connectedAccountId`, 1 to 255 letters, digits, `-` or `_`; the other two are the defaults for steps
+`connectedAccountId`, 1 to 255 letters, digits, `-` or `_`; a `connectedAccountId` needs an
+explicit `mode`, so a business account never quietly defaults to the platform's; the other two are the defaults for steps
 that name none and for payments outside a flow, 15 minutes and card, Apple Pay, Google Pay and
 Link); Gate `{targets, maxGrantsPerCall?}` (section 17); Trace `{receipts?, wordings?}`
 (`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr}}`, purposes
@@ -402,12 +406,21 @@ disputes are not handled by the engine (SECURITY-MODEL.md, open questions).
 
 **Link life.** A link lives `linkLifeMinutes` (step, else settings, else 15; 5 to 60) from the
 moment it was texted, but never past what the provider was asked for: `expiresAt`. The provider is
-asked for twice the link life from the request (so a text resumed late still gets its full life)
-and may keep a longer minimum of its own (Stripe Checkout: 30 minutes). `expirePaymentLinks(callId)`, which the host
+asked for twice the link life from the request (so a text resumed late still gets its full life),
+held within what the payments adapter declares (`capabilities.minLinkMinutes` and
+`maxLinkMinutes`; Stripe Checkout: 30 minutes to 24 hours). A link is never texted with less than
+5 minutes of that left: the request is expired instead (at the provider first, `payment.link_expired`
+with reason `not_sent_in_time`), and `requestPayment` throws `precondition_failed`. `expirePaymentLinks(callId)`, which the host
 calls at `expiresAt` or later, asks the provider to expire each texted link still open past its
 deadline (`expireLink`): on `expired` the request settles `expired` (and its flow step fails); on
 `not_open` it is left for the provider's webhook, which may still say paid. A link that was never
 texted never expires this way; it stays open to resume.
+
+**Adapter capabilities.** `PaymentLinks.capabilities` declares `{modes, minLinkMinutes,
+maxLinkMinutes}`. When the config is saved, a step's mode (and Paylink's default mode) must be one
+the adapter takes, and the link life no longer than its maximum; malformed capabilities are a
+problem too. A registry built without capabilities (only adapter names) skips these checks; an
+engine always has them.
 
 **Methods.** `paymentMethods` lists only methods that settle during the call: `card` (credit, and
 Visa and Mastercard debit), `apple_pay`, `google_pay`, `link`; the default is all four. Anything
@@ -457,7 +470,8 @@ started; a flow attached later is refused when a step names a target the call di
 `gate.grantAccess(engine, callId, input?)`: in a flow the `gate.grant` step names the target and
 the lifetime (pass no input); outside one the host's code passes `{target, lifetimeSeconds?}`.
 
-1. **Reserve** (`updateModule`, held to `entry.open`; Gate also checks `authorized("entry.open")`).
+1. **Reserve** (`updateModule`, held to `entry.open`; Gate also checks `authorized("entry.open")`),
+   opening a reservation named by the grant id; every later write for this grant settles only it.
    Refused: `scope_denied` without a verification grant covering `entry.open` (none, expired,
    tainted, or below today's minimum); `invalid_input` for a missing or unknown target or a bad
    lifetime; `precondition_failed` while another grant of the call is in flight or once
@@ -496,9 +510,11 @@ the lifetime (pass no input); outside one the host's code passes `{target, lifet
 }
 ```
 
-`verifyAccessGrant(grant, keys, {audience, now, clockSkewSeconds?})` returns `{ok: true, body}` or
-`{ok: false, reason}`: `malformed` (not this shape), `signature` (unknown `kid`, another algorithm,
-any change), `audience`, `not_yet_valid` and `expired` (with 30 seconds of skew by default), and
+`verifyAccessGrant(grant, keys, {workspaceId, audience, now, clockSkewSeconds?})` returns `{ok:
+true, body}` or `{ok: false, reason}`: `malformed` (not this shape), `signature` (unknown `kid`,
+another algorithm, any change), `workspace` (issued by another workspace, or no `workspaceId`
+given: it is required, so workspaces sharing a key and a controller name never open each other's
+doors), `audience`, `not_yet_valid` and `expired` (with 30 seconds of skew by default), and
 `lifetime` (longer than 900 seconds, or ending before it starts). `new SeenGrants({ clockSkewSeconds })` (default
 30, at least the verifier's): `accept(body, now)` is true once per grant id, and keeps the id until
 the verifier would refuse the grant as expired. `gate.keys()` is the public key set.
@@ -510,7 +526,7 @@ URL; redirects are not followed; the timeout is 100 to 30,000 ms (default 5,000)
 answers 2xx after it worked the door, optionally `{"state": "confirmed", "ref": "<its id>"}`; 4xx
 when it did not act, optionally `{"error": "<code>"}` (`replay`, `signature`, ...). Anything else,
 including no answer, is `unknown`. A relay checks the grant with `verifyAccessGrant` against
-`gate.keys()` and its own audience, and refuses a grant id it has seen.
+`gate.keys()`, its own workspace and its own audience, and refuses a grant id it has seen.
 
 A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);
 revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS

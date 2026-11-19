@@ -132,7 +132,11 @@ is asked, so a call tainted or a grant expired while it was signed sends nothing
 signed with ES256 under Gate's own key and carries its audience (the controller), its target, its
 level and a short validity, never past the verification grant (tested); a relay holds only the
 public key, so taking a relay over does not let anyone mint grants, and one changed byte fails
-(tested). The example relay refuses a grant id it has seen (`SeenGrants`, tested in the demo).
+(tested). A grant is bound to its workspace: a verifier must name the workspace it serves, so
+workspaces that share a key and a controller name never open each other's doors (tested). The
+example relay refuses a grant id it has seen (`SeenGrants`, tested in the demo). An outcome write
+settles only a grant Gate reserved under its scope check, so no write marks a door delivered
+without a grant, and none reaches the ledger after a call ended with nothing in flight (tested).
 **An unlock is never retried:** one grant in flight per call, sent once, no redirects followed;
 a lost answer (a timeout, a dropped connection, a 5xx) is recorded as `unknown`, and opening again
 is a fresh request with a new grant, up to `maxGrantsPerCall` (tested). The answer is recorded
@@ -146,7 +150,9 @@ skew after one), and the door's own safety
 
 A webhook from one account settles a payment taken on another, or a config sends money to the
 wrong merchant. **Controls:** each step names its mode; connect mode needs a connected account in
-the settings, checked when the config is saved and again when the link is requested (tested). An
+the settings, checked when the config is saved and again when the link is requested, and a
+business account with no explicit mode is refused rather than defaulting to the platform (tested).
+A mode the payments adapter does not declare is refused when the config is saved (tested). An
 outcome from a connected account other than the payment's, or a connected account's outcome for a
 platform payment, is ignored and written to the ledger (tested). The reference server takes
 connect-mode events on their own endpoint with their own signing secret. The idempotency key of a
