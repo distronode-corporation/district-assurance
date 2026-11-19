@@ -102,7 +102,7 @@ as its own adapter.
 | Porting (`lastPortHoursAgo`) | not used: always null | yes, `portability.ported_status` and `ported_date`; no approval |
 | Identity match (`identityMatch`) | yes, the `identity_match` field, when the host gives the identity on file; needs Twilio's approval, per country | no: always `unavailable` |
 | Carrier | not used | yes, name and line type, from `lookup()`, outside the report |
-| Countries this account may use | `TWILIO_LOOKUP_COUNTRIES`, `US` by default | `TELNYX_LOOKUP_COUNTRIES`, `US` by default; Canadian lookups are not enabled on our account yet |
+| Countries this account may use | `TWILIO_LOOKUP_COUNTRIES`, `US` by default | `TELNYX_LOOKUP_COUNTRIES`, `US` by default; list a country only once your account may look it up |
 
 How the answers are read:
 
