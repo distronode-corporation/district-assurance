@@ -64,3 +64,16 @@ describe("hostile #106: what holds", () => {
     }
   });
 });
+
+describe("hostile #106: the month is a string", () => {
+  it("refuses a month that only reads as one, before the ledger is read", async () => {
+    const ledger = new MemoryAuditLedger();
+    let lists = 0;
+    const list = ledger.list.bind(ledger);
+    ledger.list = async () => (lists++, list());
+    for (const month of [["2026-01"], { toString: () => "2026-01" }, new String("2026-01"), 202601]) {
+      await assert.rejects(monthlyReport({ ledger, workspaceId: "ws_test", month } as never), (e: unknown) => e instanceof Error && /month must be YYYY-MM/.test(e.message), String(month));
+    }
+    assert.equal(lists, 0);
+  });
+});

@@ -135,7 +135,8 @@ export async function monthlyReport(input: { ledger: AuditLedger; workspaceId: s
   // Read once: the workspace and month checked are the ones every entry is filtered by and the report names.
   const { ledger, workspaceId, month: wanted, timeZone: zone } = input;
   if (typeof workspaceId !== "string" || workspaceId === "") throw new EngineError("invalid_input", "workspaceId is empty");
-  if (!MONTH.test(wanted)) throw new EngineError("invalid_input", "month must be YYYY-MM");
+  // A string first: the pattern would read an array or an object through its toString.
+  if (typeof wanted !== "string" || !MONTH.test(wanted)) throw new EngineError("invalid_input", "month must be YYYY-MM");
   const timeZone = zone ?? "UTC";
   const monthOf = monthReader(timeZone);
   const entries = await ledger.list();
