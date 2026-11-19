@@ -5,6 +5,7 @@ import { MemorySessionStore } from "../core/session-store.ts";
 import { createEngine, type Engine, type EngineOptions } from "../engine.ts";
 import { MemoryAuditLedger } from "../prove/ledger.ts";
 import {
+  FakeAccessController,
   FakeCarrierSignals,
   FakeIdentityProvider,
   FakeMessageSender,
@@ -33,6 +34,8 @@ export interface TestEngine {
   ledger: MemoryAuditLedger;
   sessions: SessionStore;
   pinVerifier: FakePinVerifier;
+  /** Gate's door, wired as the access controller named `door`. */
+  door: FakeAccessController;
 }
 
 export type TestEngineOptions = Partial<Omit<EngineOptions, "adapters">> & {
@@ -41,8 +44,8 @@ export type TestEngineOptions = Partial<Omit<EngineOptions, "adapters">> & {
 };
 
 /**
- * An engine on fakes only: a fixed clock, sequential ids, in-memory stores, a throwaway signing key,
- * every adapter wired, and `defaultConfig()` unless a config is given.
+ * An engine on fakes only: a fixed clock, sequential ids, in-memory stores, throwaway signing keys
+ * (receipts, and Gate's `accessSigner`), a fake door as the `access` controller `door`, every adapter wired, and `defaultConfig()` unless a config is given.
  */
 export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
   const parts = {
@@ -56,6 +59,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     ledger: new MemoryAuditLedger(),
     sessions: new MemorySessionStore() as SessionStore,
     pinVerifier: new FakePinVerifier(),
+    door: new FakeAccessController(),
   };
   const { adapters: overrides = {}, ...rest } = options;
   const adapters = {
@@ -68,6 +72,8 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     sessions: parts.sessions,
     pinVerifier: parts.pinVerifier,
     signer: generateTestSigner(),
+    access: { door: parts.door },
+    accessSigner: generateTestSigner("test-access-key-1"),
     ...overrides,
   } as EngineAdapters;
   if (overrides.sessions !== undefined) parts.sessions = overrides.sessions;

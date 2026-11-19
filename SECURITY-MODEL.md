@@ -21,7 +21,7 @@ claim.
 |---|---|
 | The host's code paths that call the engine | Everything the caller says |
 | The adapters the host plugs in | Everything the model says or proposes |
-| The knowledge key, the receipt signing key and Gate's signing key | Caller ID and any number given on the call |
+| The knowledge key, the receipt signing key and the access signing key | Caller ID and any number given on the call |
 | The clock and id source | Webhook bodies until their signature verifies |
 | The outside modules the host installs | Text from business endpoints, CRMs and documents |
 | The door controllers and relays the host configures | A door relay's answer, beyond "took it", "refused" or "lost" |
@@ -126,29 +126,30 @@ the host's code with an `amountSource`, and destinations come from the subject r
 ### Unlocks: forged, replayed, or sent twice
 
 Someone forges an access grant, replays one, or a retry opens a door for a caller who is no longer
-there. **Controls:** Gate refuses without a verification grant covering `entry.open` (level 2 or
-more), checked by the engine itself on the flow step and by Gate, and once more right before the door
-is asked, so a call tainted or a grant expired while it was signed sends nothing (tested). An access grant is
-signed with ES256 under Gate's own key and carries its audience (the controller), its target, its
+there, or code inside the engine writes an outcome the door never gave. **Controls:** the engine
+owns every access grant (ADR-25): it reserves it, signs it, computes its digest, calls the
+controller once and records the controller's actual answer, all in its own writes. Gate is a
+built-in module, so no module code can reach a grant (`updateModule` refuses it) and there is no
+outcome API to write one: a forged delivery, a re-pointed or lowered grant, a second settlement or
+a digest the engine did not compute has no path in (tested, for every attack of the PR 2 reviews).
+A grant needs a verification grant covering `entry.open` (level 2 or more), checked on every
+request, in a flow and outside one, and once more right before the door is asked, so a call tainted
+or a grant expired while it was signed sends nothing (tested). An access grant is signed with
+ES256 under the access signer's own key and carries its audience (the controller), its target, its
 level and a short validity, never past the verification grant (tested); a relay holds only the
 public key, so taking a relay over does not let anyone mint grants, and one changed byte fails
 (tested). A grant is bound to its workspace: a verifier must name the workspace it serves, so
 workspaces that share a key and a controller name never open each other's doors (tested). The
-example relay refuses a grant id it has seen (`SeenGrants`, tested in the demo). An outcome write
-settles only the one grant its reservation names, and the engine refuses any other change, so a
-pending grant's reservation cannot write a forged one (tested). Even on that grant, the identity
-(door, ref, target, level, expiry) is fixed, the status moves only from reserved to a final value,
-and a final value must be the controller's actual answer to this Gate, so no write can mark a door
-delivered that the controller did not report, re-point a grant, or settle it twice (tested). After
-a call ends, a door answer that arrives late is still recorded, only as that grant's one settling
-write; once the call's receipt is signed, nothing is written to the call, and a late answer is
-refused rather than appended after the receipt (tested). It settles only a grant Gate
-reserved under its scope check, so no write marks a door delivered
-without a grant, and none reaches the ledger after a call ended with nothing in flight (tested).
+example relay refuses a grant id it has seen (`SeenGrants`, tested in the demo). Ending a call
+settles a grant still at its door as `unknown` in the same write, before the receipt's ledger head
+is taken, so a door answer that arrives later changes nothing and no access outcome ever follows
+the receipt (tested). Outside modules' `updateModule` is held by the engine to their manifest's
+scopes on every call, outside a flow too (tested).
 **An unlock is never retried:** one grant in flight per call, sent once, no redirects followed;
 a lost answer (a timeout, a dropped connection, a 5xx) is recorded as `unknown`, and opening again
 is a fresh request with a new grant, up to `maxGrantsPerCall` (tested). The answer is recorded
-even if the caller's grant expired or the call ended while the door answered (tested). The ledger
+even if the caller's grant expired while the door answered (tested); one that arrives after the
+call ended is not (the grant was settled `unknown` at the end). The ledger
 holds each grant's digest and outcome, never the grant. Left to the host: a relay that keeps seen
 grant ids across restarts (or refuses every grant for 15 minutes plus twice the verifier's clock
 skew after one), and the door's own safety
@@ -211,7 +212,7 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
   speech-to-text and the model while `sensitive` is set.
-- Keeping the knowledge key, the receipt signing key and Gate's signing key in a key store, Gate's
+- Keeping the knowledge key, the receipt signing key and the access signing key in a key store, the access key
   apart from the receipts'.
 - Calling `expirePaymentLinks` at each link's `expiresAt` (a timer or a sweep); until it does, a
   link lives as long as the provider keeps it.

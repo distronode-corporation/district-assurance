@@ -28,7 +28,7 @@ describe("reference server", () => {
 
   const post = (path: string, body: string, headers: Record<string, string> = {}) => fetch(`${base}${path}`, { method: "POST", body, headers });
   const signed = (body: string) => ({ "stripe-signature": signStripePayload(body, SECRET, Math.floor(t.clock.now().getTime() / 1000)) });
-  const event = (id: string, type: string, object: Record<string, unknown>) => JSON.stringify({ id, type, data: { object } });
+  const event = (id: string, type: string, object: Record<string, unknown>, extra: Record<string, unknown> = {}) => JSON.stringify({ id, type, data: { object }, ...extra });
 
   it("answers health, the key set, and 404 for anything else", async () => {
     assert.deepEqual(await (await fetch(`${base}/healthz`)).json(), { ok: true });
@@ -60,7 +60,30 @@ describe("reference server", () => {
     assert.deepEqual(await (await post("/webhooks/stripe/identity", body, signed(body))).json(), { received: true, applied: false });
     assert.deepEqual(await (await post("/webhooks/stripe/identity", body, signed(body))).json(), { received: true, duplicate: true });
     const pay = event("evt_3", "checkout.session.expired", { id: "cs_x" });
-    assert.deepEqual(await (await post("/webhooks/stripe/identity", pay, signed(pay))).json(), { received: true, applied: false });
+    assert.deepEqual(await (await post("/webhooks/stripe/identity", pay, signed(pay))).json(), { received: true, applied: false, handled: false });
+  });
+
+  it("applies an event only on its own endpoint, never remembering one that went to the wrong one", async () => {
+    const both = createTestEngine();
+    const server = createReferenceServer({ engine: both.engine, stripeSecrets: { identity: [SECRET], payments: [SECRET], connect: [SECRET] }, clock: both.clock });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const send = async (path: string, body: string) => (await fetch(`${url}${path}`, { method: "POST", headers: signed(body), body })).json();
+    try {
+      // An identity event that an unfiltered listener sent to the payments endpoint first.
+      const id = event("evt_10", "identity.verification_session.verified", { id: "vs_unknown" });
+      assert.deepEqual(await send("/webhooks/stripe/payments", id), { received: true, applied: false, handled: false });
+      assert.deepEqual(await send("/webhooks/stripe/identity", id), { received: true, applied: false }, "applied where it belongs, not a duplicate");
+      // The endpoint fixes the payment mode: a Connect event names an account, an account event does not.
+      const platform = event("evt_11", "checkout.session.expired", { id: "cs_x" });
+      assert.deepEqual(await send("/webhooks/stripe/connect", platform), { received: true, applied: false, handled: false });
+      assert.deepEqual(await send("/webhooks/stripe/payments", platform), { received: true, applied: false });
+      const connect = event("evt_12", "checkout.session.expired", { id: "cs_y" }, { account: "acct_1" });
+      assert.deepEqual(await send("/webhooks/stripe/payments", connect), { received: true, applied: false, handled: false });
+      assert.deepEqual(await send("/webhooks/stripe/connect", connect), { received: true, applied: false });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("refuses a body over the limit", async () => {

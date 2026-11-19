@@ -5,55 +5,18 @@
 // it has seen (`SeenGrants`), and only then works the door.
 import type { JsonWebKey } from "node:crypto";
 
-import { canonicalPayload, verifyDocument, type SignedDocument } from "../prove/receipt.ts";
+import { canonicalPayload, verifyDocument } from "../prove/receipt.ts";
 import { sha256Hex } from "../core/hash.ts";
-import type { AssuranceLevel } from "../core/policy.ts";
 
-export interface AccessGrantBody {
-  v: 1;
-  kind: "access";
-  /** Unique per grant. A relay refuses an id it has seen until the grant expires. */
-  grantId: string;
-  /** The workspace that issued it. */
-  workspaceId: string;
-  /** The controller it is for: its name in `gateModule({ controllers })`. A relay checks it is its own. */
-  audience: string;
-  /** The door, lock or access point, as the controller names it. Set in config, never by the model. */
-  target: string;
-  action: "unlock";
-  /** The scope the call's verification grant covered. */
-  scope: string;
-  /** The level the caller was verified to. */
-  level: AssuranceLevel;
-  /** ISO 8601. */
-  issuedAt: string;
-  /** ISO 8601. Never later than the call's verification grant. */
-  expiresAt: string;
-}
-
-export type SignedAccessGrant = SignedDocument<AccessGrantBody>;
+export type { AccessGrantBody, SignedAccessGrant } from "../core/adapters.ts";
+import type { AccessGrantBody, SignedAccessGrant } from "../core/adapters.ts";
 
 /** SHA-256 hex of a grant's signed bytes: what the ledger keeps instead of the grant. */
 export function accessGrantDigest(body: AccessGrantBody): string {
   return sha256Hex(canonicalPayload(body));
 }
 
-/** What a controller answered. A lost answer is a thrown error, never a value. */
-export type UnlockResult =
-  /** The controller took the request. `confirmed` only when it reports that the door actually moved. */
-  | { outcome: "delivered"; providerRef: string; confirmed: boolean }
-  /** The controller certainly did not act (it refused the grant, the door is offline). */
-  | { outcome: "refused"; reason: string };
-
-/**
- * A door controller, lock or access system, reached by the host's adapter. Gate calls `unlock`
- * once per grant and never retries: if the call throws or times out, the outcome is recorded as
- * "unknown", and opening again needs a fresh request (a new grant). An adapter therefore must not
- * retry on its own either.
- */
-export interface AccessController {
-  unlock(input: { grant: SignedAccessGrant; target: string; idempotencyKey: string }): Promise<UnlockResult>;
-}
+export type { AccessController, UnlockResult } from "../core/adapters.ts";
 
 export type AccessGrantCheck =
   | { ok: true; body: AccessGrantBody }

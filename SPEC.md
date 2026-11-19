@@ -93,34 +93,21 @@ module the config has on.
 | `dossier` | `dossier.collect` | `intake.file` | `records` |
 | `paylink` | `paylink.request` | `payment.request` | `payments`, `messages` |
 | `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
+| `gate` | `gate.grant` | `entry.open` | `access` (door controllers by name), `accessSigner` |
 
-Gate (section 17) ships in the package but is installed like an outside module, with
-`engine.use(gateModule({ signer, controllers }))`: its step is `gate.grant`, it needs `entry.open`
-(class access, floor 2), and it holds its own signer and door controllers, so it needs no engine
-adapter.
+Gate (section 17) is off in `defaultConfig()`: it needs doors in its settings and the two access
+adapters. Built-in modules' parts of a call are written only by the engine's own code: no outside
+code reaches them (`updateModule` and `moduleState` refuse a built-in module).
 
 An outside module changes its part of a call with `updateModule(callId, name, fn)`: one
-compare-and-set write, refused once the flow has ended, refused while the flow is on another
-module's step, and held by the engine to the scope the current step needs. `fn` gets a copy of the
-module's part and a view: the session state, the current step (a copy, or null), the engine's
-clock (`now`), `newId(prefix)`, `authorized(scope)`, `emit(event, detail)` (a `module.event`
-ledger entry) and `reserve(ref)`, which opens a reservation in the call record for work whose
-outcome comes later (refused once the call has ended). `recordModuleOutcome(callId, name, ref, fn)`
-is the write for that outcome (a provider's answer), not held to the scope. A module that uses it
-declares two pure functions: `outcomeRecord(slice, ref)` splits the record a reservation names
-from the rest, and `checkOutcome(before, after, {reservation, now})` judges the record's change:
-`"open"` (still pending), `"settled"` (final) or `{refused}`. The write is refused
-(`precondition_failed`, nothing saved, no ledger entry) when:
-
-- `ref` is not an open reservation of that module on that call (never opened, or consumed);
-- the call's receipt is signed: nothing more is written to that call, a late answer included;
-- anything but the named record changed (a record added, dropped or touched), or the record is gone;
-- `checkOutcome` refuses the change;
-- the call has ended and the change is not final: after the end, only a reservation opened before
-  it takes its one settling write.
-
-The first `"settled"` write consumes the reservation, so an outcome is written once.
-`moduleReservations(callId, name)` lists the open ones.
+compare-and-set write, refused once the flow has ended and while the flow is on another module's
+step. The engine holds every call to the module's scopes, so a module that never asks still fails
+closed: in a flow, the scope the current step needs; outside a flow, every scope the module's
+manifest names (`scope_denied`). `fn` gets a copy of the module's part and a view: the session
+state, the current step (a copy, or null), the engine's clock (`now`), `newId(prefix)`,
+`authorized(scope)` and `emit(event, detail)` (a `module.event` ledger entry). There is no way for
+an outside module to write an outcome for work the engine holds: outcomes the engine must vouch
+for (an access grant's) are the engine's own (ADR-25).
 
 ## 4. Factors, levels and scopes
 
@@ -316,7 +303,9 @@ answer on file, a phone number, a link or card data.
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
-| `module.event` | `module`, `event`, `detail` (written by an outside module; Gate's are in section 17) |
+| `access.issued` | `grantId`, `target`, `controller`, `scope`, `level`, `verificationGrantId`, `expiresAt` (section 17) |
+| `access.delivered` / `access.refused` / `access.unknown` / `access.failed` | `grantId`, `digest` and `kid` once signed, `confirmed` or `reason` (written by the engine only) |
+| `module.event` | `module`, `event`, `detail` (written by an outside module) |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
 A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
@@ -493,47 +482,48 @@ the currency's own decimals.
 ## 17. Gate and access grants
 
 Gate's settings: `targets`, at least one, each `{id, controller, ref}`: `id` lower-case letters,
-digits and `-` (unique), `controller` a name the Gate was built with (`gateModule({ controllers })`,
-names lower-case letters, digits and `-`), `ref` the controller's own name for the door, 1 to 200
-characters; `maxGrantsPerCall` 1 to 5, default 3. A call keeps the targets in force when it
-started; a flow attached later is refused when a step names a target the call did not keep.
+digits and `-` (unique), `controller` the name of one of the engine's `access` adapters (checked
+when the engine is built and when a config is saved), `ref` the controller's own name for the
+door, 1 to 200 characters; `maxGrantsPerCall` 1 to 5, default 3. A call keeps the targets in force
+when it started; a flow attached later is refused when a step names a target the call did not keep.
 
-`gate.grantAccess(engine, callId, input?)`: in a flow the `gate.grant` step names the target and
-the lifetime (pass no input); outside one the host's code passes `{target, lifetimeSeconds?}`.
+The engine owns every access grant (ADR-25): it reserves it, signs it, computes its digest, calls
+the controller and records the controller's answer, in its own writes. Module code never writes a
+grant or its outcome. `engine.grantAccess(callId, input?)`: in a flow the `gate.grant` step names
+the target and the lifetime (pass no input); outside one the host's code passes `{target,
+lifetimeSeconds?}`. `engine.accessGrants(callId)` lists a call's grants as recorded;
+`engine.accessKeys()` is the access signer's public key set.
 
-1. **Reserve** (`updateModule`, held to `entry.open`; Gate also checks `authorized("entry.open")`),
-   opening a reservation named by the grant id; every later write for this grant settles only it.
-   Gate's `checkOutcome`: the grant's identity (id, target, controller, ref, level, issue and expiry
-   times) never changes; it settles once, from `reserved`; while reserved, the only legal write is
-   its digest and key id, once, just before the send; a final status must be the answer this Gate
-   received from its controller (or `failed`, when nothing was sent), except `unknown` once the
-   grant expired (a stale reservation, which any process may settle). A forged write that comes from
-   anywhere else is refused.
-   Refused: `scope_denied` without a verification grant covering `entry.open` (none, expired,
-   tainted, or below today's minimum); `invalid_input` for a missing or unknown target or a bad
-   lifetime; `precondition_failed` while another grant of the call is in flight or once
-   `maxGrantsPerCall` grants were issued. First, in a write of its own (so it holds even when the
-   request is then refused), a reservation whose grant expired without an answer recorded is
-   settled as `unknown`; at the grant limit that fails the step. The grant's expiry is the earlier of now plus its
+1. **Settle stale grants**, in a write of their own (so it holds even when the request is then
+   refused): a grant still reserved past its expiry (its process stopped before recording the
+   answer) becomes `unknown` (`access.unknown`, reason `no_answer_recorded`, with its digest and key
+   id when it was signed). At the grant limit, that fails the step.
+2. **Reserve**: refused with `precondition_failed` off the flow's current step, `scope_denied`
+   without a verification grant covering `entry.open` (checked on every request, in a flow or
+   not: none, expired, tainted, or below today's minimum), `invalid_input` for a missing or unknown
+   target or a bad lifetime, and `precondition_failed` while another grant of the call is in flight
+   or once `maxGrantsPerCall` grants were issued. The grant's expiry is the earlier of now plus its
    lifetime and the verification grant's expiry. Ledger: `access.issued`.
-2. **Sign**: ES256 over the canonical JSON of the body below, with Gate's signer. A signing
-   failure settles the grant `failed` (nothing sent) and throws.
-   Then, in a write of its own, the grant is checked once more: if the call is no longer
-   authorized for `entry.open` (tainted, its grant expired) or the access grant expired while it
-   was signed, it is settled `failed` (`access.failed`, with `digest`, `kid` and the reason
-   `not_authorized` or `expired`),
-   nothing is sent, and `scope_denied` is thrown.
-3. **Send once** to the target's controller: `unlock({grant, target, idempotencyKey})`, the key
+3. **Sign**: ES256 over the canonical JSON of the body below, with the `accessSigner`. The engine
+   computes the digest (SHA-256 of those bytes) itself. A signing failure settles the grant
+   `failed` (`access.failed`, reason `not_signed`; nothing sent) and throws.
+4. **Check again**, in a write: if the grant was settled meanwhile (the call ended), the call is no
+   longer authorized for `entry.open`, or the grant expired while it was signed, nothing is sent
+   and `scope_denied` is thrown (the last two settle it `failed`, reason `not_authorized` or
+   `expired`). The digest and key id are written to the grant.
+5. **Send once** to the target's controller: `unlock({grant, target, idempotencyKey})`, the key
    being `[workspaceId, callId, grantId, "unlock"]`. Never retried.
-4. **Record** (`recordModuleOutcome`): `delivered` (with `confirmed` when the controller reported
-   the door moved), `refused` (the controller certainly did not act; its reason as a short code),
-   or `unknown` when the controller's call threw or timed out. A failure to write the answer is
-   thrown as it is, never turned into `unknown`; the reservation settles once its grant expires. Ledger: `access.delivered`, `access.refused`,
-   `access.unknown` or `access.failed`, each with `grantId` and the grant's `digest`
-   (also kept on the reservation before the send, so a stale reservation settled as `unknown`
-   still names it)
-   (SHA-256 of its signed bytes) and `kid`, never the grant or its signature. A fresh request
-   after `unknown` is a new grant.
+6. **Record the answer**, in the engine's write: `delivered` (with `confirmed` when the controller
+   reported the door moved), `refused` (the controller certainly did not act; its reason as a short
+   code), or `unknown` (reason `answer_lost`) when the call threw or timed out. A grant settled
+   meanwhile stays as it is. `grantAccess` returns what the call holds. A failure to write the
+   answer is thrown as it is; the grant then settles as stale (step 1). Every outcome entry carries
+   `grantId`, `digest` and `kid`, never the grant or its signature. A fresh request after `unknown`
+   is a new grant.
+
+**Ending a call** settles every grant still in flight as `unknown` (reason `call_ended`) in the
+same write that ends the call, before the receipt's ledger head is taken. A door answer that
+arrives afterwards changes nothing, so no access outcome ever follows `receipt.issued`.
 
 ```json
 {
@@ -554,7 +544,7 @@ given: it is required, so workspaces sharing a key and a controller name never o
 doors), `audience`, `not_yet_valid` and `expired` (with 30 seconds of skew by default), and
 `lifetime` (longer than 900 seconds, or ending before it starts). `new SeenGrants({ clockSkewSeconds })` (default
 30, at least the verifier's): `accept(body, now)` is true once per grant id, and keeps the id until
-the verifier would refuse the grant as expired. `gate.keys()` is the public key set.
+the verifier would refuse the grant as expired. `engine.accessKeys()` is the public key set.
 
 **The relay contract, version 1** (`webhookRelay({url, timeoutMs?})`): `POST <url>` with
 `content-type: application/json`, `idempotency-key: <the key above>` and the signed grant as
@@ -563,7 +553,7 @@ URL; redirects are not followed; the timeout is 100 to 30,000 ms (default 5,000)
 answers 2xx after it worked the door, optionally `{"state": "confirmed", "ref": "<its id>"}`; 4xx
 when it did not act, optionally `{"error": "<code>"}` (`replay`, `signature`, ...). Anything else,
 including no answer, is `unknown`. A relay checks the grant with `verifyAccessGrant` against
-`gate.keys()`, its own workspace and its own audience, and refuses a grant id it has seen.
+`engine.accessKeys()`, its own workspace and its own audience, and refuses a grant id it has seen.
 
 A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);
 revoking an issued code belongs to one-time codes. Planned: one-time access codes (GAT-3), web sign-in step-up as an ES256 JWT against a JWKS

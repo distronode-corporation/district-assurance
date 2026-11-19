@@ -18,14 +18,14 @@
   |                                                                     |
   |   modules (on or off per FlowConfig):                               |
   |     Badge verify/   Dossier file/   Paylink pay/   Trace prove/     |
-  |     Gate gate/ (engine.use)         outside modules: engine.use()   |
+  |     Gate gate/                      outside modules: engine.use()   |
   |                                                                     |
   |   webhooks/: Stripe signatures and event mapping                    |
   +----+----------------------------------------------------------------+
        | adapter interfaces (src/core/adapters.ts, EngineAdapters)
   SessionStore  AuditLedger  RecordStore  PinVerifier  IdentityProvider
   CarrierSignals  MessageSender  PaymentLinks  ReceiptSigner
-  (Gate's own: AccessController, its ReceiptSigner)
+  access (AccessController by name)  accessSigner
        |
   the host's database and key store, Stripe, Twilio / Telnyx, door relays
 ```
@@ -59,7 +59,7 @@ engine, its inputs or its answers; it hears fixed lines the host speaks on the e
 | Dossier | `src/file/dossier.ts`, `intake.ts` | the `dossier.collect` step, records | `intake.file` | `records` |
 | Paylink | `src/pay/paylink.ts`, `payment.ts` | the `paylink.request` step, payments in `connect` or `platform` mode, the engine's link deadline | `payment.request` | `payments`, `messages` |
 | Trace | `src/prove/trace.ts`, `ledger.ts`, `receipt.ts`, `consent.ts` | the ledger (always on), the `trace.consent` and `trace.receipt` steps, receipts, consents | | `ledger`, and `signer` while receipts are on |
-| Gate | `src/gate/gate.ts`, `access.ts`, `relay.ts` | the `gate.grant` step, signed access grants, the signed-webhook relay | `entry.open` | none: its own signer and `AccessController`s, given to `gateModule` |
+| Gate | `src/gate/gate.ts`, `access.ts`, `relay.ts` | the `gate.grant` step, signed access grants whose outcomes the engine records, the signed-webhook relay | `entry.open` | `access`, `accessSigner` |
 
 Each module is an object with a manifest and a few pure functions: `validateSettings`,
 `requiredAdapters`, `validateStep`, `initCall` (its part of a new call record), `enterStep` and
@@ -71,8 +71,9 @@ the `Engine` methods.
 
 Module boundaries: the core imports no module. Badge, Dossier and Trace import only the core.
 Paylink imports Badge's `matchedSubject`, because a payment link goes to the number on file that
-Badge matched. Gate imports Trace's `signDocument` (one ES256 format for receipts and grants) and
-only the `Engine` type: it runs on the outside module path, never on the internal runtime. `src/modules.ts` lists the built-in modules and the default config, and
+Badge matched. Gate imports Trace's `signDocument` (one ES256 format for receipts and grants); like
+the other built-in modules it runs on the engine's internal runtime, and no outside code can reach
+its part of a call (ADR-25). `src/modules.ts` lists the built-in modules and the default config, and
 `src/engine.ts` composes everything.
 
 ### Outside modules
@@ -83,10 +84,10 @@ validator, and `validateConfig` holds its steps to the scopes its manifest says 
 time the host's code changes the module's part of a call with `engine.updateModule(callId, name,
 fn)`, one compare-and-set write, and reads it with `engine.moduleState`. `fn` sees the session
 state, the current step, the engine's clock and an id source, can ask whether a scope is
-authorized, and can write `module.event` ledger entries; the engine holds the current step to the
-scope it needs whatever `fn` does. `engine.recordModuleOutcome` writes the result of work started
-there (a provider's answer) even if the grant expired meanwhile. A running flow moves on when the
-module's `stepStatus` says its step is complete. Gate is built exactly this way.
+authorized, and can write `module.event` ledger entries; the engine holds every call to the
+module's scopes whatever `fn` does (the current step's in a flow, all its manifest's outside one).
+A running flow moves on when the module's `stepStatus` says its step is complete. Built-in modules'
+parts are never reachable this way.
 
 ## One call, step by step
 
@@ -110,10 +111,11 @@ module's `stepStatus` says its step is complete. Gate is built exactly this way.
    The link lives 15 minutes from the text by default; the host calls `expirePaymentLinks` at
    `expiresAt`, and the engine expires a link still open, at the provider first.
 7. Trace: `recordConsent(purpose)` fingerprints the configured wording and stores the answer.
-   Gate: `gate.grantAccess` needs `entry.open`, reserves one grant, signs it, sends it once to the
-   door's controller and records the answer (delivered, refused or unknown).
-8. `endCall` closes the session (abandoning a flow still running) and, when the call gets a
-   receipt, takes the ledger head and signs it.
+   Gate: `grantAccess` needs `entry.open`; the engine reserves one grant, signs it, sends it once to
+   the door's controller and records the controller's answer (delivered, refused or unknown).
+8. `endCall` closes the session (abandoning a flow still running, and settling an access grant
+   still at its door as unknown) and, when the call gets a receipt, takes the ledger head and signs
+   it.
 
 Every step appends to the `AuditLedger`, and the optional `onEvent` listener sees the same event.
 While a flow runs, any work that is not the current step's is refused.
