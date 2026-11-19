@@ -60,7 +60,12 @@ const WARN_MS = 30 * DAY_MS;
  * This project's own reporting addresses (SECURITY.md). A host that copies one into its settings
  * would send reports about its deployment to this project, so they are refused.
  */
-const PROJECT_ADDRESSES: readonly RegExp[] = [/opensource@distronode\.com/i, /github\.com\/distronode-corporation\/district-assurance(?![\w.-])/i];
+const PROJECT_ADDRESSES: readonly RegExp[] = [
+  // The mailbox with or without a plus tag, which reaches it too; never a longer domain that starts the same.
+  /(?<![\w.+-])opensource(?:\+[^@\s]*)?@distronode\.com(?![\w-]|\.[\w-])/i,
+  // The repository however its path is spelled: doubled slashes, a .git suffix, any page under it.
+  /github\.com\/+distronode-corporation\/+district-assurance(?:\.git)?(?![\w.-])/i,
+];
 
 /**
  * A URI of an allowed scheme, on one line of printable ASCII, so it can never add a field of its
@@ -159,7 +164,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   const warn = options.warn ?? console.warn;
   const startedAt = options.clock.now();
   // The expiry the route enforces is read with the one the file was built from, from one copy.
-  const securityCopy = security === undefined ? undefined : { ...security, contact: [...security.contact] };
+  const securityCopy = security === undefined ? undefined : { ...security, contact: [...security.contact], expires: new Date(security.expires.getTime()) };
   const securityFile = securityCopy === undefined ? null : { text: securityTxt(securityCopy, startedAt, warn), expires: securityCopy.expires.getTime() };
   // A server that runs into the last 30 days, or past the expiry, says so once each, on the first
   // request for the file after it happens: the start-up check alone would never see it.
@@ -168,12 +173,12 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   const securityRequested = (now: number): boolean => {
     const file = securityFile!;
     if (now >= file.expires) {
-      if (!warnedExpired) warn(`security.txt expired at ${security!.expires.toISOString()}: it is no longer served; renew it`);
+      if (!warnedExpired) warn(`security.txt expired at ${securityCopy!.expires.toISOString()}: it is no longer served; renew it`);
       warnedExpired = true;
       return false;
     }
     if (!warnedSoon && file.expires - now <= WARN_MS) {
-      warn(expiryWarning(security!.expires));
+      warn(expiryWarning(securityCopy!.expires));
       warnedSoon = true;
     }
     return true;
