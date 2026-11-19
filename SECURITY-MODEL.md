@@ -126,7 +126,13 @@ call's version, retried from a fresh read; links are reserved before they are cr
 processes cannot both send one; a lost race writes nothing to the ledger (tested). A durable store
 must pass `sessionStoreContract`. Failure counters across calls are recorded in one atomic step
 that returns what came before, so of two attempts racing on one subject only one is judged
-(tested); a durable counter store must pass `attemptCountersContract`.
+(tested); a durable counter store must pass `attemptCountersContract`. This holds for two genuine
+callers too: when two entries for one account arrive at once, the second meets the first's
+provisional failure and waits, unjudged, even with the right answer, and there is no skip while
+the first is being judged (decision 1: a skip would be a free try). A pass by the first lifts the
+wait at once; a failure makes it the wait after two failures (tested). Two callers for one
+account at the same moment are rare, and the cost is a wait of seconds and the second caller
+entering the answer again.
 
 ### Prompt injection
 

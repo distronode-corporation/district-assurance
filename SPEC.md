@@ -216,6 +216,13 @@ when there is a number.
   up against others. A failure stands, and
   one that starts a hard lock returns `locked: true` and writes `verification.locked`. A judge or
   verifier that throws leaves its failure counted.
+- Two entries for one subject at once (two callers for one account, on any calls or engines)
+  meet this rule too: the first's failure is recorded before it is judged, so it is provisional,
+  but the second sees it as a failure and waits (`locked: true`, unjudged, the call's attempt
+  given back, `verification.locked` with `hard: false`). The wait is never skipped while the other
+  entry is still being judged, since a provisional failure that let an entry through would be a
+  free try. If the first passes, its pass resets the subject's counter and the second may enter
+  again at once; if it fails, both failures stand and the second waits the longer wait for two.
 - Lifting a lock early is the host's: `AttemptCounters.reset` with the keys (`counterKeys`).
 
 ## 7. FlowConfig

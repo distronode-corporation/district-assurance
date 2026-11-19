@@ -18,6 +18,22 @@ const SUBJECT = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const LONG_AGO = "2000-01-01T00:00:00.000Z";
 const subjectCounter = (factor: string, key = SUBJECT): AttemptCounterKey => ({ workspaceId: "ws_test", factor, scope: "subject", key });
 
+/** Holds the first `gate` reads until all of them are in, so racing attempts all find the counters open. */
+class Barrier extends MemoryAttemptCounters {
+  held: Array<() => void> = [];
+  gate = 0;
+  override async get(key: AttemptCounterKey, since: string): Promise<string[]> {
+    if (this.gate > 0) {
+      this.gate--;
+      await new Promise<void>((resolve) => {
+        this.held.push(resolve);
+        if (this.gate === 0) for (const release of this.held) release();
+      });
+    }
+    return super.get(key, since);
+  }
+}
+
 describe("MemoryAttemptCounters passes the AttemptCounters contract", () => {
   for (const c of attemptCountersContract(() => new MemoryAttemptCounters())) it(c.name, c.run);
 });
@@ -341,21 +357,6 @@ describe("lockouts across calls", () => {
   });
 
   it("lets one of two attempts racing on two engines be judged, and refuses the other as locked", async () => {
-    /** Holds the first two reads until both are in, so both attempts find the counters open. */
-    class Barrier extends MemoryAttemptCounters {
-      held: Array<() => void> = [];
-      gate = 0;
-      override async get(key: AttemptCounterKey, since: string): Promise<string[]> {
-        if (this.gate > 0) {
-          this.gate--;
-          await new Promise<void>((resolve) => {
-            this.held.push(resolve);
-            if (this.gate === 0) for (const release of this.held) release();
-          });
-        }
-        return super.get(key, since);
-      }
-    }
     const counters = new Barrier();
     const a = setup({ adapters: { counters } });
     const b = createTestEngine({ config: testConfig(), clock: a.clock, ids: a.ids, adapters: { records: a.records, ledger: a.ledger, counters } });
@@ -377,6 +378,47 @@ describe("lockouts across calls", () => {
     assert.equal(stored.modules.badge.attempts.pin, 0, "the refused one gave back the call's attempt");
     const locked = (await a.ledger.list()).filter((e) => e.event === "verification.locked");
     assert.deepEqual(locked.map((e) => e.detail), [{ kind: "pin", scope: "subject", hard: false, until: iso(T0 + 5_000) }]);
+  });
+
+  it("makes the second of two right entries for one account at once wait, unjudged, until the first's pass is accepted (decision 1)", async () => {
+    // Two genuine callers for one account, on two lines, enter the right PIN at the same instant.
+    // The first's failure is recorded before it is judged, so the second meets a wait: it is not
+    // judged and not skipped, and the clock never moves here, so only the first's pass lets it in.
+    const counters = new Barrier();
+    const t = setup({ adapters: { counters } });
+    const one = await call(t, { callingNumber: "+15555550142" });
+    const two = await call(t, { callingNumber: "+15555550143" });
+    counters.gate = 2;
+    const results = await Promise.all([t.engine.submitPin(one, "4826"), t.engine.submitPin(two, "4826")]);
+    assert.deepEqual(results, [
+      { matched: true, locked: false },
+      { matched: false, locked: true },
+    ], "the first is judged and passes; the second, with the right PIN too, waits");
+    assert.deepEqual((await t.engine.state(two)).factors, [], "the waiting entry was not judged");
+    const stored = (await t.sessions.get("ws_test", two))!.record as { modules: { badge: { attempts: Record<string, number> } } };
+    assert.equal(stored.modules.badge.attempts.pin, 0, "the waiting entry gave back the call's attempt");
+    const locked = (await t.ledger.list()).filter((e) => e.event === "verification.locked");
+    assert.deepEqual(locked.map((e) => e.detail), [{ kind: "pin", scope: "subject", hard: false, until: iso(T0 + 5_000) }], "the wait is the first's provisional failure");
+    assert.deepEqual(await t.counters.get(subjectCounter("pin"), LONG_AGO), [], "the first's pass forgot both failures on the subject");
+    assert.deepEqual(await t.engine.submitPin(two, "4826"), { matched: true, locked: false }, "once the pass is accepted, the second gets in at once, with no time passed");
+  });
+
+  it("makes the second of two entries for one account at once wait the longer wait for two when the first fails", async () => {
+    const counters = new Barrier();
+    const t = setup({ adapters: { counters } });
+    const one = await call(t, { callingNumber: "+15555550142" });
+    const two = await call(t, { callingNumber: "+15555550143" });
+    counters.gate = 2;
+    const results = await Promise.all([t.engine.submitPin(one, "0000"), t.engine.submitPin(two, "4826")]);
+    assert.deepEqual(results, [
+      { matched: false, locked: false },
+      { matched: false, locked: true },
+    ]);
+    assert.equal((await t.counters.get(subjectCounter("pin"), LONG_AGO)).length, 2, "both failures stand on the subject");
+    t.clock.advance(5_000);
+    assert.deepEqual(await t.engine.submitPin(two, "4826"), { matched: false, locked: true }, "the 5-second wait is not enough after two failures");
+    t.clock.advance(10_000);
+    assert.deepEqual(await t.engine.submitPin(two, "4826"), { matched: true, locked: false }, "after 15 seconds the second gets in");
   });
 
   it("counts a host's factor plug-in, and needs the counters for it", async () => {
