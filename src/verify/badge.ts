@@ -245,8 +245,12 @@ export class BadgeModule implements AssuranceModule {
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
     const badge = s as unknown as BadgeSlice;
-    // No verification finished (or the record predates `lastJudgedBy`): the receipt names neither field.
-    return { verification: { level: state.level, methods: state.level === 0 ? [] : badge.lastMethods, ...badge.lastJudgedBy } };
+    // No verification finished (or the record predates `lastJudgedBy`): the receipt names neither
+    // field. Only the two fields are taken, after level and methods are set, so nothing stored
+    // beside them can change what the receipt says about the verification.
+    const judged = badge.lastJudgedBy ?? null;
+    const by = judged === null ? {} : { policyVersion: judged.policyVersion, configRevision: judged.configRevision };
+    return { verification: { ...by, level: state.level, methods: state.level === 0 ? [] : badge.lastMethods } };
   }
 }
 
