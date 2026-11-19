@@ -526,3 +526,66 @@ describe("the FlowConfig schema at the edges of each pattern and range", () => {
     });
   }
 });
+
+// ---- hostile-pass regressions (#82): text and number forms an editor or another language writes; all held
+
+describe("hostile #82: the schema is never stricter on text and numbers", () => {
+  /** Each candidate that validateConfig accepts must pass the schema; returns how many it accepted. */
+  function holds(candidates: ReadonlyArray<readonly [string, FlowConfig]>): number {
+    let accepted = 0;
+    for (const [name, config] of candidates) {
+      if (validateConfig(config, registry()).length > 0) continue;
+      accepted++;
+      assert.deepEqual(passes(config), [], name);
+    }
+    return accepted;
+  }
+  const withLabel = (label: string): FlowConfig =>
+    testConfig((c) => ((c.modules.dossier!.settings as unknown as DossierSettings).forms[0]!.fields[0]!.label = { en: label, fr: label }));
+  const withDescription = (description: string): FlowConfig => {
+    const c = json(demoConfig());
+    c.flows.deposit.steps[2].description = description;
+    return c as unknown as FlowConfig;
+  };
+
+  it("S1: labels in every Unicode shape validateConfig takes", () => {
+    const labels = ["\u{1F527}", "Re\u0301paration", "\u200b", "\u00a0x\u00a0", "\u3000x", "x\ufeff", "\u202eabc", "a".repeat(500), "\u{1F527}".repeat(200)];
+    const blanks = ["\ufeff", "\u00a0", "\u3000", "\u2028", " \t\n"];
+    assert.ok(holds(labels.map((l) => [JSON.stringify(l).slice(0, 30), withLabel(l)] as const)) >= 7);
+    for (const blank of blanks) {
+      assert.notDeepEqual(validateConfig(withLabel(blank), registry()), [], `validateConfig refuses ${JSON.stringify(blank)}`);
+      assert.notDeepEqual(passes(withLabel(blank)), [], `so does the schema: ${JSON.stringify(blank)}`);
+    }
+  });
+
+  it("S2: payment descriptions at the edge, counted in UTF-16 units and in code points", () => {
+    const candidates = [199, 200, 201].flatMap((n) => [
+      [`${n} ascii`, withDescription("d".repeat(n))] as const,
+      [`${n} units of emoji`, withDescription("\u{1F4B3}".repeat(Math.floor(n / 2)) + (n % 2 === 1 ? "d" : ""))] as const,
+      [`${n} padded`, withDescription(`  ${"d".repeat(n)}\t`)] as const,
+    ]);
+    assert.ok(holds(candidates) >= 4);
+  });
+
+  it("S3: numbers written with a zero fraction or an exponent, as another language's JSON writer may", () => {
+    const text = JSON.stringify(demoConfig());
+    assert.match(text, /"amountMinor":15000,/);
+    const variants = [
+      ["15000.0", text.replace('"amountMinor":15000', '"amountMinor":15000.0')],
+      ["1.5e4", text.replace('"amountMinor":15000', '"amountMinor":1.5e4')],
+      ["150E2", text.replace('"amountMinor":15000', '"amountMinor":150E2')],
+      ["2.0 attempts", text.replace('"maxKeypadAttemptsPerCall":2', '"maxKeypadAttemptsPerCall":2.0')],
+    ].map(([name, json]) => [name!, JSON.parse(json!) as FlowConfig] as const);
+    assert.equal(holds(variants), variants.length);
+  });
+
+  it("S4: keys that JSON.parse makes own properties (__proto__, constructor) are judged the same way by both", () => {
+    for (const json of [
+      JSON.stringify(demoConfig()).replace('"flows":{', '"flows":{"__proto__":{"steps":[{"type":"trace.receipt"}]},'),
+      JSON.stringify(demoConfig()).replace('"flows":{', '"flows":{"constructor":{"steps":[{"type":"trace.receipt"}]},'),
+    ]) {
+      const config = JSON.parse(json) as FlowConfig;
+      if (validateConfig(config, registry()).length === 0) assert.deepEqual(passes(config), [], json.slice(0, 60));
+    }
+  });
+});
