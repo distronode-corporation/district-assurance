@@ -40,8 +40,11 @@ export interface CarrierAdapterOptions {
   /** Per lookup, connection and body included. Default 3000. */
   timeoutMs?: number;
   clock?: Clock;
-  /** Hears each lookup that gave no answer, for the host's logs and metrics. Its errors are ignored. */
-  onUnavailable?: (failure: CarrierLookupFailure) => void;
+  /**
+   * Hears each lookup that gave no answer, for the host's logs and metrics. Its errors, thrown or
+   * rejected, are ignored, and the report is not held back waiting for it.
+   */
+  onUnavailable?: (failure: CarrierLookupFailure) => void | Promise<void>;
 }
 
 /** What the business has on file for the subject, for Twilio Identity Match. Sent to Twilio, kept nowhere. */
@@ -121,16 +124,37 @@ function countryList(raw: string | undefined, fallback: readonly string[]): stri
   return list.length > 0 ? list : [...fallback];
 }
 
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * The API origin without a trailing slash. Credentials go to it, so it must be https, or plain
+ * http only on a loopback host (a local fake server). Anything else throws when the adapter is
+ * built, before any credential is used.
+ */
+function safeBaseUrl(raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("carrier adapter baseUrl is not a valid URL");
+  }
+  const loopback = LOOPBACK_HOSTS.has(url.hostname) || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new Error("carrier adapter baseUrl must be https, or http only on a loopback host");
+  }
+  return raw.replace(/\/+$/, "");
+}
+
 abstract class LookupAdapter implements CarrierSignals {
   protected abstract readonly vendor: CarrierVendor;
   protected readonly baseUrl: string;
   protected readonly clock: Clock;
   readonly #countries: ReadonlySet<string>;
   readonly #timeoutMs: number;
-  readonly #onUnavailable: ((failure: CarrierLookupFailure) => void) | undefined;
+  readonly #onUnavailable: ((failure: CarrierLookupFailure) => void | Promise<void>) | undefined;
 
   constructor(options: CarrierAdapterOptions, defaultBaseUrl: string) {
-    this.baseUrl = (options.baseUrl ?? defaultBaseUrl).replace(/\/+$/, "");
+    this.baseUrl = safeBaseUrl(options.baseUrl ?? defaultBaseUrl);
     this.clock = options.clock ?? systemClock;
     this.#countries = new Set(options.countries.map((c) => c.toUpperCase()));
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -142,7 +166,8 @@ abstract class LookupAdapter implements CarrierSignals {
   /** Reports a failure to the host's listener and answers that nothing is known. */
   protected unavailable(failure: Omit<CarrierLookupFailure, "vendor">): CarrierSignalReport {
     try {
-      this.#onUnavailable?.({ vendor: this.vendor, ...failure });
+      const result: unknown = this.#onUnavailable?.({ vendor: this.vendor, ...failure });
+      if (result instanceof Promise) result.catch(() => undefined);
     } catch {
       // A listener's error never reaches the call.
     }
@@ -249,8 +274,10 @@ export class TwilioLookupSignals extends LookupAdapter {
   }
 
   /**
-   * Hours since the last SIM change: from its date, else from the period Twilio gives, else 0 when
-   * Twilio says only that it changed within its period. Anything else is not an answer.
+   * Hours since the last SIM change: from its date; else 0 when Twilio says it changed within the
+   * period it looked at; else, when Twilio says it did not, the length of that period as a lower
+   * bound (the change is at least that old). `swapped_period` is the window Twilio looked at, never
+   * the age of a change. Anything else is not an answer.
    */
   #simSwapHours(field: unknown): number | null | Omit<CarrierLookupFailure, "vendor"> {
     if (!isObject(field)) return { reason: "bad_response" };
@@ -261,11 +288,11 @@ export class TwilioLookupSignals extends LookupAdapter {
       const at = Date.parse(last.last_sim_swap_date);
       if (!Number.isNaN(at)) return hoursSince(at, this.clock.now());
     }
-    if (typeof last.swapped_period === "string") {
+    if (last.swapped_in_period === true) return 0;
+    if (last.swapped_in_period === false && typeof last.swapped_period === "string") {
       const hours = durationHours(last.swapped_period);
       if (hours !== null) return hours;
     }
-    if (last.swapped_in_period === true) return 0;
     return { reason: "bad_response" };
   }
 

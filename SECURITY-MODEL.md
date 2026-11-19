@@ -65,8 +65,10 @@ selfie, which a stolen SIM alone does not pass. Contact and payout scopes defaul
 The reference carrier adapters (Twilio Lookup, Telnyx Number Lookup) fail closed: a timeout, an
 error, a country outside their allow-list, a feature the account is not approved for or an answer
 they cannot read gives `checked: false`, never an exception into the call; a SIM change or port
-without a usable time counts as just now, and hours are rounded down (tested against replayed
-responses). Their failure reports carry the vendor's status and error code, never the number or
+without a usable time counts as just now, Twilio's `swapped_period` (the window it looked at) is
+only a lower bound when it reports no change inside it, and hours are rounded down (tested against
+replayed responses). They refuse a plain-http `baseUrl` other than loopback, so credentials never
+travel in clear text. Their failure reports carry the vendor's status and error code, never the number or
 the identity on file. **Gap:** Telnyx reports no SIM change, so a Telnyx report says `checked` with
 no SIM swap known; before texted codes ship (VER-2), a host must take the SIM swap signal from
 Twilio, not Telnyx alone. Twilio Identity Match sends the identity on file to Twilio, in the

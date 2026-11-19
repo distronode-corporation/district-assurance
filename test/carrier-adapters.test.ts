@@ -191,6 +191,16 @@ describe("carrier adapters", () => {
       ]);
     });
 
+    it("never reads swapped_period as the age of a change inside it, and as a lower bound when there was none", async () => {
+      replies.set("+15555550113", { body: twilioBody({ sim_swap: simSwap({ last_sim_swap_date: null, swapped_period: "PT120H", swapped_in_period: true }) }) });
+      replies.set("+15555550114", { body: twilioBody({ sim_swap: simSwap({ last_sim_swap_date: null, swapped_period: "PT120H" }) }) });
+      replies.set("+15555550115", { body: twilioBody({ sim_swap: simSwap({ last_sim_swap_date: null, swapped_period: "bogus", swapped_in_period: false }) }) });
+      const adapter = twilio();
+      assert.equal((await adapter.check({ phoneNumber: "+15555550113" })).lastSimSwapHoursAgo, 0, "a change inside the window is just now");
+      assert.deepEqual(await adapter.check({ phoneNumber: "+15555550114" }), uncheckedReport(), "a window without an answer is no answer");
+      assert.deepEqual(await adapter.check({ phoneNumber: "+15555550115" }), uncheckedReport());
+    });
+
     it("fails closed on a feature the account is not approved for, in either field", async () => {
       replies.set("+15555550109", { body: twilioBody({ sim_swap: simSwap(null, 60606) }) });
       replies.set("+15555550110", {
@@ -357,6 +367,44 @@ describe("carrier adapters", () => {
         },
       });
       assert.deepEqual(await adapter.check({ phoneNumber: "+15555550303" }), uncheckedReport());
+    });
+
+    it("ignores a rejecting async listener without waiting for it", async () => {
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        let settled = false;
+        const adapter = new TwilioLookupSignals(TWILIO, {
+          countries: ["US"],
+          baseUrl: base,
+          onUnavailable: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            settled = true;
+            throw new Error("metrics offline");
+          },
+        });
+        assert.deepEqual(await adapter.check({ phoneNumber: "not a number" }), uncheckedReport());
+        assert.equal(settled, false, "the report did not wait for the listener");
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        assert.equal(settled, true);
+        assert.deepEqual(unhandled, []);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
+    });
+  });
+
+  describe("the API origin", () => {
+    it("accepts https and loopback http, and refuses clear-text http elsewhere before any credential is used", () => {
+      for (const ok of ["https://lookups.example.com/", "http://127.0.0.1:8080", "http://127.1.2.3", "http://localhost:3000/", "http://[::1]:9000"]) {
+        assert.ok(new TwilioLookupSignals(TWILIO, { countries: ["US"], baseUrl: ok }), ok);
+      }
+      for (const bad of ["http://lookups.example.com", "http://10.0.0.5", "http://127.0.0.1.example.com", "ftp://127.0.0.1", "not a url"]) {
+        assert.throws(() => new TwilioLookupSignals(TWILIO, { countries: ["US"], baseUrl: bad }), /baseUrl/, bad);
+        assert.throws(() => new TelnyxNumberLookupSignals(TELNYX_KEY, { countries: ["US"], baseUrl: bad }), /baseUrl/, bad);
+      }
+      assert.throws(() => telnyxLookupFromEnv({ TELNYX_API_KEY: TELNYX_KEY }, { baseUrl: "http://api.example.com" }), /baseUrl/);
     });
   });
 

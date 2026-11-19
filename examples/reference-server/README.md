@@ -106,8 +106,10 @@ as its own adapter.
 
 How the answers are read:
 
-- **SIM swap:** hours since `last_sim_swap_date`, else from `swapped_period` (an ISO 8601
-  duration), else 0 when Twilio says only `swapped_in_period: true`. Anything else is no answer.
+- **SIM swap:** hours since `last_sim_swap_date`; else 0 when `swapped_in_period` is true; else,
+  when it is false, the length of `swapped_period` (an ISO 8601 duration) as a lower bound.
+  `swapped_period` is the window Twilio looked at, not the age of a change, so it is never read as
+  one when the change fell inside it. Anything else is no answer.
 - **Identity match:** `match` when `summary_score` is at least `identityMinScore` (80 by
   default), else `no_match`. The identity comes from the host's `identityFor(phoneNumber)`;
   without it only SIM Swap is asked. Twilio takes the identity in the query string.
@@ -121,7 +123,12 @@ number that is not E.164, an answer for a country outside the allow-list, a time
 account is not approved for, or a country it does not cover), or an answer that cannot be read. A
 Twilio report is `checked` only when every field asked for answered. The optional `onUnavailable`
 listener hears why (`vendor`, `reason`, the HTTP `status` and the vendor's error `code`), never
-the number, the identity or a credential.
+the number, the identity or a credential; it may be async, and its errors, thrown or rejected, are
+ignored without holding back the report.
+
+A `baseUrl` override must be `https:`; plain `http:` is accepted only on a loopback host (a local
+fake server), so credentials are never sent in clear text. Any other origin throws when the adapter
+is built, before a credential is used.
 
 Telnyx alone reports no SIM change, so its `checked: true` report has no SIM swap known, which the
 policy reads as no recent SIM change. Before texted codes (VER-2) go live, take SIM swap from
