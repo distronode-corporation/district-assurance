@@ -19,7 +19,7 @@ describe("Engine construction", () => {
     const base = { workspaceId: "w", knowledgeKey: TEST_KNOWLEDGE_KEY, adapters: { ledger: new MemoryAuditLedger() }, config: { ...defaultConfig(), modules: { trace: { settings: { receipts: false } } } } };
     assert.throws(() => createEngine({ ...base, knowledgeKey: "short" }), /at least 16 bytes/);
     assert.throws(() => createEngine({ ...base, knowledgeKey: new Uint8Array(15) }), /at least 16 bytes/);
-    assert.throws(() => createEngine({ ...base, workspaceId: "" }), rejects("invalid_input", /workspaceId is empty/));
+    assert.throws(() => createEngine({ ...base, workspaceId: "" }), rejects("invalid_input", /workspaceId must be a non-empty string/));
     assert.throws(() => createEngine({ ...base, adapters: {} as never }), /the ledger adapter is required/);
     assert.throws(
       () => createEngine({ ...base, config: { ...defaultConfig(), policy: { ...defaultVerificationPolicy(), keypadFields: [] } } }),
@@ -384,6 +384,19 @@ describe("Engine authorize", () => {
   });
 });
 
+describe("Engine file: text the record cannot carry", () => {
+  it("refuses a field value with a lone surrogate at setIntakeField, so confirmIntake never throws (review of 1d52bfb, A5)", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await assert.rejects(t.engine.setIntakeField(callId, "issue", "leak \ud83d"), rejects("invalid_input", /lone surrogate/));
+    await assert.rejects(t.engine.setIntakeField(callId, "issue", 7 as never), rejects("invalid_input"));
+    assert.deepEqual(await t.engine.setIntakeField(callId, "issue", "leak \ud83d\ude00"), { ok: true, value: "leak \ud83d\ude00" }, "a valid pair is fine");
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    assert.equal(record.values.issue, "leak \ud83d\ude00");
+  });
+});
+
 describe("Engine file", () => {
   it("files a confirmed record with its digest", async () => {
     const t = setup();
@@ -463,6 +476,41 @@ describe("Engine file", () => {
     await assert.rejects(t.engine.setIntakeField(callId, "issue", "changed"), rejects("precondition_failed"), "still reserved after the failed write");
     const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
     assert.deepEqual([record.recordId, record.values.issue, record.confirmedBy], ["rec_1", "leak", "voice"], "the same record, written again");
+  });
+});
+
+describe("Engine ledger detail", () => {
+  it("refuses at startCall every host value the ledger could not hash, before anything is saved (review of 1d52bfb, A1 and A2)", async () => {
+    const t = setup();
+    for (const [input, why] of [
+      [{ callId: "call_\ud800" }, /callId/],
+      [{ callId: "" }, /callId/],
+      [{ callId: "x".repeat(201) }, /callId/],
+      [{ callId: 7 }, /callId/],
+      [{ locale: "e\ud800" }, /locale/],
+      [{ locale: "de" }, /locale/],
+      [{ flow: 7 }, /flow/],
+    ] as const) {
+      await assert.rejects(t.engine.startCall(input as never), rejects("invalid_input", why), JSON.stringify(input));
+    }
+    await assert.rejects(t.engine.state("call_\ud800"), rejects("unknown_call"), "nothing was saved");
+    assert.deepEqual(await t.ledger.list(), []);
+    // The ledger still takes the next call.
+    const { callId } = await t.engine.startCall({ callId: "call_ok", locale: "fr" });
+    await t.engine.markUntrusted(callId, "crm_note");
+    assert.deepEqual((await t.ledger.list()).map((e) => e.event), ["call.started", "session.tainted"]);
+    assert.throws(() => setup({ workspaceId: "ws_\ud800" }), /workspaceId must be a non-empty string the ledger can carry/);
+  });
+
+  it("refuses detail the ledger could not hash before it is saved, so the call's ledger never blocks (CodeRabbit on 699637f)", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await assert.rejects(t.engine.markUntrusted(callId, "x\ud800"), rejects("invalid_input", /canonical JSON/));
+    assert.equal((await t.engine.state(callId)).tainted, false, "nothing was saved");
+    // The call's ledger still takes entries.
+    await t.engine.markUntrusted(callId, "crm_note");
+    const events = (await t.ledger.list()).map((e) => e.event);
+    assert.deepEqual(events, ["call.started", "session.tainted"]);
   });
 });
 

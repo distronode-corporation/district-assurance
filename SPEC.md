@@ -241,7 +241,11 @@ unique).
 
 ## 8. Flow execution
 
-`startCall({flow})` or `startFlow(callId, name)`, on an open call that has not run a flow, copies
+`startCall` refuses (`invalid_input`, nothing saved) a `callId` that is not 1 to 200 characters the
+ledger can carry (no lone surrogate), a `locale` not in `SUPPORTED_LOCALES` (`en`, `fr`), and a `flow` that is not a
+name; the engine refuses a `workspaceId` with a lone surrogate. These enter the ledger directly, so
+no host value can block a call's ledger. `startCall({flow})` or `startFlow(callId, name)`, on an
+open call that has not run a flow, copies
 the flow's steps into the call record, so a later config change never moves a call. The first step
 is entered: its module's `enterStep` returns a mark. After every change to the call, the engine
 asks the current step's module for `stepStatus(step, {state, slice, mark})`:
@@ -310,8 +314,9 @@ answer on file, a phone number, a link or card data.
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
 A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
 with an `eventId` (the JSON tuple `[workspaceId, callId, version, index]`, unique on a ledger that
-several workspaces share), then appended in order; an entry the ledger would refuse (card data) is
-refused before it is saved; the outbox is cleared by
+several workspaces share), then appended in order; an entry the ledger would refuse (card data, or detail
+that is not canonical JSON, such as a lone surrogate) is refused before it is saved, so it can never
+block a call's ledger; the outbox is cleared by
 a further write if nobody wrote since. A failed append leaves them pending, and the next write or
 `flushLedger(callId)` appends them. A ledger appends an `eventId` once (a second append returns the
 first entry), so nothing is lost or doubled. The listener is told after each append, at least once
@@ -329,7 +334,8 @@ a card number.
 
 Object keys sorted by UTF-16 code units, no whitespace, strings and numbers as ECMAScript
 `JSON.stringify` writes them. Refused: `undefined`, functions, symbols, bigints, non-finite
-numbers, sparse array holes, and objects whose prototype is not `Object.prototype` or `null`.
+numbers, sparse array holes, strings or keys with a lone UTF-16 surrogate (RFC 8785 says these
+must fail), and objects whose prototype is not `Object.prototype` or `null`.
 
 ## 12. Receipts
 
@@ -372,7 +378,9 @@ Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording 
 Forms live in Dossier's settings: a `formId` (lower case, digits, `-`, `_`), a `version` and
 fields with snake_case unique keys, a known type and an English and a French label.
 `validateConfig` refuses fields marked `sensitive` until field encryption exists (FIL-2).
-`startIntake(callId, formId)` names the form, and the draft keeps the form as it was then, so a
+`setIntakeField` refuses (`invalid_input`) a value with a lone surrogate, which speech-to-text or a
+model can produce and a record's digest cannot hash. `startIntake(callId, formId)` names the form,
+and the draft keeps the form as it was then, so a
 config change mid-intake never changes what is filed; a call also keeps the forms (and Trace the
 wordings) in force when it started. A draft being filed refuses changes. A filing that failed
 after its reservation (the store refused it, or the last write was lost) stays reserved and
@@ -456,7 +464,8 @@ Settlement:
 | async payment failed | failed |
 | expired | expired |
 
-A request settles once; later outcomes are ignored, with one exception: money that moved is
+A payment recorded before modes existed (no `mode`) appears on its receipt as `platform`: it was
+taken on the host's own account. A request settles once; later outcomes are ignored, with one exception: money that moved is
 always recorded. A request the engine expired (its own deadline, a link too late to text, or a race
 with a slow create) that the provider then reports paid becomes `paid`, and `payment.settled`
 carries `late: true`.
@@ -469,11 +478,18 @@ body)`. The check passes if any `v1` matches any configured secret and `t` is wi
 of now, either way. `parseStripeEvent` maps
 `identity.verification_session.{verified,requires_input,canceled}` and
 `checkout.session.{completed,async_payment_succeeded,async_payment_failed,expired}`; other types
-are reported as ignored, and a body that is not a well-formed event is `null`.
+are reported as ignored, and a body that is not a well-formed event is `null`, including one whose
+`account` is present but not a string (never read as "no account").
 
 ## 16. Texts
 
-Code builds every text, in the call's locale (English or French). The destination is always the
+Code builds every text, in the call's locale, one of `SUPPORTED_LOCALES` (exported, a frozen
+`["en", "fr"]` whose members are the `Locale` type; `isSupportedLocale` checks a host's value).
+Each catalog of code-built words is a `Record<Locale, ...>`: `IDENTITY_TEXT`, `PAYMENT_TEXT`,
+`AMOUNT_REGION` (where amounts are formatted) and `DIGIT_WORDS_BY_LOCALE` (the spoken digits the
+card-number detector reads, every locale's always on). A test fails when a catalog lacks a
+supported locale, when a `Record<Locale, ...>` in `src/` is not one it checks, or when code picks
+words by comparing a locale instead, so a new locale grows every catalog. The destination is always the
 subject's number on file. Identity link: "Your one-time identity check link: URL" / "Votre lien
 de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
@@ -521,7 +537,10 @@ receipt never verifies as an access grant. A host's module can never take a buil
 5. **Send once** to the target's controller (if it was removed from the adapters meanwhile, the
    grant is settled `failed`, reason `not_sent`, and `precondition_failed` is thrown: nothing was
    sent, so it is never recorded as `unknown`): `unlock({grant, target, idempotencyKey})`, the key
-   being `[workspaceId, callId, grantId, "unlock"]`. Never retried.
+   being `[workspaceId, callId, grantId, "unlock"]`. Never retried. Right before it, with nothing in
+   between, the call is checked once more against the config in force, so a config that raised
+   `entry.open`'s floor after step 4 settles the grant `failed` (`not_authorized`) and nothing is
+   sent. A config changed by another process is seen at its next write, not here.
 6. **Record the answer**, in the engine's write: `delivered` (with `confirmed` when the controller
    reported the door moved), `refused` (the controller certainly did not act; its reason as a short
    code), or `unknown` (reason `answer_lost`) when the call threw or timed out. A grant settled
@@ -568,7 +587,12 @@ the skew, because the engine ends a call only once every grant at a door has ans
 and `lifetime` (longer than 900 seconds, or ending before it starts). This assumes the engine's and
 the relay's clocks agree (NTP): a relay whose clock runs behind by some seconds accepts a grant for
 that much longer. `new SeenGrants()`: `accept(body, now)` is true once per grant id, and keeps the
-id until the grant expires, when the verifier refuses it anyway. `engine.accessKeys()` is the public key set.
+id until the grant expires, when the verifier refuses it anyway. It keeps a forget point: ids are
+forgotten only once their grant expired at or before it, and any grant expiring at or before it is
+refused, so a grant accepted once is never accepted again, under any sequence of clock jumps and
+rollbacks. The forget point follows the relay's clock but never passes the latest expiry it has
+accepted, so a clock that jumped forward refuses no fresh grant beyond one grant lifetime (at most
+15 minutes) of grants it has really seen. `engine.accessKeys()` is the public key set.
 It, and `engine.receiptKeys()`, publish only a key's public members (`kty`, `crv`, `x`, `y`, `kid`,
 `alg`, `use`), whatever a signer's `publicJwk` returns, so a signer that hands back its private `d`
 never has it published.
@@ -578,8 +602,9 @@ never has it published.
 canonical JSON. HTTPS only, or HTTP to `127.0.0.1`, `localhost` or `[::1]`; no credentials in the
 URL; redirects are not followed; the timeout is 100 to 30,000 ms (default 5,000). The relay
 answers 2xx after it worked the door, optionally `{"state": "confirmed", "ref": "<its id>"}`; 4xx
-when it did not act, optionally `{"error": "<code>"}` (`replay`, `signature`, ...). Anything else,
-including no answer, is `unknown`. A relay checks the grant with `verifyAccessGrant` against
+when it did not act, optionally `{"error": "<code>"}` (`signature`, `workspace`, ...). A 409
+(`replay`) is not a refusal: an earlier request with this grant was accepted and may have opened
+the door, so it is `unknown`. Anything else, including no answer, is `unknown` too. A relay checks the grant with `verifyAccessGrant` against
 `engine.accessKeys()`, its own workspace and its own audience, and refuses a grant id it has seen.
 
 A momentary unlock has nothing to revoke: there is no grant revocation, by design (ADR-22);

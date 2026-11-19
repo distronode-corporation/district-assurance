@@ -406,7 +406,11 @@ describe("gate: grants", () => {
     // Later requests get their answers at once; the first one's stays held.
     t.door.unlock = async () => ({ outcome: "delivered", providerRef: "garage-1", confirmed: true });
     t.clock.advance(120_000);
-    await Promise.allSettled([1, 2, 3].map(() => t.engine.grantAccess(callId, { target: "garage" })));
+    const fresh = await Promise.allSettled([1, 2, 3].map(() => t.engine.grantAccess(callId, { target: "garage" })));
+    assert.ok(
+      fresh.some((r) => r.status === "fulfilled" && r.value.status === "delivered" && r.value.grantId !== "acc_1"),
+      "a fresh request gets a new grant; the others may lose the race",
+    );
     assert.equal((await accessEvents(t)).filter(([e]) => e === "access.unknown").length, 1, "settled once");
     // The late real answer to the first grant changes nothing (review round 4, R3).
     door.answer({ outcome: "delivered", providerRef: "p", confirmed: true });
@@ -663,6 +667,50 @@ describe("gate: the engine owns every outcome (ADR-25)", () => {
     assert.deepEqual([...t.engine.receiptKeys(), ...t.engine.accessKeys()].map((k) => (k as { kid?: string }).kid), ["r-1", "a-1"]);
   });
 
+  it("never sends a grant the config stopped authorizing between the last check and the send (review of #50, M2)", async () => {
+    class Hooked extends StoppingStore {
+      after: (() => void) | null = null;
+      override async compareAndSet(w: string, c: string, v: number, r: JsonValue) {
+        const out = await super.compareAndSet(w, c, v, r);
+        const g = (r as unknown as { modules: { gate?: { grants: Array<{ digest: string | null; status: string }> } } }).modules.gate?.grants.at(-1);
+        const run = this.after;
+        if (out.ok && run !== null && typeof g?.digest === "string" && g.status === "reserved") {
+          this.after = null;
+          run();
+        }
+        return out;
+      }
+    }
+    const sessions = new Hooked();
+    const door = new FakeAccessController();
+    const t = setup({ config: gateConfig(), adapters: { sessions, access: { lobby: door }, accessSigner: generateTestSigner("gate-key-1") } });
+    t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+    const callId = await verified(t as unknown as GateTest, null);
+    // Right after the write that checked the grant, the host raises entry.open to level 3.
+    sessions.after = () => t.engine.configure(gateConfig((c) => ((c.policy.scopes["entry.open"] = 3), (c.flows = {}))));
+    await assert.rejects(t.engine.grantAccess(callId, { target: "front-door" }), rejects("scope_denied", /no longer authorized/));
+    assert.equal(door.received.length, 0, "the door was never asked");
+    assert.deepEqual((await t.engine.accessGrants(callId)).map((g) => g.status), ["failed"]);
+    assert.deepEqual((await t.ledger.list()).filter((e) => e.event === "access.failed").map((e) => e.detail.reason), ["not_authorized"]);
+  });
+
+  it("refuses an access adapter whose controllers are not a list of names, never throwing in validateConfig", () => {
+    for (const access of [{}, { controllers: "lobby" }, { controllers: [1] }, null]) {
+      assert.deepEqual(validateConfig(gateConfig(), registry(undefined, { access })), ["modules.gate: the access adapter must declare its controllers as a list of names"], JSON.stringify(access));
+    }
+  });
+
+  it("keeps built-in names reserved in the registry itself, even after a removal (review of #50)", () => {
+    const t = gateSetup();
+    t.engine.configure(testConfig((c) => (c.policy.scopes["entry.open"] = 2)));
+    t.engine.remove("gate");
+    assert.throws(() => t.engine.registry.use({ ...gateModule, stepStatus: () => "complete" }), /gate is the name of a built-in module/);
+    assert.equal(t.engine.registry.get("gate"), undefined);
+    const plain = new ModuleRegistry({ modules: builtInModules() });
+    plain.remove("gate");
+    assert.doesNotThrow(() => plain.use(gateModule), "a registry with no reserved names is the host's to fill");
+  });
+
   it("uses an access controller only by the name a target gives", async () => {
     const side: AccessController = { unlock: async () => ({ outcome: "delivered", providerRef: "side-1", confirmed: true }) };
     const lobby = new FakeAccessController();
@@ -753,6 +801,43 @@ describe("access grants: the verifier and replay", () => {
     assert.deepEqual(check({ ...good, alg: "none" }), { ok: false, reason: "signature" });
   });
 
+  it("lets one forward clock jump refuse no fresh grant afterwards (review of 1d52bfb, A4)", () => {
+    const seen = new SeenGrants();
+    assert.equal(seen.accept({ ...body, grantId: "x", issuedAt: "2030-01-01T00:00:00.000Z", expiresAt: "2030-01-01T00:01:00.000Z" }, new Date("2030-01-01T00:00:00.000Z")), true);
+    assert.equal(seen.accept({ ...body, grantId: "acc_fresh" }, new Date("2026-01-01T00:00:10.000Z")), true, "the fresh grant is accepted");
+    assert.equal(seen.accept({ ...body, grantId: "acc_fresh" }, new Date("2026-01-01T00:00:20.000Z")), false, "and still never twice");
+  });
+
+  it("never replays an earlier grant after a forward jump followed by a rollback (review of 1d52bfb)", () => {
+    const seen = new SeenGrants();
+    const g1 = { ...body, grantId: "g1" };
+    const g2 = { ...body, grantId: "g2", issuedAt: "2026-01-01T00:30:00.000Z", expiresAt: "2026-01-01T00:31:00.000Z" };
+    assert.equal(seen.accept(g1, new Date("2026-01-01T00:00:00.000Z")), true);
+    // The clock jumps forward and a grant valid then is accepted: g1 is forgotten on the way.
+    assert.equal(seen.accept(g2, new Date("2026-01-01T00:30:00.000Z")), true);
+    // Then it rolls back to inside g1's validity: neither g1 nor g2 is ever accepted again.
+    for (const at of ["2026-01-01T00:00:30.000Z", "2026-01-01T00:30:30.000Z", "2026-01-01T00:00:59.999Z"]) {
+      assert.equal(seen.accept(g1, new Date(at)), false, `g1 at ${at}`);
+      assert.equal(seen.accept(g2, new Date(at)), false, `g2 at ${at}`);
+    }
+    // A forward jump past everything, then a rollback: still never.
+    assert.equal(seen.accept({ ...body, grantId: "g3", issuedAt: "2026-01-01T02:00:00.000Z", expiresAt: "2026-01-01T02:01:00.000Z" }, new Date("2026-01-01T02:00:00.000Z")), true);
+    assert.equal(seen.accept(g2, new Date("2026-01-01T00:30:30.000Z")), false);
+    assert.equal(seen.accept(g1, new Date("2026-01-01T00:00:30.000Z")), false);
+  });
+
+  it("never accepts a forgotten grant again when the relay's clock moves back (review of #50, M1)", async () => {
+    const seen = new SeenGrants();
+    const first = await sign();
+    assert.equal(seen.accept(first.body, now), true);
+    // Much later, ids are forgotten (the first grant expired); then the relay's clock is set back.
+    assert.equal(seen.accept({ ...body, grantId: "acc_9", issuedAt: "2026-01-01T00:05:00.000Z", expiresAt: "2026-01-01T00:06:00.000Z" }, new Date("2026-01-01T00:05:00.000Z")), true);
+    const back = new Date("2026-01-01T00:00:30.000Z");
+    assert.equal(check(first, back).ok, true, "the verifier, on the moved clock, finds it valid again");
+    assert.equal(seen.accept(first.body, back), false, "but it is never accepted twice");
+    assert.equal(seen.accept({ ...body, grantId: "acc_10", issuedAt: "2026-01-01T00:00:00.000Z", expiresAt: "2026-01-01T00:10:00.000Z" }, back), true, "a grant still in date is unaffected");
+  });
+
   it("refuses a grant id it has seen until the grant expired", async () => {
     const seen = new SeenGrants();
     const first = await sign();
@@ -760,7 +845,7 @@ describe("access grants: the verifier and replay", () => {
     assert.equal(seen.accept(first.body, now), false);
     const later = new Date("2026-01-01T00:02:01.000Z");
     assert.equal(seen.accept({ ...body, grantId: "acc_2", expiresAt: "2026-01-01T00:03:00.000Z" }, later), true, "and forgets the expired one");
-    assert.equal(seen.accept(first.body, later), true, "forgotten after its expiry, when the verifier refuses it anyway");
+    assert.equal(seen.accept(first.body, later), false, "after its expiry it is refused, never accepted again");
   });
 
   it("keeps a grant id for exactly as long as the verifier accepts the grant", async () => {
