@@ -16,7 +16,7 @@ import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clo
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
 import { EngineError, NotImplementedError } from "./core/errors.ts";
 import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
-import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
+import type { Actor, EngineEvent, EngineEventName, EventListener } from "./core/events.ts";
 import { hmacSha256Hex } from "./core/hash.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
 import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
@@ -426,7 +426,7 @@ export class Engine {
     if (head.seq === 0) throw new EngineError("precondition_failed", "the ledger is empty; there is no head to anchor");
     const proof: unknown = await anchor.anchor({ seq: head.seq, hash: head.hash, payload: anchorPayload(head) });
     if (!isAnchorProof(proof)) throw new EngineError("invalid_input", "the anchor adapter answered with a malformed proof");
-    return this.#adapters.ledger.append({
+    const entry = await this.#adapters.ledger.append({
       eventId: JSON.stringify(["ledger.anchored", head.seq]),
       callId: null,
       actor: "system",
@@ -434,6 +434,8 @@ export class Engine {
       at: this.#now(),
       detail: { seq: head.seq, proof },
     });
+    this.#notify({ name: "ledger.anchored", callId: null, actor: entry.actor, at: entry.at, detail: entry.detail });
+    return entry;
   }
 
   /** The key set for verifying this engine's receipts (empty without a signer). */
@@ -635,15 +637,19 @@ export class Engine {
     if (record.outbox.length === 0) return;
     for (const queued of record.outbox) {
       await this.#adapters.ledger.append({ eventId: queued.eventId, callId, actor: queued.actor, event: queued.name, at: queued.at, detail: queued.detail });
-        // A listener is told, at least once and best effort; its failure, thrown or rejected, never stops the ledger (INT-5).
-      try {
-        const told: unknown = this.#onEvent?.({ name: queued.name, callId, actor: queued.actor, at: queued.at, detail: queued.detail });
-        if (told instanceof Promise) told.catch(() => undefined);
-      } catch {
-        // Ignored by design: the ledger is the record.
-      }
+      this.#notify({ name: queued.name, callId, actor: queued.actor, at: queued.at, detail: queued.detail });
     }
     await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue);
+  }
+
+  /** Tells the listener, at least once and best effort; its failure, thrown or rejected, never stops the ledger (INT-5). */
+  #notify(event: EngineEvent): void {
+    try {
+      const told: unknown = this.#onEvent?.(event);
+      if (told instanceof Promise) told.catch(() => undefined);
+    } catch {
+      // Ignored by design: the ledger is the record.
+    }
   }
 
   /** A ledger event id, unique across workspaces sharing one ledger: a JSON tuple, so no two ids collide. */

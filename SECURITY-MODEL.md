@@ -146,7 +146,8 @@ anchored, nor anything after the last anchor. With a time-stamp authority alone,
 sees only a hash and only the proofs the operator keeps exist, so an operator could drop an
 inconvenient one. With Rekor, everyone can see every head the operator anchored, so a missing
 anchor shows too. A public log shows each anchored head (a hash), the key that signed it and the
-time, and nothing else: no entry, no call and no workspace. The anchor payload is domain-separated,
+signature, and nothing else: no entry, no call and no workspace. The time is not in the log; it
+is in the authority's token, which the operator keeps. The anchor payload is domain-separated,
 so a head signed for the log can never verify as a receipt, even under the receipt key (tested).
 The time always comes from the authority, since Rekor v2 keeps none.
 

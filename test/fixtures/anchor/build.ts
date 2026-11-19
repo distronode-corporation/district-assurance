@@ -2,7 +2,7 @@
 // responses, and a Rekor v2 style log (an RFC 9162 Merkle tree, inclusion proofs and a signed
 // checkpoint). `record.ts` uses them to write the recorded fixtures; the tests use them to build
 // broken tokens and entries. Test code only: every key here is a throwaway, not a secret.
-import { createHash, sign, type KeyObject } from "node:crypto";
+import { createECDH, createHash, createPrivateKey, createPublicKey, sign, type KeyObject } from "node:crypto";
 
 import { MemoryAuditLedger } from "../../../src/prove/ledger.ts";
 import type { AuditEntry } from "../../../src/core/adapters.ts";
@@ -235,3 +235,17 @@ export async function fixtureLedger(): Promise<{ ledger: MemoryAuditLedger; entr
 }
 
 export const REKOR_ORIGIN = "log2025-test.rekor.example.test";
+
+/**
+ * The host's P-256 key the recorded Rekor entry is signed with: derived from a fixed label, so the
+ * adapter test can use the same key without a private key file in the repository.
+ */
+export function fixtureSigner(): { privateKey: KeyObject; publicKey: KeyObject } {
+  const d = createHash("sha256").update("district-assurance anchor fixture signer").digest();
+  const ecdh = createECDH("prime256v1");
+  ecdh.setPrivateKey(d);
+  const point = ecdh.getPublicKey();
+  const jwk = { kty: "EC", crv: "P-256", d: d.toString("base64url"), x: point.subarray(1, 33).toString("base64url"), y: point.subarray(33).toString("base64url") };
+  const privateKey = createPrivateKey({ key: jwk, format: "jwk" });
+  return { privateKey, publicKey: createPublicKey(privateKey) };
+}

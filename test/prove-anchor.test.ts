@@ -9,7 +9,7 @@ import { describe, it } from "node:test";
 import { RekorAnchor, TimestampAuthorityAnchor, timestampRequest } from "../examples/reference-server/src/anchor-adapters.ts";
 import type { AnchorProof, AuditEntry } from "../src/core/adapters.ts";
 import { canonicalJson } from "../src/core/canonical.ts";
-import { ENGINE_EVENTS } from "../src/core/events.ts";
+import { ENGINE_EVENTS, type EngineEvent } from "../src/core/events.ts";
 import { ANCHOR_CONTEXT, anchorPayload, checkRekorEntry, checkTimestamp, isAnchorProof, readDer, verifyAnchor, type RekorLog } from "../src/prove/anchor.ts";
 import { GENESIS_HASH, chainEntry, verifyChain } from "../src/prove/ledger.ts";
 import { signReceipt, verifyReceipt, type ReceiptBody, type SignedReceipt } from "../src/prove/receipt.ts";
@@ -25,6 +25,7 @@ import {
   der,
   explicit0,
   fixtureLedger,
+  fixtureSigner,
   hashedRekordBody,
   int,
   logEntry,
@@ -42,8 +43,7 @@ import { rejects } from "./helpers.ts";
 const fixture = (file: string): Buffer => readFileSync(new URL(`./fixtures/anchor/${file}`, import.meta.url));
 const recordedChain = fixture("tsa-chain.pem")
   .toString()
-  .split(/(?<=-----END CERTIFICATE-----\n)/)
-  .filter((part) => part.trim() !== "")
+  .match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g)!
   .map((part) => new X509Certificate(part));
 const recordedTimestamp = Buffer.from(fixture("tsa-response.der.b64").toString(), "base64");
 const recordedLog: RekorLog = { key: createPublicKey(fixture("rekor-log.pem")), origin: REKOR_ORIGIN };
@@ -147,6 +147,18 @@ describe("anchorLedger", () => {
     const next = await engine.anchorLedger();
     assert.equal(next.detail.seq, entry.seq);
     assert.equal(verifyAnchor(next, await ledger.list(), { tsa: tsa.chain }).ok, true);
+  });
+
+  it("tells the listener after the append, and a failing listener never stops the anchor", async () => {
+    const { ledger, tsa } = await anchoredEngine();
+    const events: EngineEvent[] = [];
+    const told = createTestEngine({ adapters: { ledger, anchor: tsa }, onEvent: (e) => events.push(e) }).engine;
+    const entry = await told.anchorLedger();
+    assert.deepEqual(events, [{ name: "ledger.anchored", callId: null, actor: "system", at: entry.at, detail: entry.detail }]);
+    for (const onEvent of [() => { throw new Error("listener down"); }, async () => { throw new Error("listener down"); }]) {
+      const failing = createTestEngine({ adapters: { ledger, anchor: tsa }, onEvent }).engine;
+      assert.equal((await failing.anchorLedger()).event, "ledger.anchored");
+    }
   });
 
   it("checks offline: the exported entries and the authority's chain are enough", async () => {
@@ -350,7 +362,7 @@ describe("the Rekor adapter, on a recorded answer", () => {
     const payload = anchorPayload(head);
     const { fetch, requests } = replay({ body: recordedEntry }, { body: recordedTimestamp });
     const timestamps = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain: recordedChain, fetch });
-    const signingKey = ecKeys().privateKey;
+    const signingKey = fixtureSigner().privateKey;
     const anchor = new RekorAnchor({ url: "https://rekor.example.test/", signingKey, log: recordedLog, timestamps, fetch });
     const { engine } = createTestEngine({ adapters: { ledger, anchor } });
     const entry = await engine.anchorLedger();
@@ -376,6 +388,16 @@ describe("the Rekor adapter, on a recorded answer", () => {
       const anchor = new RekorAnchor({ url: "https://r.example.test", signingKey: ecKeys().privateKey, log: recordedLog, timestamps, fetch: replay(reply).fetch });
       await assert.rejects(anchor.anchor(input), Error);
     }
+  });
+
+  it("refuses a valid entry for the same head under another key", async () => {
+    const head = await (await fixtureLedger()).ledger.head();
+    const timestamps = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain: recordedChain });
+    const { fetch, requests } = replay({ body: recordedEntry });
+    const anchor = new RekorAnchor({ url: "https://r.example.test", signingKey: ecKeys().privateKey, log: recordedLog, timestamps, fetch });
+    await assert.rejects(anchor.anchor({ ...head, payload: anchorPayload(head) }), /another key/);
+    // Refused before the authority is asked.
+    assert.equal(requests.length, 1);
   });
 
   it("checks the body, the signature, the inclusion proof and the checkpoint", async () => {
@@ -409,7 +431,7 @@ describe("the Rekor adapter, on a recorded answer", () => {
     ];
     for (const [i, entry] of broken.entries()) assert.deepEqual(checkRekorEntry(entry, payload, recordedLog), { ok: false, reason: "log" }, String(i));
     assert.deepEqual(checkRekorEntry(entryB64, payload, { key: otherLog.publicKey, origin: REKOR_ORIGIN }), { ok: false, reason: "log" });
-    assert.deepEqual(checkRekorEntry(entryB64, payload, { key: generateKeyPairSync("rsa", { modulusLength: 1024 }).publicKey, origin: REKOR_ORIGIN }), { ok: false, reason: "log" });
+    assert.deepEqual(checkRekorEntry(entryB64, payload, { key: generateKeyPairSync("rsa", { modulusLength: 2048 }).publicKey, origin: REKOR_ORIGIN }), { ok: false, reason: "log" });
   });
 
   it("accepts a log with an ECDSA key, and an entry at any place in the tree", () => {

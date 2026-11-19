@@ -1,12 +1,13 @@
 // Writes the recorded anchor fixtures (PRV-9): what a time-stamp authority and a Rekor v2 log
 // answer for the head of `fixtureLedger()`. Run once with `node test/fixtures/anchor/record.ts`;
 // the tests replay the files and never touch a network. The authority (an RSA root and a
-// time-stamping certificate) and the log (an Ed25519 key) are throwaways made here, not a secret.
+// time-stamping certificate) and the log (an Ed25519 key) are throwaways made here, not a secret;
+// the host key that signs the logged head is `fixtureSigner()`, so the adapter test can use it.
 import { generateKeyPairSync, sign } from "node:crypto";
 import { writeFileSync } from "node:fs";
 
 import { anchorPayload } from "../../../src/prove/anchor.ts";
-import { REKOR_ORIGIN, certificate, fixtureLedger, hashedRekordBody, logEntry, pem, timestampResponse, timestampToken, OIDS } from "./build.ts";
+import { REKOR_ORIGIN, certificate, fixtureLedger, fixtureSigner,hashedRekordBody, logEntry, pem, timestampResponse, timestampToken, OIDS } from "./build.ts";
 
 const dir = new URL("./", import.meta.url);
 const { ledger } = await fixtureLedger();
@@ -22,7 +23,7 @@ writeFileSync(new URL("tsa-chain.pem", dir), pem(tsaCert) + pem(rootCert));
 writeFileSync(new URL("tsa-response.der.b64", dir), `${timestampResponse(0, token).toString("base64")}\n`);
 
 const log = generateKeyPairSync("ed25519");
-const signer = generateKeyPairSync("ec", { namedCurve: "P-256" });
+const signer = fixtureSigner();
 const body = hashedRekordBody(payload, sign("sha256", payload, signer.privateKey), signer.publicKey);
 const entry = logEntry({ body, index: 9, size: 11, origin: REKOR_ORIGIN, logKey: log.privateKey, logPublicKey: log.publicKey });
 writeFileSync(new URL("rekor-log.pem", dir), log.publicKey.export({ type: "spki", format: "pem" }));

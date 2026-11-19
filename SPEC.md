@@ -306,7 +306,8 @@ holds the ledger could rebuild all of it. `engine.anchorLedger()` takes the ledg
 `ledger.anchored` entry `{seq, proof}` (event id `["ledger.anchored", seq]`, so engines anchoring
 the same head append one entry). It refuses without the adapter or on an empty ledger
 (`precondition_failed`), and refuses a malformed proof (`invalid_input`). The host schedules it
-(daily, for example); the engine never calls out on its own.
+(daily, for example); the engine never calls out on its own. After the append the listener is
+told, best effort, with `callId` null.
 
 - Anchor payload: the UTF-8 bytes of `"district-assurance/ledger-anchor/v1\n" +
   canonicalJson({seq, hash})`. It is not JSON, so a signature over it never verifies as a receipt.

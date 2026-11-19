@@ -10,7 +10,7 @@
 //
 // A time-stamp authority signs a hash of the head and never sees the ledger; only the proofs the
 // operator keeps exist. Rekor is a public log: it shows anyone each anchored head (a hash), the key
-// that signed it and the time, and nothing else.
+// that signed it and the signature, and nothing else; the time is in the authority's token.
 import { createHash, createPublicKey, sign, type KeyObject, type X509Certificate } from "node:crypto";
 
 import { checkRekorEntry, checkTimestamp, readDer, type Anchor, type AnchorProof, type RekorLog } from "../../../src/index.ts";
@@ -66,6 +66,15 @@ export class TimestampAuthorityAnchor implements Anchor {
   }
 }
 
+/** The key a Rekor v2 `hashedrekord` entry (base64 of the JSON Rekor answered) names as its signer. */
+function loggedSigner(entry: string): KeyObject {
+  const parsed = JSON.parse(Buffer.from(entry, "base64").toString("utf8")) as { canonicalizedBody: string };
+  const body = JSON.parse(Buffer.from(parsed.canonicalizedBody, "base64").toString("utf8")) as {
+    spec: { hashedRekordV002: { signature: { verifier: { publicKey: { rawBytes: string } } } } };
+  };
+  return createPublicKey({ key: Buffer.from(body.spec.hashedRekordV002.signature.verifier.publicKey.rawBytes, "base64"), format: "der", type: "spki" });
+}
+
 /**
  * Sigstore's Rekor v2: the anchor payload signed with the host's P-256 key (under the payload's
  * domain separation, so it never verifies as a receipt) and logged as a `hashedrekord`. Rekor v2
@@ -111,6 +120,10 @@ export class RekorAnchor implements Anchor {
     const entry = Buffer.from(await response.arrayBuffer()).toString("base64");
     const check = checkRekorEntry(entry, input.payload, this.#log);
     if (!check.ok) throw new Error("the Rekor entry does not verify");
+    // A valid entry for the same payload under another key is not this host's proof.
+    if (!loggedSigner(entry).equals(createPublicKey(this.#signingKey))) {
+      throw new Error("the Rekor entry is signed by another key");
+    }
     return { kind: "rekor", token: await this.#timestamps.timestamp(input.payload), entry };
   }
 }
