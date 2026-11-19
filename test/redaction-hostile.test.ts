@@ -15,7 +15,7 @@ describe("hostile #89: separators a transcript or a text can carry", () => {
   // marks: a card number with these between its groups reached storage whole.
   const separators: Record<string, string> = {
     "en dash": "–",
-    "em dash": "—",
+    "em dash": "\u2014",
     "non-breaking hyphen": "‑",
     "minus sign": "−",
     "zero-width space": "​",
