@@ -48,6 +48,9 @@ export function webhookRelay(options: WebhookRelayOptions): AccessController {
         const ref = typeof reported.ref === "string" && reported.ref.length <= 200 ? reported.ref : input.grant.body.grantId;
         return { outcome: "delivered", providerRef: ref, confirmed: reported.state === "confirmed" };
       }
+      // A replay answer means an earlier request with this grant was accepted, and may have opened
+      // the door: that is not a refusal, so it is thrown and recorded as unknown.
+      if (response.status === 409) throw new Error("the relay answered 409: the grant was already used");
       if (response.status >= 400 && response.status < 500) {
         const answer = await response.json().catch(() => null);
         const error = typeof answer === "object" && answer !== null ? (answer as Record<string, unknown>).error : undefined;

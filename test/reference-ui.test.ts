@@ -274,6 +274,24 @@ describe("reference UI: demo routes", () => {
     assert.equal((await fetch(`${s.base}/receipts/${last.callId}`)).status, 404);
   });
 
+  it("runs two entry calls that reach the door together: both wait for the relay, and each checks its own door (review of #50)", async () => {
+    const world = createDemoWorld();
+    const server = createReferenceServer({ engine: world.engine, clock: world.t.clock, stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET], connect: [DEMO_CONNECT_SECRET] }, ui: new DemoRuns(world) });
+    const runs = new DemoRuns(world);
+    try {
+      const a = await runs.start("entry");
+      const b = await runs.start("entry");
+      for (let i = 0; i < 2; i++) await Promise.all([runs.step(a.runId), runs.step(b.runId)]);
+      // Both reach the door at once, before the relay has started.
+      const [ra, rb] = await Promise.all([runs.step(a.runId), runs.step(b.runId)]);
+      for (const r of [ra, rb]) assert.ok(r.ok && r.view.results.at(-1)!.ok, JSON.stringify(r.ok ? r.view.results.at(-1) : r));
+      assert.equal(world.openedFor.size, 2);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await world.close();
+    }
+  });
+
   it("runs deposit-connect and entry to the end, one step per request", async () => {
     for (const flow of ["deposit-connect", "entry"] as const) {
       const [, view] = await start(flow);
