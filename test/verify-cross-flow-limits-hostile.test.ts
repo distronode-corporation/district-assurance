@@ -90,3 +90,27 @@ describe("#120 hostile: counting starts", () => {
     assert.equal((await t.engine.flowPosition(second))!.status, "failed");
   });
 });
+
+describe("#120 double reads", () => {
+  it("X6 startCall reads flow and callingNumber once each: the flow counted is the flow attached, the number checked is the number kept", async () => {
+    const t = setup({ config: cfg() });
+    const reads: Record<string, number> = {};
+    const input: Record<string, unknown> = {};
+    for (const [field, first, then] of [
+      ["flow", "pay", "status"],
+      ["callingNumber", CALLING, "+15555550111"],
+    ] as const) {
+      Object.defineProperty(input, field, {
+        enumerable: true,
+        get() {
+          reads[field] = (reads[field] ?? 0) + 1;
+          return reads[field] === 1 ? first : then;
+        },
+      });
+    }
+    const state = await t.engine.startCall(input as never);
+    assert.deepEqual(reads, { flow: 1, callingNumber: 1 });
+    assert.equal((await t.engine.flowPosition(state.callId))!.flow, "pay");
+    assert.equal(await starts(t), 1, "counted on the number that was checked");
+  });
+});

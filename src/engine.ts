@@ -204,8 +204,10 @@ export class Engine {
    * that flow failed: the host speaks its fixed line and ends it.
    */
   async startCall(input: { callId?: string; locale?: Locale; flow?: string; callingNumber?: string } = {}): Promise<SessionState> {
-    const callId = input.callId ?? this.#ids.next("call");
-    const numberKey = this.#numberKey(input.callingNumber);
+    // Each read once: a getter read again (the flow, after an await) could change a value after it was checked or counted.
+    const { callId: givenId, locale, flow, callingNumber } = input;
+    const callId = givenId ?? this.#ids.next("call");
+    const numberKey = this.#numberKey(callingNumber);
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
       const name = module.manifest.name;
@@ -214,7 +216,7 @@ export class Engine {
     const record: CallRecord = {
       v: 1,
       state: newSession(callId, this.workspaceId, this.#now()),
-      locale: input.locale ?? "en",
+      locale: locale ?? "en",
       revision: this.#config.revision,
       flow: null,
       modules,
@@ -225,12 +227,12 @@ export class Engine {
     // different flow on the same id in between.
     const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
     let start: FlowStart = UNCOUNTED;
-    if (input.flow !== undefined) {
-      const definition = this.#flowDefinition(input.flow);
+    if (flow !== undefined) {
+      const definition = this.#flowDefinition(flow);
       if (await this.#sessions.get(this.workspaceId, callId) !== null) throw new EngineError("invalid_input", "a call with that id exists");
-      start = await this.#countFlowStart(record, input.flow, definition);
+      start = await this.#countFlowStart(record, flow, definition);
       const draft = this.#draft(record, events);
-      this.#attachFlow(draft, input.flow, definition, this.#config.revision, start);
+      this.#attachFlow(draft, flow, definition, this.#config.revision, start);
       this.#advance(draft);
     }
     record.outbox = events.map((event, i) => ({ eventId: this.#eventId(callId, 1, i), ...event }));
