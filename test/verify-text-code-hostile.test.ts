@@ -174,6 +174,16 @@ describe("#79 hostile: where a code may go", () => {
       assert.match(spec, new RegExp(`\\b${code}\\b`), `SPEC names ${code}`);
       assert.match(listComment, new RegExp(`\\b${code}\\b`), `the list's comment names ${code}`);
     }
-    assert.match(listComment, /not been checked against ITU-T/, "the list's comment says it is unverified");
+    assert.match(listComment, /Checked 2026-11-19 against Google libphonenumber's country-code map/, "the list's comment says how it was checked");
+  });
+
+  it("C8 379, reserved for Vatican City with no numbers issued under it, is refused", async () => {
+    const { validatePolicy, defaultVerificationPolicy, isAssignedCountryPrefix, E164_COUNTRY_CODES } = await import("../src/core/policy.ts");
+    assert.equal(E164_COUNTRY_CODES.includes("379"), false);
+    for (const prefix of ["379", "3791", "37912"]) {
+      assert.equal(isAssignedCountryPrefix(prefix), false, prefix);
+      assert.notDeepEqual(validatePolicy({ ...defaultVerificationPolicy(), textCodeCountryCodes: [prefix] }).filter((e) => e.includes("textCodeCountryCodes")), [], prefix);
+    }
+    assert.equal(isAssignedCountryPrefix("39"), true, "Italy, which serves Vatican City numbers, stays");
   });
 });

@@ -118,11 +118,11 @@ const COUNTRY_CODE = /^[1-9][0-9]{0,5}$/;
  * ITU publishes with its Operational Bulletin). Spare and withdrawn codes are left out, and so are
  * the codes for global services (800, 808, 870, 878, 881, 882, 883, 888, 979, and the trial code
  * 991), which no number on file for a person's country carries: a texted code is never sent to
- * one. The list is prefix-free, as E.164 requires.
+ * one. 379, reserved for Vatican City with no numbers issued under it, is left out too. The list
+ * is prefix-free, as E.164 requires.
  *
- * UNVERIFIED: this list was written from memory and has not been checked against ITU-T's
- * published list. Check every entry against ITU-T's current list before release, and again when
- * ITU assigns or withdraws a code.
+ * Checked 2026-11-19 against Google libphonenumber's country-code map, which tracks ITU-T E.164
+ * assignments; re-check when ITU assigns or withdraws a code.
  */
 export const E164_COUNTRY_CODES: readonly string[] = [
   "1", "7", "20", "27", "30", "31", "32", "33", "34", "36", "39", "40", "41", "43", "44", "45",
@@ -133,7 +133,7 @@ export const E164_COUNTRY_CODES: readonly string[] = [
   "245", "246", "247", "248", "249", "250", "251", "252", "253", "254", "255", "256", "257", "258",
   "260", "261", "262", "263", "264", "265", "266", "267", "268", "269", "290", "291", "297", "298",
   "299", "350", "351", "352", "353", "354", "355", "356", "357", "358", "359", "370", "371", "372",
-  "373", "374", "375", "376", "377", "378", "379", "380", "381", "382", "383", "385", "386", "387",
+  "373", "374", "375", "376", "377", "378", "380", "381", "382", "383", "385", "386", "387",
   "389", "420", "421", "423", "500", "501", "502", "503", "504", "505", "506", "507", "508", "509",
   "590", "591", "592", "593", "594", "595", "596", "597", "598", "599", "670", "672", "673", "674",
   "675", "676", "677", "678", "679", "680", "681", "682", "683", "685", "686", "687", "688", "689",
