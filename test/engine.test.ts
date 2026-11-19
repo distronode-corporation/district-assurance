@@ -6,7 +6,6 @@ import type { IntakeRecord, PaymentLinks } from "../src/core/adapters.ts";
 import { canonicalJson, type JsonValue } from "../src/core/canonical.ts";
 import { ConfigError } from "../src/core/config.ts";
 import { hmacSha256Hex } from "../src/core/hash.ts";
-import { NotImplementedError } from "../src/core/errors.ts";
 import type { EngineEvent } from "../src/core/events.ts";
 import { defaultVerificationPolicy } from "../src/core/policy.ts";
 import { createEngine } from "../src/engine.ts";
@@ -19,6 +18,11 @@ import { verifyReceipt } from "../src/prove/receipt.ts";
 import { FakeCarrierSignals, FakeFieldCipher, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryAttemptCounters, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine } from "../src/testing/index.ts";
 import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, form, heard, rejects, setup, testConfig, verifiedCall, waitOut } from "./helpers.ts";
+
+/** The digest of the read-back the caller heard, or any digest once no draft is open (a filed or released intake asks for none). */
+async function readBackOf(t: { engine: { intakeReadBack(callId: string): Promise<{ digest: string }> } }, callId: string): Promise<string> {
+  return t.engine.intakeReadBack(callId).then((r) => r.digest, () => "0".repeat(64));
+}
 
 describe("Engine construction", () => {
   it("refuses a short key, an empty workspace, a missing ledger and a bad config", () => {
@@ -687,13 +691,14 @@ describe("Engine file", () => {
   });
 
   describe("sensitive fields", () => {
+    // Not a SIN: #76 refuses a field that names one, so FIL-2 is shown on a policy number (rehearsal).
     const SIN = "046 454 286"; // a made-up number, not a secret
     const secure: IntakeForm = {
       formId: "secure",
       version: "1",
       fields: [
         { key: "issue", label: { en: "Issue", fr: "Problème" }, type: "text", required: true },
-        { key: "sin", label: { en: "SIN", fr: "NAS" }, type: "text", required: true, sensitive: true },
+        { key: "policy", label: { en: "Policy number", fr: "Numéro de police" }, type: "text", required: true, sensitive: true },
         { key: "pets", label: { en: "Pets", fr: "Animaux" }, type: "number", required: false, sensitive: true },
       ],
     };
@@ -701,7 +706,7 @@ describe("Engine file", () => {
     /** The digest the engine must give: the plaintext, with each sensitive value as an HMAC bound to the record and field. */
     const expectedDigest = (recordId: string, values: Record<string, string | number>) => {
       const covered: Record<string, string | number> = { ...values };
-      for (const key of ["sin", "pets"]) if (key in values) covered[key] = hmacSha256Hex(TEST_KNOWLEDGE_KEY, canonicalJson(["intake", recordId, key, values[key]!]));
+      for (const key of ["policy", "pets"]) if (key in values) covered[key] = hmacSha256Hex(TEST_KNOWLEDGE_KEY, canonicalJson(["intake", recordId, key, values[key]!]));
       return intakeDigest(secure, covered);
     };
 
@@ -711,7 +716,7 @@ describe("Engine file", () => {
       const callId = await verifiedCall(t);
       await t.engine.startIntake(callId, "secure");
       await t.engine.setIntakeField(callId, "issue", "Leak");
-      await t.engine.setIntakeField(callId, "sin", SIN);
+      await t.engine.setIntakeField(callId, "policy", SIN);
       const put = t.records.putIntakeRecord.bind(t.records);
       const attempts: IntakeRecord[] = [];
       t.records.putIntakeRecord = async (record) => {
@@ -719,20 +724,21 @@ describe("Engine file", () => {
         if (attempts.length === 1) throw new Error("database down");
         return put(record);
       };
-      await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /database down/);
-      const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+      await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await readBackOf(t, callId) }), /database down/);
+      const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await readBackOf(t, callId) });
       assert.equal(record.values.issue, "Leak", "a field that is not sensitive stays in the clear");
       assert.equal(Object.hasOwn(record.values, "pets"), false, "an optional sensitive field left empty is not encrypted");
-      assert.match(String(record.values.sin), /^fake-cipher:2:/);
-      assert.equal(cipher.decrypt(String(record.values.sin)), SIN);
-      assert.deepEqual(cipher.encrypted, [1, 2].map(() => ({ workspaceId: "ws_test", recordId: record.recordId, field: "sin" })), "encrypted again on the retry");
-      assert.notEqual(attempts[0]!.values.sin, attempts[1]!.values.sin, "a different ciphertext each time");
+      assert.match(String(record.values.policy), /^fake-cipher:2:/);
+      assert.equal(cipher.decrypt(String(record.values.policy)), SIN);
+      assert.deepEqual(cipher.encrypted, [1, 2].map(() => ({ workspaceId: "ws_test", recordId: record.recordId, field: "policy" })), "encrypted again on the retry");
+      assert.notEqual(attempts[0]!.values.policy, attempts[1]!.values.policy, "a different ciphertext each time");
       assert.equal(attempts[0]!.digest, attempts[1]!.digest, "the same digest each time");
-      assert.equal(record.digest, expectedDigest(record.recordId, { issue: "Leak", sin: SIN }));
-      assert.notEqual(record.digest, intakeDigest(secure, { issue: "Leak", sin: SIN }), "a receipt is no oracle for the plain value");
-      assert.notEqual(record.digest, intakeDigest(secure, { issue: "Leak", sin: String(record.values.sin) }), "nor the ciphertext");
+      assert.equal(record.digest, expectedDigest(record.recordId, { issue: "Leak", policy: SIN }));
+      assert.notEqual(record.digest, intakeDigest(secure, { issue: "Leak", policy: SIN }), "a receipt is no oracle for the plain value");
+      assert.notEqual(record.digest, intakeDigest(secure, { issue: "Leak", policy: String(record.values.policy) }), "nor the ciphertext");
       assert.deepEqual(await t.records.getIntakeRecord("ws_test", record.recordId), record);
-      assert.equal(await t.engine.confirmIntake(callId, { confirmedBy: "voice" }).then((r) => r.values.sin), record.values.sin, "a retry after filing returns the stored record");
+      // Filed: the intake is closed, so no read-back is asked for (any digest).
+      assert.equal(await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: "0".repeat(64) }).then((r) => r.values.policy), record.values.policy, "a retry after filing returns the stored record");
       const receipt = (await t.engine.endCall(callId))!;
       assert.equal(receipt.body.records[0]!.digest, record.digest);
       const stored = JSON.stringify([await t.sessions.get("ws_test", callId), await t.ledger.list(), receipt]);
@@ -743,13 +749,13 @@ describe("Engine file", () => {
       const t = setup({ config: withSecure(), adapters: { fieldCipher: new FakeFieldCipher() } });
       const callId = await verifiedCall(t);
       await t.engine.startIntake(callId, "secure");
-      await t.engine.setIntakeField(callId, "sin", SIN);
+      await t.engine.setIntakeField(callId, "policy", SIN);
       const before = (await t.ledger.list()).map((e) => e.event);
       await t.engine.endCall(callId);
       const stored = JSON.stringify([await t.sessions.get("ws_test", callId), await t.ledger.list()]);
       assert.equal(stored.includes(SIN), false, "the ended call record keeps no plain value");
       assert.deepEqual((await t.ledger.list()).map((e) => e.event).slice(before.length), ["call.ended", "receipt.issued"], "dropping the draft writes no event of its own");
-      await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }));
+      await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: "0".repeat(64) }));
     });
 
     it("refuses to file when the cipher answers with nothing or with the plain value, and names no value", async () => {
@@ -760,8 +766,8 @@ describe("Engine file", () => {
         const callId = await verifiedCall(t);
         await t.engine.startIntake(callId, "secure");
         await t.engine.setIntakeField(callId, "issue", "Leak");
-        await t.engine.setIntakeField(callId, "sin", SIN);
-        await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), (e: unknown) => {
+        await t.engine.setIntakeField(callId, "policy", SIN);
+        await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), (e: unknown) => {
           assert.ok(e instanceof Error && e.message.includes("(no_ciphertext)") && !e.message.includes(SIN), String(answer));
           return true;
         });
@@ -774,10 +780,10 @@ describe("Engine file", () => {
       const t = setup({ config: withSecure(), adapters: { fieldCipher: cipher } });
       const callId = await verifiedCall(t);
       await t.engine.startIntake(callId, "secure");
-      for (const [key, value] of [["issue", "Leak"], ["sin", SIN], ["pets", "2"]]) await t.engine.setIntakeField(callId, key!, value!);
-      const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
-      assert.deepEqual([cipher.decrypt(String(record.values.sin)), cipher.decrypt(String(record.values.pets))], [SIN, "2"]);
-      assert.equal(record.digest, expectedDigest(record.recordId, { issue: "Leak", sin: SIN, pets: 2 }));
+      for (const [key, value] of [["issue", "Leak"], ["policy", SIN], ["pets", "2"]]) await t.engine.setIntakeField(callId, key!, value!);
+      const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack: await heard(t, callId) });
+      assert.deepEqual([cipher.decrypt(String(record.values.policy)), cipher.decrypt(String(record.values.pets))], [SIN, "2"]);
+      assert.equal(record.digest, expectedDigest(record.recordId, { issue: "Leak", policy: SIN, pets: 2 }));
     });
 
     it("files a form whose optional sensitive field is named like an Object property and left empty", async () => {
@@ -795,7 +801,7 @@ describe("Engine file", () => {
       const callId = await verifiedCall(t);
       await t.engine.startIntake(callId, "proto");
       await t.engine.setIntakeField(callId, "issue", "Leak");
-      const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+      const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await readBackOf(t, callId) });
       assert.equal(Object.hasOwn(record.values, "constructor"), false);
       assert.deepEqual(cipher.encrypted, []);
       assert.equal(record.digest, intakeDigest(proto, { issue: "Leak" }));
@@ -809,12 +815,12 @@ describe("Engine file", () => {
       const callId = await verifiedCall(a);
       await a.engine.startIntake(callId, "secure");
       await a.engine.setIntakeField(callId, "issue", "Leak");
-      await a.engine.setIntakeField(callId, "sin", SIN);
-      await assert.rejects(b.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("precondition_failed", /needs the fieldCipher adapter/));
+      await a.engine.setIntakeField(callId, "policy", SIN);
+      await assert.rejects(b.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(b, callId) }), rejects("precondition_failed", /needs the fieldCipher adapter/));
       assert.equal(await a.records.getIntakeRecord("ws_test", "rec_1"), null, "nothing stored");
-      const record = await a.engine.confirmIntake(callId, { confirmedBy: "voice" });
+      const record = await a.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await readBackOf(a, callId) });
       assert.equal(record.recordId, "rec_1", "the reservation is resumed by an engine with a cipher");
-      assert.notEqual((await a.records.getIntakeRecord("ws_test", "rec_1"))!.values.sin, SIN);
+      assert.notEqual((await a.records.getIntakeRecord("ws_test", "rec_1"))!.values.policy, SIN);
     });
   });
 });

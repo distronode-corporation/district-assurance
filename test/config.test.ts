@@ -357,7 +357,8 @@ describe("validateConfig: modules", () => {
   });
 
   it("needs the fieldCipher adapter once a form has a sensitive field (FIL-2)", () => {
-    const sin = { key: "sin", label: { en: "SIN", fr: "NAS" }, type: "text", required: true, sensitive: true };
+    // Not a SIN: #76 refuses a field that names one (rehearsal).
+    const sin = { key: "policy", label: { en: "Policy number", fr: "Numéro de police" }, type: "text", required: true, sensitive: true };
     const sensitive = config((c) => c.modules.dossier.settings.forms[0].fields.push(sin));
     assert.deepEqual(validateConfig(sensitive, registry()), ["modules.dossier: needs the fieldCipher adapter, which the engine does not have"]);
     assert.deepEqual(validateConfig(sensitive, registry([...ALL_ADAPTERS, "fieldCipher"])), []);
