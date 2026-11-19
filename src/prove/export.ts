@@ -139,8 +139,6 @@ export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<st
     throw new EngineError("precondition_failed", "exportLedger: the ledger run does not reach its expected end");
   }
 
-  for (const entry of entries) yield `${canonicalJson(entry)}\n`;
-
   const trailer: LedgerExportTrailerBody = {
     v: 1,
     type: "ledger_export",
@@ -152,8 +150,12 @@ export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<st
     exportedAt: input.clock.now().toISOString(),
     cursor: encodeCursor(check.head),
   };
+  // Signed before any line is handed out, so a signer that fails, or answers anything but a 64-byte
+  // P1363 signature (a key store's DER), never leaves a consumer with entries and no valid trailer.
   const signature = await input.signer.sign(ledgerExportPayload(trailer));
+  if (signature.byteLength !== 64) throw new EngineError("invalid_input", `exportLedger: the signer returned ${signature.byteLength} bytes, not a 64-byte P1363 signature`);
   const signed: LedgerExportTrailer = { trailer, alg: input.signer.algorithm, kid: input.signer.keyId, signature: Buffer.from(signature).toString("base64url") };
+  for (const entry of entries) yield `${canonicalJson(entry)}\n`;
   yield `${canonicalJson(signed)}\n`;
 }
 
@@ -188,8 +190,8 @@ function isTrailer(v: unknown): v is LedgerExportTrailer {
 }
 
 function signatureValid(t: LedgerExportTrailer, keys: ReadonlyArray<JsonWebKey & { kid?: string }>): boolean {
-  if (t.alg !== "ES256") return false;
-  const jwk = keys.find((k) => k.kid === t.kid);
+  if (t.alg !== "ES256" || !Array.isArray(keys)) return false;
+  const jwk = keys.find((k: unknown) => typeof k === "object" && k !== null && (k as { kid?: unknown }).kid === t.kid);
   if (jwk === undefined) return false;
   try {
     const key = createPublicKey({ key: jwk, format: "jwk" });
@@ -211,7 +213,7 @@ export function verifyLedgerExport(
   keys: ReadonlyArray<JsonWebKey & { kid?: string }>,
   after?: LedgerExportTrailerBody,
 ): LedgerExportCheck {
-  if (!ndjson.endsWith("\n")) return { ok: false, reason: "malformed" };
+  if (typeof ndjson !== "string" || !ndjson.endsWith("\n")) return { ok: false, reason: "malformed" };
   const parsed: unknown[] = [];
   try {
     for (const line of ndjson.slice(0, -1).split("\n")) parsed.push(JSON.parse(line));
@@ -222,7 +224,7 @@ export function verifyLedgerExport(
   if (!isTrailer(signed)) return { ok: false, reason: "malformed" };
   if (!signatureValid(signed, keys)) return { ok: false, reason: "signature" };
   const { trailer } = signed;
-  if (after !== undefined && (after.ledgerId !== trailer.ledgerId || after.cursor !== encodeCursor(trailer.from))) {
+  if (after !== undefined && (typeof after !== "object" || after === null || after.ledgerId !== trailer.ledgerId || after.cursor !== encodeCursor(trailer.from))) {
     return { ok: false, reason: "continuity" };
   }
   const entries = parsed as AuditEntry[];

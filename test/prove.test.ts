@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { generateKeyPairSync } from "node:crypto";
 import { describe, it } from "node:test";
 
-import type { AuditEntry, AuditInput, AuditLedger } from "../src/core/adapters.ts";
+import type { AuditEntry, AuditInput, AuditLedger, ReceiptSigner } from "../src/core/adapters.ts";
 import { canonicalJson } from "../src/core/canonical.ts";
 import { EngineError } from "../src/core/errors.ts";
 import { wordingDigest } from "../src/prove/consent.ts";
@@ -327,6 +327,26 @@ describe("ledger export", () => {
     for (const trailer of bodies) assert.deepEqual(verifyLedgerExport(`${e1}\n${e2}\n${JSON.stringify({ ...signed, trailer })}\n`, keys), malformed);
     // Signed, but an entry line is not an entry.
     assert.deepEqual(verifyLedgerExport(`${e1}\nnull\n${trailerLine}\n`, keys), malformed);
+    // Whatever an auditor's tool hands it, it answers and never throws.
+    for (const value of [null, undefined, 42, Buffer.from(text)]) assert.deepEqual(verifyLedgerExport(value as unknown as string, keys), malformed);
+    for (const keySet of [null, undefined, {}, "keys", [null, 7]]) {
+      assert.deepEqual(verifyLedgerExport(text, keySet as unknown as typeof keys), { ok: false, reason: "signature" });
+    }
+    for (const after of [null, 7, "trailer", {}]) {
+      assert.deepEqual(verifyLedgerExport(text, keys, after as unknown as LedgerExportTrailer["trailer"]), { ok: false, reason: "continuity" });
+    }
+  });
+
+  it("refuses a signer that does not answer a 64-byte P1363 signature, before yielding", async () => {
+    const der: ReceiptSigner = { ...signer, sign: async () => new Uint8Array(70) };
+    const lines: string[] = [];
+    await assert.rejects(
+      (async () => {
+        for await (const line of exportLedger({ ledger: await ledgerOf(2), signer: der, clock, ledgerId: "ws_1", fromSeq: 1 })) lines.push(line);
+      })(),
+      (e: unknown) => e instanceof EngineError && e.code === "invalid_input" && /64-byte P1363/.test(e.message),
+    );
+    assert.deepEqual(lines, [], "no entry is handed out under a trailer that could never verify");
   });
 
   it("refuses bad arguments", async () => {

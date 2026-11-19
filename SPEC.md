@@ -324,7 +324,10 @@ order, then one signed trailer line.
 
 The payload is the bytes of `district-assurance ledger export v1\n` followed by
 `canonicalJson(trailer)`, so a trailer signature and a receipt signature can never stand in for each
-other. The signer is a `ReceiptSigner`, and the receipt key set verifies trailers by `kid`.
+other. The signer is a `ReceiptSigner`, and the receipt key set verifies trailers by `kid`. The
+trailer is signed before the first line is yielded, and a signature that is not 64 bytes (P1363)
+is refused with `invalid_input`, so a failing signer never leaves a consumer with entries and no
+valid trailer.
 
 A run starts at `fromSeq` (1 or more, at most the head plus one) or right after `cursor`
 (`<seq>.<hash>` of a previous trailer's `through`), never both, and stops at the head read when the
@@ -336,7 +339,9 @@ before anything is yielded: a head the ledger does not hold, a cursor whose entr
 longer holds with that hash, a missing entry before `fromSeq`, and a run that fails `verifyChain`
 from its start. `ledgerId` is the host's name for the ledger, for example the workspace id.
 
-`verifyLedgerExport(ndjson, keys, after?)` checks a whole run and never throws. It returns
+`verifyLedgerExport(ndjson, keys, after?)` checks a whole run and never throws, whatever its
+arguments are (a text that is not a string is `malformed`, a key set that is not a list of keys
+fails `signature`, an `after` that is not a trailer fails `continuity`). It returns
 `{ok: true, entries, trailer}`, or `{ok: false, reason}` with `reason`: `malformed` (a line that is
 not JSON, no final newline, a trailer that is missing or inconsistent, an entry line that is not an
 object), `signature` (unknown `kid`, wrong `alg`, a signature that does not verify), `continuity`
