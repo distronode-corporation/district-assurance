@@ -58,7 +58,9 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      - run: npm ci
+      # Development dependencies only, with no install scripts: no package in the lockfile has one
+      # (none is marked hasInstallScript), as release.yml installs them.
+      - run: npm ci --ignore-scripts
       # Inputs reach the step as environment variables, never pasted into the script; the
       # harness (test/fuzz/harness.ts) refuses a budget that is not a non-negative integer and a
       # seed that is not an integer.
