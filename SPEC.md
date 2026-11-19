@@ -524,8 +524,9 @@ receipt never verifies as an access grant. A host's module can never take a buil
    not: none, expired, tainted, or below today's minimum), `invalid_input` for a missing or unknown
    target or a bad lifetime, and `precondition_failed` while another grant of the call is in flight
    or once `maxGrantsPerCall` grants were issued, and `precondition_failed` when the engine has no
-   access controller by the target's name (own adapter entries with an `unlock` function only). The
-   grant's expiry is the earlier of now plus its
+   access controller by the target's name (own adapter entries with an `unlock` function only), and
+   `conflict` when the id generator gives a grant id the call already used (nothing is reserved; a
+   retry draws a new one). The grant's expiry is the earlier of now plus its
    lifetime and the verification grant's expiry. Ledger: `access.issued`.
 3. **Sign**: ES256 over the canonical JSON of the body below, with the `accessSigner`. The engine
    computes the digest (SHA-256 of those bytes) itself. A signing failure settles the grant
@@ -586,13 +587,16 @@ grant issued a little ahead of the relay's clock), `expired` (strict: from `expi
 the skew, because the engine ends a call only once every grant at a door has answered or expired),
 and `lifetime` (longer than 900 seconds, or ending before it starts). This assumes the engine's and
 the relay's clocks agree (NTP): a relay whose clock runs behind by some seconds accepts a grant for
-that much longer. `new SeenGrants()`: `accept(body, now)` is true once per grant id, and keeps the
+that much longer. `new SeenGrants()`: `accept(body, now)` is true once per grant id (false for an
+expiry it cannot parse or a `now` that is not a valid time), and keeps the
 id until the grant expires, when the verifier refuses it anyway. It keeps a forget point: ids are
 forgotten only once their grant expired at or before it, and any grant expiring at or before it is
 refused, so a grant accepted once is never accepted again, under any sequence of clock jumps and
 rollbacks. The forget point follows the relay's clock but never passes the latest expiry it has
 accepted, so a clock that jumped forward refuses no fresh grant beyond one grant lifetime (at most
-15 minutes) of grants it has really seen. `engine.accessKeys()` is the public key set.
+15 minutes) of grants it has really seen. It knows a grant by its id alone, so grant ids must be
+unique per workspace: the default generator is random (96 bits); a host's own `ids` that repeats
+across calls or processes makes a relay refuse a fresh grant as a replay. `engine.accessKeys()` is the public key set.
 It, and `engine.receiptKeys()`, publish only a key's public members (`kty`, `crv`, `x`, `y`, `kid`,
 `alg`, `use`), whatever a signer's `publicJwk` returns, so a signer that hands back its private `d`
 never has it published.

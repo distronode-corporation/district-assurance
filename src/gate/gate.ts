@@ -327,8 +327,13 @@ function reserve(rt: EngineRuntime, draft: CallDraft, input: { target: string; l
   // `entry.open` is an access scope, never below level 2, so an authorized call holds a grant.
   const verification = draft.record.state.grant!;
   const now = rt.now();
+  // Grant ids come from the host's id generator; one that repeats an id on this call (a second
+  // process with its own sequence) would send a grant the relay takes for a replay, and leave this
+  // reservation unanswerable (every write finds the first grant of that id). Refused: try again.
+  const grantId = rt.ids.next("acc");
+  if (slice.grants.some((g) => g.grantId === grantId)) throw new EngineError("conflict", "the id generator gave an access grant id this call already used; try again");
   const record: AccessRecord = {
-    grantId: rt.ids.next("acc"),
+    grantId,
     target: target.id,
     controller: target.controller,
     ref: target.ref,

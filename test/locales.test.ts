@@ -4,6 +4,7 @@ import { strict as assert } from "node:assert";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { SUPPORTED_LOCALES, isSupportedLocale } from "../src/engine.ts";
 import { DIGIT_WORDS_BY_LOCALE } from "../src/core/redaction.ts";
@@ -21,9 +22,9 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
-const SOURCES = sourceFiles(new URL("../src", import.meta.url).pathname).map((path) => ({ path, text: readFileSync(path, "utf8") }));
+const SOURCES = sourceFiles(fileURLToPath(new URL("../src", import.meta.url))).map((path) => ({ path, text: readFileSync(path, "utf8") }));
 /** The demo, the e2e demo and the UI's server code: they start calls too, and could grow a catalog of their own. */
-const DEMO_SOURCES = sourceFiles(new URL("../examples/reference-server/src", import.meta.url).pathname).map((path) => ({ path, text: readFileSync(path, "utf8") }));
+const DEMO_SOURCES = sourceFiles(fileURLToPath(new URL("../examples/reference-server/src", import.meta.url))).map((path) => ({ path, text: readFileSync(path, "utf8") }));
 
 describe("supported locales", () => {
   it("are en and fr, in one frozen list", () => {

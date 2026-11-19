@@ -127,13 +127,14 @@ describe("example door relay", () => {
       const big = await (async () => {
         try {
           const r = await fetch(`${url}/unlock`, { method: "POST", body: "x".repeat(64 * 1024) });
-          return [r.status, await r.json()];
+          return { status: r.status, text: await r.text() };
         } catch {
           return "cut off";
         }
       })();
+      // Only a transport failure counts as cut off: a complete answer that is not JSON fails here.
       // Answered at once and the upload cut off: the client sees the 413, or the connection close.
-      assert.ok(big === "cut off" || JSON.stringify(big) === JSON.stringify([413, { error: "body_too_large" }]), JSON.stringify(big));
+      if (big !== "cut off") assert.deepEqual([big.status, JSON.parse(big.text)], [413, { error: "body_too_large" }]);
       const junk = await fetch(`${url}/unlock`, { method: "POST", body: "{" });
       assert.deepEqual([junk.status, await junk.json()], [400, { error: "malformed" }]);
       assert.equal((await fetch(`${url}/other`)).status, 404);
