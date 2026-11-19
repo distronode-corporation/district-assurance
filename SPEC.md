@@ -290,9 +290,22 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   call, and `authorize` refuses as section 4 says, with the same `false` as a scope with no grant
   (so `requestPayment` is refused with `scope_denied`). Anything sent after the call (PRV-10)
   follows the same rule as on a normal call.
+- Flag until cleared: a duress entry also flags its subject, durably and hidden, in the
+  `AttemptCounters` store every engine shares (kind `duress.flag`), after the call's write and
+  before the counters' visible reset, even when the entry was stale. While the flag is set, every
+  later pass on the subject, on any call and by any entered factor, is a duress entry: alerted, its
+  scopes refused, and the same to the caller as any pass. A duress entry resets the visible
+  counters as a pass does, so it looks like one; every entered factor's failures on the subject are
+  also counted in a hidden counter (kind `duress.hidden.<kind>`) that only a pass not under duress
+  resets (a duress entry takes off only its own failure), and that counter's hard lock (not its
+  waits) refuses like any lock. So a caller who knows the duress PIN gets no more guesses at the
+  real PIN than one who does not. `clearDuress(subjectKey, memberId)` is the business's host call
+  (never a caller's) once it knows the subject is safe: `memberId` 1 to 128 of letters, digits, `.`,
+  `_`, `:`, `@`, `-` (`invalid_input` otherwise), `duress.cleared` written to the ledger first, then
+  the flag and the hidden counters cleared.
 - Every duress entry owes an alert: in the same write, Badge's part of the call record gets
   `duressAlerts` `{alertId, subjectKey, at}` and `duress`, and the record `owesAlerts: true` until
-  none is owed; `alertId` is `JSON.stringify(["duress", callId, n])` for the call's `n`th duress
+  none is owed; `alertId` is `JSON.stringify(["duress", workspaceId, callId, n])` for the call's `n`th duress
   entry, unique across engines whatever their id generators, even when verification restarted or the
   call ended while the entry was judged (the entry is then not a factor, and `submitPin` throws the
   same error as for any other stale entry). After a write, `flushLedger` included, and even when its
@@ -408,6 +421,7 @@ answer on file, a phone number, a link or card data.
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt` |
 | `pin.enrolled` | none (never the digits, the digest or their length) |
 | `pin.reset` | `subjectKey`; actor `member`, `callId` null |
+| `duress.cleared` | `subjectKey`, `memberId`; actor `member`, `callId` null |
 | `session.tainted` | `source` |
 | `sensitive.opened` / `sensitive.closed` | `reason` / none |
 | `intake.started` | `formId`, `version` |

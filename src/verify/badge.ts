@@ -37,6 +37,7 @@ import {
   type PinSettings,
 } from "./factors.ts";
 import { counterKeys, currentLock, isCallingNumber, lockoutOf, lockoutSettingsErrors, forgetPass, recordFailures, type Lock } from "./counters.ts";
+import { duressFlagKey, flagDuress, hiddenCounterKey, hiddenHardLock, hiddenWindowStart, isUnderDuress } from "./duress-flag.ts";
 import { isKeypadEntry } from "./knowledge.ts";
 
 export const BADGE = "badge";
@@ -419,7 +420,15 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   const counters = rt.adapter("counters");
   const lockout = lockoutOf(rt.settings<BadgeSettings>(BADGE).lockout);
   const keys = counterKeys(rt.workspaceId, kind, current);
-  const lock = await currentLock(counters, lockout, keys, rt.clock.now());
+  const settings = rt.settings<BadgeSettings>(BADGE);
+  // With the duress PIN on, a subject's failures are also counted where a duress entry never
+  // resets them, and the hard lock they reach holds (duress-flag.ts).
+  const duressOn = settings.pin?.duress !== undefined;
+  const hidden = duressOn && current.subjectKey !== null ? hiddenCounterKey(rt.workspaceId, kind, current.subjectKey) : null;
+  const flag = duressOn && current.subjectKey !== null ? duressFlagKey(rt.workspaceId, current.subjectKey) : null;
+  const lock =
+    (await currentLock(counters, lockout, keys, rt.clock.now())) ??
+    (hidden === null ? null : hiddenHardLock(lockout, await counters.get(hidden, hiddenWindowStart(lockout, rt.clock.now())), rt.clock.now()));
   if (lock !== null) return refuseLocked(rt, callId, kind, current.epoch, lock);
   const reserved = await rt.update(callId, (draft) => {
     const s = assertAttempt(rt, draft, kind, current.epoch);
@@ -441,16 +450,19 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     });
     return refuseLocked(rt, callId, kind, reserved.epoch, recorded.raced);
   }
+  const hiddenAfter = hidden === null ? null : await counters.recordFailure(hidden, at.toISOString(), hiddenWindowStart(lockout, at));
   const input = { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey, subject: reserved.subject, entry, hmac: (d: string) => rt.hmac(d) };
-  const settings = rt.settings<BadgeSettings>(BADGE);
   let outcome: PinOutcome;
   if (kind === "pin") outcome = await judgePin(rt, settings.pin as PinSettings, input);
   else outcome = (kind === "keypad_knowledge" ? await judgeKeypad(rt.policy, input) : (await plugin!.judge(input)) === true) ? "pass" : "fail";
+  // A subject under duress stays so: every pass on it, on any call, is a duress entry until the
+  // business clears the flag (clearDuress).
+  if (outcome === "pass" && flag !== null && (await isUnderDuress(counters, flag))) outcome = "duress";
   // A duress entry is a pass everywhere the caller can reach: the factor, the level, the grant, the
   // events, the receipt and the counters across calls. Only the call record's `duress` and the PIN
   // entry's keyed tag differ.
   const passed = outcome !== "fail";
-  const hard = passed ? null : recorded.hard;
+  const hard = passed ? null : (recorded.hard ?? (hiddenAfter === null ? null : hiddenHardLock(lockout, hiddenAfter, at)));
   const stale = await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
     const now = rt.now();
@@ -463,7 +475,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
       // Unique without the id generator: the call and the number of this duress entry on it, which
       // the compare-and-set write makes one per entry across every engine.
       s.duressEntries = (s.duressEntries ?? 0) + 1;
-      s.duressAlerts = [...(s.duressAlerts ?? []), { alertId: JSON.stringify(["duress", callId, s.duressEntries]), subjectKey: reserved.subjectKey!, at: now }];
+      s.duressAlerts = [...(s.duressAlerts ?? []), { alertId: JSON.stringify(["duress", rt.workspaceId, callId, s.duressEntries]), subjectKey: reserved.subjectKey!, at: now }];
     }
     // Otherwise the result is applied only to the verification it was judged for, as for any factor;
     // a stale one is refused with the same error either way, after the write.
@@ -475,12 +487,40 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     if (hard !== null) draft.emit("verification.locked", "code", { kind, scope: hard.scope, hard: true, until: hard.until });
     return null;
   });
+  // A duress entry flags its subject, even a stale one: durable and hidden, before the visible reset.
+  if (outcome === "duress") await flagDuress(counters, flag!, at);
   // A stale entry's failure stays counted across calls, as for any entry that was not accepted.
   if (stale !== null) throw stale;
   // Only once the result is accepted. The number keeps its failures but this attempt's own: they
   // may be against other accounts, so a pass on this one must not clear them.
   if (passed) await forgetPass(counters, keys, at);
+  // The hidden counter forgets only on a pass that is not under duress; a duress entry takes off its
+  // own failure, as a pass does, and keeps the rest.
+  if (passed && hidden !== null) {
+    if (outcome === "duress") await counters.removeFailure(hidden, at.toISOString());
+    else await counters.reset(hidden);
+  }
   return { matched: passed, locked: !passed && (reserved.last || hard !== null) };
+}
+
+const MEMBER_ID = /^[A-Za-z0-9._:@-]{1,128}$/;
+
+/**
+ * The business lifts a subject's duress flag (VER-12): a host call from its own tools, never on a
+ * caller's request, once it knows the subject is safe. `duress.cleared` goes to the ledger with the
+ * member before the flag and the hidden counters are cleared, so no clearing goes unrecorded. Until
+ * then every pass on the subject is a duress entry.
+ */
+export async function clearDuress(rt: EngineRuntime, subjectKey: string, memberId: string): Promise<void> {
+  const settings = rt.settings<BadgeSettings>(BADGE);
+  const errors: string[] = [];
+  if (typeof subjectKey !== "string" || !/^[0-9a-f]{64}$/.test(subjectKey)) errors.push("subjectKey must be 64 lower-case hex characters");
+  if (typeof memberId !== "string" || !MEMBER_ID.test(memberId)) errors.push("memberId must be 1 to 128 of letters, digits, '.', '_', ':', '@', '-'");
+  if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+  const counters = rt.adapter("counters");
+  await rt.adapter("ledger").append({ callId: null, actor: "member", event: "duress.cleared", at: rt.now(), detail: { subjectKey, memberId } });
+  await counters.reset(duressFlagKey(rt.workspaceId, subjectKey));
+  for (const kind of settings.factors) await counters.reset(hiddenCounterKey(rt.workspaceId, kind, subjectKey));
 }
 
 /** Asks the carrier about the number on file, never the calling number. Only after a keypad or PIN match. */

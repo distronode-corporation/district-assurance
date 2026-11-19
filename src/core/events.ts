@@ -18,6 +18,7 @@ export const ENGINE_EVENTS = [
   "grant.issued",
   "pin.enrolled",
   "pin.reset",
+  "duress.cleared",
   "session.tainted",
   "sensitive.opened",
   "sensitive.closed",

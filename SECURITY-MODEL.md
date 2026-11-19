@@ -116,7 +116,13 @@ file, so a reset and a new PIN meanwhile can never make the duress PIN equal the
 reset removes the PIN and the duress PIN in one store step, so it never removes a duress PIN
 enrolled against a newer PIN (tested); and an entry that matches both, on an imported subject or in
 the host's verifier's answer, or any entry on a subject whose two digests are equal, is refused like
-a wrong PIN, neither a login nor an alarm (tested). Every PIN ledger entry carries a
+a wrong PIN, neither a login nor an alarm (tested). A duress entry flags its subject until the
+business clears it (`clearDuress`, written to the ledger with the member): every later pass on the
+subject, on any call, is a duress entry, alerted and refused the same scopes (tested). A duress
+entry resets the visible counters as any pass does, but the subject's failures are also counted
+where only a pass not under duress resets them, and their hard lock holds: an attacker who knows
+the duress PIN gets no more guesses at the real PIN than one who does not, and the real PIN, when
+it passes, alerts (tested, 20 wrong guesses between duress entries over 10 calls). Every PIN ledger entry carries a
 `tag` keyed to its event id and outcome, so only the holder of the knowledge key can tell a duress
 pass from a normal one (tested); enrolling or removing a duress PIN writes nothing to the ledger.
 A PIN reset removes the duress PIN too.

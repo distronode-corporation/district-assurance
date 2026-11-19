@@ -374,6 +374,14 @@ export class Engine {
     return pin.enrolPin(this.#rt, callId, input);
   }
 
+  /**
+   * The business lifts a subject's duress flag (VER-12) once it knows the subject is safe: a host
+   * call, never a caller's, written to the ledger with the member (`duress.cleared`).
+   */
+  clearDuress(subjectKey: string, memberId: string): Promise<void> {
+    return badge.clearDuress(this.#rt, subjectKey, memberId);
+  }
+
   /** The business resets a subject's PIN (and removes any duress PIN). A host call from the business's own tools, never on a caller's request. */
   resetPin(subjectKey: string): Promise<void> {
     return pin.resetPin(this.#rt, subjectKey, this.#adapters.counters);
