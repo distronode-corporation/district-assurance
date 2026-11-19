@@ -283,12 +283,12 @@ describe("lockouts across calls", () => {
   it("runs a cleanup a call still owes before its next factor, after the cleanup itself failed", async () => {
     let fail = true;
     class Flaky extends MemoryAttemptCounters {
-      override async reset(key: AttemptCounterKey): Promise<void> {
+      override async removeFailure(key: AttemptCounterKey, at: string): Promise<void> {
         if (fail) {
           fail = false;
           throw new Error("counters down");
         }
-        return super.reset(key);
+        return super.removeFailure(key, at);
       }
     }
     const t = setup({ adapters: { counters: new Flaky() }, config: testConfig((c) => ((c.modules.badge!.settings as { lockout?: unknown }).lockout = { lockAfterFailures: 1 })) });

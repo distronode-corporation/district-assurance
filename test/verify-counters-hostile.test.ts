@@ -56,16 +56,16 @@ describe("wp-a: two engines, one counter store", () => {
     assert.equal(after.length, 10);
   });
 
-  it("subject scope: a pass on line A resets the subject and drops a PIN failure engine B recorded on line B in between", async () => {
+  it("subject scope: a pass on line A forgets the subject's failures up to it and keeps one engine B recorded on line B in between", async () => {
     class Interleave extends MemoryAttemptCounters {
       during: (() => Promise<unknown>) | null = null;
-      override async reset(key: AttemptCounterKey): Promise<void> {
+      override async removeFailure(key: AttemptCounterKey, at: string): Promise<void> {
         const run = this.during;
         if (key.scope === "subject" && run !== null) {
           this.during = null;
           await run();
         }
-        return super.reset(key);
+        return super.removeFailure(key, at);
       }
     }
     const counters = new Interleave();
@@ -85,7 +85,8 @@ describe("wp-a: two engines, one counter store", () => {
     assert.deepEqual(judged, { matched: false, locked: false }, "the hook ran and the attacker's submit was judged and failed");
     assert.ok(before !== null && (before as string[]).includes(a.clock.now().toISOString()), `the attacker's failure is on the subject before reset: ${JSON.stringify(before)}`);
     const left = await counters.get(subjKey("keypad_knowledge"), LONG_AGO);
-    assert.equal(left.length, 0, "the attacker's concurrent failure on the subject is gone");
+    // Recorded after the pass (T13): the pass's cleanup is not its to forget.
+    assert.equal(left.length, 1, "the attacker's later failure on the subject stays");
   });
 });
 
