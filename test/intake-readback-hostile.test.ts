@@ -95,3 +95,11 @@ describe("hostile #76: the read-back the caller heard", () => {
     await assert.rejects(t.engine.setIntakeField(callId, "since", "2026-11-02"), rejects("invalid_transition"));
   });
 });
+
+describe("hostile #76: the not_text reason is announced", () => {
+  it("R7 CHANGELOG names not_text, since a host switching over the normalise reasons must add it", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const changelog = await readFile(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+    assert.match(changelog, /`not_text`/);
+  });
+});

@@ -44,6 +44,9 @@ All notable changes to this project are documented here. The format follows
 - `confirmIntake` requires `readBack`, the digest of the read-back the caller heard (FIL-1), and
   the `buildReadBack` stub in `file/later.ts` is replaced by `file/readback.ts`. A host that
   confirmed without a read-back must call `intakeReadBack` first.
+- A text field value holding a lone surrogate is refused with the new normalise reason `not_text`
+  (`NormaliseResult`), since no record, digest or read-back can hold it faithfully: a host that
+  switches over the reasons must add it.
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 
