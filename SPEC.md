@@ -107,7 +107,8 @@ Built-in factor kinds: `keypad_knowledge`, `pin`, `carrier_identity_match`, `pho
 kind the caller enters and code judges: `{kind, summary, maxAttemptsPerCall (1 to 5), adapters,
 judge}`, installed with `badgeModule({ factors })` when the engine is built, or later with
 `engine.useFactor(plugin)`, or supplied by an outside module installed with `engine.use(module)`
-whose manifest provides the factor (section 3). Its kind is snake_case, 3 to 32 characters, not a
+whose manifest provides the factor (section 3). `adapters` is a list of adapter names. Its kind
+is a string, snake_case, 3 to 32 characters, not a
 built-in kind or a kind another installed module provides, and never `caller_id`,
 `calling_number`, `ani` or `cli`; the registry refuses it otherwise, and nothing changes. Its
 judge gets the subject, the entry and `hmac(data)` under the knowledge key, never the key. Caller

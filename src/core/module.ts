@@ -15,7 +15,7 @@ import { EngineError } from "./errors.ts";
 import { FORBIDDEN_FACTOR_KINDS, scopeClass, type ScopeClass, type VerificationPolicy } from "./policy.ts";
 import type { AdapterName } from "./runtime.ts";
 import type { SessionState } from "./session.ts";
-import { isIntegerIn } from "./shape.ts";
+import { isIntegerIn, isStringArray } from "./shape.ts";
 
 /** What the caller entered: one string (a PIN), or one value per field (keypad knowledge). */
 export type FactorEntry = string | Readonly<Record<string, string>>;
@@ -151,6 +151,9 @@ export function checkFactorKind(kind: string): string[] {
 
 /** Every problem with a factor plug-in, given the kinds already taken. */
 export function checkFactorPlugin(plugin: FactorPlugin, taken: readonly string[]): string[] {
+  // A kind that is not a string (an object whose toString passes the pattern) would never match
+  // the name a config uses, so it is refused before anything compares it.
+  if (typeof plugin.kind !== "string") return ["factor kind must be a string"];
   const errors = checkFactorKind(plugin.kind);
   if (taken.includes(plugin.kind)) errors.push(`factor kind ${plugin.kind} already exists`);
   errors.push(...judgeErrors(plugin).map((e) => `factor ${plugin.kind}: ${e}`));
@@ -161,6 +164,8 @@ function judgeErrors(plugin: FactorPlugin): string[] {
   const errors: string[] = [];
   if (!isIntegerIn(plugin.maxAttemptsPerCall, 1, 5)) errors.push("maxAttemptsPerCall must be 1 to 5");
   if (typeof plugin.judge !== "function") errors.push("judge must be a function");
+  // A string here would be read one character at a time as adapter names.
+  if (!isStringArray(plugin.adapters)) errors.push("adapters must be a list of adapter names");
   return errors;
 }
 

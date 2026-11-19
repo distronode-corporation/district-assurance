@@ -243,6 +243,10 @@ describe("factor plug-ins added after the engine is built (MOD-3)", () => {
     assert.throws(() => t.engine.useFactor({ ...token(), kind: "pin" }), rejects("invalid_input", /factor kind pin already exists/));
     assert.throws(() => t.engine.useFactor(token()), rejects("invalid_input", /factor hardware_token is already provided by token-check/));
     assert.throws(() => t.engine.useFactor({ ...token(), kind: "ab", maxAttemptsPerCall: 9 }), rejects("invalid_input", /snake_case.*maxAttemptsPerCall/));
+    assert.throws(() => t.engine.useFactor({ ...token(), kind: { toString: () => "desk_code" } as unknown as string }), rejects("invalid_input", /factor kind must be a string/));
+    assert.throws(() => t.engine.useFactor({ ...token(), kind: "desk_code", adapters: "records" as unknown as [] }), rejects("invalid_input", /adapters must be a list of adapter names/));
+    const fob = tokenModule({ ...token(), kind: "key_fob", adapters: "records" as unknown as [] });
+    assert.throws(() => t.engine.use({ ...fob, manifest: { ...fob.manifest, name: "fob-check" } }), rejects("invalid_input", /^module fob-check: factor key_fob: adapters must be a list of adapter names$/));
     t.engine.useFactor({ ...token(), kind: "desk_code" });
     assert.throws(() => t.engine.useFactor({ ...token(), kind: "desk_code" }), rejects("invalid_input", /desk_code already exists/));
     assert.deepEqual(t.engine.registry.factorKinds(), [...kinds.slice(0, 6), "desk_code", ...kinds.slice(6)]);
