@@ -450,8 +450,9 @@ export class Engine {
         const reason = slice === undefined ? null : (module.blocksEnd?.(slice) ?? null);
         if (reason !== null) throw new EngineError("precondition_failed", `the call cannot end yet: ${reason}`);
       }
-      // A grant still at its door when the call ends is settled now, as unknown, before the receipt's
-      // ledger head is taken: no access outcome can ever follow the receipt.
+      // Refused while a signed grant may still be acted on at its door; a grant reserved but not yet
+      // signed (or past its expiry) is settled now, as unknown, before the receipt's ledger head is
+      // taken: no access outcome can ever follow the receipt.
       gate.settleInFlight(this.#rt, draft, "call_ended");
       draft.apply({ type: "call_ended", at: this.#now() });
       const flow = draft.record.flow;
