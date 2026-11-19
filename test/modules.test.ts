@@ -119,6 +119,26 @@ describe("file: intake forms", () => {
 });
 
 describe("file: field rules and conditional fields", () => {
+  it("refuses a card or a SIN named in one word, in a key or a label, and keeps words that only contain the letters", () => {
+    const named = (key: string, en: string, fr = "Référence") => validateForm({ formId: "f", version: "1", fields: [{ key, label: { en, fr }, type: "text", required: false }] }).length;
+    for (const [key, en, fr] of [
+      ["creditcard", "Number"],
+      ["cardno", "Number"],
+      ["card_num", "Number"],
+      ["debitcards", "Number"],
+      ["sinnumber", "Number"],
+      ["nas_no", "Number"],
+      ["ref", "Creditcard number"],
+      ["ref", "Cardholder name"],
+      ["ref", "Reference", "Numérocarte"],
+    ] as const) {
+      assert.equal(named(key, en, fr), 1, `${key} / ${en} / ${fr ?? ""}`);
+    }
+    for (const [key, en] of [["cardiology", "Department"], ["discard_reason", "Why it was discarded"], ["ref", "Cartel"], ["business", "Business name"], ["casino", "Using"]] as const) {
+      assert.equal(named(key, en), 0, `${key} / ${en}`);
+    }
+  });
+
   const f = (key: string, type: IntakeField["type"], extra: Partial<IntakeField> = {}): IntakeField => ({ key, label: { en: key, fr: key }, type, required: false, ...extra });
 
   it("holds numbers and dates to min and max, inclusive", () => {
