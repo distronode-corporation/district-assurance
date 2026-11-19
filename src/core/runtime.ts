@@ -104,7 +104,9 @@ export interface EngineRuntime {
    * Holds a step's own work to a scope at the minimum the step-up rules raise it to for `amount`.
    * Null when the grant covers it. When step-up rules are why it does not, the running flow fails
    * naming them and the refusal is returned, to be thrown once the change is saved, so the ledger
-   * keeps both; any other refusal throws `scope_denied` at once.
+   * keeps both. A refusal the grant earns without any rule is returned too when a rule applies
+   * (naming it, so a first `policy.step_up` is kept; the flow is not failed); one no rule touches
+   * throws `scope_denied` at once.
    */
   requireScope(draft: CallDraft, scope: string, amount: StepUpAmount | undefined): EngineError | null;
   bindRef(ref: string, callId: string): Promise<void>;

@@ -584,14 +584,14 @@ export class Engine {
   async #read(callId: string): Promise<CallRecord> {
     const stored = await this.#sessions.get(this.workspaceId, callId);
     if (stored === null) throw new EngineError("unknown_call", "no such call");
-    return structuredClone(stored.record) as unknown as CallRecord;
+    return loadRecord(stored.record);
   }
 
   async #update<R>(callId: string, fn: (draft: CallDraft) => R): Promise<R> {
     for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
       const stored = await this.#sessions.get(this.workspaceId, callId);
       if (stored === null) throw new EngineError("unknown_call", "no such call");
-      const record = structuredClone(stored.record) as unknown as CallRecord;
+      const record = loadRecord(stored.record);
       const events: QueuedEvent[] = [];
       const draft = this.#draft(record, events);
       const result = fn(draft);
@@ -686,9 +686,15 @@ export class Engine {
 
   /** See `EngineRuntime.requireScope`. */
   #requireScope(draft: CallDraft, scope: string, amount: StepUpAmount | undefined): EngineError | null {
-    const { ok, rules } = this.#cover(draft.record, scope, amount);
+    const { ok, applied, rules } = this.#cover(draft.record, scope, amount);
     if (ok) return null;
-    if (rules.length === 0) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
+    if (rules.length === 0) {
+      // A denial no rule affects throws at once. When a rule applies, the refusal is returned, so
+      // the change is saved and a rule applied for the first time stays on the ledger. The flow is
+      // not failed: without the rule the grant would not cover the scope either.
+      if (applied.length === 0) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
+      return new EngineError("scope_denied", `the grant does not cover ${scope}; the step-up rule(s) ${applied.join(", ")} also apply`);
+    }
     this.#failStep(draft, rules);
     return new EngineError("scope_denied", `the grant does not cover ${scope} at the level the step-up rule(s) ${rules.join(", ")} require`);
   }
@@ -722,8 +728,19 @@ export class Engine {
   async flushLedger(callId: string): Promise<void> {
     const stored = await this.#sessions.get(this.workspaceId, callId);
     if (stored === null) throw new EngineError("unknown_call", "no such call");
-    await this.#flush(callId, stored.version, structuredClone(stored.record) as unknown as CallRecord);
+    await this.#flush(callId, stored.version, loadRecord(stored.record));
   }
+}
+
+/**
+ * A stored call, copied, with the fields later changes added filled in: a record saved before
+ * step-up rules (VER-13) has no `signals` or `stepUps`, and loads with both empty.
+ */
+function loadRecord(stored: JsonValue): CallRecord {
+  const record = structuredClone(stored) as unknown as CallRecord;
+  record.signals ??= [];
+  record.stepUps ??= [];
+  return record;
 }
 
 export function createEngine(options: EngineOptions): Engine {

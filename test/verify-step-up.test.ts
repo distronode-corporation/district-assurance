@@ -285,3 +285,30 @@ describe("step-up in a flow", () => {
     assert.deepEqual((await entries(t, "flow.failed")).at(-1)!.rules, ["status_after_hours"]);
   });
 });
+
+describe("step-up on stored calls and ordinary denials", () => {
+  it("loads a call stored before step-up rules existed with no signals and no rules applied", async () => {
+    const t = stepUpSetup();
+    const callId = await level2Call(t);
+    const stored = (await t.sessions.get("ws_test", callId))!;
+    const legacy = structuredClone(stored.record) as Record<string, unknown>;
+    delete legacy.signals;
+    delete legacy.stepUps;
+    assert.ok((await t.sessions.compareAndSet("ws_test", callId, stored.version, legacy as never)).ok);
+    await t.engine.flushLedger(callId);
+    assert.equal(await t.engine.authorize(callId, "payment.request", { amountMinor: 50001, currency: "cad" }), false);
+    await t.engine.raiseSignal(callId, "intake_flagged");
+    assert.deepEqual(await entries(t, "signal.raised"), [{ signal: "intake_flagged" }]);
+    assert.deepEqual(await entries(t, "policy.step_up"), [{ rule: "large_payment", scope: "payment.request", level: 3 }]);
+  });
+
+  it("keeps a rule's first step-up on the ledger when the grant is refused without it too", async () => {
+    const t = stepUpSetup();
+    const { callId } = await t.engine.startCall();
+    await assert.rejects(t.engine.requestPayment(callId, payment(90000)), rejects("scope_denied", /step-up rule\(s\) large_payment also apply/));
+    assert.equal(t.payments.created.length, 0);
+    assert.deepEqual(await entries(t, "policy.step_up"), [{ rule: "large_payment", scope: "payment.request", level: 3 }]);
+    // A denial no rule affects still throws at once, naming no rule.
+    await assert.rejects(t.engine.requestPayment(callId, payment(100)), rejects("scope_denied", /^the grant does not cover payment\.request$/));
+  });
+});
