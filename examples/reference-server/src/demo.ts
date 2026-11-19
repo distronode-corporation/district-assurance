@@ -4,7 +4,8 @@
 // 1. `owner-command`: the owner's PIN only, on two engines that share one session store (as two
 //    processes of a host would). One wrong PIN, then the right one.
 // 2. `deposit`: keypad knowledge and a carrier match to level 2, a repair form, a deposit by link
-//    settled by a signed webhook, a consent, and a signed receipt checked with the public key.
+//    settled by a signed webhook, a consent, and a signed receipt, fetched by its capability link
+//    and checked with the public key.
 import type { JsonWebKey } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
@@ -26,12 +27,17 @@ export interface DemoResult {
 export async function runDemo(print = true): Promise<DemoResult> {
   const say = print ? log : () => undefined;
   const world = createDemoWorld();
-  const server = createReferenceServer({ engine: world.engine, stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET] }, clock: world.t.clock });
+  const server = createReferenceServer({
+    engine: world.engine,
+    stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET] },
+    clock: world.t.clock,
+    receiptLinks: world.links,
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   world.base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   let allOk = true;
   const play = async (flow: DemoFlow): Promise<ScriptRun> => {
-    const call: ScriptRun = { callId: "", linkId: "", receipt: null };
+    const call: ScriptRun = { callId: "", linkId: "", receipt: null, receiptToken: null };
     for (const step of SCRIPTS[flow]) {
       const outcome = await step.run(world, call);
       allOk &&= outcome.ok;
@@ -43,8 +49,12 @@ export async function runDemo(print = true): Promise<DemoResult> {
   try {
     say("District Assurance demo (fake adapters, no network)");
     const owner = await play("owner-command");
-    const { callId } = await play("deposit");
-    const receipt = (await (await fetch(`${world.base}/receipts/${callId}`)).json()) as SignedReceipt;
+    const { receiptToken } = await play("deposit");
+    // The receipt by its capability link, as the caller would open it: the page, then the JSON.
+    const page = await (await fetch(`${world.base}/r/${receiptToken}`)).text();
+    const pageOk = page.includes("Signature valid");
+    say("prove: receipt page at /r/<token>", pageOk ? "signature valid" : "NOT VALID");
+    const receipt = (await (await fetch(`${world.base}/r/${receiptToken}.json`)).json()) as SignedReceipt;
     const { keys } = (await (await fetch(`${world.base}/.well-known/receipt-keys.json`)).json()) as { keys: JsonWebKey[] };
     const valid = verifyReceipt(receipt, keys);
     const tampered = structuredClone(receipt);
@@ -54,7 +64,7 @@ export async function runDemo(print = true): Promise<DemoResult> {
     say("prove: receipt with one change", tamperedFails ? "rejected" : "ACCEPTED");
     const chain = verifyChain(await world.t.ledger.list());
     say("prove: audit ledger (both calls)", chain.ok ? `${chain.head.seq} entries, hash chain intact` : "BROKEN");
-    if (!allOk || !valid || !tamperedFails || !chain.ok) throw new Error("the demo's checks failed");
+    if (!allOk || !pageOk || !valid || !tamperedFails || !chain.ok) throw new Error("the demo's checks failed");
     return { checksOk: allOk, ownerReceipt: owner.receipt, receipt, tamperedFails, chainOk: chain.ok };
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));

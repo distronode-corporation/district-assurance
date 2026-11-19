@@ -15,7 +15,8 @@ npm run serve   # the server on 127.0.0.1:8787 until stopped, for your own Strip
 `npm run ui`, then open `http://127.0.0.1:8787/`. Pick a flow, then run its scripted steps one at
 a time (or the rest in one go). After each step the page shows the call's session state, its
 entries in the audit ledger, and whether the whole ledger's hash chain is intact. When a flow with
-a `trace.receipt` step ends, the page fetches the receipt from `/receipts/:callId` and the key set
+a `trace.receipt` step ends, the script issues the receipt's capability link (`/r/:token`; the
+server keeps only the token's hash), and the page fetches the receipt from `/r/:token.json` and the key set
 from `/.well-known/receipt-keys.json` and checks the ES256 signature itself, with Web Crypto, over
 its own canonical JSON of the body; a button changes one character and checks again, which fails.
 The page also recomputes each ledger entry's hash.
@@ -59,7 +60,7 @@ How the page is kept small and safe:
 
 | File | |
 |---|---|
-| `src/app.ts` | `createReferenceServer({ engine, stripeSecrets, clock })`: the routes |
+| `src/app.ts` | `createReferenceServer({ engine, stripeSecrets, clock, receiptLinks })`: the routes, `ReceiptLinks` and the receipt page |
 | `src/script.ts` | the scripted calls, one step at a time, and the demo's records and engines |
 | `src/demo.ts` | `npm run demo`: every step in a row; `runDemo(false)` is also run by the test suite |
 | `src/demo-runs.ts` | the UI's runs: one step per request, and the run's state, ledger and chain check |

@@ -334,6 +334,21 @@ and returns false for any change, a wrong algorithm, a malformed signature or an
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
 `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
 
+**Receipt links.** A call id is not a secret, so a receipt is shared by a capability link.
+`newReceiptLinkToken()` returns a `token` (32 random bytes, base64url, 43 characters) and its
+`hash`, `SHA-256("receipt-link:" + token)` in hex; the host sends the token once and stores only
+the hash with the call id. `receiptLinkTokenHash(token)` gives the hash to look up, or null for a
+string that is not a token. The reference server keeps the hashes in `ReceiptLinks` and serves:
+
+| Route | |
+|---|---|
+| `GET /r/:token` | an HTML page, in English or French (`?lang=en` or `?lang=fr`, else the browser's first `Accept-Language`, else English): the signature check against the server's key set, the verification level and methods, records, payments, consents and the ledger head |
+| `GET /r/:token.json` | the signed receipt |
+
+An unknown token, a malformed one and a call without a receipt yet all answer the same `404`. The
+page has no script, style or form, every value is escaped, and it is sent with `no-store`,
+`Referrer-Policy: no-referrer` and `noindex`. There is no route by call id.
+
 ## 13. Intake values
 
 | Type | Accepted | Stored as |

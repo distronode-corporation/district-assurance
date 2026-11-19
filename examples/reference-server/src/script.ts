@@ -8,6 +8,7 @@
 // server over the loopback.
 import { createEngine, signStripePayload, subjectKeyFor, type Engine, type SignedReceipt } from "../../../src/index.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, generateTestSigner, testSubject, type TestEngine } from "../../../src/testing/index.ts";
+import { ReceiptLinks } from "./app.ts";
 import { demoConfig } from "./flows.ts";
 
 /** The demo's webhook signing secret. Not a secret: it is published here on purpose. */
@@ -24,6 +25,8 @@ export interface DemoWorld {
   other: Engine;
   /** The reference server's base URL, set once it listens. */
   base: string;
+  /** The receipt links the host issues when a call ends with a receipt; give them to the server. */
+  links: ReceiptLinks;
   /** Signs a Stripe event with the demo secret and posts it to the server. */
   stripe(path: string, type: string, object: Record<string, unknown>): Promise<Record<string, unknown>>;
 }
@@ -50,6 +53,7 @@ export function createDemoWorld(): DemoWorld {
     engine: t.engine,
     other,
     base: "",
+    links: new ReceiptLinks(),
     async stripe(path, type, object) {
       const payload = JSON.stringify({ id: `evt_demo_${++n}`, type, livemode: false, data: { object } });
       const header = signStripePayload(payload, DEMO_SECRET, Math.floor(t.clock.now().getTime() / 1000));
@@ -66,6 +70,8 @@ export interface ScriptRun {
   /** This call's payment link, once requested: runs share the fakes, so never "the latest link". */
   linkId: string;
   receipt: SignedReceipt | null;
+  /** The capability token of the receipt's link (`/r/<token>`), once the call ended with one. */
+  receiptToken: string | null;
 }
 
 /** What a step did, in one line, and whether the demo's check on it held. */
@@ -222,7 +228,9 @@ const deposit: ScriptStep[] = [
     async run(w, call) {
       const done = await w.engine.flowPosition(call.callId);
       call.receipt = await w.engine.endCall(call.callId);
-      return { detail: `flow ${done!.status} (${done!.index} steps), receipt ${call.receipt === null ? "MISSING" : "signed"}`, ok: call.receipt !== null };
+      // The host would text this link to the caller; the server keeps only the token's hash.
+      call.receiptToken = call.receipt === null ? null : w.links.issue(call.callId);
+      return { detail: `flow ${done!.status} (${done!.index} steps), receipt ${call.receipt === null ? "MISSING" : "signed, link issued"}`, ok: call.receipt !== null };
     },
   },
 ];

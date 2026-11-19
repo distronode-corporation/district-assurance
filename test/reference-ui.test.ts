@@ -42,6 +42,7 @@ async function serve(ui = true): Promise<Served> {
     engine: world.engine,
     clock: world.t.clock,
     stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET] },
+    receiptLinks: world.links,
     ...(ui ? { ui: new DemoRuns(world) } : {}),
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -157,7 +158,7 @@ describe("reference UI: static files", () => {
 
   it("with the UI on, refuses a foreign Host on every route, the webhooks, receipts and key set included", async () => {
     const host = `evil.example:${s.port}`;
-    for (const path of ["/.well-known/receipt-keys.json", "/receipts/call_1", "/healthz", "/webhooks/twilio", "/nope"]) {
+    for (const path of ["/.well-known/receipt-keys.json", `/r/${"A".repeat(43)}`, "/healthz", "/webhooks/twilio", "/nope"]) {
       const res = await raw(s.port, path, { host });
       assert.deepEqual([res.status, JSON.parse(res.body)], [403, { error: "host_not_allowed" }], path);
     }
@@ -250,7 +251,10 @@ describe("reference UI: demo routes", () => {
     assert.deepEqual(again.results, last.results);
 
     const check = (await import(new URL("receipt-check.js", PUBLIC).href)) as ReceiptCheckModule;
-    const receipt = (await (await fetch(`${s.base}/receipts/${last.callId}`)).json()) as SignedReceipt;
+    assert.match(last.receiptLink!, /^\/r\/[A-Za-z0-9_-]{43}$/);
+    assert.equal(last.receiptLink!.includes(last.callId!), false, "the link does not name the call");
+    const receipt = (await (await fetch(`${s.base}${last.receiptLink}.json`)).json()) as SignedReceipt;
+    assert.equal(receipt.body.callId, last.callId);
     const { keys } = (await (await fetch(`${s.base}/.well-known/receipt-keys.json`)).json()) as { keys: unknown[] };
     assert.deepEqual(await check.checkReceipt(receipt, keys), { ok: true, reason: "valid" });
     assert.deepEqual(await check.checkReceipt(check.tamperedCopy(receipt), keys), { ok: false, reason: "signature_mismatch" });
@@ -263,7 +267,8 @@ describe("reference UI: demo routes", () => {
     for (let i = 0; i < SCRIPTS["owner-command"].length; i++) last = (await (await next(view.runId)).json()) as RunView;
     assert.deepEqual(last.results.map((r) => r.ok), [true, true, true, true, true, true]);
     assert.equal(last.done, true);
-    assert.equal((await fetch(`${s.base}/receipts/${last.callId}`)).status, 404);
+    assert.equal(last.receiptLink, null);
+    assert.equal((await fetch(`${s.base}/receipts/${last.callId}`)).status, 404, "no receipt by call id");
   });
 
   it("refuses an unknown flow, bad JSON, a non-JSON body and another origin", async () => {

@@ -15,7 +15,7 @@ const REASONS = {
   signature_mismatch: "the signature does not match the body",
 };
 
-/** @type {null | { runId: string, steps: string[], next: number, done: boolean, callId: string | null }} */
+/** @type {null | { runId: string, steps: string[], next: number, done: boolean, callId: string | null, receiptLink: string | null }} */
 let current = null;
 let busy = false;
 
@@ -182,19 +182,25 @@ function verdict(node, result, kid) {
 let lastReceipt = null;
 let lastKeys = [];
 
-async function showReceipt(callId) {
-  const res = await fetch(`/receipts/${encodeURIComponent(callId)}`);
-  if (res.status === 404) {
+/** @param {string | null} link the receipt's capability link, `/r/<token>`, or null without a receipt */
+async function showReceipt(link) {
+  if (link === null) {
     $("receipt-status").textContent = "This flow has no trace.receipt step, so the call has no receipt: the ledger holds it all.";
     return "This flow issues no receipt.";
   }
+  const res = await fetch(`${link}.json`);
   if (!res.ok) throw new Error(`receipt: HTTP ${res.status}`);
   const receipt = await res.json();
   const { keys } = await api("/.well-known/receipt-keys.json");
   lastReceipt = receipt;
   lastKeys = keys;
   const result = await checkReceipt(receipt, keys);
-  $("receipt-status").textContent = `Receipt ${receipt.body.receiptId} for ${receipt.body.callId}, fetched from /receipts/${receipt.body.callId}.`;
+  $("receipt-status").textContent = `Receipt ${receipt.body.receiptId} for ${receipt.body.callId}, fetched by its capability link. The caller's page: `;
+  const page = document.createElement("a");
+  page.href = link;
+  page.rel = "noreferrer";
+  page.textContent = link;
+  $("receipt-status").append(page, ".");
   verdict($("receipt-check"), result, receipt.kid);
   $("tamper").hidden = false;
   $("tamper-result").hidden = true;
@@ -206,12 +212,12 @@ async function showReceipt(callId) {
 /**
  * Fetches and checks the receipt; on a failure, offers a retry that runs no engine step.
  *
- * @param {string} callId
+ * @param {{ receiptLink: string | null }} view the finished run
  * @returns {Promise<string>} what to announce
  */
-async function loadReceipt(callId) {
+async function loadReceipt(view) {
   try {
-    const message = await showReceipt(callId);
+    const message = await showReceipt(view.receiptLink);
     $("receipt-retry").hidden = true;
     return message;
   } catch (error) {
@@ -242,7 +248,7 @@ async function recover() {
   try {
     const view = await api(`/demo/runs/${current.runId}`);
     await render(view);
-    if (view.done && view.callId !== null) return `The run is finished. ${await loadReceipt(view.callId)}`;
+    if (view.done && view.callId !== null) return `The run is finished. ${await loadReceipt(view)}`;
     return `The run is at step ${view.next + 1} of ${view.steps.length}.`;
   } catch (error) {
     return `The run could not be read back (${error instanceof Error ? error.message : String(error)}): start a new run.`;
@@ -257,7 +263,7 @@ async function step() {
     await render(view);
     const result = view.results.at(-1);
     let message = `Step ${result.index + 1} of ${view.steps.length}, ${result.label}: ${result.detail}.${result.ok ? "" : " The check failed."}`;
-    if (view.done && view.callId !== null) message += ` Run finished. ${await loadReceipt(view.callId)}`;
+    if (view.done && view.callId !== null) message += ` Run finished. ${await loadReceipt(view)}`;
     announce(message);
     return true;
   } catch (error) {
@@ -309,7 +315,7 @@ $("receipt-retry").addEventListener("click", async () => {
   if (current === null || current.callId === null || busy) return;
   setBusy(true);
   try {
-    announce(await loadReceipt(current.callId));
+    announce(await loadReceipt(current));
     if ($("receipt-retry").hidden) $("receipt-heading").focus();
   } finally {
     setBusy(false);

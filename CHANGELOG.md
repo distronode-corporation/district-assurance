@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- Receipt links by capability token (SRV-3): `newReceiptLinkToken` and `receiptLinkTokenHash`; the
+  reference server keeps only token hashes and serves `GET /r/:token`, a receipt page in English
+  and French with its signature check, and `/r/:token.json`. `GET /receipts/:callId` is removed.
 
 ### Changed
 
