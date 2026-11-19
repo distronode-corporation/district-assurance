@@ -10,7 +10,7 @@ import { revokeConsent } from "../src/prove/consent.ts";
 import { exportLedger } from "../src/prove/later.ts";
 import { gateModule } from "../src/gate/later.ts";
 import { createTestEngine } from "../src/testing/index.ts";
-import { checkTextCode, enrolPin, normaliseSpokenAnswer, recordSubjectFailure, sendTextCode } from "../src/verify/later.ts";
+import { checkTextCode, normaliseSpokenAnswer, recordSubjectFailure, sendTextCode } from "../src/verify/later.ts";
 import { verifyTelnyxSignature, verifyTwilioSignature } from "../src/webhooks/carrier.ts";
 
 const form = { formId: "f", version: "1", fields: [] };
@@ -21,7 +21,6 @@ const STUBS: Array<[string, () => unknown]> = [
   ["VER-2", () => sendTextCode({ callId: "c" })],
   ["VER-2", () => checkTextCode({ callId: "c", code: "1" })],
   ["VER-3", () => normaliseSpokenAnswer({ field: "postal", transcript: "", locale: "en" })],
-  ["VER-6", () => enrolPin({ callId: "c" })],
   ["FIL-1", () => buildReadBack(form, {}, "fr")],
   ["FIL-3", () => deliverRecord({ workspaceId: "w", recordId: "r" })],
   ["FIL-5", () => createUploadLink({ callId: "c", recordId: "r" })],

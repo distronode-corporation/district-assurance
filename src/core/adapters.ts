@@ -113,6 +113,20 @@ export interface RecordStore {
   /** Idempotent by `recordId`: the engine retries a write whose outcome it could not see, with the same record. */
   putIntakeRecord(record: IntakeRecord): Promise<void>;
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
+  /**
+   * Stores a subject's PIN digest (`pinDigest`), or removes it with null (a reset by the business).
+   * Never given the PIN itself. A subject the store does not have is left alone.
+   */
+  putPinDigest(workspaceId: string, subjectKey: string, digest: string | null): Promise<void>;
+}
+
+/**
+ * Failure counters across calls (VER-1). Stand-in: only `reset`, which a PIN reset needs, with the
+ * keys VER-1 describes (workspace, factor kind, subject key or a hash of the calling number).
+ * VER-1 brings `get` and `recordFailure`.
+ */
+export interface AttemptCounters {
+  reset(input: { workspaceId: string; kind: string; key: { subject: string } | { number: string } }): Promise<void>;
 }
 
 export interface AuditInput {

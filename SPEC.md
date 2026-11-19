@@ -173,8 +173,27 @@ Settings: `{mode, minDigits (4 to 12), maxDigits (minDigits to 12), maxAttemptsP
   applied (`precondition_failed`), and a change of subject drops pending photo ID checks.
 - The photo ID link is reserved, created, enrolled and texted in turn; after a failure,
   `startPhotoId` resumes with the same idempotency keys, so a call never has two links. After `maxAttemptsPerCall`,
-  `submitPin` returns `locked` without judging. Across calls: planned (VER-1). Enrolment: planned
-  (VER-6).
+  `submitPin` returns `locked` without judging. Across calls: planned (VER-1).
+- Enrolment: `enrolPin(callId, {pin, confirm})` lets a caller choose a PIN, keyed twice. It needs
+  the `pin` factor on in `keyed_hash` mode (in `verifier` mode the host's own store enrols, and
+  `enrolPin` refuses with `precondition_failed`), a call with no running or ended flow
+  (`precondition_failed`), an open call (`invalid_transition`) and an unexpired grant at level 2 or
+  above from this call (`scope_denied`). Each try is counted in its own write before it is judged,
+  up to `maxAttemptsPerCall`; after that it answers `{enrolled: false, reason: "locked"}` without
+  judging. The subject is read from the `RecordStore`; one not on file, or one that already has a
+  PIN, is refused (`precondition_failed`): only the business changes a PIN on file. Both entries
+  are hashed as `pinDigest` and compared in constant time. Answers: `malformed` (either entry is
+  not digits of a length from `minDigits` to `maxDigits`), `mismatch`, `weak` (every digit the
+  same, a run up or down with 0 following 9, as in 1234, 4321 or 7890, or a PIN equal to the
+  subject's account number or any keypad knowledge on file, compared as keyed hashes; `weak` does
+  not say which), or `{enrolled: true}` once `RecordStore.putPinDigest(workspaceId, subjectKey,
+  digest)` stored it. Then `pin.enrolled`.
+- Reset: `resetPin(subjectKey)` is a host call for the business's own staff tools, never on a
+  caller's request, and needs the `pin` factor on. In `keyed_hash` mode it removes the digest
+  (`putPinDigest` with null), so the subject has no PIN until they enrol again at level 2; in
+  `verifier` mode the host's store resets its own PIN. Either way it clears the subject's PIN
+  failure counters when the engine has a `counters` adapter (VER-1; a stand-in with only `reset`
+  until VER-1 lands), and appends `pin.reset` to the ledger with no call.
 
 ## 7. FlowConfig
 
@@ -268,6 +287,8 @@ answer on file, a phone number, a link or card data.
 | `identity.link_sent` | none |
 | `verification.finished` | `level`, `methods`, `discounted` |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt` |
+| `pin.enrolled` | none (never the digits, the digest or their length) |
+| `pin.reset` | `subjectKey`; actor `member`, `callId` null |
 | `session.tainted` | `source` |
 | `sensitive.opened` / `sensitive.closed` | `reason` / none |
 | `intake.started` | `formId`, `version` |

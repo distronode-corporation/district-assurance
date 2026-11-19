@@ -35,10 +35,12 @@ import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
 import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
 import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
+import * as pin from "./verify/pin.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
 export type { EngineAdapters, Locale } from "./core/runtime.ts";
 export type { KeypadResult, OutcomeResult, VerificationResult } from "./verify/badge.ts";
+export type { PinEnrolmentResult } from "./verify/pin.ts";
 
 
 /** Writes per step before the engine gives up with `conflict`. */
@@ -338,6 +340,19 @@ export class Engine {
 
   finishVerification(callId: string): Promise<badge.VerificationResult> {
     return badge.finishVerification(this.#rt, callId);
+  }
+
+  /**
+   * Lets a caller verified to level 2 or above on this call choose a PIN, keyed twice. Outside a
+   * flow, in `keyed_hash` mode, and only when the subject has no PIN on file.
+   */
+  enrolPin(callId: string, input: { pin: string; confirm: string }): Promise<pin.PinEnrolmentResult> {
+    return pin.enrolPin(this.#rt, callId, input);
+  }
+
+  /** The business resets a subject's PIN. A host call from the business's own tools, never on a caller's request. */
+  resetPin(subjectKey: string): Promise<void> {
+    return pin.resetPin(this.#rt, subjectKey, this.#adapters.counters);
   }
 
   // ---- Dossier (file) ----------------------------------------------------------------------

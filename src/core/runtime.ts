@@ -2,6 +2,7 @@
 // change it (one compare-and-set write per change), the adapters and the clock. This is internal
 // to the package; outside modules use `Engine.updateModule` and `Engine.moduleState` instead.
 import type {
+  AttemptCounters,
   AuditLedger,
   CarrierSignals,
   IdentityProvider,
@@ -36,6 +37,8 @@ export interface EngineAdapters {
   payments?: PaymentLinks;
   signer?: ReceiptSigner;
   pinVerifier?: PinVerifier;
+  /** Failure counters across calls (VER-1). A PIN reset clears the subject's PIN counters. */
+  counters?: AttemptCounters;
 }
 
 export type AdapterName = keyof EngineAdapters;

@@ -25,6 +25,7 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- PIN enrolment and reset (VER-6): `enrolPin` lets a caller verified to level 2 on the call choose a PIN, keyed twice, weak PINs refused, stored through the new `RecordStore.putPinDigest`; `resetPin` is the business's host call; `pin.enrolled` and `pin.reset` events.
 
 ### Changed
 

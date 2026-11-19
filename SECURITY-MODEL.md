@@ -53,7 +53,21 @@ store). PINs are at least 4 digits, and keypad attempts are capped at 5 per call
 owner-command flow, or any PIN factor, on a live line. Without it, a 4-digit PIN with 3 attempts
 per call falls within about 3,300 calls, half that on average. In `verifier` mode the host's PIN
 store is asked for every attempt, with a stand-in for a malformed entry, so timing does not tell
-them apart.
+them apart. A PIN a caller chooses (`enrolPin`) is refused when every digit is the same, when it is
+a run (1234, 4321, 7890), or when it equals the account number or any keypad knowledge on file,
+with one answer (`weak`) for all three, so a try never says which value is on file (tested).
+
+### PIN enrolment and reset
+
+A caller who passed weaker checks choosing or replacing a PIN, which would then stand for them on
+every later call. **Controls:** `enrolPin` needs a grant at level 2 or above from the same call,
+which always includes a factor that is not knowledge, on an open call outside any flow; tries are
+counted before they are judged and limited to the PIN's attempts per call; the PIN is keyed twice
+and the two digests compared in constant time; only a subject with no PIN on file can enrol, so a
+caller can never replace a PIN: changing one is `resetPin`, a host call from the business's own
+tools (tested). In `verifier` mode the engine never enrols. `pin.enrolled` and `pin.reset` carry no
+digits (tested). Who may call `resetPin`, and how the business confirms the request first, is the
+host's (left to the host).
 
 ### SIM swap and port-out
 
@@ -154,6 +168,9 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 - Choosing the subject when it starts verification with a subject key (for example the owner of
   the line it was called on). That choice is not a factor: the PIN or other factors still decide.
 - A `PinVerifier` that answers the same way, in the same time, for an unknown subject.
+- Calling `resetPin` only from the business's own staff tools, after the business has confirmed
+  the request, never from a path a caller or the model can reach; and a `RecordStore.putPinDigest`
+  that stores only the digest it is given.
 - Who may edit a workspace's FlowConfig, and keeping its revisions.
 - Outside modules: their code runs inside the engine's writes and is part of the host's security
   model.
