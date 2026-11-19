@@ -173,3 +173,18 @@ describe("wp-a: PIN path", () => {
     assert.equal((await counters.get(numKey("pin"), LONG_AGO)).length, 1);
   });
 });
+
+describe("wp-a: calling numbers", () => {
+  it("refuses a calling number that is not a string, never coerced into one by the E.164 check", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    for (const callingNumber of [["+15555550142"], { toString: () => "+15555550142" }, 15555550142]) {
+      await assert.rejects(
+        t.engine.beginVerification(callId, { accountNumber: ACCOUNT, callingNumber: callingNumber as unknown as string }),
+        (e: unknown) => e instanceof Error && /E\.164/.test(e.message),
+        JSON.stringify(callingNumber),
+      );
+    }
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT, callingNumber: "+15555550142" });
+  });
+});
