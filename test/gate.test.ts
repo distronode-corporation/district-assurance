@@ -13,7 +13,18 @@ import { SeenGrants, accessGrantDigest, verifyAccessGrant, type AccessGrantBody,
 import { GateModule, gateModule, type GateHost, type GateSlice } from "../src/gate/gate.ts";
 import { builtInModules } from "../src/modules.ts";
 import { keyPairSigner } from "../src/prove/receipt.ts";
-import { FakeAccessController, generateTestSigner } from "../src/testing/index.ts";
+import { FakeAccessController, FakeMessageSender, FixedClock, generateTestSigner } from "../src/testing/index.ts";
+import type { MessageSender } from "../src/core/adapters.ts";
+import {
+  AccessCodes,
+  MemoryAccessCodeStore,
+  MemoryTextSendLimits,
+  accessCodeDigest,
+  accessCodes,
+  type AccessCodeEntry,
+  type AccessCodeStore,
+  type TextSendLimits,
+} from "../src/gate/codes.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig } from "./helpers.ts";
 
 const verify = { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["entry.open"] };
@@ -633,5 +644,236 @@ describe("access grants: the verifier and replay", () => {
 
   it("is the GateModule class gateModule builds", () => {
     assert.ok(gateModule({ signer, controllers: { lobby: new FakeAccessController() } }) instanceof GateModule);
+  });
+});
+
+// One-time access codes (GAT-3): a code texted to the number on file, redeemed once at a keypad.
+const CODE_KEY = "access-code-key-not-a-secret";
+const keypadTarget = { id: "side-door", controller: "keypad", ref: "keypad-1" };
+const keypadDoor = { workspaceId: "ws_test", audience: "keypad", target: "keypad-1" };
+const TEXT = /^Your one-time door code: (\d{8})\. It works once, within (\d+) min\.$/;
+
+function codesSetup(options: { limits?: TextSendLimits; newCode?: () => string; messages?: MessageSender; store?: AccessCodeStore } = {}) {
+  const clock = new FixedClock();
+  const texts = new FakeMessageSender();
+  const store = options.store ?? new MemoryAccessCodeStore();
+  const signer = generateTestSigner("gate-key-1");
+  const codes = accessCodes({
+    key: CODE_KEY,
+    signer,
+    store,
+    messages: options.messages ?? texts,
+    limits: options.limits ?? new MemoryTextSendLimits(),
+    clock,
+    ...(options.newCode === undefined ? {} : { newCode: options.newCode }),
+  });
+  const door = new FakeAccessController();
+  const gate = gateModule({ signer, controllers: { lobby: door, keypad: codes.controller } });
+  const t = setup({
+    modules: [gate],
+    clock,
+    config: gateConfig((c) => {
+      c.modules.gate = { settings: { targets: [...structuredClone(targets), keypadTarget] } };
+      c.flows["code-entry"] = { steps: [verify as never, { type: "gate.grant", target: "side-door", lifetimeSeconds: 600 }] };
+    }),
+  });
+  t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+  return { ...t, clock, gate, door, codes, texts, store };
+}
+
+type CodesSetup = ReturnType<typeof codesSetup>;
+
+async function codeCall(t: CodesSetup, locale: "en" | "fr" = "en"): Promise<string> {
+  const { callId } = await t.engine.startCall({ flow: "code-entry", locale });
+  await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+  await t.engine.submitKeypad(callId, { dob: DOB });
+  await t.engine.checkCarrier(callId);
+  assert.equal((await t.engine.finishVerification(callId)).level, 2);
+  return callId;
+}
+
+const textedCode = (t: CodesSetup, i = -1) => TEXT.exec(t.texts.sent.at(i)!.body)![1]!;
+const codeEvents = async (t: CodesSetup) => (await gateEvents(t as never)).map(([event, detail]) => [event, detail as Record<string, unknown>] as const);
+const codeSlice = (t: CodesSetup, callId: string) => slice(t as never, callId);
+
+describe("gate: one-time access codes", () => {
+  it("texts a code to the number on file and redeems it once, for the grant it stands for", async () => {
+    const t = codesSetup();
+    const callId = await codeCall(t);
+    assert.deepEqual(await t.codes.issue(t.gate, t.engine, callId), { grantId: "acc_1", status: "delivered", confirmed: false });
+    assert.equal((await t.engine.flowPosition(callId))!.status, "completed");
+    assert.equal(t.door.received.length, 0, "no door was asked");
+    const [text] = t.texts.sent;
+    assert.equal(text!.to, PHONE_ON_FILE);
+    assert.equal(text!.purpose, "one_time_code");
+    assert.equal(TEXT.exec(text!.body)![2], "10");
+    const code = textedCode(t);
+    // The code is in the text and nowhere else.
+    assert.ok(!JSON.stringify(await t.ledger.list()).includes(code));
+    const digest = (await codeSlice(t, callId)).grants[0]!.digest!;
+    assert.deepEqual(await codeEvents(t), [
+      ["access.issued", { grantId: "acc_1", target: "side-door", controller: "keypad", scope: "entry.open", level: 2, verificationGrantId: "grant_1", expiresAt: "2026-01-01T00:10:00.000Z" }],
+      ["access.delivered", { grantId: "acc_1", digest, confirmed: false, kid: "gate-key-1" }],
+    ]);
+
+    assert.deepEqual(await t.codes.redeem({ ...keypadDoor, code: code === "00000000" ? "00000001" : "00000000" }), { ok: false });
+    t.clock.advance(9 * 60_000);
+    const redeemed = await t.codes.redeem({ ...keypadDoor, code });
+    assert.ok(redeemed.ok);
+    const check = verifyAccessGrant(redeemed.grant, t.gate.keys(), { workspaceId: "ws_test", audience: "keypad", now: t.clock.now() });
+    assert.ok(check.ok);
+    assert.equal(check.body.grantId, "acc_1");
+    assert.equal(check.body.target, "keypad-1");
+    assert.equal(accessGrantDigest(check.body), digest, "the very grant Gate issued");
+    assert.deepEqual(await t.codes.redeem({ ...keypadDoor, code }), { ok: false }, "single use");
+  });
+
+  it("stores only a keyed hash of the code, with the unsigned grant", async () => {
+    const put: AccessCodeEntry[] = [];
+    const store = new (class extends MemoryAccessCodeStore {
+      override async put(entry: AccessCodeEntry, now: Date): Promise<boolean> {
+        put.push(structuredClone(entry));
+        return super.put(entry, now);
+      }
+    })();
+    const t = codesSetup({ store });
+    const callId = await codeCall(t);
+    await t.codes.issue(t.gate, t.engine, callId);
+    const code = textedCode(t);
+    const [entry] = put;
+    assert.deepEqual(Object.keys(entry!).sort(), ["body", "callId", "digest", "grantId", "workspaceId"]);
+    assert.equal(entry!.digest, accessCodeDigest(CODE_KEY, keypadDoor, code));
+    assert.ok(!JSON.stringify(entry).includes(code));
+    assert.ok(!("signature" in entry!.body));
+  });
+
+  it("binds a code to its workspace, its controller, its door and its grant's lifetime, in French too", async () => {
+    const t = codesSetup();
+    const callId = await codeCall(t, "fr");
+    await t.codes.issue(t.gate, t.engine, callId);
+    const match = /^Votre code de porte, à usage unique : (\d{8})\. Valable une fois, dans les 10 min\.$/.exec(t.texts.sent[0]!.body);
+    const code = match![1]!;
+    for (const door of [{ ...keypadDoor, workspaceId: "ws_other" }, { ...keypadDoor, audience: "lobby" }, { ...keypadDoor, target: "door-1" }]) {
+      assert.deepEqual(await t.codes.redeem({ ...door, code }), { ok: false });
+    }
+    for (const bad of [null, 12345678, "1".repeat(33)]) assert.deepEqual(await t.codes.redeem({ ...keypadDoor, code: bad as never }), { ok: false });
+    t.clock.advance(10 * 60_000);
+    assert.deepEqual(await t.codes.redeem({ ...keypadDoor, code }), { ok: false }, "expired with its grant");
+  });
+
+  it("never outlives the verification grant", async () => {
+    const t = codesSetup();
+    const callId = await codeCall(t);
+    t.clock.advance(14 * 60_000 + 30_000);
+    await t.codes.issue(t.gate, t.engine, callId);
+    assert.equal(TEXT.exec(t.texts.sent[0]!.body)![2], "1");
+    assert.equal((await codeSlice(t, callId)).grants[0]!.expiresAt, "2026-01-01T00:15:00.000Z");
+  });
+
+  it("revokes a code before its end, and revoking one already gone is success", async () => {
+    const t = codesSetup();
+    const callId = await codeCall(t);
+    await t.codes.issue(t.gate, t.engine, callId);
+    const code = textedCode(t);
+    await t.codes.revoke("ws_test", "acc_1");
+    await t.codes.revoke("ws_test", "acc_1");
+    await t.codes.revoke("ws_other", "acc_9");
+    assert.deepEqual(await t.codes.redeem({ ...keypadDoor, code }), { ok: false });
+  });
+
+  it("counts against the send limits texted codes use, and a limited send texts nothing", async () => {
+    const limits = new MemoryTextSendLimits();
+    const t = codesSetup({ limits });
+    const callId = await codeCall(t);
+    const { subjectKey } = await t.engine.numberOnFile(callId);
+    // A texted code (VER-2) to the same subject a moment ago, through the same limiter.
+    assert.equal(await limits.acquire({ workspaceId: "ws_test", subjectKey, purpose: "one_time_code", at: t.clock.now() }), true);
+    assert.deepEqual(await t.codes.issue(t.gate, t.engine, callId), { grantId: "acc_1", status: "refused", confirmed: false });
+    assert.equal(t.texts.sent.length, 0);
+    const digest = (await codeSlice(t, callId)).grants[0]!.digest!;
+    assert.deepEqual((await codeEvents(t)).at(-1), ["access.refused", { grantId: "acc_1", digest, reason: "send_limit", kid: "gate-key-1" }]);
+    t.clock.advance(60_000);
+    assert.equal((await t.codes.issue(t.gate, t.engine, callId)).status, "delivered");
+  });
+
+  it("limits each subject to 5 texts in 24 hours, 60 seconds apart", async () => {
+    const limits = new MemoryTextSendLimits();
+    const at = (s: number) => new Date(Date.parse("2026-01-01T00:00:00.000Z") + s * 1000);
+    const send = (subjectKey: string, s: number) => limits.acquire({ workspaceId: "ws_test", subjectKey, purpose: "one_time_code", at: at(s) });
+    assert.equal(await send("a", 0), true);
+    assert.equal(await send("a", 59), false);
+    assert.equal(await send("b", 59), true, "per subject");
+    for (const s of [60, 120, 180, 240]) assert.equal(await send("a", s), true);
+    assert.equal(await send("a", 300), false, "the sixth in a day");
+    assert.equal(await send("a", 86_400), true, "a day after the first");
+    const loose = new MemoryTextSendLimits({ perSubjectPerDay: 1, minGapSeconds: 0 });
+    assert.equal(await loose.acquire({ workspaceId: "w", subjectKey: "a", purpose: "identity_link", at: at(0) }), true);
+    assert.equal(await loose.acquire({ workspaceId: "w", subjectKey: "a", purpose: "one_time_code", at: at(1) }), false, "shared across purposes");
+  });
+
+  it("revokes the code when its text fails, and records unknown when the revoke fails too", async () => {
+    const failing: MessageSender = {
+      sendText: async () => {
+        throw new Error("the carrier is down");
+      },
+    };
+    const t = codesSetup({ messages: failing, newCode: () => "24681357" });
+    const callId = await codeCall(t);
+    assert.deepEqual(await t.codes.issue(t.gate, t.engine, callId), { grantId: "acc_1", status: "refused", confirmed: false });
+    assert.equal((await codeEvents(t)).at(-1)![1].reason, "text_failed");
+    assert.deepEqual(await t.codes.redeem({ ...keypadDoor, code: "24681357" }), { ok: false });
+
+    const stuck = new (class extends MemoryAccessCodeStore {
+      override async revoke(): Promise<void> {
+        throw new Error("the store is down");
+      }
+    })();
+    const u = codesSetup({ messages: failing, store: stuck });
+    const other = await codeCall(u);
+    assert.deepEqual(await u.codes.issue(u.gate, u.engine, other), { grantId: "acc_1", status: "unknown", confirmed: false });
+  });
+
+  it("tries a new code when one is live for the same door, and frees a code once its grant expired", async () => {
+    const t = codesSetup({ newCode: () => "12345678" });
+    const first = await codeCall(t);
+    assert.equal((await t.codes.issue(t.gate, t.engine, first)).status, "delivered");
+    const second = await codeCall(t);
+    t.clock.advance(60_000);
+    assert.deepEqual(await t.codes.issue(t.gate, t.engine, second), { grantId: "acc_2", status: "refused", confirmed: false });
+    assert.equal((await codeEvents(t)).at(-1)![1].reason, "no_free_code");
+    assert.equal(t.texts.sent.length, 1);
+    t.clock.advance(10 * 60_000);
+    const third = await codeCall(t);
+    assert.equal((await t.codes.issue(t.gate, t.engine, third)).status, "delivered");
+    assert.equal((t.store as MemoryAccessCodeStore).size, 1, "the expired code was dropped");
+  });
+
+  it("texts only for its own issue calls, each for its own call", async () => {
+    const t = codesSetup({ limits: new MemoryTextSendLimits({ minGapSeconds: 0 }) });
+    const callId = await codeCall(t);
+    assert.deepEqual(await t.gate.grantAccess(t.engine, callId), { grantId: "acc_1", status: "refused", confirmed: false });
+    assert.equal((await codeEvents(t)).at(-1)![1].reason, "not_requested");
+    assert.equal(t.texts.sent.length, 0);
+    const a = await codeCall(t);
+    const b = await codeCall(t);
+    const results = await Promise.all([t.codes.issue(t.gate, t.engine, a), t.codes.issue(t.gate, t.engine, b)]);
+    assert.deepEqual(results.map((r) => r.status), ["delivered", "delivered"]);
+    const keys = t.texts.sent.map((s) => s.messageId);
+    assert.equal(new Set(keys).size, 2);
+    assert.deepEqual((await codeSlice(t, a)).grants.map((g) => g.status), ["delivered"]);
+    assert.deepEqual((await codeSlice(t, b)).grants.map((g) => g.status), ["delivered"]);
+  });
+
+  it("refuses before a keypad match, without entry.open, and with a short key", async () => {
+    const t = codesSetup();
+    const { callId } = await t.engine.startCall({ flow: "code-entry" });
+    await assert.rejects(t.engine.numberOnFile(callId), rejects("precondition_failed"));
+    await assert.rejects(t.codes.issue(t.gate, t.engine, callId), rejects("precondition_failed"));
+    const open = await t.engine.startCall({});
+    await assert.rejects(t.codes.issue(t.gate, t.engine, open.callId, { target: "side-door" }), rejects("scope_denied"));
+    assert.equal(t.texts.sent.length, 0);
+    const parts = { signer: generateTestSigner(), store: new MemoryAccessCodeStore(), messages: t.texts, limits: new MemoryTextSendLimits() };
+    assert.throws(() => accessCodes({ key: "short", ...parts }), /at least 16 bytes/);
+    assert.ok(accessCodes({ key: new Uint8Array(16), ...parts }) instanceof AccessCodes);
   });
 });

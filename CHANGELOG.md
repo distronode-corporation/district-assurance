@@ -15,6 +15,11 @@ All notable changes to this project are documented here. The format follows
 - The signed-webhook relay adapter (GAT-2), `webhookRelay`, and an example door relay. An unlock
   is never retried; a lost answer is `unknown`.
 - `FakeAccessController` in `district-assurance/testing`.
+- One-time access codes (GAT-3): `accessCodes(...)`, an `AccessController` that texts an 8-digit
+  code for an access grant to the number on file instead of working a door; codes kept only as
+  keyed hashes (`AccessCodeStore`, `MemoryAccessCodeStore`), redeemed once within the grant's
+  lifetime for the signed grant, revocable; texts counted by `TextSendLimits` (a stand-in shared
+  with texted codes, VER-2); `Engine.numberOnFile`.
 - Paylink's two modes (PAY-7), `connect` and `platform`, per flow step; `linkLifeMinutes` (5 to 60,
   default 15) with the engine expiring links itself (`expirePaymentLinks`, `PaymentLinks.expireLink`);
   an allow-list of instant payment methods (card, Apple Pay, Google Pay, Link). Outcomes from
