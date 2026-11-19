@@ -16,7 +16,8 @@ npm run serve   # the server on 127.0.0.1:8787 until stopped, for your own Strip
 a time (or the rest in one go). After each step the page shows the call's session state, its
 entries in the audit ledger, and whether the whole ledger's hash chain is intact. When a flow with
 a `trace.receipt` step ends, the script issues the receipt's capability link (`/r/:token`; the
-server keeps only the token's hash), and the page fetches the receipt from `/r/:token.json` and the key set
+link store keeps only the token's hash, but the demo run itself holds the raw token in memory so
+later views of the run can show the link, which a real host would not do), and the page fetches the receipt from `/r/:token.json` and the key set
 from `/.well-known/receipt-keys.json` and checks the ES256 signature itself, with Web Crypto, over
 its own canonical JSON of the body; a button changes one character and checks again, which fails.
 The page also recomputes each ledger entry's hash.
