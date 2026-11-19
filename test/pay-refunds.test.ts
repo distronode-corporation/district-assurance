@@ -230,11 +230,33 @@ describe("refunds: disputes", () => {
     await assert.rejects(u.engine.refundPayment({ callId: c2, paymentId: "pay_1", reason: "duplicate" }), rejects("precondition_failed", /after it was lost/));
   });
 
+  it("keeps a payment intent named by a later paid outcome, and resumes a lost refund though a dispute opened since", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.requestPayment(callId, request);
+    // Paid first by an outcome that names no payment intent; the next one names it.
+    assert.equal((await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid" })).applied, true);
+    assert.deepEqual(await t.engine.applyDisputeOutcome(dispute()), { applied: false, unbound: true });
+    assert.deepEqual(await t.engine.applyPaymentOutcome({ kind: "async_succeeded", linkId: "cs_fake_1", paymentIntentId: "pi_1" }), { applied: false });
+    // The provider makes a refund but its answer is lost; a dispute opens; the retry still learns the answer.
+    const refund = t.payments.refund.bind(t.payments);
+    t.payments.refund = async (input) => {
+      await refund(input);
+      throw new Error("the answer was lost");
+    };
+    await assert.rejects(t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "requested_by_customer" }), /answer was lost/);
+    assert.equal((await t.engine.applyDisputeOutcome(dispute())).applied, true, "the later payment intent was kept");
+    t.payments.refund = refund;
+    assert.deepEqual(await t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "requested_by_customer" }), { refundId: "ref_1", status: "succeeded", amountMinor: 15000, refundedMinor: 15000 });
+    assert.equal(t.payments.refunds.length, 1, "the provider made it once");
+    await assert.rejects(t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "duplicate" }), rejects("precondition_failed"));
+  });
+
   it("ignores a dispute it cannot place, and one from a connected account", async () => {
     const t = setup();
     const callId = await paidCall(t);
     assert.deepEqual(await t.engine.applyDisputeOutcome(dispute({ paymentIntentId: null })), { applied: false });
-    assert.deepEqual(await t.engine.applyDisputeOutcome(dispute({ paymentIntentId: "pi_other" })), { applied: false });
+    assert.deepEqual(await t.engine.applyDisputeOutcome(dispute({ paymentIntentId: "pi_other" })), { applied: false, unbound: true }, "not bound (yet): to be delivered again");
     assert.deepEqual(await t.engine.applyDisputeOutcome(dispute({ account: ACCT })), { applied: false });
     assert.deepEqual(await entries(t, "payment.outcome_ignored"), [{ paymentId: "pay_1", reason: "account" }]);
     assert.deepEqual(await entries(t, "payment.disputed"), []);
@@ -253,7 +275,7 @@ describe("refunds: disputes", () => {
     };
     const paid = { kind: "async_succeeded", linkId: "cs_fake_1", paymentIntentId: "pi_1" } as const;
     await assert.rejects(t.engine.applyPaymentOutcome(paid), /store down/);
-    assert.deepEqual(await t.engine.applyDisputeOutcome(dispute()), { applied: false }, "not bound yet");
+    assert.deepEqual(await t.engine.applyDisputeOutcome(dispute()), { applied: false, unbound: true }, "not bound yet");
     fail = false;
     assert.deepEqual(await t.engine.applyPaymentOutcome(paid), { applied: false }, "settled once");
     assert.equal((await t.engine.applyDisputeOutcome(dispute())).applied, true, "bound by the event sent again");
@@ -263,7 +285,7 @@ describe("refunds: disputes", () => {
     const fCall = await verifiedCall(f);
     await f.engine.requestPayment(fCall, request);
     await f.engine.applyPaymentOutcome({ kind: "async_failed", linkId: "cs_fake_1", paymentIntentId: "pi_1" });
-    assert.deepEqual(await f.engine.applyDisputeOutcome(dispute()), { applied: false });
+    assert.deepEqual(await f.engine.applyDisputeOutcome(dispute()), { applied: false, unbound: true });
 
     const connect = setup({ config: testConfig((cfg) => (cfg.modules.paylink = { settings: { mode: "connect", connectedAccountId: ACCT } })) });
     const connectCall = await verifiedCall(connect);
@@ -272,7 +294,7 @@ describe("refunds: disputes", () => {
       await connect.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid", paymentIntentId: "pi_1", account: ACCT }),
       { applied: true, callId: connectCall, status: "paid" },
     );
-    assert.deepEqual(await connect.engine.applyDisputeOutcome(dispute({ account: ACCT })), { applied: false }, "never bound");
+    assert.deepEqual(await connect.engine.applyDisputeOutcome(dispute({ account: ACCT })), { applied: false, unbound: true }, "never bound");
     await assert.rejects(connect.engine.refundPayment({ callId: connectCall, paymentId: "pay_1", reason: "duplicate" }), rejects("precondition_failed", /business's/));
     assert.equal(connect.payments.refunds.length, 0);
   });

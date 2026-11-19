@@ -418,7 +418,7 @@ export class Engine {
   }
 
   /** A verified dispute event (`charge.dispute.*`), recorded against the platform payment it names. */
-  applyDisputeOutcome(outcome: refunds.DisputeOutcome): Promise<{ applied: false } | { applied: true; callId: string; status: refunds.DisputeStatus }> {
+  applyDisputeOutcome(outcome: refunds.DisputeOutcome): Promise<refunds.DisputeApplied> {
     return refunds.applyDisputeOutcome(this.#rt, outcome);
   }
 

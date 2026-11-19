@@ -3,6 +3,7 @@ export { PAYLINK, formatAmount, paylinkModule, type PaylinkRequestStep, type Pay
 export * from "./payment.ts";
 export {
   DISPUTE_STATUSES,
+  type DisputeApplied,
   type DisputeOutcome,
   type DisputeRecord,
   type DisputeStatus,

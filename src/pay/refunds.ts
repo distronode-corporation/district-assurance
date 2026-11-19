@@ -76,6 +76,9 @@ export interface DisputeOutcome {
   account?: string;
 }
 
+/** A dispute event's result. `unbound`: no payment is bound to its payment intent yet; deliver it again later. */
+export type DisputeApplied = { applied: false; unbound?: true } | { applied: true; callId: string; status: DisputeStatus };
+
 export interface RefundInput {
   callId: string;
   paymentId: string;
@@ -131,8 +134,10 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
     if (payment === undefined) throw new EngineError("invalid_input", "no such payment on this call");
     if (payment.mode !== "platform") throw new EngineError("precondition_failed", "a connect payment is the business's: it refunds it on its own account");
     if (payment.status !== "paid") throw new EngineError("precondition_failed", "only a paid payment can be refunded");
-    if ((payment.disputes ?? []).some(blocksRefund)) throw new EngineError("precondition_failed", "the payment is disputed: it cannot be refunded while its dispute is open or after it was lost");
     const refunds = (payment.refunds ??= []);
+    // A refund already sent (its answer lost) is resumed with its own key whatever happened since:
+    // the provider may have made it, and only the same key learns that. The dispute guard is for
+    // new refunds.
     const open = refunds.find((r) => r.status === "requested");
     if (open !== undefined) {
       if (input.amountMinor !== undefined && input.amountMinor !== open.amountMinor) {
@@ -140,6 +145,7 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
       }
       return { refund: open, payment };
     }
+    if ((payment.disputes ?? []).some(blocksRefund)) throw new EngineError("precondition_failed", "the payment is disputed: it cannot be refunded while its dispute is open or after it was lost");
     const left = payment.amountMinor - refunded(refunds);
     if (left === 0) throw new EngineError("precondition_failed", "the payment is refunded in full");
     const amountMinor = input.amountMinor ?? left;
@@ -188,10 +194,12 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
  * down (a platform payment's disputes come from the platform's own account). A dispute that was won
  * or lost is final; an event that changes nothing is not written again.
  */
-export async function applyDisputeOutcome(rt: EngineRuntime, outcome: DisputeOutcome): Promise<{ applied: false } | { applied: true; callId: string; status: DisputeStatus }> {
+export async function applyDisputeOutcome(rt: EngineRuntime, outcome: DisputeOutcome): Promise<DisputeApplied> {
   if (outcome.paymentIntentId === null) return { applied: false };
   const callId = await rt.resolveRef(paymentIntentRef(outcome.paymentIntentId));
-  if (callId === null) return { applied: false };
+  // Not bound yet: the payment's own outcome may still be on its way (webhooks come in any order).
+  // `unbound` tells the host to have the event delivered again rather than drop it.
+  if (callId === null) return { applied: false, unbound: true };
   return rt.update(callId, (draft) => {
     const slice = draft.slice<PaylinkSlice>(PAYLINK);
     const payment = slice.payments.find((p) => p.paymentIntentId === outcome.paymentIntentId)!;

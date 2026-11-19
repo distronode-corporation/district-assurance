@@ -63,6 +63,29 @@ describe("reference server", () => {
     assert.deepEqual(await (await post("/webhooks/stripe/identity", pay, signed(pay))).json(), { received: true, applied: false, handled: false });
   });
 
+  it("has Stripe deliver again a dispute whose payment is not bound yet, and remembers it once applied", async () => {
+    const both = createTestEngine();
+    const server = createReferenceServer({ engine: both.engine, stripeSecrets: { identity: [SECRET], payments: [SECRET], connect: [SECRET] }, clock: both.clock });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const send = async (path: string, body: string) => {
+      const res = await fetch(`${url}${path}`, { method: "POST", headers: signed(body), body });
+      return [res.status, await res.json()] as const;
+    };
+    try {
+      const object = { id: "dp_1", object: "dispute", charge: "ch_1", payment_intent: "pi_unbound", status: "needs_response", amount: 15000, currency: "cad" };
+      const dispute = event("evt_20", "charge.dispute.created", object);
+      assert.deepEqual(await send("/webhooks/stripe/payments", dispute), [503, { received: true, applied: false, retry: true }]);
+      assert.deepEqual(await send("/webhooks/stripe/payments", dispute), [503, { received: true, applied: false, retry: true }], "never remembered as processed");
+      const placed = event("evt_21", "charge.dispute.created", { ...object, payment_intent: null });
+      assert.deepEqual(await send("/webhooks/stripe/payments", placed), [200, { received: true, applied: false }], "one that can never be placed is acknowledged");
+      assert.deepEqual(await send("/webhooks/stripe/payments", placed), [200, { received: true, duplicate: true }]);
+      assert.deepEqual(await send("/webhooks/stripe/connect", dispute), [200, { received: true, applied: false, handled: false }], "a connected account's dispute is the business's");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("applies an event only on its own endpoint, never remembering one that went to the wrong one", async () => {
     const both = createTestEngine();
     const server = createReferenceServer({ engine: both.engine, stripeSecrets: { identity: [SECRET], payments: [SECRET], connect: [SECRET] }, clock: both.clock });

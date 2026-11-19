@@ -479,7 +479,9 @@ reserved in one write (one in flight per payment; asking again while it is resum
 amount is refused), sent with `PaymentLinks.refund({linkId, paymentIntentId?, mode: "platform",
 amountMinor, currency, reason, idempotencyKey})`, the key being `[workspaceId, callId, paymentId,
 "refund", refundId]`, and committed in another write with the provider's answer and
-`payment.refunded`. It returns `{refundId, status, amountMinor, refundedMinor}`. An adapter
+`payment.refunded`. It returns `{refundId, status, amountMinor, refundedMinor}`. A refund still
+in flight is resumed with its own key before the dispute check, which is for new refunds: a refund
+the provider made whose answer was lost is learned even if a dispute opened since. An adapter
 answers a refund the provider refused as `failed` and throws only when the answer was lost: a
 refund that threw stays in flight and the next `refundPayment` resumes it with the same key, so
 an adapter that throws for a refusal blocks the payment's refunds. A `pending` refund counts
@@ -494,8 +496,13 @@ intent, not the Checkout Session. When a platform payment settles `paid`, the ou
 intent is kept on it and bound to the call (`payment_intent:<id>`), after the write, and again on
 every later outcome for the link, so a lost binding is made when the event comes again.
 `applyDisputeOutcome` finds the payment by it and records the dispute's status and amount
-(`payment.disputed`); a dispute that names no payment intent, or one not bound, is not applied; a
-connected account's dispute event is ignored (`payment.outcome_ignored`). `won` and `lost` are
+(`payment.disputed`). A dispute that names no payment intent is not applied (`{applied: false}`);
+one whose payment intent is not bound yet answers `{applied: false, unbound: true}`, since
+webhooks come in any order and the payment's own event may still be on its way: the host has it
+delivered again (the reference server answers 503 and does not remember the event, so Stripe
+retries it within its own retry window). A connected account's dispute event is ignored
+(`payment.outcome_ignored`). A later paid outcome that names the payment intent of a payment
+already paid without one keeps it too. `won` and `lost` are
 final; an event that changes neither status nor amount is not written again.
 
 Refunds and disputes work after the flow and the call ended. They never change a payment's

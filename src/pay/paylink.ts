@@ -491,6 +491,8 @@ export async function applyPaymentOutcome(
       if (status === "paid") keepIntent();
       return { result: { applied: true, callId, status } as const, paymentIntentId: request.paymentIntentId };
     }
+    // Paid already, by an outcome that named no payment intent: a later one that names it is kept.
+    if (request.status === "paid" && status === "paid") keepIntent();
     return { result: { applied: false } as const, paymentIntentId: request.paymentIntentId };
   });
   // Bound after the write, and again on every later outcome for the link, so a bind that failed
