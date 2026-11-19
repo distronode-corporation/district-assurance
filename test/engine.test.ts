@@ -708,3 +708,85 @@ describe("Engine prove", () => {
     }
   });
 });
+
+describe("Engine in Spanish (FIL-6)", () => {
+  const spanishForm: IntakeForm = {
+    ...form,
+    fields: form.fields.map((f) => ({ ...f, label: { ...f.label, es: f.key === "issue" ? "Problema" : "Urgente" } })),
+  };
+  const englishAndFrench = { en: "May we text you?", fr: "Pouvons-nous vous texter?" };
+  const spanishWording = { purpose: "texts", version: "1", text: { ...englishAndFrench, es: "¿Podemos enviarle mensajes de texto?" } };
+  /** A level 1 flow with a form and a wording; `spanish` says which of them have Spanish text. */
+  const flowSetup = (spanish: { form: boolean; wording: boolean }) =>
+    setup({
+      config: testConfig((c) => {
+        c.modules.dossier = { settings: { forms: [structuredClone(spanish.form ? spanishForm : form)] } as unknown as JsonValue };
+        c.modules.trace = { settings: { receipts: true, wordings: [spanish.wording ? structuredClone(spanishWording) : { ...spanishWording, text: englishAndFrench }] } };
+        c.flows = {
+          intake: { steps: [{ type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }, { type: "dossier.collect", form: "repair" }, { type: "trace.consent", purpose: "texts" }] },
+          verify: { steps: [{ type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }] },
+        };
+      }),
+    });
+
+  it("starts a call in en, fr or es and refuses any other locale", async () => {
+    const t = setup();
+    await assert.rejects(t.engine.startCall({ locale: "de" as "en" }), rejects("invalid_input", /locale must be en, fr or es/));
+    await t.engine.startCall({ callId: "call_es", locale: "es" });
+    assert.deepEqual((await t.ledger.list()).map((e) => [e.event, e.detail.locale]), [["call.started", "es"]]);
+  });
+
+  it("refuses a Spanish call whose flow needs a form or a wording with no Spanish text, and runs it when both have it", async () => {
+    await assert.rejects(
+      flowSetup({ form: false, wording: true }).engine.startCall({ locale: "es", flow: "intake" }),
+      rejects("precondition_failed", /dossier\.collect cannot run on this call: form repair has no es label/),
+    );
+    await assert.rejects(
+      flowSetup({ form: true, wording: false }).engine.startCall({ locale: "es", flow: "intake" }),
+      rejects("precondition_failed", /trace\.consent cannot run on this call: the wording for texts has no es text/),
+    );
+    // Spanish is optional: English and French calls run the same flow without it.
+    for (const locale of ["en", "fr"] as const) assert.equal((await flowSetup({ form: false, wording: false }).engine.startCall({ locale, flow: "intake" })).phase, "open");
+    // A flow that needs neither runs in Spanish; one attached later is held to the same rule.
+    const t = flowSetup({ form: false, wording: false });
+    assert.equal((await t.engine.startCall({ locale: "es", flow: "verify" })).phase, "open");
+    const { callId } = await t.engine.startCall({ locale: "es" });
+    await assert.rejects(t.engine.startFlow(callId, "intake"), rejects("precondition_failed", /no es label/));
+    const both = flowSetup({ form: true, wording: true });
+    const started = await both.engine.startCall({ locale: "es" });
+    assert.equal((await both.engine.startFlow(started.callId, "intake")).status, "running");
+  });
+
+  it("files and consents in Spanish: a sí, a Spanish read-back, the call's locale on the consent", async () => {
+    const t = flowSetup({ form: true, wording: true });
+    const { callId } = await t.engine.startCall({ locale: "es", flow: "intake" });
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "Fuga bajo el fregadero");
+    assert.deepEqual(await t.engine.setIntakeField(callId, "urgent", "Sí"), { ok: true, value: true });
+    const readBack = await t.engine.intakeReadBack(callId);
+    assert.equal(readBack.text, "Esto es lo que vamos a registrar. Problema: Fuga bajo el fregadero. Urgente: sí. ¿Es correcto? Diga sí u oprima el 1 para confirmar.");
+    await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: readBack.digest });
+    const consent = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    assert.equal(consent.locale, "es");
+    assert.equal((await t.engine.flowPosition(callId))!.status, "completed");
+  });
+
+  it("refuses, outside a flow, a Spanish intake or consent with no Spanish text", async () => {
+    const t = flowSetup({ form: false, wording: false });
+    const callId = await verifiedCall(t, "es");
+    await assert.rejects(t.engine.startIntake(callId, "repair"), rejects("precondition_failed", /form repair has no es label for every field/));
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), rejects("precondition_failed", /the wording for texts has no es text/));
+    assert.equal((await t.engine.state(callId)).phase, "open");
+  });
+
+  it("texts identity and payment links in Spanish, with the amount as a Spanish speaker in the United States reads it", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t, "es");
+    assert.match(t.messages.sent[0]!.body, /^Su enlace de verificación de identidad, de un solo uso: https:/);
+    await t.engine.requestPayment(callId, { amountMinor: 150050, currency: "usd", description: "Depósito", amountSource: "price_list" });
+    assert.equal(t.messages.sent.at(-1)!.body, "Su enlace de pago seguro por $1,500.50: https://pay.example.test/c/cs_fake_1");
+  });
+});

@@ -19,7 +19,20 @@ import type { FlowStep } from "./module.ts";
 import type { VerificationPolicy } from "./policy.ts";
 import type { SessionEvent, SessionState } from "./session.ts";
 
-export type Locale = "en" | "fr";
+/** The languages a call can run in. Every text code builds exists in each of them. */
+export const LOCALES = ["en", "fr", "es"] as const;
+
+export type Locale = (typeof LOCALES)[number];
+
+/**
+ * Words a workspace writes (a form's labels, a consent wording): English and French always,
+ * Spanish when the workspace offers it. A call in Spanish can use only those that have it.
+ */
+export interface LocalisedText {
+  en: string;
+  fr: string;
+  es?: string;
+}
 
 /**
  * Everything the engine can be given. Only `ledger` is always required (the ledger is always on);

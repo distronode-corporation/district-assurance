@@ -101,6 +101,22 @@ describe("file: intake forms", () => {
     assert.deepEqual(normaliseFieldValue(field("urgent"), "maybe"), { ok: false, reason: "not_yes_or_no" });
   });
 
+  it("takes sí, si and no in Spanish, any case, with the accent composed or not", () => {
+    for (const yes of ["sí", "si", "Sí", "SÍ", "SI", " si ", "sí"]) assert.deepEqual(normaliseFieldValue(field("urgent"), yes), { ok: true, value: true }, JSON.stringify(yes));
+    for (const no of ["no", "No", "NO"]) assert.deepEqual(normaliseFieldValue(field("urgent"), no), { ok: true, value: false }, no);
+    for (const other of ["sí sí", "sip", "s", "nó", "tal vez"]) assert.deepEqual(normaliseFieldValue(field("urgent"), other), { ok: false, reason: "not_yes_or_no" }, other);
+  });
+
+  it("takes an optional Spanish label, and refuses an empty one or a label in another language", () => {
+    const labelled = (label: unknown) =>
+      validateForm({ formId: "x", version: "1", fields: [{ key: "issue", label, type: "text", required: false } as unknown as IntakeField] });
+    assert.deepEqual(labelled({ en: "Issue", fr: "Problème" }), []);
+    assert.deepEqual(labelled({ en: "Issue", fr: "Problème", es: "Problema" }), []);
+    assert.deepEqual(labelled({ en: "Issue", fr: "Problème", es: " " }), ["field issue: the Spanish label (es), when given, must not be empty"]);
+    assert.deepEqual(labelled({ en: "Issue", fr: "Problème", es: 1 }), ["field issue: the Spanish label (es), when given, must not be empty"]);
+    assert.deepEqual(labelled({ en: "Issue", fr: "Problème", de: "Problem" }), ["field issue: label de is not a locale (en, fr or es)"]);
+  });
+
   it("checks calendar dates", () => {
     assert.equal(isCalendarDate("2024-02-29"), true);
     assert.equal(isCalendarDate("2023-02-29"), false);
@@ -162,6 +178,14 @@ describe("file: field rules and conditional fields", () => {
       ["discard", "Discarded items", "Articles jetés"],
       ["insurance", "Insurance provider", "Assureur"],
     ]) assert.equal(named(key!, en!, fr!), 0, `${key} / ${en} / ${fr}`);
+  });
+
+  it("refuses a Spanish label that names a card or a social security number, and nothing else", () => {
+    const named = (es: string) => validateForm({ formId: "x", version: "1", fields: [{ key: "ref", label: { en: "Number", fr: "Numéro", es }, type: "text", required: false }] });
+    for (const es of ["Número de tarjeta", "TARJETAS", "Número de Seguro Social", "Código CVV"]) {
+      assert.deepEqual(named(es), ["field ref names a card or a Social Insurance Number, which intake never collects"], es);
+    }
+    for (const es of ["Número de cuenta", "Seguro de la casa", "Tarjetero roto", "Fecha"]) assert.deepEqual(named(es), [], es);
   });
 
   const branching: IntakeForm = {

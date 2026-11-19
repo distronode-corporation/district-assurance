@@ -142,4 +142,13 @@ describe("consent wording", () => {
     assert.notEqual(wordingDigest(w), wordingDigest({ ...w, version: "2" }));
     assert.notEqual(wordingDigest(w), wordingDigest({ ...w, text: { ...w.text, fr: "Autre" } }));
   });
+
+  it("keeps the digest a wording without Spanish had before Spanish existed, and covers Spanish when given", () => {
+    const w = { purpose: "texts", version: "1", text: { en: "May we text you?", fr: "Pouvons-nous vous texter?" } };
+    // Pinned: SHA-256 of canonicalJson({purpose, version, text: {en, fr}}), as receipts already carry it.
+    assert.equal(wordingDigest(w), "77671e4df90e7ca2b7d6f7ee791eff69a9ea430b87e684f23a85bc85fef79991");
+    const es = { ...w, text: { ...w.text, es: "¿Podemos enviarle mensajes de texto?" } };
+    assert.notEqual(wordingDigest(es), wordingDigest(w));
+    assert.notEqual(wordingDigest(es), wordingDigest({ ...es, text: { ...es.text, es: "Otro" } }));
+  });
 });

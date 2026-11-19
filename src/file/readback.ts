@@ -1,12 +1,12 @@
-// The read-back: what will be filed, built by code in English or French, which the host speaks
-// before the caller confirms. Its digest goes back to `confirmIntake`, which files the draft only
-// while it still reads back the same, so a value changed after the caller heard it is never filed.
-// A sensitive value is never read back: its line says only that it was given.
+// The read-back: what will be filed, built by code in English, French or Spanish, which the host
+// speaks before the caller confirms. Its digest goes back to `confirmIntake`, which files the draft
+// only while it still reads back the same, so a value changed after the caller heard it is never
+// filed. A sensitive value is never read back: its line says only that it was given.
 import { canonicalJson } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { sha256Hex } from "../core/hash.ts";
-import type { Locale } from "../core/runtime.ts";
-import { intakeDigest, shownValues, type FieldValue, type IntakeField, type IntakeForm } from "./intake.ts";
+import { LOCALES, type Locale } from "../core/runtime.ts";
+import { formSpeaks, intakeDigest, shownValues, type FieldValue, type IntakeField, type IntakeForm } from "./intake.ts";
 
 export interface ReadBack {
   locale: Locale;
@@ -24,7 +24,7 @@ export interface ReadBack {
   digest: string;
 }
 
-interface Wording {
+export interface ReadBackWording {
   opening: string;
   /** A label and its value, as one sentence. */
   line(label: string, value: string): string;
@@ -41,7 +41,8 @@ interface Wording {
   months: readonly string[];
 }
 
-const WORDING: Record<Locale, Wording> = {
+/** What code says in each locale. A locale missing here does not build (and the parity test fails). */
+export const READBACK_WORDING: Record<Locale, ReadBackWording> = {
   en: {
     opening: "Here is what will be filed.",
     line: (label, value) => `${label}: ${value}`,
@@ -71,6 +72,23 @@ const WORDING: Record<Locale, Wording> = {
     weekdays: ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"],
     months: ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"],
   },
+  // Spanish as spoken in the United States: 1,234.5 as in English, and the first of a month as
+  // "primero", the way a speech engine should say it.
+  es: {
+    opening: "Esto es lo que vamos a registrar.",
+    line: (label, value) => `${label}: ${value}`,
+    // "se proporcionó" agrees with any label, where "proporcionado" would not.
+    withheld: (label) => `${label}: se proporcionó, pero no se lee en voz alta por su seguridad.`,
+    prompt: "¿Es correcto? Diga sí u oprima el 1 para confirmar.",
+    yes: "sí",
+    no: "no",
+    minus: "menos ",
+    group: ",",
+    decimal: ".",
+    date: (weekday, day, month, year) => `el ${weekday} ${day === 1 ? "primero" : day} de ${month} de ${year}`,
+    weekdays: ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"],
+    months: ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"],
+  },
 };
 
 /**
@@ -78,13 +96,15 @@ const WORDING: Record<Locale, Wording> = {
  * prompt. A field hidden by its `showIf` is neither read nor counted in the digest, as it is not filed.
  */
 export function buildReadBack(form: IntakeForm, values: Readonly<Record<string, FieldValue>>, locale: Locale): ReadBack {
-  if (locale !== "en" && locale !== "fr") throw new EngineError("invalid_input", "a read-back is in English (en) or French (fr)");
-  const w = WORDING[locale];
+  if (!LOCALES.includes(locale)) throw new EngineError("invalid_input", "a read-back is in English (en), French (fr) or Spanish (es)");
+  // Spanish labels are optional: a form without them is never read back, even in part, in Spanish.
+  if (!formSpeaks(form, locale)) throw new EngineError("precondition_failed", `form ${form.formId} has no ${locale} label for every field`);
+  const w = READBACK_WORDING[locale];
   const filed = shownValues(form, values);
   const lines: string[] = [];
   for (const field of form.fields) {
     if (!Object.hasOwn(filed, field.key)) continue;
-    const label = field.label[locale].trim();
+    const label = field.label[locale]!.trim();
     lines.push(field.sensitive === true ? w.withheld(label) : sentence(w.line(label, spoken(field, filed[field.key]!, w))));
   }
   const text = [w.opening, ...lines, w.prompt].join(" ");
@@ -97,7 +117,7 @@ function sentence(line: string): string {
   return /[.!?]$/.test(line) ? line : `${line}.`;
 }
 
-function spoken(field: IntakeField, value: FieldValue, w: Wording): string {
+function spoken(field: IntakeField, value: FieldValue, w: ReadBackWording): string {
   switch (field.type) {
     case "number":
       return spokenNumber(value as number, w);
@@ -111,7 +131,7 @@ function spoken(field: IntakeField, value: FieldValue, w: Wording): string {
 }
 
 /** Digits grouped by thousands in the locale's way, never in exponent form, with the sign as a word. */
-function spokenNumber(value: number, w: Wording): string {
+function spokenNumber(value: number, w: ReadBackWording): string {
   const [whole, fraction] = plainDecimal(Math.abs(value)).split(".") as [string, string | undefined];
   const grouped = whole.replace(/\B(?=(\d{3})+$)/g, w.group);
   return `${value < 0 ? w.minus : ""}${grouped}${fraction === undefined ? "" : `${w.decimal}${fraction}`}`;
@@ -131,7 +151,7 @@ function plainDecimal(value: number): string {
 }
 
 /** A YYYY-MM-DD date in full: weekday, day, month and year. */
-function spokenDate(value: string, w: Wording): string {
+function spokenDate(value: string, w: ReadBackWording): string {
   const date = new Date(`${value}T00:00:00Z`);
   return w.date(w.weekdays[date.getUTCDay()]!, date.getUTCDate(), w.months[date.getUTCMonth()]!, date.getUTCFullYear());
 }

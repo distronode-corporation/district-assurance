@@ -6,13 +6,15 @@
 import { canonicalJson } from "../core/canonical.ts";
 import { sha256Hex } from "../core/hash.ts";
 import { findCardNumbers } from "../core/redaction.ts";
+import { LOCALES, type Locale, type LocalisedText } from "../core/runtime.ts";
 import { isObject, unknownKeys } from "../core/shape.ts";
 
 export type FieldType = "text" | "number" | "date" | "yes_no";
 
 export interface IntakeField {
   key: string;
-  label: { en: string; fr: string };
+  /** English and French always; Spanish when the workspace offers it. */
+  label: LocalisedText;
   type: FieldType;
   /** Required while the field is shown. */
   required: boolean;
@@ -49,7 +51,8 @@ export type NormaliseResult =
     };
 
 const FIELD_KEY = /^[a-z][a-z0-9_]{0,63}$/;
-const YES = new Set(["yes", "y", "oui"]);
+// Spoken answers in any locale: a caller may answer in English whatever the call's language.
+const YES = new Set(["yes", "y", "oui", "sí", "si"]);
 const NO = new Set(["no", "n", "non"]);
 const FIELD_SETTINGS = ["key", "label", "type", "required", "sensitive", "maxLength", "showIf", "min", "max", "pattern"];
 const DEFAULT_MAX_LENGTH = 500;
@@ -57,8 +60,8 @@ const DEFAULT_MAX_LENGTH = 500;
 export const MAX_PATTERN_LENGTH = 200;
 /** The most ways a pattern may have to try a value: about 100,000 paths of at most a value's length each. */
 export const MAX_PATTERN_WORK = 100_000;
-/** Words that name a card or a Social Insurance Number, in English or French, in a key or a label (accents and case ignored). */
-const FORBIDDEN_NAME = /\b(?:cards?|cartes?|cardholder|cvv2?|cvc|sin|nas|social insurance|assurance sociale)\b/;
+/** Words that name a card or a Social Insurance Number, in English, French or Spanish, in a key or a label (accents and case ignored). */
+const FORBIDDEN_NAME = /\b(?:cards?|cartes?|tarjetas?|cardholder|cvv2?|cvc|sin|nas|social insurance|assurance sociale|seguro social)\b/;
 
 /** Every problem with a form, as sentences. */
 export function validateForm(form: IntakeForm): string[] {
@@ -70,8 +73,12 @@ export function validateForm(form: IntakeForm): string[] {
     if (keys.has(field.key)) errors.push(`field ${field.key} is defined twice`);
     keys.add(field.key);
     if (field.label.en.trim() === "" || field.label.fr.trim() === "") errors.push(`field ${field.key} needs an English and a French label`);
+    // Spanish is optional; when given it is a label like the others.
+    const es: unknown = field.label.es;
+    if (es !== undefined && (typeof es !== "string" || es.trim() === "")) errors.push(`field ${field.key}: the Spanish label (es), when given, must not be empty`);
+    for (const k of unknownKeys(field.label as unknown as Record<string, unknown>, LOCALES)) errors.push(`field ${field.key}: label ${k} is not a locale (en, fr or es)`);
     for (const k of unknownKeys(field as unknown as Record<string, unknown>, FIELD_SETTINGS)) errors.push(`field ${field.key}: ${k} is not a field setting`);
-    if ([field.key.replaceAll("_", " "), field.label.en, field.label.fr].some(namesForbidden)) {
+    if ([field.key.replaceAll("_", " "), field.label.en, field.label.fr, typeof es === "string" ? es : ""].some(namesForbidden)) {
       errors.push(`field ${field.key} names a card or a Social Insurance Number, which intake never collects`);
     }
     errors.push(...rangeErrors(field).map((e) => `field ${field.key}: ${e}`));
@@ -224,7 +231,8 @@ export function normaliseFieldValue(field: IntakeField, raw: string): NormaliseR
     case "date":
       return isCalendarDate(value) ? inRange(field, value) : { ok: false, reason: "not_a_date" };
     case "yes_no": {
-      const word = value.toLowerCase();
+      // NFC, so a "sí" whose accent arrives as a separate mark is the same word.
+      const word = value.normalize("NFC").toLowerCase();
       if (YES.has(word)) return { ok: true, value: true };
       if (NO.has(word)) return { ok: true, value: false };
       return { ok: false, reason: "not_yes_or_no" };
@@ -272,6 +280,14 @@ export function shownValues(form: IntakeForm, values: Readonly<Record<string, Fi
 /** Required fields that are shown and have no value, in form order. */
 export function missingRequired(form: IntakeForm, values: Readonly<Record<string, FieldValue>>): string[] {
   return form.fields.filter((f) => f.required && !(f.key in values) && isShown(form, values, f)).map((f) => f.key);
+}
+
+/**
+ * Whether every field of a form has a label in a locale, so a call in that language can ask and
+ * read back any of them. English and French always do; Spanish only where the workspace wrote it.
+ */
+export function formSpeaks(form: IntakeForm, locale: Locale): boolean {
+  return form.fields.every((field) => typeof field.label[locale] === "string");
 }
 
 /** The fingerprint a receipt carries for a confirmed record. */

@@ -107,7 +107,10 @@ and the record digest of every value, and refuses a draft that no longer reads b
 value changed since, a sensitive one included, is never filed on an old yes (tested). A sensitive
 value is never read back: its line says only that it was given, so it does not reach the
 transcript, the model or anyone listening in (tested). The digest says no more about the values
-than the record digest the ledger and the receipt already carry.
+than the record digest the ledger and the receipt already carry. Spanish is optional per form and
+per consent wording: a call in Spanish whose flow needs a form or a wording with no Spanish text is
+refused when the flow starts, and outside a flow at `startIntake` and `recordConsent`, so a caller
+is never asked to confirm, or to consent to, words they were not read in their language (tested).
 
 ### Config tampering
 
@@ -138,12 +141,13 @@ the host's code with an `amountSource`, and destinations come from the subject r
 ### Card data and PCI DSS scope
 
 **Controls:** Pay is by a hosted payment page; the engine sees a link id and a status, never a card
-number. Card numbers in transcripts are detected (Luhn, digits and English or French digit words)
-and replaced, and the host is told to interrupt (tested). Intake refuses a value carrying a card
-number, and the ledger refuses detail carrying one (tested). A form cannot ask for a card or a
-Social Insurance Number at all: `validateConfig` refuses a field whose key or label, in English or
-French, names one (`card`, `carte`, `cvv`, `SIN`, `NAS`, `assurance sociale` and so on), with case,
-accents and dots ignored (tested). The check reads names, not intent: a field named to slip past it
+number. Card numbers in transcripts are detected (Luhn, digits and English, French or Spanish
+digit words, all three on every call whatever its language, so a caller who switches language is
+still caught) and replaced, and the host is told to interrupt (tested). Intake refuses a value
+carrying a card number, and the ledger refuses detail carrying one (tested). A form cannot ask for
+a card or a Social Insurance Number at all: `validateConfig` refuses a field whose key or label, in
+English, French or Spanish, names one (`card`, `carte`, `tarjeta`, `cvv`, `SIN`, `NAS`,
+`assurance sociale`, `seguro social` and so on), with case, accents and dots ignored (tested). The check reads names, not intent: a field named to slip past it
 is still caught by the card-number check on its value, but a SIN under another name is not. Keypad card capture is planned only
 through a PCI-certified carrier service on a call path where tones never reach this engine
 (PAY-6), after an assessor's scoping. Nothing here is a PCI DSS attestation; a host's scope

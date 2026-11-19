@@ -48,7 +48,8 @@ enforces it.
 ## 2. The call record and the SessionStore
 
 A call is one JSON record: `{v: 1, state, locale, revision, flow, modules}`, where `state` is the
-session above, `revision` the FlowConfig revision the call started under, `flow` the cursor of the
+session above, `locale` the call's language (`en`, `fr` or `es`, default `en`; `startCall` refuses
+any other with `invalid_input`), `revision` the FlowConfig revision the call started under, `flow` the cursor of the
 flow it runs (or null), and `modules` each enabled module's own part, created by its `initCall`
 when the call starts. A module turned on after a call started has no part in it and is refused on
 that call (`module_disabled`).
@@ -215,8 +216,15 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 
 Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
 until FIL-2, field rules as section 13 lists); Paylink `{maxAmountMinor?}` (1 to 1,000,000); Trace `{receipts?, wordings?}`
-(`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr}}`, purposes
-unique).
+(`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr, es?}}`, purposes
+unique, `en` and `fr` non-empty, `es` optional and non-empty when given, no other key in `text`).
+
+**Spanish is optional** (FIL-6). Forms and wordings always have English and French; Spanish only
+where the workspace wrote it. A call in `es` is refused (`precondition_failed`) when its flow, at
+`startCall` or `startFlow`, has a `dossier.collect` step whose form lacks a Spanish label on any
+field, or a `trace.consent` step whose wording has no Spanish text. Outside a flow, the same call
+is refused at `startIntake` for such a form and at `recordConsent` for such a wording, and
+`buildReadBack` refuses such a form in Spanish.
 
 ## 8. Flow execution
 
@@ -343,7 +351,8 @@ part. `ledger` is the head after `call.ended`, kept in the call record. If signi
 the ended call issues the receipt later with the same head, without ending the call again. `verifyReceipt(receipt, keys)` picks the key by `kid`
 and returns false for any change, a wrong algorithm, a malformed signature or an unknown key.
 Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
-`SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
+`SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`, or `text: {en, fr, es}` for a
+wording with a Spanish text, so a wording without one keeps the digest it had before Spanish.
 
 ## 13. Intake values
 
@@ -352,19 +361,20 @@ Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording 
 | `text` | trimmed, non-empty, at most `maxLength` (500), no card number, and matching `pattern` whole if set (`no_match`) | string |
 | `number` | `-?\d+(\.\d+)?`, from `min` to `max` if set (`below_min`, `above_max`) | number |
 | `date` | `YYYY-MM-DD` naming a real day, from `min` to `max` if set | string |
-| `yes_no` | `yes`, `y`, `oui` / `no`, `n`, `non`, any case | boolean |
+| `yes_no` | `yes`, `y`, `oui`, `sí`, `si` / `no`, `n`, `non`, any case, in every locale | boolean |
 
 Forms live in Dossier's settings: a `formId` (lower case, digits, `-`, `_`), a `version` and
-fields with snake_case unique keys, a known type and an English and a French label.
+fields with snake_case unique keys, a known type and an English and a French label, plus an
+optional Spanish one (`label: {en, fr, es?}`; `es` non-empty when given, no other key).
 `validateConfig` refuses fields marked `sensitive` until field encryption exists (FIL-2).
 
 Field rules (FIL-4), each checked by `validateConfig`, which reports every bad one:
 
 - A field has only `key`, `label`, `type`, `required`, `sensitive`, `maxLength`, `showIf`, `min`,
   `max` and `pattern`.
-- No field's key or label (either language; case, accents and dots ignored) names a card or a
-  Social Insurance Number: the words `card`, `carte`, `cardholder`, `cvv`, `cvc`, `sin`, `nas`,
-  `social insurance` or `assurance sociale`.
+- No field's key or label (any language; case, accents and dots ignored) names a card or a
+  Social Insurance Number: the words `card`, `carte`, `tarjeta`, `cardholder`, `cvv`, `cvc`, `sin`,
+  `nas`, `social insurance`, `assurance sociale` or `seguro social`.
 - `min` and `max` only on number fields (finite numbers) and date fields (`YYYY-MM-DD` dates),
   inclusive, with `min` at most `max`.
 - `pattern` only on text fields: a regular expression of 1 to 200 characters, valid in Unicode
@@ -381,22 +391,25 @@ Only shown fields are asked: `setIntakeField` on a hidden one is refused (`preco
 Only shown fields are required, read back and filed: a value given while a field was shown stays in
 the draft but out of the record, its digest and the read-back if the field is hidden again.
 
-**Read-back** (FIL-1). `buildReadBack(form, values, locale)` builds, in English or French, what the
-host speaks before the caller confirms: an opening, one sentence per shown field with a value, in
-form order, and the fixed confirm prompt. `text` is all three, one space apart; `lines` and `prompt`
-are its parts.
+**Read-back** (FIL-1, FIL-6). `buildReadBack(form, values, locale)` builds, in English, French or
+Spanish, what the host speaks before the caller confirms: an opening, one sentence per shown field
+with a value, in form order, and the fixed confirm prompt. `text` is all three, one space apart;
+`lines` and `prompt` are its parts. Another locale is refused (`invalid_input`), and Spanish is
+refused (`precondition_failed`) for a form with any field that has no Spanish label.
 
-| Type | English | French |
-|---|---|---|
-| `text` | `Issue: Leak.` (as given; a full stop unless it ends in `.`, `!` or `?`) | `Problème : Leak.` |
-| `number` | `1,234.5`, `minus 2` (never in exponent form) | `1 234,5` (a non-breaking space), `moins 2` |
-| `date` | `Tuesday, September 1, 2026` | `le mardi 1er septembre 2026` |
-| `yes_no` | `yes` / `no` | `oui` / `non` |
-| sensitive | `Label: given, and not read aloud for your security.` | `Libellé : fourni, mais pas lu à voix haute, pour votre sécurité.` |
+| Type | English | French | Spanish (United States) |
+|---|---|---|---|
+| `text` | `Issue: Leak.` (as given; a full stop unless it ends in `.`, `!` or `?`) | `Problème : Leak.` | `Problema: Leak.` |
+| `number` | `1,234.5`, `minus 2` (never in exponent form) | `1 234,5` (a non-breaking space), `moins 2` | `1,234.5`, `menos 2` |
+| `date` | `Tuesday, September 1, 2026` | `le mardi 1er septembre 2026` | `el martes primero de septiembre de 2026`, `el jueves 29 de febrero de 2024` |
+| `yes_no` | `yes` / `no` | `oui` / `non` | `sí` / `no` |
+| sensitive | `Label: given, and not read aloud for your security.` | `Libellé : fourni, mais pas lu à voix haute, pour votre sécurité.` | `Etiqueta: se proporcionó, pero no se lee en voz alta por su seguridad.` |
 
-Opening: "Here is what will be filed." / "Voici ce que nous allons enregistrer." Prompt: "Is that
-correct? Say yes or press 1 to confirm." / "Est-ce exact? Dites oui ou appuyez sur le 1 pour
-confirmer." A sensitive field's value is never in the read-back, its text or its lines. The
+Opening: "Here is what will be filed." / "Voici ce que nous allons enregistrer." / "Esto es lo que
+vamos a registrar." Prompt: "Is that correct? Say yes or press 1 to confirm." / "Est-ce exact?
+Dites oui ou appuyez sur le 1 pour confirmer." / "¿Es correcto? Diga sí u oprima el 1 para
+confirmar." Every string code builds exists in every locale (`LOCALES`), and a parity test fails
+when one is missing or copies another locale's. A sensitive field's value is never in the read-back, its text or its lines. The
 `digest` is `SHA-256(canonicalJson({v: 1, locale, text, record}))`, where `record` is the record
 digest of the values that would be filed (section 12), so a change to any of them, a sensitive one
 included, changes it.
@@ -452,11 +465,13 @@ are reported as ignored, and a body that is not a well-formed event is `null`.
 
 ## 16. Texts
 
-Code builds every text, in the call's locale (English or French). The destination is always the
-subject's number on file. Identity link: "Your one-time identity check link: URL" / "Votre lien
-de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
-AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
-the currency's own decimals.
+Code builds every text, in the call's locale (English, French or Spanish). The destination is
+always the subject's number on file. Identity link: "Your one-time identity check link: URL" /
+"Votre lien de vérification d'identité, à usage unique : URL" / "Su enlace de verificación de
+identidad, de un solo uso: URL". Payment link: "Your secure payment link for AMOUNT: URL" /
+"Votre lien de paiement sécurisé pour AMOUNT : URL" / "Su enlace de pago seguro por AMOUNT: URL",
+with the amount formatted in the currency's own decimals, as in `en-CA`, `fr-CA` and `es-US`
+(`$1,500.50` in Spanish for US dollars).
 
 ## 17. Keypad collector
 

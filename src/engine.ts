@@ -21,7 +21,7 @@ import { hmacSha256Hex } from "./core/hash.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
 import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
-import type { AdapterName, CallDraft, CallRecord, EngineAdapters, EngineRuntime, FlowStatus, Locale } from "./core/runtime.ts";
+import { LOCALES, type AdapterName, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
 import * as dossier from "./file/dossier.ts";
@@ -173,6 +173,8 @@ export class Engine {
   /** Opens a call. With `flow`, the call runs that flow from its first step. */
   async startCall(input: { callId?: string; locale?: Locale; flow?: string } = {}): Promise<SessionState> {
     const callId = input.callId ?? this.#ids.next("call");
+    const locale = input.locale ?? "en";
+    if (!LOCALES.includes(locale)) throw new EngineError("invalid_input", "locale must be en, fr or es");
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
       const name = module.manifest.name;
@@ -181,7 +183,7 @@ export class Engine {
     const record: CallRecord = {
       v: 1,
       state: newSession(callId, this.workspaceId, this.#now()),
-      locale: input.locale ?? "en",
+      locale,
       revision: this.#config.revision,
       flow: null,
       modules,
@@ -280,7 +282,7 @@ export class Engine {
         const slice = record.modules[owner];
         if (slice === undefined) throw new EngineError("module_disabled", `${owner} was off when this call started`);
         if (!this.isEnabled(owner)) throw new EngineError("module_disabled", `the ${owner} module is turned off`);
-        const reason = module.cannotRunStep?.(step, slice) ?? null;
+        const reason = module.cannotRunStep?.(step, slice, record.locale) ?? null;
         if (reason !== null) throw new EngineError("precondition_failed", `${step.type} cannot run on this call: ${reason}`);
       }
       const first = steps[0]!;

@@ -6,10 +6,10 @@ import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import { hexDigestsEqual } from "../core/hash.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
-import type { EngineRuntime } from "../core/runtime.ts";
+import type { EngineRuntime, Locale } from "../core/runtime.ts";
 import type { SessionState } from "../core/session.ts";
 import { isDenseArray, isObject, unknownKeys } from "../core/shape.ts";
-import { intakeDigest, isShown, missingRequired, normaliseFieldValue, shownValues, validateForm, type FieldValue, type IntakeForm, type NormaliseResult } from "./intake.ts";
+import { formSpeaks, intakeDigest, isShown, missingRequired, normaliseFieldValue, shownValues, validateForm, type FieldValue, type IntakeForm, type NormaliseResult } from "./intake.ts";
 import { buildReadBack, type ReadBack } from "./readback.ts";
 
 export const DOSSIER = "dossier";
@@ -95,8 +95,10 @@ export const dossierModule: AssuranceModule = {
     return (s as unknown as DossierSlice).records.length;
   },
 
-  cannotRunStep(step: FlowStep, s: JsonValue): string | null {
-    return (s as unknown as DossierSlice).forms.some((f) => f.formId === step.form) ? null : `the call has no form ${String(step.form)}`;
+  cannotRunStep(step: FlowStep, s: JsonValue, locale: Locale): string | null {
+    const form = (s as unknown as DossierSlice).forms.find((f) => f.formId === step.form);
+    if (form === undefined) return `the call has no form ${String(step.form)}`;
+    return formSpeaks(form, locale) ? null : `form ${form.formId} has no ${locale} label for every field`;
   },
 
   blocksEnd(s: JsonValue): string | null {
@@ -123,6 +125,8 @@ export async function startIntake(rt: EngineRuntime, callId: string, formId: str
     if (chosen === undefined) throw new EngineError("invalid_input", `no form ${formId} in this call's dossier settings`);
     const step = stepOfType<DossierCollectStep>(draft.record, "dossier.collect");
     if (step !== null && step.form !== formId) throw new EngineError("precondition_failed", `the flow step collects ${step.form}`);
+    // Refused before the caller answers anything that could not be read back to them.
+    if (!formSpeaks(chosen, draft.record.locale)) throw new EngineError("precondition_failed", `form ${formId} has no ${draft.record.locale} label for every field`);
     if (!rt.authorized(draft.record, "intake.file")) throw new EngineError("scope_denied", "the grant does not cover intake.file");
     draft.apply({ type: "intake_started" });
     s.intake = { form: structuredClone(chosen), values: {}, filing: null };
