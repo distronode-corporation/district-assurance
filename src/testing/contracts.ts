@@ -16,6 +16,13 @@ export interface ContractCase {
   run(): Promise<void>;
 }
 
+/**
+ * Keys that differ only in a lone UTF-16 surrogate, and the replacement character a store that
+ * encodes keys as UTF-8 turns each of them into (SQLite with a TEXT key does). A JavaScript string
+ * can hold either, so a store must keep all three apart. Escaped here: the files stay ASCII.
+ */
+const SURROGATE_KEYS = ["k\ud800", "k\udc00", "k\udbff", "k\ufffd"] as const;
+
 /** The SessionStore contract (INT-3). `factory` returns a new, empty store for each case. */
 export function sessionStoreContract(factory: () => SessionStore | Promise<SessionStore>): ContractCase[] {
   const cases: Array<[string, (store: SessionStore) => Promise<void>]> = [
@@ -81,6 +88,23 @@ export function sessionStoreContract(factory: () => SessionStore | Promise<Sessi
         assert.deepEqual((await store.get("north/branch", "c1"))!.record, { n: 2 });
         assert.equal(await store.bindRef("a", "b/c", "c1"), true);
         assert.equal(await store.resolveRef("a/b", "c"), null);
+      },
+    ],
+    [
+      "keeps keys that differ only in a lone UTF-16 surrogate apart: workspaces, calls and references",
+      async (store) => {
+        for (const [i, key] of SURROGATE_KEYS.entries()) {
+          assert.equal(await store.create("w", key, { n: i }), true, `call ${JSON.stringify(key)}`);
+          assert.equal(await store.create(key, "c1", { n: i }), true, `workspace ${JSON.stringify(key)}`);
+          assert.equal(await store.bindRef("w", key, `call_${i}`), true, `reference ${JSON.stringify(key)}`);
+        }
+        for (const [i, key] of SURROGATE_KEYS.entries()) {
+          assert.deepEqual(await store.get("w", key), { version: 1, record: { n: i } });
+          assert.deepEqual((await store.get(key, "c1"))!.record, { n: i });
+          assert.equal(await store.resolveRef("w", key), `call_${i}`);
+        }
+        assert.deepEqual(await store.compareAndSet("w", SURROGATE_KEYS[0], 1, { n: 9 }), { ok: true, version: 2 });
+        assert.deepEqual(await store.get("w", SURROGATE_KEYS[1]), { version: 1, record: { n: 1 } }, "a write to one never lands on another");
       },
     ],
     [
@@ -195,6 +219,20 @@ export function auditLedgerContract(factory: () => AuditLedger | Promise<AuditLe
       },
     ],
     [
+      "keeps eventIds that differ only in a lone UTF-16 surrogate apart",
+      async (ledger) => {
+        const appended: AuditEntry[] = [];
+        for (const [i, eventId] of SURROGATE_KEYS.entries()) appended.push(await ledger.append(contractEntry(i + 1, { eventId })));
+        assert.deepEqual(
+          appended.map((e) => [e.seq, e.eventId]),
+          SURROGATE_KEYS.map((eventId, i) => [i + 1, eventId]),
+          "each appends, and keeps its eventId as given",
+        );
+        for (const [i, eventId] of SURROGATE_KEYS.entries()) assert.deepEqual(await ledger.append(contractEntry(9, { eventId })), appended[i], "and is appended once");
+        assert.deepEqual(await ledger.list(), appended);
+      },
+    ],
+    [
       "refuses a detail that carries a card number, and stores nothing",
       async (ledger) => {
         await assert.rejects(
@@ -269,6 +307,8 @@ export function recordStoreContract(factory: (subjects: SeededSubject[]) => Reco
     { workspaceId: "w", subject: contractSubject("2".repeat(64)) },
     { workspaceId: "north", subject: contractSubject("branch/3") },
     { workspaceId: "north/branch", subject: contractSubject("3", { phoneOnFile: "+15555550199" }) },
+    ...SURROGATE_KEYS.map((key, i) => ({ workspaceId: "w", subject: contractSubject(key, { phoneOnFile: `+1555555011${i}` }) })),
+    ...SURROGATE_KEYS.map((key, i) => ({ workspaceId: key, subject: contractSubject("4", { phoneOnFile: `+1555555012${i}` }) })),
   ];
   const cases: Array<[string, (store: RecordStore) => Promise<void>]> = [
     [
@@ -301,6 +341,22 @@ export function recordStoreContract(factory: (subjects: SeededSubject[]) => Reco
         assert.deepEqual(await store.getIntakeRecord("north", "branch/r1"), contractRecord("north", "branch/r1"));
         assert.deepEqual(await store.getIntakeRecord("north/branch", "r1"), contractRecord("north/branch", "r1"));
         assert.equal(await store.getIntakeRecord("w", "branch/r1"), null);
+      },
+    ],
+    [
+      "keeps keys that differ only in a lone UTF-16 surrogate apart: subjects, records and workspaces",
+      async (store) => {
+        for (const [i, key] of SURROGATE_KEYS.entries()) {
+          assert.equal((await store.getSubject("w", key))!.phoneOnFile, `+1555555011${i}`, `subject ${JSON.stringify(key)}`);
+          assert.equal((await store.getSubject(key, "4"))!.phoneOnFile, `+1555555012${i}`, `workspace ${JSON.stringify(key)}`);
+          await store.putIntakeRecord({ ...contractRecord("w", key), callId: `call_${i}` });
+          await store.putIntakeRecord({ ...contractRecord(key, "r1"), callId: `call_${i}` });
+        }
+        for (const [i, key] of SURROGATE_KEYS.entries()) {
+          assert.equal((await store.getIntakeRecord("w", key))!.callId, `call_${i}`, `record ${JSON.stringify(key)}`);
+          assert.equal((await store.getIntakeRecord(key, "r1"))!.callId, `call_${i}`, `workspace ${JSON.stringify(key)}`);
+        }
+        assert.equal(await store.getSubject("w", "k"), null);
       },
     ],
     [

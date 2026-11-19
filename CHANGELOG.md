@@ -31,7 +31,8 @@ All notable changes to this project are documented here. The format follows
   refused.
 - `auditLedgerContract` and `recordStoreContract` in `district-assurance/testing` (PRV-5), which
   the memory adapters pass; `MemoryRecordStore` now keys by JSON tuples, so two workspace and id
-  pairs can no longer share a key.
+  pairs can no longer share a key. The session, ledger and record contracts keep keys that differ
+  only in a lone UTF-16 surrogate apart, which a store encoding keys as UTF-8 would collapse.
 
 ### Changed
 

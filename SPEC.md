@@ -68,7 +68,9 @@ then throws `EngineError("conflict")`. Ledger entries and listener events for a 
 only after its write succeeded. Steps with side effects use two writes or more: an attempt is
 counted before it is judged; a photo ID link and a payment link are reserved before the provider
 is called. `sessionStoreContract(factory)` in `district-assurance/testing` is the suite a store
-must pass; `MemorySessionStore` is the reference.
+must pass; `MemorySessionStore` is the reference. Every keyed store's contract (session, ledger,
+record) includes keys that differ only in a lone UTF-16 surrogate, and the replacement character
+U+FFFD: a store that encodes keys as UTF-8 (SQLite with a TEXT key) collapses them, and must not.
 
 ## 3. Modules
 
@@ -303,11 +305,12 @@ a card number.
 it starts at seq 0 and the genesis hash, appends one seq at a time with each entry exactly as
 `chainEntry` builds it, `list(fromSeq)` returns entries in order as a slice that continues the
 chain, entries are copied in and out and never change once appended, an `eventId` is appended
-once (a second append, concurrent or not, returns the first entry), a detail carrying a card number
+once (a second append, concurrent or not, returns the first entry, and eventIds that differ only
+in a lone surrogate are distinct), a detail carrying a card number
 is refused with nothing stored, and concurrent appends stay one valid chain.
 `recordStoreContract(factory)` is the suite a `RecordStore` must pass: subjects (seeded by the
 factory, since the engine only reads them) and intake records are copied in and out, workspaces
-never share a key, and `putIntakeRecord` is idempotent by `recordId`, also concurrently.
+never share a key, keys that differ only in a lone surrogate stay apart, and `putIntakeRecord` is idempotent by `recordId`, also concurrently.
 `MemoryAuditLedger` and `MemoryRecordStore` pass both.
 
 ## 11. Canonical JSON
