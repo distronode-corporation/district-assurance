@@ -228,7 +228,9 @@ adapters or another part of the document (installed modules and factors, floors,
 and modes, the form or wording a step names, unique ids, step order), so a config that passes it
 can still be refused; `validateConfig` stays the authority. `test/config-schema.test.ts` checks it
 against the TypeScript types (at type-check time) and against `validateConfig` (a corpus of good
-and bad configs, and a seeded sweep of near-miss configs).
+and bad configs, both sides of the edge of every pattern and range the schema copies from a
+validator, and a seeded sweep of near-miss configs), and that the package's exports resolve the
+published name to the file.
 
 ## 8. Flow execution
 

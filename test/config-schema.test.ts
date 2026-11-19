@@ -397,6 +397,9 @@ describe("the FlowConfig schema: the document", () => {
     const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
     assert.ok(pkg.files.includes("schema/"));
     assert.equal(pkg.exports["./schema/flow-config.v1.json"], "./schema/flow-config.v1.json");
+    // The exports map resolves the published name to this very file, and nothing else under schema/.
+    assert.equal(import.meta.resolve("district-assurance/schema/flow-config.v1.json"), SCHEMA_URL.href);
+    assert.throws(() => import.meta.resolve("district-assurance/schema/"), /ERR_PACKAGE_PATH_NOT_EXPORTED|not exported/i);
   });
 
   it("describes every field of the TypeScript types, and no other", () => {
@@ -452,4 +455,74 @@ describe("the FlowConfig schema against validateConfig", () => {
     assert.ok(accepted >= 200, `only ${accepted} accepted configs`);
     assert.ok(refusedByBoth >= 1000, `only ${refusedByBoth} configs refused by both`);
   });
+});
+
+// ---- boundaries: the schema's patterns and ranges, held to validateConfig's own ------------
+
+/**
+ * Each pattern and range the schema copies from a validator, tried on both sides of its edge. The
+ * schema and validateConfig must answer alike, so a change to either one alone fails here: the
+ * sweep above is random and rarely lands on an edge.
+ */
+const rename = (c: { [key: string]: any }, from: string, to: string) => {
+  c.flows[to] = c.flows[from];
+  delete c.flows[from];
+};
+const formId = (c: { [key: string]: any }, id: string) => {
+  c.modules.dossier.settings.forms[0].formId = id;
+  c.flows.deposit.steps[1].form = id;
+};
+const purpose = (c: { [key: string]: any }, p: string) => {
+  c.modules.trace.settings.wordings[0].purpose = p;
+  c.flows.deposit.steps[3].purpose = p;
+};
+const EDGES: ReadonlyArray<readonly [name: string, accepted: boolean, patch: Patch]> = [
+  ["a revision of 64 characters", true, (c) => (c.revision = "r".repeat(64))],
+  ["a revision of 65 characters", false, (c) => (c.revision = "r".repeat(65))],
+  ["a revision with every allowed character", true, (c) => (c.revision = "aZ09._:-")],
+  ["a revision with a slash", false, (c) => (c.revision = "a/b")],
+  ["an empty revision", false, (c) => (c.revision = "")],
+  ["a flow name of 64 characters", true, (c) => rename(c, "deposit", `d${"-".repeat(63)}`)],
+  ["a flow name of 65 characters", false, (c) => rename(c, "deposit", `d${"-".repeat(64)}`)],
+  ["a flow name that starts with a digit", false, (c) => rename(c, "deposit", "1deposit")],
+  ["a form id of 64 characters", true, (c) => formId(c, `m${"_".repeat(63)}`)],
+  ["a form id of 65 characters", false, (c) => formId(c, `m${"_".repeat(64)}`)],
+  ["a form id with a hyphen", true, (c) => formId(c, "repair-form")],
+  ["a field key of 64 characters", true, (c) => (c.modules.dossier.settings.forms[0].fields[0].key = `k${"_".repeat(63)}`)],
+  ["a field key of 65 characters", false, (c) => (c.modules.dossier.settings.forms[0].fields[0].key = `k${"_".repeat(64)}`)],
+  ["a wording purpose of 64 characters", true, (c) => purpose(c, `p${"_".repeat(63)}`)],
+  ["a wording purpose of 65 characters", false, (c) => purpose(c, `p${"_".repeat(64)}`)],
+  ["one keypad attempt", true, (c) => (c.policy.maxKeypadAttemptsPerCall = 1)],
+  ["no keypad attempt", false, (c) => (c.policy.maxKeypadAttemptsPerCall = 0)],
+  ["a grant of 1 second", true, (c) => (c.modules.badge.settings.grantTtlSeconds = 1)],
+  ["a grant of 3600 seconds", true, (c) => (c.modules.badge.settings.grantTtlSeconds = 3600)],
+  ["a grant of 3601 seconds", false, (c) => (c.modules.badge.settings.grantTtlSeconds = 3601)],
+  ["a PIN of 12 digits", true, (c) => Object.assign(c.modules.badge.settings.pin, { minDigits: 12, maxDigits: 12 })],
+  ["a PIN of 13 digits", false, (c) => Object.assign(c.modules.badge.settings.pin, { minDigits: 12, maxDigits: 13 })],
+  ["five PIN attempts", true, (c) => (c.modules.badge.settings.pin.maxAttemptsPerCall = 5)],
+  ["six PIN attempts", false, (c) => (c.modules.badge.settings.pin.maxAttemptsPerCall = 6)],
+  ["a payment limit of 1,000,000", true, (c) => (c.modules.paylink.settings.maxAmountMinor = 1_000_000)],
+  ["a payment limit of 0", false, (c) => (c.modules.paylink.settings.maxAmountMinor = 0)],
+  ["an amount of 1", true, (c) => (c.flows.deposit.steps[2].amountMinor = 1)],
+  ["a description of 1 character", true, (c) => (c.flows.deposit.steps[2].description = "x")],
+  ["a description of 200 characters", true, (c) => (c.flows.deposit.steps[2].description = "x".repeat(200))],
+  ["a description of 200 characters with spaces inside", true, (c) => (c.flows.deposit.steps[2].description = `x${" ".repeat(198)}x`)],
+  ["a description with a line break inside", true, (c) => (c.flows.deposit.steps[2].description = "Repair\ndeposit")],
+  ["a currency of 2 letters", false, (c) => (c.flows.deposit.steps[2].currency = "ca")],
+  ["a SIM swap window of half an hour", true, (c) => (c.policy.simSwapWindowHours = 0.5)],
+  ["an empty policy version", false, (c) => (c.policy.version = "")],
+  ["an empty form version", true, (c) => (c.modules.dossier.settings.forms[0].version = "")],
+  ["an empty wording version", false, (c) => (c.modules.trace.settings.wordings[0].version = "")],
+  ["a flow summary that is not a string", false, (c) => (c.flows.deposit.summary = 1)],
+];
+
+describe("the FlowConfig schema at the edges of each pattern and range", () => {
+  for (const [name, accepted, patch] of EDGES) {
+    it(`${accepted ? "accepts" : "refuses"}, as validateConfig does: ${name}`, () => {
+      const config = json(demoConfig());
+      patch(config);
+      assert.equal(validateConfig(config, registry()).length === 0, accepted, "validateConfig");
+      assert.equal(passes(config).length === 0, accepted, "the schema");
+    });
+  }
 });
