@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   browser against `/.well-known/receipt-keys.json`. Plain HTML, CSS and JavaScript, a fixed file
   allow-list, a strict CSP, no new dependency. The demo's script moves to `script.ts`, shared by
   `npm run demo` and the UI.
+- `forwardingFor(state)` (INT-2): the single place a host asks whether it may forward the
+  transcript, audio to speech-to-text, audio to the model and listen-in; all held while `sensitive`
+  is set and after the call ends.
 
 ### Changed
 

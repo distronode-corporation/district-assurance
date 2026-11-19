@@ -147,7 +147,10 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
 ## Left to the host
 
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
-  speech-to-text and the model while `sensitive` is set.
+  speech-to-text and the model while `sensitive` is set. The engine answers what may be forwarded
+  in one place, `forwardingFor(state)`, which holds the transcript, both audio paths and listen-in
+  together while `sensitive` is set and after the call ends (tested); acting on that answer on
+  every path, and forwarding nothing when the state cannot be read, is the host's.
 - Keeping the knowledge key and the receipt signing key in a key store.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
   guarantees (`sessionStoreContract` today; PRV-5 for the others).

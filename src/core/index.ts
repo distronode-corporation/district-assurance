@@ -5,6 +5,7 @@ export * from "./config.ts";
 export * from "./errors.ts";
 export * from "./events.ts";
 export * from "./flow.ts";
+export * from "./forwarding.ts";
 export * from "./hash.ts";
 export * from "./module.ts";
 export * from "./policy.ts";
