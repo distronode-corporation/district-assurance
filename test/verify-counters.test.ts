@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import type { AttemptCounterKey, AttemptCounters } from "../src/core/adapters.ts";
+import { EngineError } from "../src/core/errors.ts";
 import { defaultConfig } from "../src/modules.ts";
 import { badgeModule } from "../src/verify/badge.ts";
 import { DEFAULT_LOCKOUT, counterKeys, lockState, lockoutOf, numberKeyFor, type Lockout } from "../src/verify/counters.ts";
@@ -145,6 +146,9 @@ describe("the counters adapter's shape (iMac hostile pass on 607b324)", () => {
     const store = { get: legacy.get.bind(legacy), recordFailure: legacy.recordFailure.bind(legacy), reset: legacy.reset.bind(legacy) };
     assert.throws(() => setup({ adapters: { counters: store as unknown as AttemptCounters } }), (e: unknown) => e instanceof Error && /counters adapter is missing removeFailure/.test(e.message));
     assert.throws(() => setup({ adapters: { counters: {} as unknown as AttemptCounters } }), /missing get, recordFailure, removeFailure, reset/);
+    for (const counters of [null, 7, "counters"]) {
+      assert.throws(() => setup({ adapters: { counters: counters as unknown as AttemptCounters } }), (e: unknown) => e instanceof EngineError && e.code === "invalid_input" && /missing get/.test(e.message), String(counters));
+    }
     assert.equal(setup({ adapters: { counters: new MemoryAttemptCounters() } }).counters instanceof MemoryAttemptCounters, true);
   });
 });
