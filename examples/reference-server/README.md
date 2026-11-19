@@ -98,7 +98,7 @@ as its own adapter.
 
 | Signal | Twilio Lookup v2 (`TwilioLookupSignals`) | Telnyx Number Lookup (`TelnyxNumberLookupSignals`) |
 |---|---|---|
-| SIM swap (`lastSimSwapHoursAgo`) | yes, the `sim_swap` field; needs Twilio's approval and the carrier's, per country | no: always null (none known) |
+| SIM swap (`simSwapChecked`, `lastSimSwapHoursAgo`) | yes, the `sim_swap` field (`simSwapChecked: true`); needs Twilio's approval and the carrier's, per country | no: `simSwapChecked: false`, hours null, so a texted code never counts on this report alone |
 | Porting (`lastPortHoursAgo`) | not used: always null | yes, `portability.ported_status` and `ported_date`; no approval |
 | Identity match (`identityMatch`) | yes, the `identity_match` field, when the host gives the identity on file; needs Twilio's approval, per country | no: always `unavailable` |
 | Carrier | not used | yes, name and line type, from `lookup()`, outside the report |
@@ -111,8 +111,9 @@ How the answers are read:
   `swapped_period` is the window Twilio looked at, not the age of a change, so it is never read as
   one when the change fell inside it. Anything else is no answer.
 - **Identity match:** `match` when `summary_score` is at least `identityMinScore` (1 to 100, 80
-  by default; anything else throws when the adapter is built), else `no_match`. The identity comes from the host's `identityFor(phoneNumber)`;
-  without it only SIM Swap is asked. Twilio takes the identity in the query string.
+  by default; anything else throws when the adapter is built), else `no_match`. The identity
+  comes from the host's `identityFor(phoneNumber)`; without it only SIM Swap is asked. Twilio
+  takes the identity in the query string.
 - **Porting:** `N` is none known; `Y` gives the hours from the last moment the port date ends
   anywhere (Telnyx gives a day, with no time or zone, so noon UTC the next day), or 0 without a
   date; anything else is no answer.
@@ -132,9 +133,10 @@ fake server), so credentials are never sent in clear text. Any other origin thro
 is built, before a credential is used, and so does a `timeoutMs` that is not a whole number from 1
 to 60000. A number on file that is not a string is not E.164.
 
-Telnyx alone reports no SIM change, so its `checked: true` report has no SIM swap known, which the
-policy reads as no recent SIM change. Before texted codes (VER-2) go live, take SIM swap from
-Twilio, not from Telnyx alone.
+Telnyx alone reports no SIM change, so its `checked: true` report says `simSwapChecked: false`, and
+the policy never counts a texted code on it, whatever `trustTextCodeWithoutCarrierCheck` says. Its
+port signal stays in the report. A host that turns texted codes on (VER-2) takes SIM swap from
+Twilio.
 
 Credentials come from the environment only:
 

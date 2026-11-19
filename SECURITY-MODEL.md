@@ -58,9 +58,10 @@ them apart.
 ### SIM swap and port-out
 
 An attacker who took over the number on file receives the texted code or link. **Controls:** a
-texted code counts only when the carrier answered and reported no SIM change or port inside the
-policy window (72 hours by default); without a carrier answer it does not count unless the policy
-says so (tested). A texted code is never a factor alone, and level 3 requires a photo ID plus
+texted code counts only when the carrier answered, its answer covered SIM changes
+(`simSwapChecked`), and it reported no SIM change or port inside the policy window (72 hours by
+default); an answer that did not cover SIM changes never makes one count, whatever the policy
+says, and without a carrier answer it does not count unless the policy says so (tested). A texted code is never a factor alone, and level 3 requires a photo ID plus
 selfie, which a stolen SIM alone does not pass. Contact and payout scopes default to level 3.
 The reference carrier adapters (Twilio Lookup, Telnyx Number Lookup) fail closed: a timeout, an
 error, a country outside their allow-list, a feature the account is not approved for or an answer
@@ -69,9 +70,9 @@ without a usable time counts as just now, Twilio's `swapped_period` (the window 
 only a lower bound when it reports no change inside it, and hours are rounded down (tested against
 replayed responses). They refuse a plain-http `baseUrl` other than loopback, so credentials never
 travel in clear text. Their failure reports carry the vendor's status and error code, never the number or
-the identity on file. **Gap:** Telnyx reports no SIM change, so a Telnyx report says `checked` with
-no SIM swap known; before texted codes ship (VER-2), a host must take the SIM swap signal from
-Twilio, not Telnyx alone. Twilio Identity Match sends the identity on file to Twilio, in the
+the identity on file. Telnyx reports no SIM change, so its report says `simSwapChecked: false` and a
+texted code never counts on it (tested); a host that turns texted codes on (VER-2) takes the SIM
+swap signal from Twilio. Twilio Identity Match sends the identity on file to Twilio, in the
 request's query string.
 
 ### Text flooding and SMS pumping

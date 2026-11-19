@@ -31,6 +31,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Breaking: `CarrierSignalReport` has a required `simSwapChecked`, true only when the carrier was
+  asked about SIM changes and answered, and `textCodeTrusted` never trusts a texted code on a
+  report without it, whatever the policy says (VER-4). The Telnyx adapter answers false; every
+  `CarrierSignals` adapter has to set it.
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

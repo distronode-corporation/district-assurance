@@ -283,6 +283,7 @@ The second factor for level 2. Codes are also the easiest way to abuse a phone l
 - `sendTextCode(callId)` sends a 6-digit code to the number on file only after the keypad checks matched; the code is stored as an HMAC, expires after 10 minutes, allows 5 tries, is single-use and bound to the call.
 - Limits: 5 codes per subject per 24 hours, 60 seconds between sends, a per-calling-number limit, and a destination country allow-list in the policy; a refused send gives the same spoken result as a sent one.
 - `checkTextCode(callId, code)` records a `text_code` factor; the policy's carrier rule decides whether it counts (already implemented).
+- A texted code counts only on a carrier report with `simSwapChecked: true` (already implemented, VER-4): a carrier that cannot report SIM changes, Telnyx alone for example, never makes one count, whatever `trustTextCodeWithoutCarrierCheck` says; the docs tell a host to take SIM swap from Twilio Lookup.
 - The texts are code-built in English and French; `text_code` can be turned on in Badge's settings, and `Engine.sendTextCode` stops throwing.
 
 *Files:* `src/verify/text-code.ts` (new), `src/verify/later.ts`, `src/verify/factors.ts`, `src/verify/badge.ts`, `src/core/adapters.ts` (a CodeStore interface), `src/testing/fakes.ts`  

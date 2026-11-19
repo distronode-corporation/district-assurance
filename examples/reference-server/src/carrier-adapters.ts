@@ -90,7 +90,7 @@ type Env = Readonly<Record<string, string | undefined>>;
 type Json = Record<string, unknown>;
 type Fetched = { ok: true; body: Json } | { ok: false; failure: Omit<CarrierLookupFailure, "vendor"> };
 
-const UNCHECKED: CarrierSignalReport = { checked: false, lastSimSwapHoursAgo: null, lastPortHoursAgo: null, identityMatch: "unavailable" };
+const UNCHECKED: CarrierSignalReport = { checked: false, simSwapChecked: false, lastSimSwapHoursAgo: null, lastPortHoursAgo: null, identityMatch: "unavailable" };
 const E164 = /^\+[1-9]\d{6,14}$/;
 const HOUR_MS = 3_600_000;
 const DEFAULT_TIMEOUT_MS = 3000;
@@ -282,7 +282,7 @@ export class TwilioLookupSignals extends LookupAdapter {
       if (typeof matched !== "string") return this.unavailable(matched);
       identityMatch = matched;
     }
-    return { checked: true, lastSimSwapHoursAgo: swap, lastPortHoursAgo: null, identityMatch };
+    return { checked: true, simSwapChecked: true, lastSimSwapHoursAgo: swap, lastPortHoursAgo: null, identityMatch };
   }
 
   /**
@@ -319,7 +319,8 @@ export class TwilioLookupSignals extends LookupAdapter {
 
 /**
  * Telnyx Number Lookup (`type=carrier`): porting status and date, and the carrier. Telnyx reports
- * no SIM change and no identity match, so those are always null and `unavailable`.
+ * no SIM change and no identity match, so `simSwapChecked` is false (a texted code never counts on
+ * this report alone), the SIM swap hours null and the identity match `unavailable`.
  */
 export class TelnyxNumberLookupSignals extends LookupAdapter {
   protected readonly vendor = "telnyx";
@@ -349,7 +350,7 @@ export class TelnyxNumberLookupSignals extends LookupAdapter {
     const port = this.#portHours(data.portability);
     if (typeof port !== "number" && port !== null) return { report: this.unavailable(port), carrier: null };
     return {
-      report: { checked: true, lastSimSwapHoursAgo: null, lastPortHoursAgo: port, identityMatch: "unavailable" },
+      report: { checked: true, simSwapChecked: false, lastSimSwapHoursAgo: null, lastPortHoursAgo: port, identityMatch: "unavailable" },
       carrier: carrierOf(data.carrier),
     };
   }

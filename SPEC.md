@@ -126,8 +126,8 @@ It checks every part in one pass: a malformed part is reported and the others ar
 The default policy: level 1 is keypad knowledge; level 2 is keypad plus a trusted texted code, or
 keypad plus carrier identity match, or a PIN plus a texted code; level 3 is keypad plus photo ID.
 Scopes: `status.read` 1, `intake.file` 1, `payment.request` 2, `contact.update` 3, `payout.update`
-3. Two keypad attempts per call. A texted code counts only when the carrier answered and reported
-no SIM change or port in the last 72 hours.
+3. Two keypad attempts per call. A texted code counts only when the carrier answered, its answer
+covered SIM changes (`simSwapChecked`), and it reported no SIM change or port in the last 72 hours.
 
 Badge's settings turn factors on (`factors`, at least one), set the grant lifetime
 (`grantTtlSeconds`, default 900, at most 3600) and, when `pin` is on, the PIN settings (section 6).
@@ -143,12 +143,16 @@ factor passed since verification last started from nothing. A plug-in's pass doe
 texts.
 
 **Carrier signals.** `checkCarrier` asks the `CarrierSignals` adapter about the number on file
-and gets a `CarrierSignalReport`: `checked`, `lastSimSwapHoursAgo`, `lastPortHoursAgo` (null when
-none is known) and `identityMatch` (`match`, `no_match`, `unavailable`). An `identityMatch` other
-than `unavailable` records the `carrier_identity_match` factor. The reference server's adapters
-(`examples/reference-server/src/carrier-adapters.ts`, VER-4) map Twilio Lookup v2 (SIM Swap, and
-Identity Match by `summary_score`, 80 by default) and Telnyx Number Lookup (porting status and
-date; no SIM swap, identity match `unavailable`). They round hours down and read a change without
+and gets a `CarrierSignalReport`: `checked`, `simSwapChecked`, `lastSimSwapHoursAgo`,
+`lastPortHoursAgo` (null when none is known) and `identityMatch` (`match`, `no_match`,
+`unavailable`). `simSwapChecked` is true only when the carrier was asked about SIM changes and
+answered; `textCodeTrusted` never trusts a texted code on a report without it (anything but `true`,
+so an adapter that leaves it out fails closed), whatever `trustTextCodeWithoutCarrierCheck` says,
+since that covers no answer at all. VER-2 keeps this rule as one of its acceptance criteria. An
+`identityMatch` other than `unavailable` records the `carrier_identity_match` factor. The reference
+server's adapters (`examples/reference-server/src/carrier-adapters.ts`, VER-4) map Twilio Lookup v2
+(SIM Swap, and Identity Match by `summary_score`, 80 by default) and Telnyx Number Lookup (porting
+status and date; `simSwapChecked: false`, identity match `unavailable`). They round hours down and read a change without
 a usable time as 0 hours ago (a Telnyx port date from the last moment that date ends anywhere,
 noon UTC the next day); a Twilio answer of no
 SIM change within its `swapped_period` window gives that window as a lower bound, and the window is

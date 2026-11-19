@@ -136,6 +136,7 @@ describe("carrier adapters", () => {
       });
       assert.deepEqual(await twilio().check({ phoneNumber: "+15555550101" }), {
         checked: true,
+        simSwapChecked: true,
         lastSimSwapHoursAgo: 5,
         lastPortHoursAgo: null,
         identityMatch: "unavailable",
@@ -155,6 +156,7 @@ describe("carrier adapters", () => {
       const adapter = twilio({ identityFor: identity });
       assert.deepEqual(await adapter.check({ phoneNumber: "+15555550102" }), {
         checked: true,
+        simSwapChecked: true,
         lastSimSwapHoursAgo: 2208,
         lastPortHoursAgo: null,
         identityMatch: "match",
@@ -172,7 +174,7 @@ describe("carrier adapters", () => {
     it("skips Identity Match when the host has no identity on file", async () => {
       replies.set("+15555550104", { body: twilioBody({ sim_swap: simSwap({ last_sim_swap_date: null, swapped_period: "PT120H", swapped_in_period: false }) }) });
       const report = await twilio({ identityFor: async () => null }).check({ phoneNumber: "+15555550104" });
-      assert.deepEqual(report, { checked: true, lastSimSwapHoursAgo: 120, lastPortHoursAgo: null, identityMatch: "unavailable" });
+      assert.deepEqual(report, { checked: true, simSwapChecked: true, lastSimSwapHoursAgo: 120, lastPortHoursAgo: null, identityMatch: "unavailable" });
       assert.equal(requests[0]!.query.get("Fields"), "sim_swap");
     });
 
@@ -274,7 +276,7 @@ describe("carrier adapters", () => {
       replies.set("+15555550201", { body: telnyxBody({ portability: portability("Y", "2025-12-30") }) });
       const adapter = telnyx();
       assert.deepEqual(await adapter.lookup({ phoneNumber: "+15555550201" }), {
-        report: { checked: true, lastSimSwapHoursAgo: null, lastPortHoursAgo: 12, identityMatch: "unavailable" },
+        report: { checked: true, simSwapChecked: false, lastSimSwapHoursAgo: null, lastPortHoursAgo: 12, identityMatch: "unavailable" },
         carrier: { name: "Example Mobile", type: "mobile" },
       });
       assert.equal(requests[0]!.path, "/v2/number_lookup/%2B15555550201");
@@ -289,7 +291,7 @@ describe("carrier adapters", () => {
       replies.set("+15555550204", { body: telnyxBody({ portability: { ported_status: "Y" } }) });
       replies.set("+15555550205", { body: telnyxBody({ portability: portability("Y", "2026-01-01") }) });
       const adapter = telnyx();
-      assert.deepEqual(await adapter.check({ phoneNumber: "+15555550202" }), { checked: true, lastSimSwapHoursAgo: null, lastPortHoursAgo: null, identityMatch: "unavailable" });
+      assert.deepEqual(await adapter.check({ phoneNumber: "+15555550202" }), { checked: true, simSwapChecked: false, lastSimSwapHoursAgo: null, lastPortHoursAgo: null, identityMatch: "unavailable" });
       assert.equal((await adapter.check({ phoneNumber: "+15555550203" })).lastPortHoursAgo, 12);
       assert.equal((await adapter.check({ phoneNumber: "+15555550204" })).lastPortHoursAgo, 0);
       assert.equal((await adapter.check({ phoneNumber: "+15555550205" })).lastPortHoursAgo, 0, "a port today is just now");
@@ -300,7 +302,10 @@ describe("carrier adapters", () => {
       replies.set("+15555550219", { body: telnyxBody({ portability: portability("Y", "2025-12-28") }) });
       const report = await telnyx({ clock: new FixedClock("2026-01-01T06:00:00Z") }).check({ phoneNumber: "+15555550219" });
       assert.equal(report.lastPortHoursAgo, 66, "from 2025-12-29T12:00Z, the end of 2025-12-28 at UTC-12");
-      assert.equal(textCodeTrusted(defaultVerificationPolicy(), report), false, "a port that may be 71 hours old is inside the 72-hour window");
+      // Telnyx alone never trusts a texted code (simSwapChecked is false), so pair its port with a
+      // SIM swap answer from elsewhere to see the port on its own.
+      const withSimSwap = { ...report, simSwapChecked: true };
+      assert.equal(textCodeTrusted(defaultVerificationPolicy(), withSimSwap), false, "a port that may be 71 hours old is inside the 72-hour window");
     });
 
     it("drops a carrier it cannot read without dropping the report", async () => {
@@ -476,6 +481,22 @@ describe("carrier adapters", () => {
       );
       const checked = (await t.ledger.list()).find((e) => e.event === "verification.carrier_checked");
       assert.deepEqual(checked?.detail, { checked: false, textCodeTrusted: false, identityMatch: "unavailable" });
+    });
+
+    it("never trusts a texted code on a Telnyx answer alone, though the number was never ported, and keeps its port", async () => {
+      replies.set(PHONE_ON_FILE, { body: telnyxBody({}) });
+      const adapter = telnyx();
+      const report = await adapter.check({ phoneNumber: PHONE_ON_FILE });
+      assert.deepEqual([report.checked, report.simSwapChecked, report.lastSimSwapHoursAgo, report.lastPortHoursAgo], [true, false, null, null]);
+      const t = setup({ adapters: { carrier: adapter } });
+      const { callId } = await t.engine.startCall();
+      await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+      await t.engine.submitKeypad(callId, { dob: DOB });
+      assert.deepEqual(await t.engine.checkCarrier(callId), { textCodeTrusted: false }, "SIM changes were never asked");
+      const checked = (await t.ledger.list()).find((e) => e.event === "verification.carrier_checked");
+      assert.deepEqual(checked?.detail, { checked: true, textCodeTrusted: false, identityMatch: "unavailable" });
+      replies.set("+15555550220", { body: telnyxBody({ portability: portability("Y", "2025-12-30") }) });
+      assert.equal((await adapter.check({ phoneNumber: "+15555550220" })).lastPortHoursAgo, 12, "the port signal stays in the report");
     });
   });
 

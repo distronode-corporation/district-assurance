@@ -16,7 +16,7 @@ import {
 
 const at = "2026-01-01T00:00:00.000Z";
 const pass = (...kinds: FactorKind[]): FactorResult[] => kinds.map((kind) => ({ kind, passed: true, at }));
-const clean: CarrierSignalReport = { checked: true, lastSimSwapHoursAgo: null, lastPortHoursAgo: null, identityMatch: "unavailable" };
+const clean: CarrierSignalReport = { checked: true, simSwapChecked: true, lastSimSwapHoursAgo: null, lastPortHoursAgo: null, identityMatch: "unavailable" };
 
 function policy(patch: Partial<VerificationPolicy> = {}): VerificationPolicy {
   return { ...defaultVerificationPolicy(), ...patch };
@@ -177,6 +177,18 @@ describe("textCodeTrusted", () => {
     assert.equal(textCodeTrusted(p, { ...clean, lastSimSwapHoursAgo: 72 }), false);
     assert.equal(textCodeTrusted(p, { ...clean, lastSimSwapHoursAgo: 73 }), true);
     assert.equal(textCodeTrusted(p, { ...clean, lastPortHoursAgo: 1 }), false);
+  });
+
+  it("never trusts a texted code on a carrier answer that did not cover SIM changes, whatever the policy", () => {
+    // Telnyx Number Lookup answers about ports only: lastSimSwapHoursAgo null there is not "none".
+    const portsOnly: CarrierSignalReport = { ...clean, simSwapChecked: false };
+    assert.equal(textCodeTrusted(p, portsOnly), false);
+    assert.equal(textCodeTrusted({ ...p, trustTextCodeWithoutCarrierCheck: true }, portsOnly), false, "the opt-in covers no answer at all, not half of one");
+    assert.equal(textCodeTrusted(p, { ...portsOnly, lastPortHoursAgo: 1000 }), false, "an old port does not stand in for SIM changes");
+    const { simSwapChecked: _omitted, ...withoutField } = clean;
+    assert.equal(textCodeTrusted(p, withoutField as CarrierSignalReport), false, "an adapter that leaves the field out fails closed");
+    assert.equal(textCodeTrusted(p, clean), true);
+    assert.equal(evaluateAssurance(p, pass("keypad_knowledge", "text_code"), portsOnly).level, 1, "the texted code is discounted");
   });
 });
 
