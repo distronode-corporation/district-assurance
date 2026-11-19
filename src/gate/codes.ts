@@ -24,6 +24,7 @@ import { randomInt } from "node:crypto";
 
 import type { AuditLedger, CodeStore, MessageSender, ReceiptSigner } from "../core/adapters.ts";
 import { systemClock, type Clock } from "../core/clock.ts";
+import type { Locale } from "../core/runtime.ts";
 import { EngineError } from "../core/errors.ts";
 import { hmacSha256Hex } from "../core/hash.ts";
 import type { Engine } from "../engine.ts";
@@ -128,6 +129,12 @@ export class MemoryAccessCodeStore implements AccessCodeStore {
     return this.#entries.size;
   }
 }
+
+/** The access code text, by the call's locale: the code and the minutes it stays valid. */
+export const ACCESS_CODE_TEXT: Record<Locale, (code: string, minutes: number) => string> = {
+  en: (code, minutes) => `Your one-time door code: ${code}. It works once, within ${minutes} min.`,
+  fr: (code, minutes) => `Votre code de porte, à usage unique : ${code}. Valable une fois, dans les ${minutes} min.`,
+};
 
 /**
  * The send limits an access code counts against, per subject: VER-2's subject limits for texted
@@ -305,10 +312,7 @@ export class AccessCodes {
       return { outcome: "refused", reason: "expired" };
     }
     const minutes = Math.max(1, Math.ceil((Date.parse(body.expiresAt) - sendAt) / 60_000));
-    const text =
-      to.locale === "fr"
-        ? `Votre code de porte, à usage unique : ${code}. Valable une fois, dans les ${minutes} min.`
-        : `Your one-time door code: ${code}. It works once, within ${minutes} min.`;
+    const text = ACCESS_CODE_TEXT[to.locale](code, minutes);
     try {
       const { messageId } = await this.#options.messages.sendText({
         to: to.phoneOnFile,
