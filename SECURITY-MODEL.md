@@ -60,10 +60,16 @@ them apart.
 ### Spoken answers
 
 A postal code or a reference said aloud is heard by speech-to-text, can reach the model and the
-transcript, and is known to more people than a keypad value. Misrecognition must never turn into a
-pass. **Controls:** `normaliseSpokenAnswer` is exact: a fixed vocabulary per language, a fixed
-format per field, and anything else is `unusable`, never a near match (a corpus of English and
-French transcripts, misrecognitions included, is tested). The value is compared like a keypad
+transcript, and is known to more people than a keypad value. A misrecognised transcript must never
+be read loosely into a pass. **Controls:** `normaliseSpokenAnswer` is exact: a fixed vocabulary per
+language, a fixed format per field, and anything else is `unusable`, never a near match (a corpus of
+English and French transcripts, misrecognitions included, is tested). **Limit:** the engine sees
+only the transcript, not what the caller said. At level 1 a spoken answer is accepted when its
+transcript is the stored value in the field's format; if speech-to-text turns a wrong answer into
+the stored value, the engine cannot tell and the factor passes. Speech-to-text accuracy is outside
+this engine and belongs to the host's speech handling. The engine offers no host control for such
+a substitution; a host that needs one must provide it (for example, reading the value back for the
+caller to confirm, or requiring another factor), or keep spoken answers off. The value is compared like a keypad
 field, as a keyed digest in constant time, and never stored or logged. A spoken answer counts on
 its own only at level 1; above it, the policy needs another factor that is not knowledge
 (tested). A spoken match does not unlock texts to the number on file (tested). A policy without

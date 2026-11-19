@@ -22,6 +22,8 @@ const CORPUS: Case[] = [
   ["en", "ca_postal_code", "k1a0b1", "K1A0B1"],
   ["en", "ca_postal_code", "K one A zero B one", "K1A0B1"],
   ["en", "ca_postal_code", "Kay one A, zero, bee one.", "K1A0B1"],
+  ["en", "ca_postal_code", "kay one ay zero bee one", "K1A0B1"],
+  ["en", "ca_postal_code", "ee six jay three tee one", "E6J3T1"],
   ["en", "ca_postal_code", "kilo one alpha zero bravo one", "K1A0B1"],
   ["en", "ca_postal_code", "K as in kilo 1 A as in alpha 0 B for bravo 1", "K1A0B1"],
   ["en", "ca_postal_code", "B as in boy, three see, eight are, two", "B3C8R2"],
