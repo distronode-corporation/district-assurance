@@ -50,7 +50,9 @@ enforces it.
 is set (`heldFor` is the reason, `keypad` or `payment`) and once the phase is `ended` (`heldFor`
 is `ended`), and all true otherwise (`heldFor` null). With no state (null or undefined, when the
 host could not read it) or a state the engine never writes (an unknown phase, a missing or unknown
-`sensitive`), all four are false and `heldFor` is `unknown`. Taint does not change forwarding. The
+`sensitive`, `paying` without the `payment` hold as a call stored before the hold could no longer be
+lifted may hold, or fields that are not the state's own), all four are false and `heldFor` is
+`unknown`. Each field is read once. Taint does not change forwarding. The
 function is pure; the host asks again after each engine call and forwards nothing when it cannot
 read the state.
 

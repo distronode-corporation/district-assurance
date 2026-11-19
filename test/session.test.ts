@@ -122,7 +122,9 @@ describe("forwardingFor", () => {
     const s = newSession("c1", "w1", at);
     assert.deepEqual(forwardingFor(s), all);
     assert.deepEqual(forwardingFor(reduce(s, SAMPLES.untrusted_content)), all);
-    for (const phase of ["open", "verifying", "filing", "paying"] as const) assert.deepEqual(forwardingFor(inPhase(phase)), all, phase);
+    for (const phase of ["open", "verifying", "filing"] as const) assert.deepEqual(forwardingFor(inPhase(phase)), all, phase);
+    // Paying without the payment hold is not a state the engine writes (see test/forwarding-hostile.test.ts).
+    assert.deepEqual(forwardingFor(inPhase("paying")), { ...none, heldFor: "unknown" });
   });
 
   it("holds the transcript, both audio paths and listen-in through keypad entry and payment, and after the call", () => {

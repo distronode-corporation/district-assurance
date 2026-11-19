@@ -38,8 +38,14 @@ export function forwardingFor(state: SessionState | null | undefined): Forwardin
 
 function heldReason(state: SessionState | null | undefined): Forwarding["heldFor"] {
   if (typeof state !== "object" || state === null) return "unknown";
-  if (state.phase === "ended") return "ended";
-  if (!LIVE_PHASES.includes(state.phase)) return "unknown";
-  if (state.sensitive === null) return null;
-  return REASONS.includes(state.sensitive) ? state.sensitive : "unknown";
+  // Each field read once, and only as the state's own: the answer rests on the values it judged.
+  const phase: unknown = Object.hasOwn(state, "phase") ? state.phase : undefined;
+  const sensitive: unknown = Object.hasOwn(state, "sensitive") ? state.sensitive : undefined;
+  if (phase === "ended") return "ended";
+  if (!LIVE_PHASES.includes(phase)) return "unknown";
+  // A payment always holds: a paying call without the hold (a call stored before the hold could no
+  // longer be lifted) is not a state the engine writes, so it fails closed.
+  if (phase === "paying") return sensitive === "payment" ? "payment" : "unknown";
+  if (sensitive === null) return null;
+  return REASONS.includes(sensitive) ? (sensitive as SensitiveReason) : "unknown";
 }
