@@ -104,6 +104,11 @@ export const dossierModule: AssuranceModule = {
     return (s as unknown as DossierSlice).intake?.filing != null ? "a record is being filed; confirm it first" : null;
   },
 
+  /** An open draft is dropped when the call ends, so its sensitive values never outlive the call in the clear. */
+  onEnd(s: JsonValue): JsonValue {
+    return { ...(s as unknown as DossierSlice), intake: null } as unknown as JsonValue;
+  },
+
   stepStatus(step: FlowStep, view: StepView): StepStatus {
     const filed = (view.slice as unknown as DossierSlice).records.slice(view.mark as number);
     return filed.some((r) => r.formId === step.form) ? "complete" : "pending";
@@ -175,7 +180,16 @@ async function sealed(rt: EngineRuntime, record: IntakeRecord, form: IntakeForm)
   const cipher: FieldCipher | undefined = rt.adapter("fieldCipher");
   if (cipher === undefined) throw new EngineError("precondition_failed", "a sensitive field needs the fieldCipher adapter, which the engine does not have");
   const values = { ...record.values };
-  for (const field of keys) values[field] = await cipher.encrypt(String(values[field]), { workspaceId: record.workspaceId, recordId: record.recordId, field });
+  for (const field of keys) {
+    const plain = String(values[field]);
+    const sealedValue: unknown = await cipher.encrypt(plain, { workspaceId: record.workspaceId, recordId: record.recordId, field });
+    // Fail closed on a cipher that answers with nothing, or with the value itself: the record is not
+    // stored and the reservation waits. The message names the field, never the value.
+    if (typeof sealedValue !== "string" || sealedValue === "" || sealedValue === plain) {
+      throw new EngineError("precondition_failed", `the fieldCipher returned no ciphertext for ${field}`);
+    }
+    values[field] = sealedValue;
+  }
   return { ...record, values };
 }
 
@@ -216,9 +230,9 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
   if (reserved.form === null) return reserved.record;
   // Encrypted on every attempt: a cipher may answer differently each time, and the digest does not
   // depend on it. A rejected write may still have been stored, so the reservation is kept and any
-  // retry writes this same record again (RecordStore.putIntakeRecord is idempotent by recordId).
-  // Two processes confirming at once write the same record; the first to commit files it, the
-  // other finds it filed.
+  // retry writes this record again (RecordStore.putIntakeRecord is idempotent by recordId). Two
+  // processes confirming at once write the same record, each sensitive value possibly under a
+  // different ciphertext of the same value; the first to commit files it, the other finds it filed.
   const record = await sealed(rt, reserved.record, reserved.form);
   await rt.adapter("records").putIntakeRecord(record);
   await rt.update(callId, (draft) => {

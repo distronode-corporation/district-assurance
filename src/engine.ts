@@ -387,6 +387,10 @@ export class Engine {
         const reason = slice === undefined ? null : (module.blocksEnd?.(slice) ?? null);
         if (reason !== null) throw new EngineError("precondition_failed", `the call cannot end yet: ${reason}`);
       }
+      for (const module of guards) {
+        const slice = draft.record.modules[module.manifest.name];
+        if (module.onEnd !== undefined && slice !== undefined) draft.record.modules[module.manifest.name] = module.onEnd(slice);
+      }
       draft.apply({ type: "call_ended", at: this.#now() });
       const flow = draft.record.flow;
       if (flow !== null && flow.status === "running") {

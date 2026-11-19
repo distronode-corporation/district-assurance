@@ -63,7 +63,7 @@ engine, its inputs or its answers; it hears fixed lines the host speaks on the e
 Each module is an object with a manifest and a few pure functions: `validateSettings`,
 `requiredAdapters`, `validateStep`, `initCall` (its part of a new call record), `enterStep` and
 `stepStatus` (where its current flow step stands), and optionally `stepLevel`, `stepGrants`,
-`onUntrusted` and `receiptPart`. The registry refuses a manifest whose name, steps or factors clash
+`onEnd`, `onUntrusted` and `receiptPart`. The registry refuses a manifest whose name, steps or factors clash
 with an installed module. The built-in modules' runtime functions (Badge's `submitFactor`,
 Paylink's `requestPayment` and so on) take the engine's internal runtime; hosts reach them through
 the `Engine` methods.

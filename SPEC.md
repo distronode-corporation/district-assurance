@@ -355,9 +355,11 @@ record, then, on every attempt to store it, asks `FieldCipher.encrypt(text, {wor
 recordId, field})` for each sensitive value given (a number or a yes/no as JSON writes it) and
 stores and returns the record with the ciphertext in its place; the engine never decrypts. The
 digest does not depend on the ciphertext, so it is the same when a retry encrypts again. An
-engine without a cipher (another process on the same SessionStore) refuses to file such a record
-(`precondition_failed`) and leaves it reserved. Until the record is filed or abandoned, the draft
-in the call record holds sensitive values in the clear; afterwards the call record keeps only the
+engine without a cipher (another process on the same SessionStore), or a cipher that answers with
+an empty string, a non-string or the value itself, refuses to file such a record
+(`precondition_failed`, naming the field, never the value) and leaves it reserved. Until the
+record is filed, abandoned or the call ends (Dossier's `onEnd` drops an open draft), the draft in
+the call record holds sensitive values in the clear; afterwards the call record keeps only the
 encrypted record.
 `startIntake(callId, formId)` names the form, and the draft keeps the form as it was then, so a
 config change mid-intake never changes what is filed; a call also keeps the forms (and Trace the

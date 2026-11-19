@@ -522,6 +522,34 @@ describe("Engine file", () => {
       assert.equal(stored.includes(SIN), false, "the call record, the ledger and the receipt keep no plain value");
     });
 
+    it("drops an open draft's plain values when the call ends before it is filed", async () => {
+      const t = setup({ config: withSecure(), adapters: { fieldCipher: new FakeFieldCipher() } });
+      const callId = await verifiedCall(t);
+      await t.engine.startIntake(callId, "secure");
+      await t.engine.setIntakeField(callId, "sin", SIN);
+      await t.engine.endCall(callId);
+      const stored = JSON.stringify([await t.sessions.get("ws_test", callId), await t.ledger.list()]);
+      assert.equal(stored.includes(SIN), false, "the ended call record keeps no plain value");
+      await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }));
+    });
+
+    it("refuses to file when the cipher answers with nothing or with the plain value, and names no value", async () => {
+      for (const answer of ["", SIN, undefined]) {
+        const cipher = new FakeFieldCipher();
+        cipher.encrypt = async () => answer as string;
+        const t = setup({ config: withSecure(), adapters: { fieldCipher: cipher } });
+        const callId = await verifiedCall(t);
+        await t.engine.startIntake(callId, "secure");
+        await t.engine.setIntakeField(callId, "issue", "Leak");
+        await t.engine.setIntakeField(callId, "sin", SIN);
+        await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), (e: unknown) => {
+          assert.ok(e instanceof Error && e.message.endsWith("no ciphertext for sin") && !e.message.includes(SIN), String(answer));
+          return true;
+        });
+        assert.equal(await t.records.getIntakeRecord("ws_test", "rec_1"), null, "nothing stored");
+      }
+    });
+
     it("encrypts a number as text", async () => {
       const cipher = new FakeFieldCipher();
       const t = setup({ config: withSecure(), adapters: { fieldCipher: cipher } });

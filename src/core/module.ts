@@ -91,6 +91,8 @@ export interface AssuranceModule {
   cannotRunStep?(step: FlowStep, slice: JsonValue): string | null;
   /** Why the call cannot end now (work in progress that would be lost), or null. */
   blocksEnd?(slice: JsonValue): string | null;
+  /** The call is ending (after every `blocksEnd` allowed it): drop what must not outlive the call. Returns the new slice. */
+  onEnd?(slice: JsonValue): JsonValue;
   /** Untrusted text entered the call: drop anything that relied on trust. Returns the new slice. */
   onUntrusted?(slice: JsonValue): JsonValue;
   /** What this module puts in the call's receipt (built-in modules only: `verification`, `records`, `payments`). */
