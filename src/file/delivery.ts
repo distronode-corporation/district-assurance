@@ -130,13 +130,14 @@ function retryProblem(r: DeliveryRetry): string | null {
  * same idempotency key.
  */
 export async function deliverRecord(input: DeliverRecordInput): Promise<DeliveryResult> {
-  const { destination, clock } = input;
+  // Read once: the record fetched is the one whose key and ledger entries are built.
+  const { destination, clock, workspaceId, recordId, records, delivery, ledger } = input;
   const retry: DeliveryRetry = { ...DEFAULT_DELIVERY_RETRY, ...input.retry };
   const problem = destinationProblem(destination) ?? retryProblem(retry);
   if (problem !== null) throw new EngineError("invalid_input", problem);
-  const record = await input.records.getIntakeRecord(input.workspaceId, input.recordId);
-  if (record === null) throw new EngineError("invalid_input", `no record ${input.recordId} in this workspace`);
-  const idempotencyKey = deliveryIdempotencyKey(input.workspaceId, input.recordId, destination.destinationId);
+  const record = await records.getIntakeRecord(workspaceId, recordId);
+  if (record === null) throw new EngineError("invalid_input", `no record ${recordId} in this workspace`);
+  const idempotencyKey = deliveryIdempotencyKey(workspaceId, recordId, destination.destinationId);
   const message: RecordDeliveryBody = { v: 1, type: "record.confirmed", idempotencyKey, destinationId: destination.destinationId, record };
   const body = canonicalJson(message);
   const sleep = input.sleep ?? timerSleep;
@@ -147,14 +148,14 @@ export async function deliverRecord(input: DeliverRecordInput): Promise<Delivery
       "idempotency-key": idempotencyKey,
       [DELIVERY_SIGNATURE_HEADER]: signDelivery(body, destination.secret, timestamp),
     };
-    const status = await input.delivery.post({ url: destination.url, headers, body }).then(
+    const status = await delivery.post({ url: destination.url, headers, body }).then(
       (answer) => answer.status,
       () => null,
     );
     const delivered = status !== null && status >= 200 && status < 300;
     const again = !delivered && attempt < retry.maxAttempts && (status === null || isRetryableStatus(status));
     const outcome: DeliveryOutcome = delivered ? "delivered" : again ? "retry" : "failed";
-    await input.ledger.append({
+    await ledger.append({
       callId: record.callId,
       actor: "system",
       event: "delivery.attempted",
