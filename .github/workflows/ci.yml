@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The merge queue runs the same required checks on the queued commit.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
