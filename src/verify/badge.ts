@@ -27,6 +27,7 @@ import {
   BUILT_IN_FACTORS,
   KNOWLEDGE_FACTORS,
   checkFactorPlugin,
+  snapshotFactorPlugin,
   judgeKeypad,
   judgePin,
   type BadgeSettings,
@@ -116,7 +117,9 @@ export class BadgeModule implements AssuranceModule {
 
   constructor(plugins: readonly FactorPlugin[], outside: readonly FactorPlugin[] = []) {
     const errors: string[] = [];
-    for (const plugin of plugins) {
+    for (const given of plugins) {
+      // Read once: the copy that passes the checks is the one Badge keeps and runs.
+      const plugin = snapshotFactorPlugin(given);
       const problems = checkFactorPlugin(plugin, [...FACTOR_KINDS, ...this.#plugins.keys()]);
       errors.push(...problems);
       if (problems.length === 0) this.#plugins.set(plugin.kind, plugin);

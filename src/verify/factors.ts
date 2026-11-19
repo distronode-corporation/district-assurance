@@ -9,7 +9,7 @@ import { FACTOR_KINDS, type VerificationPolicy } from "../core/policy.ts";
 import type { AdapterName, EngineRuntime } from "../core/runtime.ts";
 import { isKeypadEntry, judgeKeypadWith } from "./knowledge.ts";
 
-export { checkFactorPlugin, type FactorEntry, type FactorJudgeInput, type FactorPlugin } from "../core/module.ts";
+export { checkFactorPlugin, snapshotFactorPlugin, type FactorEntry, type FactorJudgeInput, type FactorPlugin } from "../core/module.ts";
 
 export type PinMode = "keyed_hash" | "verifier";
 

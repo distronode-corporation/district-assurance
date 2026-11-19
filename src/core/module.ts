@@ -149,6 +149,22 @@ export function checkFactorKind(kind: string): string[] {
   return errors;
 }
 
+/**
+ * A plug-in as it is when it is registered: its fields read once into a frozen copy, and its judge
+ * called on the original. What is checked is what runs: a host that changes the object later (a
+ * higher attempt limit, another kind) changes nothing, and a getter answers once.
+ */
+export function snapshotFactorPlugin(plugin: FactorPlugin): FactorPlugin {
+  const { kind, summary, maxAttemptsPerCall, adapters, judge } = plugin;
+  return Object.freeze({
+    kind,
+    summary,
+    maxAttemptsPerCall,
+    adapters: Array.isArray(adapters) ? Object.freeze([...adapters]) : adapters,
+    judge: typeof judge === "function" ? (input: FactorJudgeInput) => judge.call(plugin, input) : judge,
+  });
+}
+
 /** Every problem with a factor plug-in, given the kinds already taken. */
 export function checkFactorPlugin(plugin: FactorPlugin, taken: readonly string[]): string[] {
   // A kind that is not a string (an object whose toString passes the pattern) would never match
@@ -177,10 +193,10 @@ const SELF_JUDGING_MODULE = "badge";
  * provides, whether or not it gives a list (only Badge judges its own). The kinds' names and
  * clashes are checked with the manifest.
  */
-export function checkFactorPlugins(module: AssuranceModule): string[] {
+export function checkFactorPlugins(module: AssuranceModule, given: readonly FactorPlugin[] | undefined = module.factorPlugins): string[] {
   const { name, provides } = module.manifest;
-  if (module.factorPlugins === undefined && name === SELF_JUDGING_MODULE) return [];
-  const plugins = module.factorPlugins ?? [];
+  if (given === undefined && name === SELF_JUDGING_MODULE) return [];
+  const plugins = given ?? [];
   const errors: string[] = [];
   const judged: string[] = [];
   for (const plugin of plugins) {
@@ -231,6 +247,8 @@ export function checkManifest(manifest: ModuleManifest, installed: readonly Assu
 export class ModuleRegistry {
   readonly adapters: ReadonlySet<string>;
   readonly #modules = new Map<string, AssuranceModule>();
+  /** The judges each module supplied, as they were checked when it was installed. */
+  readonly #judges = new Map<string, readonly FactorPlugin[]>();
 
   constructor(options: { adapters?: Iterable<string>; modules?: readonly AssuranceModule[] } = {}) {
     this.adapters = new Set(options.adapters ?? []);
@@ -239,8 +257,9 @@ export class ModuleRegistry {
 
   /** Installs a module. Refuses a bad or clashing manifest, or bad factor judges, with every problem. */
   use(module: AssuranceModule): this {
-    this.#check(module, this.list());
+    const judges = this.#check(module, this.list());
     this.#modules.set(module.manifest.name, module);
+    this.#judges.set(module.manifest.name, judges);
     return this;
   }
 
@@ -251,13 +270,18 @@ export class ModuleRegistry {
   replace(module: AssuranceModule): void {
     const name = module.manifest.name;
     if (!this.#modules.has(name)) throw new EngineError("invalid_input", `no module named ${name} is installed`);
-    this.#check(module, this.list().filter((m) => m.manifest.name !== name));
+    const judges = this.#check(module, this.list().filter((m) => m.manifest.name !== name));
     this.#modules.set(name, module);
+    this.#judges.set(name, judges);
   }
 
-  #check(module: AssuranceModule, others: readonly AssuranceModule[]): void {
-    const errors = [...checkManifest(module.manifest, others), ...checkFactorPlugins(module)];
+  /** Checks a module and returns the judges it supplies, copied once: a list changed later is never read again. */
+  #check(module: AssuranceModule, others: readonly AssuranceModule[]): readonly FactorPlugin[] {
+    const given = module.factorPlugins;
+    const judges = given === undefined ? undefined : Array.from(given, snapshotFactorPlugin);
+    const errors = [...checkManifest(module.manifest, others), ...checkFactorPlugins(module, judges)];
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+    return judges ?? [];
   }
 
   /** Uninstalls a module. The ledger's module cannot be removed. */
@@ -266,6 +290,7 @@ export class ModuleRegistry {
     if (module === undefined) throw new EngineError("invalid_input", `no module named ${name} is installed`);
     if (module.manifest.alwaysOn === true) throw new EngineError("precondition_failed", `${name} holds the audit ledger and cannot be removed`);
     this.#modules.delete(name);
+    this.#judges.delete(name);
   }
 
   get(name: string): AssuranceModule | undefined {
@@ -298,6 +323,7 @@ export class ModuleRegistry {
 
   /** The judges outside modules supply for their factors. Badge's own plug-ins are inside Badge. */
   factorPlugins(): FactorPlugin[] {
-    return this.list().flatMap((m) => [...(m.factorPlugins ?? [])]);
+    // Every installed module has its entry: use() and replace() set it with the module.
+    return this.list().flatMap((m) => [...this.#judges.get(m.manifest.name)!]);
   }
 }
