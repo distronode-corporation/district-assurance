@@ -61,9 +61,10 @@ export interface OpenUploadLink {
 
 /**
  * Why an upload was refused. `link_not_usable` covers an unknown, malformed, used and expired
- * token alike. The first four refusals leave the link usable; `scan_refused` spends it.
+ * token alike. The type, size and content refusals leave the link usable; `scan_refused` (the
+ * scanner did not pass it) and `scan_failed` (the scanner threw) spend it.
  */
-export type UploadRefusal = "link_not_usable" | "type_not_allowed" | "empty" | "too_large" | "content_mismatch" | "scan_refused";
+export type UploadRefusal = "link_not_usable" | "type_not_allowed" | "empty" | "too_large" | "content_mismatch" | "scan_refused" | "scan_failed";
 
 export type UploadResult = { ok: true; document: DocumentRecord } | { ok: false; reason: UploadRefusal };
 
@@ -146,8 +147,14 @@ export async function acceptUpload(
   const now = context.clock.now().toISOString();
   if (!(await context.documents.claimUploadLink(context.workspaceId, link.tokenHash, now))) return { ok: false, reason: "link_not_usable" };
   const documentId = context.ids.next("doc");
-  const scan = await context.scanner.scan({ workspaceId: context.workspaceId, documentId, contentType, bytes });
-  if (scan.clean !== true) return { ok: false, reason: "scan_refused" };
+  let scan: { clean: boolean };
+  try {
+    scan = await context.scanner.scan({ workspaceId: context.workspaceId, documentId, contentType, bytes });
+  } catch {
+    // The scanner's error is the host's to log; the caller only learns the document was not taken.
+    return { ok: false, reason: "scan_failed" };
+  }
+  if (scan?.clean !== true) return { ok: false, reason: "scan_refused" };
   const document: DocumentRecord = {
     documentId,
     workspaceId: context.workspaceId,
@@ -165,8 +172,19 @@ export async function acceptUpload(
 async function usableLink(token: string, context: UploadContext): Promise<UploadLinkRecord | null> {
   if (!TOKEN.test(token)) return null;
   const link = await context.documents.getUploadLink(context.workspaceId, sha256Hex(token));
-  if (link === null || link.usedAt !== null || context.clock.now().getTime() >= Date.parse(link.expiresAt)) return null;
-  return link;
+  if (link === null) return null;
+  const now = context.clock.now();
+  if (!(now.getTime() < Date.parse(link.expiresAt))) {
+    // An expired link is read once more at most: reading it purges it, and every other expired link.
+    await context.documents.purgeExpiredUploadLinks(context.workspaceId, now.toISOString());
+    return null;
+  }
+  return link.usedAt === null ? link : null;
+}
+
+/** Removes the workspace's expired upload links, for a host's periodic sweep. Returns how many. */
+export async function sweepUploadLinks(context: UploadContext): Promise<number> {
+  return context.documents.purgeExpiredUploadLinks(context.workspaceId, context.clock.now().toISOString());
 }
 
 const tupleKey = (workspaceId: string, id: string): string => JSON.stringify([workspaceId, id]);
@@ -193,9 +211,20 @@ export class MemoryDocumentStore implements DocumentStore {
 
   async claimUploadLink(workspaceId: string, tokenHash: string, usedAt: string): Promise<boolean> {
     const link = this.#links.get(tupleKey(workspaceId, tokenHash));
-    if (link === undefined || link.usedAt !== null) return false;
+    if (link === undefined || link.usedAt !== null || !(Date.parse(usedAt) < Date.parse(link.expiresAt))) return false;
     link.usedAt = usedAt;
     return true;
+  }
+
+  async purgeExpiredUploadLinks(workspaceId: string, now: string): Promise<number> {
+    let purged = 0;
+    for (const [key, link] of this.#links) {
+      if (link.workspaceId === workspaceId && !(Date.parse(now) < Date.parse(link.expiresAt))) {
+        this.#links.delete(key);
+        purged++;
+      }
+    }
+    return purged;
   }
 
   async putDocument(document: DocumentRecord, bytes: Uint8Array): Promise<void> {

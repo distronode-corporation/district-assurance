@@ -418,6 +418,9 @@ accept an upload.
   never stored.
 - `openUploadLink(token)` returns `{locale, allowedTypes, maxBytes, expiresAt}` for a link that
   exists in the workspace, is unused and has not expired (now before `expiresAt`), else null.
+  Reading an expired link calls `DocumentStore.purgeExpiredUploadLinks(workspaceId, now)`, which
+  removes every expired link of the workspace; `sweepUploadLinks(context)` does the same from a
+  host's own timer.
 - `acceptUpload({token, contentType, bytes})` throws `invalid_input` when `bytes` is not a
   `Uint8Array` or `contentType` not a string, and refuses a body over 25 MiB (`too_large`) before
   copying it. It then checks, in order: the link is usable
@@ -425,9 +428,10 @@ accept an upload.
   without parameters and in any case, is one the link allows (`type_not_allowed`); the file is not
   empty (`empty`) and at most `maxBytes` (`too_large`); the bytes start with the type's signature
   (`FF D8 FF`, the PNG signature, `%PDF-`; else `content_mismatch`). None of these spends the
-  link. Then `DocumentStore.claimUploadLink` sets `usedAt` if it is still null, and only the one
-  claim that did goes on (a lost claim is `link_not_usable`); the scanner is asked, and anything but
-  `clean: true` is `scan_refused`; the document is stored as `{documentId, workspaceId, callId,
+  link. Then `DocumentStore.claimUploadLink` sets `usedAt` if it is still null and `usedAt` is
+  before `expiresAt`, and only the one claim that did goes on (a lost or late claim is
+  `link_not_usable`); the scanner is asked, anything but `clean: true` is `scan_refused`, and a
+  scanner that throws is `scan_failed`, its error never passed on; the document is stored as `{documentId, workspaceId, callId,
   recordId, contentType, size, digest, receivedAt}` with `digest` the SHA-256 hex of the bytes.
   From the claim on, the link is spent whatever happens.
 
@@ -435,5 +439,5 @@ accept an upload.
 `GET /u/:token` (the upload page, in the link's language or `?lang=en|fr`, with a switch to the
 other) and `POST /u/:token` (a `multipart/form-data` body with a part named `file`, read up to the
 link's `maxBytes` plus 16 KiB). Answers: 201 received, 400 no file, 410 link not usable, 413 too
-large, 415 type, 422 scan refused, each as a page in the same language. Creating the link, texting
+large, 415 type, 422 scan refused, 503 scan failed, each as a page in the same language. Creating the link, texting
 it to the number on file and writing ledger entries for it are not wired into the engine yet.

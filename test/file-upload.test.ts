@@ -15,6 +15,7 @@ import {
   createUploadLink,
   isDocumentType,
   openUploadLink,
+  sweepUploadLinks,
 } from "../src/file/upload.ts";
 import { FixedClock, MemoryRecordStore, SequentialIds } from "../src/testing/index.ts";
 import { rejects, setup, verifiedCall } from "./helpers.ts";
@@ -161,8 +162,36 @@ describe("acceptUpload", () => {
     w.clock.advance(1);
     assert.equal(await openUploadLink(token, w.context), null);
     assert.deepEqual(await w.upload(token), { ok: false, reason: "link_not_usable" });
-    assert.equal(w.documents.links()[0]!.usedAt, null);
+    assert.deepEqual(w.documents.links(), [], "reading the expired link purged it");
     assert.deepEqual(w.scanner.scanned, []);
+  });
+
+  it("purges expired links on read and by a sweep, and keeps live ones", async () => {
+    const w = world();
+    const old = await w.link();
+    await w.link();
+    w.clock.advance(UPLOAD_LINK_TTL_SECONDS * 1000 - 1000);
+    const fresh = await w.link();
+    w.clock.advance(1000);
+    assert.equal(await sweepUploadLinks(w.context), 2, "both links from the start expired");
+    assert.equal(w.documents.links().length, 1);
+    assert.equal(await openUploadLink(old.token, w.context), null);
+    assert.notEqual(await openUploadLink(fresh.token, w.context), null);
+    assert.equal(await sweepUploadLinks(w.context), 0);
+  });
+
+  it("does not spend a link that expires between the check and the claim", async () => {
+    const w = world();
+    const { token } = await w.link();
+    w.clock.advance(UPLOAD_LINK_TTL_SECONDS * 1000 - 1);
+    const claim = w.documents.claimUploadLink.bind(w.documents);
+    w.documents.claimUploadLink = (workspaceId, tokenHash) => {
+      w.clock.advance(1);
+      return claim(workspaceId, tokenHash, w.clock.now().toISOString());
+    };
+    assert.deepEqual(await w.upload(token), { ok: false, reason: "link_not_usable" });
+    assert.deepEqual(w.scanner.scanned, [], "nothing past the claim ran");
+    assert.equal(w.documents.links()[0]!.usedAt, null);
   });
 
   it("refuses an unknown or malformed token, and one from another workspace, the same way", async () => {
@@ -228,6 +257,20 @@ describe("acceptUpload", () => {
     assert.deepEqual(w.documents.documents().map((d) => [...d.bytes]), [[...JPEG]]);
   });
 
+  it("answers scan_failed when the scanner throws, never its error, and spends the link", async () => {
+    const w = world();
+    const { token } = await w.link();
+    w.scanner.scan = async () => {
+      throw new Error("scanner at 10.0.0.5 timed out");
+    };
+    assert.deepEqual(await w.upload(token), { ok: false, reason: "scan_failed" });
+    assert.deepEqual(w.documents.documents(), []);
+    assert.deepEqual(await w.upload(token), { ok: false, reason: "link_not_usable" });
+    const other = await w.link();
+    w.scanner.scan = async () => undefined as unknown as { clean: boolean };
+    assert.deepEqual(await w.upload(other.token), { ok: false, reason: "scan_refused" }, "no answer is not clean");
+  });
+
   it("refuses what the scanner does not pass, and the link is spent", async () => {
     const w = world();
     const { token } = await w.link();
@@ -242,16 +285,20 @@ describe("acceptUpload", () => {
 describe("MemoryDocumentStore", () => {
   it("keeps the first link per token hash, claims once, and copies in and out", async () => {
     const store = new MemoryDocumentStore();
-    const link = { workspaceId: WS, tokenHash: "a".repeat(64), callId: "c", recordId: "r", locale: "en" as const, allowedTypes: ["image/png" as const], maxBytes: 1, createdAt: "t", expiresAt: "t", usedAt: null };
+    const link = { workspaceId: WS, tokenHash: "a".repeat(64), callId: "c", recordId: "r", locale: "en" as const, allowedTypes: ["image/png" as const], maxBytes: 1, createdAt: "2026-01-01T00:00:00.000Z", expiresAt: "2026-01-01T00:30:00.000Z", usedAt: null };
     assert.equal(await store.putUploadLink(link), true);
     assert.equal(await store.putUploadLink({ ...link, callId: "other" }), false);
     link.allowedTypes.push("image/jpeg" as never);
     assert.deepEqual((await store.getUploadLink(WS, link.tokenHash))!.allowedTypes, ["image/png"]);
     assert.equal(await store.getUploadLink("ws_other", link.tokenHash), null);
-    assert.equal(await store.claimUploadLink("ws_other", link.tokenHash, "u"), false);
-    assert.equal(await store.claimUploadLink(WS, link.tokenHash, "u"), true);
-    assert.equal(await store.claimUploadLink(WS, link.tokenHash, "v"), false);
-    assert.equal((await store.getUploadLink(WS, link.tokenHash))!.usedAt, "u");
+    const u = "2026-01-01T00:10:00.000Z";
+    assert.equal(await store.claimUploadLink("ws_other", link.tokenHash, u), false);
+    assert.equal(await store.claimUploadLink(WS, link.tokenHash, link.expiresAt), false, "not at or after expiry");
+    assert.equal(await store.claimUploadLink(WS, link.tokenHash, "not a time"), false, "fails closed on a bad time");
+    assert.equal(await store.claimUploadLink(WS, link.tokenHash, u), true);
+    assert.equal(await store.claimUploadLink(WS, link.tokenHash, "2026-01-01T00:11:00.000Z"), false);
+    assert.equal((await store.getUploadLink(WS, link.tokenHash))!.usedAt, u);
+    assert.equal(await store.purgeExpiredUploadLinks("ws_other", link.expiresAt), 0, "another workspace's sweep purges nothing here");
     const bytes = Uint8Array.from([1]);
     await store.putDocument({ documentId: "d", workspaceId: WS, callId: "c", recordId: "r", contentType: "image/png", size: 1, digest: "d", receivedAt: "t" }, bytes);
     bytes[0] = 9;

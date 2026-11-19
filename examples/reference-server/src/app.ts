@@ -171,7 +171,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     if (file === null) return uploadPage(400, locale, "empty", link);
     const result = await acceptUpload({ token, contentType: file.contentType, bytes: file.bytes }, { ...context, ids: uploads.ids ?? randomIds, scanner: uploads.scanner });
     if (result.ok) return uploadPage(201, locale, "received", null);
-    const spent = result.reason === "link_not_usable" || result.reason === "scan_refused";
+    const spent = result.reason === "link_not_usable" || result.reason === "scan_refused" || result.reason === "scan_failed";
     return uploadPage(REFUSAL_STATUS[result.reason], locale, result.reason, spent ? null : link);
   }
 
@@ -279,6 +279,7 @@ const REFUSAL_STATUS: Readonly<Record<UploadRefusal, number>> = {
   empty: 400,
   too_large: 413,
   scan_refused: 422,
+  scan_failed: 503,
 };
 
 type PageMessage = UploadRefusal | "received";
@@ -300,6 +301,7 @@ const UPLOAD_TEXT = {
       empty: "Choose a file first.",
       too_large: "This file is too large.",
       scan_refused: "This file could not be accepted. Ask for a new link.",
+      scan_failed: "This file could not be checked right now. Ask for a new link.",
     },
   },
   fr: {
@@ -318,6 +320,7 @@ const UPLOAD_TEXT = {
       empty: "Choisissez d'abord un fichier.",
       too_large: "Ce fichier est trop volumineux.",
       scan_refused: "Ce fichier n'a pas pu être accepté. Demandez un nouveau lien.",
+      scan_failed: "Ce fichier n'a pas pu être vérifié pour le moment. Demandez un nouveau lien.",
     },
   },
 } as const;

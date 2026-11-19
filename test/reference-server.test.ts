@@ -212,6 +212,21 @@ describe("reference server: document uploads", () => {
     assert.equal((await send(token, JPEG)).status, 410);
   });
 
+  it("answers a page, not a 500, when the scanner throws, and the link is spent", async () => {
+    const token = await link({ locale: "fr" });
+    const scan = scanner.scan;
+    scanner.scan = async () => {
+      throw new Error("scanner internals");
+    };
+    const res = await send(token, JPEG);
+    scanner.scan = scan;
+    assert.equal(res.status, 503);
+    const html = await res.text();
+    assert.match(html, /n'a pas pu être vérifié/);
+    assert.doesNotMatch(html, /internals|<form/);
+    assert.equal((await send(token, JPEG)).status, 410);
+  });
+
   it("is off without the uploads option", async () => {
     const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [], payments: [] }, clock: t.clock });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

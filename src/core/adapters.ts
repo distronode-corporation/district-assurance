@@ -158,14 +158,21 @@ export interface DocumentRecord {
 
 /**
  * Where upload links and the documents they bring in live. `claimUploadLink` is the one place a
- * link is spent, so it must be atomic: of two claims at once, one wins.
+ * link is spent, so it must be atomic: of two claims at once, one wins. Expired links are removed
+ * by `purgeExpiredUploadLinks`, which the engine calls whenever it reads one and a host may call
+ * from its own sweep (`sweepUploadLinks`).
  */
 export interface DocumentStore {
   /** Stores a new link. False, and nothing written, when a link with that token hash exists. */
   putUploadLink(link: UploadLinkRecord): Promise<boolean>;
   getUploadLink(workspaceId: string, tokenHash: string): Promise<UploadLinkRecord | null>;
-  /** Sets `usedAt` only if the link exists and is unused. True for the one claim that did. */
+  /**
+   * Sets `usedAt` only if the link exists, is unused and has not expired at `usedAt` (`usedAt`
+   * before `expiresAt`), in one atomic step. True for the one claim that did.
+   */
   claimUploadLink(workspaceId: string, tokenHash: string, usedAt: string): Promise<boolean>;
+  /** Removes the workspace's links whose `expiresAt` is at or before `now` (ISO 8601). Returns how many. */
+  purgeExpiredUploadLinks(workspaceId: string, now: string): Promise<number>;
   putDocument(document: DocumentRecord, bytes: Uint8Array): Promise<void>;
 }
 
@@ -174,6 +181,7 @@ export interface DocumentStore {
  * type, size and leading bytes passed and before it is stored. Anything but `clean: true` refuses it.
  */
 export interface DocumentScanner {
+  /** A scanner that throws refuses the document as `scan_failed`; the error never reaches the caller. */
   scan(input: { workspaceId: string; documentId: string; contentType: DocumentType; bytes: Uint8Array }): Promise<{ clean: boolean }>;
 }
 
