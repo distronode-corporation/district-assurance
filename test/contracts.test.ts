@@ -4,8 +4,10 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import type { AuditEntry, AuditInput, IntakeRecord, SubjectRecord } from "../src/core/adapters.ts";
+import type { JsonValue } from "../src/core/canonical.ts";
+import { MemorySessionStore } from "../src/core/session-store.ts";
 import { GENESIS_HASH, MemoryAuditLedger, chainEntry } from "../src/prove/ledger.ts";
-import { type ContractCase, MemoryRecordStore, type SeededSubject, auditLedgerContract, recordStoreContract } from "../src/testing/index.ts";
+import { type ContractCase, MemoryRecordStore, type SeededSubject, auditLedgerContract, recordStoreContract, sessionStoreContract } from "../src/testing/index.ts";
 
 function seed<S extends MemoryRecordStore>(store: S, subjects: SeededSubject[]): S {
   for (const { workspaceId, subject } of subjects) store.putSubject(workspaceId, subject);
@@ -50,6 +52,7 @@ describe("the AuditLedger contract", () => {
     assert.deepEqual(await failing(auditLedgerContract(() => new Leaky())), [
       "copies in and out, so a caller cannot change what is stored",
       "appends an eventId once: a second append returns the first entry",
+      "keeps eventIds that differ only in a lone UTF-16 surrogate apart",
       "stores one entry for concurrent appends of one eventId",
     ]);
   });
@@ -145,5 +148,65 @@ describe("the RecordStore contract", () => {
       }
     }
     assert.deepEqual(await failing(recordStoreContract((subjects) => seed(new Leaky(), subjects))), ["stores an intake record and returns copies"]);
+  });
+});
+
+/**
+ * A key as a store that encodes keys as UTF-8 keeps it: a lone surrogate becomes U+FFFD, so keys
+ * that differ only in one collapse into one (SQLite with a TEXT key, #95).
+ */
+const utf8Key = (key: string): string => Buffer.from(key, "utf8").toString("utf8");
+
+describe("the contracts catch a store that collapses keys differing only in a lone surrogate", () => {
+  it("SessionStore", async () => {
+    class Collapsing extends MemorySessionStore {
+      override create(w: string, c: string, record: JsonValue) {
+        return super.create(utf8Key(w), utf8Key(c), record);
+      }
+      override get(w: string, c: string) {
+        return super.get(utf8Key(w), utf8Key(c));
+      }
+      override compareAndSet(w: string, c: string, version: number, record: JsonValue) {
+        return super.compareAndSet(utf8Key(w), utf8Key(c), version, record);
+      }
+      override bindRef(w: string, ref: string, callId: string) {
+        return super.bindRef(utf8Key(w), utf8Key(ref), callId);
+      }
+      override resolveRef(w: string, ref: string) {
+        return super.resolveRef(utf8Key(w), utf8Key(ref));
+      }
+    }
+    assert.deepEqual(await failing(sessionStoreContract(() => new Collapsing())), ["keeps keys that differ only in a lone UTF-16 surrogate apart: workspaces, calls and references"]);
+  });
+
+  it("AuditLedger", async () => {
+    class Collapsing extends MemoryAuditLedger {
+      override append(input: AuditInput) {
+        return super.append(input.eventId === undefined ? input : { ...input, eventId: utf8Key(input.eventId) });
+      }
+    }
+    assert.deepEqual(await failing(auditLedgerContract(() => new Collapsing())), ["keeps eventIds that differ only in a lone UTF-16 surrogate apart"]);
+  });
+
+  it("RecordStore", async () => {
+    class Collapsing extends MemoryRecordStore {
+      override putSubject(w: string, subject: SubjectRecord) {
+        super.putSubject(utf8Key(w), { ...subject, subjectKey: utf8Key(subject.subjectKey) });
+      }
+      override async getSubject(w: string, key: string) {
+        const got = await super.getSubject(utf8Key(w), utf8Key(key));
+        return got === null ? null : { ...got, subjectKey: key };
+      }
+      override putIntakeRecord(record: IntakeRecord) {
+        return super.putIntakeRecord({ ...record, workspaceId: utf8Key(record.workspaceId), recordId: utf8Key(record.recordId) });
+      }
+      override async getIntakeRecord(w: string, id: string) {
+        const got = await super.getIntakeRecord(utf8Key(w), utf8Key(id));
+        return got === null ? null : { ...got, workspaceId: w, recordId: id };
+      }
+    }
+    assert.deepEqual(await failing(recordStoreContract((subjects) => seed(new Collapsing(), subjects))), [
+      "keeps keys that differ only in a lone UTF-16 surrogate apart: subjects, records and workspaces",
+    ]);
   });
 });

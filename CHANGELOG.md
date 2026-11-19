@@ -31,7 +31,8 @@ All notable changes to this project are documented here. The format follows
   refused.
 - `auditLedgerContract` and `recordStoreContract` in `district-assurance/testing` (PRV-5), which
   the memory adapters pass; `MemoryRecordStore` now keys by JSON tuples, so two workspace and id
-  pairs can no longer share a key.
+  pairs can no longer share a key. The session, ledger and record contracts keep keys that differ
+  only in a lone UTF-16 surrogate apart, which a store encoding keys as UTF-8 would collapse.
 - Property and fuzz tests (SRV-7, `test/property`, `test/fuzz`) for the ledger, the keypad collector,
   `validateConfig`, `canonicalJson`, the Stripe checks, the carrier stubs and the reference server,
   on `fast-check` (a development dependency only), in CI and nightly (`fuzz.yml`); they found, and

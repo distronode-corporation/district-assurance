@@ -144,6 +144,17 @@ describe("KeypadCollector", () => {
     assert.equal(keypad.press("#").status, "empty");
   });
 
+  it("discards an entry when the clock was set back, so it never outlives its timeout", () => {
+    const { keypad, clock, received, keyAll } = collector({ idleTimeoutMs: 5000 });
+    keyAll("12");
+    clock.advance(-60_000);
+    assert.deepEqual(keypad.press("#"), { status: "empty", timedOut: true });
+    keyAll("34");
+    clock.advance(-1);
+    assert.equal(keypad.expire(), true);
+    assert.deepEqual(received, []);
+  });
+
   it("an empty collector never times out", () => {
     const { keypad, clock } = collector();
     clock.advance(10 * 60_000);
@@ -201,6 +212,8 @@ describe("KeypadCollector", () => {
       { maxDigits: 4, idleTimeoutMs: 1000, onDigits: "not a function" as unknown as () => void },
       { maxDigits: 4, idleTimeoutMs: 1000, onDigits, maxDigit: 8 },
       { maxDigits: 4, idleTimeoutMs: 1000, onDigits, clock: new FixedClock(), logDigits: true },
+      { maxDigits: 4, idleTimeoutMs: 1000, onDigits, clock: { now: "2026-01-01" } },
+      { maxDigits: 4, idleTimeoutMs: 1000, onDigits, clock: null },
       null,
       [],
     ]) {

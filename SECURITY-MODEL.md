@@ -153,8 +153,9 @@ HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mo
   callback receives, and cutting audio to speech-to-text and the model while `sensitive` is set.
   `KeypadCollector` is that buffer (SPEC.md, section 17): it shows no digit, nor how many, through
   `toString`, JSON or `util.inspect`, discards an entry that is too long, idle or ends in an
-  unexpected tone (ignoring the rest of it until `#` or `*`, so no tail is submitted), and gives the digits only to its one callback (tested). JavaScript cannot wipe a
-  string, so the buffer is dropped, not overwritten.
+  unexpected tone (ignoring the rest of it until `#` or `*`, so no tail is submitted), and gives
+  the digits only to its one callback (tested). JavaScript cannot wipe a string, so the buffer is
+  dropped, not overwritten.
 - Keeping the knowledge key and the receipt signing key in a key store.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
   guarantees: they must pass `sessionStoreContract`, `recordStoreContract` and
