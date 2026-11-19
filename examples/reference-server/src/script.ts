@@ -47,8 +47,10 @@ export interface DemoWorld {
   stripe(path: string, type: string, object: Record<string, unknown>, account?: string): Promise<Record<string, unknown>>;
   /** Gate's one door controller, the relay adapter to the example door relay, on both engines. */
   lobby: AccessController;
-  /** Every door the example relay opened, in order. */
+  /** Every door the example relay opened, in order (for display). */
   doorsOpened: string[];
+  /** The grant ids the example relay opened a door for: each run checks its own. */
+  openedFor: Set<string>;
   /** Each grant Gate sent, by grant id, so a step can try to replay it. */
   sentGrants: Map<string, SignedAccessGrant>;
   /** The example door relay's unlock URL; starts the relay on the loopback the first time. */
@@ -59,9 +61,10 @@ export interface DemoWorld {
 
 export function createDemoWorld(): DemoWorld {
   const doorsOpened: string[] = [];
+  const openedFor = new Set<string>();
   const sentGrants = new Map<string, SignedAccessGrant>();
   let relay: Server | null = null;
-  let url = "";
+  let starting: Promise<string> | null = null;
   // The relay adapter needs the relay's port, known once it listens: built per unlock.
   // Gate's adapters: its own signing key, and one controller, the relay adapter, whose URL is known
   // once the example relay listens (so it is built per unlock).
@@ -95,25 +98,28 @@ export function createDemoWorld(): DemoWorld {
     base: "",
     lobby,
     doorsOpened,
+    openedFor,
     sentGrants,
-    async relayUrl() {
-      if (relay === null) {
+    relayUrl() {
+      // One startup shared by every caller, so two runs that begin together both wait for it.
+      starting ??= (async () => {
         relay = createDoorRelay({
           workspaceId: "ws_test",
           audience: "lobby",
           keys: t.engine.accessKeys(),
           clock: t.clock,
-          open: async (target) => {
+          open: async (target, grant) => {
             doorsOpened.push(target);
+            openedFor.add(grant.grantId);
           },
         });
         const started = relay;
         await new Promise<void>((resolve) => started.listen(0, "127.0.0.1", resolve));
         // Never keeps a process alive on its own: the demo, the UI and the tests decide when to stop.
         started.unref();
-        url = `http://127.0.0.1:${(started.address() as AddressInfo).port}/unlock`;
-      }
-      return url;
+        return `http://127.0.0.1:${(started.address() as AddressInfo).port}/unlock`;
+      })();
+      return starting;
     },
     async close() {
       const running = relay;
@@ -378,12 +384,13 @@ const entry: ScriptStep[] = [
   {
     label: "gate: access grant delivered",
     async run(w, call) {
-      const opened = w.doorsOpened.length;
       const access = await w.engine.grantAccess(call.callId);
       call.grantId = access.grantId;
+      // This run's own grant opened the door: other runs' openings never count here.
+      const opened = w.openedFor.has(access.grantId);
       return {
-        detail: `${access.grantId}, ${access.status}, door moved: ${access.confirmed}, opened ${w.doorsOpened.slice(opened).join(", ")}`,
-        ok: access.status === "delivered" && w.doorsOpened.length === opened + 1,
+        detail: `${access.grantId}, ${access.status}, door moved: ${access.confirmed}, ${opened ? "the door opened for it" : "NO door opened for it"}`,
+        ok: access.status === "delivered" && opened,
       };
     },
   },

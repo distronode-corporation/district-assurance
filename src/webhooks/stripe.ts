@@ -87,6 +87,8 @@ export function parseStripeEvent(body: string): ParsedStripeEvent | null {
   if (!isRecord(object) || typeof object.id !== "string") return null;
   const base = { eventId: event.id, livemode: event.livemode === true };
   // A Connect event names the connected account it came from; the engine checks it against the payment's.
+  // One that is present but not a name is not a well-formed event: never read as "no account".
+  if (event.account !== undefined && typeof event.account !== "string") return null;
   const account = typeof event.account === "string" ? { account: event.account } : {};
   const linkId = object.id;
   const identity = IDENTITY_TYPES[event.type];

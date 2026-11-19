@@ -25,6 +25,14 @@ describe("canonicalJson", () => {
     assert.equal(canonicalJson(value), '{"k":1}');
   });
 
+  it("refuses a lone UTF-16 surrogate in a string or a key, as RFC 8785 requires, and keeps valid pairs", () => {
+    assert.throws(() => canonicalJson({ a: "x\ud800" }), /lone surrogate in a string at \$\.a/);
+    assert.throws(() => canonicalJson(["\udc00y"]), /lone surrogate in a string at \$\[0\]/);
+    assert.throws(() => canonicalJson({ ["k\ud83d"]: 1 }), /lone surrogate in a string at \$/, "in a key");
+    assert.throws(() => canonicalJson("\ud800\ud800\udc00"), /lone surrogate/, "a high surrogate followed by a pair");
+    assert.equal(canonicalJson({ "\ud83d\ude00": "\ud83d\ude00" }), '{"\ud83d\ude00":"\ud83d\ude00"}', "a valid pair passes");
+  });
+
   it("refuses values JSON cannot carry faithfully, naming the path", () => {
     assert.throws(() => canonicalJson({ a: undefined }), /unsupported undefined at \$\.a/);
     assert.throws(() => canonicalJson([1, () => 1]), /unsupported function at \$\[1\]/);
