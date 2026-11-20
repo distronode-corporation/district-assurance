@@ -1,44 +1,6 @@
 # Issues
 
-Every open issue of [ROADMAP.md](ROADMAP.md), 41 of them, ready to paste into GitHub: the heading is the title, the fenced block is the body. They are in milestone order, owner-command first; open them in that order. ROADMAP.md has the waves and the dependencies, and `test/stubs.test.ts` fails if an id here is missing there.
-
-### VER-1: Durable failure counters and lockout per subject and per calling number (hard gate before owner-command goes live)
-
-**Labels:** `badge`, `m2`  
-**Milestone:** M2 Owner command  
-**Depends on:** none
-
-```markdown
-## Why
-
-Attempt limits are per call today, for keypad knowledge, the PIN and plug-in factors alike; a caller can call again, and a 4-digit PIN with 3 attempts per call falls within about 3,300 calls. **Hard gate:** no host runs the owner-command flow, or any PIN factor, on a live line before this is merged.
-
-## Acceptance criteria
-
-- [ ] An `AttemptCounters` adapter interface in `src/core/adapters.ts`: `get`, `recordFailure`, `reset`, keyed by workspace, factor kind and either subject key or a hash of the calling number.
-- [ ] `submitFactor` (and so `submitKeypad` and `submitPin`) consults the counters before counting the attempt, and refuses to judge while locked (the same `locked: true` answer).
-- [ ] Backoff after failures (5, 15, 60, 300, 900 seconds) and a hard lock after 10 failures in 24 hours, in Badge's settings with these as defaults and floors, checked by `validateConfig`.
-- [ ] A `verification.locked` event with the scope of the lock (`subject` or `number`) and the factor kind, never the values.
-- [ ] Badge requires the adapter when any entered factor is on; `recordSubjectFailure` in `src/verify/later.ts` is replaced by the real implementation.
-
-## Files
-
-- src/core/adapters.ts
-- src/verify/counters.ts (new)
-- src/verify/badge.ts
-- src/verify/later.ts
-- src/testing/fakes.ts
-- src/testing/contracts.ts
-
-## Tests
-
-- test/verify-counters.test.ts: backoff and lock with the fixed clock, and a contract suite for the adapter
-- test/pin.test.ts: a PIN lock carries across two calls and two engines; unknown subjects are counted by number
-
-## Done when
-
-All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
-```
+Every open issue of [ROADMAP.md](ROADMAP.md), 40 of them, ready to paste into GitHub: the heading is the title, the fenced block is the body. They are in milestone order, owner-command first; open them in that order. ROADMAP.md has the waves and the dependencies, and `test/stubs.test.ts` fails if an id here is missing there.
 
 ### VER-8: Policy version and config revision in grants and receipts
 

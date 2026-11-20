@@ -242,10 +242,10 @@ describe("SECURITY-MODEL.md STRIDE tables", () => {
     }
   });
 
-  it("lists open threats as open: VER-1, the hard gate, is open and never covered", () => {
-    const open = rows.filter((r) => r.status === "open");
-    assert.ok(open.length > 0);
-    assert.ok(open.some((r) => r.proof.includes("VER-1")));
+  it("lists built threats as covered: VER-1, the hard gate, is built, closed and its row covered", () => {
+    assert.ok(!roadmap.includes("#### **VER-1**"), "VER-1 is closed in ROADMAP.md");
+    const pin = rows.find((r) => r.id === "badge-2");
+    assert.equal(pin?.status, "covered");
     assert.ok(rows.every((r) => r.status === "open" || !/[A-Z]{3}-\d+/.test(r.proof)));
   });
 });

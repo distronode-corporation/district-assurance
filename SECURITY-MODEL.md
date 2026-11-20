@@ -865,7 +865,7 @@ yes/no answer, a date, a short phrase) can be confirmed by anyone who holds the 
 receipt, guesses the values and hashes them. Treat the ledger and receipts as personal
 information for retention and access control. The export lists these as kept, with that reason.
 Records filed on a call with no matched subject cannot be found by subject; the export says so.
-Consents stay in their call records until PRV-3's `ConsentStore`; counters across calls are VER-1's.
+Consents stay in their call records until PRV-3's `ConsentStore`; the erase resets the failure counters kept under the subject's key (VER-1).
 
 ## Open questions
 
@@ -939,7 +939,7 @@ Who is calling, in levels (`src/verify/`).
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
 | badge-1 | S | A caller guesses keypad knowledge or a PIN within one call. | A per-call limit on judged attempts for every entered factor; after it, even the right answer is not judged. | covered | `engine.test.ts`: "locks keypad judging after the policy's attempts"; `pin.test.ts`: "counts malformed, wrong and unknown-subject entries the same way, and locks after the limit"; `policy.test.ts`: "caps keypad attempts like the PIN" |
-| badge-2 | S | A caller guesses a PIN across many calls (a 4-digit PIN with 3 attempts per call falls within about 3,300 calls). | Durable failure counters and lockout per subject and per calling number. Hard gate before any live PIN. | open | VER-1 |
+| badge-2 | S | A caller guesses a PIN across many calls (a 4-digit PIN with 3 attempts per call falls within about 3,300 calls). | Durable failure counters per subject and per calling number, shared by every engine: waits after each failure and a hard lock after 10 failures in 24 hours, checked before a factor is judged. | covered | `verify-counters.test.ts`: "refuses during the wait without judging or using the call's attempt, then locks hard after 10 failures in 24 hours"; `pin.test.ts`: "carries a PIN lock across two calls and two engines, and lifts it only when the window passes or the business resets it"; `verify-counters.test.ts`: "counts an unknown subject by its key too, so a lock never tells which accounts exist" |
 | badge-3 | S | A crash, a failing PIN verifier or a second process gives a caller a free try. | Each attempt is counted in its own write before it is judged. | covered | `pin.test.ts`: "counts the attempt before asking, so a verifier that fails still uses it"; `session-store.test.ts`: "gives concurrent attempts on one call no more than the limit, and judges only one of them at once" |
 | badge-4 | I | A caller learns which accounts exist, or which field was wrong. | All keypad fields are judged together; an unknown account, a wrong value and a non-keypad entry answer the same, and so do the PIN's cases. | covered | `engine.test.ts`: "gives the same answer for an unknown account, a wrong value and a non-keypad entry"; `modules.test.ts`: "never passes a non-keypad entry, even one whose digest is on file"; `pin.test.ts`: "counts malformed, wrong and unknown-subject entries the same way, and locks after the limit" |
 | badge-5 | I | Stored reference values or PIN digests are reversed, or two equal PINs show as equal digests. | Keyed HMACs per workspace key, field and value; PIN digests are bound to their subject. | covered | `modules.test.ts`: "derives stable keyed digests that differ per key, field and value"; `pin.test.ts`: "binds the digest to the subject" |

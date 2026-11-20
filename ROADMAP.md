@@ -37,7 +37,7 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-25, says why.
 |---|---|---|
 | M0 Skeleton | The engine, real core pieces, stubs, reference server, demo, CI | done |
 | M1 Modular core | Module registry, Badge, Dossier, Paylink and Trace as modules, factor plug-ins and the PIN factor, FlowConfig with `validateConfig` and flow execution, the shared SessionStore, the ledger always on | done |
-| M2 Owner command | What the first live use (`owner-command`) still needs. VER-1 (lockouts across calls) is a hard gate before it goes live in any host. Also: policy and config revision in receipts, the keypad collector, key store contracts, ledger and record store contracts, PIN enrolment | VER-1, VER-8, INT-1, INT-4, PRV-5, VER-6 |
+| M2 Owner command | What the first live use (`owner-command`) still needs. VER-1 (lockouts across calls), the hard gate before it goes live in any host, is built. Also: policy and config revision in receipts, the keypad collector, key store contracts, ledger and record store contracts, PIN enrolment | VER-1, VER-8, INT-1, INT-4, PRV-5, VER-6 |
 | M3 Gate and payment modes | Done: the Gate module with signed access grants, the signed-webhook relay, Paylink's `connect` and `platform` modes, link life and instant methods; built, acceptance open: one-time codes, web step-up, Seam, direct vendor adapters | GAT-3 to GAT-6 |
 | M4 Badge | Texted codes, spoken answers, carrier and Stripe Identity adapters, adversarial suite | VER-2 to VER-5, VER-7 |
 | M5 Dossier | Read-backs, encrypted fields, delivery, conditional fields, documents by text | FIL-1 to FIL-5 |
@@ -51,8 +51,8 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-25, says why.
 Milestones overlap; the order below is by dependency, owner-command first. Items in the same wave
 touch different files, so they can run in parallel.
 
-1. **Wave 1, owner-command:** VER-1, VER-8, INT-1, INT-4, PRV-5. **VER-1 is a hard gate:** no host runs owner-command, or any PIN factor, on a
-   live line before VER-1 is merged.
+1. **Wave 1, owner-command:** VER-1, VER-8, INT-1, INT-4, PRV-5. **VER-1 was the hard gate** for owner-command and any PIN
+   factor on a live line; it is built.
 2. **Wave 2:** VER-6, VER-2, VER-4, VER-5, FIL-1, FIL-2, PAY-1, PAY-5, PRV-1, PRV-3, SRV-1, SRV-2,
    MOD-1.
 3. **Wave 3:** VER-3, VER-7, FIL-3, FIL-4, PAY-2, PAY-3, PRV-2, PRV-6, SRV-3, SRV-5, INT-2, GAT-3,
@@ -104,25 +104,15 @@ roadmap are done here.
 
 ### M2. Owner command
 
-The first live use: the `owner-command` flow (Badge with a PIN only, plus Trace) replaces a host's own owner PIN check. What it still needs before a live call. VER-1 is a hard gate: no host runs owner-command live before it is merged.
+The first live use: the `owner-command` flow (Badge with a PIN only, plus Trace) replaces a host's own owner PIN check. What it still needs before a live call. VER-1, the hard gate before any live PIN, is built.
 
 **Proven by:** Unit and contract tests at 100%; the PIN lockout proven across two calls and two engines on one session store; the live call is proven in the host's own repository.
 
-#### **VER-1** Durable failure counters and lockout per subject and per calling number (hard gate before owner-command goes live)
-
-Attempt limits are per call today, for keypad knowledge, the PIN and plug-in factors alike; a caller can call again, and a 4-digit PIN with 3 attempts per call falls within about 3,300 calls. **Hard gate:** no host runs the owner-command flow, or any PIN factor, on a live line before this is merged.
-
-*Acceptance*
-
-- An `AttemptCounters` adapter interface in `src/core/adapters.ts`: `get`, `recordFailure`, `reset`, keyed by workspace, factor kind and either subject key or a hash of the calling number.
-- `submitFactor` (and so `submitKeypad` and `submitPin`) consults the counters before counting the attempt, and refuses to judge while locked (the same `locked: true` answer).
-- Backoff after failures (5, 15, 60, 300, 900 seconds) and a hard lock after 10 failures in 24 hours, in Badge's settings with these as defaults and floors, checked by `validateConfig`.
-- A `verification.locked` event with the scope of the lock (`subject` or `number`) and the factor kind, never the values.
-- Badge requires the adapter when any entered factor is on; `recordSubjectFailure` in `src/verify/later.ts` is replaced by the real implementation.
-
-*Files:* `src/core/adapters.ts`, `src/verify/counters.ts` (new), `src/verify/badge.ts`, `src/verify/later.ts`, `src/testing/fakes.ts`, `src/testing/contracts.ts`  
-*Tests:* test/verify-counters.test.ts: backoff and lock with the fixed clock, and a contract suite for the adapter; test/pin.test.ts: a PIN lock carries across two calls and two engines; unknown subjects are counted by number  
-*Depends on:* none
+Built: durable failure counters and lockout per subject and per calling number (VER-1). An
+`AttemptCounters` adapter shared by every engine of a workspace, waits of 5, 15, 60, 300 and 900
+seconds after a failure and a hard lock after 10 failures in 24 hours, checked before a factor is
+judged (`test/verify-counters.test.ts`); a PIN lock carries across two calls and two engines
+(`test/pin.test.ts`).
 
 #### **VER-8** Policy version and config revision in grants and receipts
 
