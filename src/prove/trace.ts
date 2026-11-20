@@ -372,14 +372,14 @@ async function recordedOnLedger(rt: EngineRuntime, consent: ConsentRecord): Prom
   // workspace and the call) says whose entry it is.
   const prefix = `${JSON.stringify([rt.workspaceId, consent.callId]).slice(0, -1)},`;
   const recorded = (e: AuditEntry) => e.event === "consent.recorded" && e.callId === consent.callId && e.detail.consentId === consent.consentId && e.eventId?.startsWith(prefix) === true;
-  // Read page by page, stopping at the entry: a shared ledger's whole history is never held at once.
+  // Read page by page, stopping at the entry or an empty page: a shared ledger's whole history is
+  // never held at once. A page may be shorter than asked (an adapter can cap it), so the next one
+  // starts after the last entry returned.
   const ledger = rt.adapter("ledger");
-  let page = await ledger.list(1, LEDGER_PAGE);
-  while (!page.some(recorded)) {
-    if (page.length < LEDGER_PAGE) return false;
-    page = await ledger.list(page[LEDGER_PAGE - 1]!.seq + 1, LEDGER_PAGE);
+  for (let page = await ledger.list(1, LEDGER_PAGE); page.length > 0; page = await ledger.list(page.at(-1)!.seq + 1, LEDGER_PAGE)) {
+    if (page.some(recorded)) return true;
   }
-  return true;
+  return false;
 }
 
 /** Whether a call ends with a receipt: its flow has a `trace.receipt` step, or it ran no flow and receipts are on. */

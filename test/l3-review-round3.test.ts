@@ -389,4 +389,19 @@ describe("L3 review round 3: revokeConsent once the call is gone", () => {
     ]);
     assert.equal((await list()).filter((e) => e.event === "consent.revoked").length, 1);
   });
+
+  it("keeps reading past a page shorter than asked: an adapter may cap its pages", async () => {
+    const consents = new MemoryConsentStore();
+    const t = setup({ adapters: { consents } });
+    for (let i = 0; i < 150; i++) await t.ledger.append({ callId: null, actor: "system", event: "signal.raised", at: "2026-01-01T00:00:00.000Z", detail: { signal: `filler_${i}` } });
+    const { callId } = await t.engine.startCall();
+    const yes = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    const list = t.ledger.list.bind(t.ledger);
+    // At most 100 entries a page, whatever the limit asked.
+    t.ledger.list = async (from, limit) => (await list(from, limit)).slice(0, 100);
+    const later = createTestEngine({ config: testConfig(), adapters: { consents, ledger: t.ledger } });
+    await later.engine.revokeConsent({ consentId: yes.consentId, via: "web" });
+    const entry = (await list()).find((e) => e.event === "consent.revoked")!;
+    assert.equal("priorRecord" in entry.detail, false, "the consent.recorded entry past the first short page was found");
+  });
 });
