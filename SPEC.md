@@ -1091,7 +1091,8 @@ created again (`startCall` refuses it): its ledger event ids are spent. `removeC
 contact notice (`sweepAlerts` sends it), for one that still owes its receipt (a signing that failed
 after the call ended; `endCall` signs it), for one with a refund of its payment not yet final (in
 flight, with the provider's answer still on its way, which `refundPayment` resumes, or `pending` at
-the provider, which its update settles), for one with a filed record whose confirmed mark it could
+the provider, which its update settles), for one with a payment link still open (one `endCall`
+could not close at the provider, which `endCall` closes when called again), for one with a filed record whose confirmed mark it could
 not make (the call keeps the marks it owes in `marksOwed` until the record store has them), and for
 one whose outbox still holds entries after it tried to flush them (the ledger refused them): the record is kept, and `flushPending` keeps
 listing it, until they are appended, so no pending entry (a `consent.recorded` written while the

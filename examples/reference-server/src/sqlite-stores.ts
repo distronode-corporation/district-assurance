@@ -438,11 +438,14 @@ export class SqliteRecordStore implements RecordStore {
   }
 
   async deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void> {
-    for (const recordId of recordIds) {
-      this.#db.prepare("INSERT INTO erased_records (workspace_id, record_id) VALUES (?, ?) ON CONFLICT DO NOTHING").run(key(workspaceId), key(recordId));
-      this.#db.prepare("DELETE FROM intake_records WHERE workspace_id = ? AND record_id = ?").run(key(workspaceId), key(recordId));
-      this.#db.prepare("DELETE FROM confirmed_records WHERE workspace_id = ? AND record_id = ?").run(key(workspaceId), key(recordId));
-    }
+    // One transaction: a failure part-way deletes none of them, and the erasure is asked again.
+    writeTransaction(this.#db, () => {
+      for (const recordId of recordIds) {
+        this.#db.prepare("INSERT INTO erased_records (workspace_id, record_id) VALUES (?, ?) ON CONFLICT DO NOTHING").run(key(workspaceId), key(recordId));
+        this.#db.prepare("DELETE FROM intake_records WHERE workspace_id = ? AND record_id = ?").run(key(workspaceId), key(recordId));
+        this.#db.prepare("DELETE FROM confirmed_records WHERE workspace_id = ? AND record_id = ?").run(key(workspaceId), key(recordId));
+      }
+    });
   }
 
   async markSubjectErased(workspaceId: string, subjectKey: string): Promise<void> {

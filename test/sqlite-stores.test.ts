@@ -182,6 +182,27 @@ describe("SQLite stores", () => {
     assert.equal((await records.getSubject("w", "s"))!.phoneOnFile, "+15555550199");
   });
 
+  it("delete intake records in one transaction: a failure part-way deletes none of them", async () => {
+    const db = openSqliteDatabase(":memory:");
+    const records = new SqliteRecordStore(db);
+    for (const id of ["rec_1", "rec_2"]) {
+      await records.putIntakeRecord(record(id));
+      await records.confirmIntakeRecord("w", id);
+    }
+    // The second record's mark cannot be deleted, after the first record is already gone.
+    db.exec(`CREATE TEMP TRIGGER fail_mid_delete BEFORE DELETE ON confirmed_records WHEN old.record_id = '"rec_2"' BEGIN SELECT RAISE(ABORT, 'injected failure'); END`);
+    await assert.rejects(records.deleteIntakeRecords("w", ["rec_1", "rec_2"]), /injected failure/);
+    assert.equal(db.isTransaction, false, "nothing left open");
+    for (const id of ["rec_1", "rec_2"]) {
+      assert.deepEqual(await records.getIntakeRecord("w", id), record(id), `${id} kept`);
+      assert.equal(await records.isIntakeRecordConfirmed("w", id), true, `${id} still marked`);
+    }
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM erased_records").get()!.n, 0, "no id marked erased");
+    db.exec("DROP TRIGGER fail_mid_delete");
+    await records.deleteIntakeRecords("w", ["rec_1", "rec_2"]);
+    for (const id of ["rec_1", "rec_2"]) assert.equal(await records.getIntakeRecord("w", id), null);
+  });
+
   it("refuse a file: URI, whose file would not get the owner-only mode", () => {
     assert.throws(() => openSqliteDatabase(`file:${newFile()}`), /not a file: URI/);
     assert.throws(() => openSqliteStores(`FILE:${newFile()}?mode=rwc`), /not a file: URI/);

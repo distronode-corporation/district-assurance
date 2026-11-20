@@ -355,8 +355,9 @@ All notable changes to this project are documented here. The format follows
 - Host-facing: a call record is removed through `Engine.removeCall(callId)`, never in the session
   store directly. It is refused while the call has not ended and while its outbox holds ledger
   entries not yet appended (it flushes them first; `flushPending` keeps listing the call), while it
-  still owes a duress alert or a contact notice, and while a filed record's confirmed mark is owed
-  (it makes the mark first), so a
+  still owes a duress alert, a contact notice or its receipt, while a payment link is still open
+  or a refund is not yet final, and while a filed record's confirmed mark is owed (it makes the
+  mark first), so a
   pending entry such as `consent.recorded` is never lost with its record. `SessionStore` has an
   optional `remove(workspaceId, callId, expectedVersion)` (in `MemorySessionStore` and
   `sessionStoreContract`).
