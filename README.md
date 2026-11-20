@@ -20,17 +20,17 @@ end on your own machine.
 
 The **core** holds the call session and its state machine (on a shared session store, so several
 processes can run one call), the assurance policy and its levels, redaction, the module registry
-and the audit ledger. Everything else is a module, and every module can be turned on, turned off,
-added and removed per workspace config.
+and the audit ledger. Everything else is a module. Trace's ledger is always on; every other module
+can be turned on, turned off, added and removed per workspace config.
 
 | Module | What it does | Today |
 |---|---|---|
-| **Badge** (verify) | Who is calling, in levels. Factors are plug-ins: a PIN (against a keyed hash, or the host's own PIN store), keypad knowledge checked against the organisation's records, the same answers spoken instead of keyed, a texted one-time code, a callback to the number on file, carrier signals on that number, a photo ID plus selfie by a texted link, and any factor a host adds. A flow can use a PIN only or all of them. | Built on fakes, with lockouts across calls per subject and per calling number. The reference server has a Stripe Identity adapter for photo ID and Twilio and Telnyx carrier lookups. |
-| **Dossier** (file) | Intake the caller confirms: forms the organisation defines, values normalised by code, a structured record with a fingerprint. | Built, with read-backs in English, French and Spanish, encrypted sensitive fields through a host `fieldCipher`, conditional fields and validation rules, record delivery by signed webhook with retries and one idempotency key per record, and documents by single-use upload links. |
-| **Paylink** (pay) | Payment by a secure link texted to the number on file (a hosted page such as Stripe Checkout), on the business's own account (`connect`) or the platform's (`platform`), chosen per flow. Only methods that settle during the call; the link lives 15 minutes after it is texted by default, and the host calls `expirePaymentLinks` at that deadline (a timer or a sweep) so the engine expires it. The engine never handles card numbers. | Built on fakes, both modes, with amounts from code read back before the link is sent, cancel and expiry, refunds and disputes in platform mode, and a live detector that interrupts a caller saying a card number. The reference server has a minimal Stripe Checkout adapter (platform mode, test keys only). A full Stripe adapter is planned; saved-card charges and keypad card capture are gated and throw `NotImplementedError`. |
-| **Gate** (entry) | The outcome after verification: a signed, time-limited access grant for a door, never sent twice, whose outcome the engine itself records from the door controller's answer, or a one-time access code texted to the number on file. | Built, with the signed-webhook relay adapter, one-time access codes, the Seam adapter, direct Kisi and Verkada adapters, and a fake. |
-| **Step-up** (entry) | Web sign-in step-up: a 2 to 5 minute ES256 token for a website's sign-in, bound to the site's nonce, the verified subject and the verification grant, with an OpenID Connect `acr`, exchanged once and recorded by the engine. | Built, with its own signing key (`stepUpSigner`) and key set (`stepUpKeys`). |
-| **Trace** (prove) | The hash-chained audit ledger, which is always on and cannot be turned off, plus optional signed receipts (ES256 over canonical JSON) and consent records with fingerprinted wording. | Built, in memory (a SQLite ledger in the reference server), with consent revocation through a host `ConsentStore`, receipt key rotation (`receiptKeyRing`) and ledger export as signed NDJSON (`exportLedger`). |
+| **Badge** (verify) | Who is calling, in levels. Factors are plug-ins: a PIN (against a keyed hash, or the host's own PIN store), keypad knowledge checked against the organisation's records, spoken answers, a texted code, a callback to the number on file, carrier signals on that number, a photo ID plus selfie by a texted link, and any factor a host adds. A flow can use a PIN only or all of them. | Built on fakes, with lockouts across calls per subject and per calling number, PIN enrolment and an optional duress PIN, and Stripe Identity, Twilio Lookup and Telnyx Number Lookup adapters in the reference server. |
+| **Dossier** (file) | Intake the caller confirms: forms the organisation defines, values normalised by code and read back before filing, a structured record with a fingerprint, encrypted sensitive fields, delivery to the organisation and documents by texted link. | Built. |
+| **Paylink** (pay) | Payment by a secure link texted to the number on file (a hosted page such as Stripe Checkout), on the business's own account (`connect`) or the platform's (`platform`), chosen per flow, for an amount the flow or the host's code sets and the caller hears read back. Only methods that settle during the call; the link lives 15 minutes after it is texted by default, and the host calls `expirePaymentLinks` at that deadline (a timer or a sweep) so the engine expires it. The engine never handles card numbers. | Built on fakes, both modes, with refunds and disputes in platform mode, and a minimal Stripe Checkout adapter in the reference server's `npm run demo:e2e`. Charging a saved card (PAY-4) and keypad card capture (PAY-6) are planned. |
+| **Trace** (prove) | The hash-chained audit ledger, which is always on and cannot be turned off, plus optional signed receipts (ES256 over canonical JSON) and consent records with fingerprinted wording. | Built, in memory, with receipt key rotation, consent revocation through a host `ConsentStore`, ledger export, public timestamp anchors, monthly reports, and access and deletion requests for one subject. |
+| **Gate** (entry) | The outcome after verification: a signed, time-limited access grant for a door, never sent twice, whose outcome the engine itself records from the door controller's answer, or a one-time access code texted to the number on file. | Built, with the signed-webhook relay, Seam, Kisi and Verkada adapters, one-time access codes and a fake. |
+| **Step-up** (entry) | Web sign-in step-up: a short-lived ES256 token, bound to the nonce a site showed, that the site exchanges once after the caller is verified. | Built. |
 
 Outside modules plug in with `engine.use(module)`. A module declares what it provides (factors,
 flow steps, outcomes), the scopes it grants or needs, the adapters it requires and a validator for
@@ -77,14 +77,16 @@ module, a level below a scope's floor, a missing adapter, a bad step), so a host
 when it is saved, never in the middle of a call. The engine runs a flow step by step and allows
 only the current step's work, and none once the flow has ended. Money movement, contact changes and
 access can never go below level 2, whatever a scope is called, and level 2 always needs a factor
-that is not something the caller knows. Pay by link is level 2 by default. There is no configuration UI: config and API come first.
-This config turns Gate on, so the engine needs Gate's adapters: its door controllers (`access`) and
-its grant signer (`accessSigner`), as in "Using the engine" below. The validator refuses the config
-without them, or with a target naming a controller the engine does not have.
+that is not something the caller knows. Pay by link is level 2 by default. There is no
+configuration UI: config and API come first.
+
+This config turns Gate on, so the engine needs Gate's adapters: its door controllers (`access`)
+and its grant signer (`accessSigner`), as in "Using the engine" below. The validator refuses the
+config without them, or with a target naming a controller the engine does not have.
 
 ## Try it
 
-Node.js 24.2 or later. The only dependencies are four development tools.
+Node.js 24.2 or later. The only dependencies are five development tools.
 
 ```sh
 npm ci
@@ -102,7 +104,7 @@ one flow of a FlowConfig file with a scripted caller on the in-memory adapters, 
 step, each decision, every event and the final receipt. Built-in scripts: `pass`, `wrong-pin`,
 `lockout`, `consent-no`, `payment-paid` and `payment-expired`, or a JSON file of your own. A
 config with any problem, or one that turns on an outside module, is refused with every reason
-([SPEC.md](SPEC.md), section 17). Exit codes: 0 the flow ran, whatever its outcome; 1 a refused
+([SPEC.md](SPEC.md), section 28). Exit codes: 0 the flow ran, whatever its outcome; 1 a refused
 config, flow or script; 2 bad usage; 3 a valid config whose flow reached a step the simulator has
 no scripted caller for (a Gate step, a step an outside module adds, or a `badge.verify` step with a
 factor other than `keypad_knowledge`, `pin`, `carrier_identity_match` or `photo_id`). Exit 3 is not
@@ -112,11 +114,11 @@ The demo runs `owner-command` first: the owner of a line keys a PIN, on two engi
 session store as two processes of a host would; one wrong PIN, then the right one, and a grant for
 owner commands only. Then `deposit`: a made-up caller is verified to level 2 by keypad and a
 carrier match, files a repair request, has a card number read aloud removed from the transcript,
-hears the amount the flow sets read back and confirms it, receives a payment link for that amount, pays (a signed Stripe webhook), consents, and
-the signed receipt and the key set are fetched from the server and checked (and a one-byte change
-fails); that money goes to the platform's account. `deposit-connect` takes a deposit on the
-business's own account: a webhook without the connected account is ignored, the Connect one
-settles it. Last, `entry`: a verified caller gets a signed 30-second access grant, the relay adapter
+hears the amount the flow sets read back and confirms it, receives a payment link for that amount,
+pays (a signed Stripe webhook), consents, and the signed receipt and the key set are fetched from
+the server and checked (and a one-byte change fails); that money goes to the platform's account.
+`deposit-connect` takes a deposit on the business's own account: a webhook without the connected
+account is ignored, the Connect one settles it. Last, `entry`: a verified caller gets a signed 30-second access grant, the relay adapter
 posts it to an example door relay, which checks it with Gate's public key and opens the pretend
 door; the same grant sent again, and a changed copy, are refused. Nothing leaves the machine.
 
@@ -186,16 +188,20 @@ state machine, the config, the events and the formats.
 | `POST /webhooks/stripe/identity` | Stripe Identity outcomes, signature checked first |
 | `POST /webhooks/stripe/payments` | Stripe Checkout outcomes on the platform's account, signature checked first, each event applied once |
 | `POST /webhooks/stripe/connect` | Stripe Checkout outcomes from connected accounts (connect mode), with their own signing secret |
-| `GET /r/:token` | a receipt page in English and French, with its signature check, by a capability token the host issued (`/r/:token.json`: the signed receipt) |
+| `POST /webhooks/records` | the sample receiver of record deliveries, signature checked first |
 | `POST /webhooks/twilio`, `POST /webhooks/telnyx` | carrier webhooks, signature checked, then acknowledged (nothing is applied yet) |
+| `GET /r/:token` | a receipt page in English and French (a Spanish reader gets the English page), with its signature check, by a capability token the host issued (`/r/:token.json`: the signed receipt) |
+| `GET`, `POST /u/:token` | the single-use document upload page, when the server is given `uploads` |
 | `GET /.well-known/receipt-keys.json` | the public key set for receipts |
+| `GET /.well-known/security.txt` | the host's own security.txt, when the server is given `securityTxt` |
 | `GET /healthz` | liveness |
 
-`npm run ui` adds the demo page and its `/demo/*` routes. `npm run serve` starts the server alone on `127.0.0.1:8787`. With `STRIPE_IDENTITY_WEBHOOK_SECRET`,
-`STRIPE_PAYMENTS_WEBHOOK_SECRET` and `STRIPE_CONNECT_WEBHOOK_SECRET` set to your own test-mode endpoint secrets, `stripe listen` can
+`npm run ui` adds the demo page and its `/demo/*` routes. `npm run serve` starts the server alone
+on `127.0.0.1:8787`. With `STRIPE_IDENTITY_WEBHOOK_SECRET`, `STRIPE_PAYMENTS_WEBHOOK_SECRET` and
+`STRIPE_CONNECT_WEBHOOK_SECRET` set to your own test-mode endpoint secrets, `stripe listen` can
 forward real test events to it, and their signatures are checked. The Stripe Identity adapter is
-built (below). That server keeps fake payment adapters, so the Checkout sessions those events name
-are unknown to the engine (`npm run demo:e2e` runs a real Checkout). It is not hardened for
+wired in (below). That server keeps fake payment adapters, so the Checkout sessions those events
+name are unknown to the engine (`npm run demo:e2e` runs a real Checkout). It is not hardened for
 production.
 
 ### Trying Stripe Identity with your own test account
@@ -250,8 +256,8 @@ runs on fakes.
 - **Caller ID is never a factor.** There is no factor kind for it, and no plug-in may take one.
 - **Card numbers never enter.** Pay is by hosted link; transcripts are redacted; intake refuses a
   value that carries a card number; the ledger refuses detail that carries one.
-- **Refuse at save time.** A config with any problem never runs; planned work is refused by the
-  validator or throws `NotImplementedError` with its roadmap id instead of guessing.
+- **Refuse at save time.** A config with any problem never runs; planned work throws
+  `NotImplementedError` with its roadmap id instead of guessing.
 - **Fail closed.** An unknown scope is refused, an expired grant is refused, an unsigned webhook is
   refused, a step outside the flow's current one is refused.
 - **Never open a door twice.** An unlock is sent once; a lost answer is recorded as unknown, and
@@ -260,7 +266,8 @@ runs on fakes.
 ## What it does not do
 
 No call handling, speech, carrier routing or hosting: those belong to the host. No voice
-biometrics. No recording. No storage beyond the in-memory reference adapters. No configuration UI.
+biometrics. No recording. No production storage: only the in-memory adapters and the reference
+server's optional SQLite stores. No configuration UI.
 No regulated identity proofing: it checks a caller against the organisation's own records.
 
 ## Checking a release
