@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Simulator callers for the rest of the built-in steps (#134): `gate.grant` (the fake door, as
+  every controller the config's Gate targets name, opens or refuses), `step-up.issue` (a token
+  issued and exchanged), and Badge's `text_code`, `spoken_knowledge` and `callback` (the caller
+  goes on on the callback call); script fields `textCode`, `spoken`, `callback` and `door`, and the
+  built-in scripts `text-code-wrong`, `spoken-wrong`, `callback-not-confirmed` and `door-refused`.
+  A flow with every built-in step type runs to the end with exit code 0; nothing keyed or said is
+  printed.
 - A pending refund's later outcome (PAY-9, #117, #132): `applyRefundOutcome` applies Stripe's
   signed `refund.updated`, `refund.failed` and `charge.refund.updated` (`parseStripeEvent` kind
   `refund`; the reference server's payments endpoint), found by the provider's refund id. A pending

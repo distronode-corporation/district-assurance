@@ -47,7 +47,7 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-28, says why.
 | M6 Paylink | Amounts from code, cancel and expiry, the live detector, refunds; the Stripe Checkout adapter in platform mode. Open: the Checkout adapter's connect mode; saved cards and keypad capture gated | PAY-1, PAY-4, PAY-6 |
 | M7 Trace | Key rotation, the stand-alone verifier, consent revocation, ledger export, more redactors, subject requests, monthly reports, a public timestamp anchor, receipt links by text | done |
 | M8 Reference server hardening | Carrier signatures, limits and logs, receipt links, persistent stores, the release workflow, signed releases, fuzz tests, the threat tables, security.txt, benchmarks. Open: the release dry run in a fork and the first release | SRV-5 |
-| M9 Host integration and module authors | Transcript forwarding, event delivery, the module author kit, the FlowConfig JSON Schema, factors added after construction, the flow simulator. Open: simulator callers for the remaining steps | [#134](https://github.com/distronode-corporation/district-assurance/issues/134) |
+| M9 Host integration and module authors | Transcript forwarding, event delivery, the module author kit, the FlowConfig JSON Schema, factors added after construction, the flow simulator, with a scripted caller for every built-in step | done |
 
 ## What is left
 
@@ -55,10 +55,7 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-28, says why.
    mode.
 2. **SRV-5:** the release workflow's dry run on a tag in a fork, and the checks on the first real
    release.
-3. **[#134](https://github.com/distronode-corporation/district-assurance/issues/134):** scripted
-   simulator callers for `gate.grant`, `step-up.issue`, callbacks, texted codes and spoken
-   answers; a flow with one of those steps stops there with exit code 3 today.
-4. **Gated, not scheduled:** PAY-4 (saved-card charges) and PAY-6 (keypad card capture); PAY-6
+3. **Gated, not scheduled:** PAY-4 (saved-card charges) and PAY-6 (keypad card capture); PAY-6
    starts only after an assessor's scoping and a buyer who needs it.
 
 Dependencies: PAY-6 needs PAY-1.
@@ -272,11 +269,7 @@ The release workflow is built, and nothing is published yet, by decision: `packa
 | JSON Schema for FlowConfig (MOD-2) | `schema/flow-config.v1.json` | every config `validateConfig` accepts passes the schema (`test/config-schema.test.ts`) |
 | Factors added after construction (MOD-3) | `src/engine.ts`, `src/verify/badge.ts` | `engine.useFactor` and modules that provide factors (`test/factor-plugins-hostile.test.ts`, `test/pin.test.ts`) |
 | Flow simulator (MOD-4) | `src/cli/simulate.ts` | scripted callers on the fakes (`test/simulate.test.ts`) |
-
-Open on GitHub and not written out here:
-[#134](https://github.com/distronode-corporation/district-assurance/issues/134), simulator callers
-for `gate.grant`, `step-up.issue`, callbacks, texted codes and spoken answers. A flow with one of
-those steps stops there with exit code 3 today (SPEC.md section 28).
+| Simulator callers for every built-in step (#134) | `src/cli/simulate.ts` | Gate, step-up, callback, texted code and spoken answers (`test/simulate-all-steps.test.ts`) |
 
 ## Not planned
 

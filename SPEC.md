@@ -2816,26 +2816,34 @@ is `src/cli/simulate.ts`.
   or when `validateConfig` finds a problem; an outside module listed with `enabled: false` is left
   out. A flow the config does not have, or a script that is neither built in nor a valid file, is
   refused the same way. Bad arguments print the usage and exit 2. A flow that ran exits 0, whether
-  it completed or failed. A step the simulator has no scripted caller for (a type another module
-  adds, a Gate or a step-up step: only `badge.verify`, `dossier.collect`, `paylink.request` and
-  `trace.consent` have one) prints `step <type> is not simulated`, and a `badge.verify` step that lists
-  a factor other than `keypad_knowledge`, `pin`, `carrier_identity_match` or `photo_id` prints
-  `step badge.verify factor <kind> is not simulated`; either way the call ends there and the run
-  exits 3, never guessing or skipping part of the step.
+  it completed or failed. Every built-in step type and factor has a scripted caller. A step the
+  simulator has no caller for (a type another module adds) prints `step <type> is not simulated`,
+  and a `badge.verify` step that lists a factor plug-in prints `step badge.verify factor <kind> is
+  not simulated`; either way the call ends there and the run exits 3, never guessing or skipping
+  part of the step.
 - The caller is made up: one subject on file with a 555 number, an answer for every keypad field
-  and a PIN of `minDigits` digits. It acts on whatever step the flow is on: at `badge.verify` it
-  keys the account number, then each factor the step lists (keypad answers, the PIN, the carrier
-  check, the photo ID link), then waits for the result; at `dossier.collect` it answers every field
-  of the step's form with a sample value (a text answer cut to the field's `maxLength`) and
-  confirms; at `paylink.request` it asks to pay and the provider reports the script's outcomes; at
-  `trace.consent` it answers. A refusal by the engine is printed and the caller goes on. After the
+  and every spoken field (a value of the field's format) and a PIN of `minDigits` digits. It acts on
+  whatever step the flow is on: at `badge.verify` it keys the account number, then each factor the
+  step lists (keypad answers, the PIN, spoken answers, the carrier check, a texted code it asks for
+  and keys, the photo ID link), then waits for the result. With `callback`, it asks to be called
+  back once it has keyed: that call ends, whoever answers on the number on file keys the
+  confirmation or not, and the caller goes on on the callback call (`call: the callback call
+  <id>`), keying its entered factors again, right, for the rest of the flow. At `dossier.collect` it
+  answers every field of the step's form with a sample value (a text answer cut to the field's
+  `maxLength`) and confirms; at `paylink.request` it asks to pay and the provider reports the
+  script's outcomes; at `trace.consent` it answers; at `gate.grant` the fake door, which answers as
+  every controller the config's Gate targets name, opens or refuses; at `step-up.issue` it keys a
+  sign-in code and the website exchanges the token, with the site's audience. A refusal by the engine is printed and the caller goes on. After the
   last step the call ends, abandoning a flow still running, and `flow: <status>` gives the status
   once the call has ended.
-- A script is `{summary, wrongKeypad, wrongPins, carrier, photoId, consent, payment}`: wrong keypad
+- A script is `{summary, wrongKeypad, wrongPins, carrier, photoId, consent, payment, textCode,
+  spoken, callback, door}`: wrong keypad
   answers and wrong PINs before the right ones (0 to 5; after each wrong entry the caller waits out
   the wait Badge's `lockout` setting gives for the failures so far, and stops once locked out), the
   carrier's `identityMatch`, the photo ID outcome, the consent answer, and the payment outcome
-  (`paid`; `paid_later`, completed unpaid then the asynchronous success; `failed`; `expired`). A
+  (`paid`; `paid_later`, completed unpaid then the asynchronous success; `failed`; `expired`), the
+texted code keyed (`right` or `wrong`), how spoken answers are heard (`right` or `wrong`), the
+callback (`confirmed` or `not_confirmed`) and the door (`opens` or `refuses`). A
   script file is a JSON object with any of these fields, checked field by field; the rest come from
   `pass`. Built in:
 
@@ -2847,12 +2855,16 @@ is `src/cli/simulate.ts`.
 | `consent-no` | as `pass`, consent no |
 | `payment-paid` | as `pass`, paid later: completed unpaid, then the asynchronous success |
 | `payment-expired` | as `pass`, the link expires |
+| `text-code-wrong` | as `pass`, a wrong texted code |
+| `spoken-wrong` | as `pass`, spoken answers heard as another value |
+| `callback-not-confirmed` | as `pass`, the callback answered without the confirmation |
+| `door-refused` | as `pass`, the door's controller refuses the unlock |
 
 Output, one line each: the headings `simulate:`, `script:`, `call:`, `step <n>/<count>: <type>
 <fields>`, `flow: <status>` and `receipt:`; `  caller:` what the caller does, then `  decision:` the
 engine's answer or `  refused:` its refusal; `    event <name> (<actor>) <detail>` for every ledger
 entry, as it is appended. Then the signed receipt as JSON, checked against the engine's key set, or
-`receipt: none`. Nothing the caller keys is printed: events carry no values (section 9) and
+`receipt: none`. Nothing the caller keys or says is printed (no texted code, sign-in code or transcript either): events carry no values (section 9) and
 decisions say right or wrong, never the digits. A config and a script file are someone else's
 text, so every line, on standard output and standard error, writes C0 and C1 control characters
 and bidi controls and marks as `\u` escapes (`terminalSafe`): a file can never move the cursor,

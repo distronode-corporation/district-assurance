@@ -98,12 +98,13 @@ npm run simulate -- config.json --flow deposit --script pass   # one flow of you
 `npm run simulate` (the `district-assurance simulate` command once the package is published) runs
 one flow of a FlowConfig file with a scripted caller on the in-memory adapters, and prints each
 step, each decision, every event and the final receipt. Built-in scripts: `pass`, `wrong-pin`,
-`lockout`, `consent-no`, `payment-paid` and `payment-expired`, or a JSON file of your own. A
+`lockout`, `consent-no`, `payment-paid`, `payment-expired`, `text-code-wrong`, `spoken-wrong`,
+`callback-not-confirmed` and `door-refused`, or a JSON file of your own. A
 config with any problem, or one that turns on an outside module, is refused with every reason
 ([SPEC.md](SPEC.md), section 28). Exit codes: 0 the flow ran, whatever its outcome; 1 a refused
 config, flow or script; 2 bad usage; 3 a valid config whose flow reached a step the simulator has
-no scripted caller for (a Gate step, a step an outside module adds, or a `badge.verify` step with a
-factor other than `keypad_knowledge`, `pin`, `carrier_identity_match` or `photo_id`). Exit 3 is not
+no scripted caller for (a step an outside module adds, or a `badge.verify` step with a factor
+plug-in): every built-in step type and factor has one. Exit 3 is not
 a refusal: the run stops at that step, ends the call and prints what it did up to there.
 
 The demo runs `owner-command` first: the owner of a line keys a PIN, on two engines that share one

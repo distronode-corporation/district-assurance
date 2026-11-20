@@ -177,8 +177,19 @@ describe("simulate: built-in scripts", () => {
     assert.match(text, /^flow: failed$/m);
   });
 
-  it("the built-in scripts are the six the documents name", () => {
-    assert.deepEqual(Object.keys(BUILT_IN_SCRIPTS), ["pass", "wrong-pin", "lockout", "consent-no", "payment-paid", "payment-expired"]);
+  it("the built-in scripts are the ten the documents name", () => {
+    assert.deepEqual(Object.keys(BUILT_IN_SCRIPTS), [
+      "pass",
+      "wrong-pin",
+      "lockout",
+      "consent-no",
+      "payment-paid",
+      "payment-expired",
+      "text-code-wrong",
+      "spoken-wrong",
+      "callback-not-confirmed",
+      "door-refused",
+    ]);
   });
 
   it("runs a config without the PIN, or without Badge at all", async () => {
@@ -227,7 +238,7 @@ describe("simulate: script files", () => {
   it("refuses a script that is neither built in nor a readable file", async () => {
     const result = await run(["simulate", file(flows()), "--flow", "deposit", "--script", "sunny-day"]);
     assert.equal(result.code, 1);
-    assert.match(result.err[1]!, /^  - sunny-day: .*\(not a built-in script: pass, wrong-pin, lockout, consent-no, payment-paid, payment-expired\)$/);
+    assert.match(result.err[1]!, /^  - sunny-day: .*\(not a built-in script: pass, wrong-pin, lockout, consent-no, payment-paid, payment-expired, text-code-wrong, spoken-wrong, callback-not-confirmed, door-refused\)$/);
   });
 });
 
