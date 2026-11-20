@@ -145,7 +145,11 @@ export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: 
       const field = outcome === "duress" ? "duressDigest" : "pinDigest";
       const check = outcome === "duress" ? duressCheck : pinCheck;
       if (outcome === "fail" || !check.upgrade) return;
-      await records.upgradePinDigest(input.workspaceId, subjectKey, field, onFile![field]!, await hashPinRecord(keyed[field])).catch(() => false);
+      try {
+        await records.upgradePinDigest(input.workspaceId, subjectKey, field, onFile![field]!, await hashPinRecord(keyed[field]));
+      } catch {
+        // Hashing the new record or writing it failed: the earlier record stays, and still verifies.
+      }
     };
   }
   // A subject on file implies a keypad-shaped account or a host's subject key, never the stand-in.

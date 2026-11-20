@@ -11,8 +11,11 @@ const runs: Array<{ memory: number; passes: number; parallelism: number }> = [];
 const compares: Array<[number, number]> = [];
 const realArgon2 = crypto.argon2;
 const realEqual = crypto.timingSafeEqual;
+/** Which runs, counted from 1 after the last reset, fail as an Argon2id run that cannot get its memory would. */
+const failing = new Set<number>();
 mock.method(crypto, "argon2", (algorithm: crypto.Argon2Algorithm, parameters: crypto.Argon2Parameters, callback: (err: Error | null, key: Buffer) => void) => {
   runs.push({ memory: parameters.memory, passes: parameters.passes, parallelism: parameters.parallelism });
+  if (failing.has(runs.length)) return void setImmediate(() => callback(new Error("argon2 failed"), Buffer.alloc(0)));
   realArgon2(algorithm, parameters, callback);
 });
 mock.method(crypto, "timingSafeEqual", (a: NodeJS.ArrayBufferView, b: NodeJS.ArrayBufferView) => {
@@ -26,6 +29,7 @@ const { PIN_HASH_PARAMETERS, checkPinRecord, hashPinRecord } = await import("../
 const { subjectKeyFor } = await import("../src/verify/knowledge.ts");
 const { TEST_KNOWLEDGE_KEY } = await import("../src/testing/index.ts");
 const { ACCOUNT, PHONE_ON_FILE, PIN, setup, waitOut } = await import("./helpers.ts");
+const { MemoryRecordStore } = await import("../src/testing/index.ts");
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const keyed = (pin: string) => hmacSha256Hex(TEST_KNOWLEDGE_KEY, `pin:${OWNER}:${pin}`);
@@ -33,6 +37,7 @@ const keyed = (pin: string) => hmacSha256Hex(TEST_KNOWLEDGE_KEY, `pin:${OWNER}:$
 function reset(): void {
   runs.length = 0;
   compares.length = 0;
+  failing.clear();
 }
 
 describe("the PIN record check takes the same work whatever is on file", () => {
@@ -85,5 +90,19 @@ describe("the PIN record check takes the same work whatever is on file", () => {
       assert.equal(runs.length, 2, label);
       waitOut(t);
     }
+  });
+
+  it("keeps a verified outcome when hashing the upgraded record fails, and leaves the earlier record (CodeRabbit #143)", async () => {
+    const records = new MemoryRecordStore();
+    const t = setup({ adapters: { records } });
+    records.putSubject("ws_test", { subjectKey: OWNER, phoneOnFile: PHONE_ON_FILE, knowledge: {}, pinDigest: keyed(PIN) });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { subjectKey: OWNER });
+    reset();
+    // Runs 1 and 2 are the entry's two checks; run 3 hashes the upgraded record, and fails.
+    failing.add(3);
+    assert.deepEqual(await t.engine.submitPin(callId, PIN), { matched: true, locked: false });
+    assert.equal(runs.length, 3);
+    assert.equal((await records.getSubject("ws_test", OWNER))!.pinDigest, keyed(PIN), "the earlier record is left for the next match");
   });
 });

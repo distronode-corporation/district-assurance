@@ -515,8 +515,9 @@ the duress PIN is off unless it is set.
   `duress` for a duress record) the PIN factor replaces it with a new Argon2id record through
   `RecordStore.upgradePinDigest(workspaceId, subjectKey, field, from, to)`, which writes only while
   the field is still `from`, in one atomic step; a miss, a lock or a lost race changes nothing, and
-  the answer to the caller is the same either way. The upgrade is best effort: a store write that
-  fails leaves the earlier record for the next match, and the entry keeps its outcome. Lockouts and counters are unchanged.
+  the answer to the caller is the same either way. The upgrade is best effort: if hashing the new record or
+  the store's write fails, the earlier record stays for the next match, and the entry keeps its
+  outcome. Lockouts and counters are unchanged.
 - `verifier` mode: the host's `PinVerifier.verify({workspaceId, subjectKey, pin})` decides; the
   PIN is passed once and kept nowhere. It is asked for every attempt: for a malformed entry or an
   account a keypad cannot produce, with a stand-in (`minDigits` zeros, an HMAC subject key) whose
