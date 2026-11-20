@@ -882,7 +882,7 @@ function assertNullOrString(value: unknown, what: string): void {
 function sampleStates(): SessionState[] {
   const at = "2026-01-01T00:00:00.000Z";
   const open = newSession("call_contract", "ws_contract", at);
-  const grant: Grant = { grantId: "grant_contract", level: 2, scopes: ["status.read"], issuedAt: at, expiresAt: "2026-01-01T00:15:00.000Z" };
+  const grant: Grant = { grantId: "grant_contract", level: 2, scopes: ["status.read"], issuedAt: at, expiresAt: "2026-01-01T00:15:00.000Z", policyVersion: "1", configRevision: "contract" };
   const verified: SessionState = { ...open, level: 2, grant, factors: [{ kind: "keypad_knowledge", passed: true, at }] };
   return [open, verified, { ...verified, tainted: true, level: 0, grant: null }, { ...open, phase: "ended", endedAt: at }];
 }
@@ -904,8 +904,8 @@ export function moduleContract(module: AssuranceModule, options: ModuleContractO
   const policy = options.policy ?? defaultVerificationPolicy();
   const installed = options.installed ?? builtInModules();
   const goodContext = (): StepContext =>
-    Object.freeze({ settings: frozen(settings), policy: frozen(policy), adapters: new Set(module.requiredAdapters(frozen(settings))) });
-  const emptyContext = (): StepContext => Object.freeze({ settings: null, policy: null, adapters: new Set<string>() });
+    Object.freeze({ settings: frozen(settings), policy: frozen(policy), adapters: new Set(module.requiredAdapters(frozen(settings))), capabilities: {} });
+  const emptyContext = (): StepContext => Object.freeze({ settings: null, policy: null, adapters: new Set<string>(), capabilities: {} });
   /** validateStep on a frozen context. A host shares its adapter set, so a change to it fails the case. */
   const validateStep = (step: FlowStep, ctx: StepContext, what: string): string[] => {
     const before = [...ctx.adapters];
@@ -997,9 +997,9 @@ export function moduleContract(module: AssuranceModule, options: ModuleContractO
       () => {
         const slice = module.initCall(frozen(settings));
         if (module.cannotRunStep !== undefined) {
-          for (const step of steps) assertNullOrString(mustNotThrow("cannotRunStep", () => module.cannotRunStep!(frozen(step), frozen(slice))), "cannotRunStep");
+          for (const step of steps) assertNullOrString(mustNotThrow("cannotRunStep", () => module.cannotRunStep!(frozen(step), frozen(slice), "en")), "cannotRunStep");
         }
-        if (module.blocksEnd !== undefined) assertNullOrString(mustNotThrow("blocksEnd", () => module.blocksEnd!(frozen(slice))), "blocksEnd");
+        if (module.blocksEnd !== undefined) assertNullOrString(mustNotThrow("blocksEnd", () => module.blocksEnd!(frozen(slice), new Date("2026-01-01T00:00:00.000Z"))), "blocksEnd");
         if (module.onUntrusted !== undefined) assertJson(mustNotThrow("onUntrusted", () => module.onUntrusted!(frozen(slice))), "onUntrusted");
         if (module.receiptPart !== undefined) {
           for (const state of sampleStates()) {

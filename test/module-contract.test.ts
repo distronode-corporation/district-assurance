@@ -7,23 +7,44 @@ import { bookCallback, callbackModule, callbackSettings, declineCallback } from 
 import type { JsonValue } from "../src/core/canonical.ts";
 import type { AssuranceModule, FlowStep } from "../src/core/module.ts";
 import { builtInModules } from "../src/modules.ts";
+import { defaultVerificationPolicy } from "../src/core/policy.ts";
 import { moduleContract, type ModuleContractOptions } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, rejects, setup, testConfig } from "./helpers.ts";
 
 const config = testConfig();
-const settingsOf = (name: string) => config.modules[name]!.settings;
+// testConfig leaves Gate and step-up off: their settings are the ones test/gate.test.ts and
+// test/gate-step-up-hostile.test.ts turn them on with.
+const EXTRA_SETTINGS: Record<string, unknown> = {
+  gate: {
+    targets: [
+      { id: "front-door", controller: "lobby", ref: "door-1" },
+      { id: "side-door", controller: "side", ref: "s-1" },
+    ],
+  },
+  "step-up": { issuer: "https://verify.example.test", sites: [{ id: "portal", audience: "https://portal.example.test" }] },
+};
+const settingsOf = (name: string) => (Object.hasOwn(EXTRA_SETTINGS, name) ? EXTRA_SETTINGS[name] : config.modules[name]!.settings);
+// The scopes the two modules' steps need, as their own tests set them.
+const policy = defaultVerificationPolicy();
+policy.scopes["entry.open"] = 2;
+policy.scopes["entry.sign_in"] = 2;
 const BUILT_IN_SAMPLES: Record<string, FlowStep[]> = {
   badge: [{ type: "badge.verify", level: 1, factors: ["keypad_knowledge"], scopes: ["status.read"] }],
   dossier: [{ type: "dossier.collect", form: "repair" }],
   paylink: [{ type: "paylink.request", amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" }],
   trace: [{ type: "trace.consent", purpose: "texts", require: "answer" }, { type: "trace.receipt" }],
+  gate: [
+    { type: "gate.grant", target: "front-door" },
+    { type: "gate.grant", target: "side-door", lifetimeSeconds: 600 },
+  ],
+  "step-up": [{ type: "step-up.issue", site: "portal" }],
 };
 
 for (const module of builtInModules()) {
   const name = module.manifest.name;
   describe(`the built-in ${name} module passes the module contract`, () => {
     // The built-in modules are the modules an outside one joins, so each is checked on its own.
-    for (const c of moduleContract(module, { settings: settingsOf(name), steps: BUILT_IN_SAMPLES[name]!, installed: [] })) it(c.name, c.run);
+    for (const c of moduleContract(module, { settings: settingsOf(name), steps: BUILT_IN_SAMPLES[name]!, policy, installed: [] })) it(c.name, c.run);
   });
 }
 
@@ -119,13 +140,13 @@ describe("the example Callback module in a flow", () => {
       "windows[1].label needs English and French",
       "two windows have the same id",
     ]);
-    const ctx = { settings: callbackSettings, policy: null, adapters: new Set<string>() };
+    const ctx = { settings: callbackSettings, policy: null, adapters: new Set<string>(), capabilities: {} };
     assert.deepEqual(callbackModule.validateStep({ type: "callback.book", window: 3, x: 1 }, ctx), ["x is not a field of this step", "window must name a window"]);
     assert.deepEqual(callbackModule.validateStep({ type: "callback.book", window: "never" }, ctx), ["no window never in the callback settings"]);
     assert.deepEqual(callbackModule.validateStep({ type: "callback.book", window: "never" }, { ...ctx, settings: null }), []);
     const slice = callbackModule.initCall(callbackSettings);
-    assert.equal(callbackModule.cannotRunStep!({ type: "callback.book", window: "never" }, slice), "this call has no callback window never");
-    assert.equal(callbackModule.cannotRunStep!({ type: "callback.book" }, slice), null);
+    assert.equal(callbackModule.cannotRunStep!({ type: "callback.book", window: "never" }, slice, "en"), "this call has no callback window never");
+    assert.equal(callbackModule.cannotRunStep!({ type: "callback.book" }, slice, "en"), null);
   });
 });
 
