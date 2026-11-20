@@ -355,6 +355,7 @@ All notable changes to this project are documented here. The format follows
   English and French on every call, Spanish on a Spanish call and on text with no call.
 - README badges for the OpenSSF Scorecard, the licence and CI on main, and a section in
   CONTRIBUTING.md on reporting bugs and asking for features through GitHub issues.
+- A README badge for the OpenSSF Best Practices badge (project 16957, passing).
 
 ### Changed
 
