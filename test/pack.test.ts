@@ -3,7 +3,10 @@
 // `npm publish` builds first (prepack); the release workflow builds explicitly, packs with
 // install scripts off, and checks the tarball's entry points.
 import { strict as assert } from "node:assert";
-import { readFileSync, readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -74,5 +77,66 @@ describe("the release workflow's tarball allow-list", () => {
     };
     walk(exportsMap);
     for (const target of targets) assert.ok(required.includes(target), `release.yml requires ${target}`);
+  });
+});
+
+describe("SPEC's published package section", () => {
+  it("names every path the exports map publishes, and says how many there are", () => {
+    const spec = readFileSync(new URL("../SPEC.md", import.meta.url), "utf8");
+    const section = spec.slice(spec.indexOf("## 17. The published package"));
+    const paragraph = section.slice(0, section.indexOf("\n\n", section.indexOf("\n\n") + 2));
+    const exportsMap = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { exports: Record<string, unknown> }).exports;
+    const names = Object.keys(exportsMap).map((key) => (key === "." ? "district-assurance" : `district-assurance/${key.slice(2)}`));
+    for (const name of names) assert.ok(paragraph.includes(`\`${name}\``), `SPEC names ${name}`);
+    const words = ["one", "two", "three", "four", "five", "six"];
+    assert.match(paragraph, new RegExp(`has ${words[names.length - 1]} entry points`), `${names.length} entry points`);
+  });
+});
+
+/** The run script of the release workflow's "Tarball contents" step, as the runner gets it. */
+function tarballCheck(): string {
+  const lines = release.split("\n");
+  const start = lines.findIndex((l) => l.trim() === "- name: Tarball contents");
+  const run = lines.findIndex((l, i) => i > start && l.trim() === "run: |");
+  const indent = lines[run + 1]!.length - lines[run + 1]!.trimStart().length;
+  const body: string[] = [];
+  for (const line of lines.slice(run + 1)) {
+    if (line.trim() !== "" && line.length - line.trimStart().length < indent) break;
+    body.push(line.slice(indent));
+  }
+  return body.join("\n");
+}
+
+describe("the release workflow's tarball check, run as written", { skip: process.platform === "win32" ? "bash and tar as on the Linux runner" : false }, () => {
+  const required = ["package/dist/index.js", "package/dist/index.d.ts", "package/dist/testing/index.js", "package/dist/testing/index.d.ts", "package/schema/flow-config.v1.json", "package/package.json", "package/LICENSE", "package/NOTICE"];
+  const complete = [...required, "package/dist/core/engine.js", "package/README.md", "package/SPEC.md"];
+
+  /** Packs these paths into a tarball and runs the step on it: its exit code. */
+  function check(paths: readonly string[]): number | null {
+    const dir = mkdtempSync(join(tmpdir(), "da-tarball-"));
+    try {
+      for (const path of paths) {
+        mkdirSync(join(dir, "tree", dirname(path)), { recursive: true });
+        writeFileSync(join(dir, "tree", path), "x");
+      }
+      mkdirSync(join(dir, "release"));
+      const tar = spawnSync("tar", ["-czf", join(dir, "release", "p.tgz"), "-C", join(dir, "tree"), ...paths]);
+      assert.equal(tar.status, 0, String(tar.stderr));
+      return spawnSync("bash", ["-c", tarballCheck()], { env: { ...process.env, RUNNER_TEMP: dir, FILE: "p.tgz" }, stdio: "ignore" }).status;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("passes a tarball with everything it requires", () => {
+    assert.equal(check(complete), 0);
+  });
+
+  it("fails a tarball missing any one required path", () => {
+    for (const path of required) assert.equal(check(complete.filter((p) => p !== path)), 1, `without ${path}`);
+  });
+
+  it("fails a tarball holding a path outside the published set", () => {
+    for (const extra of ["package/src/index.ts", "package/schema/x.ts", "package/.env"]) assert.equal(check([...complete, extra]), 1, extra);
   });
 });

@@ -2886,9 +2886,10 @@ page refusal is its HTML page):
 
 ## 17. The published package
 
-The package has three entry points and no others: `district-assurance`, `district-assurance/testing`
-and `district-assurance/package.json`; any other path is refused by Node. The tarball holds the
-compiled `dist/` (JavaScript and declarations) and the documents `files` names. It is not on npm:
+The package has four entry points and no others: `district-assurance`, `district-assurance/testing`,
+`district-assurance/package.json` and `district-assurance/schema/flow-config.v1.json` (the FlowConfig
+JSON Schema, section 7); any other path is refused by Node. The tarball holds the compiled `dist/`
+(JavaScript and declarations), the schema and the documents `files` names. It is not on npm:
 `package.json` is `"private": true` until a release is decided (ADR-12). A release is a version tag
 `vX.Y.Z` matching `package.json`, run by `.github/workflows/release.yml`: the CI workflow and the
 supply-chain checks on the tag, two builds that must pack to the same bytes, a check of the file

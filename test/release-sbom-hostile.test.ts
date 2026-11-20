@@ -22,11 +22,19 @@ function checkScripts(text: string = workflow): string[] {
   });
 }
 
+/** A file's text as it is, not JSON-encoded: for an SBOM that is not JSON at all. */
+class RawFile {
+  readonly text: string;
+  constructor(text: string) {
+    this.text = text;
+  }
+}
+
 function runCheck(script: string, bom: unknown, version: string): { ok: boolean; output: string } {
   const dir = mkdtempSync(join(tmpdir(), "zz125-"));
   try {
     writeFileSync(join(dir, "check.mjs"), script);
-    writeFileSync(join(dir, "bom.json"), JSON.stringify(bom));
+    writeFileSync(join(dir, "bom.json"), bom instanceof RawFile ? bom.text : JSON.stringify(bom));
     const r = spawnSync(process.execPath, [join(dir, "check.mjs"), join(dir, "bom.json"), version], { encoding: "utf8" });
     return { ok: r.status === 0, output: `${r.stdout}${r.stderr}` };
   } finally {
@@ -54,7 +62,9 @@ describe("hostile #125: the release workflow's SBOM check", () => {
       ["a scoped look-alike", { ...good, metadata: { component: { purl: "pkg:npm/%40evil/district-assurance@1.2.3" } } }, "1.2.3"],
       ["not CycloneDX", { ...good, bomFormat: "SPDX" }, "1.2.3"],
       ["no root component", { ...good, metadata: {} }, "1.2.3"],
-      ["not JSON at all", "<html>", "1.2.3"],
+      ["a JSON string, not an SBOM object", "<html>", "1.2.3"],
+      ["not JSON at all", new RawFile("<html>"), "1.2.3"],
+      ["an empty file", new RawFile(""), "1.2.3"],
     ] as const) {
       assert.equal(runCheck(script!, bom, version).ok, false, why);
     }
