@@ -121,12 +121,14 @@ and the 501 answers are gone.
 **Why.** Pre-alpha code should not be installable by accident. Publishing is a separate decision
 with its own release workflow (provenance, reproducible packs), modelled on our other public
 packages.
+**Amended (SRV-5):** the release workflow is built (`.github/workflows/release.yml`); the package
+stays private until the pull request that decides the first release removes `"private": true`.
 
 ## ADR-13. A small core plus modules, switched by config
 
 **Decided.** The core holds the session state machine, the policy and its levels, redaction, the
-module registry and the audit ledger. Badge, Dossier, Paylink and Trace are modules, Gate will be
-the fifth, and a host adds its own with `engine.use(module)`. A module declares, in code, what it
+module registry and the audit ledger. Badge, Dossier, Paylink and Trace are modules, Gate is the
+fifth, step-up the sixth (ADR-18, ADR-24, ADR-25), and a host adds its own with `engine.use(module)`. A module declares, in code, what it
 provides (factors, flow steps, outcomes), the scopes it grants or needs, the adapters it requires,
 and a validator for its settings. Installing and removing is code (`use`, `remove`); turning an
 installed module on or off is the workspace's FlowConfig. A module turned on after a call started
@@ -209,6 +211,8 @@ ships first. Badge stays identity only. Built in the second pull request of the 
 (ADR-21, ADR-22).
 **Why.** Access is an outcome, like a record or a payment, with its own format, adapter and
 failure modes; folding it into Badge would make identity code decide about doors.
+**Amended:** the real adapters are built: the signed-webhook relay, Seam, Kisi and Verkada
+controllers, one-time access codes and web sign-in step-up (ADR-22, ADR-24, ADR-25).
 
 ## ADR-19. Paylink takes payments in one of two modes
 
@@ -224,8 +228,8 @@ on its own account. One adapter shape keeps the engine's payment rules the same 
 **Decided.** The first flow a host runs live is `owner-command`: Badge with a PIN only, plus Trace
 (the ledger; no receipt step), granting `owner.command` at level 1 and nothing else. It replaces a
 host's own owner PIN check on its phone line, before Dossier or Paylink go live. The PIN factor
-and the shared session store are on its critical path, and so were built first. VER-1 (lockouts across
-calls) is a hard gate: no host runs it on a live line before VER-1 is merged.
+and the shared session store are on its critical path, and so were built first. VER-1 (lockouts
+across calls) was the hard gate for a live line, and is built.
 **Why.** It is the smallest flow that proves the engine on a real line: one factor, one scope, no
 money and no customer data, run across the host's processes. Its scopes stay below the floors, so
 an owner command can never move money or change contact details at level 1.
@@ -255,8 +259,8 @@ mint grants. HTTPS only (HTTP to the loopback for tests and the demo), no redire
 timeout, one request. A 2xx is delivered, a 4xx refused, anything else unknown. Gate never retries
 an unlock: one grant in flight per call, a lost answer recorded as `unknown`, and opening again is
 a fresh request with a new grant, up to `maxGrantsPerCall` (default 3). Seam (GAT-5) and direct
-vendor adapters (GAT-6) are `NotImplementedError`; one-time codes (GAT-3) and web step-up (GAT-4)
-too.
+vendor adapters (GAT-6) came after the relay, as did one-time codes (GAT-3) and web step-up
+(GAT-4); all four are built now, under the same never-retry rule.
 **Why.** The maintainers' decisions of 2026-11-18: the relay first (no vendor account, testable in CI, the
 escape hatch for any door system), Seam after its pricing and Canadian data handling are
 checked, and a lost unlock never retried, because a retry can open a door twice for a caller who
@@ -298,9 +302,9 @@ Checking the account stops an event from one business settling another's payment
 when Stripe offers Interac in online Checkout, or a provider's methods need mapping the validator
 cannot see (how wallets map to Checkout's parameters is PAY-1's to prove in test mode).
 
-## ADR-24. Web step-up will be an ES256 JWT checked against a JWKS
+## ADR-24. Web step-up is an ES256 JWT checked against a JWKS
 
-**Decided.** GAT-4 (not built) issues a compact JWS (`alg: ES256`) bound to a nonce the site
+**Decided.** GAT-4 issues a compact JWS (`alg: ES256`) bound to a nonce the site
 showed and the caller keyed, checked by the site with any JOSE library against a published JWKS.
 Receipts and access grants keep canonical JSON. No OpenID Provider (CIBA) for now.
 **Why.** Sites already verify JWTs against a JWKS (sign-in with large identity providers works the
@@ -389,6 +393,7 @@ key is needed to recompute each sensitive value's HMAC; a host that rotates it k
 for checking.
 **Revisit** if a third party without the knowledge key must check a record against its receipt:
 that needs a per-record salt published with the record instead.
+
 ## ADR-28. Subject erasure deletes values and keeps digests (PRV-7)
 
 **Decided.** `eraseSubject` deletes a subject's intake records, the copy of their values a call
@@ -400,7 +405,8 @@ signed bytes start with `district-assurance/subject-export/v1`), so it never ver
 **Why.** The ledger is append-only and hash-chained and receipts are signed: removing an entry or
 editing a digest would break every hash after it and every signature that covers it, and the
 record of what happened is what the business needs to show later. Neither holds a value, only ids
-and digests (SPEC.md sections 9 and 12). But a digest is not anonymous: it is an unkeyed SHA-256,
+and digests (SPEC.md sections 9 and 12). But a digest is not anonymous: apart from sensitive values,
+which it covers keyed (ADR-27), it is an unkeyed SHA-256,
 and a short or guessable value (a yes/no answer, a date, a short phrase) can be confirmed by
 anyone who guesses it and hashes it. So the ledger and receipts stay personal information for
 retention and access control, and the business decides, case by case, what the law lets it keep.
