@@ -184,8 +184,8 @@ Open on GitHub and not written out here:
 pending refund with the provider's final status. Until then a refund the provider leaves pending
 still counts against the payment (SPEC.md section 14).
 
-**Proven by:** Unit tests at 100%; the Checkout adapter against a local fake and once in Stripe
-test mode in each mode.
+**Proven by:** Unit tests at 100%; the Checkout adapter against a local fake, and in Stripe test
+mode in platform mode (`npm run demo:e2e`). Proving connect mode in test mode is PAY-1, below.
 
 #### **PAY-1** Stripe Checkout adapter: connect mode and wallet methods
 
@@ -252,7 +252,8 @@ Some buyers will need it; it must never route tones through this engine.
 | security.txt (SRV-9), benchmarks (SRV-10) | `examples/reference-server/src/app.ts`, `bench/` | `test/security-txt-review.test.ts`, `test/bench.test.ts` |
 
 **Proven by:** Server tests over a real socket; vendor test vectors for each signature scheme;
-the release workflow dry-runs on a tag in a fork.
+the release workflow's tests. Its dry run on a tag in a fork has not been done yet: that is SRV-5,
+below.
 
 #### **SRV-5** Release workflow: the dry run in a fork and the first release
 

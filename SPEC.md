@@ -1501,7 +1501,7 @@ that is not a whole, non-negative, safe integer.
 | `text` | trimmed, non-empty, Unicode text (a lone surrogate is `not_text`), at most `maxLength` (500), no card number, and matching `pattern` whole if set (`no_match`) | string |
 | `number` | `-?\d+(\.\d+)?`, from `min` to `max` if set (`below_min`, `above_max`) | number |
 | `date` | `YYYY-MM-DD` naming a real day, from `min` to `max` if set | string |
-| `yes_no` | `yes`, `y`, `oui`, `sí`, `si` / `no`, `n`, `non`, any case, in every locale | boolean |
+| `yes_no` | `yes`, `y`, `oui` / `no`, `n`, `non`, any case, in every locale (no Spanish word: a Spanish call confirms on the keypad) | boolean |
 
 Forms live in Dossier's settings: a `formId` (lower case, digits, `-`, `_`), a `version` and
 fields with snake_case unique keys, a known type and an English and a French label, plus an
@@ -2043,8 +2043,11 @@ controller's timeout, or for the grant's expiry if the answer was lost or its pr
 grant reserved but not yet signed is settled `unknown` (reason `call_ended`) in the same write that
 ends the call, and is then never sent (step 4 finds it settled); one that expired is settled
 `unknown` (reason `no_answer_recorded`). All of it happens before the receipt's ledger head is
-taken, so no access outcome ever follows `receipt.issued`, and no grant reaches a door after the
-receipt while it can still open it: once it expires, a relay refuses it (`verifyAccessGrant`). A
+taken, so no outcome of a grant sent to a door controller follows `receipt.issued`, and no such
+grant reaches a door after the receipt while it can still open it: once it expires, a relay refuses
+it (`verifyAccessGrant`). A one-time access code (below) is the exception: its grant is `delivered`
+when the code is texted, the door can accept the code after the receipt until the grant expires,
+and a code spent by wrong guesses then is recorded as `access.code_spent` after the receipt. A
 controller that does not check a grant's expiry could still act on a request delayed past it; the
 relay contract requires the check.
 
@@ -2648,10 +2651,7 @@ a written number only when its groups break where the format's do, or not at all
 |---|---|---|---|
 | `card_number` | `cardNumberRedactor` | 13 to 19 digits, Luhn | `[card number removed]` |
 | `sin` | `sinRedactor` | 9 digits, Luhn, groups 3-3-3 | `[SIN removed]` |
-| `health_card` | `healthCardRedactor` | Ontario: 10 digits, Luhn, groups 4-3-3 (a version code after it is kept). British Columbia: 10 digits starting with 9, mod 11 check digit (weights 2, 4, 8, 5, 10, 9, 7, 3 on digits 2 to 9), groups 4-3-3. Quebec: four letters right before the run, as one word or spelled one by one (at most 8
-separators in each gap and before the digits, so only the last 48 characters before a run are read),
-then 8 digits whose 3rd to 6th give a month (or month plus 50) and a day, groups 4-4; the letters
-are removed too | `[health card number removed]` |
+| `health_card` | `healthCardRedactor` | Ontario: 10 digits, Luhn, groups 4-3-3 (a version code after it is kept). British Columbia: 10 digits starting with 9, mod 11 check digit (weights 2, 4, 8, 5, 10, 9, 7, 3 on digits 2 to 9), groups 4-3-3. Quebec: four letters right before the run, as one word or spelled one by one (at most 8 separators in each gap and before the digits, so only the last 48 characters before a run are read), then 8 digits whose 3rd to 6th give a month (or month plus 50) and a day, groups 4-4; the letters are removed too | `[health card number removed]` |
 | `bank_account` | `bankAccountRedactor` | a whole run of 3 or more digits with a bank word among the last 4 words before it, counting only words after the previous run. English: bank, branch, transit, institution, account; French: banque, bancaire, succursale, compte, folio; Spanish: banco, bancaria, bancario, sucursal, cuenta, tránsito, institución, with or without accents; each also in the plural; read in the languages `numberLanguagesFor` gives the call: English and French always, Spanish on a Spanish call and on text with no call | `[banking details removed]` |
 
 Bank numbers carry no check digit, so a bank word is what marks them; an account number read with no
