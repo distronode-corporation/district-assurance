@@ -215,7 +215,10 @@ export async function exportSubject(rt: EngineRuntime, input: SubjectRequest & {
   const hostKept = checkKept(kept);
   const signer: ReceiptSigner | undefined = rt.adapter("signer");
   if (signer === undefined) throw new EngineError("precondition_failed", "an export is signed, and the engine has no signer adapter");
-  const intakeRecords = await records.listIntakeRecords(rt.workspaceId, subjectKey);
+  // Only confirmed records: a row no confirmation committed is no record of the subject's (an erasure deletes it all the same).
+  const stored = await records.listIntakeRecords(rt.workspaceId, subjectKey);
+  const marks = await Promise.all(stored.map((r) => records.isIntakeRecordConfirmed(rt.workspaceId, r.recordId)));
+  const intakeRecords = stored.filter((_, i) => marks[i]);
   const subject = await records.getSubject(rt.workspaceId, subjectKey);
   const calls = callsOf(intakeRecords);
   const consents: ConsentRecord[] = [];

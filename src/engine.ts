@@ -150,6 +150,9 @@ export interface FlushReport {
 /** Calls per `flushPending` run unless the host says otherwise. */
 export const DEFAULT_FLUSH_LIMIT = 100;
 
+/** Reads of a call record `removeCall` makes before it gives up on writes that keep landing. */
+const REMOVE_ATTEMPTS = 3;
+
 export interface FlowPosition {
   flow: string;
   revision: string;
@@ -1161,6 +1164,15 @@ export class Engine {
     return refunds.applyDisputeOutcome(this.#rt, outcome);
   }
 
+  /**
+   * A verified refund update (`refund.updated`, `refund.failed`, `charge.refund.updated`): a
+   * refund's later outcome, recorded against the refund the engine made. One that failed
+   * stops counting toward the refunded total. Works after the call ended; the receipt is never changed.
+   */
+  applyRefundOutcome(outcome: refunds.RefundOutcome): Promise<refunds.RefundApplied> {
+    return refunds.applyRefundOutcome(this.#rt, outcome);
+  }
+
   // ---- Gate (entry) ------------------------------------------------------------------------
 
   /** Issues an access grant and sends it to its door controller, once (SPEC.md, section 17). */
@@ -1839,6 +1851,65 @@ export class Engine {
    */
   #eventId(callId: string, write: number, index: number): string {
     return JSON.stringify([this.workspaceId, callId, "w", write, index]);
+  }
+
+  /**
+   * Removes an ended call's record from the session store, for the host's own retention. Refused
+   * (`precondition_failed`) while the call has not ended, and while its outbox holds ledger entries
+   * not yet appended: it flushes them first, and a ledger that still refuses them keeps the record
+   * (and `flushPending` keeps listing it), so no pending entry, a `consent.recorded` among them, is
+   * lost with the record. Refused too while the call owes a notification, a confirmed mark or its
+   * receipt (a signing that failed after the call ended: endCall completes it), while a payment
+   * link is still open (one endCall could not close), and while a refund of its payment is not yet
+   * final (in flight, or pending at the provider). A succeeded refund that
+   * later fails is recorded only while the record is kept: the host's retention decides. Removes only the version it checked: a write that lands first is read
+   * again, up to three times (`conflict` after that). A host removes call records only through
+   * this, never in its store directly. Needs a session store with `remove`.
+   */
+  async removeCall(callId: string): Promise<{ removed: true }> {
+    if (this.#sessions.remove === undefined) throw new EngineError("precondition_failed", "the session store cannot remove call records (remove)");
+    let flushed = false;
+    for (let attempt = 0; attempt < REMOVE_ATTEMPTS; attempt++) {
+      const stored = await this.#sessions.get(this.workspaceId, callId);
+      if (stored === null) throw new EngineError("unknown_call", "no such call");
+      const record = stored.record as unknown as CallRecord;
+      if (record.state.phase !== "ended") throw new EngineError("precondition_failed", "the call has not ended; end it before removing its record");
+      // A duress alert or a contact notice still owed is sent by sweepAlerts, which needs the record.
+      if (badge.owedDuressAlerts(record).length > 0 || trace.noticeDue(record)) {
+        throw new EngineError("precondition_failed", "the call still owes a notification; sweepAlerts sends it, then remove the record");
+      }
+      // A filed record whose confirmed mark is still owed is marked first, or the record is kept.
+      if (((record.modules[dossier.DOSSIER] as unknown as dossier.DossierSlice | undefined)?.marksOwed ?? []).length > 0) {
+        await dossier.settleOwedMarks(this.#rt, callId).catch(() => {
+          throw new EngineError("precondition_failed", "a confirmed record is not yet marked in the record store; the call record is kept until it is");
+        });
+        continue;
+      }
+      if (record.outbox.length > 0) {
+        if (flushed) throw new EngineError("precondition_failed", "the call's ledger entries are not yet on the ledger; the record is kept until they are");
+        // A ledger that refuses them leaves them pending, and the record is read again to see.
+        await this.flushLedger(callId).catch(() => undefined);
+        flushed = true;
+        continue;
+      }
+      // A refund with no final answer yet is recorded on the call: one reserved with the provider's
+      // answer still on its way (refundPayment resumes it), or one the provider answered pending
+      // (its update, applyRefundOutcome, settles it). Removing the record would lose either.
+      if (((record.modules[paylink.PAYLINK] as unknown as paylink.PaylinkSlice | undefined)?.payments ?? []).some((p) => (p.refunds ?? []).some((r) => r.status === "requested" || r.status === "pending"))) {
+        throw new EngineError("precondition_failed", "a refund of the call's payment is not yet final; it is kept until the provider's answer is recorded, then remove the record");
+      }
+      // A link endCall could not close (the provider failed) is still payable: its outcome, and the
+      // close that endCall or cancelPaymentLink retries, need the record.
+      if (paylink.openPayments(record).length > 0) {
+        throw new EngineError("precondition_failed", "a payment link of the call is still open; endCall closes it, then remove the record");
+      }
+      // A receipt whose signing failed after the call ended is completed by endCall, which needs the record.
+      if (trace.wantsReceipt(this.#rt, record) && trace.receiptOf(record) === null) {
+        throw new EngineError("precondition_failed", "the call still owes its receipt; endCall signs it, then remove the record");
+      }
+      if (await this.#sessions.remove(this.workspaceId, callId, stored.version)) return { removed: true };
+    }
+    throw new EngineError("conflict", "the call record kept changing while it was removed; remove it again");
   }
 
   /** Appends any ledger entries a call still has pending (after a ledger outage), and sends any owed duress alert. Every write does this too. */

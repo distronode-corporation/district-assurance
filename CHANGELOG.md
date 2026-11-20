@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Simulator callers for the rest of the built-in steps (#134): `gate.grant` (the fake door, as
+  every controller the config's Gate targets name, opens or refuses), `step-up.issue` (a token
+  issued and exchanged), and Badge's `text_code`, `spoken_knowledge` and `callback` (the caller
+  goes on on the callback call); script fields `textCode`, `spoken`, `callback` and `door`, and the
+  built-in scripts `text-code-wrong`, `spoken-wrong`, `callback-not-confirmed` and `door-refused`.
+  A flow with every built-in step type runs to the end with exit code 0; nothing keyed or said is
+  printed.
+- A pending refund's later outcome (PAY-9, #117, #132): `applyRefundOutcome` applies Stripe's
+  signed `refund.updated`, `refund.failed` and `charge.refund.updated` (`parseStripeEvent` kind
+  `refund`; the reference server's payments endpoint), found by the provider's refund id. A pending
+  refund that succeeds stays counted; one that fails (or is canceled) is released, so the business
+  can refund that amount again, and a succeeded one that fails later is released too; a
+  `payment.refund_updated` entry each time, never one for an event that changes nothing. A failed
+  refund stays failed; the receipt is never changed.
 - M0 skeleton. The engine (`createEngine`) with the call session state machine, the assurance policy
   (levels, scope floors, carrier signal handling), keypad knowledge comparison, the photo ID flow,
   intake forms and confirmed records, payment links and settlement, consent records, the
@@ -344,6 +358,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Host-facing: a call record is removed through `Engine.removeCall(callId)`, never in the session
+  store directly. It is refused while the call has not ended and while its outbox holds ledger
+  entries not yet appended (it flushes them first; `flushPending` keeps listing the call), while it
+  still owes a duress alert, a contact notice or its receipt, while a payment link is still open
+  or a refund is not yet final, and while a filed record's confirmed mark is owed (it makes the
+  mark first), so a
+  pending entry such as `consent.recorded` is never lost with its record. `SessionStore` has an
+  optional `remove(workspaceId, callId, expectedVersion)` (in `MemorySessionStore` and
+  `sessionStoreContract`).
+- Breaking for record stores: `RecordStore` has `confirmIntakeRecord(workspaceId, recordId)` and
+  `isIntakeRecordConfirmed(workspaceId, recordId)`. A record is stored unconfirmed and marked once
+  the confirmation that filed it committed; `deliverRecord`, `exportSubject` and `createUploadLink`
+  skip a record without the mark (one a refusal left behind when its delete failed), and an
+  erasure still deletes it. A host store keeps the mark beside each record, and records it stored
+  before this change read as unconfirmed until the host marks them. `MemoryRecordStore`, the
+  reference server's `SqliteRecordStore` (a `confirmed_records` table) and `recordStoreContract`
+  are updated.
 - Breaking, reference server: the `maxBodyBytes` option of `createReferenceServer` is replaced by
   `bodyLimits`, one limit per route that reads a body (SRV-2).
 - Breaking: `CarrierSignalReport` has a required `simSwapChecked`, true only when the carrier was

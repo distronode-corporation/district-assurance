@@ -2,8 +2,6 @@
 
 Every open issue of [ROADMAP.md](ROADMAP.md) that has an id, 4 of them, written out: the heading is the title, the fenced block is the body. Each is already open on GitHub under the same id ([PAY-1](https://github.com/distronode-corporation/district-assurance/issues/25), [PAY-4](https://github.com/distronode-corporation/district-assurance/issues/28), [PAY-6](https://github.com/distronode-corporation/district-assurance/issues/30), [SRV-5](https://github.com/distronode-corporation/district-assurance/issues/40)); this file keeps their text with the code. ROADMAP.md has the order and the dependencies, and `test/stubs.test.ts` fails if an id here is missing there.
 
-Two more open issues have no id and are not written out here: [#132](https://github.com/distronode-corporation/district-assurance/issues/132) (reconcile a pending refund with the provider's final status) and [#134](https://github.com/distronode-corporation/district-assurance/issues/134) (simulator callers for the remaining steps).
-
 ### PAY-1: Stripe Checkout adapter: connect mode and wallet methods
 
 **Labels:** `paylink`, `m6`  

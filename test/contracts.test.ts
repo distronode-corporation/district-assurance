@@ -131,6 +131,11 @@ describe("the RecordStore contract", () => {
       }
       // FIL-2 (#78), VER-6 (#74), VER-12 (#124) and PRV-7 (#105) writes: a store that drops them fails the digest case too.
       async deleteIntakeRecords() {}
+      // A store that never keeps the mark fails the confirmed-flag case.
+      async confirmIntakeRecord() {}
+      async isIntakeRecordConfirmed() {
+        return false;
+      }
       async listIntakeRecords() {
         return [];
       }
@@ -148,6 +153,7 @@ describe("the RecordStore contract", () => {
     }
     assert.deepEqual(await failing(recordStoreContract((subjects) => new Joined(subjects))), [
       "keeps workspaces apart, and never lets two workspace and id pairs share a key",
+      "keeps a record unconfirmed until confirmIntakeRecord marks it, idempotently, and never marks an id it does not hold",
       "deletes a subject's PIN and duress digests, keeps the rest, and deleting a missing one is harmless",
     ]);
   });
@@ -165,6 +171,7 @@ describe("the RecordStore contract", () => {
     assert.deepEqual(await failing(recordStoreContract((subjects) => seed(new Strict(), subjects))), [
       "files a record idempotently by recordId",
       "files concurrent puts, of one record and of many, without losing one",
+      "keeps a record unconfirmed until confirmIntakeRecord marks it, idempotently, and never marks an id it does not hold",
     ]);
   });
 
@@ -178,7 +185,7 @@ describe("the RecordStore contract", () => {
         return this.#records.get(JSON.stringify([workspaceId, recordId])) ?? null;
       }
     }
-    assert.deepEqual(await failing(recordStoreContract((subjects) => seed(new Leaky(), subjects))), ["stores an intake record and returns copies"]);
+    assert.deepEqual(await failing(recordStoreContract((subjects) => seed(new Leaky(), subjects))), ["stores an intake record and returns copies", "keeps a record unconfirmed until confirmIntakeRecord marks it, idempotently, and never marks an id it does not hold"]);
   });
 
   it("catches a store whose digest deletion reaches the same key in another workspace, or drops the rest of the subject", async () => {

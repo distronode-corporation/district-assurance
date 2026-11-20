@@ -797,7 +797,9 @@ and ARRÊTER map to revocation; a longer message that only contains one does not
 store, a consent is written to it before it is recorded on the call, so no recorded consent is
 missing from the store; one still being written when the call ends counts as no consent, is noted
 as `consent.unrecorded` and shows as `not_recorded` on the receipt, so a store outage never keeps
-a call from ending and never leaves a yes behind (tested). The ledger
+a call from ending and never leaves a yes behind (tested). A call record is removed only through
+`removeCall`, which refuses while its outbox holds entries the ledger has not taken, so a
+`consent.recorded` is never lost with its record (tested). The ledger
 detail names the consent and the channel, never a phone number or the message. Left to the host:
 plugging in a `ConsentStore` wherever consents are recorded (without one, consents cannot be
 revoked through the engine), deciding which consents an inbound STOP revokes, checking the store
@@ -958,10 +960,11 @@ block, allowing only the endpoints the first real publish run's audit log shows.
 - **Who carries refunds and disputes in platform mode.** The engine now refunds platform payments
   and records their disputes (above), but who bears a lost dispute, and on what terms between the
   platform and the business, is a legal and payment provider question that is not decided.
-  Refund status changes after the provider's first answer (`charge.refund.updated`,
-  `refund.updated`) are not followed yet: a `pending` refund counts as pending until a provider
-  update arrives, and the engine has no path for one, so a pending refund that later fails still
-  counts against the payment until the business refunds the rest by hand at the provider (#117).
+  A `pending` refund counts against the payment until the provider's signed refund update
+  (`refund.updated`, `refund.failed`, `charge.refund.updated`) says how it ended
+  (`applyRefundOutcome`): one that failed is released and can be refunded again. Following Stripe,
+  `succeeded` is not final: a refund that succeeded and later fails is released too, and only
+  `failed` is final. A provider that never sends the update leaves it pending.
 
 ## STRIDE tables
 
@@ -1049,6 +1052,7 @@ Intake the caller confirms (`src/file/`).
 | dossier-6 | R | A caller disputes a value because it was never read back to them. | `buildReadBack` reads the draft back in the call's language, and `confirmIntake` files only a draft that still reads back to the digest the caller heard. | covered | `file-readback.test.ts`: "builds the whole line in form order, skips fields without a value, and ends with the fixed prompt"; `file-readback.test.ts`: "digests the text with the record digest, so any change shows, a sensitive one included"; `intake-readback-hostile.test.ts`: "I3: a value changed after the read-back is refused; changed back, the same read-back files" |
 | dossier-7 | T | A record delivered to the business is forged, changed or replayed on the way. | `deliverRecord` signs each attempt in the Stripe scheme, retries with one idempotency key per record and destination, and the sample receiver checks the signature and applies each key once. | covered | `file-delivery.test.ts`: "posts the record once, signed in the Stripe scheme, and records the attempt without the payload"; `file-delivery.test.ts`: "keeps one idempotency key per record and destination, whoever delivers and how often"; `file-delivery.test.ts`: "verifies the signature, applies each record once, and answers a duplicate with 200" |
 | dossier-8 | S | A document upload link is guessed or reused. | Upload links are 256-bit tokens stored only as a hash, bound to one call and record, expire after 30 minutes and are single use by an atomic claim. | covered | `file-upload.test.ts`: "returns a capability token with a 30-minute expiry, and stores only its hash, bound to the call and record"; `file-upload.test.ts`: "stores one document and spends the link: single use"; `file-upload.test.ts`: "lets only one of two uploads at once through" |
+| dossier-9 | T | A stored row no confirmation committed (a refusal after the write whose delete failed) is delivered, exported or given an upload link as a confirmed record. | The store keeps a confirmed mark beside each record, set only after the filing committed; `deliverRecord`, `exportSubject` and `createUploadLink` read only marked records, and an erasure still deletes the row. | covered | `intake-confirmed-flag.test.ts`: "skips a stored row no confirmation committed: no delivery, no export, no upload link; an erasure still deletes it" |
 
 ### Paylink
 
@@ -1085,6 +1089,7 @@ The hash-chained ledger, receipts and consent (`src/prove/`).
 | trace-10 | R | An outside party cannot check a receipt without this engine. | `scripts/verify-receipt.mjs`, a stand-alone verifier with no dependencies. | covered | `verifier.test.ts`: "prints valid for a receipt and its key set, from a file, standard input or the key set URL"; `verifier.test.ts`: "prints invalid, and exits 1, for a tampered receipt or one the key set cannot verify" |
 | trace-11 | R | A caller withdraws consent and nothing records it. | `revokeConsent` records a revocation by voice, text or dashboard in the `ConsentStore` and the ledger, once, even after the call is gone. | covered | `engine.test.ts`: "stores each consent, and revokes one by text after the call ended, once, in the ledger"; `engine.test.ts`: "never writes consent.revoked before its consent.recorded, even with the recorded entry still pending" |
 | trace-12 | R | An auditor cannot take the ledger out in a verifiable form. | `exportLedger` writes NDJSON with an ES256-signed trailer and a cursor, and `verifyLedgerExport` detects a changed, removed or replaced entry and a run that does not continue the previous one. | covered | `prove.test.ts`: "yields one canonical entry per line and a signed trailer with the head"; `prove.test.ts`: "detects a changed, removed or replaced entry, and a changed trailer"; `prove.test.ts`: "refuses a run that does not continue the previous one" |
+| trace-13 | R | A call record is removed while ledger entries it holds are still pending, and they are lost with it (a `consent.recorded`). | `removeCall` flushes first and refuses while the outbox is not empty; `flushPending` keeps listing the call until it is. | covered | `call-removal.test.ts`: "refuses while the outbox holds an entry, keeps the call listed for the background flush, and removes it once flushed" |
 
 ### Gate
 

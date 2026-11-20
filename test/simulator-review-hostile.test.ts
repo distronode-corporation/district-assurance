@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { main } from "../src/cli/simulate.ts";
+import { BUILT_IN_SCRIPTS, main, simulate, simulationEngine } from "../src/cli/simulate.ts";
 import type { FlowConfig } from "../src/core/config.ts";
 import { testConfig } from "./helpers.ts";
 
@@ -83,17 +83,19 @@ describe("hostile: the simulator waits out the configured backoff", () => {
 });
 
 describe("hostile: a badge.verify factor the simulator has no caller for", () => {
-  it("F1: factors pin and callback, callback enabled: the run stops at the step with exit 3, PIN never keyed", async () => {
-    const config = pinFlow((badge) => (badge.factors = ["keypad_knowledge", "pin", "carrier_identity_match", "photo_id", "callback"]), ["pin", "callback"]);
-    const result = await run(config, "owner", "pass");
-    assert.deepEqual(result.err, []);
-    assert.equal(result.code, 3);
-    assert.ok(result.out.includes("step badge.verify factor callback is not simulated"), result.out.join("\n"));
-    assert.equal(result.out.some((l) => l.startsWith("  caller:")), false, "no caller acts on the step");
-    assert.match(result.out.join("\n"), /^flow: abandoned$/m);
+  it("F1: factors pin and a plug-in: the run stops at the step with exit 3, PIN never keyed", async () => {
+    const lines: string[] = [];
+    const t = simulationEngine(lines);
+    t.engine.useFactor({ kind: "hardware_token", summary: "a code from a token", maxAttemptsPerCall: 2, adapters: [], judge: async () => false });
+    const config = pinFlow((badge) => (badge.factors = ["pin", "hardware_token"]), ["pin", "hardware_token"]);
+    const result = await simulate(t, lines, config, "owner", "pass", BUILT_IN_SCRIPTS.pass!);
+    assert.equal(result.exitCode, 3);
+    assert.ok(lines.includes("step badge.verify factor hardware_token is not simulated"), lines.join("\n"));
+    assert.equal(lines.some((l) => l.startsWith("  caller:")), false, "no caller acts on the step");
+    assert.equal(result.status, "abandoned");
   });
 
-  it("F3: a valid config whose flow reaches a Gate step stops there with exit 3, apart from a refused config (exit 1)", async () => {
+  it("F3: a valid config whose flow reaches a Gate step runs it (#134), exit 0", async () => {
     const config = testConfig((c) => {
       c.policy.scopes["entry.open"] = 2;
       c.modules.gate = { settings: { targets: [{ id: "front-door", controller: "door", ref: "door-1" }] } };
@@ -101,9 +103,10 @@ describe("hostile: a badge.verify factor the simulator has no caller for", () =>
     });
     const result = await run(config, "entry", "pass");
     assert.deepEqual(result.err, []);
-    assert.equal(result.code, 3);
-    assert.ok(result.out.includes("step gate.grant is not simulated"), result.out.join("\n"));
+    assert.equal(result.code, 0);
     assert.match(result.out.join("\n"), /decision: level 2/, "the steps before it ran");
+    assert.match(result.out.join("\n"), /decision: access grant \S+ delivered, the door moved: true/);
+    assert.match(result.out.join("\n"), /^flow: completed$/m);
   });
 
   it("F2: a PIN-only step runs as before, exit 0", async () => {

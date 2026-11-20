@@ -182,6 +182,39 @@ describe("hostile #78: sensitive values", () => {
     await assert.rejects(second, rejects("precondition_failed", /nothing was filed/));
     assert.equal((await c.ledger.list()).filter((e) => e.event === "record.filing_failed").length, 1);
   });
+
+  it("G8: the record another process filed is returned only once its confirmed mark is made (CodeRabbit #143)", async () => {
+    class MarkDown extends MemoryRecordStore {
+      down = true;
+      override async confirmIntakeRecord(workspaceId: string, recordId: string): Promise<void> {
+        if (this.down) throw new Error("store down");
+        return super.confirmIntakeRecord(workspaceId, recordId);
+      }
+    }
+    let fail!: () => void;
+    const slow = { encrypt: () => new Promise<string>((_, reject) => (fail = () => reject(new Error("timeout")))) };
+    const sessions = new MemorySessionStore();
+    const records = seeded(new MarkDown());
+    const a = setup({ config: config(), adapters: { fieldCipher: slow, sessions, records } });
+    const callId = await draftOn(a);
+    const failing = a.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await readBackOf(a, callId) });
+    await new Promise((resolve) => setImmediate(resolve));
+    const b = setup({ config: config(), adapters: { fieldCipher: new FakeFieldCipher(), sessions, records, ledger: a.ledger } });
+    // B files the record, and its mark fails: the mark stays owed on the call.
+    await assert.rejects(b.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await readBackOf(b, callId) }), /store down/);
+    fail();
+    // A's cipher fails and it finds B's filing: it makes the owed mark, which still fails, so it throws.
+    await assert.rejects(failing, /store down/);
+    const call = (await sessions.get("ws_test", callId))!.record as unknown as { modules: { dossier: { records: Array<{ recordId: string }>; marksOwed: string[] } } };
+    const recordId = call.modules.dossier.records[0]!.recordId;
+    assert.deepEqual(call.modules.dossier.marksOwed, [recordId], "still owed");
+    const stored = await records.getIntakeRecord("ws_test", recordId);
+    assert.equal(await records.isIntakeRecordConfirmed("ws_test", stored!.recordId), false, "no record returned unmarked");
+    records.down = false;
+    assert.deepEqual(await a.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: "ignored on a retry" }), stored);
+    assert.equal(await records.isIntakeRecordConfirmed("ws_test", stored!.recordId), true);
+    assert.equal((await a.ledger.list()).some((e) => e.event === "record.filing_failed"), false);
+  });
 });
 
 describe("FIL-2: a failed filing is never logged for a record that ends up stored", () => {
@@ -202,6 +235,7 @@ describe("FIL-2: a failed filing is never logged for a record that ends up store
     bRecords.getIntakeRecord = records.getIntakeRecord.bind(records);
     bRecords.subjectErasures = records.subjectErasures.bind(records);
     bRecords.deleteIntakeRecords = records.deleteIntakeRecords.bind(records);
+    bRecords.confirmIntakeRecord = records.confirmIntakeRecord.bind(records);
     bRecords.putIntakeRecord = async (r: IntakeRecord, erasuresSeen?: number) => {
       entered();
       await held;

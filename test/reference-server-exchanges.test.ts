@@ -45,6 +45,7 @@ describe("an upload that outlasts its deadline", () => {
     const t = createTestEngine();
     const documents = new MemoryDocumentStore();
     await t.records.putIntakeRecord({ recordId: "rec_1", workspaceId: t.engine.workspaceId, callId: "call_1", subjectKey: null, formId: "f", formVersion: "1", values: {}, digest: "0".repeat(64), confirmedBy: "voice", confirmedAt: "2026-01-01T00:00:00.000Z" });
+    await t.records.confirmIntakeRecord(t.engine.workspaceId, "rec_1");
     let scans = 0;
     let finish: () => void = () => undefined;
     const scanner = {
@@ -172,6 +173,7 @@ describe("a full store of kept upload outcomes", () => {
     const t = createTestEngine();
     const documents = new MemoryDocumentStore();
     await t.records.putIntakeRecord({ recordId: "rec_1", workspaceId: t.engine.workspaceId, callId: "call_1", subjectKey: null, formId: "f", formVersion: "1", values: {}, digest: "0".repeat(64), confirmedBy: "voice", confirmedAt: "2026-01-01T00:00:00.000Z" });
+    await t.records.confirmIntakeRecord(t.engine.workspaceId, "rec_1");
     // Each scan resolves its entry signal on entry, with the callback that finishes it, so a test
     // releases a scan only once the scanner holds it, however slow the request is to arrive.
     const finishes: Array<() => void> = [];

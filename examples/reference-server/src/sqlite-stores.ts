@@ -357,6 +357,11 @@ export class SqliteRecordStore implements RecordStore {
         record TEXT NOT NULL,
         PRIMARY KEY (workspace_id, record_id)
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS confirmed_records (
+        workspace_id TEXT NOT NULL,
+        record_id TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, record_id)
+      ) STRICT;
       CREATE TABLE IF NOT EXISTS erased_records (
         workspace_id TEXT NOT NULL,
         record_id TEXT NOT NULL,
@@ -408,6 +413,19 @@ export class SqliteRecordStore implements RecordStore {
       );
   }
 
+  async confirmIntakeRecord(workspaceId: string, recordId: string): Promise<void> {
+    // One statement: only a record the store holds is marked.
+    this.#db
+      .prepare(
+        "INSERT INTO confirmed_records (workspace_id, record_id) SELECT workspace_id, record_id FROM intake_records WHERE workspace_id = ? AND record_id = ? ON CONFLICT DO NOTHING",
+      )
+      .run(key(workspaceId), key(recordId));
+  }
+
+  async isIntakeRecordConfirmed(workspaceId: string, recordId: string): Promise<boolean> {
+    return this.#db.prepare("SELECT 1 FROM confirmed_records WHERE workspace_id = ? AND record_id = ?").get(key(workspaceId), key(recordId)) !== undefined;
+  }
+
   async getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null> {
     const row = this.#db.prepare("SELECT record FROM intake_records WHERE workspace_id = ? AND record_id = ?").get(key(workspaceId), key(recordId));
     return row === undefined ? null : fromStored<IntakeRecord>(row.record);
@@ -420,10 +438,14 @@ export class SqliteRecordStore implements RecordStore {
   }
 
   async deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void> {
-    for (const recordId of recordIds) {
-      this.#db.prepare("INSERT INTO erased_records (workspace_id, record_id) VALUES (?, ?) ON CONFLICT DO NOTHING").run(key(workspaceId), key(recordId));
-      this.#db.prepare("DELETE FROM intake_records WHERE workspace_id = ? AND record_id = ?").run(key(workspaceId), key(recordId));
-    }
+    // One transaction: a failure part-way deletes none of them, and the erasure is asked again.
+    writeTransaction(this.#db, () => {
+      for (const recordId of recordIds) {
+        this.#db.prepare("INSERT INTO erased_records (workspace_id, record_id) VALUES (?, ?) ON CONFLICT DO NOTHING").run(key(workspaceId), key(recordId));
+        this.#db.prepare("DELETE FROM intake_records WHERE workspace_id = ? AND record_id = ?").run(key(workspaceId), key(recordId));
+        this.#db.prepare("DELETE FROM confirmed_records WHERE workspace_id = ? AND record_id = ?").run(key(workspaceId), key(recordId));
+      }
+    });
   }
 
   async markSubjectErased(workspaceId: string, subjectKey: string): Promise<void> {

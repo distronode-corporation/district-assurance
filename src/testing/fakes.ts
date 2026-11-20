@@ -232,6 +232,8 @@ export class MemoryRecordStore implements RecordStore {
   readonly #records = new Map<string, IntakeRecord>();
   /** Ids of deleted records: a late write of one stores nothing. */
   readonly #deleted = new Set<string>();
+  /** Ids of records marked confirmed. */
+  readonly #confirmed = new Set<string>();
   /** Erasures counted per subject: a write reserved before the latest stores nothing. */
   readonly #erasures = new Map<string, number>();
 
@@ -253,6 +255,15 @@ export class MemoryRecordStore implements RecordStore {
     this.#records.set(key, structuredClone(record));
   }
 
+  async confirmIntakeRecord(workspaceId: string, recordId: string): Promise<void> {
+    const key = scoped(workspaceId, recordId);
+    if (this.#records.has(key)) this.#confirmed.add(key);
+  }
+
+  async isIntakeRecordConfirmed(workspaceId: string, recordId: string): Promise<boolean> {
+    return this.#confirmed.has(scoped(workspaceId, recordId));
+  }
+
   async getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null> {
     const record = this.#records.get(scoped(workspaceId, recordId));
     return record === undefined ? null : structuredClone(record);
@@ -265,6 +276,7 @@ export class MemoryRecordStore implements RecordStore {
   async deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void> {
     for (const recordId of recordIds) {
       this.#records.delete(scoped(workspaceId, recordId));
+      this.#confirmed.delete(scoped(workspaceId, recordId));
       this.#deleted.add(scoped(workspaceId, recordId));
     }
   }
