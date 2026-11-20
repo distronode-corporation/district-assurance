@@ -358,7 +358,11 @@ export async function confirmIntake(
     return { record: built, form: intake.form, erasuresSeen: seen };
   });
   if ("refused" in reserved) throw reserved.refused;
-  if (reserved.form === null) return reserved.record;
+  // Filed already: the mark is made again (a confirmation whose mark failed is asked again).
+  if (reserved.form === null) {
+    await records.confirmIntakeRecord(rt.workspaceId, reserved.record.recordId);
+    return reserved.record;
+  }
   // Encrypted on every attempt: a cipher may answer differently each time, and the digest does not
   // depend on it. A rejected write may still have been stored, so the reservation is kept and any
   // retry writes this record again (RecordStore.putIntakeRecord is idempotent by recordId). Two
@@ -463,6 +467,9 @@ export async function confirmIntake(
   if (filed === "abandoned") throw new EngineError("precondition_failed", "the filing was abandoned while it was written, or released by a failing fieldCipher; nothing was filed");
   // The subject was erased (after another process filed it, too): no locally sealed copy stands in for it.
   if (kept === null) throw new EngineError("precondition_failed", "the subject was erased while this record was filed; nothing was filed");
+  // The confirmation committed: the stored record is marked confirmed, and only then delivered or
+  // exported. A mark that fails throws; confirming again marks it and gives the same record back.
+  await records.confirmIntakeRecord(rt.workspaceId, kept.recordId);
   return kept;
 }
 

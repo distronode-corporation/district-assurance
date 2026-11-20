@@ -409,10 +409,20 @@ export interface RecordStore {
    * `erasuresSeen` (what `subjectErasures` answered before the record was reserved), when its
    * subject has been marked erased more times than that since: a confirmation still in flight when
    * its subject was erased must not bring the values back, whether or not the erasure saw it.
+   * A record is stored unconfirmed; a retried write keeps any mark it has.
    */
   putIntakeRecord(record: IntakeRecord, erasuresSeen?: number): Promise<void>;
+  /**
+   * Marks a stored record confirmed, once the confirmation that filed it committed. Idempotent;
+   * marks nothing for a record id the store does not hold (never written, or deleted). The mark is
+   * kept beside the record, never in it.
+   */
+  confirmIntakeRecord(workspaceId: string, recordId: string): Promise<void>;
+  /** Whether a stored record is marked confirmed: false for one never marked and for one the store does not hold. */
+  isIntakeRecordConfirmed(workspaceId: string, recordId: string): Promise<boolean>;
+  /** A stored record, confirmed or not (the engine reads it while filing; readers check the mark). */
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
-  /** The intake records filed under a subject key. Records filed under null are never listed. */
+  /** The intake records stored under a subject key, confirmed or not. Records filed under null are never listed. */
   listIntakeRecords(workspaceId: string, subjectKey: string): Promise<IntakeRecord[]>;
   /**
    * Stores a subject's PIN digest (`pinDigest`) with the id of the enrolment that chose it

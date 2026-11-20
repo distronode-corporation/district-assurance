@@ -1108,8 +1108,9 @@ and eventIds that differ only in a lone surrogate are distinct), a detail carryi
 refused with nothing stored, and concurrent appends stay one valid chain.
 `recordStoreContract(factory)` is the suite a `RecordStore` must pass: subjects (seeded by the
 factory, since the engine only reads them) and intake records are copied in and out, workspaces
-never share a key, keys that differ only in a lone surrogate stay apart, and `putIntakeRecord` is
-idempotent by `recordId`, also concurrently. `MemoryAuditLedger` and `MemoryRecordStore` pass both.
+never share a key, keys that differ only in a lone surrogate stay apart, `putIntakeRecord` is
+idempotent by `recordId`, also concurrently, and the confirmed flag is kept beside each record
+(below). `MemoryAuditLedger` and `MemoryRecordStore` pass both.
 
 The reference server has optional SQLite stores on `node:sqlite` (SRV-4,
 `examples/reference-server/src/sqlite-stores.ts`; no dependency). `SqliteAuditLedger` keeps each
@@ -1610,7 +1611,18 @@ none had. A resume needs `intake.file` again, as a first confirmation does: refu
 deletes the record by id first (`RecordStore.deleteIntakeRecords`, which also makes a later write
 of that id store nothing), then drops the draft, so the call can end; a confirmation whose write
 was in flight then fails (`precondition_failed`) and files nothing. A confirmation retried after
-its record was filed (its ledger entry failed) returns the same record. `endCall` is refused while
+its record was filed (its ledger entry failed) returns the same record.
+
+**The confirmed flag.** A record is stored unconfirmed (`putIntakeRecord`); once the write that
+files it on the call commits, the engine marks it with `RecordStore.confirmIntakeRecord(workspaceId,
+recordId)` (idempotent; it marks nothing for an id the store does not hold, never written or
+deleted), and `isIntakeRecordConfirmed(workspaceId, recordId)` reads the mark. The mark is kept
+beside the record, never in it. `deliverRecord`, `exportSubject` and `createUploadLink` read only
+marked records: a row no confirmation committed (one a refusal after the write left behind when its
+delete failed) is never delivered, exported or given an upload link, and an erasure still deletes
+it. A mark that fails makes `confirmIntake` throw after the filing committed; confirming again marks
+the record and returns the same one. `getIntakeRecord` and `listIntakeRecords` return records
+whether marked or not. `endCall` is refused while
 a record is being filed. Provider idempotency keys are JSON tuples of the workspace, the call and the
 operation, so workspaces sharing an adapter never share a key. A flow attached to a running call
 is refused when a step needs a form or a wording the call did not keep.
@@ -2512,7 +2524,8 @@ each.
 ## 22. Record delivery
 
 `deliverRecord({ workspaceId, recordId, destination, records, delivery, ledger, clock, sleep?,
-retry? })` posts a confirmed record, read from the `RecordStore`, to one destination through the
+retry? })` posts a confirmed record, read from the `RecordStore` (one not marked confirmed is
+`invalid_input`, never sent), to one destination through the
 host's `RecordDelivery` adapter, which makes one HTTP request per call and never retries itself.
 It is a library call the host makes after `confirmIntake` (for example from a job queue), not a
 flow step. A destination is `{ destinationId, url, secret }` from the host's own configuration:
@@ -2724,7 +2737,7 @@ the reservation is refused with `conflict`, to be confirmed again.
 }
 ```
 
-- `intakeRecords` are the subject's, values included; `pinDigestOnFile` says whether a digest is
+- `intakeRecords` are the subject's records marked confirmed, values included; `pinDigestOnFile` says whether a digest is
   on file, never the digest.
 - `calls` are the calls those records name. `consents` and `receipts` are the ones those call
   records hold (a call record that is gone is skipped). A consent carries the `subjectKey` Badge

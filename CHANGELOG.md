@@ -352,6 +352,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Breaking for record stores: `RecordStore` has `confirmIntakeRecord(workspaceId, recordId)` and
+  `isIntakeRecordConfirmed(workspaceId, recordId)`. A record is stored unconfirmed and marked once
+  the confirmation that filed it committed; `deliverRecord`, `exportSubject` and `createUploadLink`
+  skip a record without the mark (one a refusal left behind when its delete failed), and an
+  erasure still deletes it. A host store keeps the mark beside each record, and records it stored
+  before this change read as unconfirmed until the host marks them. `MemoryRecordStore`, the
+  reference server's `SqliteRecordStore` (a `confirmed_records` table) and `recordStoreContract`
+  are updated.
 - Breaking, reference server: the `maxBodyBytes` option of `createReferenceServer` is replaced by
   `bodyLimits`, one limit per route that reads a body (SRV-2).
 - Breaking: `CarrierSignalReport` has a required `simSwapChecked`, true only when the carrier was

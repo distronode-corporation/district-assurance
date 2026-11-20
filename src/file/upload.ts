@@ -96,7 +96,9 @@ export async function createUploadLink(input: UploadLinkInput, context: UploadCo
   if (problems.length > 0) throw new EngineError("invalid_input", `upload link: ${problems.join("; ")}`);
 
   const record = await context.records.getIntakeRecord(context.workspaceId, recordId);
-  if (record === null || record.callId !== callId) throw new EngineError("precondition_failed", "upload link: the record is not a confirmed record of this call");
+  if (record === null || record.callId !== callId || !(await context.records.isIntakeRecordConfirmed(context.workspaceId, recordId))) {
+    throw new EngineError("precondition_failed", "upload link: the record is not a confirmed record of this call");
+  }
 
   const token = `upl_${randomBytes(32).toString("base64url")}`;
   const now = context.clock.now();

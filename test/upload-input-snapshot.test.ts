@@ -30,6 +30,8 @@ function world() {
   const records = new MemoryRecordStore();
   void records.putIntakeRecord(record("rec_1", "call_1"));
   void records.putIntakeRecord(record("rec_other", "call_other"));
+  void records.confirmIntakeRecord(WS, "rec_1");
+  void records.confirmIntakeRecord(WS, "rec_other");
   const documents = new MemoryDocumentStore();
   const context = { workspaceId: WS, documents, clock: new FixedClock(), records, scanner: { scan: async () => ({ clean: true }) }, ids: new SequentialIds() };
   return { documents, context };

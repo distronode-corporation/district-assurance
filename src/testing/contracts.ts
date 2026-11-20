@@ -688,6 +688,28 @@ export function recordStoreContract(factory: (subjects: SeededSubject[]) => Reco
       },
     ],
     [
+      "keeps a record unconfirmed until confirmIntakeRecord marks it, idempotently, and never marks an id it does not hold",
+      async (store) => {
+        assert.equal(await store.isIntakeRecordConfirmed("w", "rec_c"), false);
+        await store.confirmIntakeRecord("w", "rec_c");
+        assert.equal(await store.isIntakeRecordConfirmed("w", "rec_c"), false, "a mark before the write marks nothing");
+        await store.putIntakeRecord(contractRecord("w", "rec_c"));
+        assert.equal(await store.isIntakeRecordConfirmed("w", "rec_c"), false, "a stored record starts unconfirmed");
+        await store.confirmIntakeRecord("w", "rec_c");
+        await store.confirmIntakeRecord("w", "rec_c");
+        assert.equal(await store.isIntakeRecordConfirmed("w", "rec_c"), true);
+        await store.putIntakeRecord(contractRecord("w", "rec_c"));
+        assert.equal(await store.isIntakeRecordConfirmed("w", "rec_c"), true, "a retried write keeps the mark");
+        assert.deepEqual(await store.getIntakeRecord("w", "rec_c"), contractRecord("w", "rec_c"), "the mark is not part of the record");
+        await store.putIntakeRecord(contractRecord("w2", "rec_c"));
+        assert.equal(await store.isIntakeRecordConfirmed("w2", "rec_c"), false, "workspaces apart");
+        await store.deleteIntakeRecords("w", ["rec_c"]);
+        await store.confirmIntakeRecord("w", "rec_c");
+        assert.equal(await store.isIntakeRecordConfirmed("w", "rec_c"), false, "a deleted record is never confirmed");
+        assert.equal(await store.getIntakeRecord("w", "rec_c"), null);
+      },
+    ],
+    [
       "deletes a subject's PIN and duress digests, keeps the rest, and deleting a missing one is harmless",
       async (store) => {
         const key = "2".repeat(64);

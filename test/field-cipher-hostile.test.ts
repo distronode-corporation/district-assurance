@@ -202,6 +202,7 @@ describe("FIL-2: a failed filing is never logged for a record that ends up store
     bRecords.getIntakeRecord = records.getIntakeRecord.bind(records);
     bRecords.subjectErasures = records.subjectErasures.bind(records);
     bRecords.deleteIntakeRecords = records.deleteIntakeRecords.bind(records);
+    bRecords.confirmIntakeRecord = records.confirmIntakeRecord.bind(records);
     bRecords.putIntakeRecord = async (r: IntakeRecord, erasuresSeen?: number) => {
       entered();
       await held;
