@@ -18,7 +18,9 @@
 // the call. The engine's events for the trial (which hold no values) are printed too, so the
 // applied outcome shows as a `verification.factor` line. Each answered request is logged as one
 // JSON line (route pattern, status, time; never a path, header or body). Everything else runs on fake adapters until its Stripe adapter is built (PAY-1).
+import { realpathSync } from "node:fs";
 import type { Server } from "node:http";
+import { fileURLToPath } from "node:url";
 
 import { systemClock, type Clock, type MessagePurpose, type MessageSender } from "../../../src/index.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine, type TestEngineOptions } from "../../../src/testing/index.ts";
@@ -121,7 +123,22 @@ export function createServe(options: ServeOptions): Serve {
   return { server, t, startTrialCall: key === "" ? null : startTrialCall };
 }
 
-if (import.meta.main) {
+/**
+ * Whether the module at `moduleUrl` is the program node was started with (`entry`, its argv[1]).
+ * Not `import.meta.main`: on Node.js 24.2 (the oldest the package allows) it is false for a `.ts`
+ * entry, so `npm run serve` exited at once without listening. Both paths are resolved through
+ * symlinks; importing this module from anywhere else does not start the server.
+ */
+export function isProgram(entry: string | undefined, moduleUrl: string): boolean {
+  if (entry === undefined) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
+if (isProgram(process.argv[1], import.meta.url)) {
   guardLogStream(process.stdout, logJsonLines);
   const port = Number(process.env.PORT ?? 8787);
   const { server, startTrialCall } = createServe({ env: process.env });

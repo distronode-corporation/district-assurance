@@ -12,7 +12,7 @@
 // IMMEDIATE), so several processes on one file also keep one chain; a process waits up to the busy
 // timeout for another's lock, blocking its event loop meanwhile. Fine for a reference server, not
 // tuned for production.
-import { closeSync, linkSync, lstatSync, mkdtempSync, openSync, rmSync, rmdirSync, type Stats } from "node:fs";
+import { closeSync, linkSync, lstatSync, mkdtempSync, openSync, readdirSync, realpathSync, rmSync, rmdirSync, statSync, type Stats } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -22,40 +22,92 @@ import { GENESIS_HASH, chainEntry, type AuditEntry, type AuditInput, type AuditL
 export const SQLITE_BUSY_TIMEOUT_MS = 5_000;
 
 /**
- * Opens (and creates, readable and writable by its owner only) a database file, in WAL mode so
- * readers do not wait for a writer. `":memory:"` opens a database that lives as long as the
- * connection. A `file:` URI is refused: SQLite would open the file the URI names, not the path
+ * The SQLite versions with the fix for the WAL-reset bug (https://sqlite.org/wal.html#walresetbug):
+ * in every version from 3.7.0 through 3.51.2, two connections on one file in WAL mode, in separate
+ * threads or processes, writing or checkpointing at the same instant could corrupt the database.
+ * 3.51.3 fixed it, and every later release has the fix except 3.52.0, which was withdrawn and is
+ * counted as without it; 3.44.6 and 3.50.7 are backports of it. Per release line: [minor, the first
+ * fixed patch].
+ */
+const WAL_RESET_BACKPORTS: readonly (readonly [number, number])[] = [
+  [44, 6],
+  [50, 7],
+  [51, 3],
+];
+
+/**
+ * Whether a SQLite build of `version` (as `sqlite_version()` gives it) has the WAL-reset fix. A
+ * version that does not parse counts as one without it.
+ */
+export function sqliteHasWalResetFix(version: string): boolean {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+  if (match === null) return false;
+  const [major, minor, patch] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  if (major !== 3) return major > 3;
+  if (minor === 52) return false;
+  const line = WAL_RESET_BACKPORTS.find(([fixedMinor]) => fixedMinor === minor);
+  return line === undefined ? minor > 51 : patch >= line[1];
+}
+
+/** Options for {@link openSqliteDatabase}. */
+export type SqliteOpenOptions = {
+  /**
+   * The SQLite version the journal mode is chosen for, in place of the one this Node bundles
+   * (`sqlite_version()`): a seam for tests of each choice. A host leaves it out.
+   */
+  sqliteVersion?: string;
+};
+
+/**
+ * Opens (and creates, readable and writable by its owner only) a database file. On a SQLite build
+ * with the WAL-reset fix (`sqliteHasWalResetFix`) the file is in WAL mode, so readers do not wait
+ * for a writer; on an older build, such as the SQLite 3.50.0 that Node 24.2 bundles, it uses a
+ * rollback journal (`journal_mode = DELETE`), which the bug does not touch, and a file left in WAL
+ * mode is moved back to one. `":memory:"` opens a database that lives as long as the connection,
+ * on any build. A `file:` URI is refused: SQLite would open the file the URI names, not the path
  * whose mode was set, so the database could be created readable by others. A file that already
  * exists readable or writable by group or others is refused too (the mode only applies when the
  * file is created), since its subjects and records would be readable to them, and so is a WAL,
  * shared-memory or rollback journal file left beside it (SQLite creates new ones with the database
  * file's mode, but keeps the mode of one that exists).
  *
+ * The checks read entries by name and SQLite then opens the same names, so no other account may
+ * be able to change an entry in between. That is a host requirement, enforced here before any file
+ * is created or opened: the database's directory is owned by the current user and not writable by
+ * group or others, and no directory above it is writable by others unless it has the sticky bit
+ * (as /tmp has). Ownership is not checked where there are no user ids (no `process.getuid`).
+ *
  * An existing file is checked by path and never opened here: on Linux and macOS, closing any
  * descriptor on a file drops every POSIX lock this process holds on it, including those of another
  * SQLite connection to it, which could then corrupt its WAL. A new file is created, exclusively
- * and owner-only, under a private name in a directory made beside it (so on its filesystem), closed
- * there, and then linked into place: no descriptor is ever opened or closed on the database path
- * outside SQLite, even while another thread or process opens the path. A symbolic link is refused, at the database path and
- * beside it: SQLite follows it and uses the target's WAL and shared-memory files, not the ones
- * checked here. Any other file type (a directory, a FIFO) is refused too.
+ * and owner-only, under a private name in a directory made in the directory the path resolves to
+ * (so on its filesystem), closed there, and then linked into place: no descriptor is ever opened
+ * or closed on the database path outside SQLite, even while another thread or process opens the
+ * path. A symbolic link is refused, at the database path and beside it: SQLite follows it and uses
+ * the target's WAL and shared-memory files, not the ones checked here. A file with a second hard
+ * link is refused too, since SQLite names the WAL after the name it opens, and connections through
+ * two names would keep two WALs for one database; the one second link allowed is another opener's
+ * private name for a file it has just linked into place, which it removes next. Any other file
+ * type (a directory, a FIFO) is refused too.
  *
  * POSIX only: on Windows a file is refused, since the owner-only mode sets no ACL there and the
  * file would be as readable as its directory makes it. There is no option to allow it; a Windows
  * host uses another store (or `":memory:"`, which keeps nothing across a restart).
  */
-export function openSqliteDatabase(path: string): DatabaseSync {
+export function openSqliteDatabase(path: string, options: SqliteOpenOptions = {}): DatabaseSync {
   if (/^file:/i.test(path)) throw new Error("openSqliteDatabase takes a filesystem path, not a file: URI");
   if (path !== ":memory:") {
     if (process.platform === "win32") {
       throw new Error("openSqliteDatabase refuses a database file on Windows, where an owner-only mode sets no ACL: the file-backed stores are POSIX only, so a Windows host uses another store");
     }
     let info = lstatIfExists(path);
+    const directory = assertPrivateDirectory(dirname(path));
     if (info === undefined) {
-      createOwnerOnly(path);
+      createOwnerOnly(path, directory);
       info = lstatSync(path);
     }
     assertOwnerOnlyFile(path, info);
+    if (info.nlink > 1) assertNoAlias(path, directory, info);
     for (const file of [`${path}-wal`, `${path}-shm`, `${path}-journal`]) {
       const sidecar = lstatIfExists(file);
       if (sidecar !== undefined) assertOwnerOnlyFile(file, sidecar);
@@ -63,7 +115,11 @@ export function openSqliteDatabase(path: string): DatabaseSync {
   }
   const db = new DatabaseSync(path, { timeout: SQLITE_BUSY_TIMEOUT_MS });
   try {
-    db.exec("PRAGMA journal_mode = WAL");
+    const version = options.sqliteVersion ?? String(db.prepare("SELECT sqlite_version() AS version").get()!.version);
+    const wal = sqliteHasWalResetFix(version);
+    const mode = db.prepare(wal ? "PRAGMA journal_mode = WAL" : "PRAGMA journal_mode = DELETE").get()!.journal_mode;
+    // SQLite answers with the mode it is in: a build with the bug never goes on in WAL mode.
+    if (!wal && mode === "wal") throw new Error(`${path} is in WAL mode, which SQLite ${version} cannot use safely (the WAL-reset bug), and could not leave it while another connection had it open`);
   } catch (error) {
     // Not a database, or unreadable: the connection is closed (close cannot fail on an open
     // connection) and the reason thrown.
@@ -74,13 +130,50 @@ export function openSqliteDatabase(path: string): DatabaseSync {
 }
 
 /**
+ * The real path of `directory`, once it is checked: owned by the current user (where there are
+ * user ids) and not writable by group or others, under ancestors that others cannot write, or
+ * that have the sticky bit.
+ */
+function assertPrivateDirectory(directory: string): string {
+  // The native realpath resolves `link/..` on the filesystem; the JS one takes it away by name first.
+  const real = realpathSync.native(directory);
+  const info = statSync(real);
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (uid !== undefined && info.uid !== uid) throw new Error(`the database directory ${real} is owned by another user; keep the database in a directory the server's own user owns`);
+  if ((info.mode & 0o022) !== 0) throw new Error(`the database directory ${real} is writable by group or others, who could swap a file between the checks and SQLite's open; make it owner-only (chmod 700) first`);
+  for (let below = real, above = dirname(real); above !== below; below = above, above = dirname(above)) {
+    const mode = statSync(above).mode;
+    if ((mode & 0o002) !== 0 && (mode & 0o1000) === 0) throw new Error(`${above}, above the database directory, is writable by others without the sticky bit, so they could replace the directory; keep the database elsewhere`);
+  }
+  return real;
+}
+
+/**
+ * Refuses a file with a second hard link, unless that link is another opener's private name for
+ * it (a `.sqlite-create-*` directory beside it holding the same file), which that opener removes
+ * once the file is in place. If the private name is gone by the time it is looked for, the file is
+ * looked at again: one link then is the file alone.
+ */
+function assertNoAlias(path: string, directory: string, info: Stats): void {
+  for (const name of readdirSync(directory)) {
+    if (!name.startsWith(".sqlite-create-")) continue;
+    const staged = lstatIfPresent(join(directory, name, "database"));
+    if (staged !== undefined && staged.dev === info.dev && staged.ino === info.ino) return;
+  }
+  const again = lstatSync(path);
+  if (again.dev === info.dev && again.ino === info.ino && again.nlink === 1) return;
+  throw new Error(`the database file ${path} has another hard link, and SQLite would keep a separate WAL for each name; remove the other links first`);
+}
+
+/**
  * Creates an empty owner-only file at `path`, or leaves alone one another thread or process created
  * there first (the caller checks it as any existing file). The descriptor that creates it is on a
- * private name in a new owner-only directory beside `path`, and is closed before the file is linked
- * into place; then the private name and directory are removed, also when a step fails.
+ * private name in a new owner-only directory in `directory` (the real path of the path's own
+ * directory, so the link never crosses a filesystem), and is closed before the file is linked into
+ * place; then the private name and directory are removed, also when a step fails.
  */
-function createOwnerOnly(path: string): void {
-  const staging = mkdtempSync(join(dirname(path), ".sqlite-create-"));
+function createOwnerOnly(path: string, directory: string): void {
+  const staging = mkdtempSync(join(directory, ".sqlite-create-"));
   const staged = join(staging, "database");
   const cleanUp = () => {
     rmSync(staged, { force: true });
@@ -104,6 +197,16 @@ function createOwnerOnly(path: string): void {
   }
   // A private directory left behind is an error too.
   cleanUp();
+}
+
+/** Like lstatIfExists, but a path under something that is not a directory counts as absent too. */
+function lstatIfPresent(file: string): Stats | undefined {
+  try {
+    return lstatIfExists(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOTDIR") return undefined;
+    throw error;
+  }
 }
 
 /** The file's own status (a symbolic link's, not its target's), or undefined if there is none. */

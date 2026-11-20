@@ -57,6 +57,20 @@ describe("hostile: the simulator waits out the configured backoff", () => {
     assert.match(text, /^flow: failed$/m);
   });
 
+  it("S4: the wait follows the failures still in the window: a day-long first backoff is waited out again after the first failure leaves it", async () => {
+    // backoffSeconds [86400, 15, ...] with a 24-hour window: waiting out the first failure's 86400
+    // seconds moves it out of the window, so after the second wrong PIN only one failure is in it,
+    // and the wait is 86400 seconds again, not the second entry's 15 (counters.ts, lockState).
+    const config = pinFlow((badge) => (badge.lockout = { backoffSeconds: [86400, 15, 60, 300, 900], windowHours: 24 }));
+    const result = await run(config, "owner", file({ summary: "two wrong PINs, then the right one", wrongPins: 2 }));
+    assert.deepEqual(result.err, []);
+    const text = result.out.join("\n");
+    assert.equal(text.match(/caller: keys PIN \(wrong\)/g)!.length, 2);
+    assert.match(text, /caller: keys PIN \(right\)\n.*"passed":true.*\n  decision: PIN matched/);
+    assert.match(text, /^flow: completed$/m);
+    assert.equal(result.code, 0);
+  });
+
   it("S3: with a hard lock after 2 failures, the lockout script stops at the hard lock and never keys the right PIN", async () => {
     const config = pinFlow((badge) => (badge.lockout = { lockAfterFailures: 2 }));
     const result = await run(config, "owner", "lockout");

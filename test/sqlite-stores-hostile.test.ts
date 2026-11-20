@@ -1,7 +1,7 @@
 // SRV-4 SQLite stores under attack (a hostile pass on #95): file modes, hostile input checked
 // against the memory stores, and races and faults across connections. Each pins safe behaviour.
 import { strict as assert } from "node:assert";
-import fs, { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, closeSync, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -102,7 +102,9 @@ const entry = (n: number, more: object = {}) => ({ callId: `call_${n}`, actor: "
 describe("attack: file modes", { skip: process.platform === "win32" }, () => {
   it("the WAL and shared-memory files SQLite creates beside the database are owner-only too", async () => {
     const path = newFile();
-    const stores = track(openSqliteStores(path));
+    // In WAL mode whatever SQLite this Node bundles (a build with the WAL-reset bug uses a rollback journal).
+    const db = track(openSqliteDatabase(path, { sqliteVersion: "3.53.0" }));
+    const stores = { ledger: new SqliteAuditLedger(db), records: new SqliteRecordStore(db) };
     await stores.ledger.append(entry(1));
     stores.records.putSubject("w", { subjectKey: "s", phoneOnFile: "+15555550100", knowledge: {} });
     for (const file of [`${path}-wal`, `${path}-shm`]) {
@@ -264,6 +266,153 @@ describe("attack: file modes", { skip: process.platform === "win32" }, () => {
     const directory = join(dir, `dir-${++files}.db`);
     mkdirSync(directory, { mode: 0o700 });
     assert.throws(() => track(openSqliteDatabase(directory)), /not a regular file/);
+  });
+
+  it("a path through a symbolic link and '..' is staged in the directory it resolves to, on the database's filesystem", () => {
+    const data = join(dir, `data-${++files}`);
+    mkdirSync(join(data, "releases"), { recursive: true, mode: 0o700 });
+    const config = join(dir, `config-${++files}`);
+    mkdirSync(config, { mode: 0o700 });
+    symlinkSync(join(data, "releases"), join(config, "current"));
+    // Not join(): it would take `current/..` away before the filesystem resolves the link.
+    const path = `${config}/current/../store.db`;
+    const calls = spyOnFs((seen) => {
+      track(openSqliteDatabase(path)).close();
+      return seen;
+    });
+    const staging = calls.find((c) => c.fn === "mkdtempSync");
+    assert.equal(dirname(staging!.path), data, "staged beside the file the path names, not beside its lexical parent");
+    assert.equal(statSync(join(data, "store.db")).mode & 0o777, 0o600);
+    assert.equal(existsSync(join(config, "store.db")), false);
+    assert.deepEqual(readdirSync(data).filter((name) => name.startsWith(".sqlite-create-")), []);
+  });
+
+  it("a database file with a second hard link is refused, by either name, since SQLite keeps a WAL per name", () => {
+    const path = newFile();
+    track(openSqliteDatabase(path)).close();
+    const alias = newFile();
+    linkSync(path, alias);
+    assert.throws(() => track(openSqliteDatabase(path)), /hard link/);
+    assert.throws(() => track(openSqliteDatabase(alias)), /hard link/);
+    // A second link in a private creating directory that is not the file is still an alias.
+    const staging = mkdtempSync(join(dir, ".sqlite-create-"));
+    writeFileSync(join(staging, "database"), "", { mode: 0o600 });
+    assert.throws(() => track(openSqliteDatabase(path)), /hard link/);
+    rmSync(staging, { recursive: true });
+    rmSync(alias);
+    track(openSqliteDatabase(path)).close();
+  });
+
+  it("a database file another opener has linked into place, before it removes its private name, opens", () => {
+    const path = newFile();
+    track(openSqliteDatabase(path)).close();
+    // Another process's create, between its link and the unlink of its private name.
+    const staging = mkdtempSync(join(dir, ".sqlite-create-"));
+    linkSync(path, join(staging, "database"));
+    assert.equal(statSync(path).nlink, 2);
+    track(openSqliteDatabase(path)).close();
+    // And when the private name goes between this opener's look at the file and its look beside it.
+    spyOnFs(
+      () => track(openSqliteDatabase(path)).close(),
+      (call) => {
+        if (call.fn === "lstatSync" && call.path === join(staging, "database")) rmSync(staging, { recursive: true, force: true });
+      },
+    );
+    assert.equal(existsSync(staging), false);
+    assert.equal(statSync(path).nlink, 1);
+  });
+});
+
+describe("attack: the database's directory", onFile, () => {
+  it("a directory group or others can write is refused, since an entry there could be swapped between the checks and SQLite's open", () => {
+    for (const mode of [0o770, 0o707]) {
+      const sub = join(dir, `open-${++files}`);
+      mkdirSync(sub, { mode: 0o700 });
+      chmodSync(sub, mode);
+      assert.throws(() => track(openSqliteDatabase(join(sub, "x.db"))), /writable by group or others/, mode.toString(8));
+      assert.equal(existsSync(join(sub, "x.db")), false, "nothing created there");
+      chmodSync(sub, 0o700);
+      track(openSqliteDatabase(join(sub, "x.db"))).close();
+    }
+  });
+
+  it("an ancestor others can write is refused, unless it has the sticky bit (as /tmp has)", () => {
+    const outer = join(dir, `outer-${++files}`);
+    mkdirSync(join(outer, "inner"), { recursive: true, mode: 0o700 });
+    chmodSync(outer, 0o777);
+    assert.throws(() => track(openSqliteDatabase(join(outer, "inner", "x.db"))), /writable by others without the sticky bit/);
+    chmodSync(outer, 0o1777);
+    track(openSqliteDatabase(join(outer, "inner", "x.db"))).close();
+    chmodSync(outer, 0o700);
+  });
+
+  it("a directory in /tmp, which is sticky, opens", { skip: !existsSync("/tmp") || (statSync("/tmp").mode & 0o1002) !== 0o1002 ? "no sticky, world-writable /tmp" : false }, () => {
+    const sticky = mkdtempSync("/tmp/da-sqlite-sticky-");
+    try {
+      track(openSqliteDatabase(join(sticky, "x.db"))).close();
+    } finally {
+      rmSync(sticky, { recursive: true, force: true });
+    }
+  });
+
+  it("a directory another user owns is refused; where there are no user ids, ownership is not checked", () => {
+    const sub = join(dir, `owned-${++files}`);
+    mkdirSync(sub, { mode: 0o700 });
+    const getuid = Object.getOwnPropertyDescriptor(process, "getuid")!;
+    Object.defineProperty(process, "getuid", { ...getuid, value: () => statSync(sub).uid + 1 });
+    try {
+      assert.throws(() => track(openSqliteDatabase(join(sub, "x.db"))), /owned by another user/);
+      Object.defineProperty(process, "getuid", { ...getuid, value: undefined });
+      track(openSqliteDatabase(join(sub, "x.db"))).close();
+    } finally {
+      Object.defineProperty(process, "getuid", getuid);
+    }
+  });
+});
+
+describe("attack: the journal mode follows the SQLite build (the WAL-reset bug)", onFile, () => {
+  const journalMode = (db: DatabaseSync) => db.prepare("PRAGMA journal_mode").get()!.journal_mode;
+
+  it("WAL only on a build with the fix (3.51.3 and later, or the 3.44.6 and 3.50.7 backports); rollback journaling otherwise", () => {
+    const cases: [string, string][] = [
+      ["3.50.0", "delete"],
+      ["3.50.6", "delete"],
+      ["3.51.2", "delete"],
+      ["3.52.0", "delete"],
+      ["3.44.5", "delete"],
+      ["3.45.0", "delete"],
+      ["not a version", "delete"],
+      ["3.51.3", "wal"],
+      ["3.53.0", "wal"],
+      ["3.44.6", "wal"],
+      ["3.50.7", "wal"],
+      ["3.100.0", "wal"],
+      ["4.0.0", "wal"],
+    ];
+    for (const [sqliteVersion, mode] of cases) {
+      const db = track(openSqliteDatabase(newFile(), { sqliteVersion }));
+      assert.equal(journalMode(db), mode, sqliteVersion);
+      db.close();
+    }
+  });
+
+  it("a database left in WAL mode is moved to rollback journaling by an affected build", () => {
+    const path = newFile();
+    const fixed = track(openSqliteDatabase(path, { sqliteVersion: "3.53.0" }));
+    fixed.exec("CREATE TABLE t (x INTEGER) STRICT; INSERT INTO t VALUES (1);");
+    fixed.close();
+    const affected = track(openSqliteDatabase(path, { sqliteVersion: "3.50.0" }));
+    assert.equal(journalMode(affected), "delete");
+    assert.deepEqual(affected.prepare("SELECT x FROM t").all().map((row) => row.x), [1]);
+    affected.close();
+  });
+
+  it("an in-memory database opens on any build", () => {
+    for (const sqliteVersion of ["3.50.0", "3.53.0"]) {
+      const db = openSqliteDatabase(":memory:", { sqliteVersion });
+      assert.equal(journalMode(db), "memory");
+      db.close();
+    }
   });
 });
 

@@ -1072,15 +1072,24 @@ U+FFFD, so two ids that differ only there stay apart; `putIntakeRecord` keeps th
 as JSON with one change, since JSON writes -0 as 0: -0 is stored as the string NUL `-0`, and every
 string that starts with NUL gets one more NUL in front, so -0 reads back as -0 and no stored string
 reads back as anything else; the entry's hash is over canonical JSON, the same either way.
-`openSqliteStores(path)` opens both on one file in WAL mode with a 5-second busy timeout; it takes
+`openSqliteStores(path)` opens both on one file with a 5-second busy timeout, in WAL mode only on
+a SQLite build with the fix for the WAL-reset bug (3.51.3 or later except the withdrawn 3.52.0, or
+the 3.44.6 and 3.50.7 backports; https://sqlite.org/wal.html#walresetbug), and with a rollback
+journal (`journal_mode = DELETE`) on an older one, such as Node 24.2's SQLite 3.50.0; it takes
 a filesystem path or `:memory:`, and refuses a `file:` URI, whose file would not get the mode
-below. A new file is created exclusively with mode 0600 before SQLite opens it (one another process
+below. Since the checks below read files by name before SQLite opens them, the database's
+directory must be owned by the current user and not writable by group or others, and no directory
+above it writable by others unless it has the sticky bit; anything else is refused before a file
+is created. A new file is created exclusively with mode 0600 before SQLite opens it, in a private
+directory in the directory the path resolves to, and hard-linked into place (one another process
 creates in between is checked as an existing one). An existing file is checked by path (`lstat`)
 and never opened outside SQLite, since closing any descriptor on a file drops every POSIX lock the
 process holds on it, another connection's too. It refuses an existing database file, or a `-wal`,
 `-shm` or `-journal` file beside it, that is readable or writable by group or others (SQLite keeps
 an existing file's mode), a symbolic link at the path or beside it (SQLite would use the files
-beside the link's target, not the ones checked), and anything that is not a regular file. The
+beside the link's target, not the ones checked), a database file with a second hard link (SQLite
+names the WAL after the name it opens, so two names would keep two WALs; the brief second link
+of another opener's create, its private name, is allowed), and anything that is not a regular file. The
 file-backed stores are POSIX only: on Windows `openSqliteStores` refuses every database file, since
 the mode sets no ACL there, so a Windows host uses another store, its own `RecordStore` and
 `AuditLedger`. `:memory:` opens on every platform and keeps nothing across a restart: it is for

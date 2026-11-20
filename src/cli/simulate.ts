@@ -25,7 +25,7 @@ import type { PaymentOutcome } from "../pay/payment.ts";
 import { verifyReceipt } from "../prove/receipt.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../testing/index.ts";
 import type { BadgeSettings } from "../verify/factors.ts";
-import { lockoutOf } from "../verify/counters.ts";
+import { lockState, lockoutOf } from "../verify/counters.ts";
 import { subjectKeyFor } from "../verify/knowledge.ts";
 
 /** How the scripted caller behaves at each kind of step. A script file is a JSON object with any of these fields. */
@@ -159,14 +159,26 @@ async function keyEntries(run: Run, what: string, wrong: number, submit: (right:
       return result.matched ? `${what} matched` : result.locked ? `no match, locked: no more ${what} attempts on this call` : "no match";
     });
   // A wrong entry starts a wait across calls (VER-1): the simulated caller keys again after it.
-  // The wait is the configured one for the failures counted so far (counters.ts, lockState), so a
-  // longer backoff is waited out too; nothing is cleared, and a hard lock still stops the caller.
-  // Only badge.verify keys entries, and its config has the badge module on.
-  const { backoffSeconds } = lockoutOf((run.config.modules.badge!.settings as unknown as BadgeSettings).lockout);
-  const waitOut = (failures: number) => run.t.clock.advance(backoffSeconds[Math.min(failures, backoffSeconds.length) - 1]! * 1000);
+  // The wait is the engine's own (counters.ts, lockState) for the failures still inside the window
+  // when the caller keys again, so a longer backoff is waited out too, and a wait that moves an old
+  // failure out of the window is recomputed for the ones left. Nothing is cleared, and a hard lock
+  // still stops the caller. Only badge.verify keys entries, and its config has the badge module on.
+  const lockout = lockoutOf((run.config.modules.badge!.settings as unknown as BadgeSettings).lockout);
+  const failures: string[] = [];
+  const waitOut = () => {
+    for (;;) {
+      const now = run.t.clock.now();
+      // The window counters.ts reads: a failure exactly one window old has left it.
+      const since = now.getTime() - lockout.windowHours * 3_600_000 + 1;
+      const state = lockState(lockout, failures.filter((at) => Date.parse(at) >= since), now);
+      if (state === null || state.hard) return;
+      run.t.clock.advance(Date.parse(state.until) - now.getTime());
+    }
+  };
   for (let i = 0; i < wrong && !locked; i++) {
+    failures.push(run.t.clock.now().toISOString());
     await key(false);
-    waitOut(i + 1);
+    waitOut();
   }
   if (!locked) await key(true);
 }

@@ -141,9 +141,25 @@ The file holds subjects and records, so it is kept owner-only:
   first).
 - A symbolic link, at the path or beside it, is refused: SQLite would use the files beside the
   link's target, not the ones checked. Give the target's own path.
+- A database file with a second hard link is refused: SQLite names the WAL after the name it
+  opens, so two names would keep two WALs for one database. The only second link allowed is the
+  brief one while another opener creates the file (its private name, which it removes next).
+- The checks read files by name before SQLite opens them, so the host must keep other accounts
+  from changing the names in between, and this is enforced: **the database's directory must be
+  owned by the server's user and not writable by group or others (chmod 700), and no directory
+  above it may be writable by others unless it has the sticky bit** (as `/tmp` has). Otherwise the
+  open is refused before any file is created.
 - An existing file is checked by path, never opened outside SQLite, since closing a descriptor on
   it would drop the locks another SQLite connection in the process holds on it.
 - A `file:` URI is refused, since its file would not get the mode.
+
+The journal mode depends on the SQLite that Node bundles. SQLite's
+[WAL-reset bug](https://sqlite.org/wal.html#walresetbug) (every version from 3.7.0 through
+3.51.2) can corrupt a WAL-mode database when two connections in separate threads or processes
+write or checkpoint at the same instant. So the file is in WAL mode only on a build with the fix
+(3.51.3 or later, except the withdrawn 3.52.0, or the 3.44.6 and 3.50.7 backports); an older one,
+such as the SQLite 3.50.0 in Node 24.2, uses a rollback journal (`journal_mode = DELETE`), and
+moves a file left in WAL mode back to one. Readers then wait for a writer, which is slower but safe.
 
 ## Trying it with your own Stripe test account
 

@@ -20,6 +20,7 @@ import type { AddressInfo } from "node:net";
 
 import { verifyChain, verifyReceipt, type SignedReceipt } from "../../../src/index.ts";
 import { createReferenceServer } from "./app.ts";
+import { isProgram } from "./main.ts";
 import { CALLBACK_SCRIPT, DEMO_CONNECT_SECRET, DEMO_SECRET, SCRIPTS, createDemoWorld, type ScriptRun, type ScriptStep } from "./script.ts";
 
 const log = (step: string, detail = "") => console.log(`  ${step.padEnd(36)} ${detail}`);
@@ -88,7 +89,8 @@ export async function runDemo(print = true): Promise<DemoResult> {
   }
 }
 
-if (import.meta.main) {
+// Not `import.meta.main`, which Node.js 24.2 sets false for a .ts entry (see `isProgram`).
+if (isProgram(process.argv[1], import.meta.url)) {
   const { receipt } = await runDemo();
   console.log("\nDeposit receipt body:\n" + JSON.stringify(receipt.body, null, 2));
 }

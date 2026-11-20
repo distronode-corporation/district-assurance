@@ -38,7 +38,8 @@ describe("audit pack: the v8 temp folder and --out", () => {
     const temp = join(base, "real", "v8");
     mkdirSync(temp, { recursive: true });
     const link = join(base, "link");
-    symlinkSync(join(base, "real"), link);
+    // A junction on Windows, which needs no symbolic-link privilege; other platforms ignore the type.
+    symlinkSync(join(base, "real"), link, "junction");
     assert.notEqual(v8TempProblem(link, temp), null);
     assert.notEqual(v8TempProblem(join(link, "v8", "new"), temp), null, "a new folder under it, through the link");
   });

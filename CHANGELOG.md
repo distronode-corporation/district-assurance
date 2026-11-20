@@ -382,7 +382,9 @@ All notable changes to this project are documented here. The format follows
   - Reference server: `jsonLinesLog(stream)` (behind `logJsonLines`) drops entries while the
     stream is backpressured and writes one `log_entries_dropped` line on drain, and `stop()` ends
     it; `npm run serve` registers `guardLogStream`, so an error on standard output stops logging
-    instead of ending the process. An upload that spent its link keeps its outcome until the link
+    instead of ending the process. On Node.js 24.2, where `import.meta.main` is false for a `.ts`
+    entry, `npm run serve`, `npm run demo` and `npm run demo:e2e` exited without running; their
+    entry check (`isProgram`) now compares the resolved `argv[1]` with the module's own path. An upload that spent its link keeps its outcome until the link
     expires, so a retry gets the same answer (a received page names the document), and a retry
     while the first upload still runs gets 503 with `Retry-After`. Kept outcomes are never evicted
     before they expire: when `uploads.keptMax` (default 10,000) are held, a new upload gets 503

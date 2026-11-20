@@ -5,11 +5,11 @@ import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { fileURLToPath } from "node:url";
-import { describe, it } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { describe, it, type TestContext } from "node:test";
 
 import { createReferenceServer, jsonLinesLog, logJsonLines, type RequestLog } from "../examples/reference-server/src/app.ts";
-import { guardLogStream } from "../examples/reference-server/src/main.ts";
+import { guardLogStream, isProgram } from "../examples/reference-server/src/main.ts";
 import { createTestEngine } from "../src/testing/index.ts";
 
 /** A stream that records each write, and answers backpressure while `full` until `drain()`. */
@@ -135,27 +135,66 @@ describe("guardLogStream", () => {
   });
 
   it("keeps npm run serve running when standard output's reader goes away", { timeout: 30_000 }, async (ctx) => {
-    const free = createServer();
-    await new Promise<void>((resolve) => free.listen(0, "127.0.0.1", resolve));
-    const port = (free.address() as AddressInfo).port;
-    await new Promise<void>((resolve) => free.close(() => resolve()));
-    const main = fileURLToPath(new URL("../examples/reference-server/src/main.ts", import.meta.url));
-    const child = spawn(process.execPath, [main], { env: { ...process.env, PORT: String(port) }, stdio: ["ignore", "pipe", "pipe"] });
-    ctx.after(() => {
-      child.kill();
-    });
-    let stderr = "";
-    child.stderr.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
-    await new Promise<void>((resolve, reject) => {
-      child.stdout.once("data", () => resolve());
-      child.once("exit", () => reject(new Error(`exited early: ${stderr}`)));
-    });
+    const { child, port, stderr } = await startServe(ctx);
     // The reader closes its end: the next log line is an EPIPE.
     child.stdout.destroy();
     const url = `http://127.0.0.1:${port}/healthz`;
     for (let i = 0; i < 3; i++) assert.equal((await fetch(url)).status, 200);
     await new Promise((resolve) => setTimeout(resolve, 300));
-    assert.equal(child.exitCode, null, stderr);
+    assert.equal(child.exitCode, null, stderr());
     assert.equal((await fetch(url)).status, 200);
+  });
+});
+
+const MAIN = fileURLToPath(new URL("../examples/reference-server/src/main.ts", import.meta.url));
+
+/**
+ * Starts `npm run serve`'s program (node on main.ts) on a free port and waits for its first line.
+ * `nodeArgs` go before the entry. Rejects with its standard error if it exits first.
+ */
+async function startServe(ctx: TestContext, nodeArgs: string[] = []) {
+  const free = createServer();
+  await new Promise<void>((resolve) => free.listen(0, "127.0.0.1", resolve));
+  const port = (free.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => free.close(() => resolve()));
+  const child = spawn(process.execPath, [...nodeArgs, MAIN], { env: { ...process.env, PORT: String(port) }, stdio: ["ignore", "pipe", "pipe"] });
+  ctx.after(() => {
+    child.kill();
+  });
+  let stderr = "";
+  child.stderr.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
+  await new Promise<void>((resolve, reject) => {
+    child.stdout.once("data", () => resolve());
+    child.once("exit", () => reject(new Error(`exited early: ${stderr}`)));
+  });
+  return { child, port, stderr: () => stderr };
+}
+
+// Node.js 24.2 sets import.meta.main to false for a .ts entry. Node 24.19 does not, so this load
+// hook gives main.ts what 24.2 gives it: every `import.meta.main` in its source reads false.
+const NODE_24_2_MAIN = `data:text/javascript,${encodeURIComponent(`
+import { registerHooks } from "node:module";
+registerHooks({
+  load(url, context, nextLoad) {
+    const result = nextLoad(url, context);
+    if (!url.endsWith("/examples/reference-server/src/main.ts")) return result;
+    return { ...result, source: String(result.source).replaceAll("import.meta.main", "false") };
+  },
+});
+`)}`;
+
+describe("npm run serve's entry check", () => {
+  it("starts the server where import.meta.main is false for a .ts entry, as on Node.js 24.2", { timeout: 30_000 }, async (ctx) => {
+    const { child, port, stderr } = await startServe(ctx, ["--import", NODE_24_2_MAIN]);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/healthz`)).status, 200);
+    assert.equal(child.exitCode, null, stderr());
+  });
+
+  it("is the program only for main.ts itself, so importing main.ts does not start the server", () => {
+    const url = pathToFileURL(MAIN).href;
+    assert.equal(isProgram(MAIN, url), true);
+    assert.equal(isProgram(fileURLToPath(import.meta.url), url), false, "this test file imports main.ts");
+    assert.equal(isProgram(undefined, url), false, "no entry, as under node -e");
+    assert.equal(isProgram(`${MAIN}.missing`, url), false, "an entry that does not resolve");
   });
 });

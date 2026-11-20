@@ -172,8 +172,19 @@ describe("a full store of kept upload outcomes", () => {
     const t = createTestEngine();
     const documents = new MemoryDocumentStore();
     await t.records.putIntakeRecord({ recordId: "rec_1", workspaceId: t.engine.workspaceId, callId: "call_1", subjectKey: null, formId: "f", formVersion: "1", values: {}, digest: "0".repeat(64), confirmedBy: "voice", confirmedAt: "2026-01-01T00:00:00.000Z" });
+    // Each scan resolves its entry signal on entry, with the callback that finishes it, so a test
+    // releases a scan only once the scanner holds it, however slow the request is to arrive.
     const finishes: Array<() => void> = [];
-    const scanner = { scan: () => new Promise<{ clean: boolean }>((resolve) => finishes.push(() => resolve({ clean: true }))) };
+    const entries: Array<PromiseWithResolvers<() => void>> = [];
+    const entry = (i: number) => (entries[i] ??= Promise.withResolvers<() => void>());
+    const scanner = {
+      scan: () =>
+        new Promise<{ clean: boolean }>((resolve) => {
+          const finish = () => resolve({ clean: true });
+          entry(finishes.length).resolve(finish);
+          finishes.push(finish);
+        }),
+    };
     const s = await serve(ctx, { uploads: { documents, scanner, ids: t.ids, keptMax: 1 }, timeoutMs: 100 }, t);
     const link = async () => (await createUploadLink({ callId: "call_1", recordId: "rec_1" }, { workspaceId: t.engine.workspaceId, documents, clock: t.clock, records: t.records })).token;
     const send = async (token: string) => {
@@ -182,7 +193,9 @@ describe("a full store of kept upload outcomes", () => {
       const res = await fetch(`${s.base}/u/${token}`, { method: "POST", body });
       return { status: res.status, retryAfter: res.headers.get("retry-after"), html: await res.text() };
     };
-    return { t, documents, link, send, finishes };
+    /** Resolves with the i-th scan's finish callback once the scanner has entered it. */
+    const entered = (i: number) => entry(i).promise;
+    return { t, documents, link, send, finishes, entered };
   }
 
   it("refuses a new upload before it claims its link, and the link works once room frees", async (ctx) => {
@@ -191,8 +204,7 @@ describe("a full store of kept upload outcomes", () => {
     u.t.clock.advance(10 * 60 * 1000);
     const second = await u.link();
     const sent = u.send(first);
-    await sleep(20);
-    u.finishes[0]!();
+    (await u.entered(0))();
     assert.equal((await sent).status, 201);
     const refused = await u.send(second);
     assert.deepEqual([refused.status, refused.retryAfter], [503, String(20 * 60)], "until the first link's outcome expires");
@@ -201,8 +213,7 @@ describe("a full store of kept upload outcomes", () => {
     assert.equal(u.finishes.length, 1, "no scan");
     u.t.clock.advance(20 * 60 * 1000);
     const later = u.send(second);
-    await sleep(20);
-    u.finishes[1]!();
+    (await u.entered(1))();
     assert.equal((await later).status, 201);
     assert.equal(u.documents.documents().length, 2);
   });
