@@ -88,6 +88,29 @@ function isPositiveInteger(n: unknown): n is number {
   return typeof n === "number" && Number.isSafeInteger(n) && n >= 1;
 }
 
+/** The most entries one read of the walk from a run's end to the head asks for. */
+export const EXPORT_WALK_PAGE = 1000;
+
+/**
+ * Whether the chain continues from `point` to `head` as the ledger holds it, read in pages of at
+ * most EXPORT_WALK_PAGE entries. A page short of the head is signed only when this holds, so a
+ * page that verifies on its own but is not the start of the signed head's chain (an entry swapped
+ * for another chain's) is never vouched for. Answers the seq where the walk failed, or null.
+ */
+async function walkToHead(ledger: AuditLedger, point: ChainPoint, head: ChainPoint): Promise<number | null> {
+  let at = point;
+  while (at.seq < head.seq) {
+    const count = Math.min(EXPORT_WALK_PAGE, head.seq - at.seq);
+    const page = (await ledger.list(at.seq + 1, count)).filter((e) => e.seq <= at.seq + count);
+    const check = verifyChain(page, at);
+    if (!check.ok) return check.seq;
+    // A page that came back short holds no further entry: the chain stops before the head.
+    if (check.head.seq !== at.seq + count) return check.head.seq + 1;
+    at = check.head;
+  }
+  return at.hash === head.hash ? null : head.seq;
+}
+
 /** The chain point at `seq` as the ledger holds it, or null when the ledger does not hold it. */
 async function pointAt(ledger: AuditLedger, seq: number): Promise<ChainPoint | null> {
   if (seq === 0) return { seq: 0, hash: GENESIS_HASH };
@@ -141,6 +164,12 @@ export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<st
   // it must end on the head that is signed, so a short or rewritten read is never vouched for.
   if (check.head.seq !== last || (last === head.seq && check.head.hash !== head.hash)) {
     throw new EngineError("precondition_failed", "exportLedger: the ledger run does not reach its expected end");
+  }
+  // A page short of the head must be the start of the head's chain: walked to the head, in
+  // bounded pages, before anything is signed. An export reads the ledger from the run to the head.
+  if (last < head.seq) {
+    const broken = await walkToHead(ledger, check.head, head);
+    if (broken !== null) throw new EngineError("precondition_failed", `exportLedger: the ledger chain does not reach the head from the run's end, at seq ${broken}`);
   }
 
   const trailer: LedgerExportTrailerBody = {

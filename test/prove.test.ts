@@ -7,6 +7,7 @@ import { canonicalJson } from "../src/core/canonical.ts";
 import { EngineError } from "../src/core/errors.ts";
 import { wordingDigest } from "../src/prove/consent.ts";
 import {
+  EXPORT_WALK_PAGE,
   decodeCursor,
   encodeCursor,
   exportLedger,
@@ -629,7 +630,19 @@ describe("ledger export", () => {
     await assert.rejects(run(wrongHead, { fromSeq: 1, limit: 1 }), refused(), "even on a page short of the head");
   });
 
-  it("reads one page of exactly the run's entries, and cuts an adapter that hands back more", async () => {
+  it("refuses to sign a page whose first entry was swapped for another chain's (the page never reaches the head)", async () => {
+    const ledger = await ledgerOf(3);
+    const [foreign] = await (await ledgerOf(1, 10)).list();
+    // A valid first entry of another chain: the page 1..1 verifies from genesis on its own.
+    const swapped = new EditedLedger(ledger, { list: (es) => es.map((e) => (e.seq === 1 ? foreign! : e)) });
+    const refused = (e: unknown) => e instanceof EngineError && e.code === "precondition_failed";
+    await assert.rejects(run(swapped, { fromSeq: 1, limit: 1 }), refused);
+    await assert.rejects(run(swapped, { fromSeq: 1, limit: 2 }), refused);
+    // The same pages of the untouched ledger are signed.
+    assert.equal(verifyLedgerExport(await run(ledger, { fromSeq: 1, limit: 1 }), keys).ok, true);
+  });
+
+  it("reads one page of exactly the run's entries, then walks to the head in bounded pages, and cuts an adapter that hands back more", async () => {
     const inner = await ledgerOf(50);
     const asked: Array<[number | undefined, number | undefined]> = [];
     const paged: AuditLedger = {
@@ -642,8 +655,32 @@ describe("ledger export", () => {
     };
     const check = verifyLedgerExport(await run(paged, { fromSeq: 11, limit: 5 }), keys);
     assert.equal(check.ok && check.entries.map((e) => e.seq).join(","), "11,12,13,14,15");
-    assert.deepEqual(asked.at(-1), [11, 5], "the run's page, no more");
-    assert.equal(asked.every(([, limit]) => limit !== undefined), true, "never the whole ledger");
+    assert.ok(asked.some(([from, limit]) => from === 11 && limit === 5), "the run's page, no more");
+    assert.deepEqual(asked.at(-1), [16, 35], "then the rest of the chain to the head");
+    assert.equal(asked.every(([, limit]) => limit !== undefined && limit <= EXPORT_WALK_PAGE), true, "in bounded pages, never the whole ledger at once");
+  });
+
+  it("walks to the head in pages of at most EXPORT_WALK_PAGE entries", async () => {
+    const inner = await ledgerOf(EXPORT_WALK_PAGE + 5);
+    const asked: Array<[number | undefined, number | undefined]> = [];
+    const paged: AuditLedger = { append: (i) => inner.append(i), head: () => inner.head(), list: async (f, l) => (asked.push([f, l]), inner.list(f, l)) };
+    assert.equal(verifyLedgerExport(await run(paged, { fromSeq: 1, limit: 2 }), keys).ok, true);
+    assert.deepEqual(asked.slice(-2), [[3, EXPORT_WALK_PAGE], [EXPORT_WALK_PAGE + 3, 3]]);
+  });
+
+  it("refuses a page whose walk to the head is cut short or ends on another head", async () => {
+    const ledger = await ledgerOf(3);
+    const stored = await ledger.list();
+    const refused = (e: unknown) => e instanceof EngineError && e.code === "precondition_failed" && /does not reach the head/.test(e.message);
+    // The walk is the third read: the head check, the run's page, then the walk.
+    const onWalk = (edit: (es: AuditEntry[]) => AuditEntry[]) => {
+      let calls = 0;
+      return new EditedLedger(ledger, { list: (es) => (++calls === 3 ? edit(es) : es) });
+    };
+    await assert.rejects(run(onWalk((es) => es.filter((e) => e.seq !== 3)), { fromSeq: 1, limit: 1 }), refused, "a walk that stops before the head");
+    // Seq 3 rewritten and chained on seq 2: the walk verifies, and ends on a hash that is not the head.
+    const rewritten = chainEntry({ ...input("module.event", { i: 99 }) }, 3, stored[1]!.hash);
+    await assert.rejects(run(onWalk((es) => es.map((e) => (e.seq === 3 ? rewritten : e))), { fromSeq: 1, limit: 1 }), refused, "a walk that ends on another head");
   });
 
   it("refuses a run read short of, or past a rewrite of, its end", async () => {

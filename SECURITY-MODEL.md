@@ -756,7 +756,10 @@ an entry without one is reported as unattributed, so one business never sees ano
 workspace: one tenant's bad entry never stops another tenant's report (tested).
 `exportLedger` copies the ledger out as NDJSON with an ES256-signed trailer naming where the run
 starts and ends and the head; it checks the chain before signing, and refuses a ledger whose
-entries, head or cursor entry no longer match (tested). `verifyLedgerExport` detects a changed,
+entries, head or cursor entry no longer match (tested). A run that stops short of the head is signed only
+after the chain is walked from its end to the head, so a page that verifies on its own but is not
+the start of the head's chain (a first entry swapped for another chain's) is refused, not signed
+(tested). `verifyLedgerExport` detects a changed,
 removed, added or replaced entry, a changed trailer and a run that does not continue the previous
 one (tested). The signed bytes start with a fixed context line, so a trailer signature cannot pass
 as a receipt signature under the same key, or the other way round (tested). A run that starts at a
