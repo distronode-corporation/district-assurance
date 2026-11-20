@@ -129,7 +129,7 @@ export interface EngineOptions {
   ids?: IdGenerator;
   /** Default: card numbers. */
   redactor?: Redactor;
-  /** Told of each event after its ledger entry is appended: at least once, best effort, never awaited (INT-5). */
+  /** Told of each event after its ledger entry is appended: best effort, possibly more than once, never awaited (INT-5). */
   onEvent?: EventListener;
   /**
    * How long one `DuressNotifier.notify` may take, in milliseconds: a whole number from 100 to 30000
@@ -1732,15 +1732,16 @@ export class Engine {
    * id once), then clears them from the record if nobody wrote since. A failed append throws and
    * leaves the rest pending; a lost clear leaves them for the next write, which appends nothing twice.
    * The listener is told after each append, so it never hears of an entry the ledger does not have.
+   * Answers whether the clear was saved (true for an empty outbox, which needs none).
    */
-  async #flush(callId: string, version: number, record: CallRecord): Promise<void> {
-    if (record.outbox.length === 0) return;
+  async #flush(callId: string, version: number, record: CallRecord): Promise<boolean> {
+    if (record.outbox.length === 0) return true;
     for (const queued of record.outbox) {
       await this.#append({ eventId: queued.eventId, callId, actor: queued.actor, event: queued.name, at: queued.at, detail: queued.detail });
       // Not awaited: a notice store that stalls holds up neither the rest of the outbox nor the call. It never rejects.
       if (queued.counter !== undefined) void this.#notifyLock(queued.counter, queued.detail);
     }
-    await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue, { ledgerPending: false });
+    return (await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue, { ledgerPending: false })).ok;
   }
 
   /**
@@ -1841,18 +1842,22 @@ export class Engine {
    * mark when nothing is pending: a write that sent no hint (an engine from before INT-5) can empty
    * the outbox and leave the mark, and `#flush` writes nothing on an empty outbox, so the call would
    * be listed for ever. A host's own flushLedger never writes on an empty outbox.
+   * Answers whether the call has nothing pending: after a lost clear or unmark, the write that won
+   * may have left entries of its own (its append failed), so the call is read again.
    */
-  async #flushStored(callId: string, unmark: boolean): Promise<void> {
+  async #flushStored(callId: string, unmark: boolean): Promise<boolean> {
     const stored = await this.#sessions.get(this.workspaceId, callId);
     if (stored === null) throw new EngineError("unknown_call", "no such call");
     const record = structuredClone(stored.record) as unknown as CallRecord;
     this.#sendDuressAlertsSoon(callId, record);
     if (unmark && record.outbox.length === 0) {
       // A lost write here is fine: the write that won sent its own hint.
-      await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, stored.record, { ledgerPending: false });
-      return;
+      if ((await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, stored.record, { ledgerPending: false })).ok) return true;
+    } else if (await this.#flush(callId, stored.version, record)) {
+      return true;
     }
-    await this.#flush(callId, stored.version, record);
+    const now = await this.#sessions.get(this.workspaceId, callId);
+    return now === null || (now.record as unknown as CallRecord).outbox.length === 0;
   }
 
   /**
@@ -1869,8 +1874,8 @@ export class Engine {
     const report: FlushReport = { flushed: [], failed: [] };
     for (const callId of await this.#sessions.pendingCalls(this.workspaceId, limit)) {
       try {
-        await this.#flushStored(callId, true);
-        report.flushed.push(callId);
+        // A call a concurrent write left with entries pending is reported as still pending.
+        (await this.#flushStored(callId, true) ? report.flushed : report.failed).push(callId);
       } catch {
         report.failed.push(callId);
       }

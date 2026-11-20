@@ -1025,7 +1025,8 @@ consentId]`, so a consent is revoked in the ledger once (section 17).
 `flushPending(limit = 100)` is the background flush a host schedules (for example every minute, in
 any process): it asks the store's `pendingCalls` for up to `limit` calls and flushes each in turn,
 returning `{flushed, failed}` (call ids); a call that fails stays pending for the next run, and
-the others go on. A listed call with nothing pending (a write that sent no hint, from an engine
+the others go on. A call whose clear lost to a write that left entries of its own pending (that
+write's append failed) is read again and listed in `failed`, as it is still pending. A listed call with nothing pending (a write that sent no hint, from an engine
 before INT-5, emptied its outbox and left the mark) is unmarked by a write with
 `{ledgerPending: false}`; `flushLedger` itself writes nothing on an empty outbox. Two runs at once
 append nothing twice. It throws `invalid_input` for a limit
@@ -1034,9 +1035,10 @@ that is not a positive integer, and `precondition_failed` when the store has no 
 replayed run of event ids once, as a retried flush sends it.
 
 The ledger is the source of truth; the `onEvent` listener is a notification. It is told of an entry
-after the ledger has it, with the entry's `eventId` and `seq`, at least once and best effort: the
-same event comes again, with the same `eventId`, when a flush replays it (after a lost clear, or
-from another process), and one is missed when the process stops between the append and the call.
+after the ledger has it, with the entry's `eventId` and `seq`, best effort and possibly more than
+once, so not at least once: the same event comes again, with the same `eventId`, when a flush
+replays it (after a lost clear, or from another process), and one is missed when the process stops
+between the append and the call.
 The engine calls the listener inline and never awaits it; a listener with slow work returns a
 promise. A throw or a rejection is passed to `onListenerError(error, event)`, and a failure of
 that hook is ignored: nothing the listener does stops the call, the write or the ledger. Any
