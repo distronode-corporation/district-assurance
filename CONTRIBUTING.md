@@ -18,7 +18,7 @@ Thank you for helping. A few ground rules keep the engine small and trustworthy.
 
 ## Setup
 
-Node.js 24.2 or later.
+Node.js 24.19 or later.
 
 ```sh
 npm ci

@@ -4,11 +4,13 @@ import { strict as assert } from "node:assert";
 import type { JsonValue } from "../src/core/canonical.ts";
 import type { FlowConfig } from "../src/core/config.ts";
 import { EngineError, type EngineErrorCode } from "../src/core/errors.ts";
+import { hmacSha256Hex } from "../src/core/hash.ts";
 import type { Engine } from "../src/engine.ts";
 import type { Locale } from "../src/core/runtime.ts";
 import type { IntakeForm } from "../src/file/intake.ts";
 import { defaultConfig } from "../src/modules.ts";
 import type { PaymentInput } from "../src/pay/paylink.ts";
+import { checkPinRecord } from "../src/verify/pin-hash.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine, type TestEngineOptions } from "../src/testing/index.ts";
 
 export const ACCOUNT = "12345678";
@@ -47,6 +49,14 @@ export function setup(options: TestEngineOptions = {}): TestEngine {
   const t = createTestEngine({ config: testConfig(), ...options });
   t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB }, pin: PIN }));
   return t;
+}
+
+/**
+ * Whether a PIN (or duress PIN) record on file is of this PIN for this subject, under a knowledge
+ * key (the test key by default). Records are salted, so tests check them instead of comparing.
+ */
+export async function pinOnFile(stored: string | undefined, subjectKey: string, pin: string, kind: "pin" | "duress" = "pin", key: string | Uint8Array = TEST_KNOWLEDGE_KEY): Promise<boolean> {
+  return (await checkPinRecord(stored, hmacSha256Hex(key, `${kind}:${subjectKey}:${pin}`))).match;
 }
 
 /** Moves the fixed clock past the longest wait after a failure (900 seconds), as a caller keying again later would. */

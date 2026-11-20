@@ -498,6 +498,14 @@ export class SqliteRecordStore implements RecordStore {
     });
   }
 
+  async upgradePinDigest(workspaceId: string, subjectKey: string, field: "pinDigest" | "duressDigest", from: string, to: string): Promise<boolean> {
+    return this.#update(workspaceId, subjectKey, (subject) => {
+      if (subject[field] !== from) return false;
+      subject[field] = to;
+      return true;
+    });
+  }
+
   #update(workspaceId: string, subjectKey: string, change: (subject: SubjectRecord) => boolean): boolean {
     return writeTransaction(this.#db, () => {
       const row = this.#db.prepare("SELECT subject FROM subjects WHERE workspace_id = ? AND subject_key = ?").get(key(workspaceId), key(subjectKey));

@@ -755,6 +755,31 @@ export function recordStoreContract(factory: (subjects: SeededSubject[]) => Reco
         assert.deepEqual(await store.getSubject("w2", key), { ...subjects.at(-1)!.subject, pinDigest: pin, duressDigest: duress });
       },
     ],
+    [
+      "upgrades a PIN or duress digest only from the value on file, and changes nothing else",
+      async (store) => {
+        const key = "2".repeat(64);
+        const [pin, duress, stronger, other] = ["e".repeat(64), "f".repeat(64), "$pin1$stronger", "$pin1$other"];
+        for (const w of ["w", "w2"]) {
+          assert.equal(await store.putPinDigest(w, key, pin, "enr_up"), true, `${w}: the PIN digest is stored`);
+          assert.equal(await store.putDuressDigest(w, key, duress, pin), true, `${w}: the duress digest is stored`);
+        }
+        assert.equal(await store.upgradePinDigest("w", key, "pinDigest", "0".repeat(64), stronger), false, "not from a value that is not on file");
+        assert.equal(await store.upgradePinDigest("w", key, "pinDigest", duress, stronger), false, "not from the other field's value");
+        assert.equal(await store.upgradePinDigest("w", key, "pinDigest", pin, stronger), true);
+        assert.equal(await store.upgradePinDigest("w", key, "pinDigest", pin, other), false, "a second upgrade from the same value replaces nothing");
+        assert.deepEqual(await store.getSubject("w", key), { ...subjects[1]!.subject, pinDigest: stronger, pinEnrolmentId: "enr_up", duressDigest: duress });
+        assert.equal(await store.upgradePinDigest("w", key, "duressDigest", duress, other), true);
+        assert.deepEqual(await store.getSubject("w", key), { ...subjects[1]!.subject, pinDigest: stronger, pinEnrolmentId: "enr_up", duressDigest: other });
+        // A field that is missing, a subject the store does not have, and another workspace are left alone.
+        await store.putDuressDigest("w", key, null);
+        assert.equal(await store.upgradePinDigest("w", key, "duressDigest", other, stronger), false);
+        assert.equal("duressDigest" in (await store.getSubject("w", key))!, false, "a missing field is not created");
+        assert.equal(await store.upgradePinDigest("w", "f".repeat(64), "pinDigest", pin, stronger), false);
+        assert.equal(await store.getSubject("w", "f".repeat(64)), null);
+        assert.deepEqual(await store.getSubject("w2", key), { ...subjects.at(-1)!.subject, pinDigest: pin, pinEnrolmentId: "enr_up", duressDigest: duress });
+      },
+    ],
   ];
   return cases.map(([name, body]) => ({ name, run: async () => body(await factory(structuredClone(subjects))) }));
 }

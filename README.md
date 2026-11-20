@@ -82,7 +82,7 @@ config without them, or with a target naming a controller the engine does not ha
 
 ## Try it
 
-Node.js 24.2 or later. The only dependencies are five development tools.
+Node.js 24.19 or later. The only dependencies are five development tools.
 
 ```sh
 npm ci

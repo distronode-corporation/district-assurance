@@ -403,8 +403,9 @@ longer than the window); `MemoryCodeStore` is the reference.
   is compared. An answer that is not 64 lower-case hex is refused with `invalid_input`, whose
   message never quotes it. A function that throws or rejects fails closed: no factor, the attempt
   counted, the error passed to the host (below). `subjectKeyFor`, `knowledgeDigest`, `pinDigest`
-  and `judgeKeypadFactors` take either form and give the same digests for the same key: at once
-  for bytes, as a `Promise` for a function.
+  and `judgeKeypadFactors` take either form and give the same digests for the same key (a
+  `pinDigest` record is salted, so a new one each time, which checks the same): at once for
+  bytes, as a `Promise` for a function.
 - Subject key: `HMAC-SHA256(knowledgeKey, "subject:" + accountNumber)`, hex. A host may instead
   start verification with a subject key its own code chose (`{subjectKey}`, a string of 64
   lower-case hex, read once; anything else is `invalid_input`); choosing the subject is not a
@@ -495,13 +496,26 @@ the duress PIN is off unless it is set.
 
 - An entry is well formed when it is ASCII digits with a length from `minDigits` to `maxDigits`.
   A malformed entry is still an attempt, and fails.
-- `keyed_hash` mode: the stored digest is `pinDigest(knowledgeKey, subjectKey, pin)` =
-  `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`, in `SubjectRecord.pinDigest`,
-  read from the `RecordStore` on every attempt; the call record's copy of the subject never holds
-  it, so a reset, an enrolment, an erasure (section 26) or any other change since verification
-  began counts at once. The entry is hashed the same way and compared in constant time; an
-  unknown subject, a subject without a digest and a malformed entry do the same work and give the
-  same answer.
+- `keyed_hash` mode: the stored record is `pinDigest(knowledgeKey, subjectKey, pin)`, Argon2id
+  over the keyed PIN `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)` (ADR-29), in
+  `SubjectRecord.pinDigest`, read from the `RecordStore` on every attempt; the call record's copy
+  of the subject never holds it, so a reset, an enrolment, an erasure (section 26) or any other
+  change since verification began counts at once. The entry is keyed the same way, run through
+  Argon2id with the record's salt and parameters, and the tag compared in constant time; an
+  unknown subject, a subject without a record and a malformed entry do the same work (one
+  Argon2id run at today's cost on a stand-in) and give the same answer.
+- PIN records (ADR-29): `$pin1$argon2id$v=19$m=<KiB>,t=<passes>,p=<lanes>$<salt>$<tag>`, with
+  `node:crypto`'s Argon2id (RFC 9106) over the 32 bytes of the keyed PIN, a random 16-byte salt and
+  a 32-byte tag, both in unpadded base64. A new record costs `m=19456,t=2,p=1` (19 MiB, 2 passes,
+  1 lane). A record is read strictly: another algorithm or version, a number or base64 spelled
+  another way, or a parameter below `m=19456,t=2,p=1` (a downgrade) or above
+  `m=262144,t=16,p=8` (a cost no check should pay, refused before any run) never matches, and a
+  changed parameter, salt or tag gives another tag, which never matches. A record of the earlier
+  format, the bare 64-hex keyed PIN, still matches in constant time; on a match (`pass`, or
+  `duress` for a duress record) the PIN factor replaces it with a new Argon2id record through
+  `RecordStore.upgradePinDigest(workspaceId, subjectKey, field, from, to)`, which writes only while
+  the field is still `from`, in one atomic step; a miss, a lock or a lost race changes nothing, and
+  the answer to the caller is the same either way. Lockouts and counters are unchanged.
 - `verifier` mode: the host's `PinVerifier.verify({workspaceId, subjectKey, pin})` decides; the
   PIN is passed once and kept nowhere. It is asked for every attempt: for a malformed entry or an
   account a keypad cannot produce, with a stand-in (`minDigits` zeros, an HMAC subject key) whose
@@ -528,7 +542,8 @@ the duress PIN is off unless it is set.
   up to `maxAttemptsPerCall`; after that it answers `{enrolled: false, reason: "locked"}` without
   judging. The subject is read from the `RecordStore`; one not on file, or one that already has a
   PIN, is refused (`precondition_failed`): only the business changes a PIN on file. Both entries
-  are hashed as `pinDigest` and compared in constant time. Answers: `malformed` (either entry is
+  are keyed as `pin:` digests and compared in constant time, and the digest stored is a new
+  Argon2id record of it. Answers: `malformed` (either entry is
   not digits of a length from `minDigits` to `maxDigits`), `mismatch`, `weak` (every digit the
   same, a run up or down with 0 following 9, as in 1234, 4321 or 7890, or a PIN equal to the
   subject's account number or any keypad knowledge on file, compared as keyed hashes; `weak` does
@@ -776,22 +791,23 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   from `minDigits` to `maxDigits`), `weak` (equal to the PIN on file, the account number or any
   keypad knowledge, compared as keyed hashes; every digit the same; a run; `weak` does not say
   which), or `{enrolled: true}` once `RecordStore.putDuressDigest(workspaceId, subjectKey, digest,
-  ifPinDigest)` stored `duressDigest(knowledgeKey, subjectKey, pin)` = `HMAC-SHA256(knowledgeKey,
-  "duress:" + subjectKey + ":" + pin)`, in `SubjectRecord.duressDigest`. The store writes it only
+  ifPinDigest)` stored `duressDigest(knowledgeKey, subjectKey, pin)`, the Argon2id record (ADR-29)
+  of `HMAC-SHA256(knowledgeKey, "duress:" + subjectKey + ":" + pin)`, in
+  `SubjectRecord.duressDigest`. The store writes it only
   while the subject's PIN digest is still the one it was checked against, atomically, and answers
   whether it did; when not (a reset and a new PIN meanwhile) `enrolDuressPin` throws `conflict` and
   nothing is stored. A second enrolment replaces it. `removeDuressPin(subjectKey)` removes it (same
   checks, except `pin.duress` may be off). Neither writes to the ledger. `enrolPin` answers `weak`
   for a PIN equal to a duress PIN on file.
-- Judging: in `keyed_hash` mode every PIN entry is hashed as both a PIN and a duress PIN and
-  compared with both digests (an empty one when none is on file), whatever the subject, the entry or
-  the setting, so the work and the time are the same. Both digests are read from the store on every
+- Judging: in `keyed_hash` mode every PIN entry is keyed as both a PIN and a duress PIN and
+  checked against both records at once, two Argon2id runs (each on a stand-in when no record is on
+  file), whatever the subject, the entry or the setting, so the work and the time are the same. Both digests are read from the store on every
   entry, never from the call's copy, so a duress PIN removed, or a PIN reset (which removes both),
   counts even on a call that began verification before it. In `verifier` mode `PinVerifier.verify`
   may answer `{duress: true}`, and `matched` is then ignored. A duress match counts only on a
   subject on file, with a well-formed entry, while `pin.duress` is set; otherwise it fails like a
   wrong PIN. An entry that matches both the PIN and the duress PIN (a subject imported with the two
-  PINs equal), in either mode, and in `keyed_hash` mode any entry on a subject whose two digests are
+  PINs equal), in either mode, and in `keyed_hash` mode any entry on a subject whose two records are
   byte for byte equal, fail like a wrong PIN, with no alarm: in `verifier` mode, an answer
   `{matched: true, duress: true}` fails.
 - A duress entry is a pass everywhere the caller can reach: the same `submitPin` answer, the same
@@ -1427,7 +1443,7 @@ anyone holding the key could have signed it.
 
 ### Checking a receipt without this package
 
-`scripts/verify-receipt.mjs` is one file with no dependencies beyond Node 24.2 or later; it can be
+`scripts/verify-receipt.mjs` is one file with no dependencies beyond Node 24.19 or later; it can be
 copied out of the repository on its own. It takes a receipt (a file, or `-` for standard input) and
 a key set (a file, or a URL), and repeats only what a verifier needs: the canonical JSON of
 section 11 and ES256 over it.

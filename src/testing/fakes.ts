@@ -307,6 +307,14 @@ export class MemoryRecordStore implements RecordStore {
     return true;
   }
 
+  async upgradePinDigest(workspaceId: string, subjectKey: string, field: "pinDigest" | "duressDigest", from: string, to: string): Promise<boolean> {
+    // No await: one atomic step.
+    const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
+    if (subject === undefined || subject[field] !== from) return false;
+    subject[field] = to;
+    return true;
+  }
+
   async markSubjectErased(workspaceId: string, subjectKey: string): Promise<void> {
     const key = scoped(workspaceId, subjectKey);
     this.#erasures.set(key, (this.#erasures.get(key) ?? 0) + 1);

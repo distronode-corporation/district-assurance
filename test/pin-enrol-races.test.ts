@@ -5,9 +5,9 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import type { FlowConfig } from "../src/core/config.ts";
-import { pinDigest, subjectKeyFor } from "../src/verify/knowledge.ts";
+import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { TEST_KNOWLEDGE_KEY, testSubject, type TestEngine } from "../src/testing/index.ts";
-import { DOB, setup, testConfig } from "./helpers.ts";
+import { DOB, pinOnFile, setup, testConfig } from "./helpers.ts";
 
 const NEW_ACCOUNT = "20481937";
 const NEW_PHONE = "+15555550142";
@@ -146,7 +146,7 @@ describe("wp-d: different PINs", () => {
     assert.equal([ra, rb].filter(enrolled).length, 1, "exactly one answered enrolled");
     const [winner, loser, pin] = enrolled(ra) ? [a, b, Y] : [b, a, X];
     const on = (await t.records.getSubject("ws_test", SUBJ))!.pinDigest;
-    assert.equal(on, pinDigest(TEST_KNOWLEDGE_KEY, SUBJ, winner === a ? X : Y), "the stored PIN is the winner's");
+    assert.ok(await pinOnFile(on, SUBJ, winner === a ? X : Y), "the stored PIN is the winner's");
     assert.deepEqual(await enrolledEvents(t), [winner], "the one pin.enrolled is the winner's");
     assert.equal((await settle(t.engine.enrolPin(loser, { pin, confirm: pin }))).ok, false);
     assert.deepEqual(await enrolledEvents(t), [winner]);
@@ -157,9 +157,9 @@ describe("wp-d: different PINs", () => {
     const c = await verified(t);
     const [rx, ry] = await Promise.all([settle(t.engine.enrolPin(c, { pin: X, confirm: X })), settle(t.engine.enrolPin(c, { pin: Y, confirm: Y }))]);
     const on = (await t.records.getSubject("ws_test", SUBJ))!.pinDigest;
-    const [dx, dy] = [pinDigest(TEST_KNOWLEDGE_KEY, SUBJ, X), pinDigest(TEST_KNOWLEDGE_KEY, SUBJ, Y)];
-    assert.ok(on === dx || on === dy, "one of the two PINs is stored");
-    const [winner, other] = on === dx ? [rx, ry] : [ry, rx];
+    const [dx, dy] = [await pinOnFile(on, SUBJ, X), await pinOnFile(on, SUBJ, Y)];
+    assert.ok(dx !== dy, "one of the two PINs is stored");
+    const [winner, other] = dx ? [rx, ry] : [ry, rx];
     assert.equal(enrolled(winner), true, "the stored PIN's try answered enrolled");
     assert.equal(enrolled(other), false, "the other PIN's try did not");
     assert.equal((await enrolledEvents(t)).length, 1);
@@ -254,7 +254,7 @@ describe("re-check d62c9c6: ids", () => {
     assert.equal(old.ok, false);
     assert.match(old.ok ? "" : old.e, /session store down/, "old 'dup' stored X, then its session write failed");
     const onFile = (await t1.records.getSubject("ws_test", SUBJ))!;
-    assert.equal(onFile.pinDigest, pinDigest(TEST_KNOWLEDGE_KEY, SUBJ, X), "X is on file");
+    assert.ok(await pinOnFile(onFile.pinDigest, SUBJ, X), "X is on file");
     assert.equal(onFile.pinEnrolmentId, "dup:1", "under the old call's id");
     // New call with the same id, against the same records (the old session expired, or another store).
     const t2 = setup({ config: testConfig(), adapters: { records: t1.records } });

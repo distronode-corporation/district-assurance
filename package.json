@@ -47,7 +47,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=24.2"
+    "node": ">=24.19"
   },
   "bin": {
     "district-assurance": "./dist/cli/simulate.js"

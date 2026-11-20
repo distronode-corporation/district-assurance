@@ -10,6 +10,7 @@ import { isObject } from "../core/shape.ts";
 import type { AdapterName, EngineRuntime } from "../core/runtime.ts";
 import type { LockoutSettings } from "./counters.ts";
 import { isKeypadEntry, judgeKeypadWith } from "./knowledge.ts";
+import { checkPinRecord, hashPinRecord, hashPinRecordSync } from "./pin-hash.ts";
 import { normaliseSpokenAnswer, normaliseSpokenKeypadEntry } from "./spoken.ts";
 
 export { checkFactorPlugin, snapshotFactorPlugin, type FactorEntry, type FactorJudgeInput, type FactorPlugin } from "../core/module.ts";
@@ -40,9 +41,12 @@ export type PinOutcome = "fail" | "pass" | "duress";
 
 export const PIN_OUTCOMES: readonly PinOutcome[] = ["fail", "pass", "duress"];
 
-/** The stored digest of a subject's duress PIN: `HMAC(key, "duress:" + subjectKey + ":" + pin)`. */
+/**
+ * The stored record of a subject's duress PIN: Argon2id over `HMAC(key, "duress:" + subjectKey +
+ * ":" + pin)`, with a fresh salt (pin-hash.ts, ADR-29), so the same PIN gives a new record each time.
+ */
 export function duressDigest(knowledgeKey: string | Uint8Array, subjectKey: string, pin: string): string {
-  return hmacSha256Hex(knowledgeKey, `duress:${subjectKey}:${pin}`);
+  return hashPinRecordSync(hmacSha256Hex(knowledgeKey, `duress:${subjectKey}:${pin}`));
 }
 
 /**
@@ -99,9 +103,10 @@ export const BUILT_IN_FACTORS: Readonly<Record<(typeof FACTOR_KINDS)[number], { 
 export const KNOWLEDGE_FACTORS: readonly string[] = ["keypad_knowledge", "pin"];
 
 /**
- * The PIN factor's judge: a keyed hash on file, or the host's verifier. Unknown subjects do the same
- * work. Every entry is compared with the PIN and the duress PIN digests alike, whether or not a
- * duress PIN is on file or turned on, so the work and the time never say which it was.
+ * The PIN factor's judge: a record on file, or the host's verifier. Unknown subjects do the same
+ * work. Every entry is compared with the PIN and the duress PIN records alike, whether or not a
+ * duress PIN is on file or turned on, so the work and the time never say which it was. A record of
+ * the earlier format (a bare keyed HMAC) that matches is replaced by an Argon2id one (ADR-29).
  */
 export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: FactorJudgeInput): Promise<PinOutcome> {
   const pin = typeof input.entry === "string" ? input.entry : "";
@@ -109,6 +114,7 @@ export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: 
   let match: boolean;
   let duress: boolean;
   let brokenSubject = false;
+  let upgrade: (outcome: PinOutcome) => Promise<void> = async () => {};
   if (settings.mode === "verifier") {
     // The verifier is asked every time, with a stand-in for a malformed entry or a non-keypad
     // account, so the answer's timing never says which it was. The stand-in's answer is ignored.
@@ -120,20 +126,34 @@ export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: 
     // Both digests on file are read from the store now, not from the call's copy of the subject, so
     // a reset (which removes both) since verification began counts. An unknown subject is looked up
     // the same way.
-    const onFile = await rt.adapter("records").getSubject(input.workspaceId, input.subjectKey ?? (await input.hmac("subject:")));
+    const records = rt.adapter("records");
+    const subjectKey = input.subjectKey ?? (await input.hmac("subject:"));
+    const onFile = await records.getSubject(input.workspaceId, subjectKey);
     const entry = wellFormed ? pin : "";
-    match = hexDigestsEqual(await input.hmac(`pin:${input.subjectKey ?? ""}:${entry}`), onFile?.pinDigest ?? "");
-    duress = hexDigestsEqual(await input.hmac(`duress:${input.subjectKey ?? ""}:${entry}`), onFile?.duressDigest ?? "");
-    // The two digests are keyed apart, so they are equal only on a subject imported wrongly.
-    brokenSubject = hexDigestsEqual(onFile?.pinDigest ?? "", onFile?.duressDigest ?? "") && onFile?.pinDigest !== undefined;
+    const keyed = { pinDigest: await input.hmac(`pin:${input.subjectKey ?? ""}:${entry}`), duressDigest: await input.hmac(`duress:${input.subjectKey ?? ""}:${entry}`) };
+    // Both records are run at once, each one Argon2id run, whatever is on file.
+    const [pinCheck, duressCheck] = await Promise.all([checkPinRecord(onFile?.pinDigest, keyed.pinDigest), checkPinRecord(onFile?.duressDigest, keyed.duressDigest)]);
+    match = pinCheck.match;
+    duress = duressCheck.match;
+    // The two are keyed apart and salted apart, so they are equal only on a subject imported wrongly.
+    brokenSubject = onFile?.pinDigest !== undefined && onFile.pinDigest === onFile.duressDigest;
+    // Rehash on a match (ADR-29): the record that matched, if it is of the earlier format, becomes an
+    // Argon2id record, only while it is still the one on file. A miss changes nothing.
+    upgrade = async (outcome) => {
+      const field = outcome === "duress" ? "duressDigest" : "pinDigest";
+      const check = outcome === "duress" ? duressCheck : pinCheck;
+      if (outcome === "fail" || !check.upgrade) return;
+      await records.upgradePinDigest(input.workspaceId, subjectKey, field, onFile![field]!, await hashPinRecord(keyed[field]));
+    };
   }
   // A subject on file implies a keypad-shaped account or a host's subject key, never the stand-in.
   if (!wellFormed || input.subject === null) return "fail";
   // An entry that is both the PIN and the duress PIN, in either mode, and a subject imported with
   // the two digests equal, are refused like a wrong PIN, with no alarm: neither a login nor an alarm.
   if ((match && duress) || brokenSubject) return "fail";
-  if (duress && settings.duress !== undefined) return "duress";
-  return match ? "pass" : "fail";
+  const outcome: PinOutcome = duress && settings.duress !== undefined ? "duress" : match ? "pass" : "fail";
+  await upgrade(outcome);
+  return outcome;
 }
 
 /** The keypad knowledge factor's judge: every configured field at once, one answer. */

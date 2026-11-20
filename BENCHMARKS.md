@@ -33,7 +33,8 @@ stops doing its work fails the run instead of looking faster.
 
 | Case | One operation |
 |---|---|
-| owner-command flow | the whole `owner-command` flow: `startCall`, `beginVerification` with the owner's subject key, `submitPin` (keyed hash), `finishVerification`, `authorize("owner.command")` and `endCall` (no receipt) |
+| owner-command flow | the whole `owner-command` flow: `startCall`, `beginVerification` with the owner's subject key, `submitPin` (two Argon2id record checks), `finishVerification`, `authorize("owner.command")` and `endCall` (no receipt) |
+| PIN record check | one `checkPinRecord`: Argon2id (19 MiB, 2 passes, 1 lane) of a keyed PIN, compared with its record in constant time (ADR-29); the PIN factor runs two at once per entry, the PIN's and the duress PIN's |
 | level 2 verification | the `deposit` flow's first step: `startCall`, `beginVerification` by account number, `submitKeypad`, `checkCarrier` (an identity match) and `finishVerification` at level 2 |
 | ledger append | one `MemoryAuditLedger.append`: canonical JSON, SHA-256, chained to the last entry |
 | receipt sign | `signReceipt`: ES256 (P-256) over the canonical JSON of a receipt with a record, a payment and a consent |
@@ -59,9 +60,15 @@ in microseconds. Another machine gives other numbers; compare runs on the same m
 | receipt verify | 5241.5 | 190.78 | 173.69 | 337.41 |
 | validateConfig, large | 831.3 | 1202.95 | 1167.36 | 1617.92 |
 
-So on this machine the engine adds about a millisecond to a whole owner-command call or a level 2
+So on this machine the engine added about a millisecond to a whole owner-command call or a level 2
 verification, a receipt costs well under a millisecond to sign or check, and even a very large
 config validates in about a millisecond, at save time.
+
+That run predates PIN records in Argon2id (ADR-29), which make the PIN the one deliberately slow
+step. One run on the same machine with the PIN record check, while other jobs shared it (so every
+case read slower than above): `PIN record check` 30.2 ms mean (p99 32.2 ms), and `owner-command
+flow` 40.8 ms mean (p99 45.4 ms), its two PIN record checks running at once. The other cases do
+not touch a PIN record.
 
 ## The results file
 

@@ -40,12 +40,15 @@ Stripe calls the reference server will make are a few `fetch` requests. **Revisi
 interoperability is needed (a receipt as a compact JWS is a small change), or SAML or similar
 arrives.
 
-## ADR-4. Node 24.2 or later
+## ADR-4. Node 24.19 or later
 
-**Decided.** `engines: >=24.2`; CI runs 24.2 and the latest 24 on Linux, macOS and Windows.
-**Why.** Node 24 is the current LTS line, runs the TypeScript sources directly (type stripping),
-and 24.2 adds `import.meta.main`, which the demo uses. A host on an older line would be on an
-unsupported Node by the time this reaches 1.0.
+**Decided.** `engines: >=24.19`; CI runs 24.19 and the latest 24 on Linux, macOS and Windows.
+**Why.** Node 24 is the current LTS line and runs the TypeScript sources directly (type
+stripping). `crypto.argon2`, which PIN records use (ADR-29), arrived in 24.7.0 as a release
+candidate (stability 1.2) and is stable from 24.19.0, so 24.19 is the first release whose API
+for it is no longer experimental. The floor was 24.2 (the first with `import.meta.main`); the
+entry points still do not rely on it. A host on an older line would be on an unsupported Node by
+the time this reaches 1.0.
 
 ## ADR-5. Internal segment names in code
 
@@ -412,3 +415,40 @@ anyone who guesses it and hashes it. So the ledger and receipts stay personal in
 retention and access control, and the business decides, case by case, what the law lets it keep.
 **Would change it.** Keyed or salted record digests whose key can be destroyed per subject (a
 change to the receipt format, so a new version), or a regulator's guidance that the digests must go.
+
+## ADR-29. PINs are Argon2id over the keyed HMAC
+
+**Decided.** In `keyed_hash` mode a PIN or duress PIN on file is
+`$pin1$argon2id$v=19$m=19456,t=2,p=1$<salt>$<tag>`: Argon2id (`node:crypto`, RFC 9106) whose
+message is the 32 bytes of the keyed HMAC the engine already computed,
+`HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)` (or `"duress:"`), with a random 16-byte
+salt and a 32-byte tag. `pin1` names the construction, and the algorithm, version and cost are in the
+string. A record is read strictly: a cost below today's (a downgrade) or above a ceiling of
+`m=262144,t=16,p=8` (refused before any run), another algorithm, version or spelling, never matches.
+Every check is one Argon2id run (on a stand-in at today's cost when no usable record is on file)
+and a constant-time compare of the tag. A record of the earlier format, the bare 64-hex HMAC, still
+verifies, and on a match the PIN factor replaces it with an Argon2id record through
+`RecordStore.upgradePinDigest`, a compare-and-set on the old value (rehash on login). Lockouts,
+counters and answers are unchanged. Keypad knowledge stays a keyed HMAC.
+**Why.** The keyed HMAC alone kept records useless without the knowledge key, but anyone holding
+both the store and the key could try every PIN at HMAC speed; OpenSSF's `crypto_password_storage`
+asks for an iterated, salted, key-stretched hash. Argon2id over the HMAC, rather than the HMAC as
+Argon2's secret, keeps what the HMAC gave: the key can stay in a key store behind an HMAC function
+(the engine never needs its bytes), each guess still needs the key, and the input to Argon2id is
+already domain-separated (`pin:` and `duress:`) and bound to the subject. An earlier record is
+exactly the Argon2id message, so it upgrades in place on the next match with no new key call. ADR-3
+forbids runtime dependencies, so it is `node:crypto`'s Argon2, which sets the Node floor (ADR-4).
+The cost is OWASP's minimum for Argon2id (19 MiB, 2 passes, 1 lane), chosen for a phone call: the
+PIN factor runs two at once per entry (the PIN's and the duress PIN's, so the time never says
+whether a duress PIN is on file), off the main thread on libuv's pool. The `PIN record check`
+benchmark measures one run: about 30 ms on a 2018 laptop core (BENCHMARKS.md), and the two runs
+of an entry overlap, so a PIN entry costs about 40 ms. The bar for a verify step is the pause a
+caller hears after the last digit; that sits well inside the hundreds of milliseconds a carrier
+and a speech engine already take, and an enrolment pays three runs. Records are not deterministic, so
+the stores compare them as opaque strings and never look one up by value.
+**Limits.** Stretching cannot make a 4-digit PIN strong: with the store and the key, 10,000 runs
+find it. Custody of the knowledge key and the lockouts remain the main controls. A subject who never
+calls again keeps an earlier record until a reset.
+**Revisit** when the cost should rise (a new floor in `PIN_HASH_PARAMETERS`, with the old floor kept
+as the lowest accepted and records below the new target rehashed on login, as the earlier format
+is), or when Node changes the API.
