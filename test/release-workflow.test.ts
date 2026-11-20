@@ -105,4 +105,13 @@ describe("hostile #119: what the workflow can be made to run", () => {
     // The private guard is tested on fixture manifests (test/release-steps.test.ts), so the pull
     // request that removes "private" for the first release (ADR-12) does not have to edit this file.
   });
+
+  it("says the trusted publisher must allow a direct npm publish, which the publish job runs", () => {
+    // npm trusted publishers created since September 2026 allow only `npm stage publish` until
+    // `npm publish` is ticked as an allowed action; set up without it, the publish step fails.
+    // The header's prose, its comment markers and line breaks folded into single spaces.
+    const header = workflow.slice(0, workflow.indexOf("\non:")).replace(/\n# ?/g, " ");
+    assert.match(workflow.slice(workflow.indexOf("  publish:"), workflow.indexOf("  dry-run:")), /\bnpm publish "\$RUNNER_TEMP/);
+    assert.match(header, /`npm publish` ticked as an allowed action/);
+  });
 });

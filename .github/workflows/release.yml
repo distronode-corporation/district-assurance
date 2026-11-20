@@ -53,8 +53,11 @@ name: Release
 # No secret and no npm token. npm's trusted publishing exchanges the job's OIDC token for a
 # one-time publish credential and signs the provenance statement. It is set up on npmjs.com,
 # outside this file: the package's trusted publisher is this repository, the workflow file
-# `release.yml` and the environment `npm-publish`. The environment, with required reviewers
-# and a tag rule of `v*`, is set up in the repository's settings.
+# `release.yml` and the environment `npm-publish`, with `npm publish` ticked as an allowed
+# action: a trusted publisher created since September 2026 allows only `npm stage publish`
+# until it is, and the publish step below runs `npm publish`, so without it the step fails.
+# The environment, with required reviewers and a tag rule of `v*`, is set up in the
+# repository's settings.
 #
 # First publication: npm sets a trusted publisher only on a package that already exists, so this
 # workflow cannot create the package (with no token and no trusted publisher it has no
