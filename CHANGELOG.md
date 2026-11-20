@@ -384,6 +384,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Integration of the release and tooling landing (L5):
+  - `validateConfig` refuses a policy list with a hole (a sparse `levels[].anyOf`, factor set or
+    `keypadFields`) as a sentence; one used to throw a TypeError, found by the config fuzz suite.
+  - `verifyLedgerExport` answers `malformed` for an entry line that is not an object again, now
+    that `verifyChain` reports such an entry as a break instead of throwing.
+  - The FlowConfig schema describes Gate's and step-up's settings and steps, and a receipt step's
+    `textLink`; the release tarball allows and requires the schema.
 - Integration review of the server and proof landing (L4):
   - Anchors (PRV-9): `checkTimestamp` and `verifyAnchor` require the token's signed
     SigningCertificate or SigningCertificateV2 to name the authority's signing certificate
