@@ -84,6 +84,23 @@ describe("fuzz: validateConfig", () => {
     await fuzz(fc.property(registry, fc.gen(), (registry, g) => void checkProblems(input(g), registry)));
   });
 
+  it("refuses a policy list with a hole as a sentence, never a crash (found by fuzzing)", () => {
+    // `every` skips the holes of a sparse array, so a hole once passed the shape check and the
+    // factor-set check then read it as a list. JSON never makes a hole; a host's own object can.
+    const all = new ModuleRegistry({ adapters: ALL_ADAPTERS, modules: builtInModules() });
+    const holes: Array<[string, (config: ReturnType<typeof defaultConfig>) => void]> = [
+      ["levels[0]", (c) => void (c.policy.levels[0]!.anyOf.length += 1)],
+      ["levels[0]", (c) => void (c.policy.levels[0]!.anyOf[0]!.length += 1)],
+      ["keypadFields", (c) => void (c.policy.keypadFields.length += 1)],
+    ];
+    for (const [where, punch] of holes) {
+      const config = defaultConfig();
+      punch(config);
+      const problems = checkProblems(config, all);
+      assert.ok(problems.some((p) => p.startsWith(`policy: ${where} must`)), `${where}: ${JSON.stringify(problems)}`);
+    }
+  });
+
   it("shows an empty key as an empty path (found by fuzzing)", () => {
     const all = new ModuleRegistry({ adapters: ALL_ADAPTERS, modules: builtInModules() });
     const config = defaultConfig();
