@@ -16,13 +16,14 @@
 // on file is a 555 number nothing is texted to; open the link, complete Stripe's test check, and
 // the signed `identity.verification_session.*` event that `stripe listen` forwards is applied to
 // the call. The engine's events for the trial (which hold no values) are printed too, so the
-// applied outcome shows as a `verification.factor` line. Everything else runs on fake adapters until its Stripe adapter is built (PAY-1).
+// applied outcome shows as a `verification.factor` line. Each answered request is logged as one
+// JSON line (route pattern, status, time; never a path, header or body). Everything else runs on fake adapters until its Stripe adapter is built (PAY-1).
 import type { Server } from "node:http";
 
 import { systemClock, type Clock, type MessagePurpose, type MessageSender } from "../../../src/index.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine, type TestEngineOptions } from "../../../src/testing/index.ts";
 
-import { createReferenceServer } from "./app.ts";
+import { createReferenceServer, logJsonLines, type RequestLog } from "./app.ts";
 import { StripeIdentityProvider, type StripeAdapterOptions } from "./stripe-adapters.ts";
 
 const TRIAL_ACCOUNT = "12345678";
@@ -52,6 +53,8 @@ export interface ServeOptions {
   stripe?: StripeAdapterOptions;
   /** For tests: the clock for the engine and the webhook signature window. Default the system clock. */
   clock?: Clock;
+  /** Where each answered request's log entry goes. Default one JSON line each on standard output. */
+  log?: (entry: RequestLog) => void;
 }
 
 export interface Serve {
@@ -94,6 +97,7 @@ export function createServe(options: ServeOptions): Serve {
     engine: t.engine,
     clock,
     stripeSecrets: { identity: secret("STRIPE_IDENTITY_WEBHOOK_SECRET"), payments: secret("STRIPE_PAYMENTS_WEBHOOK_SECRET"), connect: secret("STRIPE_CONNECT_WEBHOOK_SECRET") },
+    log: options.log ?? logJsonLines,
   });
   const startTrialCall = async () => {
     t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: TRIAL_ACCOUNT, phoneOnFile: TRIAL_PHONE, knowledge: { dob: TRIAL_DOB } }));

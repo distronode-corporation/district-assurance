@@ -238,9 +238,16 @@ All notable changes to this project are documented here. The format follows
   the test that proves it or its open issue, checked by `test/security-model.test.ts`; and an
   audit pack (`node scripts/audit-pack.mjs`, built in CI) with the test, coverage and contract
   suite reports, an SBOM and the documents (SRV-8).
+- Reference server limits and logging (SRV-2): a body limit per route (`bodyLimits`: the three
+  Stripe endpoints, the record receiver, Twilio, Telnyx and the demo runs; an upload keeps its
+  link's cap), request timeouts (408 and 503), a per-address rate limit (429), and structured
+  request logs by route pattern with no headers, bodies or link tokens (`logJsonLines`, on in
+  `npm run serve`).
 
 ### Changed
 
+- Breaking, reference server: the `maxBodyBytes` option of `createReferenceServer` is replaced by
+  `bodyLimits`, one limit per route that reads a body (SRV-2).
 - Breaking: `CarrierSignalReport` has a required `simSwapChecked`, true only when the carrier was
   asked about SIM changes and answered, and `textCodeTrusted` never trusts a texted code on a
   report without it, whatever the policy says (VER-4). The Telnyx adapter answers false; every

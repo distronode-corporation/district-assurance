@@ -367,6 +367,18 @@ minutes and is bound to one call and one confirmed record of that call (tested).
 host: whether keypad tones arrive as out-of-band events or as in-band audio on each carrier
 bridge, since in-band tones can be replayed acoustically and can reach speech-to-text.
 
+### Flooding the reference server
+
+Large or slow requests, many requests from one address, and logs that leak what a request carried.
+**Controls (reference server, SPEC.md, "Reference server limits and logs"):** a body limit per route, refused on the declared
+length before reading and cut off while streaming; deadlines to receive a request (408) and to
+answer it (503); a fixed-window rate limit per socket address, an IPv6 address counted by its /64
+so one subscriber cannot rotate through it, that ignores `X-Forwarded-For` and tracks a bounded
+number of addresses; and one structured log entry per request that names the route pattern, never
+the path, and holds no header, query string or body, so signatures, call ids, receipt link tokens
+and upload link tokens stay out of the logs (tested). Left to the host: limits in front of the
+server (a proxy shares one address for all its callers here), and limits across replicas.
+
 ### Skipping steps and widening grants
 
 A host bug or a manipulated tool path calling the engine out of order, or a grant for one purpose
@@ -1036,8 +1048,8 @@ Webhook signature checks and event mapping (`src/webhooks/`).
 | server-1 | S | The server parses or acts on an unsigned webhook. | The signature is checked before the body is read as an event. | covered | `reference-server.test.ts`: "verifies Stripe signatures before reading the event" |
 | server-2 | T | A signed event is replayed to the server. | Each event id is applied once. | covered | `reference-server.test.ts`: "applies a signed event once and ignores events of the other kind" |
 | server-3 | S | A forged or replayed Twilio or Telnyx webhook is trusted. | Carrier routes check the vendor's signature (Twilio against the public URL, Telnyx with its timestamp window) before acting. | covered | `reference-server.test.ts`: "checks Twilio signatures against the public URL, query included"; `reference-server.test.ts`: "checks Telnyx signatures and their timestamp" |
-| server-4 | D | A large body exhausts memory. | A body limit on every route that reads one. | covered | `reference-server.test.ts`: "refuses a body over the limit"; `reference-ui.test.ts`: "refuses a body over the limit" |
-| server-5 | D | Slow or repeated requests tie the server up. | Per-route limits, request timeouts and a per-address rate limit. | open | SRV-2 |
+| server-4 | D | A large body exhausts memory. | A body limit on every route that reads one. | covered | `reference-server.test.ts`: "refuses a body over its route's limit, declared or streamed"; `reference-server.test.ts`: "gives every route that reads a body its own limit"; `reference-ui.test.ts`: "refuses a body over the limit" |
+| server-5 | D | Slow or repeated requests tie the server up. | Per-route limits, request timeouts and a per-address rate limit. | covered | `reference-server.test.ts`: "limits each address to a number of requests per window, on the rate limit's clock"; `reference-server.test.ts`: "answers 503 when a request takes longer than its deadline"; `reference-server.test.ts`: "disconnects a client that sends its headers too slowly with a 408, in JSON, and logs it" |
 | server-6 | I | An error answer leaks engine detail. | 500 without detail; a demo run names an engine refusal and hides anything else. | covered | `reference-server.test.ts`: "answers 500 without detail when the engine fails"; `reference-ui.test.ts`: "ends a run on a step that throws, naming an engine refusal and hiding anything else" |
 | server-7 | I | Anyone who knows or guesses a call id fetches its receipt. | Receipt links by capability token. | open | SRV-3 |
 | server-8 | S | A web page reaches the local demo through DNS rebinding. | The Host header must name this machine and port, on every route. | covered | `reference-ui.test.ts`: "refuses a Host header that is not this machine (DNS rebinding), and accepts the local names"; `reference-ui.test.ts`: "with the UI on, refuses a foreign Host on every route, the webhooks, receipts and key set included" |

@@ -2645,3 +2645,46 @@ decisions say right or wrong, never the digits. A config and a script file are s
 text, so every line, on standard output and standard error, writes C0 and C1 control characters
 and bidi controls and marks as `\u` escapes (`terminalSafe`): a file can never move the cursor,
 set the terminal's title or make one result read as another.
+
+## 17. Reference server limits and logs
+
+`examples/reference-server/src/app.ts`, not part of the package. Every limit below, the timeout and
+each body limit is a whole number from 1 (the timeout at most 2,147,483,647 ms, what `setTimeout`
+can wait); anything else throws when the server is created, since 0 or NaN would switch a limit
+off. Each request is handled in this order, and every refusal is JSON `{"error": code}` (an upload
+page refusal is its HTML page):
+
+- **Rate limit**, first, before any other work: each caller, from the socket's address (an IPv6
+  address counts by its /64, an IPv4-mapped one such as `::ffff:192.0.2.1` as its IPv4 address),
+  gets `rateLimit.requests` requests per fixed window of `rateLimit.windowMs` (default 300 a
+  minute), counted on `rateLimit.clock`, the system clock by default and never the server's
+  `clock`, which the demo fixes. Every request counts, whatever its route or answer. Over the limit:
+  `429 rate_limited` with `Retry-After` in whole seconds to the window's end. `X-Forwarded-For` is
+  never read. At most `rateLimit.addresses` addresses are tracked (default 10,000); to make room,
+  ended windows are dropped first, then the oldest.
+- **Body limits** per route: `stripeIdentity`, `stripePayments`, `stripeConnect`, `records`,
+  `twilio` and `telnyx` 64 KiB each, `demo` 1 KiB (`bodyLimits` overrides each). An upload
+  (`POST /u/:token`) is limited by its own link's size cap plus 16 KiB of multipart overhead. A
+  declared `Content-Length` over the limit is refused before a byte is read; a streamed body is cut
+  off once it passes the limit. Either way: `413 body_too_large` (the upload page's "too large" for
+  an upload). The other routes never read a body.
+- **Timeouts**, `timeoutMs` (default 10 seconds): a request whose headers and body are not all
+  received in time gets `408 request_timeout` and the connection is closed; a request not answered
+  within `timeoutMs` of its headers gets `503 timeout`.
+- **Requests node:http cannot read** are refused by the server's `clientError` handler, also in
+  JSON and with `Connection: close`: too slow `408 request_timeout`, headers too large
+  `431 headers_too_large`, chunk extensions too large `413 body_too_large`, anything else
+  malformed `400 bad_request`. A reset connection, or one whose answer is already written, gets
+  nothing more and is closed. A malformed request sent right behind a body drained after its
+  answer is the next request, and is answered and logged as one.
+- **Logs**: with `log`, one entry per answered request, after the answer is written, including the
+  refusals above: `{time, address, method, route, status, error?, ms}`. `time` is from the
+  server's clock; `address` is the caller the rate limit counts (an IPv6 /64, never the whole
+  address); `method` is `unknown` when the request was refused before its headers were read;
+  `route` is the matched pattern (`/r/:token`, `/r/:token.json`, `/u/:token`,
+  `/webhooks/stripe/connect`, `/.well-known/security.txt`, `/demo/runs/:runId/next`) or
+  `unmatched`, never the path as sent, so no call id, run id or link token reaches a log; `error`
+  is a JSON answer's error code. An entry holds no header, query string or body. A `log` that
+  throws, or answers a promise that rejects, loses that entry; the server and the answer are
+  unaffected. `logJsonLines` writes each entry as one line of JSON on standard output, and
+  `npm run serve` (`createServe`) uses it unless given its own `log`.

@@ -132,13 +132,17 @@ describe("hostile #50: the demo routes", () => {
   const post = (path: string, body: string, headers: Record<string, string> = { "content-type": "application/json" }) => fetch(`${base}${path}`, { method: "POST", headers, body });
 
   it("R1: a flow name that is a prototype key, huge, not a string or a lone surrogate is unknown_flow, never a 500", async () => {
-    const bodies = ["__proto__", "constructor", "hasOwnProperty", "toString", "x".repeat(60_000), "entry\uD800"].map((flow) => JSON.stringify({ flow }));
+    // Long, but inside the demo routes' 1 KiB body limit (#93), so it reaches the flow check.
+    const bodies = ["__proto__", "constructor", "hasOwnProperty", "toString", "x".repeat(1000), "entry\uD800"].map((flow) => JSON.stringify({ flow }));
     bodies.push(JSON.stringify({ flow: ["entry"] }), JSON.stringify({ flow: { toString: "entry" } }), "null", "[]", '{"__proto__":{"flow":"entry"}}', "1");
     for (const body of bodies) {
       const res = await post("/demo/runs", body);
       assert.equal(res.status, 400, body.slice(0, 40));
       assert.deepEqual(await res.json(), { error: "unknown_flow" });
     }
+    // A huge one is refused by its size before it is parsed: still never a 500.
+    const huge = await post("/demo/runs", JSON.stringify({ flow: "x".repeat(60_000) }));
+    assert.deepEqual([huge.status, await huge.json()], [413, { error: "body_too_large" }]);
   });
 
   it("R2: refuses a step sent cross-origin, from a sandboxed frame, or as a simple form", async () => {
