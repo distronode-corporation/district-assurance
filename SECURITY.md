@@ -18,6 +18,14 @@ Out of scope: any host's deployment, even one built on this code. Its operator a
 report a problem with a running service to that operator, through the contact in its own
 `/.well-known/security.txt` if it has one. If the cause is in this code, report that here too.
 
+## Checking a release
+
+Each release is published to npm with provenance and carries a CycloneDX SBOM with a signed
+attestation, both signed through Sigstore by the release workflow. Check them with
+`npm audit signatures` and `gh attestation verify`, as README.md shows under
+[Checking a release](README.md#checking-a-release). If a check fails for a version we published,
+report it as a vulnerability, below.
+
 ## Reporting a vulnerability
 
 Please report privately, not in a public issue, discussion or pull request.

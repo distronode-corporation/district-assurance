@@ -249,6 +249,9 @@ All notable changes to this project are documented here. The format follows
   provenance by trusted publishing. The package stays private (ADR-12).
   A local `npm pack` or `npm publish` builds first (`prepack`), so it never ships the documents
   without dist/; the workflow packs with install scripts off after its own clean build.
+- Signed releases (SRV-6): each release has a CycloneDX SBOM of the published package with a
+  Sigstore-signed attestation, attached to the tag's GitHub release; README.md shows how to check a
+  release with `npm audit signatures` and `gh attestation verify`.
 
 ### Changed
 

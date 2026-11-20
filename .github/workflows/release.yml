@@ -14,10 +14,15 @@ name: Release
 # Then exactly one of:
 #   publish       this repository only, on a manual run on a tag with `publish` ticked, and only
 #                 after the `npm-publish` environment's reviewers approve. It rebuilds, requires
-#                 the pack job's SHA-256, and publishes that tarball.
+#                 the pack job's SHA-256, writes and checks a CycloneDX SBOM of the published
+#                 package, signs an SBOM attestation for the tarball through Sigstore, and
+#                 publishes that tarball.
+#   github-release  after publish: a GitHub release on the tag with the tarball, the SBOM and
+#                 the attestation's Sigstore bundle attached.
 #   dry-run       everything else (a tag push, a fork, or a manual run without `publish`): the
-#                 same rebuild and comparison, and `npm publish --dry-run` once the package is
-#                 not private.
+#                 same rebuild, comparison and SBOM check, and `npm publish --dry-run` once the
+#                 package is not private. Nothing is signed: only the publish job may ask for an
+#                 OIDC token.
 #
 # A tag push never publishes. Publishing takes three separate acts by people: a manual run with
 # `publish` ticked, an approval in the `npm-publish` environment, and a merged pull request that
@@ -28,6 +33,12 @@ name: Release
 # and a `v*` tag rule before the first manual publish run. Until then the publish job refuses:
 # its first step reads the environment back and stops unless it has a required reviewer and a
 # deployment rule, so an environment created without protection never lets a publish through.
+#
+# What each signature covers. npm provenance (the publish step) ties the tarball to this
+# commit and this workflow, and npm's registry signs it; `npm audit signatures` checks both.
+# Provenance does not say what is in the package, so the SBOM attestation does: its subject
+# is the tarball's SHA-256 and its predicate the SBOM, and `gh attestation verify` checks it.
+# README.md ("Checking a release") gives both commands.
 #
 # The package is private until a release is decided (DECISIONS.md, ADR-12), so the publish
 # job fails while package.json has `"private": true`. That line goes only in the pull request
@@ -244,9 +255,12 @@ jobs:
     environment: npm-publish
     permissions:
       contents: read
-      # Trusted publishing and the provenance statement. Only this job holds it, and its steps
-      # run only the pinned actions above and the repository's own build, install scripts off.
+      # Trusted publishing, the provenance statement and the SBOM attestation's signing
+      # certificate. Only this job holds it, and its steps run only the pinned actions in
+      # this file and the repository's own build, install scripts off.
       id-token: write
+      # Stores the SBOM attestation in this repository, where `gh attestation verify` finds it.
+      attestations: write
       # Reads the npm-publish environment's protection rules back (the first step).
       actions: read
     steps:
@@ -312,6 +326,39 @@ jobs:
           npm --version
           node -e 'const [a, b, c] = process.argv[1].split(".").map(Number); process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1)' "$(npm --version)" \
             || { echo "::error::npm $(npm --version) is older than 11.5.1."; exit 1; }
+      # The published package's components, from the tagged package.json and lockfile with the
+      # development tools left out. The package has no runtime dependency, so the package
+      # itself is the only thing the SBOM names; one that names more stops the release.
+      - name: CycloneDX SBOM
+        id: sbom
+        env:
+          VERSION: ${{ needs.pack.outputs.version }}
+        run: |
+          set -euo pipefail
+          sbom="$RUNNER_TEMP/release/district-assurance-$VERSION.cdx.json"
+          npm sbom --sbom-format cyclonedx --sbom-type library --omit dev > "$sbom"
+          cat > "$RUNNER_TEMP/sbom-check.mjs" <<'EOF'
+          import assert from "node:assert/strict";
+          import { readFileSync } from "node:fs";
+
+          const [file, version] = process.argv.slice(2);
+          const bom = JSON.parse(readFileSync(file, "utf8"));
+          assert.equal(bom.bomFormat, "CycloneDX");
+          // The purl, not `name`: npm sbom names the root component after the checkout's folder.
+          assert.equal(bom.metadata.component.purl, `pkg:npm/district-assurance@${version}`);
+          assert.deepEqual(bom.components ?? [], [], "The published package has a runtime dependency.");
+          console.log(`CycloneDX ${bom.specVersion} SBOM of district-assurance ${version}: no runtime dependency`);
+          EOF
+          node "$RUNNER_TEMP/sbom-check.mjs" "$sbom" "$VERSION"
+          echo "path=$sbom" >> "$GITHUB_OUTPUT"
+      # Signed before the package is published, so a published version always has one. The
+      # subject is the tarball's SHA-256, the bytes the registry serves.
+      - name: SBOM attestation
+        id: attest
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2.4.0
+        with:
+          subject-path: ${{ runner.temp }}/release/${{ needs.pack.outputs.filename }}
+          sbom-path: ${{ steps.sbom.outputs.path }}
       # A version with a pre-release part goes to the `next` dist-tag, never to `latest`.
       - name: npm publish
         env:
@@ -322,6 +369,72 @@ jobs:
           tag=latest
           case "$VERSION" in *-*) tag=next ;; esac
           npm publish "$RUNNER_TEMP/release/$FILE" --provenance --access public --tag "$tag" --ignore-scripts
+      # The files the github-release job attaches. It gets no OIDC token and this job gets no
+      # write access to the repository's contents.
+      - name: Collect the release files
+        env:
+          FILE: ${{ needs.pack.outputs.filename }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$BUNDLE" "$RUNNER_TEMP/release/$FILE.sbom.sigstore.json"
+          ls -l "$RUNNER_TEMP/release"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ needs.pack.outputs.version }}
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 30
+
+  # The tag's GitHub release, with what was published and signed. A separate job so that
+  # `contents: write` and `id-token: write` are never held together.
+  github-release:
+    needs: [pack, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      # Creates the release and uploads its files.
+      contents: write
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-${{ needs.pack.outputs.version }}
+          path: ${{ runner.temp }}/release
+      # The attached tarball must be the one the pack job checked; the SBOM and the bundle are
+      # checked by anyone with `gh attestation verify`, which needs no trust in this job.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILE: ${{ needs.pack.outputs.filename }}
+          EXPECTED_SHA256: ${{ needs.pack.outputs.sha256 }}
+          VERSION: ${{ needs.pack.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/release"
+          actual="$(sha256sum "$FILE" | cut -d' ' -f1)"
+          if [ "$actual" != "$EXPECTED_SHA256" ]; then
+            echo "::error::The tarball to attach ($actual) differs from the one the pack job checked ($EXPECTED_SHA256)."
+            exit 1
+          fi
+          prerelease=()
+          case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac
+          cat > notes.md <<EOF
+          district-assurance $VERSION, published to npm with provenance.
+
+          | File | |
+          |---|---|
+          | \`$FILE\` | the published tarball, SHA-256 \`$actual\` |
+          | \`district-assurance-$VERSION.cdx.json\` | its CycloneDX SBOM |
+          | \`$FILE.sbom.sigstore.json\` | the SBOM attestation's Sigstore bundle |
+
+          To check this release, see "Checking a release" in README.md.
+          EOF
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "v$VERSION" --notes-file notes.md "${prerelease[@]}" \
+            "$FILE" "district-assurance-$VERSION.cdx.json" "$FILE.sbom.sigstore.json"
 
   dry-run:
     needs: [ci, supply-chain, pack]
@@ -359,6 +472,35 @@ jobs:
             echo "::error::The rebuilt tarball ($actual) differs from the one the pack job checked ($EXPECTED_SHA256)."
             exit 1
           fi
+      # The publish job's SBOM and check, unsigned: this job has no OIDC token. The SBOM is
+      # kept with the run, so a dry run in a fork shows what a release would attest.
+      - name: CycloneDX SBOM
+        env:
+          VERSION: ${{ needs.pack.outputs.version }}
+        run: |
+          set -euo pipefail
+          sbom="$RUNNER_TEMP/release/district-assurance-$VERSION.cdx.json"
+          npm sbom --sbom-format cyclonedx --sbom-type library --omit dev > "$sbom"
+          cat > "$RUNNER_TEMP/sbom-check.mjs" <<'EOF'
+          import assert from "node:assert/strict";
+          import { readFileSync } from "node:fs";
+
+          const [file, version] = process.argv.slice(2);
+          const bom = JSON.parse(readFileSync(file, "utf8"));
+          assert.equal(bom.bomFormat, "CycloneDX");
+          // The purl, not `name`: npm sbom names the root component after the checkout's folder.
+          assert.equal(bom.metadata.component.purl, `pkg:npm/district-assurance@${version}`);
+          assert.deepEqual(bom.components ?? [], [], "The published package has a runtime dependency.");
+          console.log(`CycloneDX ${bom.specVersion} SBOM of district-assurance ${version}: no runtime dependency`);
+          EOF
+          node "$RUNNER_TEMP/sbom-check.mjs" "$sbom" "$VERSION"
+          echo "Dry run: the SBOM was written and checked; the publish job would sign an attestation for it." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dry-run-sbom-${{ needs.pack.outputs.version }}
+          path: ${{ runner.temp }}/release/district-assurance-${{ needs.pack.outputs.version }}.cdx.json
+          if-no-files-found: error
+          retention-days: 30
       # While the package is private (ADR-12) a real run would stop at the publish job's
       # private check, so the dry run ends at the comparison above and says so.
       - name: npm publish --dry-run
