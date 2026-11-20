@@ -32,6 +32,7 @@ import { BUILT_IN_MODULES, builtInModules, defaultConfig } from "./modules.ts";
 import type { AmountReadBack } from "./pay/amount.ts";
 import * as paylink from "./pay/paylink.ts";
 import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
+import { anchorPayload, isAnchorProof } from "./prove/anchor.ts";
 import * as refunds from "./pay/refunds.ts";
 import { detailCarriesCardNumber } from "./prove/ledger.ts";
 import { receiptKeySet, type ReceiptBody, type SignedReceipt } from "./prove/receipt.ts";
@@ -1151,6 +1152,32 @@ export class Engine {
   eraseSubject(input: subject.SubjectRequest): Promise<subject.ErasureResult> {
     const counters = { counters: this.#adapters.counters, factors: this.#badge.manifest.provides.factors };
     return subject.eraseSubject(this.#rt, input, (callId, recordIds) => dossier.forgetRecords(this.#rt, callId, recordIds), counters);
+  }
+
+  /**
+   * Anchors the ledger's current head (PRV-9): the `anchor` adapter gets a proof for it from a third
+   * party (a time-stamp authority, or Rekor plus one), and a `ledger.anchored` entry records the
+   * proof and the seq it covers. The host schedules this, daily for example; the engine never calls
+   * out on its own. Two engines anchoring the same head append one entry.
+   */
+  async anchorLedger(): Promise<AuditEntry> {
+    const anchor = this.#adapters.anchor;
+    if (anchor === undefined) throw new EngineError("precondition_failed", "anchoring needs the anchor adapter");
+    const head = await this.#adapters.ledger.head();
+    if (head.seq === 0) throw new EngineError("precondition_failed", "the ledger is empty; there is no head to anchor");
+    const proof: unknown = await anchor.anchor({ seq: head.seq, hash: head.hash, payload: anchorPayload(head) });
+    if (!isAnchorProof(proof)) throw new EngineError("invalid_input", "the anchor adapter answered with a malformed proof");
+    const entry = await this.#adapters.ledger.append({
+      eventId: JSON.stringify(["ledger.anchored", head.seq]),
+      callId: null,
+      actor: "system",
+      event: "ledger.anchored",
+      at: this.#now(),
+      detail: { seq: head.seq, proof },
+    });
+    // A copy for the listener, so what it does to the event never reaches the entry returned here.
+    this.#tell({ name: "ledger.anchored", callId: null, actor: entry.actor, at: entry.at, detail: structuredClone(entry.detail), eventId: entry.eventId!, seq: entry.seq });
+    return entry;
   }
 
   /** The key set for verifying this engine's receipts: with a key ring, the retired keys too (empty without a signer). */

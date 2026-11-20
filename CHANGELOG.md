@@ -229,6 +229,7 @@ All notable changes to this project are documented here. The format follows
   `securityTxt` settings, refusing at start an `Expires` in the past or over a year ahead, or this
   project's own reporting address, and warning within 30 days (also once when a running server
   gets there, and once at expiry); SECURITY.md adds the scope and a thanks list.
+- Public timestamp anchors for the ledger (PRV-9): `anchorLedger()` appends a `ledger.anchored` entry with a proof from an `Anchor` adapter, `verifyAnchor` checks it offline, and the reference server has an RFC 3161 time-stamp authority adapter and a Rekor v2 one; no new dependency.
 
 ### Changed
 

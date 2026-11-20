@@ -68,6 +68,7 @@ export const ENGINE_EVENTS = [
   "module.event",
   "subject.erased",
   "subject.erasure_completed",
+  "ledger.anchored",
 ] as const;
 
 export type EngineEventName = (typeof ENGINE_EVENTS)[number];
@@ -76,7 +77,8 @@ export type Actor = "caller" | "ai" | "code" | "member" | "system";
 
 export interface EngineEvent {
   name: EngineEventName;
-  callId: string;
+  /** Null for an engine-wide event (`ledger.anchored`). */
+  callId: string | null;
   actor: Actor;
   /** ISO 8601. */
   at: string;

@@ -1,0 +1,24 @@
+{
+  "logIndex": "9",
+  "logId": {
+    "keyId": "t+wUw4ItORsD93L5ms+ObkaLbD2H8RGCYl27LqzLNdw="
+  },
+  "kindVersion": {
+    "kind": "hashedrekord",
+    "version": "0.0.2"
+  },
+  "inclusionProof": {
+    "logIndex": "9",
+    "rootHash": "tE5bvTNPIDq6YKXnrANgAcI4PtC9HhGfnocGjDk8KmE=",
+    "treeSize": "11",
+    "hashes": [
+      "Nf+e94Vih71OvobPGO4+ho6s+1brXG8MO0HGdLa8xGU=",
+      "s5ccAuiw0xS3XAqYy0cm8OuytGiNl8j8B/faWSN7k0M=",
+      "aj4RSDudmTk1mbHvwqQi2nXvwbY8piHHjZ0/DGm374I="
+    ],
+    "checkpoint": {
+      "envelope": "log2025-test.rekor.example.test\n11\ntE5bvTNPIDq6YKXnrANgAcI4PtC9HhGfnocGjDk8KmE=\n\n\u2014 log2025-test.rekor.example.test CU35tVEU2QR+/+7AjfE8AVfpU7SHWkI0xuUycZ5rGEMTl1QSs4bsbN+y3EezNt5D4Zvz4rqByPHW7oFA4tSpAE33OAo=\n"
+    }
+  },
+  "canonicalizedBody": "eyJhcGlWZXJzaW9uIjoiMC4wLjIiLCJraW5kIjoiaGFzaGVkcmVrb3JkIiwic3BlYyI6eyJoYXNoZWRSZWtvcmRWMDAyIjp7ImRhdGEiOnsiYWxnb3JpdGhtIjoiU0hBMl8yNTYiLCJkaWdlc3QiOiJWM1JTTU5GbWhhY1d2Rm5leDk1aWNmQ29BNWw2UnB5emhJc1FIZldKRDlvPSJ9LCJzaWduYXR1cmUiOnsiY29udGVudCI6Ik1FVUNJUUNhM2hTdHAyOU5QVm9vdmtWSThQdWRyVEMyOHhtM3hvSEZPUGtBemQ0YUx3SWdkRXkrbjRyUEhtRWg0bkNJZXptRit4VXNFVTg2N2hoZWdMU3NxNDRUYkM4PSIsInZlcmlmaWVyIjp7InB1YmxpY0tleSI6eyJyYXdCeXRlcyI6Ik1Ga3dFd1lIS29aSXpqMENBUVlJS29aSXpqMERBUWNEUWdBRStMVXltWFdhNGIwMEVEYUtWLy83QkgrQnZRVWlZUHAvZTRsMkd6N0U5Njd4ZmtaakY5M254SWttSU1hNURSVjY3VkVnTXBGSUdQVGVNbHNkRXhZV2h3PT0ifSwia2V5RGV0YWlscyI6IlBLSVhfRUNEU0FfUDI1Nl9TSEFfMjU2In19fX19"
+}

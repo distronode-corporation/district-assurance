@@ -752,6 +752,23 @@ plugging in a `ConsentStore` wherever consents are recorded (without one, consen
 revoked through the engine), deciding which consents an inbound STOP revokes, checking the store
 before every text it sends on a consent, and who may revoke from a dashboard.
 
+Whoever holds the ledger could rebuild the whole chain. **Control (PRV-9):** `anchorLedger` fixes
+the head in time with a third party, and `verifyAnchor` checks it offline against the host's copy
+of the authority's certificate chain and Rekor's key: an entry an anchor covers cannot change
+afterwards without the change showing, and a rebuilt chain fails as `imprint` (tested; both
+adapters are tested on answers built locally in the services' formats with throwaway keys, not yet
+on an answer recorded from a real authority or log). Every certificate above the authority's own
+must be a CA allowed to issue (cA true, keyCertSign, pathLen), so a leaf under the trusted root
+cannot stand in as an issuer (tested). It does not prove the chain was honest before it was
+anchored, nor anything after the last anchor. With a time-stamp authority alone, the authority
+sees only a hash and only the proofs the operator keeps exist, so an operator could drop an
+inconvenient one. With Rekor, everyone can see every head the operator anchored, so a missing
+anchor shows too. A public log shows each anchored head (a hash), the key that signed it and the
+signature, and nothing else: no entry, no call and no workspace. The time is not in the log; it
+is in the authority's token, which the operator keeps. The anchor payload is domain-separated,
+so a head signed for the log can never verify as a receipt, even under the receipt key (tested).
+The time always comes from the authority, since Rekor v2 keeps none.
+
 ### Breach of stored data
 
 **Controls:** reference values are HMACs under a per-workspace key, because a plain hash of a date
@@ -888,6 +905,8 @@ Consents stay in their call records until PRV-3's `ConsentStore`; counters acros
 - A `FieldCipher` with authenticated encryption under a key the host keeps in a key store, binding
   the context (workspace, record, field) so a ciphertext moved elsewhere fails to decrypt; and
   protecting a durable `SessionStore` as it would the records, since an open draft is in the clear.
+- Scheduling `anchorLedger` (daily, for example), keeping the authority's certificate chain and
+  Rekor's key from a source it trusts, and choosing the authority and the log.
 - Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
   guarantees: they must pass `sessionStoreContract`, `recordStoreContract` and
   `auditLedgerContract` from `district-assurance/testing`, as the memory adapters do (tested); one
