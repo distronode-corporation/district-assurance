@@ -1062,6 +1062,16 @@ consentId]`, so a consent is revoked in the ledger once (section 21). The others
 actions of section 6, `access.code_spent`, `ledger.anchored`, the subject erasure entries) are
 described where they are written.
 
+**Removing a call record.** A host removes a call record only through `removeCall(callId)`, never
+in its session store directly: the store's optional `remove(workspaceId, callId, expectedVersion)`
+removes only the version the engine checked, with its pending mark. `removeCall` is refused
+(`precondition_failed`) for a call that has not ended and for one whose outbox still holds entries
+after it tried to flush them (the ledger refused them): the record is kept, and `flushPending` keeps
+listing it, until they are appended, so no pending entry (a `consent.recorded` written while the
+ledger was down) is ever lost with its record. A write that lands before the removal is read
+again, up to three times (`conflict` after that); an unknown call is `unknown_call`, and a store
+without `remove` is `precondition_failed`. It answers `{removed: true}`.
+
 `flushPending(limit = 100)` is the background flush a host schedules (for example every minute, in
 any process): it asks the store's `pendingCalls` for up to `limit` calls and flushes each in turn,
 returning `{flushed, failed}` (call ids); a call that fails stays pending for the next run, and
@@ -2503,7 +2513,8 @@ is refused (`invalid_transition`). Without the adapter, consents live on the cal
 not have for this workspace (`invalid_input`), a consent answered "no", and a consent that is not
 recorded on its call, still being stored or settled as not recorded (`precondition_failed`). So
 that `consent.revoked` never precedes `consent.recorded`, it appends the call's pending ledger
-entries first. When the host has removed the call record, the revocation is still stored (a yes
+entries first. A record removed through `removeCall` had its entries appended first, so its
+`consent.recorded` is on the ledger. When the host has removed the call record, the revocation is still stored (a yes
 in the store never outlives the caller's no) and `consent.revoked` is always appended; when this
 workspace's ledger holds no `consent.recorded` entry for the consent (read page by page), its detail
 adds `priorRecord: false`. Otherwise it

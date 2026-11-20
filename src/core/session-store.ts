@@ -54,6 +54,14 @@ export class MemorySessionStore implements SessionStore {
     return batch;
   }
 
+  async remove(workspaceId: string, callId: string, expectedVersion: number): Promise<boolean> {
+    const key = tupleKey(workspaceId, callId);
+    if (this.#sessions.get(key)?.version !== expectedVersion) return false;
+    this.#sessions.delete(key);
+    this.#pending.get(workspaceId)?.delete(callId);
+    return true;
+  }
+
   async bindRef(workspaceId: string, ref: string, callId: string): Promise<boolean> {
     const key = tupleKey(workspaceId, ref);
     if (this.#refs.has(key)) return false;

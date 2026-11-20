@@ -352,6 +352,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Host-facing: a call record is removed through `Engine.removeCall(callId)`, never in the session
+  store directly. It is refused while the call has not ended and while its outbox holds ledger
+  entries not yet appended (it flushes them first; `flushPending` keeps listing the call), so a
+  pending entry such as `consent.recorded` is never lost with its record. `SessionStore` has an
+  optional `remove(workspaceId, callId, expectedVersion)` (in `MemorySessionStore` and
+  `sessionStoreContract`).
 - Breaking for record stores: `RecordStore` has `confirmIntakeRecord(workspaceId, recordId)` and
   `isIntakeRecordConfirmed(workspaceId, recordId)`. A record is stored unconfirmed and marked once
   the confirmation that filed it committed; `deliverRecord`, `exportSubject` and `createUploadLink`

@@ -792,7 +792,9 @@ and ARRÊTER map to revocation; a longer message that only contains one does not
 store, a consent is written to it before it is recorded on the call, so no recorded consent is
 missing from the store; one still being written when the call ends counts as no consent, is noted
 as `consent.unrecorded` and shows as `not_recorded` on the receipt, so a store outage never keeps
-a call from ending and never leaves a yes behind (tested). The ledger
+a call from ending and never leaves a yes behind (tested). A call record is removed only through
+`removeCall`, which refuses while its outbox holds entries the ledger has not taken, so a
+`consent.recorded` is never lost with its record (tested). The ledger
 detail names the consent and the channel, never a phone number or the message. Left to the host:
 plugging in a `ConsentStore` wherever consents are recorded (without one, consents cannot be
 revoked through the engine), deciding which consents an inbound STOP revokes, checking the store
@@ -1082,6 +1084,7 @@ The hash-chained ledger, receipts and consent (`src/prove/`).
 | trace-10 | R | An outside party cannot check a receipt without this engine. | `scripts/verify-receipt.mjs`, a stand-alone verifier with no dependencies. | covered | `verifier.test.ts`: "prints valid for a receipt and its key set, from a file, standard input or the key set URL"; `verifier.test.ts`: "prints invalid, and exits 1, for a tampered receipt or one the key set cannot verify" |
 | trace-11 | R | A caller withdraws consent and nothing records it. | `revokeConsent` records a revocation by voice, text or dashboard in the `ConsentStore` and the ledger, once, even after the call is gone. | covered | `engine.test.ts`: "stores each consent, and revokes one by text after the call ended, once, in the ledger"; `engine.test.ts`: "never writes consent.revoked before its consent.recorded, even with the recorded entry still pending" |
 | trace-12 | R | An auditor cannot take the ledger out in a verifiable form. | `exportLedger` writes NDJSON with an ES256-signed trailer and a cursor, and `verifyLedgerExport` detects a changed, removed or replaced entry and a run that does not continue the previous one. | covered | `prove.test.ts`: "yields one canonical entry per line and a signed trailer with the head"; `prove.test.ts`: "detects a changed, removed or replaced entry, and a changed trailer"; `prove.test.ts`: "refuses a run that does not continue the previous one" |
+| trace-13 | R | A call record is removed while ledger entries it holds are still pending, and they are lost with it (a `consent.recorded`). | `removeCall` flushes first and refuses while the outbox is not empty; `flushPending` keeps listing the call until it is. | covered | `call-removal.test.ts`: "refuses while the outbox holds an entry, keeps the call listed for the background flush, and removes it once flushed" |
 
 ### Gate
 

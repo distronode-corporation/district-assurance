@@ -117,6 +117,9 @@ export interface FlushReport {
 /** Calls per `flushPending` run unless the host says otherwise. */
 export const DEFAULT_FLUSH_LIMIT = 100;
 
+/** Reads of a call record `removeCall` makes before it gives up on writes that keep landing. */
+const REMOVE_ATTEMPTS = 3;
+
 export interface FlowPosition {
   flow: string;
   revision: string;
@@ -1655,6 +1658,35 @@ export class Engine {
    */
   #eventId(callId: string, write: number, index: number): string {
     return JSON.stringify([this.workspaceId, callId, "w", write, index]);
+  }
+
+  /**
+   * Removes an ended call's record from the session store, for the host's own retention. Refused
+   * (`precondition_failed`) while the call has not ended, and while its outbox holds ledger entries
+   * not yet appended: it flushes them first, and a ledger that still refuses them keeps the record
+   * (and `flushPending` keeps listing it), so no pending entry, a `consent.recorded` among them, is
+   * lost with the record. Removes only the version it checked: a write that lands first is read
+   * again, up to three times (`conflict` after that). A host removes call records only through
+   * this, never in its store directly. Needs a session store with `remove`.
+   */
+  async removeCall(callId: string): Promise<{ removed: true }> {
+    if (this.#sessions.remove === undefined) throw new EngineError("precondition_failed", "the session store cannot remove call records (remove)");
+    let flushed = false;
+    for (let attempt = 0; attempt < REMOVE_ATTEMPTS; attempt++) {
+      const stored = await this.#sessions.get(this.workspaceId, callId);
+      if (stored === null) throw new EngineError("unknown_call", "no such call");
+      const record = stored.record as unknown as CallRecord;
+      if (record.state.phase !== "ended") throw new EngineError("precondition_failed", "the call has not ended; end it before removing its record");
+      if (record.outbox.length > 0) {
+        if (flushed) throw new EngineError("precondition_failed", "the call's ledger entries are not yet on the ledger; the record is kept until they are");
+        // A ledger that refuses them leaves them pending, and the record is read again to see.
+        await this.flushLedger(callId).catch(() => undefined);
+        flushed = true;
+        continue;
+      }
+      if (await this.#sessions.remove(this.workspaceId, callId, stored.version)) return { removed: true };
+    }
+    throw new EngineError("conflict", "the call record kept changing while it was removed; remove it again");
   }
 
   /** Appends any ledger entries a call still has pending (after a ledger outage), and sends any owed duress alert. Every write does this too. */

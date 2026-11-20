@@ -370,6 +370,13 @@ export interface SessionStore {
    * always lists the same first `limit` lets calls that keep failing hold back every other one.
    */
   pendingCalls?(workspaceId: string, limit: number): Promise<string[]>;
+  /**
+   * Optional. Removes a session only if the stored version is `expectedVersion` (true), and its
+   * pending ledger mark with it; false, and nothing removed, when the version moved or the session
+   * is gone. The engine removes a call record only through this (`Engine.removeCall`), once its
+   * outbox is empty.
+   */
+  remove?(workspaceId: string, callId: string, expectedVersion: number): Promise<boolean>;
   /** Points a provider reference (an identity session, a payment link) at a call. The first binding wins. */
   bindRef(workspaceId: string, ref: string, callId: string): Promise<boolean>;
   resolveRef(workspaceId: string, ref: string): Promise<string | null>;

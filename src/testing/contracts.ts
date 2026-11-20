@@ -179,6 +179,22 @@ export function sessionStoreContract(factory: () => SessionStore | Promise<Sessi
       },
     ],
     [
+      "removes a session only at its stored version, with its pending mark, if it can remove",
+      async (store) => {
+        // `remove` is optional; a store without it has nothing more to keep here.
+        if (store.remove === undefined) return;
+        await store.create("w", "c1", { n: 1 }, { ledgerPending: true });
+        await store.create("w2", "c1", { n: 1 });
+        assert.equal(await store.remove("w", "c1", 2), false, "not at another version");
+        assert.equal(await store.remove("w", "missing", 1), false);
+        assert.equal(await store.remove("w", "c1", 1), true);
+        assert.equal(await store.get("w", "c1"), null);
+        assert.equal(await store.remove("w", "c1", 1), false, "once");
+        assert.notEqual(await store.get("w2", "c1"), null, "workspaces apart");
+        if (store.pendingCalls !== undefined) assert.deepEqual(await store.pendingCalls("w", 10), [], "the mark goes with it");
+      },
+    ],
+    [
       "lists the pending calls listed least recently first, so the same few never hold back the rest",
       async (store) => {
         if (store.pendingCalls === undefined) return;
