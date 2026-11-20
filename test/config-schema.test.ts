@@ -36,7 +36,7 @@ const SCHEMA = JSON.parse(readFileSync(SCHEMA_URL, "utf8")) as { [key: string]: 
 
 const KEYWORDS = new Set([
   "$schema", "$id", "$defs", "$ref", "title", "description",
-  "type", "const", "enum", "not", "allOf", "if", "then", "else",
+  "type", "const", "enum", "not", "allOf", "oneOf", "if", "then", "else",
   "properties", "required", "additionalProperties", "propertyNames",
   "items", "minItems", "uniqueItems", "contains",
   "pattern", "minLength", "minimum", "maximum", "exclusiveMinimum",
@@ -56,7 +56,10 @@ function* subschemas(schema: Json, at = "#"): Generator<[string, Json]> {
   for (const key of ["additionalProperties", "propertyNames", "items", "contains", "not", "if", "then", "else"]) {
     if (schema[key] !== undefined) yield* subschemas(schema[key], `${at}/${key}`);
   }
-  if (Array.isArray(schema.allOf)) for (const [i, sub] of schema.allOf.entries()) yield* subschemas(sub, `${at}/allOf/${i}`);
+  for (const key of ["allOf", "oneOf"]) {
+    const list = schema[key];
+    if (Array.isArray(list)) for (const [i, sub] of list.entries()) yield* subschemas(sub, `${at}/${key}/${i}`);
+  }
 }
 
 function resolve(ref: string): Schema {
@@ -101,6 +104,7 @@ function schemaErrors(schema: Schema, value: unknown, at = ""): string[] {
   if (Array.isArray(schema.enum) && !schema.enum.some((option) => isDeepStrictEqual(value, option))) fail("enum");
   if (schema.not !== undefined && schemaErrors(sub("not"), value, at).length === 0) fail("not");
   for (const part of (schema.allOf ?? []) as Schema[]) errors.push(...schemaErrors(part, value, at));
+  if (Array.isArray(schema.oneOf) && (schema.oneOf as Schema[]).filter((part) => schemaErrors(part, value, at).length === 0).length !== 1) fail("oneOf");
   if (schema.if !== undefined) {
     const branch = schemaErrors(sub("if"), value, at).length === 0 ? "then" : "else";
     if (schema[branch] !== undefined) errors.push(...schemaErrors(sub(branch), value, at));
@@ -291,6 +295,12 @@ const GOOD: ReadonlyArray<readonly [name: string, config: { [key: string]: any }
     return c;
   })(), ALL_ADAPTERS.filter((a) => a !== "signer")],
   ["Gate and step-up on, and a receipt that texts its link", gateAndStepUpConfig()],
+  ["a step-up rule on an amount, and a keypad idle timeout left to its default with null", (() => {
+    const c = json(demoConfig());
+    c.policy.stepUp = [{ name: "big", scope: "payment.request", level: 3, amountOverMinor: { cad: 100_000 } }];
+    c.modules.badge.settings.accessibility = { keypadIdleSeconds: null };
+    return c;
+  })()],
   ["Gate and step-up listed but switched off, whose settings are not checked", (() => {
     const c = json(defaultConfig());
     c.modules.gate = { enabled: false, settings: "anything" };
@@ -365,6 +375,9 @@ const BAD: ReadonlyArray<readonly [name: string, kind: "shape" | "rule", patch: 
   ["a receipt step with a field", "shape", (c) => (c.flows.deposit.steps[4].sign = true)],
   ["a module that is not installed", "rule", (c) => (c.modules.crm2 = {})],
   ["Gate on without settings", "shape", (c) => (c.modules.gate = {})],
+  ["a step-up rule that is not an object", "shape", (c) => (c.policy.stepUp = [null])],
+  ["a step-up rule with no condition", "shape", (c) => (c.policy.stepUp = [{ name: "big", scope: "payment.request", level: 3 }])],
+  ["a step-up rule with two conditions", "shape", (c) => (c.policy.stepUp = [{ name: "big", scope: "payment.request", level: 3, amountOverMinor: { cad: 1 }, signal: "x" }])],
   ["Gate with no targets", "shape", (c) => (c.modules.gate = { settings: { targets: [] } })],
   ["a Gate target id in capitals", "shape", (c) => (c.modules.gate = { settings: { targets: [{ id: "Front", controller: "lobby", ref: "d" }] } })],
   ["a Gate target without a controller", "shape", (c) => (c.modules.gate = { settings: { targets: [{ id: "front", controller: "", ref: "d" }] } })],

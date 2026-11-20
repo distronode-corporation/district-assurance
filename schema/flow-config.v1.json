@@ -100,7 +100,9 @@
     },
     "stepUpRule": {
       "description": "Raises scope to level when its one condition holds: amountOverMinor (money scopes), localTime (needs timeZone) or signal. The level must be above the scope's minimum.",
+      "type": "object",
       "required": ["name", "scope", "level"],
+      "oneOf": [{ "required": ["amountOverMinor"] }, { "required": ["localTime"] }, { "required": ["signal"] }],
       "additionalProperties": false,
       "properties": {
         "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
@@ -222,7 +224,11 @@
       "additionalProperties": false,
       "properties": {
         "spokenKeypadFields": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "not": { "const": "pin" } } },
-        "keypadIdleSeconds": { "type": "integer", "minimum": 5, "maximum": 60 },
+        "keypadIdleSeconds": {
+          "description": "5 to 60; null or absent is the default, 10.",
+          "if": { "const": null },
+          "else": { "type": "integer", "minimum": 5, "maximum": 60 }
+        },
         "maxKeypadIdleSeconds": { "type": "integer", "minimum": 5, "maximum": 300 }
       }
     },
