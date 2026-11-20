@@ -119,7 +119,7 @@ function receiptBody(seq: number): ReceiptBody {
     issuedAt: "2026-01-01T00:04:00.000Z",
     verification: { level: 2, methods: ["keypad_knowledge", "carrier_identity_match"] },
     records: [{ recordId: "rec_1", formId: "maintenance", digest: "a".repeat(64) }],
-    payments: [{ paymentId: "pay_1", status: "paid", amountMinor: 15000, currency: "cad", providerRef: "cs_fake_1" }],
+    payments: [{ paymentId: "pay_1", status: "paid", amountMinor: 15000, currency: "cad", mode: "platform", providerRef: "cs_fake_1" }],
     consents: [{ purpose: "repair_texts", wordingVersion: "1", wordingDigest: "b".repeat(64), answer: "yes" }],
     ledger: { seq, hash: "c".repeat(64) },
   };
@@ -150,6 +150,9 @@ export const cases: readonly BenchCase[] = [
     async setup() {
       const { t } = benchEngine();
       const run = async (): Promise<number> => {
+        // The deposit flow needs payment.request, so its starts are counted per subject (VER-15, at
+        // most 5 an hour): each run starts an hour after the last, so the limit never refuses one.
+        t.clock.advance(3_600_000);
         const { callId } = await t.engine.startCall({ locale: "en", flow: "deposit" });
         await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
         await t.engine.submitKeypad(callId, { dob: DOB });
