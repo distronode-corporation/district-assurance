@@ -121,10 +121,10 @@ describe("fuzz: verifyTelnyxSignature", () => {
         const original = { body, signature, timestamp: stamp }[part];
         if (original === "") return;
         const changed = g(flipByte, Buffer.from(original, "utf8")).toString("utf8");
-        // The same signed bytes: a broken UTF-8 sequence that decodes to the same U+FFFD, or a
-        // base64 signature whose change sits only in the unused bits of its last character.
+        // The same signed bytes: a broken UTF-8 sequence that decodes to the same U+FFFD. A
+        // signature changed only in the unused bits of its last character is refused too (one
+        // spelling per signature).
         if (part === "body" && Buffer.from(changed, "utf8").equals(Buffer.from(body, "utf8"))) return;
-        if (part === "signature" && Buffer.from(changed, "base64").equals(Buffer.from(signature, "base64")) && /^[A-Za-z0-9+/]{86}==$/.test(changed)) return;
         const result = verifyTelnyxSignature({
           payload: part === "body" ? changed : body,
           signatureHeader: part === "signature" ? changed : signature,

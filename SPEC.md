@@ -2761,8 +2761,8 @@ points (in any encoding), which some platforms let verify a forged signature. Th
 configured key and the timestamp is within 300 seconds of now (configurable, an integer from 0 to
 86,400, else `invalid_input`), either way; an invalid `now` is out of tolerance. It
 returns the same `SignatureCheck` as Stripe's: `no_secret`, `missing_header` (either header),
-`malformed_header` (a signature that is not 64 bytes of base64, a timestamp that is not 1 to 12
-digits), `timestamp_out_of_tolerance`, `no_matching_signature`.
+`malformed_header` (a signature that is not 64 bytes of base64 in its one canonical spelling, with
+the unused bits of its last character zero, or a timestamp that is not 1 to 12 digits), `timestamp_out_of_tolerance`, `no_matching_signature`.
 
 The reference server answers `POST /webhooks/twilio` and `/webhooks/telnyx` with 400
 `{error: "signature", reason}` when the check fails, 200 `{received: true}` when it passes, and

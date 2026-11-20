@@ -395,6 +395,8 @@ All notable changes to this project are documented here. The format follows
     that `verifyChain` reports such an entry as a break instead of throwing.
   - The FlowConfig schema describes Gate's and step-up's settings and steps, and a receipt step's
     `textLink`; the release tarball allows and requires the schema.
+  - `verifyTelnyxSignature` refuses (`malformed_header`) a signature header whose unused trailing
+    base64 bits are set: the decoder dropped them, so one valid signature had 16 spellings.
 - Integration review of the server and proof landing (L4):
   - Anchors (PRV-9): `checkTimestamp` and `verifyAnchor` require the token's signed
     SigningCertificate or SigningCertificateV2 to name the authority's signing certificate
