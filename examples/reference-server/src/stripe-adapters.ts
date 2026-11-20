@@ -5,10 +5,12 @@
 // identity check's URL is single-use and goes back to the engine only, which texts it to the number
 // on file; it is never written to a log, an error or the ledger.
 //
-// StripeCheckoutLinks (PAY-1, minimal): Checkout Sessions in TEST MODE ONLY. The constructor
-// refuses any key that is not a secret test key (`sk_test_`), live and restricted keys included,
-// and never puts a key, or Stripe's own error message (which can quote part of one), in an error.
-// The Checkout URL is returned to the engine and never logged here.
+// StripeCheckoutLinks (PAY-1): Checkout Sessions in TEST MODE ONLY, in both modes: `platform` on the
+// platform's own account, `connect` as a direct charge on the business's connected account (the
+// `Stripe-Account` header, nothing else; Stripe's direct-charges guide). The constructor refuses any
+// key that is not a secret test key (`sk_test_`), live and restricted keys included, and never puts
+// a key, or Stripe's own error message (which can quote part of one), in an error. The Checkout URL
+// is returned to the engine and never logged here.
 import { createHash } from "node:crypto";
 
 import {
@@ -251,6 +253,23 @@ function opensAsHttps(value: string): boolean {
 }
 const SESSION_ID = /^cs_test_[A-Za-z0-9]{1,200}$/;
 
+/** A Stripe connected account id: what goes in the `Stripe-Account` header, and nothing else. */
+const CONNECTED_ACCOUNT = /^acct_[A-Za-z0-9]{1,255}$/;
+
+/**
+ * The account a request is made on: none in `platform` mode, the connected account in `connect`
+ * mode. A connect request without a well-formed account id, or a platform request naming one, is
+ * refused before anything is sent: a header value is never built from anything else.
+ */
+function accountFor(mode: PaymentMode, connectedAccountId: string | undefined): string | undefined {
+  if (mode === "platform") {
+    if (connectedAccountId !== undefined) throw new TypeError("platform mode takes no connected account");
+    return undefined;
+  }
+  if (connectedAccountId === undefined || !CONNECTED_ACCOUNT.test(connectedAccountId)) throw new TypeError("connect mode needs a connected account id (acct_...)");
+  return connectedAccountId;
+}
+
 function checkedUrl(value: string, what: string): URL {
   const url = new URL(value);
   if (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK.has(url.hostname))) throw new TypeError(`${what} must be https (http only to the loopback)`);
@@ -258,29 +277,36 @@ function checkedUrl(value: string, what: string): URL {
   return url;
 }
 
-/** How the engine's instant methods map to Checkout: Apple Pay and Google Pay are wallets of `card`. */
+/**
+ * How the engine's instant methods map to Checkout, as Stripe answered in test mode (recorded in
+ * test/fixtures/stripe-real/): Apple Pay and Google Pay are wallets of `card` (Stripe refuses
+ * `apple_pay` and `google_pay` as payment method types), so they go as `card`; Link goes as `link`,
+ * which Checkout takes only beside `card`. Link alone is refused here, before anything is sent,
+ * rather than sent for Stripe to refuse or widened to cards the step did not offer.
+ */
 export function checkoutPaymentMethodTypes(methods: readonly InstantPaymentMethod[]): string[] {
   const types = new Set<string>();
   for (const method of methods) types.add(method === "link" ? "link" : "card");
+  if (types.has("link") && !types.has("card")) throw new TypeError("Checkout offers Link only beside cards: add card, apple_pay or google_pay to the step's paymentMethods");
   return [...types];
 }
 
 /**
  * Stripe Checkout: a Session in payment mode with the engine's instant payment methods, on the
- * platform's own account (`platform`), or with the `Stripe-Account` header when a request names a
- * connected account. `expires_at` is the engine's own `expiresAt`, unchanged, so a retry under the
+ * platform's own account (`platform`), or as a direct charge on the business's connected account
+ * (`connect`: the `Stripe-Account` header; no `on_behalf_of` or `transfer_data`, which are for
+ * destination charges, where the platform is the merchant). `expires_at` is the engine's own `expiresAt`, unchanged, so a retry under the
  * same idempotency key sends the same parameters; the engine keeps it inside the declared
  * capabilities. `expireLink` calls `/v1/checkout/sessions/{id}/expire` when the engine's own
  * deadline comes.
  */
 export class StripeCheckoutLinks implements PaymentLinks {
   /**
-   * Platform mode only, the one this minimal adapter has proven against Stripe test mode (the
-   * `Stripe-Account` header for connect mode is sent, but not yet proven live). Checkout's
-   * `expires_at` runs from 30 minutes to 24 hours after creation; the engine asks for at least the
-   * minimum plus 5 minutes (35), which covers the time between its request and Stripe's arrival.
+   * Both modes, each proven by a recorded Stripe test-mode run (test/fixtures/stripe-real/).
+   * Checkout's `expires_at` runs from 30 minutes to 24 hours after creation; the engine asks for at
+   * least the minimum plus 5 minutes (35), which covers the time between its request and Stripe's arrival.
    */
-  readonly capabilities: PaymentLinkCapabilities = { modes: ["platform"], minLinkMinutes: 30, maxLinkMinutes: 1440 };
+  readonly capabilities: PaymentLinkCapabilities = { modes: ["platform", "connect"], minLinkMinutes: 30, maxLinkMinutes: 1440 };
   readonly #apiKey: string;
   readonly #base: URL;
   readonly #successUrl: string;
@@ -295,6 +321,7 @@ export class StripeCheckoutLinks implements PaymentLinks {
   }
 
   async createLink(input: PaymentLinkRequest): Promise<{ linkId: string; url: string }> {
+    const account = accountFor(input.mode, input.connectedAccountId);
     const expiresAt = Math.floor(Date.parse(input.expiresAt) / 1000);
     const form: Array<[string, string]> = [
       ["mode", "payment"],
@@ -310,7 +337,7 @@ export class StripeCheckoutLinks implements PaymentLinks {
       ["metadata[call_id]", stripeMetadataCallId(input.callId)],
       ["success_url", this.#successUrl],
     ];
-    const session = await this.#call("POST", "/v1/checkout/sessions", { form, idempotencyKey: input.idempotencyKey, account: input.connectedAccountId });
+    const session = await this.#call("POST", "/v1/checkout/sessions", { form, idempotencyKey: input.idempotencyKey, account });
     const id = session.body.id;
     const url = session.body.url;
     if (session.status !== 200 || typeof id !== "string" || !SESSION_ID.test(id) || typeof url !== "string" || !opensAsHttps(url)) {
@@ -322,27 +349,32 @@ export class StripeCheckoutLinks implements PaymentLinks {
 
   async expireLink(input: { linkId: string; mode: PaymentMode; connectedAccountId?: string; idempotencyKey: string }): Promise<{ state: "expired" | "not_open" }> {
     const id = checkedSessionId(input.linkId);
-    const res = await this.#call("POST", `/v1/checkout/sessions/${id}/expire`, { form: [], idempotencyKey: input.idempotencyKey, account: input.connectedAccountId });
+    const account = accountFor(input.mode, input.connectedAccountId);
+    const res = await this.#call("POST", `/v1/checkout/sessions/${id}/expire`, { form: [], idempotencyKey: input.idempotencyKey, account });
     // Stripe's success answer is the session, expired: a 200 that is not this session, expired, in
     // test mode, does not establish the close, so the session is read back to learn whether it is.
     if (res.status === 200 && res.body.id === id && res.body.status === "expired" && res.body.livemode === false) return { state: "expired" };
     if (res.status === 200) {
-      const now = await this.readLink(id, input.connectedAccountId);
+      const now = await this.readLink(id, account);
       if (now.status === "expired") return { state: "expired" };
       if (now.status !== "open") return { state: "not_open" };
     }
     if (res.status === 400) {
       // Stripe refuses to expire a session that is not open; read it to tell that from a bad request.
-      const now = await this.readLink(id, input.connectedAccountId);
+      const now = await this.readLink(id, account);
       if (now.status !== "open") return { state: "not_open" };
     }
     throw new StripeApiError(res.status, `Stripe did not expire the Checkout Session (${describeError(res)})`);
   }
 
-  /** Reads a Checkout Session's status from Stripe. Read only: it changes nothing. `signal` cancels the read. */
+  /**
+   * Reads a Checkout Session's status from Stripe, on the connected account when one is named.
+   * Read only: it changes nothing. `signal` cancels the read.
+   */
   async readLink(linkId: string, connectedAccountId?: string, signal?: AbortSignal): Promise<CheckoutSessionStatus> {
     const id = checkedSessionId(linkId);
-    const res = await this.#call("GET", `/v1/checkout/sessions/${id}`, { account: connectedAccountId, signal });
+    const account = connectedAccountId === undefined ? undefined : accountFor("connect", connectedAccountId);
+    const res = await this.#call("GET", `/v1/checkout/sessions/${id}`, { account, signal });
     const { status, payment_status: paymentStatus, livemode } = res.body;
     if (
       res.status !== 200 ||

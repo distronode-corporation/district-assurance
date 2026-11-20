@@ -167,13 +167,13 @@ describe("Stripe Checkout adapter: test-mode keys only", () => {
     assert.throws(() => new StripeCheckoutLinks(KEY, {} as never), TypeError, "a hosted page needs a return URL");
     assert.doesNotThrow(() => new StripeCheckoutLinks(KEY, { successUrl: "https://example.com/done" }));
     const links = new StripeCheckoutLinks(KEY, { successUrl: RETURN });
-    assert.deepEqual(links.capabilities, { modes: ["platform"], minLinkMinutes: 30, maxLinkMinutes: 1440 });
+    assert.deepEqual(links.capabilities, { modes: ["platform", "connect"], minLinkMinutes: 30, maxLinkMinutes: 1440 });
   });
 
-  it("maps Apple Pay and Google Pay to card, and keeps Link", () => {
+  it("maps Apple Pay and Google Pay to card, and keeps Link, which Checkout takes only beside card", () => {
     assert.deepEqual(checkoutPaymentMethodTypes(["card", "apple_pay", "google_pay"]), ["card"]);
     assert.deepEqual(checkoutPaymentMethodTypes(["apple_pay", "link"]), ["card", "link"]);
-    assert.deepEqual(checkoutPaymentMethodTypes(["link"]), ["link"]);
+    assert.throws(() => checkoutPaymentMethodTypes(["link"]), /Link only beside cards/);
   });
 });
 
@@ -332,6 +332,29 @@ describe("Stripe Checkout adapter against a local fake", () => {
     fake.next = { status: 404, body: JSON.stringify({ error: { type: "invalid_request_error", code: "resource_missing" } }) };
     await assert.rejects(links.readLink(open.linkId), /HTTP 404/);
     await assert.rejects(async () => links.readLink("cs_live_abc"), TypeError);
+  });
+
+  it("connect mode names a well-formed connected account and platform mode none, before anything is sent", async () => {
+    fake.seen = [];
+    const connect = { mode: "connect", connectedAccountId: "acct_1Business" } as const;
+    await assert.rejects(links.createLink(request({ mode: "connect" })), /connect mode needs a connected account id/);
+    await assert.rejects(links.createLink(request({ mode: "platform", connectedAccountId: "acct_x" })), /platform mode takes no connected account/);
+    // Never a header built from anything but an account id: no line break, no other characters.
+    for (const bad of ["acct_x\r\nx-evil: 1", "acct_", "cus_x", "acct_x y", `acct_${"a".repeat(256)}`]) {
+      await assert.rejects(links.createLink(request({ ...connect, connectedAccountId: bad })), TypeError);
+      await assert.rejects(links.expireLink({ linkId: "cs_test_x", mode: "connect", connectedAccountId: bad, idempotencyKey: "e" }), TypeError);
+      await assert.rejects(links.readLink("cs_test_x", bad), TypeError);
+    }
+    await assert.rejects(links.expireLink({ linkId: "cs_test_x", mode: "connect", idempotencyKey: "e" }), /needs a connected account id/);
+    await assert.rejects(links.expireLink({ linkId: "cs_test_x", mode: "platform", connectedAccountId: "acct_x", idempotencyKey: "e" }), /takes no connected account/);
+    // Link alone: Checkout refuses it (recorded in test/fixtures/stripe-real/), so it is never sent.
+    await assert.rejects(links.createLink(request({ ...connect, paymentMethods: ["link"] })), /Link only beside cards/);
+    assert.equal(fake.seen.length, 0, "nothing reached Stripe");
+    // Created, read and expired on the connected account: each with its Stripe-Account header.
+    const link = await links.createLink(request(connect));
+    await links.readLink(link.linkId, connect.connectedAccountId);
+    await links.expireLink({ linkId: link.linkId, ...connect, idempotencyKey: "c" });
+    assert.deepEqual(fake.seen.map((seen) => seen.headers["stripe-account"]), ["acct_1Business", "acct_1Business", "acct_1Business"]);
   });
 });
 

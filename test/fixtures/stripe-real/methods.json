@@ -1,0 +1,35 @@
+{
+  "account": "acct_redacted0001",
+  "refused": [
+    {
+      "types": [
+        "apple_pay"
+      ],
+      "status": 400,
+      "error": {
+        "type": "invalid_request_error",
+        "param": "payment_method_types[0]"
+      }
+    },
+    {
+      "types": [
+        "google_pay"
+      ],
+      "status": 400,
+      "error": {
+        "type": "invalid_request_error",
+        "param": "payment_method_types[0]"
+      }
+    },
+    {
+      "types": [
+        "link"
+      ],
+      "status": 400,
+      "error": {
+        "type": "invalid_request_error",
+        "param": "payment_method_types"
+      }
+    }
+  ]
+}

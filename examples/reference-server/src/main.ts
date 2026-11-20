@@ -18,13 +18,14 @@
 // the signed `identity.verification_session.*` event that `stripe listen` forwards is applied to
 // the call. The engine's events for the trial (which hold no values) are printed too, so the
 // applied outcome shows as a `verification.factor` line. Each answered request is logged as one
-// JSON line (route pattern, status, time; never a path, header or body). Everything else runs on fake adapters until its Stripe adapter is built (PAY-1).
+// JSON line (route pattern, status, time; never a path, header or body). Everything else runs on
+// fake adapters; payments by a real Checkout link are `npm run demo:e2e`.
 import { realpathSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 
-import { systemClock, type Clock, type MessagePurpose, type MessageSender } from "../../../src/index.ts";
+import { systemClock, type Clock, type IdGenerator, type MessagePurpose, type MessageSender } from "../../../src/index.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine, type TestEngineOptions } from "../../../src/testing/index.ts";
 
 import { createReferenceServer, logJsonLines, type JsonLinesLog, type RequestLog } from "./app.ts";
@@ -57,6 +58,13 @@ export interface ServeOptions {
   stripe?: StripeAdapterOptions;
   /** For tests: the clock for the engine and the webhook signature window. Default the system clock. */
   clock?: Clock;
+  /**
+   * The engine's ids. Default the test engine's sequential ones (`call_1`, ...). A run against
+   * Stripe that is repeated within a day passes ids of its own: the engine's idempotency keys are
+   * built from them, and Stripe answers a key it has seen in the last 24 hours with the first
+   * answer (an earlier run's session, already used).
+   */
+  ids?: IdGenerator;
   /** Where each answered request's log entry goes. Default one JSON line each on standard output. */
   log?: (entry: RequestLog) => void;
 }
@@ -105,7 +113,7 @@ export function createServe(options: ServeOptions): Serve {
     };
   }
   const clock = options.clock ?? systemClock;
-  const t = createTestEngine({ clock, ...trial });
+  const t = createTestEngine({ clock, ...(options.ids === undefined ? {} : { ids: options.ids }), ...trial });
   const server = createReferenceServer({
     engine: t.engine,
     clock,
