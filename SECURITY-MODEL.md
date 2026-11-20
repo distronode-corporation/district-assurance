@@ -928,7 +928,7 @@ Who is calling, in levels (`src/verify/`).
 |---|---|---|---|---|---|
 | badge-1 | S | A caller guesses keypad knowledge or a PIN within one call. | A per-call limit on judged attempts for every entered factor; after it, even the right answer is not judged. | covered | `engine.test.ts`: "locks keypad judging after the policy's attempts"; `pin.test.ts`: "counts malformed, wrong and unknown-subject entries the same way, and locks after the limit"; `policy.test.ts`: "caps keypad attempts like the PIN" |
 | badge-2 | S | A caller guesses a PIN across many calls (a 4-digit PIN with 3 attempts per call falls within about 3,300 calls). | Durable failure counters and lockout per subject and per calling number. Hard gate before any live PIN. | open | VER-1 |
-| badge-3 | S | A crash, a failing PIN verifier or a second process gives a caller a free try. | Each attempt is counted in its own write before it is judged. | covered | `pin.test.ts`: "counts the attempt before asking, so a verifier that fails still uses it"; `session-store.test.ts`: "gives two concurrent attempts on one call one counted attempt each, never more than the limit" |
+| badge-3 | S | A crash, a failing PIN verifier or a second process gives a caller a free try. | Each attempt is counted in its own write before it is judged. | covered | `pin.test.ts`: "counts the attempt before asking, so a verifier that fails still uses it"; `session-store.test.ts`: "gives concurrent attempts on one call no more than the limit, and judges only one of them at once" |
 | badge-4 | I | A caller learns which accounts exist, or which field was wrong. | All keypad fields are judged together; an unknown account, a wrong value and a non-keypad entry answer the same, and so do the PIN's cases. | covered | `engine.test.ts`: "gives the same answer for an unknown account, a wrong value and a non-keypad entry"; `modules.test.ts`: "never passes a non-keypad entry, even one whose digest is on file"; `pin.test.ts`: "counts malformed, wrong and unknown-subject entries the same way, and locks after the limit" |
 | badge-5 | I | Stored reference values or PIN digests are reversed, or two equal PINs show as equal digests. | Keyed HMACs per workspace key, field and value; PIN digests are bound to their subject. | covered | `modules.test.ts`: "derives stable keyed digests that differ per key, field and value"; `pin.test.ts`: "binds the digest to the subject" |
 | badge-6 | I | A factor plug-in reads the knowledge key. | Plug-ins get `hmac(data)`, never the key, and their attempts are limited. | covered | `pin.test.ts`: "judges a host's own factor with the keyed hash, never the key, and limits its attempts" |
@@ -949,7 +949,7 @@ Intake the caller confirms (`src/file/`).
 | dossier-1 | E | A caller files a record without the `intake.file` scope, or after the grant lapsed. | Intake needs the scope at start and again at confirmation. | covered | `engine.test.ts`: "refuses intake without the scope, an unknown form, and abandons"; `engine.test.ts`: "re-checks the grant at confirmation" |
 | dossier-2 | T | Two confirmations of one draft, or a lost write, file two records. | One record per draft, reserved while it is filed and resumed with the same id. | covered | `engine.test.ts`: "files one record when two confirmations of the same draft run at once"; `session-store.test.ts`: "resumes a filing whose last write was lost, with the same record" |
 | dossier-3 | I | A caller reads a card number into an intake field. | Intake refuses a value that carries a card number. | covered | `modules.test.ts`: "normalises each field type" |
-| dossier-4 | I | A sensitive field (a social insurance number) is stored in the clear. | `validateConfig` refuses sensitive fields until encrypted fields exist (FIL-2). | covered | `config.test.ts`: "checks dossier settings" |
+| dossier-4 | I | A sensitive field (a social insurance number) is stored in the clear. | A sensitive value is encrypted by the host's `fieldCipher` before the record is stored, and kept in the clear nowhere else; without the cipher the config is refused and nothing is filed. | covered | `engine.test.ts`: "sensitive fields"; `field-cipher-hostile.test.ts`: "G3: the plaintext is in no ledger entry, receipt, stored record or session after filing"; `field-cipher-hostile.test.ts`: "G5: an engine without the cipher on the same stores refuses to file, and the engine with it files the same record" |
 | dossier-5 | T | A form edited in the middle of a draft changes what the caller is confirming. | A draft keeps the form it started with. | covered | `flows.test.ts`: "keeps the form a draft started with when the config changes the form" |
 | dossier-6 | R | A caller disputes a value because it was never read back to them. | Read-backs in English and French before confirmation. | open | FIL-1 |
 | dossier-7 | T | A record delivered to the business is forged, changed or replayed on the way. | Signed delivery webhooks with retries and idempotency. | open | FIL-3 |
@@ -961,14 +961,14 @@ Payment by a link texted to the number on file (`src/pay/`).
 
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
-| paylink-1 | E | A payment is requested without the `payment.request` scope, or with a bad amount. | The scope is required; amounts and descriptions are checked. | covered | `engine.test.ts`: "refuses without the scope, without an amount, and refuses bad amounts and descriptions"; `modules.test.ts`: "validates amounts and currencies" |
+| paylink-1 | E | A payment is requested without the `payment.request` scope, or with a bad amount. | The scope is required; amounts and descriptions are checked. | covered | `engine.test.ts`: "refuses without the scope, without an amount, and refuses bad amounts and descriptions at the read-back"; `modules.test.ts`: "validates amounts and currencies" |
 | paylink-2 | T | The model or the caller chooses the amount. | In a flow, the step sets the amount. | covered | `flows.test.ts`: "runs deposit end to end, with the amount from the flow and a receipt" |
-| paylink-3 | R | The caller disputes an amount that was never read back before the link was sent. | Amounts from code, read back first. | open | PAY-2 |
+| paylink-3 | R | The caller disputes an amount that was never read back before the link was sent. | Amounts come from the step, the host or an `AmountSource`, never the model, and the link is texted only after the caller heard and confirmed the amount read back. | covered | `paylink-amounts.test.ts`: "never texts a link the caller has not heard and confirmed, whether the amount is fixed or not"; `paylink-amounts.test.ts`: "reads a fixed amount back and sends the link only for the amount the caller confirmed" |
 | paylink-4 | S | A payment link goes to the calling number or one the model supplied. | The link goes to the number on file only. | covered | `engine.test.ts`: "texts a link to the number on file and settles only on paid" |
 | paylink-5 | T | A failed, expired or forged outcome settles a payment. | A payment settles only on `paid`, and once. | covered | `modules.test.ts`: "settles as paid only when the provider says paid"; `flows.test.ts`: "refuses the wrong form or consent purpose for the step, and fails on an unpaid link" |
 | paylink-6 | E | A caller who refused consent is still taken to a payment. | A consent of no fails its step before any money step. | covered | `flows.test.ts`: "fails the flow on a consent of no, before any money step (review blocker 2)" |
 | paylink-7 | E | A link stays payable after the call or after it should have been withdrawn. | Cancel and expire open links. | open | PAY-3 |
-| paylink-8 | E | A payment lands in the wrong Stripe account (the business's or the platform's). | `connect` and `platform` modes; until then `validateConfig` refuses a step with a mode. | open | PAY-7 |
+| paylink-8 | E | A payment lands in the wrong Stripe account (the business's or the platform's). | `connect` and `platform` modes: a connect payment is made on the business's account and settles only on an outcome from that account. | covered | `paylink-modes.test.ts`: "takes a connect payment on the business's account, and its receipt says so"; `paylink-modes.test.ts`: "never lets an outcome from another account settle a payment, and writes down one that reaches it"; `paylink-modes.test.ts`: "keeps two connected accounts' payments apart even when their providers give the same link id" |
 | paylink-9 | I | Card numbers keyed on the phone reach the engine. | Keypad card capture only through a certified carrier service, gated on an assessor's scoping. Today there is no keypad card capture at all. | open | PAY-6 |
 | paylink-10 | E | A saved card is charged for a weakly verified caller. | Saved-card charges gated on level 2 and amounts from code. Not built. | open | PAY-4 |
 
@@ -988,20 +988,33 @@ The hash-chained ledger, receipts and consent (`src/prove/`).
 | trace-8 | R | A receipt does not say which policy and config revision judged the caller. | Policy version and config revision in grants and receipts. | open | VER-8 |
 | trace-9 | S | A leaked or retired signing key keeps signing receipts that verify. | Receipt key sets and rotation. | open | PRV-1 |
 | trace-10 | R | An outside party cannot check a receipt without this engine. | A stand-alone receipt verifier. | open | PRV-2 |
-| trace-11 | R | A caller withdraws consent and nothing records it. | Consent revocation. | open | PRV-3 |
+| trace-11 | R | A caller withdraws consent and nothing records it. | `revokeConsent` records a revocation by voice, text or dashboard in the `ConsentStore` and the ledger, once, even after the call is gone. | covered | `engine.test.ts`: "stores each consent, and revokes one by text after the call ended, once, in the ledger"; `engine.test.ts`: "never writes consent.revoked before its consent.recorded, even with the recorded entry still pending" |
 | trace-12 | R | An auditor cannot take the ledger out in a verifiable form. | Ledger export as signed NDJSON with a cursor. | open | PRV-4 |
 
 ### Gate
 
-Signed, time-limited access after verification (`src/gate/`, planned). `gateModule()` throws
-`NotImplementedError` today, so nothing here can run.
+Signed, time-limited access to a door after verification, and one-time access codes
+(`src/gate/`). Grants are signed with the access key, never the receipt key.
 
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
-| gate-1 | E | Access is granted without a valid verification grant, or a grant is replayed after it expired. | The Gate module: signed, time-limited grants that need a verification grant, each in the ledger. | open | GAT-1 |
-| gate-2 | S | A door controller accepts a forged or replayed grant. | The door controller webhook adapter. | open | GAT-2 |
-| gate-3 | S | A one-time access code is guessed or used twice. | One-time access codes. | open | GAT-3 |
-| gate-4 | E | A web sign-in step-up is completed by someone other than the verified caller. | The web sign-in step-up. | open | GAT-4 |
+| gate-1 | E | Access is granted without a valid verification grant, or a grant outlives the verification it rests on. | A grant needs a verification grant covering `entry.open` at level 2, and never outlives it; a tainted, expired or ended call sends nothing. | covered | `gate.test.ts`: "refuses without a verification grant covering entry.open, in a flow and outside one"; `gate.test.ts`: "never outlives the verification grant"; `gate.test.ts`: "sends nothing when the call was tainted, the grant expired or the call ended while it was signed" |
+| gate-2 | S | A door controller accepts a forged, replayed or misdirected grant. | Grants are ES256-signed with the access key; the relay's verifier checks the workspace, the audience and the window, and refuses a grant id it has seen until the grant expires. | covered | `gate.test.ts`: "runs an entry flow: a signed grant to the door, verified with the access key only"; `gate.test.ts`: "refuses the wrong audience, a long or inverted lifetime, and anything malformed"; `gate.test.ts`: "refuses a grant id it has seen until the grant expired"; `gate.test.ts`: "refuses a grant another workspace issued, even on a shared key and controller name (review R1)" |
+| gate-3 | S | A one-time access code is guessed or used twice. | Codes are single use, stored only as a keyed hash, bound to their door and workspace, and five wrong guesses at the door spend the code. | covered | `gate.test.ts`: "texts a code to the number on file and redeems it once, for the grant it stands for"; `gate-codes-hostile.test.ts`: "two keypads offering one code at once: one grant between them, however their signing interleaves"; `gate-codes-hostile.test.ts`: "five wrong guesses at its door spend the code, recorded without the guess; four do not" |
+| gate-4 | E | A web sign-in step-up is completed by someone other than the verified caller. | The step-up token is bound to the nonce the person keyed, the verified subject and the call's grant (see Step-up). | covered | `gate-step-up.test.ts`: "refuses an expired token, and one for another site, subject or nonce, each using it up" |
+
+### Step-up
+
+Web sign-in step-up (`src/gate/step-up.ts`): a verified caller keys the nonce shown on the host's
+site, and the call gets a short-lived ES256 token the site exchanges once, through the engine, to
+raise its sign-in level.
+
+| Id | STRIDE | Threat | Control | Status | Proof |
+|---|---|---|---|---|---|
+| stepup-1 | E | A token is issued without a verification at level 2, or outlives it. | Issue needs a grant covering `entry.sign_in`, never during a running verification, and a token never outlives the grant. | covered | `gate-step-up.test.ts`: "refuses without a verification grant covering entry.sign_in, or while a verification runs"; `gate-step-up.test.ts`: "never outlives the verification grant" |
+| stepup-2 | S | A stolen or replayed token signs someone in, or is used in another site or workspace. | Each token exchanges once, for its own site, subject and nonce; a mismatch uses it up, and another workspace never finds it. | covered | `gate-step-up-hostile.test.ts`: "two exchanges of one token at once: one succeeds, the other is refused, and one entry each"; `gate-step-up.test.ts`: "refuses an expired token, and one for another site, subject or nonce, each using it up"; `gate-step-up-hostile.test.ts`: "a token from one workspace never exchanges in another with the same call and token ids" |
+| stepup-3 | T | A forged or tampered token is accepted, or one signed with another key. | Tampered bytes answer unknown; the step-up signer must not share a key with the receipt or access signer. | covered | `gate-step-up-hostile.test.ts`: "never throws on hostile tokens, and a tampered byte is unknown"; `gate-step-up.test.ts`: "refuses a step-up signer that shares a key with the receipt or the access signer" |
+| stepup-4 | E | A token issued before the call was tainted, or verified again for someone else, is still exchanged. | Taint and re-verification refuse the exchange and use the token up. | covered | `gate-step-up.test.ts`: "refuses an exchange after the call is tainted, and that uses the token up"; `gate-step-up.test.ts`: "refuses a token whose call was verified again since" |
 
 ### Webhooks
 
@@ -1012,7 +1025,7 @@ Webhook signature checks and event mapping (`src/webhooks/`).
 | webhooks-1 | S | A forged Stripe webhook settles a payment or passes a photo ID. | Stripe's published scheme: HMAC-SHA256 over `t.payload`, any configured secret, constant-time comparison. | covered | `webhooks.test.ts`: "accepts Stripe's scheme: HMAC-SHA256 of t.payload"; `webhooks.test.ts`: "refuses each failure with its reason" |
 | webhooks-2 | T | An old signed Stripe webhook is replayed. | A 300-second window either way; each identity session and payment applies once. | covered | `webhooks.test.ts`: "refuses each failure with its reason"; `engine.test.ts`: "applies identity outcomes once, only while verifying, and ignores unknown sessions" |
 | webhooks-3 | T | A well-signed but malformed or unexpected event is acted on. | Anything that is not a well-formed event is `null`; other types are ignored. | covered | `webhooks.test.ts`: "returns null for anything that is not a well-formed event"; `webhooks.test.ts`: "names other event types as ignored" |
-| webhooks-4 | S | A forged Twilio or Telnyx webhook is trusted. | Carrier signature checks against the vendors' test vectors. Today they throw `NotImplementedError` and the routes answer 501. | open | SRV-1 |
+| webhooks-4 | S | A forged Twilio or Telnyx webhook is trusted. | Twilio's HMAC-SHA1 over the URL and sorted parameters, and Telnyx's Ed25519 over the timestamp and payload with a timestamp window, checked against the vendors' published examples; any configured secret or key. | covered | `webhooks.test.ts`: "accepts Twilio's published examples, form and JSON bodies"; `webhooks.test.ts`: "accepts any configured public key, skipping ones that are not 32 bytes of base64"; `carrier-signature-hostile.test.ts`: "P4: a timestamp far in the future or the past, is refused; leading zeros are the same second"; `carrier-signature-hostile.test.ts`: "P8: a body that adds an unsigned pair, or swaps two values between names, is refused"; `carrier-signature-hostile.test.ts`: "P1: a small-order public key (a placeholder of zeros, the identity) never verifies a forged signature" |
 
 ### Reference server
 
@@ -1022,7 +1035,7 @@ Webhook signature checks and event mapping (`src/webhooks/`).
 |---|---|---|---|---|---|
 | server-1 | S | The server parses or acts on an unsigned webhook. | The signature is checked before the body is read as an event. | covered | `reference-server.test.ts`: "verifies Stripe signatures before reading the event" |
 | server-2 | T | A signed event is replayed to the server. | Each event id is applied once. | covered | `reference-server.test.ts`: "applies a signed event once and ignores events of the other kind" |
-| server-3 | S | A carrier route is trusted before its signature check exists. | Carrier routes answer 501. | covered | `reference-server.test.ts`: "answers 501 on the carrier webhooks that are not built" |
+| server-3 | S | A forged or replayed Twilio or Telnyx webhook is trusted. | Carrier routes check the vendor's signature (Twilio against the public URL, Telnyx with its timestamp window) before acting. | covered | `reference-server.test.ts`: "checks Twilio signatures against the public URL, query included"; `reference-server.test.ts`: "checks Telnyx signatures and their timestamp" |
 | server-4 | D | A large body exhausts memory. | A body limit on every route that reads one. | covered | `reference-server.test.ts`: "refuses a body over the limit"; `reference-ui.test.ts`: "refuses a body over the limit" |
 | server-5 | D | Slow or repeated requests tie the server up. | Per-route limits, request timeouts and a per-address rate limit. | open | SRV-2 |
 | server-6 | I | An error answer leaks engine detail. | 500 without detail; a demo run names an engine refusal and hides anything else. | covered | `reference-server.test.ts`: "answers 500 without detail when the engine fails"; `reference-ui.test.ts`: "ends a run on a step that throws, naming an engine refusal and hiding anything else" |
@@ -1109,8 +1122,8 @@ Texts to the number on file.
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
 | messagesender-1 | S | A link is texted to the calling number or a number the model gave. | Texts go to the subject's number on file only. | covered | `engine.test.ts`: "reaches level 3 with keypad and photo ID, texting the link to the number on file only" |
-| messagesender-2 | D | Repeated calls flood a customer with texts, or pump premium numbers. | Texts only after a keypad or PIN match, at most one photo ID link per call. | covered | `engine.test.ts`: "sends photo ID links only after a match, once per call, in the caller's language"; `engine.test.ts`: "has a planned texted code, refused before a match" |
-| messagesender-3 | D | Texted codes are used for SMS pumping across calls. | Send limits per subject and per calling number, and a destination country allow-list. | open | VER-2 |
+| messagesender-2 | D | Repeated calls flood a customer with texts, or pump premium numbers. | Photo ID links only after a keypad or PIN match, at most one per call; texted codes are limited per subject and per calling number across calls. | covered | `engine.test.ts`: "sends photo ID links only after a match, once per call, in the caller's language"; `verify-text-code.test.ts`: "allows 5 codes per subject per 24 hours, across calls"; `verify-text-code.test.ts`: "limits sends per calling number, across subjects" |
+| messagesender-3 | D | Texted codes are used for SMS pumping across calls. | Send limits per subject and per calling number, held in the shared `CodeStore`, and a destination country allow-list in the policy. | covered | `verify-text-code.test.ts`: "allows 5 codes per subject per 24 hours, across calls"; `verify-text-code.test.ts`: "limits sends per calling number, across subjects"; `verify-text-code.test.ts`: "texts only to countries the policy allows, and counts nothing it refuses for that" |
 
 ### PaymentLinks
 
@@ -1130,6 +1143,104 @@ The receipt signing key, in process or in a key store.
 |---|---|---|---|---|---|
 | receiptsigner-1 | T | A signer on the wrong curve or key type signs receipts. | Signers are P-256 only. | covered | `prove.test.ts`: "builds a signer from a PEM or a JWK, P-256 only" |
 | receiptsigner-2 | I | The signing key and the knowledge key sit in process memory, where a process compromise reads them. | Key store contracts: a KMS signer and the knowledge key as an opaque HMAC function. | open | INT-4 |
+
+### AmountSource
+
+The host's lookup of a payment amount from a reference (a record, an endpoint or a price list).
+Code asks it, never the model.
+
+| Id | STRIDE | Threat | Control | Status | Proof |
+|---|---|---|---|---|---|
+| amountsource-1 | T | A source answers a bad amount or currency (negative, fractional, too large, a string). | The answer is checked like any other amount; a bad one is refused and nothing is read back or texted. | covered | `paylink-amounts-hostile.test.ts`: "refuses every bad amount a source can answer, and writes nothing"; `paylink-amounts.test.ts`: "refuses an amountRef nobody can resolve, a bad answer, and a link without a read-back" |
+| amountsource-2 | T | A source's answer changes after it was checked, so the link is for another amount. | The answer is read once; the link is for the amount the caller confirmed. | covered | `paylink-amounts-hostile.test.ts`: "reads a source's answer once, so a getter cannot pass the check and then change the amount"; `paylink-amounts.test.ts`: "resolves a flow step's amountRef, reads it back and texts the link only after the caller confirmed" |
+| amountsource-3 | D | A source answers nothing at all and the call crashes. | No answer is no amount, refused cleanly. | covered | `paylink-amounts.test.ts`: "reads an AmountSource that answers nothing at all as no amount, not as a crash" |
+
+### Anchor
+
+A time-stamp authority, or a public log plus one, that fixes the ledger head in time. It is given
+the head and its anchor payload, never the ledger.
+
+| Id | STRIDE | Threat | Control | Status | Proof |
+|---|---|---|---|---|---|
+| anchor-1 | T | A ledger is rebuilt after it was anchored and still looks anchored. | `verifyAnchor` checks the proof against the entries, offline, and catches a rebuilt chain or a proof for an earlier head. | covered | `prove-anchor.test.ts`: "catches a chain rebuilt after it was anchored"; `anchor-hostile.test.ts`: "Y2: an adapter that answers a proof for an earlier head is caught when the anchor is checked" |
+| anchor-2 | S | A proof from one ledger, or a token for another payload, is passed off as this one's. | The token's imprint must match this head's payload; a proof from another ledger never verifies. | covered | `anchor-hostile.test.ts`: "Y3: two ledgers: an anchor from one never verifies against the other"; `prove-anchor.test.ts`: "refuses a token for another payload as imprint" |
+| anchor-3 | S | An anchor payload is reused as a receipt signature. | The payload is domain-separated, so a head signed with the receipt key never verifies as a receipt. | covered | `prove-anchor.test.ts`: "is domain-separated: a context line, then the head as canonical JSON"; `prove-anchor.test.ts`: "a head signed with the receipt key never verifies as a receipt" |
+| anchor-4 | T | A malformed proof or a hostile entry is accepted, or throws. | Anything malformed is refused without throwing. | covered | `prove-anchor.test.ts`: "refuses without an anchor adapter, on an empty ledger, and on a malformed proof"; `anchor-hostile.test.ts`: "Y5: a proof with another kind, an extra field, or a Rekor kind without a log in the trust is refused" |
+
+### AttemptCounters
+
+Failed attempts across calls, per subject and per calling number, shared by every engine of a
+workspace, for lockouts that outlive a call.
+
+| Id | STRIDE | Threat | Control | Status | Proof |
+|---|---|---|---|---|---|
+| attemptcounters-1 | S | A durable store loses or reorders failures, so a guesser gets more tries than the lock allows. | `attemptCountersContract`, which the memory store passes and which catches a store whose removal is wrong or a no-op. | covered | `verify-counters.test.ts`: "MemoryAttemptCounters passes the AttemptCounters contract"; `verify-counters-hostile.test.ts`: "contract suite vs a store whose removeFailure is a no-op"; `verify-counters-hostile.test.ts`: "contract suite vs a store whose removeFailure removes the OLDEST failure whatever `at`" |
+| attemptcounters-2 | S | A caller guesses across calls and engines. | Waits after each failure and a hard lock after 10 in 24 hours; two attempts racing on two engines judge only one. | covered | `verify-counters.test.ts`: "refuses during the wait without judging or using the call's attempt, then locks hard after 10 failures in 24 hours"; `verify-counters.test.ts`: "lets one of two attempts racing on two engines be judged, and refuses the other as locked" |
+| attemptcounters-3 | I | A lock tells which accounts exist, or the store keeps a phone number. | An unknown subject is counted by its key too; a calling number is kept only as a keyed hash. | covered | `verify-counters.test.ts`: "counts an unknown subject by its key too, so a lock never tells which accounts exist"; `verify-counters.test.ts`: "keys a subject and a calling number apart, and never keeps the number" |
+| attemptcounters-4 | E | A store missing a method, or one that throws, opens the lock. | The adapter's shape is checked when the engine is built, and a failing removal fails closed. | covered | `verify-counters-hostile.test.ts`: "each method missing, or a non-function value, is refused at construction"; `verify-counters-hostile.test.ts`: "removeFailure throws: the pass is already on the call, submit rejects, the failure stays (fail closed)" |
+
+### CallbackDialer
+
+Places a callback to the number on file as a new outbound call; the person confirms with keys.
+
+| Id | STRIDE | Threat | Control | Status | Proof |
+|---|---|---|---|---|---|
+| callbackdialer-1 | S | The caller steers the callback to a number they hold. | The engine dials the number on file, read from the store when it dials, never the calling number. | covered | `verify-callback-attack.test.ts`: "the caller cannot steer the number: calling number is never dialed"; `verify-callback-attack.test.ts`: "dials the number on file in the store when it dials, not the copy taken when verification began" |
+| callbackdialer-2 | S | Voicemail, a replayed outcome or a forged reference passes the callback. | Only keys confirm; unknown, repeated and late outcomes are ignored, and a reference passes only its own callback. | covered | `verify-callback-attack.test.ts`: "voicemail-shaped outcomes never pass; replays and late outcomes are ignored"; `verify-callback-attack.test.ts`: "a ref from one callback cannot pass another call's callback" |
+| callbackdialer-3 | D | Retries or concurrent requests ring the line many times. | One callback per call, a retried dial keeps its idempotency key, and a daily limit per subject. | covered | `verify-callback-attack.test.ts`: "two concurrent requests on one call: one ring, counted once, and both resolve"; `verify-callback.test.ts`: "dials again with the same key after a dialer that placed the call and failed to answer: one ring"; `verify-callback.test.ts`: "locks after a failed callback, and holds a daily limit per subject" |
+| callbackdialer-4 | I | A dialer error tells the caller whether a number is on file. | A telephony error answers as a refusal does. | covered | `verify-callback-attack.test.ts`: "a telephony error answers as a refusal does, so the result never says whether a number is on file" |
+
+### CodeStore
+
+Send limits for texted codes, per subject and per calling number, shared by every engine of a
+workspace. The codes themselves live in the call record.
+
+| Id | STRIDE | Threat | Control | Status | Proof |
+|---|---|---|---|---|---|
+| codestore-1 | D | A durable store ignores its limits, so codes are sent for SMS pumping. | `codeStoreContract`, which the memory store passes and which catches a store that ignores its limits. | covered | `verify-text-code.test.ts`: "MemoryCodeStore passes the CodeStore contract"; `verify-text-code.test.ts`: "fails a store that ignores its limits" |
+| codestore-2 | D | Repeated calls send many codes to one subject or from one calling number. | 5 sends per subject per 24 hours, 60 seconds apart, and a limit per calling number across subjects. | covered | `verify-text-code.test.ts`: "allows 5 codes per subject per 24 hours, across calls"; `verify-text-code.test.ts`: "waits 60 seconds between sends, and a refused send keeps the live code"; `verify-text-code.test.ts`: "limits sends per calling number, across subjects" |
+| codestore-3 | I | A refused send tells the caller they hit a limit. | Refused and sent sends look the same to the caller, with the same store calls before the reply. | covered | `verify-text-code.test.ts`: "refused and sent sends look the same to the caller"; `verify-text-code-hostile.test.ts`: "C1 with a calling number, a send refused by the subject's limit makes the same store calls before the reply as a sent one" |
+
+### ConsentStore
+
+The host's consent records, so a consent given on a call can be revoked after the call is gone.
+
+| Id | STRIDE | Threat | Control | Status | Proof |
+|---|---|---|---|---|---|
+| consentstore-1 | R | A revocation is lost, or a retry moves its time or channel. | Revoked once, the first revocation wins and the ledger has one entry; revocation works after the call record is gone. | covered | `consent-hostile.test.ts`: "V2 a consent revoked twice by different channels keeps the first, and the ledger has one entry"; `engine.test.ts`: "revokes from the store alone once the host removed the call record, and passes a session store failure through" |
+| consentstore-2 | E | One workspace revokes or reads another's consent on a shared store. | Consents are keyed by workspace; another workspace's id is unknown. | covered | `consent-hostile.test.ts`: "V3 another workspace's consent id on a shared store is unknown here"; `prove.test.ts`: "keeps workspace and consent apart, whatever slashes they hold" |
+| consentstore-3 | T | A store that is down records a consent that was never kept, or two processes record it twice. | A consent whose store is down settles as not recorded, which is no consent; two resumes record one. | covered | `engine.test.ts`: "ends a call whose consent store is down: the consent settles as not recorded, which is no consent"; `engine.test.ts`: "records one consent when two processes resume it at once" |
+
+### DuressNotifier
+
+Told when a caller enters a duress PIN, so the business can alert someone away from the call.
+
+| Id | STRIDE | Threat | Control | Status | Proof |
+|---|---|---|---|---|---|
+| duressnotifier-1 | I | The caller, or someone listening, can tell the alarm went off. | The caller gets the same answer, level, events and receipt as for the normal PIN, and the reply never waits for the notifier. | covered | `verify-duress.test.ts`: "gives the same answer, level, grant, events and receipt as the normal PIN"; `verify-duress-hostile.test.ts`: "answers the caller before the notifier runs at all" |
+| duressnotifier-2 | D | A failing or slow notifier, or a failed ledger write, loses the alert. | The alert is owed in the same write as the entry and retried until the notifier answers, with the same alert id. | covered | `verify-duress.test.ts`: "keeps an alert owed until the notifier answers, and retries it on the next write, on flushLedger and on the host's sweep"; `verify-duress-hostile.test.ts`: "1. ledger append fails on the factor write: alert still goes out" |
+| duressnotifier-3 | I | The alert carries the PIN. | The alert names the workspace, subject, call and time, never the PIN. | covered | `verify-duress.test.ts`: "is told of every duress entry, after the write and off the response path, with an alert id, the workspace, the subject, the call and the time, never the PIN" |
+
+### FieldCipher
+
+Encrypts a sensitive intake value with the host's key before the record is stored. The engine
+never decrypts.
+
+| Id | STRIDE | Threat | Control | Status | Proof |
+|---|---|---|---|---|---|
+| fieldcipher-1 | I | A sensitive value reaches the ledger, the receipt, the stored record or the session in the clear. | The value is sealed before it is stored, and the plaintext is kept nowhere else, including an abandoned draft. | covered | `field-cipher-hostile.test.ts`: "G3: the plaintext is in no ledger entry, receipt, stored record or session after filing"; `field-cipher-hostile.test.ts`: "G4: an open draft dropped at endCall leaves no plaintext in the session store" |
+| fieldcipher-2 | I | A cipher that fails or answers garbage gets the value stored in the clear, or in an error. | Such an answer is refused, nothing is stored, and the plaintext is in no error; an engine without the cipher refuses to file. | covered | `field-cipher-hostile.test.ts`: "G2: a cipher answering nothing usable is refused, nothing is stored, and the plaintext is in no error"; `field-cipher-hostile.test.ts`: "G5: an engine without the cipher on the same stores refuses to file, and the engine with it files the same record" |
+| fieldcipher-3 | T | A ciphertext is moved to another record or field. | The cipher is given the workspace, record and field as context, to bind as additional authenticated data. | covered | `field-cipher-hostile.test.ts`: "G6: the context the cipher is given names this workspace, record and field, and cannot change the record" |
+
+### Notifier
+
+Tells the business that someone is locked out, best effort; the ledger stays the record.
+
+| Id | STRIDE | Threat | Control | Status | Proof |
+|---|---|---|---|---|---|
+| notifier-1 | D | A notifier that throws, rejects or hangs blocks the call or the ledger. | Notices go out after the ledger entry, and a failing notifier never blocks either. | covered | `verify-lockout-alerts.test.ts`: "go out only after the ledger entry is written"; `verify-lockout-alerts.test.ts`: "never block the call or the ledger when the notifier throws, rejects or hangs, or the bookkeeping fails" |
+| notifier-2 | I | A notice carries an account number, a phone number or what the caller keyed. | A notice names the counter and its keyed hash, never a value. | covered | `verify-lockout-alerts.test.ts`: "tell the business once per lock, however many attempts and engines it refuses, with the counter and never a value"; `verify-lockout-alerts.test.ts`: "name the calling number by its keyed hash, and tell a wait after a failure as well as a hard lock" |
+| notifier-3 | D | An attacker runs up waits so a hard lock's notice is lost in the noise. | Hard locks' notices are kept apart from waits'. | covered | `verify-lockout-alerts.test.ts`: "keep the hard locks' notices apart from the waits', so waits an attacker runs up never hide a hard lock (review)" |
 
 ## Left to the host
 
