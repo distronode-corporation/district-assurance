@@ -21,9 +21,9 @@ import type { PaylinkRequestStep, PaylinkSettings } from "../src/pay/paylink.ts"
 import { INSTANT_PAYMENT_METHODS, PAYMENT_MODES, type AmountSourceKind } from "../src/pay/payment.ts";
 import type { ConsentWording } from "../src/prove/consent.ts";
 import type { TraceConsentStep, TraceReceiptStep, TraceSettings } from "../src/prove/trace.ts";
-import type { BadgeVerifyStep } from "../src/verify/badge.ts";
+import type { BadgeVerifyStep, BadgeVoiceSettings } from "../src/verify/badge.ts";
 import type { LockoutSettings } from "../src/verify/counters.ts";
-import type { AccessibilitySettings, BadgeSettings, PinMode, PinSettings } from "../src/verify/factors.ts";
+import type { AccessibilitySettings, PinMode, PinSettings } from "../src/verify/factors.ts";
 import { testConfig } from "./helpers.ts";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -160,7 +160,8 @@ const OBJECTS: ReadonlyArray<readonly [pointer: string, keys: readonly string[]]
   ["#/$defs/levelRule", keysOf<LevelRule>()(["level", "anyOf"])],
   ["#/$defs/moduleConfig", keysOf<ModuleConfig>()(["enabled", "settings"])],
   ["#/$defs/traceModule", keysOf<ModuleConfig>()(["enabled", "settings"])],
-  ["#/$defs/badgeSettings", keysOf<BadgeSettings>()(["factors", "grantTtlSeconds", "pin", "lockout", "accessibility"])],
+  // BadgeVoiceSettings is BadgeSettings with the synthetic voice thresholds (VER-14), so it names every key.
+  ["#/$defs/badgeSettings", keysOf<BadgeVoiceSettings>()(["factors", "grantTtlSeconds", "pin", "lockout", "syntheticVoice", "accessibility"])],
   ["#/$defs/accessibilitySettings", keysOf<AccessibilitySettings>()(["spokenKeypadFields", "keypadIdleSeconds", "maxKeypadIdleSeconds"])],
   ["#/$defs/lockoutSettings", keysOf<LockoutSettings>()(["backoffSeconds", "lockAfterFailures", "windowHours", "flowStartsPerHour"])],
   ["#/$defs/pinSettings", keysOf<PinSettings>()(["mode", "minDigits", "maxDigits", "maxAttemptsPerCall", "duress"])],
@@ -604,6 +605,12 @@ const EDGES: ReadonlyArray<readonly [name: string, accepted: boolean, patch: Pat
   ["an empty form version", true, (c) => (c.modules.dossier.settings.forms[0].version = "")],
   ["an empty wording version", false, (c) => (c.modules.trace.settings.wordings[0].version = "")],
   ["a flow summary that is not a string", false, (c) => (c.flows.deposit.summary = 1)],
+  ["synthetic voice thresholds at 0 and 1", true, (c) => (c.modules.badge.settings.syntheticVoice = { acme: { spokenKnowledgeAbove: 0, levelOneAbove: 1 } })],
+  ["a synthetic voice threshold above 1", false, (c) => (c.modules.badge.settings.syntheticVoice = { acme: { spokenKnowledgeAbove: 0.5, levelOneAbove: 1.01 } })],
+  ["a synthetic voice threshold below 0", false, (c) => (c.modules.badge.settings.syntheticVoice = { acme: { spokenKnowledgeAbove: -0.01, levelOneAbove: 0.5 } })],
+  ["a synthetic voice vendor of 32 characters", true, (c) => (c.modules.badge.settings.syntheticVoice = { [`v${"_".repeat(31)}`]: { spokenKnowledgeAbove: 0.5, levelOneAbove: 0.9 } })],
+  ["a synthetic voice vendor of 33 characters", false, (c) => (c.modules.badge.settings.syntheticVoice = { [`v${"_".repeat(32)}`]: { spokenKnowledgeAbove: 0.5, levelOneAbove: 0.9 } })],
+  ["a synthetic voice vendor in capitals", false, (c) => (c.modules.badge.settings.syntheticVoice = { Acme: { spokenKnowledgeAbove: 0.5, levelOneAbove: 0.9 } })],
   ["a Gate target id of 64 characters", true, (c) => {
     gate(c, (s) => (s.targets[0].id = `f${"-".repeat(63)}`));
     c.flows.entry.steps[1].target = c.modules.gate.settings.targets[0].id;

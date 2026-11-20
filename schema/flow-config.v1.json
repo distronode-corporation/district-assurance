@@ -173,7 +173,21 @@
         "grantTtlSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
         "pin": true,
         "lockout": { "$ref": "#/$defs/lockoutSettings" },
-        "accessibility": { "$ref": "#/$defs/accessibilitySettings" }
+        "accessibility": { "$ref": "#/$defs/accessibilitySettings" },
+        "syntheticVoice": {
+          "description": "Speech vendor name to its two thresholds (VER-14). levelOneAbove is not below spokenKnowledgeAbove.",
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z][a-z0-9_-]{0,31}$" },
+          "additionalProperties": {
+            "type": "object",
+            "required": ["spokenKnowledgeAbove", "levelOneAbove"],
+            "additionalProperties": false,
+            "properties": {
+              "spokenKnowledgeAbove": { "type": "number", "minimum": 0, "maximum": 1 },
+              "levelOneAbove": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        }
       },
       "if": { "properties": { "factors": { "contains": { "const": "pin" } } } },
       "then": {
