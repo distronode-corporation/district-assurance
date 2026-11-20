@@ -127,7 +127,7 @@ export function createServe(options: ServeOptions): Serve {
 
 /**
  * Whether the module at `moduleUrl` is the program node was started with (`entry`, its argv[1]).
- * Not `import.meta.main`: on Node.js 24.2 (the oldest the package allows) it is false for a `.ts`
+ * Not `import.meta.main`: on Node.js 24.2 (the floor before 24.19) it is false for a `.ts`
  * entry, so `npm run serve` exited at once without listening. Both paths are resolved through
  * symlinks; importing this module from anywhere else does not start the server.
  */

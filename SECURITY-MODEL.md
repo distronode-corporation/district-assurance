@@ -49,8 +49,8 @@ with photo ID links, payment links and texted codes.
 Trying account numbers to learn which exist, or learning which factor failed. **Controls:** all
 keypad fields are judged together and give one answer; an unknown account, a wrong value and a
 non-keypad entry give the same result and the same ledger detail (tested), and the same holds for
-the PIN: an unknown subject, a subject with no PIN and a malformed entry do the same keyed-hash work
-and answer the same (tested), and for spoken answers: an unknown subject, a wrong answer and an
+the PIN: an unknown subject, a subject with no PIN and a malformed entry do the same keyed-hash and
+Argon2id work and answer the same (tested), and for spoken answers: an unknown subject, a wrong answer and an
 unusable transcript give the same result and the same ledger detail (tested); every field is
 compared even after a mismatch; nothing reads back a value on file; links go out only after a
 match, so a text never confirms an account. Failures are counted across calls per subject key, for
@@ -162,11 +162,27 @@ the hour is refused, which says only that the account was busy, never its detail
 early is the host's (`AttemptCounters.reset` on the `flow.start` counter); a pass never lifts a
 start limit, since it forgets only the failures of its own factor kind (`forgetPass`, tested).
 
+### Stolen PIN records
+
+Someone who copies the record store, with or without the knowledge key, trying to recover PINs.
+**Controls (ADR-29):** a PIN or duress PIN on file is Argon2id (19 MiB, 2 passes, 1 lane, a random
+16-byte salt) over `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`. Without the key a
+record says nothing, as before (the key can stay in a key store, behind an HMAC function). With the
+key too, every guess costs an Argon2id run, per subject, since each record has its own salt
+(tested). The cost travels in the record and is read strictly: a cost below today's (a downgrade), a
+cost beyond the ceiling, or any changed field never matches, so a record weakened in the store fails
+closed: even the right PIN fails until the business resets it (tested). Records of the earlier format (the bare keyed HMAC) still
+verify and are replaced on the next match (tested); a subject who never calls again keeps one, which
+the business can only remove by a reset. **Left open:** stretching cannot make a short PIN strong:
+with the store and the key, a 4-digit PIN is 10,000 Argon2id runs, minutes on one core. The
+knowledge key's custody (a key store, SPEC.md section 5) and the lockouts on the line remain the main
+controls, and a longer PIN where the risk is high.
+
 ### Coercion (duress PIN)
 
 An owner made to call under pressure, with the person forcing them listening beside them. **Controls
 (VER-12, off unless Badge's `pin.duress` is set):** the business enrols a second, duress PIN for the
-subject with a host call, never a caller one, stored as its own keyed digest and refused when it
+subject with a host call, never a caller one, stored as its own Argon2id record and refused when it
 equals the PIN, the account number or any keypad knowledge (tested). Every PIN entry is compared
 with both digests, whether or not a duress PIN is on file, so the work, the time and the answer are
 the same (tested). A duress entry gets the same answer, level, grant, events and receipt as the PIN
@@ -842,8 +858,8 @@ as failed, the draft and its values are dropped, `record.filing_failed` names on
 a reason code, and the cipher's own error, which may quote the value, is never passed on
 (tested). Left open: while a draft is open or being filed, its sensitive values sit in the clear
 in the call record, so a durable `SessionStore` holds them until the record is filed or
-abandoned, or the call ends, which drops an open draft (tested). PINs on file are HMACs bound to
-their subject, or stay in the host's own PIN store (`verifier` mode). A delivered record goes
+abandoned, or the call ends, which drops an open draft (tested). PINs on file are Argon2id records
+of an HMAC bound to their subject (ADR-29), or stay in the host's own PIN store (`verifier` mode). A delivered record goes
 only to a destination in the host's configuration, over `https:` (or `http:` to a loopback host)
 and never to a URL with credentials in it; its `delivery.attempted` ledger entries carry the
 record id, the destination's id, the attempt, the outcome and the status, never a field value,
@@ -1028,7 +1044,7 @@ Who is calling, in levels (`src/verify/`).
 | badge-2 | S | A caller guesses a PIN across many calls (a 4-digit PIN with 3 attempts per call falls within about 3,300 calls). | Durable failure counters per subject and per calling number, shared by every engine: waits after each failure and a hard lock after 10 failures in 24 hours, checked before a factor is judged. | covered | `verify-counters.test.ts`: "refuses during the wait without judging or using the call's attempt, then locks hard after 10 failures in 24 hours"; `pin.test.ts`: "carries a PIN lock across two calls and two engines, and lifts it only when the window passes or the business resets it"; `verify-counters.test.ts`: "counts an unknown subject by its key too, so a lock never tells which accounts exist" |
 | badge-3 | S | A crash, a failing PIN verifier or a second process gives a caller a free try. | Each attempt is counted in its own write before it is judged. | covered | `pin.test.ts`: "counts the attempt before asking, so a verifier that fails still uses it"; `session-store.test.ts`: "gives concurrent attempts on one call no more than the limit, and judges only one of them at once" |
 | badge-4 | I | A caller learns which accounts exist, or which field was wrong. | All keypad fields are judged together; an unknown account, a wrong value and a non-keypad entry answer the same, and so do the PIN's cases. | covered | `engine.test.ts`: "gives the same answer for an unknown account, a wrong value and a non-keypad entry"; `modules.test.ts`: "never passes a non-keypad entry, even one whose digest is on file"; `pin.test.ts`: "counts malformed, wrong and unknown-subject entries the same way, and locks after the limit" |
-| badge-5 | I | Stored reference values or PIN digests are reversed, or two equal PINs show as equal digests. | Keyed HMACs per workspace key, field and value; PIN digests are bound to their subject. | covered | `modules.test.ts`: "derives stable keyed digests that differ per key, field and value"; `pin.test.ts`: "binds the digest to the subject" |
+| badge-5 | I | Stored reference values or PIN digests are reversed, or two equal PINs show as equal digests. | Keyed HMACs per workspace key, field and value; PIN records are Argon2id over the keyed HMAC, bound to their subject and salted, so a stolen store and key still cost an Argon2id run per guess (ADR-29). | covered | `modules.test.ts`: "derives stable keyed digests that differ per key, field and value"; `pin.test.ts`: "binds the digest to the subject" |
 | badge-6 | I | A factor plug-in reads the knowledge key. | Plug-ins get `hmac(data)`, never the key, and their attempts are limited. | covered | `pin.test.ts`: "judges a host's own factor with the keyed hash, never the key, and limits its attempts" |
 | badge-7 | S | An attacker who took over the number on file (SIM swap, port-out) passes as the caller. | A carrier answer is needed, and a recent SIM change or port inside the window discredits a texted code; a carrier mismatch is a failed factor. | covered | `policy.test.ts`: "needs a carrier answer by default"; `policy.test.ts`: "refuses a recent SIM swap or port, inside the window"; `policy.test.ts`: "does not count a texted code the carrier signals discredit"; `engine.test.ts`: "records a carrier identity mismatch as a failed factor" |
 | badge-8 | E | A result judged for one subject (a factor, a carrier report, a photo ID outcome) is applied after verification restarted for another. | Results are bound to the subject they were judged for, and late outcomes are ignored. | covered | `pin.test.ts`: "never applies a factor judged for a verification that restarted for another subject"; `flows.test.ts`: "ignores a photo ID outcome that arrives after the flow moved on"; `engine.test.ts`: "ignores a photo ID outcome for a link sent before the taint" |
@@ -1037,6 +1053,7 @@ Who is calling, in levels (`src/verify/`).
 | badge-11 | S | A weakly verified caller chooses or resets the owner's PIN on the line. | `enrolPin` needs level 2 or above on the same call and a subject with no PIN on file, refuses weak PINs, and counts each try; only the business resets a PIN (`resetPin`). | covered | `pin.test.ts`: "needs a verification at level 2 or above on this call, on an open call"; `pin.test.ts`: "refuses weak, mismatched and malformed PINs, counting each try, and locks after the PIN's limit"; `pin.test.ts`: "stores the digest submitPin compares, writes pin.enrolled without the digits, and refuses a second PIN" |
 | badge-12 | S | A spoken answer is misheard or injected into speech-to-text. | Spoken answers are normalised by code, exactly or not at all, have their own attempt limit, count alone only at level 1 and never unlock texts. | covered | `verify-spoken.test.ts`: "counts an unusable or wrong answer as an attempt, then stops judging, even the right answer"; `verify-spoken.test.ts`: "can use spoken_knowledge alone at level 1, and only with a factor that is not knowledge above it"; `verify-spoken.test.ts`: "does not unlock texts to the number on file" |
 | badge-13 | I | Keypad digits leak from the host's buffer into a log or a string. | `KeypadCollector` shows no digit, nor how many, through `toString`, JSON or `util.inspect`, and wipes its buffer before its callback runs. | covered | `keypad.test.ts`: "shows no digit, nor how many, through toString, JSON or inspect"; `keypad.test.ts`: "wipes the buffer before the callback runs, even when it throws" |
+| badge-14 | T | A PIN record on file is weakened (its Argon2id cost lowered or set beyond reason) or changed, or an earlier keyed-HMAC record stays weak for good. | Records are read strictly: a cost below today's or above the ceiling, another algorithm, version or spelling never matches, and is never run above the ceiling; a changed parameter, salt or tag gives another tag. An earlier record still matches, and is replaced by an Argon2id record on the next match, only while it is still on file; every check does one Argon2id run and compares in constant time. | covered | `pin-argon2id.test.ts`: "refuses a correctly computed record below today's cost, or above the ceiling, and never upgrades it"; `pin-argon2id.test.ts`: "refuses a record whose parameters, salt, tag or spelling were changed"; `pin-argon2id.test.ts`: "verifies a record of the earlier format, then replaces it with an Argon2id record on the match"; `pin-hash-timing.test.ts`: "runs Argon2id once at today's cost for a missing, refused or earlier record, and once at the record's own cost otherwise" |
 
 ### Dossier
 
@@ -1421,7 +1438,8 @@ Tells the business that someone is locked out, best effort; the ledger stays the
   has none, atomically, and whose `putPinDigest(null)` also removes the duress digest in the same
   step; the same care for `enrolDuressPin`, `removeDuressPin` and `putDuressDigest`, which stores
   only the duress digest it is given, replaces one on file (only the business sets it), and only
-  while the PIN digest on file is the one given, atomically.
+  while the PIN digest on file is the one given, atomically; and an `upgradePinDigest` that replaces
+  a digest only while it is still the one given, atomically, changing nothing else.
 - A `DuressNotifier` that alerts someone the business named, away from the call, and never
   through anything the caller or the person beside them can see; that never blocks (it queues the
   alert and returns); that drops repeats by `alertId`; and a sweep calling `sweepAlerts` (with a

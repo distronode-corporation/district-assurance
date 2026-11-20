@@ -150,11 +150,15 @@ describe("the RecordStore contract", () => {
       async putDuressDigest() {
         return false;
       }
+      async upgradePinDigest() {
+        return false;
+      }
     }
     assert.deepEqual(await failing(recordStoreContract((subjects) => new Joined(subjects))), [
       "keeps workspaces apart, and never lets two workspace and id pairs share a key",
       "keeps a record unconfirmed until confirmIntakeRecord marks it, idempotently, and never marks an id it does not hold",
       "deletes a subject's PIN and duress digests, keeps the rest, and deleting a missing one is harmless",
+      "upgrades a PIN or duress digest only from the value on file, and changes nothing else",
     ]);
   });
 

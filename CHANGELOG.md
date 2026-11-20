@@ -45,7 +45,7 @@ All notable changes to this project are documented here. The format follows
 - The demo runs `owner-command` (a PIN only, on two engines sharing one store), `deposit` and
   `deposit-connect` (one per payment mode), and `entry`, which opens a door through the relay.
 - The reference server's Connect webhook route.
-- ROADMAP.md and ISSUES.md for the modular design, owner-command first; ADR-13 to ADR-28.
+- ROADMAP.md and ISSUES.md for the modular design, owner-command first; ADR-13 to ADR-29.
 - The callback factor (VER-9): a built-in `callback` kind; `requestCallback` ends the call and,
   after a keypad or PIN match, has a new `CallbackDialer` adapter ring the number on file on a new
   callback call, where `applyCallbackOutcome` records it only for a keyed confirmation; possession
@@ -358,6 +358,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Breaking for hosts on Node.js older than 24.19: `engines` is `>=24.19` (was `>=24.2`), the first
+  Node 24 where `crypto.argon2` is stable (it arrived in 24.7.0 as a release candidate), which PIN
+  records use (ADR-4, ADR-29). CI runs 24.19 and the latest 24.
+- Breaking for record stores: `RecordStore` has `upgradePinDigest(workspaceId, subjectKey, field,
+  from, to)`, which replaces `pinDigest` or `duressDigest` only while it is still `from`, atomically
+  (in `MemoryRecordStore`, `SqliteRecordStore` and `recordStoreContract`).
+- Host-facing: `pinDigest` and `duressDigest` return an Argon2id record with a fresh salt, so two
+  calls for the same PIN give different strings that both verify; compare records by checking, never
+  by equality.
 - Host-facing: a call record is removed through `Engine.removeCall(callId)`, never in the session
   store directly. It is refused while the call has not ended and while its outbox holds ledger
   entries not yet appended (it flushes them first; `flushPending` keeps listing the call), while it
@@ -530,6 +539,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- PINs and duress PINs on file are Argon2id over the keyed HMAC (ADR-29):
+  `$pin1$argon2id$v=19$m=19456,t=2,p=1$<salt>$<tag>`, with a random salt, the cost in the record,
+  one Argon2id run per check whatever is on file, and a constant-time compare. A record below
+  today's cost or above the ceiling, or changed in any field, never matches. Records of the earlier
+  format (the bare keyed HMAC) still verify and are replaced by an Argon2id record on the next match.
+  Lockouts are unchanged.
 - A taint now voids the keypad or PIN match made before it: `startPhotoId`, `checkCarrier` and a
   payment link refuse until a fresh verification matches (found by the adversarial suite).
 - `sensitive_closed` (`closeSensitive`) is refused while a payment is open (`invalid_transition`):
