@@ -258,9 +258,10 @@ async function textCode(run: Run): Promise<void> {
     for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
     return messages.sent.length > before ? "code texted to the number on file" : "no text came";
   });
-  const texted = messages.sent.length > before ? /\d{6}/.exec(messages.sent.at(-1)!.body)![0] : "000000";
   const right = run.script.textCode === "right";
   await act(run, `keys the texted code (${run.script.textCode})`, async () => {
+    // Read inside the act: a text without a code is printed as a refusal, never a crash.
+    const texted = messages.sent.length > before ? /\d{6}/.exec(messages.sent.at(-1)!.body)![0] : "000000";
     const code = right ? texted : `${(Number(texted[0]) + 1) % 10}${texted.slice(1)}`;
     const result = await engine.checkTextCode(run.callId, code);
     // One try per code here, so never the fifth that spends it.
