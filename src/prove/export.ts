@@ -93,7 +93,7 @@ export const EXPORT_WALK_PAGE = 1000;
 
 /**
  * Whether the chain continues from `point` to `head` as the ledger holds it, read in pages of at
- * most EXPORT_WALK_PAGE entries. A page short of the head is signed only when this holds, so a
+ * most EXPORT_WALK_PAGE entries each (a read may bring fewer). A page short of the head is signed only when this holds, so a
  * page that verifies on its own but is not the start of the signed head's chain (an entry swapped
  * for another chain's) is never vouched for. Answers the seq where the walk failed, or null.
  */
@@ -104,8 +104,9 @@ async function walkToHead(ledger: AuditLedger, point: ChainPoint, head: ChainPoi
     const page = (await ledger.list(at.seq + 1, count)).filter((e) => e.seq <= at.seq + count);
     const check = verifyChain(page, at);
     if (!check.ok) return check.seq;
-    // A page that came back short holds no further entry: the chain stops before the head.
-    if (check.head.seq !== at.seq + count) return check.head.seq + 1;
+    // A ledger may hand back fewer entries than asked ("at most limit"): the walk goes on from
+    // where the page ended. A read that brings no entry at all means the chain stops before the head.
+    if (check.head.seq === at.seq) return at.seq + 1;
     at = check.head;
   }
   return at.hash === head.hash ? null : head.seq;

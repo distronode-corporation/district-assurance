@@ -216,6 +216,24 @@ describe("synthetic voice: the ledger and the receipt", () => {
   });
 
 
+  it("never lists a method the band stopped counting on the receipt, whether the score came before or after the finish", async () => {
+    // Level 1 takes a spoken answer alone; the call passes keypad, spoken answer and carrier match.
+    const run = async (scoreFirst: boolean) => {
+      const t = setup({ config: voiceConfig(spokenPolicy) });
+      const callId = await levelTwoCall(t);
+      await recordPassed(t, callId, ["spoken_knowledge"]);
+      if (scoreFirst) await t.engine.reportSyntheticVoice(callId, { score: 0.9, vendor: "acme" });
+      await t.engine.finishVerification(callId);
+      if (!scoreFirst) await t.engine.reportSyntheticVoice(callId, { score: 0.9, vendor: "acme" });
+      return (await t.engine.endCall(callId))!.body.verification as { level: number; methods: string[] };
+    };
+    const before = await run(true);
+    const after = await run(false);
+    assert.equal(after.level, 1);
+    assert.ok(!after.methods.includes("spoken_knowledge"), `the band stopped spoken_knowledge counting: ${after.methods.join(", ")}`);
+    assert.deepEqual(after, before, "the same receipt either way");
+  });
+
   it("records the vendor and the band, never the score, and the receipt carries neither", async () => {
     const t = setup({ config: voiceConfig() });
     const callId = await verifiedCall(t);

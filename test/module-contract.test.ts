@@ -243,6 +243,7 @@ describe("the module contract catches", () => {
     ["a receiptPart that is not JSON", broken({ receiptPart: () => ({ x: undefined }) as unknown as { [key: string]: JsonValue } }), /receiptPart must return JSON/],
     ["a validateFlow that throws", broken({ validateFlow: () => { throw new Error("boom"); } }), /validateFlow threw: boom/],
     ["a validateFlow that is not a list", broken({ validateFlow: () => "fine" as unknown as string[] }), /validateFlow must return a list of strings/],
+    ["a validateFlow that adds an adapter", broken({ validateFlow: (_steps, ctx) => { (ctx.adapters as Set<string>).add("records"); return []; } }), /validateFlow must not change the adapters it is given/],
     ["a validateFlow that changes its steps", broken({ validateFlow: (steps) => { (steps as FlowStep[]).pop(); return []; } }), /validateFlow threw/],
     ["a checkAdapters that throws", broken({ checkAdapters: () => { throw new Error("boom"); } }), /checkAdapters threw: boom/],
     ["a checkAdapters with a hole for a sentence", broken({ checkAdapters: () => holed() }), /checkAdapters must return a list of strings/],

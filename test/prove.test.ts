@@ -660,6 +660,14 @@ describe("ledger export", () => {
     assert.equal(asked.every(([, limit]) => limit !== undefined && limit <= EXPORT_WALK_PAGE), true, "in bounded pages, never the whole ledger at once");
   });
 
+  it("walks on past a read that hands back fewer entries than asked, as a ledger may", async () => {
+    const inner = await ledgerOf(201);
+    // At most 100 per read: "at most limit" is all AuditLedger.list promises.
+    const capped: AuditLedger = { append: (i) => inner.append(i), head: () => inner.head(), list: async (f, l) => inner.list(f, Math.min(l ?? 100, 100)) };
+    const check = verifyLedgerExport(await run(capped, { fromSeq: 1, limit: 1 }), keys);
+    assert.equal(check.ok && check.entries.length, 1);
+  });
+
   it("walks to the head in pages of at most EXPORT_WALK_PAGE entries", async () => {
     const inner = await ledgerOf(EXPORT_WALK_PAGE + 5);
     const asked: Array<[number | undefined, number | undefined]> = [];
@@ -675,7 +683,7 @@ describe("ledger export", () => {
     // The walk is the third read: the head check, the run's page, then the walk.
     const onWalk = (edit: (es: AuditEntry[]) => AuditEntry[]) => {
       let calls = 0;
-      return new EditedLedger(ledger, { list: (es) => (++calls === 3 ? edit(es) : es) });
+      return new EditedLedger(ledger, { list: (es) => (++calls >= 3 ? edit(es) : es) });
     };
     await assert.rejects(run(onWalk((es) => es.filter((e) => e.seq !== 3)), { fromSeq: 1, limit: 1 }), refused, "a walk that stops before the head");
     // Seq 3 rewritten and chained on seq 2: the walk verifies, and ends on a hash that is not the head.

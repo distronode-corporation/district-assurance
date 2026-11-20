@@ -1111,7 +1111,8 @@ export async function reportSyntheticVoice(rt: EngineRuntime, callId: string, in
     const ceiling = heldLevel(reached, highest);
     draft.apply({ type: "synthetic_voice_scored", band, ceiling, scopes: scopesForLevel(rt.policy, ceiling) });
     // Held below what the last verification's methods reach: the receipt shows only those that support the level it shows.
-    if (draft.record.state.level < s.lastLevel) s.receiptMethods = supportingMethods(rt.policy, s.lastMethods, draft.record.state.level);
+    // Only the methods the band still counts, as a verification finished under the band would list.
+    if (draft.record.state.level < s.lastLevel) s.receiptMethods = supportingMethods(rt.policy, kept, draft.record.state.level);
     draft.emit("verification.synthetic_voice", "system", { vendor, band });
   });
 }

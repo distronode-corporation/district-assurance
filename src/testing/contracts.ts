@@ -1003,7 +1003,10 @@ export function moduleContract(module: AssuranceModule, options: ModuleContractO
         // validateConfig calls both without catching, and only once the settings are valid: each
         // must answer sentences for the sample settings and steps, and change nothing.
         if (module.validateFlow !== undefined) {
-          assertSentences(mustNotThrow("validateFlow", () => module.validateFlow!(frozen(steps), goodContext())), "validateFlow");
+          const ctx = goodContext();
+          const before = [...ctx.adapters];
+          assertSentences(mustNotThrow("validateFlow", () => module.validateFlow!(frozen(steps), ctx)), "validateFlow");
+          assert.deepEqual([...ctx.adapters], before, "validateFlow must not change the adapters it is given");
         }
         if (module.checkAdapters !== undefined) {
           assertSentences(mustNotThrow("checkAdapters", () => module.checkAdapters!(frozen(settings), Object.freeze({}))), "checkAdapters");
