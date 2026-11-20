@@ -9,6 +9,7 @@ import type { JsonValue } from "../src/core/canonical.ts";
 import type { DeliveredEvent } from "../src/core/events.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
+import { FakeTimestampAuthority } from "../src/testing/fakes.ts";
 import { sessionStoreContract } from "../src/testing/index.ts";
 import { rejects, setup } from "./helpers.ts";
 
@@ -75,13 +76,22 @@ describe("hostile #97: the listener", () => {
   it("A2: a listener that re-enters the engine on every event leaves one chain, each entry once", async () => {
     const told: DeliveredEvent[] = [];
     let reentered = 0;
+    let marked: Promise<{ ok: true } | { ok: false; error: unknown }> | undefined;
     const t = setup({
       onEvent: (e) => {
         told.push(e);
-        if (e.name === "call.started" && reentered++ === 0) void t.engine.markUntrusted(e.callId!, "document");
+        // Captured with its rejection handled at once, so a failure is asserted, never left unhandled.
+        if (e.name === "call.started" && reentered++ === 0) {
+          marked = t.engine.markUntrusted(e.callId!, "document").then(
+            () => ({ ok: true as const }),
+            (error: unknown) => ({ ok: false as const, error }),
+          );
+        }
       },
     });
     const { callId } = await t.engine.startCall();
+    assert.notEqual(marked, undefined, "the listener re-entered during startCall");
+    assert.deepEqual(await marked, { ok: true }, "the re-entrant markUntrusted succeeded");
     await new Promise((resolve) => setImmediate(resolve));
     await t.engine.flushLedger(callId);
     const entries = await t.ledger.list();
@@ -105,10 +115,54 @@ describe("hostile #97: the listener", () => {
     await t.engine.endCall(callId);
     assert.equal((await t.ledger.list()).length >= 2, true);
   });
+
+  it("A10: anchorLedger returns the appended entry when a custom ledger hands back a detail that cannot be copied", async () => {
+    class UnclonableDetail extends MemoryAuditLedger {
+      override async append(input: AuditInput) {
+        const entry = await super.append(input);
+        // A function is not structured-cloneable: copying it for the listener throws a DataCloneError.
+        return input.event === "ledger.anchored" ? { ...entry, detail: { ...entry.detail, hook: (() => undefined) as never } } : entry;
+      }
+    }
+    const ledger = new UnclonableDetail();
+    const told: string[] = [];
+    const reported: Array<{ error: unknown; event: DeliveredEvent }> = [];
+    const plain = setup();
+    const t = setup({
+      adapters: { ledger, anchor: new FakeTimestampAuthority(plain.clock) },
+      onEvent: (e) => void told.push(e.name),
+      onListenerError: (error, event) => void reported.push({ error, event }),
+    });
+    const { callId } = await t.engine.startCall();
+    await t.engine.endCall(callId);
+    const entry = await t.engine.anchorLedger();
+    assert.equal(entry.event, "ledger.anchored");
+    assert.equal(entry.seq, (await ledger.list()).at(-1)!.seq);
+    assert.equal(told.includes("ledger.anchored"), false, "the listener is not handed an uncopied detail");
+    assert.equal(reported.length, 1);
+    assert.equal((reported[0]!.error as Error).name, "DataCloneError");
+    assert.equal(reported[0]!.event.name, "ledger.anchored");
+    assert.deepEqual(reported[0]!.event.detail, {}, "the hook never holds the entry's own detail");
+  });
+
+  it("A11: anchorLedger with an unclonable detail and no listener copies nothing and returns the entry", async () => {
+    class UnclonableDetail extends MemoryAuditLedger {
+      override async append(input: AuditInput) {
+        const entry = await super.append(input);
+        return input.event === "ledger.anchored" ? { ...entry, detail: { ...entry.detail, hook: (() => undefined) as never } } : entry;
+      }
+    }
+    const ledger = new UnclonableDetail();
+    const plain = setup();
+    const t = setup({ adapters: { ledger, anchor: new FakeTimestampAuthority(plain.clock) } });
+    const { callId } = await t.engine.startCall();
+    await t.engine.endCall(callId);
+    assert.equal((await t.engine.anchorLedger()).event, "ledger.anchored");
+  });
 });
 
 describe("hostile #97: races on the outbox and the pending mark", () => {
-  it("A4: a write that lands between flushPending's read and its unmark keeps the call marked", async () => {
+  it("A4: a write that lands between flushPending's read and its unmark keeps the call marked", { timeout: 10_000 }, async () => {
     const ledger = new SwitchedLedger();
     const sessions = new HeldUnmarkStore();
     const t = setup({ adapters: { ledger, sessions } });
@@ -120,11 +174,20 @@ describe("hostile #97: races on the outbox and the pending mark", () => {
     await sessions.compareAndSet("ws_test", callId, stored.version + 1, { ...record, outbox: [] } as never);
     sessions.hold = true;
     const run = t.engine.flushPending();
-    await sessions.reached.promise;
-    // The ledger is down: this write's events stay pending in the record.
-    ledger.down = true;
-    await assert.rejects(t.engine.markUntrusted(callId, "document"), /ledger down/);
-    sessions.release.resolve();
+    // Settled either way, so a flush that ends early (or throws) is reported instead of hanging on `reached`.
+    const early = run.then(
+      () => "settled" as const,
+      () => "settled" as const,
+    );
+    try {
+      assert.equal(await Promise.race([sessions.reached.promise.then(() => "reached" as const), early]), "reached", "flushPending reached its unmarking write");
+      // The ledger is down: this write's events stay pending in the record.
+      ledger.down = true;
+      await assert.rejects(t.engine.markUntrusted(callId, "document"), /ledger down/);
+    } finally {
+      // Never left holding the gate, whatever failed above.
+      sessions.release.resolve();
+    }
     await run;
     assert.deepEqual(await sessions.pendingCalls("ws_test", 10), [callId], "still listed: its outbox holds an entry");
     ledger.down = false;

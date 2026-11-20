@@ -1,5 +1,6 @@
 // Hostile-pass regressions for #109 (PRV-9, ledger anchors). Y1 failed before the listener was
-// handed a copy of the anchored entry's detail; the rest held.
+// handed a copy of the anchored entry's detail; the rest held. Y1 also checks that the listener
+// was told at all, so a listener never called cannot pass it.
 import { strict as assert } from "node:assert";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { describe, it } from "node:test";
@@ -22,14 +23,27 @@ async function anchoredEngine(onEvent?: (e: { detail: Record<string, unknown> })
 
 describe("hostile #109: anchorLedger", () => {
   it("Y1: a listener that rewrites the event cannot change the entry anchorLedger returns, nor the ledger", async () => {
-    const { engine, ledger } = await anchoredEngine((e) => {
+    const heard: Array<{ name: unknown; seq: unknown; proof: unknown }> = [];
+    const { engine, ledger, tsa } = await anchoredEngine((e) => {
+      const event = e as { name?: unknown; detail: Record<string, unknown> };
+      if (event.name === "ledger.anchored") heard.push({ name: event.name, seq: e.detail.seq, proof: structuredClone(e.detail.proof) });
       e.detail.seq = 999;
       delete e.detail.proof;
     });
+    const head = await ledger.head();
     const entry = await engine.anchorLedger();
     const stored = (await ledger.list()).at(-1)!;
+    // The listener was told, once, of this anchor, and its rewrite reached its own copy only.
+    assert.equal(heard.length, 1, "the listener received ledger.anchored");
+    assert.equal(heard[0]!.name, "ledger.anchored");
+    assert.equal(heard[0]!.seq, head.seq);
+    for (const copy of [entry, stored]) {
+      assert.equal(copy.event, "ledger.anchored");
+      assert.equal(copy.detail.seq, head.seq, "seq unchanged");
+      assert.deepEqual(copy.detail.proof, heard[0]!.proof, "proof unchanged");
+    }
     assert.deepEqual(entry, stored);
-    assert.equal(typeof (entry.detail as { proof?: unknown }).proof, "object");
+    assert.equal(verifyAnchor(stored, await ledger.list(), { tsa: tsa.chain }).ok, true);
   });
 
   it("Y2: an adapter that answers a proof for an earlier head is caught when the anchor is checked", async () => {

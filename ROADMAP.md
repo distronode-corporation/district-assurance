@@ -37,14 +37,14 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-25, says why.
 |---|---|---|
 | M0 Skeleton | The engine, real core pieces, stubs, reference server, demo, CI | done |
 | M1 Modular core | Module registry, Badge, Dossier, Paylink and Trace as modules, factor plug-ins and the PIN factor, FlowConfig with `validateConfig` and flow execution, the shared SessionStore, the ledger always on | done |
-| M2 Owner command | What the first live use (`owner-command`) still needs. VER-1 (lockouts across calls), the hard gate before it goes live in any host, is built. Also: policy and config revision in receipts, the keypad collector, key store contracts, ledger and record store contracts, PIN enrolment | VER-1, VER-8, INT-1, INT-4, PRV-5, VER-6 |
+| M2 Owner command | What the first live use (`owner-command`) still needs. VER-1 (lockouts across calls), the hard gate before it goes live in any host, is built, and so are the ledger and record store contracts (PRV-5). Also: policy and config revision in receipts, the keypad collector, key store contracts, PIN enrolment | VER-1, VER-8, INT-1, INT-4, PRV-5, VER-6 |
 | M3 Gate and payment modes | Done: the Gate module with signed access grants, the signed-webhook relay, Paylink's `connect` and `platform` modes, link life and instant methods; built, acceptance open: one-time codes, web step-up, Seam, direct vendor adapters | GAT-3 to GAT-6 |
 | M4 Badge | Texted codes, spoken answers, carrier and Stripe Identity adapters, adversarial suite | VER-2 to VER-5, VER-7 |
 | M5 Dossier | Read-backs, encrypted fields, delivery, conditional fields, documents by text | FIL-1 to FIL-5 |
 | M6 Paylink | Stripe Checkout, amounts from code, cancel and expiry, live detector; saved cards and keypad capture gated | PAY-1 to PAY-6 |
 | M7 Trace | Key rotation, stand-alone verifier, consent revocation, ledger export, more redactors | PRV-1 to PRV-4, PRV-6 |
-| M8 Reference server hardening | Carrier signatures, limits, receipt links, persistent stores, release workflow | SRV-1 to SRV-5 |
-| M9 Host integration and module authors | Transcript forwarding, event delivery, a module author kit, a JSON Schema for FlowConfig, factors added after construction | INT-2, INT-5, MOD-1 to MOD-3 |
+| M8 Reference server hardening | Carrier signatures, limits, receipt links, release workflow; built: persistent stores (SRV-4) | SRV-1 to SRV-5 |
+| M9 Host integration and module authors | A module author kit, a JSON Schema for FlowConfig, factors added after construction; built: transcript forwarding (INT-2) and event delivery (INT-5) | INT-2, INT-5, MOD-1 to MOD-3 |
 
 ## Order of work
 
@@ -114,6 +114,12 @@ seconds after a failure and a hard lock after 10 failures in 24 hours, checked b
 judged (`test/verify-counters.test.ts`); a PIN lock carries across two calls and two engines
 (`test/pin.test.ts`).
 
+Built: adapter contract suites in `district-assurance/testing` (PRV-5). `auditLedgerContract` and
+`recordStoreContract` check ordering, pages, copies, append-only entries, chain validity, one entry
+per event id (replayed and concurrent appends too) and keys kept apart across workspaces; the
+memory adapters pass them in CI (`test/contracts.test.ts`), and the suites catch broken stores
+(`test/store-contracts-hostile.test.ts`).
+
 #### **VER-8** Policy version and config revision in grants and receipts
 
 A receipt should say which policy and which revision of the workspace's FlowConfig judged the caller. `call.started` already carries the revision; the grant and the receipt do not.
@@ -150,19 +156,6 @@ Production keys live in a KMS, not in process memory.
 
 *Files:* `src/prove/receipt.ts`, `src/verify/knowledge.ts`, `src/engine.ts`  
 *Tests:* test/prove.test.ts: DER to P1363 conversion against node:crypto output  
-*Depends on:* none
-
-#### **PRV-5** Adapter contract suites in district-assurance/testing
-
-A host's durable stores must keep the same guarantees as the memory ones.
-
-*Acceptance*
-
-- `auditLedgerContract(factory)` and `recordStoreContract(factory)` exported from `district-assurance/testing`, in the style of `sessionStoreContract`: ordering, copies, append-only, chain validity, concurrency of appends.
-- The memory adapters pass them in CI.
-
-*Files:* `src/testing/contracts.ts`, `src/testing/index.ts`  
-*Tests:* test/contracts.test.ts  
 *Depends on:* none
 
 #### **VER-6** PIN enrolment and reset
@@ -567,9 +560,15 @@ Card numbers are not the only sensitive numbers read aloud.
 
 ### M8. Reference server hardening
 
-Carrier webhook signatures, limits, capability links for receipts, an optional persistent store, and the release workflow.
+Carrier webhook signatures, limits, capability links for receipts and the release workflow. The optional persistent store is built.
 
 **Proven by:** Server tests over a real socket; vendor test vectors for each signature scheme; the release workflow dry-runs on a tag in a fork.
+
+Built: optional persistent stores for the reference server (SRV-4). `SqliteAuditLedger` and
+`SqliteRecordStore` on `node:sqlite`, with no new dependency, in
+`examples/reference-server/src/sqlite-stores.ts`; they pass the PRV-5 contract suites and keep the
+ledger, subjects and records across a restart (`test/sqlite-stores.test.ts`). They are opt-in: the
+server as `npm run serve` starts it stays in memory.
 
 #### **SRV-1** Carrier webhook signature verification
 
@@ -608,18 +607,6 @@ The reference server is not hardened.
 *Tests:* test/reference-server.test.ts  
 *Depends on:* PRV-1
 
-#### **SRV-4** Optional persistent stores for the reference server
-
-The server forgets everything on restart.
-
-*Acceptance*
-
-- SQLite-backed `RecordStore` and `AuditLedger` on `node:sqlite` (no new dependency), passing the PRV-5 contract suites.
-
-*Files:* `examples/reference-server/src/sqlite-stores.ts` (new)  
-*Tests:* The PRV-5 contract suites  
-*Depends on:* PRV-5
-
 #### **SRV-5** Release workflow
 
 Nothing is published yet, by decision.
@@ -635,34 +622,22 @@ Nothing is published yet, by decision.
 
 ### M9. Host integration and module authors
 
-What any host or module author needs next: transcript forwarding, event delivery, a module author kit and a JSON Schema for FlowConfig.
+What any host or module author needs next: a module author kit and a JSON Schema for FlowConfig. Transcript forwarding and event delivery are built.
 
 **Proven by:** Unit and contract tests at 100%; integration is proven in the host's own repository, not here.
 
-#### **INT-2** Transcript and audio forwarding helper
+Built: the transcript and audio forwarding helper (INT-2). `forwardingFor(state)` in
+`src/core/forwarding.ts`, the single place a host asks what it may forward (ARCHITECTURE.md): the
+transcript, audio to speech-to-text, audio to the model and listen-in, all held while `sensitive`
+is set, after the call, and for a state it cannot read (`test/session.test.ts`,
+`test/forwarding-hostile.test.ts`). The host must still ask it and obey.
 
-Hosts must pause transcripts and cut audio while `sensitive` is set.
-
-*Acceptance*
-
-- `forwardingFor(state)` returns what the host may forward (transcript, audio to speech-to-text, audio to the model, listen-in) for the current session; documented as the single place a host asks.
-
-*Files:* `src/core/forwarding.ts` (new), `ARCHITECTURE.md`  
-*Tests:* test/session.test.ts  
-*Depends on:* none
-
-#### **INT-5** Event delivery semantics
-
-Ledger entries are saved with each step (an outbox in the call record) and appended idempotently by event id; a failed append is retried by the next write or `flushLedger`. The listener is still synchronous and told at least once, best effort.
-
-*Acceptance*
-
-- An async listener with defined semantics: the ledger is the source of truth; listener failures are reported (an `onListenerError` hook) and never block the call or the ledger.
-- A background flush a host can schedule for calls whose outbox is not empty, and an `auditLedgerContract` case (PRV-5) for idempotent appends.
-
-*Files:* `src/engine.ts`, `src/core/events.ts`, `src/core/adapters.ts`  
-*Tests:* test/engine.test.ts  
-*Depends on:* none
+Built: event delivery semantics (INT-5). The ledger is the record; the listener may be async, is
+never awaited, and is told at least once, after each append, with the entry's `eventId` and `seq`;
+a throw or rejection goes to `onListenerError` and never stops the call or the ledger;
+`engine.flushPending()` is the background flush a host schedules for calls whose entries are
+pending; `auditLedgerContract` checks that a replayed run of event ids appends once
+(`test/engine.test.ts`, `test/event-delivery-hostile.test.ts`).
 
 #### **MOD-1** Module author kit: a contract suite for outside modules and an example module
 

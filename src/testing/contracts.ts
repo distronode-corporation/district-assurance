@@ -685,15 +685,16 @@ export function recordStoreContract(factory: (subjects: SeededSubject[]) => Reco
         const pin = "e".repeat(64);
         const duress = "f".repeat(64);
         for (const w of ["w", "w2"]) {
-          assert.equal(await store.putPinDigest(w, key, pin), true, `${w}: the PIN digest is stored`);
+          assert.equal(await store.putPinDigest(w, key, pin, w === "w" ? "enr_del" : undefined), true, `${w}: the PIN digest is stored`);
           assert.equal(await store.putDuressDigest(w, key, duress, pin), true, `${w}: the duress digest is stored`);
         }
-        assert.deepEqual(await store.getSubject("w", key), { ...subjects[1]!.subject, pinDigest: pin, duressDigest: duress });
+        assert.deepEqual(await store.getSubject("w", key), { ...subjects[1]!.subject, pinDigest: pin, pinEnrolmentId: "enr_del", duressDigest: duress });
         await store.deletePinDigest("w", key);
         const gone = await store.getSubject("w", key);
         assert.deepEqual(gone, subjects[1]!.subject, "the phone on file and the knowledge are kept");
         assert.equal("pinDigest" in gone!, false);
         assert.equal("duressDigest" in gone!, false);
+        assert.equal("pinEnrolmentId" in gone!, false, "the enrolment id goes with the PIN it names");
         // Deleting again, and deleting for a subject the store does not have, change nothing and create nothing.
         await store.deletePinDigest("w", key);
         await store.deletePinDigest("w", "f".repeat(64));

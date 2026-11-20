@@ -23,7 +23,7 @@ import type { Server } from "node:http";
 import { systemClock, type Clock, type MessagePurpose, type MessageSender } from "../../../src/index.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine, type TestEngineOptions } from "../../../src/testing/index.ts";
 
-import { createReferenceServer, logJsonLines, type RequestLog } from "./app.ts";
+import { createReferenceServer, logJsonLines, type JsonLinesLog, type RequestLog } from "./app.ts";
 import { StripeIdentityProvider, type StripeAdapterOptions } from "./stripe-adapters.ts";
 
 const TRIAL_ACCOUNT = "12345678";
@@ -62,6 +62,15 @@ export interface Serve {
   t: TestEngine;
   /** With STRIPE_IDENTITY_KEY only: starts the trial call and creates its Stripe Identity check. */
   startTrialCall: (() => Promise<{ callId: string; sessionId: string }>) | null;
+}
+
+/**
+ * Takes the error events of the stream a log writes to, and stops the log on the first. An EPIPE
+ * on standard output (its reader went away) arrives as an `error` event, which with no listener
+ * would end the process. Registered once, before the server starts.
+ */
+export function guardLogStream(stream: { on(event: "error", listener: (error: Error) => void): unknown }, log: Pick<JsonLinesLog, "stop">): void {
+  stream.on("error", () => log.stop());
 }
 
 export function createServe(options: ServeOptions): Serve {
@@ -113,6 +122,7 @@ export function createServe(options: ServeOptions): Serve {
 }
 
 if (import.meta.main) {
+  guardLogStream(process.stdout, logJsonLines);
   const port = Number(process.env.PORT ?? 8787);
   const { server, startTrialCall } = createServe({ env: process.env });
   server.listen(port, "127.0.0.1", () => {

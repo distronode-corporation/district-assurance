@@ -446,7 +446,8 @@ export interface RecordStore {
   subjectErasures(workspaceId: string, subjectKey: string): Promise<number>;
   /**
    * Removes the subject's `pinDigest` and `duressDigest` (a duress PIN left alone would still pass,
-   * VER-12) and keeps the rest of the subject record, which is the host's. Idempotent.
+   * VER-12), and the `pinEnrolmentId` that names that PIN, as a null `putPinDigest` does; keeps the
+   * rest of the subject record, which is the host's. Idempotent.
    */
   deletePinDigest(workspaceId: string, subjectKey: string): Promise<void>;
 }

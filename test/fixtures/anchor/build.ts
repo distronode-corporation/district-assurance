@@ -21,13 +21,21 @@ export const seq = (...parts: Uint8Array[]): Buffer => der(0x30, ...parts);
 export const set = (...parts: Uint8Array[]): Buffer => der(0x31, ...parts);
 export const oid = (hex: string): Buffer => der(0x06, Buffer.from(hex, "hex"));
 export const octets = (bytes: Uint8Array): Buffer => der(0x04, bytes);
-export const int = (n: number): Buffer => der(0x02, Buffer.from([n]));
+/** A DER INTEGER of a value that is not negative: big-endian, minimal, with a leading 0x00 when the high bit is set. */
+export function int(n: number): Buffer {
+  if (!Number.isSafeInteger(n) || n < 0) throw new RangeError("int: a safe integer of 0 or more");
+  const bytes: number[] = [];
+  for (let v = n; v > 0; v = Math.floor(v / 256)) bytes.unshift(v % 256);
+  if (bytes.length === 0 || bytes[0]! >= 0x80) bytes.unshift(0);
+  return der(0x02, Buffer.from(bytes));
+}
 export const text = (tag: number, value: string): Buffer => der(tag, Buffer.from(value, "latin1"));
 export const explicit0 = (...parts: Uint8Array[]): Buffer => der(0xa0, ...parts);
 
 export const OIDS = {
   sha256: "608648016503040201",
   sha384: "608648016503040202",
+  sha1: "2b0e03021a",
   md5: "2a864886f70d0205",
   rsaEncryption: "2a864886f70d010101",
   sha256WithRsa: "2a864886f70d01010b",
@@ -38,6 +46,7 @@ export const OIDS = {
   tstInfo: "2a864886f70d0109100104",
   contentType: "2a864886f70d010903",
   messageDigest: "2a864886f70d010904",
+  signingCertificate: "2a864886f70d010910020c",
   signingCertificateV2: "2a864886f70d010910022f",
   commonName: "550403",
   extendedKeyUsage: "551d25",
@@ -114,6 +123,10 @@ export interface TokenSpec {
   /** The signer's issuer name and serial (IssuerAndSerialNumber). */
   issuer: string;
   serial: number;
+  /** The DER of the certificate the token's SigningCertificateV2 names. */
+  signerCertificate: Buffer;
+  /** The TSTInfo's nonce, an INTEGER element; null leaves it out. Default 42. */
+  nonce?: Buffer | null;
   /** Certificates to carry in the token (ignored by the verifier). */
   certificates?: Buffer[];
   /** The SignerInfo's signature algorithm; default from the key. */
@@ -122,6 +135,7 @@ export interface TokenSpec {
   signatureHash?: string;
   /** Replaces the TSTInfo, or parts of a token, to build broken ones. */
   tstInfo?: (parts: { imprint: Buffer; time: Buffer }) => Buffer;
+  /** `extra` holds the default SigningCertificateV2 attribute. */
   attributes?: (parts: { contentType: Buffer; messageDigest: Buffer; extra: Buffer[] }) => Buffer[];
   signerInfos?: (signerInfo: Buffer) => Buffer;
   signedData?: (parts: { version: Buffer; digests: Buffer; content: Buffer; certificates: Buffer[]; signerInfos: Buffer }) => Buffer;
@@ -133,12 +147,11 @@ export function timestampToken(spec: TokenSpec): Buffer {
   const time = text(0x18, spec.time);
   const tstInfo =
     spec.tstInfo?.({ imprint, time }) ??
-    seq(int(1), oid(OIDS.policy), imprint, int(spec.serial), time, seq(int(1)), int(42), der(0xa0, der(0xa4, name("Test TSA"))));
-  const essCertId = seq(seq(seq(octets(Buffer.alloc(32, 7)))));
+    seq(int(1), oid(OIDS.policy), imprint, int(spec.serial), time, seq(int(1)), ...(spec.nonce === null ? [] : [spec.nonce ?? int(42)]), der(0xa0, der(0xa4, name("Test TSA"))));
   const parts = {
     contentType: seq(oid(OIDS.contentType), set(oid(OIDS.tstInfo))),
     messageDigest: seq(oid(OIDS.messageDigest), set(octets(createHash("sha256").update(tstInfo).digest()))),
-    extra: [seq(oid(OIDS.signingCertificateV2), set(essCertId))],
+    extra: [signingCertificate(2, essCertIdV2(spec.signerCertificate, { issuerSerial: issuerSerial(spec.issuer, spec.serial) }))],
   };
   const attributes = spec.attributes?.(parts) ?? [parts.contentType, parts.messageDigest, ...parts.extra];
   const alg = signatureAlgorithm(spec.signingKey);
@@ -151,6 +164,28 @@ export function timestampToken(spec: TokenSpec): Buffer {
   const signedData = spec.signedData?.(signedParts) ?? seq(signedParts.version, signedParts.digests, content, ...certificates, signerInfos);
   return spec.contentInfo?.(signedData) ?? seq(oid(OIDS.signedData), explicit0(signedData));
 }
+
+/** IssuerSerial (RFC 5035) for a certificate with this issuer name and serial: one directoryName, then the serial. */
+export const issuerSerial = (issuer: string, serial: number): Buffer => seq(seq(der(0xa4, name(issuer))), int(serial));
+
+/**
+ * An ESSCertIDv2 (RFC 5035) naming `cert`: its hash under `hash` (default SHA-256), the hash
+ * algorithm written out only when `algorithm` is given (SHA-256 is the DEFAULT, so DER leaves it
+ * out), and an IssuerSerial when given.
+ */
+export function essCertIdV2(cert: Uint8Array, options: { hash?: string; algorithm?: Buffer; issuerSerial?: Buffer } = {}): Buffer {
+  const certHash = octets(createHash(options.hash ?? "sha256").update(cert).digest());
+  return seq(...(options.algorithm === undefined ? [] : [options.algorithm]), certHash, ...(options.issuerSerial === undefined ? [] : [options.issuerSerial]));
+}
+
+/** An ESSCertID (RFC 2634): the SHA-1 hash of `cert`, and an IssuerSerial when given. */
+export const essCertId = (cert: Uint8Array, serial?: Buffer): Buffer => seq(octets(createHash("sha1").update(cert).digest()), ...(serial === undefined ? [] : [serial]));
+
+/** A signed attribute: SigningCertificate (version 1) or SigningCertificateV2 (2), holding these ESSCertIDs and no policies. */
+export const signingCertificate = (version: 1 | 2, ...ids: Buffer[]): Buffer => seq(oid(version === 1 ? OIDS.signingCertificate : OIDS.signingCertificateV2), set(seq(seq(...ids))));
+
+/** The nonce the recorded TSA answer carries; the adapter test asks with it. Eight bytes, positive and minimal. */
+export const FIXTURE_NONCE = Buffer.from("5a17c0de0b5e55ed", "hex");
 
 /** A TimeStampResp: a PKIStatusInfo and, when granted, the token. */
 export function timestampResponse(status: number, token?: Buffer): Buffer {
@@ -173,6 +208,8 @@ const split = (n: number): number => 2 ** Math.floor(Math.log2(n - 1));
 
 /** RFC 9162 MTH. */
 export function merkleRoot(leaves: readonly Buffer[]): Buffer {
+  // MTH({}) is the hash of the empty string.
+  if (leaves.length === 0) return hash();
   if (leaves.length === 1) return leafHash(leaves[0]!);
   const k = split(leaves.length);
   return nodeHash(merkleRoot(leaves.slice(0, k)), merkleRoot(leaves.slice(k)));

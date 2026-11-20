@@ -24,6 +24,7 @@ import {
   parseStripeEvent,
   randomIds,
   receiptLinkTokenHash,
+  sha256Hex,
   systemClock,
   verifyReceipt,
   verifyStripeSignature,
@@ -38,6 +39,7 @@ import {
   type RecordDeliveryBody,
   type SignedReceipt,
   type UploadRefusal,
+  type UploadResult,
 } from "../../../src/index.ts";
 import type { DemoRuns, RunAnswer } from "./demo-runs.ts";
 import { UI_HEADERS, loadStaticFiles, type StaticFile } from "./static.ts";
@@ -159,10 +161,57 @@ export interface RequestLog {
   ms: number;
 }
 
-/** A `log` that writes each entry as one line of JSON on standard output. */
-export function logJsonLines(entry: RequestLog): void {
-  process.stdout.write(`${JSON.stringify(entry)}\n`);
+/** A `log` sink of JSON lines, and the switch that stops it for good. */
+export interface JsonLinesLog {
+  (entry: RequestLog): void;
+  /** Writes nothing more: for a stream that has failed (`guardLogStream` in main.ts). */
+  stop(): void;
 }
+
+/** The stream a `JsonLinesLog` writes to: `write` answers false while its buffer is full. */
+export interface LogStream {
+  write(chunk: string): boolean;
+  once(event: "drain", listener: () => void): unknown;
+}
+
+/**
+ * A `log` that writes each entry as one line of JSON on `stream`, never holding more than the
+ * stream's own buffer: while the stream is backpressured each new entry is dropped and counted,
+ * and on `drain` one line says how many were (`{"warning":"log_entries_dropped","dropped":n}`).
+ * A request never waits on it.
+ */
+export function jsonLinesLog(stream: LogStream): JsonLinesLog {
+  let stopped = false;
+  let blocked = false;
+  let dropped = 0;
+  const put = (line: string): void => {
+    if (stream.write(line)) return;
+    blocked = true;
+    stream.once("drain", () => {
+      blocked = false;
+      if (dropped === 0 || stopped) return;
+      const count = dropped;
+      dropped = 0;
+      put(`${JSON.stringify({ warning: "log_entries_dropped", dropped: count })}\n`);
+    });
+  };
+  const log = (entry: RequestLog): void => {
+    if (stopped) return;
+    if (blocked) {
+      dropped += 1;
+      return;
+    }
+    put(`${JSON.stringify(entry)}\n`);
+  };
+  return Object.assign(log, {
+    stop: () => {
+      stopped = true;
+    },
+  });
+}
+
+/** The `log` of `npm run serve`: JSON lines on standard output, bounded as `jsonLinesLog` says. */
+export const logJsonLines: JsonLinesLog = jsonLinesLog(process.stdout);
 
 /**
  * The host's security.txt (RFC 9116). A security.txt speaks only for the domain it is served
@@ -206,6 +255,8 @@ type Json = Record<string, unknown>;
 interface Page {
   status?: number;
   upload?: true;
+  /** Headers on top of the page's own: the `retry-after` of an upload still running. */
+  headers?: Readonly<Record<string, string>>;
   html: string;
 }
 /** A plain text answer: the security.txt. */
@@ -246,7 +297,10 @@ function checkUri(field: string, value: string, schemes: readonly string[]): voi
     // Not a URI: refused below.
   }
   const malformedWeb = scheme === "https:" && !/^https:\/\/[^/]/i.test(value);
-  if (!/^[\x21-\x7e]+$/.test(value) || !schemes.includes(scheme) || malformedWeb) {
+  // A phone number is a global number (RFC 3966): `+`, then digits and visual separators with at
+  // least one digit. A local number, a parameter or an escape is refused, so `tel:` alone is too.
+  const malformedTel = scheme === "tel:" && !/^tel:\+[-.()0-9]*[0-9][-.()0-9]*$/i.test(value);
+  if (!/^[\x21-\x7e]+$/.test(value) || !schemes.includes(scheme) || malformedWeb || malformedTel) {
     throw new Error(`securityTxt: ${field} must be a ${schemes.join(" or ")} URI on one line`);
   }
   if (PROJECT_ADDRESSES.some((p) => p.test(decodeURIComponentSafe(value)))) {
@@ -480,7 +534,16 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   );
   const files = options.ui === undefined ? new Map<string, StaticFile>() : loadStaticFiles();
   const security = options.securityTxt;
-  const warn = options.warn ?? console.warn;
+  const sink = options.warn ?? console.warn;
+  // A sink that throws, or answers a promise that rejects, loses its warning, never the request.
+  const warn = (message: string): void => {
+    try {
+      const told: unknown = sink(message);
+      Promise.resolve(told).catch(() => undefined);
+    } catch {
+      // Nowhere else to report it.
+    }
+  };
   const startedAt = options.clock.now();
   // The expiry the route enforces is read with the one the file was built from, from one copy.
   const securityCopy = security === undefined ? undefined : { ...security, contact: [...security.contact], expires: new Date(security.expires.getTime()) };
@@ -491,14 +554,17 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   let warnedExpired = false;
   const securityRequested = (now: number): boolean => {
     const file = securityFile!;
+    // Each flag is set before its warning, so a sink that fails is not told again on every request.
     if (now >= file.expires) {
-      if (!warnedExpired) warn(`security.txt expired at ${securityCopy!.expires.toISOString()}: it is no longer served; renew it`);
-      warnedExpired = true;
+      if (!warnedExpired) {
+        warnedExpired = true;
+        warn(`security.txt expired at ${securityCopy!.expires.toISOString()}: it is no longer served; renew it`);
+      }
       return false;
     }
     if (!warnedSoon && file.expires - now <= WARN_MS) {
-      warn(expiryWarning(securityCopy!.expires));
       warnedSoon = true;
+      warn(expiryWarning(securityCopy!.expires));
     }
     return true;
   };
@@ -609,7 +675,9 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
    * event today (call handling is the host's), so a verified request is acknowledged and dropped.
    */
   async function carrierWebhook(req: IncomingMessage, carrier: "twilio" | "telnyx"): Promise<[number, Json]> {
-    const payload = await readBody(req, limits[carrier]);
+    // The bytes as received, never decoded first: a decoder with replacement reads two different
+    // invalid UTF-8 bodies the same, and both would verify under one signature.
+    const payload = await readBytes(req, limits[carrier]);
     const header = (name: string) => {
       const value = req.headers[name];
       return typeof value === "string" ? value : undefined;
@@ -682,6 +750,10 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     lang: PageLocale | undefined,
   ): Promise<Page> {
     const context = { workspaceId: options.engine.workspaceId, documents: uploads.documents, clock: options.clock };
+    if (method === "POST") {
+      const kept = keptUpload(sha256Hex(token));
+      if (kept !== undefined) return keptUploadPage(kept, lang ?? kept.locale);
+    }
     const link = await openUploadLink(token, context);
     if (link === null) return uploadPage(410, lang ?? "en", "link_not_usable", null);
     // The upload page is in English and French: a Spanish link (#122) gets the English page.
@@ -696,10 +768,59 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     }
     const file = filePart(body, req.headers["content-type"] ?? "");
     if (file === null) return uploadPage(400, locale, "empty", link);
-    const result = await acceptUpload({ token, contentType: file.contentType, bytes: file.bytes }, { ...context, ids: uploads.ids ?? randomIds, scanner: uploads.scanner });
-    if (result.ok) return uploadPage(201, locale, "received", null);
-    const spent = result.reason === "link_not_usable" || result.reason === "scan_refused" || result.reason === "scan_failed";
-    return uploadPage(REFUSAL_STATUS[result.reason], locale, result.reason, spent ? null : link);
+    // Checked again: another upload on this link may have started while this body arrived.
+    const key = sha256Hex(token);
+    const started = keptUpload(key);
+    if (started !== undefined) return keptUploadPage(started, lang ?? started.locale);
+    const kept: KeptUpload = { expires: Date.parse(link.expiresAt), locale, result: null };
+    keepUpload(key, kept);
+    let result: UploadResult;
+    try {
+      result = await acceptUpload({ token, contentType: file.contentType, bytes: file.bytes }, { ...context, ids: uploads.ids ?? randomIds, scanner: uploads.scanner });
+    } catch (error) {
+      forgetUpload(key, kept);
+      throw error;
+    }
+    // Kept only when this upload spent the link: it was stored, or the scanner refused or failed it.
+    // Kept even when the deadline has answered already, so the client's retry learns the outcome.
+    if (result.ok || result.reason === "scan_refused" || result.reason === "scan_failed") kept.result = result;
+    else forgetUpload(key, kept);
+    return uploadResultPage(result, locale, link);
+  }
+
+  /**
+   * The outcome of each upload that spent its link, by the token's hash, until the link would have
+   * expired: an upload can outlast the deadline after its link is spent, and the client's retry
+   * with the same link then gets that outcome, not "link used". `result` is null while the upload
+   * still runs. At most `KEPT_UPLOADS_MAX` at once.
+   */
+  const keptUploads = new Map<string, KeptUpload>();
+
+  function keptUpload(key: string): KeptUpload | undefined {
+    const kept = keptUploads.get(key);
+    if (kept === undefined || options.clock.now().getTime() < kept.expires) return kept;
+    keptUploads.delete(key);
+    return undefined;
+  }
+
+  function keepUpload(key: string, kept: KeptUpload): void {
+    if (keptUploads.size >= KEPT_UPLOADS_MAX) {
+      const now = options.clock.now().getTime();
+      for (const [k, v] of keptUploads) if (now >= v.expires) keptUploads.delete(k);
+    }
+    // Then the oldest; one still running is then answered as any spent link is.
+    if (keptUploads.size >= KEPT_UPLOADS_MAX) keptUploads.delete(keptUploads.keys().next().value!);
+    keptUploads.set(key, kept);
+  }
+
+  function forgetUpload(key: string, kept: KeptUpload): void {
+    if (keptUploads.get(key) === kept) keptUploads.delete(key);
+  }
+
+  /** A kept outcome; while the first upload still runs, a 503 to try again, and no second scan. */
+  function keptUploadPage(kept: KeptUpload, locale: PageLocale): Page {
+    if (kept.result !== null) return uploadResultPage(kept.result, locale, null);
+    return { ...uploadPage(503, locale, "in_progress", null), headers: { "retry-after": String(Math.ceil(timeoutMs / 1000)) } };
   }
 
   async function route(req: IncomingMessage, seen: Seen): Promise<Answer> {
@@ -771,6 +892,13 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
 
   /** The request each socket is answering, so a client error on it is answered and logged once. */
   const inFlight = new WeakMap<Socket, Exchange>();
+  /**
+   * The answers on each socket not yet sent in full. node:http sends pipelined answers in order,
+   * but a refusal written straight to the socket would overtake them, and be read as theirs.
+   */
+  const unsent = new WeakMap<Socket, Set<ServerResponse>>();
+  /** Sockets whose client error waits for earlier answers; a repeat of that error is not answered again. */
+  const refusing = new WeakSet<Socket>();
 
   /** Logs one answered request. A `log` that throws loses its entry, never the server. */
   function record(exchange: Exchange, address: string, status: number, error: string | undefined): void {
@@ -795,7 +923,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   function write(res: ServerResponse, answer: Answer): [number, string | undefined] {
     if ("html" in answer) {
       const status = answer.status ?? 200;
-      res.writeHead(status, answer.upload === true ? UPLOAD_PAGE_HEADERS : PAGE_HEADERS);
+      res.writeHead(status, { ...(answer.upload === true ? UPLOAD_PAGE_HEADERS : PAGE_HEADERS), ...answer.headers });
       res.end(answer.html);
       return [status, undefined];
     }
@@ -818,15 +946,25 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   // node:http enforces the receive deadline itself, checking open connections at this interval.
   const timeouts = { requestTimeout: timeoutMs, headersTimeout: timeoutMs, connectionsCheckingInterval: Math.min(timeoutMs, 1000) };
   const server = createServer(timeouts, (req: IncomingMessage, res: ServerResponse) => {
-    const exchange: Exchange = { started: performance.now(), method: req.method ?? "GET", seen: { route: "unmatched" }, done: false, req };
+    const exchange: Exchange = { started: performance.now(), method: req.method ?? "GET", seen: { route: "unmatched" }, done: false, req, res };
     const socket = req.socket;
     inFlight.set(socket, exchange);
+    const pending = unsent.get(socket) ?? new Set<ServerResponse>();
+    unsent.set(socket, pending);
+    pending.add(res);
+    let timer: NodeJS.Timeout | undefined;
     // Kept while its body is unread, so node:http timing that body out after the answer is not
     // answered and logged a second time; forgotten once the socket can carry the next request.
     res.on("close", () => {
+      pending.delete(res);
+      // Closed before its answer was sent (the client reset or left): abandoned, so neither the
+      // handler nor the deadline answers or logs it later.
+      if (!res.writableFinished && !exchange.done) {
+        exchange.done = true;
+        clearTimeout(timer);
+      }
       if (req.complete && inFlight.get(socket) === exchange) inFlight.delete(socket);
     });
-    let timer: NodeJS.Timeout | undefined;
     const deadline = new Promise<Answer>((resolve) => {
       timer = setTimeout(() => resolve([503, { error: "timeout" }]), timeoutMs);
     });
@@ -848,11 +986,27 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   // node:http's own refusals (headers or body too slow, headers too large, a malformed request)
   // reach this instead of the listener. Answered as node:http would, but in JSON, and logged.
   server.on("clientError", (err: NodeJS.ErrnoException, socket: Socket) => {
+    // Already waiting to refuse this socket: node:http reports the same error again on more data.
+    if (refusing.has(socket)) return;
     const held = inFlight.get(socket);
     inFlight.delete(socket);
     // A request received in full is over, even before its stream says so: an error after it is the
     // next request's (one the client sent right behind a body drained after its answer), answered too.
     const exchange = held?.req!.complete === true ? undefined : held;
+    // Answers to earlier requests not yet sent go first: each is sent, or its socket closes, within
+    // the deadline. Then the refusal, which the client reads as the failed request's own.
+    const earlier = [...(unsent.get(socket) ?? [])].filter((res) => res !== exchange?.res);
+    if (err.code === "ECONNRESET" || earlier.length === 0) {
+      refuse(err, socket, exchange);
+      return;
+    }
+    refusing.add(socket);
+    socket.pause();
+    void Promise.all(earlier.map((res) => new Promise((resolve) => res.once("close", resolve)))).then(() => refuse(err, socket, exchange));
+  });
+
+  /** Answers a client error as node:http would, but in JSON, logs it, and closes the socket. */
+  function refuse(err: NodeJS.ErrnoException, socket: Socket, exchange: Exchange | undefined): void {
     // A reset socket takes no answer, and one whose answer is already written cannot take another.
     if (err.code !== "ECONNRESET" && socket.writable && exchange?.done !== true) {
       const [status, code] = CLIENT_ERRORS[err.code ?? ""] ?? [400, "bad_request"];
@@ -860,12 +1014,12 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       const headers = { ...JSON_HEADERS, "content-length": String(Buffer.byteLength(body)), connection: "close" };
       const head = Object.entries(headers).map(([name, value]) => `${name}: ${value}\r\n`);
       socket.write(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\n${head.join("")}\r\n${body}`);
-      const answered = exchange ?? { started: performance.now(), method: "unknown", seen: { route: "unmatched" }, done: false, req: null };
+      const answered = exchange ?? { started: performance.now(), method: "unknown", seen: { route: "unmatched" }, done: false, req: null, res: null };
       answered.done = true;
       record(answered, rateLimitKey(socket.remoteAddress ?? "unknown"), status, code);
     }
     socket.destroy(err);
-  });
+  }
   return server;
 }
 
@@ -878,6 +1032,8 @@ interface Exchange {
   done: boolean;
   /** The request; null for one node:http refused before its headers were read. */
   req: IncomingMessage | null;
+  /** Its answer; null as `req` is. */
+  res: ServerResponse | null;
 }
 
 /** node:http's client error codes and the answer each gets; any other is `400 bad_request`. */
@@ -1085,6 +1241,23 @@ function readBytes(req: IncomingMessage, max: number): Promise<Buffer> {
   });
 }
 
+/** An upload that spent its link: its outcome, null while it runs, kept until the link's expiry. */
+interface KeptUpload {
+  expires: number;
+  locale: PageLocale;
+  result: UploadResult | null;
+}
+
+/** Kept outcomes at once; a link lives 30 minutes, so this is a rate of uploads, not a total. */
+const KEPT_UPLOADS_MAX = 10_000;
+
+/** The page for an upload's result: a spent link shows no form. */
+function uploadResultPage(result: UploadResult, locale: PageLocale, link: { allowedTypes: DocumentType[]; maxBytes: number } | null): Page {
+  if (result.ok) return uploadPage(201, locale, "received", null, result.document.documentId);
+  const spent = result.reason === "link_not_usable" || result.reason === "scan_refused" || result.reason === "scan_failed";
+  return uploadPage(REFUSAL_STATUS[result.reason], locale, result.reason, spent ? null : link);
+}
+
 const REFUSAL_STATUS: Readonly<Record<UploadRefusal, number>> = {
   link_not_usable: 410,
   type_not_allowed: 415,
@@ -1095,7 +1268,7 @@ const REFUSAL_STATUS: Readonly<Record<UploadRefusal, number>> = {
   scan_failed: 503,
 };
 
-type PageMessage = UploadRefusal | "received";
+type PageMessage = UploadRefusal | "received" | "in_progress";
 
 const UPLOAD_TEXT = {
   en: {
@@ -1106,8 +1279,10 @@ const UPLOAD_TEXT = {
     send: "Send",
     other: ["fr", "Français"],
     units: ["MB", "KB"],
+    reference: "Reference:",
     messages: {
       received: "Thank you. Your document was received. You can close this page.",
+      in_progress: "Your document is still being checked. Try again in a moment.",
       link_not_usable: "This link has expired or was already used. Ask for a new one.",
       type_not_allowed: "This type of file is not accepted here.",
       content_mismatch: "This type of file is not accepted here.",
@@ -1125,8 +1300,10 @@ const UPLOAD_TEXT = {
     send: "Envoyer",
     other: ["en", "English"],
     units: ["Mo", "Ko"],
+    reference: "Référence :",
     messages: {
       received: "Merci. Votre document a bien été reçu. Vous pouvez fermer cette page.",
+      in_progress: "Votre document est encore en cours de vérification. Réessayez dans un instant.",
       link_not_usable: "Ce lien a expiré ou a déjà été utilisé. Demandez-en un nouveau.",
       type_not_allowed: "Ce type de fichier n'est pas accepté ici.",
       content_mismatch: "Ce type de fichier n'est pas accepté ici.",
@@ -1143,9 +1320,16 @@ const TYPE_LABELS: Readonly<Record<DocumentType, string>> = { "image/jpeg": "JPE
 /**
  * The upload page: plain HTML, no script, a form that posts the file back to the same address.
  * Every string on it is the code's own; nothing from the request or the store is written into it
- * except the link's types and size cap, which come from a fixed list and a number.
+ * except the link's types and size cap, which come from a fixed list and a number, and the id the
+ * server gave a document it received, escaped.
  */
-function uploadPage(status: number, locale: PageLocale, message: PageMessage | null, link: { allowedTypes: DocumentType[]; maxBytes: number } | null): Page {
+function uploadPage(
+  status: number,
+  locale: PageLocale,
+  message: PageMessage | null,
+  link: { allowedTypes: DocumentType[]; maxBytes: number } | null,
+  documentId?: string,
+): Page {
   const text = UPLOAD_TEXT[locale];
   const [otherLang, otherName] = text.other;
   let form = "";
@@ -1168,6 +1352,7 @@ function uploadPage(status: number, locale: PageLocale, message: PageMessage | n
     "<body>",
     `<h1>${text.title}</h1>`,
     message === null ? "" : `<p role="status">${text.messages[message]}</p>`,
+    documentId === undefined ? "" : `<p>${text.reference} ${escapeHtml(documentId)}</p>`,
     form,
     `<p><a href="?lang=${otherLang}" lang="${otherLang}">${otherName}</a></p>`,
     "</body>",

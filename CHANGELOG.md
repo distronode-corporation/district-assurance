@@ -354,6 +354,53 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Integration review of the server and proof landing (L4):
+  - Anchors (PRV-9): `checkTimestamp` and `verifyAnchor` require the token's signed
+    SigningCertificate or SigningCertificateV2 to name the authority's signing certificate
+    (`certificate` otherwise; a token with neither, or one that does not read, is `token`).
+    `checkRekorEntry` takes the index from the entry's top-level `logIndex` and the tree size and
+    root from the signed checkpoint; the inclusion proof's own copies may be left out, as proto3
+    JSON leaves out defaults, and must agree when present. `isAnchorProof` counts only a proof's
+    own keys, and `verifyAnchor` answers `malformed`, never throws, for an export holding null
+    where an entry should be. New: `timestampTokenFields(token)`, the imprint hash and nonce a
+    token carries. Offline verification otherwise checks what it did.
+  - Breaking, reference server: `timestampRequest(payload, nonce)` takes the nonce.
+    `TimestampAuthorityAnchor` sends a fresh nonce with each request (a `nonce` option for tests)
+    and refuses a token that does not echo it or whose imprint is not SHA-256; both anchor
+    adapters read at most `maxReplyBytes` of a reply (`MAX_REPLY_BYTES`, 256 KiB) and never read
+    an error answer's body; `RekorAnchor` asks the authority before Rekor, so a refused
+    time-stamp writes nothing to the public log.
+  - SQLite stores (SRV-4): an existing file is checked by path (`lstat`), never opened outside
+    SQLite, which would drop another connection's locks; a new file is created exclusively with
+    mode 0600; a `-journal` file is checked as `-wal` and `-shm` are; a symbolic link (at the path
+    or beside it) and anything that is not a regular file are refused; a database file on Windows
+    is refused, since the mode sets no ACL there (`:memory:` still opens); -0 is kept through an
+    escaped encoding; a failed open or schema closes the connection; a transaction SQLite already
+    rolled back, or whose ROLLBACK fails, rejects with the error that caused it.
+  - `RecordStore.deletePinDigest` also removes `pinEnrolmentId`, as a reset does, in the memory
+    and SQLite stores, and `recordStoreContract` checks it.
+  - Reference server: `jsonLinesLog(stream)` (behind `logJsonLines`) drops entries while the
+    stream is backpressured and writes one `log_entries_dropped` line on drain, and `stop()` ends
+    it; `npm run serve` registers `guardLogStream`, so an error on standard output stops logging
+    instead of ending the process. An upload that spent its link keeps its outcome until the link
+    expires, so a retry gets the same answer (a received page names the document), and a retry
+    while the first upload still runs gets 503 with `Retry-After`. A request whose connection
+    closes before its answer is neither answered nor logged later. A client error behind
+    pipelined requests waits for their answers. A `tel:` security.txt contact must be `+` and
+    digits (with `-`, `.`, `(`, `)`), and a `warn` that throws no longer breaks the route.
+  - Carrier webhooks: `verifyTwilioSignature` and `verifyTelnyxSignature` take the raw body as a
+    `Uint8Array` too, and the reference server passes the bytes received, so two invalid UTF-8
+    bodies never verify under one signature; a Telnyx public key that is not a string is skipped.
+  - Monthly reports (PRV-8): payment totals are summed exactly, and a total past
+    `Number.MAX_SAFE_INTEGER` refuses the report (`precondition_failed`), as `signReportJson` and
+    `signReportCsv` refuse a report holding one; a `payment.link_sent` without a payment id counts
+    as malformed.
+  - Simulator (MOD-4): after each wrong entry the caller waits out the backoff Badge's `lockout`
+    setting gives, and a `badge.verify` step with a factor it has no caller for exits 3.
+  - The listener's copy of a `ledger.anchored` event is made inside the listener guard: a detail
+    that cannot be copied skips the listener and is reported to `onListenerError`.
+  - Audit pack (SRV-8): a supplied SBOM goes in `sbom/supplied/`, so it never overwrites a
+    manifest, and the coverage data goes in a new temporary folder that never overlaps `--out`.
 - Integration review of the Gate and payments landing (L1):
   - `accessKeys()` and `receiptKeys()` publish each key under its signer's `keyId`, as
     `stepUpKeys()` does, so a signer whose JWK has no `kid` no longer makes its grants and

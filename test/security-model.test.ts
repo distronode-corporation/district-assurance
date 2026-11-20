@@ -226,6 +226,7 @@ describe("the STRIDE table reader", () => {
 describe("SECURITY-MODEL.md STRIDE tables", () => {
   const { headings, rows } = readTables(strideSection(read("../SECURITY-MODEL.md")));
   const roadmap = read("../ROADMAP.md");
+  const issues = read("../ISSUES.md");
 
   it("every test a row names exists, and every open row names an open issue in ROADMAP.md", () => {
     assert.ok(rows.length > 0);
@@ -247,5 +248,15 @@ describe("SECURITY-MODEL.md STRIDE tables", () => {
     const pin = rows.find((r) => r.id === "badge-2");
     assert.equal(pin?.status, "covered");
     assert.ok(rows.every((r) => r.status === "open" || !/[A-Z]{3}-\d+/.test(r.proof)));
+  });
+
+  it("lists built threats as covered: the contract suites (PRV-5), the SQLite stores (SRV-4), event delivery (INT-5) and forwardingFor (INT-2), each closed", () => {
+    for (const issue of ["PRV-5", "SRV-4", "INT-2", "INT-5"]) {
+      assert.ok(!roadmap.includes(`#### **${issue}**`), `${issue} is closed in ROADMAP.md`);
+      assert.ok(!issues.includes(`### ${issue}:`), `${issue} is closed in ISSUES.md`);
+    }
+    for (const id of ["auditledger-2", "recordstore-2", "server-12", "core-18", "core-20"]) {
+      assert.equal(rows.find((r) => r.id === id)?.status, "covered", id);
+    }
   });
 });

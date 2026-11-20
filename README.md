@@ -100,7 +100,11 @@ one flow of a FlowConfig file with a scripted caller on the in-memory adapters, 
 step, each decision, every event and the final receipt. Built-in scripts: `pass`, `wrong-pin`,
 `lockout`, `consent-no`, `payment-paid` and `payment-expired`, or a JSON file of your own. A
 config with any problem, or one that turns on an outside module, is refused with every reason
-([SPEC.md](SPEC.md), section 17).
+([SPEC.md](SPEC.md), section 17). Exit codes: 0 the flow ran, whatever its outcome; 1 a refused
+config, flow or script; 2 bad usage; 3 a valid config whose flow reached a step the simulator has
+no scripted caller for (a Gate step, a step an outside module adds, or a `badge.verify` step with a
+factor other than `keypad_knowledge`, `pin`, `carrier_identity_match` or `photo_id`). Exit 3 is not
+a refusal: the run stops at that step, ends the call and prints what it did up to there.
 
 The demo runs `owner-command` first: the owner of a line keys a PIN, on two engines that share one
 session store as two processes of a host would; one wrong PIN, then the right one, and a grant for
@@ -181,7 +185,7 @@ state machine, the config, the events and the formats.
 | `POST /webhooks/stripe/payments` | Stripe Checkout outcomes on the platform's account, signature checked first, each event applied once |
 | `POST /webhooks/stripe/connect` | Stripe Checkout outcomes from connected accounts (connect mode), with their own signing secret |
 | `GET /r/:token` | a receipt page in English and French, with its signature check, by a capability token the host issued (`/r/:token.json`: the signed receipt) |
-| `POST /webhooks/twilio`, `/telnyx` | carrier webhooks, signature checked, then acknowledged (nothing is applied yet) |
+| `POST /webhooks/twilio`, `POST /webhooks/telnyx` | carrier webhooks, signature checked, then acknowledged (nothing is applied yet) |
 | `GET /.well-known/receipt-keys.json` | the public key set for receipts |
 | `GET /healthz` | liveness |
 

@@ -25,6 +25,7 @@ import type { PaymentOutcome } from "../pay/payment.ts";
 import { verifyReceipt } from "../prove/receipt.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../testing/index.ts";
 import type { BadgeSettings } from "../verify/factors.ts";
+import { lockoutOf } from "../verify/counters.ts";
 import { subjectKeyFor } from "../verify/knowledge.ts";
 
 /** How the scripted caller behaves at each kind of step. A script file is a JSON object with any of these fields. */
@@ -158,10 +159,14 @@ async function keyEntries(run: Run, what: string, wrong: number, submit: (right:
       return result.matched ? `${what} matched` : result.locked ? `no match, locked: no more ${what} attempts on this call` : "no match";
     });
   // A wrong entry starts a wait across calls (VER-1): the simulated caller keys again after it.
-  const waitOut = () => run.t.clock.advance(900_000);
+  // The wait is the configured one for the failures counted so far (counters.ts, lockState), so a
+  // longer backoff is waited out too; nothing is cleared, and a hard lock still stops the caller.
+  // Only badge.verify keys entries, and its config has the badge module on.
+  const { backoffSeconds } = lockoutOf((run.config.modules.badge!.settings as unknown as BadgeSettings).lockout);
+  const waitOut = (failures: number) => run.t.clock.advance(backoffSeconds[Math.min(failures, backoffSeconds.length) - 1]! * 1000);
   for (let i = 0; i < wrong && !locked; i++) {
     await key(false);
-    waitOut();
+    waitOut(i + 1);
   }
   if (!locked) await key(true);
 }
@@ -261,6 +266,14 @@ const STEP_ACTIONS: Readonly<Record<string, (run: Run, step: FlowStep) => Promis
   },
 };
 
+/** Why the simulator cannot run a step, or null: a step type without a caller, or a badge.verify factor outside FACTOR_ORDER. */
+function unsupportedStep(step: FlowStep): string | null {
+  if (!Object.hasOwn(STEP_ACTIONS, step.type)) return `step ${step.type} is not simulated`;
+  if (step.type !== "badge.verify") return null;
+  const factor = (step.factors as string[]).find((kind) => !FACTOR_ORDER.includes(kind));
+  return factor === undefined ? null : `step badge.verify factor ${factor} is not simulated`;
+}
+
 /** The outcome of a simulation: the lines it printed and the flow's final status. */
 export interface Simulation {
   lines: string[];
@@ -297,9 +310,11 @@ export async function simulate(t: TestEngine, lines: string[], config: FlowConfi
     const step = position.step!;
     const { type, ...fields } = step;
     line(`step ${position.index + 1}/${steps.length}: ${type} ${canonicalJson(fields)}`);
-    // A step type another module adds has no scripted caller here: the run stops, it never guesses.
-    if (!Object.hasOwn(STEP_ACTIONS, type)) {
-      line(terminalSafe(`step ${type} is not simulated`));
+    // A step type another module adds, or a factor the scripted caller cannot answer, has no
+    // caller here: the run stops, it never guesses or skips part of the step.
+    const unsupported = unsupportedStep(step);
+    if (unsupported !== null) {
+      line(terminalSafe(unsupported));
       exitCode = 3;
       break;
     }

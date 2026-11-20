@@ -18,6 +18,7 @@ import * as root from "../src/index.ts";
 import * as testing from "../src/testing/index.ts";
 import { createTestEngine } from "../src/testing/index.ts";
 import {
+  FIXTURE_NONCE,
   OIDS,
   REKOR_ORIGIN,
   algorithm,
@@ -84,7 +85,7 @@ describe("anchor payload", () => {
   });
 
   it("the entry points export the anchor pieces", () => {
-    for (const name of ["anchorPayload", "verifyAnchor", "checkTimestamp", "checkRekorEntry", "readDer", "isAnchorProof", "ANCHOR_CONTEXT"]) assert.ok(name in root, name);
+    for (const name of ["anchorPayload", "verifyAnchor", "checkTimestamp", "checkRekorEntry", "readDer", "isAnchorProof", "timestampTokenFields", "ANCHOR_CONTEXT"]) assert.ok(name in root, name);
     assert.ok("FakeTimestampAuthority" in testing);
   });
 
@@ -142,7 +143,7 @@ describe("anchorLedger", () => {
     assert.deepEqual(Object.keys(entry.detail).sort(), ["proof", "seq"]);
     assert.equal(entry.detail.seq, head.seq);
     const entries = await ledger.list();
-    assert.deepEqual(verifyAnchor(entry, entries, { tsa: tsa.chain }), { ok: true, seq: head.seq, hash: head.hash, time: clock.now().toISOString().replace(/\.\d+Z$/, ".000Z"), logIndex: null });
+    assert.deepEqual(verifyAnchor(entry, entries, { tsa: tsa.chain }), { ok: true, seq: head.seq, hash: head.hash, time: clock.now().toISOString(), logIndex: null });
     // The anchor entry is itself chained, and the next anchor covers it.
     assert.equal(verifyChain(entries).ok, true);
     const next = await engine.anchorLedger();
@@ -262,17 +263,19 @@ describe("RFC 3161 tokens", () => {
   const leaf = ecKeys();
   const rootCert = certificate({ subject: "Root", issuer: "Root", publicKey: root.publicKey, signingKey: root.privateKey, serial: 1, notBefore: "260101000000Z", notAfter: "360101000000Z", ca: true });
   const leafSpec = { subject: "TSA", issuer: "Root", publicKey: leaf.publicKey, signingKey: root.privateKey, serial: 2, notBefore: "260101000000Z", notAfter: "300101000000Z", usage: OIDS.timeStamping };
-  const chain = [new X509Certificate(certificate(leafSpec)), new X509Certificate(rootCert)];
-  const spec: TokenSpec = { payload, time: "20261118120000Z", signingKey: leaf.privateKey, issuer: "Root", serial: 2 };
+  const leafCert = certificate(leafSpec);
+  const chain = [new X509Certificate(leafCert), new X509Certificate(rootCert)];
+  const spec: TokenSpec = { payload, time: "20261118120000Z", signingKey: leaf.privateKey, issuer: "Root", serial: 2, signerCertificate: leafCert };
   const check = (overrides: Partial<TokenSpec>, certs: X509Certificate[] = chain) => checkTimestamp(timestampToken({ ...spec, ...overrides }).toString("base64"), payload, certs);
 
   it("accepts a token from a chain the host supplies, with any supported signature algorithm", () => {
     assert.deepEqual(check({}), { ok: true, time: "2026-11-18T12:00:00.000Z" });
     assert.deepEqual(check({ signatureAlgorithm: algorithm(OIDS.ecdsaSha256, false) }), { ok: true, time: "2026-11-18T12:00:00.000Z" });
     const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    const rsaChain = [new X509Certificate(certificate({ ...leafSpec, publicKey: rsa.publicKey })), chain[1]!];
+    const rsaLeaf = certificate({ ...leafSpec, publicKey: rsa.publicKey });
+    const rsaChain = [new X509Certificate(rsaLeaf), chain[1]!];
     // rsaEncryption leaves the hash to the signer's digest algorithm.
-    assert.equal(check({ signingKey: rsa.privateKey, signatureAlgorithm: algorithm(OIDS.rsaEncryption), signatureHash: "sha256" }, rsaChain).ok, true);
+    assert.equal(check({ signingKey: rsa.privateKey, signatureAlgorithm: algorithm(OIDS.rsaEncryption), signatureHash: "sha256", signerCertificate: rsaLeaf }, rsaChain).ok, true);
   });
 
   it("refuses a token for another payload as imprint", () => {
@@ -281,19 +284,20 @@ describe("RFC 3161 tokens", () => {
 
   it("refuses a chain that does not hold at the token's time", () => {
     const other = ecKeys();
-    const cert = (overrides: Partial<typeof leafSpec> & { usage?: string }) => new X509Certificate(certificate({ ...leafSpec, ...overrides }));
     const impostor = new X509Certificate(certificate({ subject: "Root", issuer: "Root", publicKey: other.publicKey, signingKey: other.privateKey, serial: 1, notBefore: "260101000000Z", notAfter: "360101000000Z" }));
     const { usage: _u, ...noUsage } = leafSpec;
-    for (const certs of [
-      [new X509Certificate(certificate(noUsage)), chain[1]!],
-      [cert({ usage: OIDS.codeSigning }), chain[1]!],
-      [cert({ notAfter: "261101000000Z" }), chain[1]!],
-      [cert({ notBefore: "261201000000Z" }), chain[1]!],
-      [cert({ issuer: "Someone else" }), chain[1]!],
-      [chain[0]!, impostor],
-    ]) {
-      assert.deepEqual(check({}, certs), { ok: false, reason: "certificate" });
+    // Each token names the leaf it is checked with, so the chain is what refuses it, not the SigningCertificateV2.
+    for (const [why, leafDer] of [
+      ["no extended key usage", certificate(noUsage)],
+      ["another extended key usage", certificate({ ...leafSpec, usage: OIDS.codeSigning })],
+      ["expired at the token's time", certificate({ ...leafSpec, notAfter: "261101000000Z" })],
+      ["not yet valid at the token's time", certificate({ ...leafSpec, notBefore: "261201000000Z" })],
+    ] as const) {
+      assert.deepEqual(check({ signerCertificate: leafDer }, [new X509Certificate(leafDer), chain[1]!]), { ok: false, reason: "certificate" }, why);
     }
+    const strayDer = certificate({ ...leafSpec, issuer: "Someone else" });
+    assert.deepEqual(check({ signerCertificate: strayDer, issuer: "Someone else" }, [new X509Certificate(strayDer), chain[1]!]), { ok: false, reason: "certificate" }, "issued by someone else");
+    assert.deepEqual(check({}, [chain[0]!, impostor]), { ok: false, reason: "certificate" }, "an impostor root");
     assert.deepEqual(check({}, [chain[0]!]), { ok: true, time: "2026-11-18T12:00:00.000Z" });
   });
 
@@ -304,8 +308,9 @@ describe("RFC 3161 tokens", () => {
       new X509Certificate(certificate({ subject: "Mid", issuer: "Root", publicKey: mid.publicKey, signingKey: root.privateKey, serial: 3, notBefore: "260101000000Z", notAfter: "300101000000Z", ...overrides }));
     const rootWith = (overrides: Partial<CertificateSpec>) =>
       new X509Certificate(certificate({ subject: "Root", issuer: "Root", publicKey: root.publicKey, signingKey: root.privateKey, serial: 1, notBefore: "260101000000Z", notAfter: "360101000000Z", ca: true, ...overrides }));
-    const tsaCert = new X509Certificate(certificate({ subject: "TSA", issuer: "Mid", publicKey: tsa.publicKey, signingKey: mid.privateKey, serial: 4, notBefore: "260101000000Z", notAfter: "300101000000Z", usage: OIDS.timeStamping }));
-    const through = (...rest: X509Certificate[]) => check({ signingKey: tsa.privateKey, issuer: "Mid", serial: 4 }, [tsaCert, ...rest]);
+    const tsaDer = certificate({ subject: "TSA", issuer: "Mid", publicKey: tsa.publicKey, signingKey: mid.privateKey, serial: 4, notBefore: "260101000000Z", notAfter: "300101000000Z", usage: OIDS.timeStamping });
+    const tsaCert = new X509Certificate(tsaDer);
+    const through = (...rest: X509Certificate[]) => check({ signingKey: tsa.privateKey, issuer: "Mid", serial: 4, signerCertificate: tsaDer }, [tsaCert, ...rest]);
     const bits = (bytes: number[]) => seq(oid(OIDS.keyUsage), octets(der(0x03, Buffer.from(bytes))));
 
     assert.deepEqual(through(midCert({ ca: true }), rootWith({})), { ok: true, time: "2026-11-18T12:00:00.000Z" }, "a CA intermediate");
@@ -356,13 +361,14 @@ describe("the time-stamp authority adapter, on a recorded answer", () => {
     const { ledger, entries } = await fixtureLedger();
     const head = await ledger.head();
     const { fetch, requests } = replay({ body: recordedTimestamp });
-    const anchor = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain: recordedChain, fetch });
+    // The recorded answer echoes FIXTURE_NONCE, so the request is made with it.
+    const anchor = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain: recordedChain, fetch, nonce: () => FIXTURE_NONCE });
     const { engine } = createTestEngine({ adapters: { ledger, anchor } });
     const entry = await engine.anchorLedger();
     assert.equal(requests.length, 1);
     assert.equal(requests[0]!.init.headers["content-type"], "application/timestamp-query");
-    assert.deepEqual(Buffer.from(requests[0]!.init.body as Uint8Array), timestampRequest(anchorPayload(head)));
-    assert.equal(readDer(timestampRequest(anchorPayload(head))).length, 1);
+    assert.deepEqual(Buffer.from(requests[0]!.init.body as Uint8Array), timestampRequest(anchorPayload(head), FIXTURE_NONCE));
+    assert.equal(readDer(timestampRequest(anchorPayload(head), FIXTURE_NONCE)).length, 1);
     assert.equal((entry.detail.proof as AnchorProof).kind, "rfc3161");
     assert.deepEqual(verifyAnchor(entry, [...entries, entry], { tsa: recordedChain }), { ok: true, ...head, time: "2026-11-18T12:00:00.250Z", logIndex: null });
     // The recorded chain is a root and a time-stamping certificate it issued.
@@ -379,7 +385,7 @@ describe("the time-stamp authority adapter, on a recorded answer", () => {
     ];
     for (const [i, answer] of answers.entries()) {
       const chain = i === 3 ? new FakeTimestampAuthority(new FixedClock()).chain : recordedChain;
-      const anchor = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain, fetch: replay(answer).fetch });
+      const anchor = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain, fetch: replay(answer).fetch, nonce: () => FIXTURE_NONCE });
       await assert.rejects(anchor.timestamp(payload), Error);
     }
   });
@@ -399,17 +405,18 @@ describe("the Rekor adapter, on a recorded answer", () => {
     const { ledger, entries } = await fixtureLedger();
     const head = await ledger.head();
     const payload = anchorPayload(head);
-    const { fetch, requests } = replay({ body: recordedEntry }, { body: recordedTimestamp });
-    const timestamps = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain: recordedChain, fetch });
+    // The authority is asked first, then Rekor.
+    const { fetch, requests } = replay({ body: recordedTimestamp }, { body: recordedEntry });
+    const timestamps = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain: recordedChain, fetch, nonce: () => FIXTURE_NONCE });
     const signingKey = fixtureSigner().privateKey;
     const anchor = new RekorAnchor({ url: "https://rekor.example.test/", signingKey, log: recordedLog, timestamps, fetch });
     const { engine } = createTestEngine({ adapters: { ledger, anchor } });
     const entry = await engine.anchorLedger();
-    assert.equal(requests[0]!.url, "https://rekor.example.test/api/v2/log/entries");
-    const sent = JSON.parse(requests[0]!.init.body as string).hashedRekordRequestV002;
+    assert.equal(requests[0]!.url, "https://tsa.example.test/");
+    assert.equal(requests[1]!.url, "https://rekor.example.test/api/v2/log/entries");
+    const sent = JSON.parse(requests[1]!.init.body as string).hashedRekordRequestV002;
     assert.equal(sent.digest, Buffer.from(await crypto.subtle.digest("SHA-256", payload)).toString("base64"));
     assert.equal(sent.signature.verifier.keyDetails, "PKIX_ECDSA_P256_SHA_256");
-    assert.equal(requests[1]!.url, "https://tsa.example.test/");
     const proof = entry.detail.proof as Extract<AnchorProof, { kind: "rekor" }>;
     assert.equal(proof.kind, "rekor");
     assert.deepEqual(verifyAnchor(entry, [...entries, entry], { tsa: recordedChain, rekor: recordedLog }), { ok: true, ...head, time: "2026-11-18T12:00:00.250Z", logIndex: 9 });
@@ -419,23 +426,41 @@ describe("the Rekor adapter, on a recorded answer", () => {
     assert.deepEqual(verifyAnchor(badToken, [...entries, entry], { tsa: recordedChain, rekor: recordedLog }), { ok: false, reason: "token" });
   });
 
-  it("refuses a key that is not P-256, an error answer and an entry that does not verify", async () => {
-    const timestamps = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain: recordedChain });
-    assert.throws(() => new RekorAnchor({ url: "https://r.example.test", signingKey: generateKeyPairSync("ed25519").privateKey, log: recordedLog, timestamps }), TypeError);
-    const input = { seq: 1, hash: "d".repeat(64), payload: anchorPayload({ seq: 1, hash: "d".repeat(64) }) };
-    for (const reply of [{ status: 500, body: new Uint8Array() }, { body: recordedEntry }]) {
-      const anchor = new RekorAnchor({ url: "https://r.example.test", signingKey: ecKeys().privateKey, log: recordedLog, timestamps, fetch: replay(reply).fetch });
-      await assert.rejects(anchor.anchor(input), Error);
+  it("refuses a key that is not P-256, an error answer and an entry that does not verify, each for its own cause", async () => {
+    const tsaSpy = replay();
+    const unused = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain: recordedChain, fetch: tsaSpy.fetch });
+    assert.throws(() => new RekorAnchor({ url: "https://r.example.test", signingKey: generateKeyPairSync("ed25519").privateKey, log: recordedLog, timestamps: unused }), TypeError);
+    assert.equal(tsaSpy.requests.length, 0, "a refused key asks no one");
+    const head = await (await fixtureLedger()).ledger.head();
+    const input = { ...head, payload: anchorPayload(head) };
+    // The recorded entry for another payload: it does not verify for this one.
+    const otherHead = anchorPayload({ seq: 1, hash: "d".repeat(64) });
+    const otherBody = hashedRekordBody(otherHead, sign("sha256", otherHead, fixtureSigner().privateKey), fixtureSigner().publicKey);
+    const log = generateKeyPairSync("ed25519");
+    const otherEntry = Buffer.from(JSON.stringify(logEntry({ body: otherBody, index: 0, size: 1, origin: REKOR_ORIGIN, logKey: log.privateKey, logPublicKey: log.publicKey })));
+    for (const [reply, cause] of [
+      [{ status: 500, body: new Uint8Array() }, /^Rekor answered 500$/],
+      [{ body: otherEntry }, /^the Rekor entry does not verify$/],
+    ] as const) {
+      // The authority answers first, with the recorded token for this head, so the failure is Rekor's.
+      const tsa = replay({ body: recordedTimestamp });
+      const rekor = replay(reply);
+      const timestamps = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain: recordedChain, fetch: tsa.fetch, nonce: () => FIXTURE_NONCE });
+      const anchor = new RekorAnchor({ url: "https://r.example.test", signingKey: fixtureSigner().privateKey, log: recordedLog, timestamps, fetch: rekor.fetch });
+      await assert.rejects(anchor.anchor(input), (e: Error) => cause.test(e.message));
+      assert.equal(tsa.requests.length, 1);
+      assert.equal(rekor.requests.length, 1);
     }
   });
 
   it("refuses a valid entry for the same head under another key", async () => {
     const head = await (await fixtureLedger()).ledger.head();
-    const timestamps = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain: recordedChain });
+    const tsa = replay({ body: recordedTimestamp });
+    const timestamps = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain: recordedChain, fetch: tsa.fetch, nonce: () => FIXTURE_NONCE });
     const { fetch, requests } = replay({ body: recordedEntry });
     const anchor = new RekorAnchor({ url: "https://r.example.test", signingKey: ecKeys().privateKey, log: recordedLog, timestamps, fetch });
     await assert.rejects(anchor.anchor({ ...head, payload: anchorPayload(head) }), /another key/);
-    // Refused before the authority is asked.
+    assert.equal(tsa.requests.length, 1);
     assert.equal(requests.length, 1);
   });
 
@@ -451,9 +476,13 @@ describe("the Rekor adapter, on a recorded answer", () => {
       mutate((e) => (e.inclusionProof.rootHash = Buffer.alloc(32).toString("base64")), false),
       mutate((e) => e.inclusionProof.hashes.push(Buffer.alloc(32).toString("base64")), false),
       mutate((e) => e.inclusionProof.hashes.pop(), false),
-      mutate((e) => (e.inclusionProof.logIndex = "11"), false),
-      mutate((e) => (e.inclusionProof.logIndex = "-1"), false),
-      mutate((e) => (e.inclusionProof.logIndex = "nine"), false),
+      // The index read is the top-level one; with the inner copy gone, nothing else can supply it.
+      mutate((e) => { e.logIndex = "11"; delete e.inclusionProof.logIndex; }, false),
+      mutate((e) => { e.logIndex = "-1"; delete e.inclusionProof.logIndex; }, false),
+      mutate((e) => { e.logIndex = "nine"; delete e.inclusionProof.logIndex; }, false),
+      mutate((e) => { e.logIndex = "8"; delete e.inclusionProof.logIndex; }, false),
+      // An inner copy that disagrees with the top-level index is refused, never preferred.
+      mutate((e) => (e.inclusionProof.logIndex = "8"), false),
       mutate((e) => (e.inclusionProof.checkpoint.envelope = e.inclusionProof.checkpoint.envelope.replace(REKOR_ORIGIN, "other.example.test")), false),
       mutate((e) => (e.inclusionProof.checkpoint.envelope = e.inclusionProof.checkpoint.envelope.replace("\n\n", "\n")), false),
       mutate((e) => (e.inclusionProof.checkpoint.envelope = e.inclusionProof.checkpoint.envelope.replace(/ (\S+)\n$/, (_m: string, sig: string) => {

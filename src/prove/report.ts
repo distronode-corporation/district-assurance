@@ -56,7 +56,8 @@ export interface MonthlyReport {
    * Entries anywhere in the ledger whose time does not read (any workspace's, or none): their month
    * is unknown, so they are counted here, never above and never for a workspace. So are this
    * workspace's entries in the month whose detail does not read (a consent answer other than yes or
-   * no, a link amount that is not a whole number, a level that is not one). Only the first one's
+   * no, a link amount that is not a whole number or a link without a payment id, a level that is
+   * not one). Only the first one's
    * `seq` is given, never its content, so one bad entry never stops any workspace's report.
    */
   malformed: { count: number; firstSeq: number | null };
@@ -101,7 +102,8 @@ const SETTLED = ["paid", "failed", "expired"] as const;
 function readable(name: string, d: AuditEntry["detail"]): boolean {
   switch (name) {
     case "payment.link_sent":
-      return Number.isSafeInteger(d.amountMinor) && (d.amountMinor as number) >= 0 && typeof d.currency === "string" && /^[a-z]{3}$/.test(d.currency);
+      // A link without a non-empty string payment id identifies no payment, so it is never stored to match a settlement.
+      return typeof d.paymentId === "string" && d.paymentId !== "" && Number.isSafeInteger(d.amountMinor) && (d.amountMinor as number) >= 0 && typeof d.currency === "string" && /^[a-z]{3}$/.test(d.currency);
     case "verification.finished":
       // Any whole level is counted by its number (a later level included); anything else is not a level.
       return Number.isSafeInteger(d.level) && (d.level as number) >= 0;
@@ -116,9 +118,24 @@ function tally(): PaymentTally {
   return { count: 0, totals: {} };
 }
 
+const UNSAFE_TOTAL = "a payment total is not a safe integer; the report is refused, never rounded and signed";
+
 function add(t: PaymentTally, link: { amountMinor: number; currency: string }): void {
+  // Summed exactly: every total so far is a safe integer, so its BigInt is exact, and a sum past
+  // Number.MAX_SAFE_INTEGER is refused instead of rounded.
+  const sum = BigInt(t.totals[link.currency] ?? 0) + BigInt(link.amountMinor);
+  if (sum > BigInt(Number.MAX_SAFE_INTEGER)) throw new EngineError("precondition_failed", UNSAFE_TOTAL);
   t.count++;
-  t.totals[link.currency] = (t.totals[link.currency] ?? 0) + link.amountMinor;
+  t.totals[link.currency] = Number(sum);
+}
+
+/** Refuses to sign a report (built here or handed in) with a payment total that is not a whole, non-negative, safe number. */
+function assertSignable(report: MonthlyReport): void {
+  for (const t of [report.payments.sent, report.payments.paid, report.payments.failed, report.payments.expired]) {
+    for (const total of Object.values(t.totals)) {
+      if (!Number.isSafeInteger(total) || total < 0) throw new EngineError("precondition_failed", UNSAFE_TOTAL);
+    }
+  }
 }
 
 /** Sorts an object's keys, so the JSON and the CSV list them in one order. */
@@ -157,7 +174,8 @@ export async function monthlyReport(input: { ledger: AuditLedger; workspaceId: s
     unattributed: 0,
     malformed: { count: 0, firstSeq: null },
   };
-  // Payment ids are unique per call, so links are keyed by call and payment.
+  // Payment ids are unique per call, so links are keyed by call and payment. Only a link with a
+  // non-empty string payment id is stored, so a settlement without one never matches anything.
   // Consent counters live in a map until the end, so a purpose such as `constructor` or
   // `__proto__` is counted like any other and never reaches an inherited property.
   const consents = new Map<string, { yes: number; no: number }>();
@@ -330,6 +348,7 @@ async function signed(signer: ReceiptSigner, document: ReportDocument, content: 
 
 /** Signs the JSON report (for a PDF template) with the receipt signer. */
 export async function signReportJson(signer: ReceiptSigner, report: MonthlyReport): Promise<SignedReportJson> {
+  assertSignable(report);
   // A detached copy of exactly what is signed, so a change to the caller's object while the signer
   // runs cannot break the envelope.
   const content = canonicalJson(report);
@@ -339,6 +358,7 @@ export async function signReportJson(signer: ReceiptSigner, report: MonthlyRepor
 
 /** Signs the CSV of a report with the receipt signer. */
 export async function signReportCsv(signer: ReceiptSigner, report: MonthlyReport): Promise<SignedReportCsv> {
+  assertSignable(report);
   const csv = reportCsv(report);
   return { document: "monthly_report.csv", csv, ...(await signed(signer, "monthly_report.csv", csv)) };
 }

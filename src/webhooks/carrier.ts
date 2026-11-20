@@ -26,8 +26,12 @@ export interface TwilioSignatureInput {
    * this is the public URL, not the one the server sees.
    */
   url: string;
-  /** The raw request body, exactly as received: form parameters, or JSON with `bodySHA256` in the URL. */
-  payload: string;
+  /**
+   * The raw request body, exactly as received: form parameters, or JSON with `bodySHA256` in the
+   * URL. Give the bytes: `bodySHA256` is taken over them, never over a decoded copy, in which two
+   * different invalid UTF-8 bodies would read the same. Form parameters are decoded from them.
+   */
+  payload: string | Uint8Array;
   header: string | null | undefined;
   /** The account's auth tokens; two while the secondary token is promoted. */
   authTokens: readonly string[];
@@ -43,7 +47,7 @@ export function verifyTwilioSignature(input: TwilioSignatureInput): TwilioSignat
   const query = signedUrl.indexOf("?");
   const bodyHash = query < 0 ? null : new URLSearchParams(signedUrl.slice(query + 1)).get("bodySHA256");
   // With `bodySHA256` the URL alone is signed; otherwise the body's form parameters follow it.
-  const params = bodyHash === null ? sortedParams(payload) : "";
+  const params = bodyHash === null ? sortedParams(typeof payload === "string" ? payload : Buffer.from(payload).toString("utf8")) : "";
   const matches = urlVariants(signedUrl).some((url) =>
     tokens.some((token) => stringsEqual(createHmac("sha1", token).update(url + params).digest("base64"), header)),
   );
@@ -98,8 +102,11 @@ function stringsEqual(a: string, b: string): boolean {
 }
 
 export interface TelnyxSignatureInput {
-  /** The raw request body, exactly as received. A re-serialised body never verifies. */
-  payload: string;
+  /**
+   * The raw request body, exactly as received. A re-serialised body never verifies. Give the bytes:
+   * a decoded copy reads two different invalid UTF-8 bodies the same.
+   */
+  payload: string | Uint8Array;
   /** The `telnyx-signature-ed25519` header. */
   signatureHeader: string | null | undefined;
   /** The `telnyx-timestamp` header, in unix seconds. */
@@ -130,7 +137,9 @@ function isSmallOrderKey(key: Buffer): boolean {
 }
 
 export function verifyTelnyxSignature(input: TelnyxSignatureInput): SignatureCheck {
-  const keys = input.publicKeys.filter((k) => ED25519_PUBLIC_KEY.test(k) && !isSmallOrderKey(Buffer.from(k, "base64")));
+  // A string only: a regex test turns an array into its text, which would pass, and a key made from
+  // it is one byte long. Such an entry is skipped, like any other key that is not one.
+  const keys = input.publicKeys.filter((k) => typeof k === "string" && ED25519_PUBLIC_KEY.test(k) && !isSmallOrderKey(Buffer.from(k, "base64")));
   if (keys.length === 0) return { ok: false, reason: "no_secret" };
   const { signatureHeader: signature, timestampHeader: stamp } = input;
   if (signature === null || signature === undefined || signature === "" || stamp === null || stamp === undefined || stamp === "") {
@@ -145,7 +154,7 @@ export function verifyTelnyxSignature(input: TelnyxSignatureInput): SignatureChe
   if (!(Math.abs(Math.floor(input.now.getTime() / 1000) - timestamp) <= tolerance)) {
     return { ok: false, reason: "timestamp_out_of_tolerance" };
   }
-  const signed = Buffer.from(`${stamp}|${input.payload}`);
+  const signed = Buffer.concat([Buffer.from(`${stamp}|`), Buffer.from(input.payload)]);
   const bytes = Buffer.from(signature, "base64");
   for (const k of keys) {
     const key = createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: Buffer.from(k, "base64").toString("base64url") }, format: "jwk" });

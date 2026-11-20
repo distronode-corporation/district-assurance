@@ -1176,7 +1176,7 @@ export class Engine {
       detail: { seq: head.seq, proof },
     });
     // A copy for the listener, so what it does to the event never reaches the entry returned here.
-    this.#tell({ name: "ledger.anchored", callId: null, actor: entry.actor, at: entry.at, detail: structuredClone(entry.detail), eventId: entry.eventId!, seq: entry.seq });
+    this.#tell({ name: "ledger.anchored", callId: null, actor: entry.actor, at: entry.at, detail: entry.detail, eventId: entry.eventId!, seq: entry.seq }, true);
     return entry;
   }
 
@@ -1557,19 +1557,24 @@ export class Engine {
   /**
    * Tells the listener, inline and never awaited (INT-5). A throw or a rejection goes to
    * `onListenerError`; nothing the listener or that hook does stops the call or the ledger.
+   * With `copy`, the listener gets a copy of the detail, made inside the guard: a detail that cannot
+   * be copied (a custom ledger's entry) skips the listener, and the hook is told with an empty detail,
+   * so neither ever holds the caller's own object.
    */
-  #tell(event: DeliveredEvent): void {
+  #tell(event: DeliveredEvent, copy = false): void {
     if (this.#onEvent === undefined) return;
+    let delivered: DeliveredEvent = { ...event, detail: {} };
     const report = (error: unknown): void => {
       try {
         // An async hook that rejects is ignored too, never left as an unhandled rejection.
-        settled(this.#onListenerError?.(error, event), () => undefined);
+        settled(this.#onListenerError?.(error, delivered), () => undefined);
       } catch {
         // Ignored by design: the ledger is the record, and a failing hook has nowhere left to report.
       }
     };
     try {
-      settled(this.#onEvent(event), report);
+      delivered = copy ? { ...event, detail: structuredClone(event.detail) } : event;
+      settled(this.#onEvent(delivered), report);
     } catch (error) {
       report(error);
     }

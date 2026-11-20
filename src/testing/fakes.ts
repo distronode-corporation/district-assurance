@@ -308,6 +308,7 @@ export class MemoryRecordStore implements RecordStore {
     const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
     // The duress PIN is a PIN too: left alone, it would still pass for the subject (VER-12).
     delete subject?.pinDigest;
+    delete subject?.pinEnrolmentId;
     delete subject?.duressDigest;
   }
 }
@@ -525,7 +526,8 @@ const TST_INFO_OID = derOid("2a864886f70d0109100104");
 
 /**
  * A time-stamp authority in memory: a throwaway P-256 key, a self-signed certificate for
- * time-stamping, and an RFC 3161 token over SHA-256 of each anchor payload at the clock's time.
+ * time-stamping, and an RFC 3161 token over SHA-256 of each anchor payload at the clock's time,
+ * naming that certificate in a SigningCertificateV2 (its SHA-256 hash, the DEFAULT, and IssuerSerial).
  * `chain` is what a host passes to `verifyAnchor`. It never sees more than the payload.
  */
 export class FakeTimestampAuthority implements Anchor {
@@ -534,6 +536,8 @@ export class FakeTimestampAuthority implements Anchor {
   readonly #clock: Clock;
   readonly #key: KeyObject;
   readonly #name: Buffer;
+  /** The SigningCertificateV2 attribute every token signs. */
+  readonly #signingCertificate: Buffer;
 
   constructor(clock: Clock) {
     const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
@@ -546,17 +550,23 @@ export class FakeTimestampAuthority implements Anchor {
     const spki = publicKey.export({ type: "spki", format: "der" });
     const tbs = derSequence(der(0xa0, der(0x02, Buffer.from([2]))), ONE, ECDSA_SHA256, this.#name, validity, this.#name, spki, extensions);
     this.chain = [new X509Certificate(derSequence(tbs, ECDSA_SHA256, der(0x03, Buffer.from([0]), sign("sha256", tbs, privateKey))))];
+    // ESSCertIDv2 { certHash, issuerSerial { issuer: one directoryName [4], serial 1 } }.
+    const issuerSerial = derSequence(derSequence(der(0xa4, this.#name)), ONE);
+    const essCertId = derSequence(der(0x04, createHash("sha256").update(this.chain[0]!.raw).digest()), issuerSerial);
+    this.#signingCertificate = derSequence(derOid("2a864886f70d010910022f"), der(0x31, derSequence(derSequence(essCertId))));
   }
 
   async anchor(input: { seq: number; hash: string; payload: Uint8Array }): Promise<AnchorProof> {
     this.anchored.push({ seq: input.seq, hash: input.hash });
-    const time = this.#clock.now().toISOString().replace(/[-:T]|\.\d+/g, "");
+    // GeneralizedTime keeps a fraction of a second when there is one, without trailing zeros (X.690 11.7).
+    const time = this.#clock.now().toISOString().replace(/[-:T]/g, "").replace(/\.?0*Z$/, "Z");
     const imprint = derSequence(SHA256_ALGORITHM, der(0x04, createHash("sha256").update(input.payload).digest()));
     const serial = der(0x02, Buffer.from([this.anchored.length % 128]));
     const tstInfo = derSequence(ONE, derOid("2a0304"), imprint, serial, derText(0x18, time));
     const attributes = [
       derSequence(derOid("2a864886f70d010903"), der(0x31, TST_INFO_OID)),
       derSequence(derOid("2a864886f70d010904"), der(0x31, der(0x04, createHash("sha256").update(tstInfo).digest()))),
+      this.#signingCertificate,
     ];
     const signature = sign("sha256", der(0x31, ...attributes), this.#key);
     const signerInfo = derSequence(ONE, derSequence(this.#name, ONE), SHA256_ALGORITHM, der(0xa0, ...attributes), ECDSA_SHA256, der(0x04, signature));

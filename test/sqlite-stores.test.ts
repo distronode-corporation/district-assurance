@@ -34,6 +34,9 @@ let files = 0;
 const newFile = () => join(dir, `stores-${++files}.db`);
 const openStores = (path: string) => track(openSqliteStores(path));
 const openDatabase = (path: string) => track(openSqliteDatabase(path));
+// openSqliteDatabase refuses a file on Windows (an owner-only mode sets no ACL there), so every test
+// on a file is skipped there; sqlite-stores-hostile.test.ts proves the refusal on every platform.
+const onFile = { skip: process.platform === "win32" ? "file-backed storage is refused on Windows" : false };
 
 const record = (recordId: string, issue = "leaking tap"): IntakeRecord => ({
   recordId,
@@ -53,7 +56,7 @@ describe("SqliteAuditLedger passes the AuditLedger contract", () => {
   for (const c of auditLedgerContract(() => new SqliteAuditLedger(openSqliteDatabase(":memory:")))) it(c.name, c.run);
 });
 
-describe("SqliteAuditLedger on a file passes the AuditLedger contract", () => {
+describe("SqliteAuditLedger on a file passes the AuditLedger contract", onFile, () => {
   for (const c of auditLedgerContract(() => openStores(newFile()).ledger)) it(c.name, c.run);
 });
 
@@ -67,7 +70,7 @@ describe("SqliteRecordStore passes the RecordStore contract", () => {
   }
 });
 
-describe("SqliteRecordStore on a file passes the RecordStore contract", () => {
+describe("SqliteRecordStore on a file passes the RecordStore contract", onFile, () => {
   for (const c of recordStoreContract((subjects) => {
     const { records } = openStores(newFile());
     for (const { workspaceId, subject } of subjects) records.putSubject(workspaceId, subject);
@@ -81,12 +84,12 @@ describe("SqliteRecordStore passes the RecordStore erasure contract", () => {
   for (const c of recordStoreErasureContract(() => new SqliteRecordStore(openSqliteDatabase(":memory:")))) it(c.name, c.run);
 });
 
-describe("SqliteRecordStore on a file passes the RecordStore erasure contract", () => {
+describe("SqliteRecordStore on a file passes the RecordStore erasure contract", onFile, () => {
   for (const c of recordStoreErasureContract(() => openStores(newFile()).records)) it(c.name, c.run);
 });
 
 describe("SQLite stores", () => {
-  it("keep the ledger, subjects and records across a restart, and the chain goes on", async () => {
+  it("keep the ledger, subjects and records across a restart, and the chain goes on", onFile, async () => {
     const path = newFile();
     const first = openStores(path);
     first.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB }, pin: PIN }));
@@ -118,7 +121,7 @@ describe("SQLite stores", () => {
     second.close();
   });
 
-  it("refuse any change or removal of a ledger entry, from any connection", async () => {
+  it("refuse any change or removal of a ledger entry, from any connection", onFile, async () => {
     const path = newFile();
     const stores = openStores(path);
     await stores.ledger.append(entry(1));
@@ -135,7 +138,7 @@ describe("SQLite stores", () => {
     stores.close();
   });
 
-  it("keep one chain when two connections append to one file", async () => {
+  it("keep one chain when two connections append to one file", onFile, async () => {
     const path = newFile();
     const a = openStores(path);
     const b = openStores(path);
@@ -148,7 +151,7 @@ describe("SQLite stores", () => {
     b.close();
   });
 
-  it("keep ids apart that differ only in a lone surrogate, as the memory stores do", async () => {
+  it("keep ids apart that differ only in a lone surrogate, as the memory stores do", onFile, async () => {
     // node:sqlite binds text as UTF-8, where every lone surrogate becomes U+FFFD.
     const path = newFile();
     const stores = openStores(path);
@@ -193,7 +196,7 @@ describe("SQLite stores", () => {
 
 // VER-6 (#74) and VER-12 (#124) writes in the SQLite store (#95): each reads and writes the subject
 // in one immediate transaction, so two connections on one file never both pass the check.
-describe("SQLite PIN and duress writes on two connections", () => {
+describe("SQLite PIN and duress writes on two connections", onFile, () => {
   const S = "s".repeat(64);
   const subject = { subjectKey: S, phoneOnFile: "+15555550100", knowledge: { dob: "a".repeat(64) } };
   const two = () => {
@@ -202,6 +205,19 @@ describe("SQLite PIN and duress writes on two connections", () => {
     a.records.putSubject("w", subject);
     return { a: a.records, b: openStores(path).records };
   };
+
+  it("deleting the PIN digests clears the enrolment id with them, in one write, and keeps the rest", async () => {
+    const { a, b } = two();
+    assert.equal(await a.putPinDigest("w", S, "1".repeat(64), "enr_a"), true);
+    assert.equal(await a.putDuressDigest("w", S, "3".repeat(64), "1".repeat(64)), true);
+    await b.deletePinDigest("w", S);
+    const got = (await a.getSubject("w", S))!;
+    assert.deepEqual(got, subject, "no PIN digest, duress digest or enrolment id is left");
+    assert.equal("pinEnrolmentId" in got, false);
+    // A later enrolment that names no id is never paired with the erased one.
+    assert.equal(await a.putPinDigest("w", S, "2".repeat(64)), true);
+    assert.equal("pinEnrolmentId" in (await b.getSubject("w", S))!, false);
+  });
 
   it("two enrolments at once keep one PIN digest, and both connections read it", async () => {
     const { a, b } = two();
@@ -259,7 +275,7 @@ describe("SQLite PIN and duress writes on two connections", () => {
 
 // PRV-7 (#105) writes in the SQLite store: an erased record id is remembered in its own table, so a
 // filing on another connection, before or after, never brings the record back.
-describe("SQLite erasure writes on two connections", () => {
+describe("SQLite erasure writes on two connections", onFile, () => {
   const S = "s".repeat(64);
   const filed = (recordId: string): IntakeRecord => ({ ...record(recordId), subjectKey: S });
 

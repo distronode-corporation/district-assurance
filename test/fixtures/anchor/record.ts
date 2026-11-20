@@ -7,7 +7,7 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import { writeFileSync } from "node:fs";
 
 import { anchorPayload } from "../../../src/prove/anchor.ts";
-import { REKOR_ORIGIN, certificate, fixtureLedger, fixtureSigner,hashedRekordBody, logEntry, pem, timestampResponse, timestampToken, OIDS } from "./build.ts";
+import { FIXTURE_NONCE, REKOR_ORIGIN, certificate, der, fixtureLedger, fixtureSigner, hashedRekordBody, logEntry, pem, timestampResponse, timestampToken, OIDS } from "./build.ts";
 
 const dir = new URL("./", import.meta.url);
 const { ledger } = await fixtureLedger();
@@ -17,7 +17,8 @@ const root = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const tsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const rootCert = certificate({ subject: "Test Root CA", issuer: "Test Root CA", publicKey: root.publicKey, signingKey: root.privateKey, serial: 1, notBefore: "260101000000Z", notAfter: "360101000000Z", ca: true });
 const tsaCert = certificate({ subject: "Test TSA", issuer: "Test Root CA", publicKey: tsa.publicKey, signingKey: root.privateKey, serial: 2, notBefore: "260101000000Z", notAfter: "310101000000Z", usage: OIDS.timeStamping });
-const token = timestampToken({ payload, time: "20261118120000.25Z", signingKey: tsa.privateKey, issuer: "Test Root CA", serial: 2, certificates: [tsaCert] });
+// The token names tsaCert in a SigningCertificateV2 and carries FIXTURE_NONCE, the nonce the adapter test asks with.
+const token = timestampToken({ payload, time: "20261118120000.25Z", signingKey: tsa.privateKey, issuer: "Test Root CA", serial: 2, signerCertificate: tsaCert, nonce: der(0x02, FIXTURE_NONCE), certificates: [tsaCert] });
 writeFileSync(new URL("tsa-chain.pem", dir), pem(tsaCert) + pem(rootCert));
 // The DER TimeStampResp, kept as base64 text.
 writeFileSync(new URL("tsa-response.der.b64", dir), `${timestampResponse(0, token).toString("base64")}\n`);

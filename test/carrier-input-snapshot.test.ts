@@ -30,7 +30,8 @@ describe("verifyTwilioSignature reads its input once", () => {
   });
 
   it("compares the header it checked was present", () => {
-    const input = flipping({ url: JSON_URL, payload: JSON_BODY, authTokens: [TOKEN] }, "header", header, null, 3);
+    // Valid on the first read only: a check that reads the header again compares null, and fails.
+    const input = flipping({ url: JSON_URL, payload: JSON_BODY, authTokens: [TOKEN] }, "header", header, null);
     assert.deepEqual(verifyTwilioSignature(input as never), { ok: true });
   });
 });

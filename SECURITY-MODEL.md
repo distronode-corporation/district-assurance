@@ -772,7 +772,11 @@ afterwards without the change showing, and a rebuilt chain fails as `imprint` (t
 adapters are tested on answers built locally in the services' formats with throwaway keys, not yet
 on an answer recorded from a real authority or log). Every certificate above the authority's own
 must be a CA allowed to issue (cA true, keyCertSign, pathLen), so a leaf under the trusted root
-cannot stand in as an issuer (tested). It does not prove the chain was honest before it was
+cannot stand in as an issuer (tested). The token must name the authority's signing certificate in a
+signed SigningCertificate or SigningCertificateV2 attribute, so a token cannot be passed off under
+another certificate (tested). The reference authority adapter asks with a fresh nonce for a SHA-256
+imprint and refuses an answer that does not echo the nonce, so a recorded token is not taken as a
+new answer, and both reference adapters cap a reply's size (tested). It does not prove the chain was honest before it was
 anchored, nor anything after the last anchor. With a time-stamp authority alone, the authority
 sees only a hash and only the proofs the operator keeps exist, so an operator could drop an
 inconvenient one. With Rekor, everyone can see every head the operator anchored, so a missing
@@ -806,9 +810,12 @@ tokens are 256 random bits and only their SHA-256 is stored, so a copy of the `D
 yields no working link (tested).
 The reference server's optional SQLite stores (SRV-4) keep subjects (HMACs and the number on
 file), confirmed intake values and the ledger in one file, unencrypted, created readable and
-writable by its owner only, with SQLite's WAL and shared-memory files created alike (tested); a
-file that already exists readable or writable by others is refused, and so is a `file:` URI, which
-would open a file other than the one given that mode (tested). Protecting that file, its backups and the disk under it is
+writable by its owner only (created exclusively with mode 0600), with SQLite's WAL and
+shared-memory files created alike (tested); a file that already exists, or a `-wal`, `-shm` or
+`-journal` file beside it, readable or writable by others is refused, as are a symbolic link (at
+the path or beside it), anything that is not a regular file, a database file on Windows (where the
+mode sets no ACL), and a `file:` URI, which would open a file other than the one given that mode
+(tested). Protecting that file, its backups and the disk under it is
 left to the host.
 
 ### Theft of the keys
@@ -927,9 +934,9 @@ registry, flows, redaction, canonical JSON and hashing (`src/core/`, `src/engine
 | core-15 | I | Other identifiers (social insurance, health card and bank account numbers) reach the transcript. | More redactors. | open | PRV-6 |
 | core-16 | I | An outside module's ledger detail carries a card number. | The entry is refused before anything is saved. | covered | `flows.test.ts`: "refuses an outside module's entry that carries a card number, before anything is saved" |
 | core-17 | D | A host's event listener that throws or rejects stops the call or the ledger. | Listener failures are caught; the ledger is written regardless. | covered | `engine.test.ts`: "keeps writing the ledger when the listener throws"; `engine.test.ts`: "catches a listener's rejected promise" |
-| core-18 | R | A host's listener misses an event and nobody is told. | Defined delivery semantics and an `onListenerError` hook. | open | INT-5 |
+| core-18 | R | A host's listener misses an event and nobody is told. | Defined delivery semantics: the ledger is the record, and the listener is told at least once, after each append, with the entry's `eventId` and `seq`; a throw or rejection goes to `onListenerError`; `flushPending` appends and re-delivers what a failed append left pending. A notice lost when the process stops right after an append is not re-sent; the ledger still holds the event. | covered | `engine.test.ts`: "tells the listener after each append, with the entry's event id and seq"; `engine.test.ts`: "reports a listener's throw and rejection to onListenerError, and the call and the ledger go on"; `engine.test.ts`: "tells the listener again, with the same event id and seq, of an entry a lost clear left pending"; `engine.test.ts`: "flushes in the background the calls whose ledger entries are pending, and only those"; `event-delivery-hostile.test.ts`: "A4: a write that lands between flushPending's read and its unmark keeps the call marked" |
 | core-19 | E | The model is talked into acting for someone else (urgency, authority, "calling for my mother"). | An adversarial evaluation set in English and French gating each release. The model already has no path to a factor, a level or a grant (core-1). | open | VER-7 |
-| core-20 | I | A host keeps forwarding audio or transcript to the model while keypad digits or a payment are in progress. | One helper that says what a host may forward for the current session. | open | INT-2 |
+| core-20 | I | A host keeps forwarding audio or transcript to the model while keypad digits or a payment are in progress. | `forwardingFor(state)`, the one helper that says what a host may forward for the current session: nothing while `sensitive` is set or after the call, and nothing for a state it cannot read. The host must still ask it and obey (Left to the host). | covered | `session.test.ts`: "holds the transcript, both audio paths and listen-in through keypad entry and payment, and after the call"; `session.test.ts`: "fails closed with no state, or one the engine never writes"; `forwarding-hostile.test.ts`: "W4: nothing the host can call while paying lifts the hold before the payment settles" |
 | core-21 | T | An outside module's validators throw on garbage, or its step status is not pure, and a bad config passes. | A contract suite for outside modules. | open | MOD-1 |
 
 ### Badge
@@ -1056,7 +1063,7 @@ Webhook signature checks and event mapping (`src/webhooks/`).
 | server-9 | I | A request reads a file outside the UI's allow-list. | A fixed allow-list; traversal, encodings and case tricks are refused. | covered | `reference-ui.test.ts`: "serves nothing outside the allow-list: traversal, encodings, case, other files" |
 | server-10 | E | Script injected into the demo page runs. | A strict CSP, no inline script, style or handlers, and hardening headers. | covered | `reference-ui.test.ts`: "keeps the page free of inline script, inline style and inline handlers, so the CSP holds"; `reference-ui.test.ts`: "serves every allow-listed file with its content type, the strict CSP and the hardening headers" |
 | server-11 | T | Another origin drives a demo run (cross-site request). | Demo routes refuse another origin and a non-JSON body. | covered | `reference-ui.test.ts`: "refuses an unknown flow, bad JSON, a non-JSON body and another origin" |
-| server-12 | R | The server forgets its records and ledger on restart. | Optional persistent stores on `node:sqlite`. | open | SRV-4 |
+| server-12 | R | The server forgets its records and ledger on restart. | Optional persistent stores on `node:sqlite` (`SqliteAuditLedger`, `SqliteRecordStore`), passing the ledger and record store contracts. They are opt-in: a host wires them in, and the server as `npm run serve` starts it stays in memory. | covered | `sqlite-stores.test.ts`: "keep the ledger, subjects and records across a restart, and the chain goes on"; `sqlite-stores.test.ts`: "SqliteAuditLedger on a file passes the AuditLedger contract"; `sqlite-stores.test.ts`: "SqliteRecordStore on a file passes the RecordStore contract" |
 
 ### Release
 
@@ -1085,7 +1092,7 @@ The append-only ledger (`MemoryAuditLedger`, or the host's own).
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
 | auditledger-1 | R | A retried append writes one event twice. | `append` is idempotent by event id. | covered | `session-store.test.ts`: "makes the memory ledger idempotent by event id" |
-| auditledger-2 | T | A host's durable ledger is not append-only, breaks the chain or reorders concurrent appends. | `auditLedgerContract` for durable ledgers. | open | PRV-5 |
+| auditledger-2 | T | A host's durable ledger is not append-only, breaks the chain or reorders concurrent appends. | `auditLedgerContract` for durable ledgers, which the memory and SQLite ledgers pass and which catches a ledger that rewrites an entry or whose appends interleave. | covered | `contracts.test.ts`: "MemoryAuditLedger passes the AuditLedger contract"; `contracts.test.ts`: "catches a ledger that rewrites an entry, or skips the card number check"; `contracts.test.ts`: "catches a ledger whose appends interleave, forking the chain"; `sqlite-stores.test.ts`: "SqliteAuditLedger passes the AuditLedger contract" |
 | auditledger-3 | D | An entry the ledger would refuse is saved with the step and blocks every later write. | Such an entry is refused before the step is saved. | covered | `session-store.test.ts`: "refuses an entry the ledger would refuse before it is saved, so it never blocks later writes" |
 
 ### RecordStore
@@ -1095,7 +1102,7 @@ Subject records and filed intake records (the host's own store).
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
 | recordstore-1 | T | A caller of the store changes a stored record through a shared reference. | The memory store returns copies. | covered | `entry-points.test.ts`: "the record store returns copies and nothing for unknown keys" |
-| recordstore-2 | T | A host's durable record store does not keep the memory store's guarantees. | `recordStoreContract` for durable record stores. | open | PRV-5 |
+| recordstore-2 | T | A host's durable record store does not keep the memory store's guarantees. | `recordStoreContract` for durable record stores, which the memory and SQLite stores pass and which catches a store whose keys collide across workspaces or that hands out what it stores. | covered | `contracts.test.ts`: "MemoryRecordStore passes the RecordStore contract"; `contracts.test.ts`: "catches a store whose keys collide across workspaces"; `contracts.test.ts`: "catches a store that hands out what it stores"; `sqlite-stores.test.ts`: "SqliteRecordStore passes the RecordStore contract" |
 
 ### PinVerifier
 
@@ -1177,7 +1184,12 @@ the head and its anchor payload, never the ledger.
 | anchor-1 | T | A ledger is rebuilt after it was anchored and still looks anchored. | `verifyAnchor` checks the proof against the entries, offline, and catches a rebuilt chain or a proof for an earlier head. | covered | `prove-anchor.test.ts`: "catches a chain rebuilt after it was anchored"; `anchor-hostile.test.ts`: "Y2: an adapter that answers a proof for an earlier head is caught when the anchor is checked" |
 | anchor-2 | S | A proof from one ledger, or a token for another payload, is passed off as this one's. | The token's imprint must match this head's payload; a proof from another ledger never verifies. | covered | `anchor-hostile.test.ts`: "Y3: two ledgers: an anchor from one never verifies against the other"; `prove-anchor.test.ts`: "refuses a token for another payload as imprint" |
 | anchor-3 | S | An anchor payload is reused as a receipt signature. | The payload is domain-separated, so a head signed with the receipt key never verifies as a receipt. | covered | `prove-anchor.test.ts`: "is domain-separated: a context line, then the head as canonical JSON"; `prove-anchor.test.ts`: "a head signed with the receipt key never verifies as a receipt" |
-| anchor-4 | T | A malformed proof or a hostile entry is accepted, or throws. | Anything malformed is refused without throwing. | covered | `prove-anchor.test.ts`: "refuses without an anchor adapter, on an empty ledger, and on a malformed proof"; `anchor-hostile.test.ts`: "Y5: a proof with another kind, an extra field, or a Rekor kind without a log in the trust is refused" |
+| anchor-4 | T | A malformed proof or a hostile entry is accepted, or throws. | Anything malformed is refused without throwing: a proof counts only its own keys (an inherited `kind` or `token` is not a field), and an export holding null or a non-entry where an entry should be is `malformed`. | covered | `prove-anchor.test.ts`: "refuses without an anchor adapter, on an empty ledger, and on a malformed proof"; `anchor-hostile.test.ts`: "Y5: a proof with another kind, an extra field, or a Rekor kind without a log in the trust is refused"; `anchor-review.test.ts`: "an inherited token or kind is refused, and the engine refuses such a proof"; `anchor-review.test.ts`: "a covered prefix holding null or a non-entry is a failed check, never a throw" |
+| anchor-5 | S | A token signed with the authority's key is passed off under another certificate, or names none. | The token's signed SigningCertificate or SigningCertificateV2 must name the authority's signing certificate as the host has it (its hash and, when given, its issuer and serial); a token with neither attribute, or one this reader cannot read, is refused (`certificate`, or `token` when it does not read). | covered | `anchor-review.test.ts`: "refuses a token that names another certificate"; `anchor-review.test.ts`: "refuses a token with neither attribute"; `anchor-review.test.ts`: "refuses a hash it does not know and an ESSCertID that does not read (fail closed)" |
+| anchor-6 | S | An earlier token for the same payload, or one over another hash, is taken as the authority's answer to a new request. | The reference authority adapter sends a fresh nonce and asks for a SHA-256 imprint, and refuses a token that does not echo the nonce or has another imprint hash. An archived token has no request, so `verifyAnchor` checks it without either. | covered | `anchor-review.test.ts`: "sends a nonce in the request and accepts the token that echoes it"; `anchor-review.test.ts`: "refuses a recorded token answered to a new request (another nonce, or none)"; `anchor-review.test.ts`: "refuses a token with no nonce" |
+| anchor-7 | D | An authority or a log answers an endless or huge body and the host runs out of memory. | Both reference adapters read at most `maxReplyBytes` (default `MAX_REPLY_BYTES`, 256 KiB), cancel the rest and refuse; an error answer's body is never read. | covered | `anchor-review.test.ts`: "reads at most maxReplyBytes, cancels the rest and refuses"; `anchor-review.test.ts`: "refuses an error answer without reading its body, and a reply with no body" |
+| anchor-8 | T | A Rekor entry reports an index, tree size or root the log never signed. | The index is the entry's top-level `logIndex`; the size and root come from the signed checkpoint; the inclusion proof's own copies, when present, must agree, or the entry is refused (`log`). | covered | `anchor-review.test.ts`: "reads the top-level logIndex and the checkpoint's size and root: the inner copies may be left out"; `anchor-review.test.ts`: "refuses inner copies that disagree with the top-level index or the checkpoint"; `anchor-review.test.ts`: "refuses a checkpoint whose size or root line is not canonical" |
+| anchor-9 | I | A head reaches the public log for an anchor that then fails, or a retry logs it twice. | The Rekor adapter asks the authority first: a refused time-stamp writes nothing to the log. | covered | `anchor-review.test.ts`: "a refused time-stamp writes nothing to the public log"; `anchor-review.test.ts`: "asks the authority, then Rekor, and the proof verifies offline" |
 
 ### AttemptCounters
 

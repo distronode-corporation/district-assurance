@@ -87,12 +87,16 @@ createReferenceServer({
   name this project's own reporting address (its email or its GitHub repository) are refused at
   start. Reports about this code go through [SECURITY.md](../../SECURITY.md).
 - A contact is a `mailto:`, `tel:` or `https:` URI; `policy` and `canonical` are `https:` URLs.
-  Each must be one line of printable ASCII, so a value cannot add a field of its own.
+  Each must be one line of printable ASCII, so a value cannot add a field of its own. A `tel:`
+  contact is a global number (RFC 3966): `+`, then digits and the separators `-`, `.`, `(` and
+  `)`, with at least one digit, so a local number, a parameter, an escape or `tel:` alone is refused.
 - The settings are checked when the server is created, on its clock. An `expires` that is not in
   the future, or more than a year ahead (the RFC's advice), is refused with an error, so the server
   does not start. One within 30 days starts with a warning through `warn`. A server that runs into
   the last 30 days warns once, on the first request for the file after that, and one still running
-  when `expires` passes stops serving the file and warns once more.
+  when `expires` passes stops serving the file and warns once more. A `warn` that throws, or
+  answers a promise that rejects, loses that warning and is not told it again; the route answers
+  as it would have.
 - RFC 9116 requires HTTPS. This server speaks plain HTTP, so the host's TLS front end serves the
   file to the world. Signing it (an OpenPGP cleartext signature, which the RFC recommends) is the
   host's too: this server serves the file unsigned, and a host that signs it serves its signed
@@ -115,6 +119,25 @@ createReferenceServer({
 | `src/e2e.ts` | `npm run demo:e2e`: the UI, the door relay and a real Stripe Checkout in test mode; `owner-command` and `visit` |
 | `src/stripe-adapters.ts` | `StripeCheckoutLinks`, a minimal PAY-1 Checkout adapter (test-mode keys only, platform mode, built-in fetch), and `StripeIdentityProvider`, the Stripe Identity adapter (VER-5) |
 | `src/carrier-adapters.ts` | Twilio Lookup and Telnyx Number Lookup carrier signal adapters (VER-4) |
+| `src/sqlite-stores.ts` | `openSqliteStores(path)`: optional persistent ledger and record store on `node:sqlite` (SRV-4); see below |
+
+## Persistent stores (SQLite)
+
+`openSqliteStores(path)` keeps the ledger, the subjects and the confirmed records in one SQLite
+file, so a restarted server keeps them. The file holds subjects and records, so it is kept
+owner-only:
+
+- A new file is created exclusively, with mode 0600, before SQLite opens it. An existing file, or a `-wal`,
+  `-shm` or `-journal` file beside it, that group or others can read or write is refused (chmod 600
+  first).
+- A symbolic link, at the path or beside it, is refused: SQLite would use the files beside the
+  link's target, not the ones checked. Give the target's own path.
+- An existing file is checked by path, never opened outside SQLite, since closing a descriptor on
+  it would drop the locks another SQLite connection in the process holds on it.
+- A `file:` URI is refused, since its file would not get the mode.
+- **Windows: a database file is refused.** Mode 0600 sets no ACL there, so the file would be as
+  readable as its folder. There is no option to allow it; `openSqliteStores(":memory:")` works on
+  every platform, and keeps nothing across a restart.
 
 ## Trying it with your own Stripe test account
 

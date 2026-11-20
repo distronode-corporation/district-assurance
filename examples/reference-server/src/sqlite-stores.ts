@@ -12,7 +12,7 @@
 // IMMEDIATE), so several processes on one file also keep one chain; a process waits up to the busy
 // timeout for another's lock, blocking its event loop meanwhile. Fine for a reference server, not
 // tuned for production.
-import { closeSync, existsSync, openSync, statSync } from "node:fs";
+import { closeSync, lstatSync, openSync, type Stats } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
 import { GENESIS_HASH, chainEntry, type AuditEntry, type AuditInput, type AuditLedger, type IntakeRecord, type RecordStore, type SubjectRecord } from "../../../src/index.ts";
@@ -26,28 +26,68 @@ export const SQLITE_BUSY_TIMEOUT_MS = 5_000;
  * connection. A `file:` URI is refused: SQLite would open the file the URI names, not the path
  * whose mode was set, so the database could be created readable by others. A file that already
  * exists readable or writable by group or others is refused too (the mode only applies when the
- * file is created), since its subjects and records would be readable to them, and so is a WAL or
- * shared-memory file left beside it (SQLite creates new ones with the database file's mode, but
- * keeps the mode of one that exists).
+ * file is created), since its subjects and records would be readable to them, and so is a WAL,
+ * shared-memory or rollback journal file left beside it (SQLite creates new ones with the database
+ * file's mode, but keeps the mode of one that exists).
+ *
+ * An existing file is checked by path and never opened here: on Linux and macOS, closing any
+ * descriptor on a file drops every POSIX lock this process holds on it, including those of another
+ * SQLite connection to it, which could then corrupt its WAL. A new file is created exclusively, so
+ * no connection can hold a lock on it yet. A symbolic link is refused, at the database path and
+ * beside it: SQLite follows it and uses the target's WAL and shared-memory files, not the ones
+ * checked here. Any other file type (a directory, a FIFO) is refused too.
+ *
+ * On Windows a file is refused: the owner-only mode sets no ACL there, so the file would be as
+ * readable as its directory makes it. There is no option to allow it; open `":memory:"` there.
  */
 export function openSqliteDatabase(path: string): DatabaseSync {
   if (/^file:/i.test(path)) throw new Error("openSqliteDatabase takes a filesystem path, not a file: URI");
   if (path !== ":memory:") {
-    closeSync(openSync(path, "a", 0o600));
-    // Windows has no group or other bits to check. A WAL or shared-memory file left from an earlier
-    // run keeps its own mode (SQLite reuses it), so each that exists is checked as the database is.
-    if (process.platform !== "win32") {
-      for (const file of [path, `${path}-wal`, `${path}-shm`]) {
-        if (file !== path && !existsSync(file)) continue;
-        if ((statSync(file).mode & 0o077) !== 0) {
-          throw new Error(`the database file ${file} is readable or writable by others; make it owner-only (chmod 600) first`);
-        }
+    if (process.platform === "win32") {
+      throw new Error("openSqliteDatabase refuses a database file on Windows, where an owner-only mode sets no ACL; open \":memory:\" instead");
+    }
+    let info = lstatIfExists(path);
+    if (info === undefined) {
+      try {
+        closeSync(openSync(path, "wx", 0o600));
+      } catch (error) {
+        // Another process created it since the look: it is checked as any existing file is.
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
+      info = lstatSync(path);
+    }
+    assertOwnerOnlyFile(path, info);
+    for (const file of [`${path}-wal`, `${path}-shm`, `${path}-journal`]) {
+      const sidecar = lstatIfExists(file);
+      if (sidecar !== undefined) assertOwnerOnlyFile(file, sidecar);
     }
   }
   const db = new DatabaseSync(path, { timeout: SQLITE_BUSY_TIMEOUT_MS });
-  db.exec("PRAGMA journal_mode = WAL");
+  try {
+    db.exec("PRAGMA journal_mode = WAL");
+  } catch (error) {
+    // Not a database, or unreadable: the connection is closed (close cannot fail on an open
+    // connection) and the reason thrown.
+    db.close();
+    throw error;
+  }
   return db;
+}
+
+/** The file's own status (a symbolic link's, not its target's), or undefined if there is none. */
+function lstatIfExists(file: string): Stats | undefined {
+  try {
+    return lstatSync(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function assertOwnerOnlyFile(file: string, info: Stats): void {
+  if (info.isSymbolicLink()) throw new Error(`${file} is a symbolic link, and SQLite would use the WAL and shared-memory files beside its target; give the target's own path`);
+  if (!info.isFile()) throw new Error(`${file} is not a regular file`);
+  if ((info.mode & 0o077) !== 0) throw new Error(`the database file ${file} is readable or writable by others; make it owner-only (chmod 600) first`);
 }
 
 /**
@@ -57,7 +97,24 @@ export function openSqliteDatabase(path: string): DatabaseSync {
  */
 const key = (id: string): string => JSON.stringify(id);
 
-/** Runs `body` in a write transaction: committed if it returns, rolled back if it throws. */
+/**
+ * Entries, subjects and records as stored: JSON, except that JSON.stringify writes -0 as 0. -0 is
+ * stored as the string NUL "-0", and every string that starts with NUL gets one more NUL in front,
+ * so no stored string can be read back as -0, and reading takes the added NUL away again. The
+ * entry's hash is over canonical JSON, which writes -0 as 0, so it is the same either way.
+ */
+const NEGATIVE_ZERO = "\u0000-0";
+const toStored = (value: unknown): string =>
+  JSON.stringify(value, (_key, v: unknown) => (Object.is(v, -0) ? NEGATIVE_ZERO : typeof v === "string" && v.startsWith("\u0000") ? `\u0000${v}` : v));
+const fromStored = <T>(text: unknown): T =>
+  JSON.parse(text as string, (_key, v: unknown) => (typeof v === "string" && v.startsWith("\u0000") ? (v === NEGATIVE_ZERO ? -0 : v.slice(1)) : v)) as T;
+
+/**
+ * Runs `body` in a write transaction: committed if it returns, rolled back if it throws. SQLite may
+ * have rolled the transaction back already (SQLITE_FULL, a trigger's RAISE(ROLLBACK)), and a
+ * ROLLBACK then would throw and hide why; and if the ROLLBACK itself fails, the error that caused
+ * it is still the one thrown.
+ */
 function writeTransaction<T>(db: DatabaseSync, body: () => T): T {
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -65,7 +122,13 @@ function writeTransaction<T>(db: DatabaseSync, body: () => T): T {
     db.exec("COMMIT");
     return result;
   } catch (error) {
-    db.exec("ROLLBACK");
+    if (db.isTransaction) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // The error that made the rollback necessary says more than the rollback's own.
+      }
+    }
     throw error;
   }
 }
@@ -104,14 +167,14 @@ export class SqliteAuditLedger implements AuditLedger {
     return writeTransaction(this.#db, () => {
       if (input.eventId !== undefined) {
         const seen = this.#db.prepare("SELECT entry FROM audit_entries WHERE event_id = ?").get(key(input.eventId));
-        if (seen !== undefined) return JSON.parse(seen.entry as string) as AuditEntry;
+        if (seen !== undefined) return fromStored<AuditEntry>(seen.entry);
       }
       const head = this.#head();
       // chainEntry refuses card data; the transaction is then rolled back with nothing stored.
       const entry = chainEntry(input, head.seq + 1, head.hash);
       this.#db
         .prepare("INSERT INTO audit_entries (seq, event_id, hash, entry) VALUES (?, ?, ?, ?)")
-        .run(entry.seq, entry.eventId === undefined ? null : key(entry.eventId), entry.hash, JSON.stringify(entry));
+        .run(entry.seq, entry.eventId === undefined ? null : key(entry.eventId), entry.hash, toStored(entry));
       return entry;
     });
   }
@@ -126,7 +189,7 @@ export class SqliteAuditLedger implements AuditLedger {
     return this.#db
       .prepare("SELECT entry FROM audit_entries WHERE seq >= ? ORDER BY seq LIMIT ?")
       .all(fromSeq, limit ?? -1)
-      .map((row) => JSON.parse(row.entry as string) as AuditEntry);
+      .map((row) => fromStored<AuditEntry>(row.entry));
   }
 
   #head(): { seq: number; hash: string } {
@@ -177,12 +240,12 @@ export class SqliteRecordStore implements RecordStore {
   putSubject(workspaceId: string, subject: SubjectRecord): void {
     this.#db
       .prepare("INSERT INTO subjects (workspace_id, subject_key, subject) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET subject = excluded.subject")
-      .run(key(workspaceId), key(subject.subjectKey), JSON.stringify(subject));
+      .run(key(workspaceId), key(subject.subjectKey), toStored(subject));
   }
 
   async getSubject(workspaceId: string, subjectKey: string): Promise<SubjectRecord | null> {
     const row = this.#db.prepare("SELECT subject FROM subjects WHERE workspace_id = ? AND subject_key = ?").get(key(workspaceId), key(subjectKey));
-    return row === undefined ? null : (JSON.parse(row.subject as string) as SubjectRecord);
+    return row === undefined ? null : fromStored<SubjectRecord>(row.subject);
   }
 
   async putIntakeRecord(record: IntakeRecord, erasuresSeen?: number): Promise<void> {
@@ -200,7 +263,7 @@ export class SqliteRecordStore implements RecordStore {
       .run(
         key(record.workspaceId),
         key(record.recordId),
-        JSON.stringify(record),
+        toStored(record),
         key(record.workspaceId),
         key(record.recordId),
         guarded ? 1 : 0,
@@ -212,13 +275,13 @@ export class SqliteRecordStore implements RecordStore {
 
   async getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null> {
     const row = this.#db.prepare("SELECT record FROM intake_records WHERE workspace_id = ? AND record_id = ?").get(key(workspaceId), key(recordId));
-    return row === undefined ? null : (JSON.parse(row.record as string) as IntakeRecord);
+    return row === undefined ? null : fromStored<IntakeRecord>(row.record);
   }
 
   // Subject requests (PRV-7).
   async listIntakeRecords(workspaceId: string, subjectKey: string): Promise<IntakeRecord[]> {
     const rows = this.#db.prepare("SELECT record FROM intake_records WHERE workspace_id = ?").all(key(workspaceId));
-    return rows.map((row) => JSON.parse(row.record as string) as IntakeRecord).filter((r) => r.subjectKey === subjectKey);
+    return rows.map((row) => fromStored<IntakeRecord>(row.record)).filter((r) => r.subjectKey === subjectKey);
   }
 
   async deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void> {
@@ -243,6 +306,8 @@ export class SqliteRecordStore implements RecordStore {
   async deletePinDigest(workspaceId: string, subjectKey: string): Promise<void> {
     this.#update(workspaceId, subjectKey, (subject) => {
       delete subject.pinDigest;
+      // The enrolment id names the digest's enrolment, and goes with it, as on a reset.
+      delete subject.pinEnrolmentId;
       // The duress PIN is a PIN too: left alone, it would still pass for the subject (VER-12).
       delete subject.duressDigest;
       return true;
@@ -280,25 +345,25 @@ export class SqliteRecordStore implements RecordStore {
   }
 
   #update(workspaceId: string, subjectKey: string, change: (subject: SubjectRecord) => boolean): boolean {
-    this.#db.exec("BEGIN IMMEDIATE");
-    try {
+    return writeTransaction(this.#db, () => {
       const row = this.#db.prepare("SELECT subject FROM subjects WHERE workspace_id = ? AND subject_key = ?").get(key(workspaceId), key(subjectKey));
-      const subject = row === undefined ? null : (JSON.parse(row.subject as string) as SubjectRecord);
+      const subject = row === undefined ? null : fromStored<SubjectRecord>(row.subject);
       const changed = subject !== null && change(subject);
       if (changed) {
-        this.#db.prepare("UPDATE subjects SET subject = ? WHERE workspace_id = ? AND subject_key = ?").run(JSON.stringify(subject), key(workspaceId), key(subjectKey));
+        this.#db.prepare("UPDATE subjects SET subject = ? WHERE workspace_id = ? AND subject_key = ?").run(toStored(subject), key(workspaceId), key(subjectKey));
       }
-      this.#db.exec("COMMIT");
       return changed;
-    } catch (error) {
-      this.#db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 }
 
-/** Both stores on one database file, and a `close` for the connection. */
+/** Both stores on one database file, and a `close` for the connection, which is closed if either store's schema fails. */
 export function openSqliteStores(path: string): { records: SqliteRecordStore; ledger: SqliteAuditLedger; close(): void } {
   const db = openSqliteDatabase(path);
-  return { records: new SqliteRecordStore(db), ledger: new SqliteAuditLedger(db), close: () => db.close() };
+  try {
+    return { records: new SqliteRecordStore(db), ledger: new SqliteAuditLedger(db), close: () => db.close() };
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 }

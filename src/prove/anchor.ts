@@ -33,12 +33,17 @@ function isBase64(value: unknown): value is string {
   return typeof value === "string" && value.length % 4 === 0 && BASE64.test(value);
 }
 
-/** Whether a value is an `AnchorProof` with nothing else in it. */
+/**
+ * Whether a value is an `AnchorProof` with nothing else in it: exactly its own enumerable keys, so
+ * nothing inherited counts as a field (a prototype's token is not this proof's).
+ */
 export function isAnchorProof(value: unknown): value is AnchorProof {
   if (typeof value !== "object" || value === null) return false;
+  const keys = Object.keys(value);
   const proof = value as Record<string, unknown>;
-  const fields = proof.kind === "rekor" ? ["token", "entry"] : proof.kind === "rfc3161" ? ["token"] : null;
-  return fields !== null && Object.keys(proof).length === fields.length + 1 && fields.every((field) => isBase64(proof[field]));
+  const kind = keys.includes("kind") ? proof.kind : undefined;
+  const fields = kind === "rekor" ? ["token", "entry"] : kind === "rfc3161" ? ["token"] : null;
+  return fields !== null && keys.length === fields.length + 1 && fields.every((field) => keys.includes(field) && isBase64(proof[field]));
 }
 
 // ---- DER ----------------------------------------------------------------------------------------
@@ -83,6 +88,7 @@ const SEQUENCE = 0x30;
 const SET = 0x31;
 const OCTET_STRING = 0x04;
 const OID = 0x06;
+const INTEGER = 0x02;
 const GENERALIZED_TIME = 0x18;
 const CONTEXT_0 = 0xa0;
 
@@ -102,6 +108,14 @@ function children(element: DerElement | undefined, tag: number): DerElement[] {
   return readDer(expectTag(element, tag).value);
 }
 
+/** An element with this tag around `parts`, in DER (definite, minimal length). */
+function encode(tag: number, ...parts: Uint8Array[]): Buffer {
+  const body = Buffer.concat(parts);
+  const size: number[] = [];
+  for (let n = body.length; n > 0; n = Math.floor(n / 256)) size.unshift(n % 256);
+  return Buffer.concat([Buffer.from(body.length < 0x80 ? [tag, body.length] : [tag, 0x80 | size.length, ...size]), body]);
+}
+
 /** An object identifier, as the hex of its encoded contents (compared, never decoded). */
 function oidHex(element: DerElement | undefined): string {
   return Buffer.from(expectTag(element, OID).value).toString("hex");
@@ -112,6 +126,8 @@ const SIGNED_DATA = "2a864886f70d010702"; // 1.2.840.113549.1.7.2
 const TST_INFO = "2a864886f70d0109100104"; // 1.2.840.113549.1.9.16.1.4
 const CONTENT_TYPE = "2a864886f70d010903"; // 1.2.840.113549.1.9.3
 const MESSAGE_DIGEST = "2a864886f70d010904"; // 1.2.840.113549.1.9.4
+const SIGNING_CERTIFICATE = "2a864886f70d010910020c"; // 1.2.840.113549.1.9.16.2.12
+const SIGNING_CERTIFICATE_V2 = "2a864886f70d010910022f"; // 1.2.840.113549.1.9.16.2.47
 const TIME_STAMPING = "1.3.6.1.5.5.7.3.8";
 
 const HASHES = new Map([
@@ -148,10 +164,49 @@ function generalizedTime(element: DerElement | undefined): string {
 
 // ---- RFC 3161 time-stamp tokens -----------------------------------------------------------------
 
+/** An ESSCertID or ESSCertIDv2: the hash of the certificate it names and, when present, the IssuerSerial (as encoded). */
+interface EssCertId {
+  hash: string;
+  certHash: Uint8Array;
+  issuerSerial: Uint8Array | null;
+}
+
+/**
+ * The first ESSCertID of a SigningCertificate attribute value (RFC 2634: a SHA-1 hash) or, for
+ * `v2`, of a SigningCertificateV2 (RFC 5035: hashAlgorithm DEFAULT SHA-256, written out only
+ * when it is another). The first names the signer; any others are its chain. A hash this reader
+ * does not know throws: a token whose signer it cannot tell is refused.
+ */
+function firstCertId(value: DerElement | undefined, v2: boolean): EssCertId {
+  const [certs] = children(value, SEQUENCE);
+  const parts = children(children(certs, SEQUENCE)[0], SEQUENCE);
+  const hash = !v2 ? "sha1" : parts[0]?.tag === SEQUENCE ? hashOf(parts.shift()) : "sha256";
+  const [certHash, issuerSerial, extra] = parts;
+  if (extra !== undefined) throw new TypeError("ESSCertID: trailing data");
+  return { hash, certHash: expectTag(certHash, OCTET_STRING).value, issuerSerial: issuerSerial === undefined ? null : expectTag(issuerSerial, SEQUENCE).raw };
+}
+
+/**
+ * Whether an ESSCertID names this certificate: its hash over the certificate's DER and, when it
+ * has an IssuerSerial, the certificate's issuer (as one directoryName) and serial, byte for byte.
+ */
+function namesCertificate(id: EssCertId, cert: X509Certificate): boolean {
+  if (!createHash(id.hash).update(cert.raw).digest().equals(id.certHash)) return false;
+  if (id.issuerSerial === null) return true;
+  const tbs = children(readDer(readOne(cert.raw, SEQUENCE).value)[0], SEQUENCE);
+  // The serial is the TBSCertificate's first INTEGER (a version sits inside [0]); the issuer is two after it.
+  const at = tbs.findIndex((e) => e.tag === INTEGER);
+  return encode(SEQUENCE, encode(SEQUENCE, encode(0xa4, tbs[at + 2]!.raw)), tbs[at]!.raw).equals(id.issuerSerial);
+}
+
 interface ParsedToken {
   imprintHash: string;
   imprint: Uint8Array;
   time: string;
+  /** The TSTInfo's nonce (the INTEGER's contents), when it has one. */
+  nonce: Uint8Array | null;
+  /** The first ESSCertID of each SigningCertificate and SigningCertificateV2 attribute: at least one. */
+  signerIds: EssCertId[];
   /** The signed attributes as signed: a SET, not the implicit [0] they are stored as. */
   signedAttributes: Buffer;
   signatureHash: string;
@@ -160,7 +215,8 @@ interface ParsedToken {
 
 /**
  * Reads a TimeStampToken: a CMS ContentInfo holding SignedData whose content is a TSTInfo and whose
- * one signer signed the content type and the TSTInfo's digest (RFC 3161, RFC 5652).
+ * one signer signed the content type, the TSTInfo's digest and the certificate it signs with, as a
+ * SigningCertificate or SigningCertificateV2 attribute (RFC 3161 2.4.1, RFC 5816, RFC 5652).
  */
 function parseToken(der: Uint8Array): ParsedToken {
   const [contentType, wrapped] = readDer(readOne(der, SEQUENCE).value);
@@ -169,7 +225,9 @@ function parseToken(der: Uint8Array): ParsedToken {
   const [eContentType, eContent] = children(signedData[2], SEQUENCE);
   if (oidHex(eContentType) !== TST_INFO) throw new TypeError("not a TSTInfo");
   const tstInfo = readOne(expectTag(eContent, CONTEXT_0).value, OCTET_STRING).value;
-  const [, , messageImprint, , genTime] = children(readOne(tstInfo, SEQUENCE), SEQUENCE);
+  const [, , messageImprint, , genTime, ...optional] = children(readOne(tstInfo, SEQUENCE), SEQUENCE);
+  // After genTime: accuracy (a SEQUENCE), ordering (a BOOLEAN), the nonce, tsa [0], extensions [1]. Only the nonce is an INTEGER.
+  const nonce = optional.find((e) => e.tag === INTEGER)?.value ?? null;
   const [imprintAlgorithm, imprint] = children(messageImprint, SEQUENCE);
   const [signer, otherSigner] = children(signedData.at(-1), SET);
   if (otherSigner !== undefined) throw new TypeError("a token has one signer");
@@ -183,6 +241,11 @@ function parseToken(der: Uint8Array): ParsedToken {
   if (oidHex(values.get(CONTENT_TYPE)) !== TST_INFO) throw new TypeError("the signed content type is not a TSTInfo");
   const contentDigest = createHash(digest).update(tstInfo).digest();
   if (!contentDigest.equals(expectTag(values.get(MESSAGE_DIGEST), OCTET_STRING).value)) throw new TypeError("the signed digest is not the TSTInfo's");
+  const signerIds: EssCertId[] = [];
+  for (const [id, v2] of [[SIGNING_CERTIFICATE, false], [SIGNING_CERTIFICATE_V2, true]] as const) {
+    if (values.has(id)) signerIds.push(firstCertId(values.get(id), v2));
+  }
+  if (signerIds.length === 0) throw new TypeError("the token names no signing certificate");
   const signatureHash = SIGNATURES.get(oidHex(children(signatureAlgorithm, SEQUENCE)[0]));
   if (signatureHash === undefined) throw new TypeError("unsupported signature algorithm");
   const signedAttributes = Buffer.from(attributes!.raw);
@@ -191,6 +254,8 @@ function parseToken(der: Uint8Array): ParsedToken {
     imprintHash: hashOf(imprintAlgorithm),
     imprint: expectTag(imprint, OCTET_STRING).value,
     time: generalizedTime(genTime),
+    nonce,
+    signerIds,
     signedAttributes,
     signatureHash: signatureHash ?? digest,
     signature: expectTag(signature, OCTET_STRING).value,
@@ -199,7 +264,6 @@ function parseToken(der: Uint8Array): ParsedToken {
 
 const BASIC_CONSTRAINTS = "551d13"; // 2.5.29.19
 const BOOLEAN = 0x01;
-const INTEGER = 0x02;
 
 /**
  * What a certificate may issue (RFC 5280 4.2.1.3 and 4.2.1.9): a CA only with basicConstraints
@@ -253,18 +317,35 @@ export type TimestampCheck = { ok: true; time: string } | { ok: false; reason: "
 /**
  * Checks an RFC 3161 time-stamp token (base64 DER) over `payload`, against the authority's
  * certificate chain as the host has it (its signing certificate first). Certificates inside the
- * token are ignored. Never throws.
+ * token are ignored. The token's signed SigningCertificate (or V2) must name that signing
+ * certificate: `certificate` when it names another. Never throws.
  */
 export function checkTimestamp(token: string, payload: Uint8Array, chain: readonly X509Certificate[]): TimestampCheck {
   if (chain.length === 0) return { ok: false, reason: "certificate" };
   try {
     const parsed = parseToken(Buffer.from(token, "base64"));
     if (!verify(parsed.signatureHash, parsed.signedAttributes, chain[0]!.publicKey, parsed.signature)) return { ok: false, reason: "token" };
+    if (!parsed.signerIds.every((id) => namesCertificate(id, chain[0]!))) return { ok: false, reason: "certificate" };
     if (!chainValid(chain, Date.parse(parsed.time))) return { ok: false, reason: "certificate" };
     if (!createHash(parsed.imprintHash).update(payload).digest().equals(parsed.imprint)) return { ok: false, reason: "imprint" };
     return { ok: true, time: parsed.time };
   } catch {
     return { ok: false, reason: "token" };
+  }
+}
+
+/**
+ * What a time-stamp token says about the request it answers: the imprint's hash algorithm and the
+ * nonce (the INTEGER's contents, null when it has none). Null when the token does not read. It
+ * checks nothing (`checkTimestamp` does); a host that has just asked compares these with its
+ * request. An archived token has no request to compare with, so `verifyAnchor` does not read them.
+ */
+export function timestampTokenFields(token: string): { imprintHash: string; nonce: Uint8Array | null } | null {
+  try {
+    const parsed = parseToken(Buffer.from(token, "base64"));
+    return { imprintHash: parsed.imprintHash, nonce: parsed.nonce };
+  } catch {
+    return null;
   }
 }
 
@@ -278,10 +359,16 @@ export interface RekorLog {
   origin: string;
 }
 
-/** The parts of a Rekor v2 TransparencyLogEntry this check reads (the protobuf JSON form). */
+/**
+ * The parts of a Rekor v2 TransparencyLogEntry this check reads (the protobuf JSON form). The
+ * inclusion proof's own index, size and root repeat the top-level index and the signed checkpoint;
+ * the copies are optional, and when present must agree. Proto3 JSON leaves out a default value, so
+ * a missing index is 0 and a missing list of hashes is empty.
+ */
 interface RekorEntryJson {
+  logIndex?: string;
   canonicalizedBody: string;
-  inclusionProof: { logIndex: string; treeSize: string; rootHash: string; hashes: string[]; checkpoint: { envelope: string } };
+  inclusionProof: { logIndex?: string; treeSize?: string; rootHash?: string; hashes?: string[]; checkpoint: { envelope: string } };
 }
 
 interface HashedRekordJson {
@@ -327,15 +414,29 @@ function noteKey(log: RekorLog): { id: Buffer; hash: string | null } {
   throw new TypeError("a Rekor log key is Ed25519 or ECDSA");
 }
 
-/** A signed checkpoint (C2SP signed note) for this tree, signed by the log. */
-function checkpointValid(envelope: string, log: RekorLog, size: bigint, root: Buffer): boolean {
+/** A decimal with no sign, no spaces and no leading zero: how int64 values (as strings) and checkpoint sizes are written. */
+const DECIMAL = /^(?:0|[1-9][0-9]*)$/;
+
+/** A proto3 JSON int64 that is not negative, as a string; a default 0 is left out of proto3 JSON. */
+function uint64(value: unknown): bigint {
+  if (value === undefined) return 0n;
+  if (typeof value !== "string" || !DECIMAL.test(value)) throw new TypeError("not a decimal int64");
+  return BigInt(value);
+}
+
+/**
+ * The tree a signed checkpoint (C2SP signed note) describes, when the log signed it: its first
+ * lines are the origin, the tree size in decimal and the root hash in base64 (32 bytes).
+ */
+function readCheckpoint(envelope: string, log: RekorLog): { size: bigint; root: Buffer } | null {
   const end = envelope.indexOf("\n\n");
   const text = envelope.slice(0, end + 1);
-  if (!text.startsWith(`${log.origin}\n${size}\n${root.toString("base64")}\n`)) return false;
+  const lines = /^([^\n]*)\n(0|[1-9][0-9]*)\n([A-Za-z0-9+/]{43}=)\n/.exec(text);
+  if (lines === null || lines[1] !== log.origin) return null;
   const key = noteKey(log);
   // A signature line starts with U+2014 (EM DASH), a space and the key's name.
   const prefix = `${String.fromCharCode(0x2014)} ${log.origin} `;
-  return envelope
+  const signed = envelope
     .slice(end + 2)
     .split("\n")
     .some((line) => {
@@ -343,6 +444,7 @@ function checkpointValid(envelope: string, log: RekorLog, size: bigint, root: Bu
       const signature = Buffer.from(line.slice(prefix.length), "base64");
       return signature.subarray(0, 4).equals(key.id) && verify(key.hash, Buffer.from(text), log.key, signature.subarray(4));
     });
+  return signed ? { size: BigInt(lines[2]!), root: Buffer.from(lines[3]!, "base64") } : null;
 }
 
 export type LogCheck = { ok: true; logIndex: number } | { ok: false; reason: "log" };
@@ -360,9 +462,11 @@ export function checkRekorEntry(entry: string, payload: Uint8Array, log: RekorLo
     const spec = rekord.spec.hashedRekordV002;
     const signer = createPublicKey({ key: Buffer.from(spec.signature.verifier.publicKey.rawBytes, "base64"), format: "der", type: "spki" });
     const proof = parsed.inclusionProof;
-    const size = BigInt(proof.treeSize);
-    const index = BigInt(proof.logIndex);
-    const root = inclusionRoot(sha256(Buffer.from([0]), body), index, size, proof.hashes.map((h) => Buffer.from(h, "base64")));
+    // The index is the entry's own; the tree's size and root are what the log signed (Rekor v2).
+    const index = uint64(parsed.logIndex);
+    const tree = readCheckpoint(proof.checkpoint.envelope, log);
+    if (tree === null) return { ok: false, reason: "log" };
+    const root = inclusionRoot(sha256(Buffer.from([0]), body), index, tree.size, (proof.hashes ?? []).map((h) => Buffer.from(h, "base64")));
     const valid =
       // `logIndex` is a number: an index a number cannot hold exactly is refused, never reported rounded.
       index <= BigInt(Number.MAX_SAFE_INTEGER) &&
@@ -371,8 +475,11 @@ export function checkRekorEntry(entry: string, payload: Uint8Array, log: RekorLo
       spec.data.digest === sha256(payload).toString("base64") &&
       verify("sha256", payload, signer, Buffer.from(spec.signature.content, "base64")) &&
       root !== null &&
-      root.equals(Buffer.from(proof.rootHash, "base64")) &&
-      checkpointValid(proof.checkpoint.envelope, log, size, root);
+      root.equals(tree.root) &&
+      // The inner copies, when present, must say the same: a disagreement is refused, never resolved.
+      (proof.logIndex === undefined || uint64(proof.logIndex) === index) &&
+      (proof.treeSize === undefined || uint64(proof.treeSize) === tree.size) &&
+      (proof.rootHash === undefined || Buffer.from(proof.rootHash, "base64").equals(tree.root));
     return valid ? { ok: true, logIndex: Number(index) } : { ok: false, reason: "log" };
   } catch {
     return { ok: false, reason: "log" };
@@ -419,7 +526,13 @@ export function verifyAnchor(anchored: AuditEntry, entries: readonly AuditEntry[
   if (anchored.event !== "ledger.anchored" || !Number.isSafeInteger(seq) || (seq as number) < 1 || !isAnchorProof(proof)) {
     return { ok: false, reason: "malformed" };
   }
-  const chain = verifyChain(entries.slice(0, seq as number));
+  let chain: ReturnType<typeof verifyChain>;
+  try {
+    chain = verifyChain(entries.slice(0, seq as number));
+  } catch {
+    // An export holding null, or anything else that is not an entry, where an entry should be.
+    return { ok: false, reason: "malformed" };
+  }
   if (!chain.ok || chain.head.seq !== seq) return { ok: false, reason: "chain" };
   const payload = anchorPayload(chain.head);
   const stamp = checkTimestamp(proof.token, payload, tsa as readonly X509Certificate[]);

@@ -975,13 +975,21 @@ describe("reference server: document uploads", () => {
     assert.match(html, /Accepted: PDF, up to 2 KB\./);
   });
 
-  it("takes one upload per link, then answers that the link is used", async () => {
+  it("takes one upload per link: a repeat gets the same answer, and the page then says the link is used", async () => {
     const token = await link();
     let res = await send(token, JPEG);
     assert.equal(res.status, 201);
-    assert.match(await res.text(), /Your document was received/);
-    assert.deepEqual([...documents.documents().at(-1)!.bytes], [...JPEG]);
-    res = await send(token, JPEG);
+    const received = await res.text();
+    assert.match(received, /Your document was received/);
+    const stored = documents.documents();
+    assert.deepEqual([...stored.at(-1)!.bytes], [...JPEG]);
+    assert.ok(received.includes(`Reference: ${stored.at(-1)!.document.documentId}`));
+    // A retry (the first answer lost) learns the outcome it missed; nothing is stored twice.
+    res = await send(token, JPEG, "image/jpeg", "?lang=fr");
+    assert.equal(res.status, 201);
+    assert.ok((await res.text()).includes(`Référence : ${stored.at(-1)!.document.documentId}`));
+    assert.equal(documents.documents().length, stored.length);
+    res = await fetch(`${base}/u/${token}`);
     assert.equal(res.status, 410);
     assert.match(await res.text(), /expired or was already used/);
     res = await fetch(`${base}/u/${token}?lang=fr`);
@@ -1030,13 +1038,19 @@ describe("reference server: document uploads", () => {
   it("refuses what the scanner does not pass, and spends the link", async () => {
     const token = await link();
     scanner.clean = false;
-    const res = await send(token, JPEG);
+    let res = await send(token, JPEG);
     scanner.clean = true;
     assert.equal(res.status, 422);
     const html = await res.text();
     assert.match(html, /could not be accepted/);
     assert.doesNotMatch(html, /<form/);
-    assert.equal((await send(token, JPEG)).status, 410);
+    // Spent: a repeat gets the same refusal, without a second scan, and the page no form.
+    const stored = documents.documents().length;
+    res = await send(token, JPEG);
+    assert.equal(res.status, 422);
+    assert.doesNotMatch(await res.text(), /<form/);
+    assert.equal(documents.documents().length, stored);
+    assert.equal((await fetch(`${base}/u/${token}`)).status, 410);
   });
 
   it("answers a page, not a 500, when the scanner throws, and the link is spent", async () => {
@@ -1051,7 +1065,8 @@ describe("reference server: document uploads", () => {
     const html = await res.text();
     assert.match(html, /n'a pas pu être vérifié/);
     assert.doesNotMatch(html, /internals|<form/);
-    assert.equal((await send(token, JPEG)).status, 410);
+    assert.equal((await send(token, JPEG)).status, 503, "a repeat gets the same answer, and no second scan");
+    assert.equal((await fetch(`${base}/u/${token}`)).status, 410);
   });
 
   it("is off without the uploads option", async () => {
@@ -1071,18 +1086,23 @@ describe("reference server security.txt", () => {
     expires: new Date(clock.now().getTime() + days * DAY),
     ...extra,
   });
-  const start = async (options: Partial<ReferenceServerOptions> & { clock: FixedClock }) => {
+  /** A server, closed when the test ends, passed or failed: registered as soon as it listens. */
+  const start = async (ctx: TestContext, options: Partial<ReferenceServerOptions> & { clock: FixedClock }) => {
     const server = createReferenceServer({ engine: createTestEngine().engine, stripeSecrets: { identity: [], payments: [] }, warn: () => {}, ...options });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    return {
-      get: (init?: RequestInit) => fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/.well-known/security.txt`, init),
-      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
-    };
+    ctx.after(
+      () =>
+        new Promise<void>((resolve) => {
+          server.closeAllConnections();
+          server.close(() => resolve());
+        }),
+    );
+    return { get: (init?: RequestInit) => fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/.well-known/security.txt`, init) };
   };
 
-  it("serves the host's file as plain text, with every field it was given", async () => {
+  it("serves the host's file as plain text, with every field it was given", async (ctx) => {
     const clock = new FixedClock();
-    const s = await start({ clock, securityTxt: settings(clock, 200, { policy: "https://example.test/disclosure", canonical: "https://example.test/.well-known/security.txt" }) });
+    const s = await start(ctx, { clock, securityTxt: settings(clock, 200, { policy: "https://example.test/disclosure", canonical: "https://example.test/.well-known/security.txt" }) });
     const res = await s.get();
     assert.equal(res.status, 200);
     assert.equal(res.headers.get("content-type"), "text/plain; charset=utf-8");
@@ -1099,39 +1119,34 @@ describe("reference server security.txt", () => {
       ].join("\n"),
     );
     assert.equal((await s.get({ method: "POST" })).status, 405);
-    await s.close();
   });
 
-  it("serves only Contact and Expires when nothing else is set", async () => {
+  it("serves only Contact and Expires when nothing else is set", async (ctx) => {
     const clock = new FixedClock();
-    const s = await start({ clock, securityTxt: { contact: ["tel:+1-555-0100"], expires: new Date("2026-06-01T12:30:00.000Z") } });
+    const s = await start(ctx, { clock, securityTxt: { contact: ["tel:+1-555-0100"], expires: new Date("2026-06-01T12:30:00.000Z") } });
     assert.equal(await (await s.get()).text(), "Contact: tel:+1-555-0100\nExpires: 2026-06-01T12:30:00Z\n");
-    await s.close();
   });
 
-  it("keeps nonzero milliseconds in Expires, so the file never claims an earlier expiry than the route enforces", async () => {
+  it("keeps nonzero milliseconds in Expires, so the file never claims an earlier expiry than the route enforces", async (ctx) => {
     const clock = new FixedClock();
     clock.advance(100);
-    const s = await start({ clock, securityTxt: { contact: ["tel:+1-555-0100"], expires: new Date("2026-01-01T00:00:00.900Z") } });
+    const s = await start(ctx, { clock, securityTxt: { contact: ["tel:+1-555-0100"], expires: new Date("2026-01-01T00:00:00.900Z") } });
     assert.equal(await (await s.get()).text(), "Contact: tel:+1-555-0100\nExpires: 2026-01-01T00:00:00.900Z\n");
-    await s.close();
   });
 
-  it("has no route without settings, and never a default address", async () => {
-    const s = await start({ clock: new FixedClock() });
+  it("has no route without settings, and never a default address", async (ctx) => {
+    const s = await start(ctx, { clock: new FixedClock() });
     const res = await s.get();
     assert.deepEqual([res.status, await res.json()], [404, { error: "not_found" }]);
-    await s.close();
   });
 
-  it("stops serving the file once it expires while the server runs", async () => {
+  it("stops serving the file once it expires while the server runs", async (ctx) => {
     const clock = new FixedClock();
-    const s = await start({ clock, securityTxt: settings(clock, 100) });
+    const s = await start(ctx, { clock, securityTxt: settings(clock, 100) });
     clock.advance(100 * DAY - 1);
     assert.equal((await s.get()).status, 200);
     clock.advance(1);
     assert.equal((await s.get()).status, 404);
-    await s.close();
   });
 
   it("refuses at start an Expires in the past, now, or more than a year ahead", () => {
@@ -1189,11 +1204,10 @@ describe("reference server security.txt", () => {
     assert.doesNotThrow(make({ contact: ["mailto:a%ZZ@example.test"] }), "a value that does not decode is checked as written");
   });
 
-  it("warns once when a running server reaches the last 30 days, and once when the file expires", async (t) => {
+  it("warns once when a running server reaches the last 30 days, and once when the file expires", async (ctx) => {
     const clock = new FixedClock();
     const warnings: string[] = [];
-    const s = await start({ clock, securityTxt: settings(clock, 60), warn: (m) => warnings.push(m) });
-    t.after(() => s.close());
+    const s = await start(ctx, { clock, securityTxt: settings(clock, 60), warn: (m) => warnings.push(m) });
     assert.equal((await s.get()).status, 200);
     assert.deepEqual(warnings, [], "60 days out: no warning");
     clock.advance(30 * DAY);
