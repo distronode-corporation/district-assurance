@@ -12,20 +12,26 @@
   +----v----------------------------------------------------------------+
   | Engine (src/engine.ts): one per workspace, per process              |
   |                                                                     |
-  |   core/: session state machine, policy and levels, redaction,      |
+  |   core/: session state machine, policy and levels, redaction,       |
   |          module registry, FlowConfig and validateConfig, flows,     |
   |          canonical JSON, hashing, clock and ids, adapters           |
   |                                                                     |
   |   modules (on or off per FlowConfig):                               |
   |     Badge verify/   Dossier file/   Paylink pay/   Trace prove/     |
-  |     Gate gate/                      outside modules: engine.use()   |
+  |     Gate gate/      Step-up gate/step-up.ts                         |
+  |     outside modules: engine.use()                                   |
   |                                                                     |
-  |   webhooks/: Stripe signatures and event mapping                    |
+  |   webhooks/: Stripe and carrier signatures, Stripe event mapping    |
   +----+----------------------------------------------------------------+
-       | adapter interfaces (src/core/adapters.ts, EngineAdapters)
-  SessionStore  AuditLedger  RecordStore  PinVerifier  IdentityProvider
-  CarrierSignals  MessageSender  PaymentLinks  ReceiptSigner
-  access (AccessController by name)  accessSigner
+       | EngineAdapters (src/core/runtime.ts), interfaces in src/core/adapters.ts
+  ledger (AuditLedger)  sessions (SessionStore)  records (RecordStore)
+  identity (IdentityProvider)  carrier (CarrierSignals)  messages (MessageSender)
+  payments (PaymentLinks)  signer (ReceiptSigner)  pinVerifier (PinVerifier)
+  amounts (AmountSource)  access (AccessController by name)
+  accessSigner (ReceiptSigner)  stepUpSigner (ReceiptSigner)  codes (CodeStore)
+  counters (AttemptCounters)  dialer (CallbackDialer)  notifier (Notifier)
+  duressNotifier (DuressNotifier)  fieldCipher (FieldCipher)
+  consents (ConsentStore)  anchor (Anchor)
        |
   the host's database and key store, Stripe, Twilio / Telnyx, door relays
 ```
@@ -42,11 +48,13 @@ engine, its inputs or its answers; it hears fixed lines the host speaks on the e
 | `src/core/session.ts` | `SessionState`, the events, `reduce` (pure) |
 | `src/core/forwarding.ts` | `forwardingFor(state)`: the single place a host asks what it may forward (transcript, audio to speech-to-text, audio to the model, listen-in) |
 | `src/core/policy.ts` | factor kinds, levels, `validatePolicy`, `evaluateAssurance`, scope floors |
-| `src/core/redaction.ts` | `Redactor`, Luhn, card numbers in digits and en/fr digit words |
+| `src/core/redaction.ts` | `Redactor`, Luhn, card numbers in any script's digits and in English, French and Spanish number words, the SIN, health card and bank account redactors, `composeRedactors` |
+| `src/core/live-detector.ts` | `LiveCardNumberDetector`: tells the host to interrupt once a run of digits is read |
+| `src/core/keypad.ts` | `KeypadCollector`: a buffer for keypad tones that never shows a digit |
 | `src/core/module.ts` | the module interface (`AssuranceModule`, `ModuleManifest`) and `ModuleRegistry` |
 | `src/core/config.ts` | `FlowConfig`, `validateConfig`, `ConfigError` |
 | `src/core/flow.ts` | the current step of a call, and the rule that only it may run |
-| `src/core/runtime.ts` | `EngineAdapters`, the call record, and what the built-in modules see of the engine |
+| `src/core/runtime.ts` | `EngineAdapters`, the call record, `SUPPORTED_LOCALES`, and what the built-in modules see of the engine |
 | `src/core/session-store.ts` | `MemorySessionStore`, the reference `SessionStore` |
 | `src/core/adapters.ts` | the adapter interfaces and record types |
 | `src/core/canonical.ts`, `hash.ts`, `clock.ts`, `errors.ts`, `events.ts`, `shape.ts` | canonical JSON, hashing, injected time and ids, `EngineError` and `NotImplementedError`, event names, input checks |
@@ -56,20 +64,19 @@ engine, its inputs or its answers; it hears fixed lines the host speaks on the e
 
 | Module | Path | Provides | Needs | Adapters |
 |---|---|---|---|---|
-| Badge | `src/verify/badge.ts`, `factors.ts`, `knowledge.ts` | factors (`keypad_knowledge`, `pin`, `carrier_identity_match`, `photo_id`, planned `text_code` and `spoken_knowledge`, plug-ins), the `badge.verify` step, grants | | `records`, plus per factor: `carrier`; `identity` and `messages`; `pinVerifier` in verifier mode |
-| Dossier | `src/file/dossier.ts`, `intake.ts` | the `dossier.collect` step, records | `intake.file` | `records` |
-| Paylink | `src/pay/paylink.ts`, `payment.ts` | the `paylink.request` step, payments in `connect` or `platform` mode, the engine's link deadline | `payment.request` | `payments`, `messages` |
-| Trace | `src/prove/trace.ts`, `ledger.ts`, `receipt.ts`, `consent.ts` | the ledger (always on), the `trace.consent` and `trace.receipt` steps, receipts, consents | | `ledger`, and `signer` while receipts are on |
-| Gate | `src/gate/gate.ts`, `access.ts`, `relay.ts` | the `gate.grant` step, signed access grants whose outcomes the engine records, the signed-webhook relay | `entry.open` | `access`, `accessSigner` |
-| Paylink | `src/pay/paylink.ts`, `payment.ts` | the `paylink.request` step, payments | `payment.request` | `payments`, `messages` |
-| Trace | `src/prove/trace.ts`, `ledger.ts`, `receipt.ts`, `consent.ts` | the ledger (always on), the `trace.consent` and `trace.receipt` steps, receipts, consents | | `ledger`, `signer` while receipts are on, and optionally `consents` to revoke consents |
-| Gate | `src/gate/` | planned (GAT-1): the `gate.grant` step, signed access grants | `entry.*` | `accessController` |
+| Badge | `src/verify/badge.ts`, `factors.ts`, `knowledge.ts`, `pin.ts`, `spoken.ts`, `text-code.ts`, `callback.ts`, `counters.ts`, `duress-flag.ts` | factors (`keypad_knowledge`, `spoken_knowledge`, `pin`, `carrier_identity_match`, `photo_id`, `text_code`, `callback`, plug-ins), the `badge.verify` step, grants, lockouts across calls, PIN enrolment and the duress PIN | | `records`; `counters` while a factor the caller enters is on; per factor: `carrier`; `identity` and `messages`; `messages` and `codes`; `dialer` and `counters`; `pinVerifier` in verifier mode, `duressNotifier` with a duress PIN |
+| Dossier | `src/file/dossier.ts`, `intake.ts`, `readback.ts`, `delivery.ts`, `upload.ts` | the `dossier.collect` step, read-backs, records, encrypted sensitive fields, record delivery, document uploads | `intake.file` | `records`, and `fieldCipher` once a form has a sensitive field (delivery and uploads take their own stores as arguments) |
+| Paylink | `src/pay/paylink.ts`, `payment.ts`, `amount.ts`, `refunds.ts`, `later.ts` | the `paylink.request` step, payments in `connect` or `platform` mode, amount read-backs, the engine's link deadline, refunds and disputes in platform mode; `later.ts` holds the two planned stubs (PAY-4, PAY-6) | `payment.request` | `payments`, `messages`, and `amounts` for a step with an `amountRef` |
+| Trace | `src/prove/trace.ts`, `ledger.ts`, `receipt.ts`, `consent.ts`, `export.ts`, `anchor.ts`, `report.ts`, `subject.ts` | the ledger (always on), the `trace.consent` and `trace.receipt` steps, receipts and their key sets, consents and their revocation, ledger export, anchors, monthly reports, subject export and erasure | | `ledger`, `signer` while receipts are on, and optionally `consents` to revoke consents and `anchor` for `anchorLedger` |
+| Gate | `src/gate/gate.ts`, `access.ts`, `relay.ts`, `seam.ts`, `vendors.ts`, `codes.ts` | the `gate.grant` step, signed access grants whose outcomes the engine records, the signed-webhook relay, Seam, Kisi and Verkada controllers, one-time access codes | `entry.open` | `access` (a map of controllers), `accessSigner` |
+| Step-up | `src/gate/step-up.ts` | the `step-up.issue` step: a short-lived token a web sign-in exchanges once | `entry.sign_in` | `stepUpSigner` |
 
 Each module is an object with a manifest and a few pure functions: `validateSettings`,
 `requiredAdapters`, `validateStep`, `initCall` (its part of a new call record), `enterStep` and
 `stepStatus` (where its current flow step stands), and optionally `stepLevel`, `stepGrants`,
-`validateFlow` (a whole flow's problems, such as a per-call limit), `onUntrusted` and `receiptPart`. The registry refuses a manifest whose name, steps or factors clash
-with an installed module. The built-in modules' runtime functions (Badge's `submitFactor`,
+`validateFlow` (a whole flow's problems, such as a per-call limit), `onUntrusted` and
+`receiptPart`. The registry refuses a manifest whose name, steps or factors clash with an
+installed module. The built-in modules' runtime functions (Badge's `submitFactor`,
 Paylink's `requestPayment` and so on) take the engine's internal runtime; hosts reach them through
 the `Engine` methods.
 
@@ -78,12 +85,15 @@ sits outside the engine: it builds a `createTestEngine` engine on the fakes, ref
 turns on an outside module or fails `validateConfig`, and drives one flow with a scripted caller,
 printing each step, decision, event and the receipt. Nothing in `src/` imports it.
 
-Module boundaries: the core imports no module. Badge, Dossier and Trace import only the core.
-Paylink imports Badge's `matchedSubject`, because a payment link goes to the number on file that
-Badge matched. Gate imports Trace's `signDocument` (one ES256 format for receipts and grants); like
-the other built-in modules it runs on the engine's internal runtime, and no outside code can reach
-its part of a call (ADR-25). `src/modules.ts` lists the built-in modules and the default config, and
-`src/engine.ts` composes everything.
+Module boundaries: the core imports no module. Badge and Dossier import only the core. Paylink
+imports Badge's `matchedSubject`, because a payment link goes to the number on file that Badge
+matched. Trace's subject requests import Badge's counter and duress flag keys, so an erasure clears
+them. Gate imports Trace's `signDocument` and `verifyDocument` (one ES256 format for receipts and
+grants), and its access codes share the send limits of Badge's texted codes. Step-up reads Badge's
+part of the call for the verified subject. Like the other built-in modules, Gate and step-up run on
+the engine's internal runtime, and no outside code can reach their part of a call (ADR-25).
+`src/modules.ts` lists the built-in modules and the default config, and `src/engine.ts` composes
+everything.
 
 ### Outside modules
 
@@ -95,11 +105,9 @@ fn)`, one compare-and-set write, and reads it with `engine.moduleState`. `fn` se
 state, the current step, the engine's clock and an id source, can ask whether a scope is
 authorized, and can write `module.event` ledger entries; the engine holds every call to the
 module's scopes whatever `fn` does (the current step's in a flow, all its manifest's outside one).
-A running flow moves on when the module's `stepStatus` says its step is complete. Built-in modules'
-parts are never reachable this way.
-state, can ask whether a scope is authorized, can write `module.event` ledger entries, and says
-when its change changed contact details (`contactChanged`), so the call owes a security notice. A
-running flow moves on when the module's `stepStatus` says its step is complete.
+`fn` also says when its change changed contact details (`contactChanged`), so the call owes a
+security notice. A running flow moves on when the module's `stepStatus` says its step is complete.
+Built-in modules' parts are never reachable this way.
 
 ### Writing an outside module
 
@@ -154,24 +162,25 @@ with a `callback.book` step that needs the `callback.book` scope. The rules:
 4. `finishVerification` computes the level from the factors the current step allows, and issues a
    grant with the scopes the level reaches (only those the step names, when it names them), valid
    for 15 minutes by default. The flow moves on.
-5. Dossier: `startIntake(formId)`, `setIntakeField`, `confirmIntake` need `intake.file`; the
-   record is stored through `RecordStore` and its digest goes to the ledger and the receipt.
+5. Dossier: `startIntake(formId)`, `setIntakeField` and `confirmIntake` need `intake.file`;
+   `intakeReadBack` builds what the host reads back, `confirmIntake` takes the digest of the
+   read-back the caller heard, the record is stored through `RecordStore`, and its digest goes to
+   the ledger and the receipt.
 6. Paylink: `readBackPayment` builds the amount line the host speaks and `confirmPaymentAmount`
    records the caller's yes; `requestPayment` needs `payment.request` and that confirmation, for
-   every link, and in a flow the step sets the amount. The link
-   is texted to the number on file, the call enters `paying`, and `applyPaymentOutcome` settles it
-   only on `paid`. The flow moves on when it is paid, and fails when it failed or expired.
-   The link lives 15 minutes from the text by default; the host calls `expirePaymentLinks` at
-   `expiresAt`, and the engine expires a link still open, at the provider first.
-7. Trace: `recordConsent(purpose)` fingerprints the configured wording and stores the answer.
-   Gate: `grantAccess` needs `entry.open`; the engine reserves one grant, signs it, sends it once to
-   the door's controller and records the controller's answer (delivered, refused or unknown).
-8. `endCall` closes the session (abandoning a flow still running, and settling an access grant not
-   yet signed as unknown; it waits while a signed grant is at its door) and, when the call gets a
+   every link, and in a flow the step sets the amount. The link is texted to the number on file,
+   the call enters `paying`, and `applyPaymentOutcome` settles it only on `paid`. The flow moves on
+   when it is paid, and fails when it failed or expired. The link lives 15 minutes from the text
+   by default; the host calls `expirePaymentLinks` at `expiresAt`, and the engine expires a link
+   still open, at the provider first.
 7. Trace: `recordConsent(purpose)` fingerprints the configured wording and stores the answer (in
    the host's `ConsentStore` too, when it has one); `revokeConsent` withdraws it later by voice,
-   text or dashboard and writes `consent.revoked`.
-8. `endCall` closes the session (abandoning a flow still running) and, when the call gets a
+   text or dashboard and writes `consent.revoked`. Gate: `grantAccess` needs `entry.open`; the
+   engine reserves one grant, signs it, sends it once to the door's controller and records the
+   controller's answer (delivered, refused or unknown). Step-up: `issueStepUpToken` needs
+   `entry.sign_in`, and the site's `exchangeStepUpToken` takes the token once.
+8. `endCall` closes the session (abandoning a flow still running, and settling an access grant not
+   yet signed as unknown; it waits while a signed grant is at its door) and, when the call gets a
    receipt, takes the ledger head and signs it.
 
 Every step appends to the `AuditLedger`, and the optional `onEvent` listener sees the same event.
@@ -204,4 +213,4 @@ process.
 ## Dependencies
 
 None at runtime: `node:crypto` does the hashing, HMAC and ES256. Development uses TypeScript,
-`@types/node`, oxlint and c8, pinned exactly. `DECISIONS.md` says why.
+`@types/node`, oxlint, c8 and fast-check, pinned exactly. `DECISIONS.md` says why.

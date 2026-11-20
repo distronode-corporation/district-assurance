@@ -2,12 +2,12 @@
 
 A small `node:http` server around one engine, for trying district-assurance end to end. It
 imports the package sources directly and has no dependencies or `package.json` of its own; run it
-from the repository root. Not hardened for production (ROADMAP.md, M5).
+from the repository root. Not hardened for production (ROADMAP.md, M8).
 
 ```sh
 npm run demo    # owner-command, deposit in each mode and entry, on fake adapters and loopback servers, then exits
 npm run ui      # the same scripted calls in a browser, one step at a time, on 127.0.0.1:8787
-npm run serve   # the server on 127.0.0.1:8787 until stopped, for your own Stripe test events
+npm run serve   # the server on 127.0.0.1:8787 until stopped, for your own Stripe test events (PORT=0: any free port, named in the first line)
 npm run demo:e2e  # the UI with a real Stripe Checkout in test mode (STRIPE_TEST_SECRET_KEY=sk_test_...)
 ```
 
@@ -18,17 +18,19 @@ a time (or the rest in one go). After each step the page shows the call's sessio
 entries in the audit ledger, and whether the whole ledger's hash chain is intact. When a flow with
 a `trace.receipt` step ends, the script issues the receipt's capability link (`/r/:token`; the
 link store keeps only the token's hash, but the demo run itself holds the raw token in memory so
-later views of the run can show the link, which a real host would not do), and the page fetches the receipt from `/r/:token.json` and the key set
-from `/.well-known/receipt-keys.json` and checks the ES256 signature itself, with Web Crypto, over
-its own canonical JSON of the body; a button changes one character and checks again, which fails.
-The page also recomputes each ledger entry's hash.
+later views of the run can show the link, which a real host would not do), and the page fetches
+the receipt from `/r/:token.json` and the key set from `/.well-known/receipt-keys.json` and checks
+the ES256 signature itself, with Web Crypto, over its own canonical JSON of the body; a button
+changes one character and checks again, which fails. The page also recomputes each ledger entry's
+hash.
 
 Plain HTML, CSS and JavaScript in `public/`: no framework, no build step, no dependency. Light and
 dark follow the system setting. Step results are announced through a polite live region, focus
 moves to the run when it starts and to the receipt when it ends, and everything works from the
 keyboard.
 
-The routes, on this server only (not on `npm run serve`):
+The routes, on this server only (not on `npm run serve`); the server's own routes are listed in
+the repository's README.md, "The reference server":
 
 | Route | |
 |---|---|
@@ -49,9 +51,8 @@ How the page is kept small and safe:
   The page writes every value as text, never as markup.
 - On every route, receipts, key set and webhooks included, only a Host of `127.0.0.1`,
   `localhost` or `[::1]` with the server's own port is served (a rebound DNS name or another port
-  gets `403`), and a run
-  is started or stepped only by a JSON `POST` from the page's own origin, which another site cannot
-  send without a preflight this server never answers.
+  gets `403`), and a run is started or stepped only by a JSON `POST` from the page's own origin,
+  which another site cannot send without a preflight this server never answers.
 - No secret reaches the browser: it sees session states, ledger entries, the receipt and the public
   key set, all of which hold no values the caller keyed. The Stripe routes on this server accept
   only the demo's published secret, so point `stripe listen` at `npm run serve` instead.
@@ -106,7 +107,7 @@ createReferenceServer({
 
 | File | |
 |---|---|
-| `src/app.ts` | `createReferenceServer({ engine, stripeSecrets, clock, receiptLinks })`: the routes, `ReceiptLinks`, the receipt page and the security.txt checks |
+| `src/app.ts` | `createReferenceServer({ engine, stripeSecrets, clock, ... })` (with the optional `receiptLinks`, `records`, `carriers`, `uploads`, `bodyLimits`, `securityTxt` and others): the routes, `ReceiptLinks`, the receipt and upload pages and the security.txt checks |
 | `src/script.ts` | the scripted calls, one step at a time, and the demo's records, engines and door relay |
 | `src/demo.ts` | `npm run demo`: every step in a row; `runDemo(false)` is also run by the test suite |
 | `src/demo-runs.ts` | the UI's runs: one step per request, and the run's state, ledger and chain check |
@@ -120,6 +121,7 @@ createReferenceServer({
 | `src/stripe-adapters.ts` | `StripeCheckoutLinks`, a minimal PAY-1 Checkout adapter (test-mode keys only, platform mode, built-in fetch), and `StripeIdentityProvider`, the Stripe Identity adapter (VER-5) |
 | `src/carrier-adapters.ts` | Twilio Lookup and Telnyx Number Lookup carrier signal adapters (VER-4) |
 | `src/sqlite-stores.ts` | `openSqliteStores(path)`: optional persistent ledger and record store on `node:sqlite` (SRV-4); see below |
+| `src/anchor-adapters.ts` | `TimestampAuthorityAnchor` (an RFC 3161 time-stamp authority) and `RekorAnchor` (a Rekor v2 log plus an authority), `Anchor` adapters for `anchorLedger` (PRV-9) |
 
 ## Persistent stores (SQLite)
 
@@ -223,8 +225,8 @@ the originating provider's signature: only the plain Passed values give a level.
 result, such as `shaken_stir_attestation` in the Voice API's `call.initiated` screening result,
 is not listed here, so it maps to `none`; and a TeXML `ShakenStirAttestation` is never read
 without `ShakenStirValidated`. The Telnyx rows follow Telnyx's SIP header parameters page
-(`TN-Validation-Passed` is A, `-B` and `-C` are B and C) and its TeXML callback fields. Twilio documents `StirVerstat` for
-the United States and France. Coverage for Canadian numbers is checked per carrier before it is
+(`TN-Validation-Passed` is A, `-B` and `-C` are B and C) and its TeXML callback fields. Twilio
+documents `StirVerstat` for the United States and France. Coverage for Canadian numbers is checked per carrier before it is
 documented here.
 
 In Canada and the United States, `C` or no attestation is common for genuine callers: calls from
@@ -268,8 +270,8 @@ How the answers are read:
 
 Every failure answers `checked: false` with nothing known, and never throws into the call: a
 number that is not E.164, an answer for a country outside the allow-list, a timeout (`timeoutMs`,
-3000 by default, over the whole exchange, the host's `identityFor` included), a network or HTTP error, a field error (a feature the
-account is not approved for, or a country it does not cover), or an answer that cannot be read. A
+3000 by default, over the whole exchange, the host's `identityFor` included), a network or HTTP
+error, a field error (a feature the account is not approved for, or a country it does not cover), or an answer that cannot be read. A
 Twilio report is `checked` only when every field asked for answered. The optional `onUnavailable`
 listener hears why (`vendor`, `reason`, the HTTP `status` and the vendor's error `code`), never
 the number, the identity or a credential; it may be async, and its errors, thrown or rejected, are
@@ -283,8 +285,7 @@ to 60000. A number on file that is not a string is not E.164.
 
 Telnyx alone reports no SIM change, so its `checked: true` report says `simSwapChecked: false`, and
 the policy never counts a texted code on it, whatever `trustTextCodeWithoutCarrierCheck` says. Its
-port signal stays in the report. A host that turns texted codes on (VER-2) takes SIM swap from
-Twilio.
+port signal stays in the report. A host that turns texted codes on takes SIM swap from Twilio.
 
 Credentials come from the environment only:
 

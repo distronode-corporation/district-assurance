@@ -83,7 +83,7 @@ describe("the release workflow's tarball allow-list", () => {
 describe("SPEC's published package section", () => {
   it("names every path the exports map publishes, and says how many there are", () => {
     const spec = readFileSync(new URL("../SPEC.md", import.meta.url), "utf8");
-    const section = spec.slice(spec.indexOf("## 17. The published package"));
+    const section = spec.slice(spec.indexOf("## 30. The published package"));
     const paragraph = section.slice(0, section.indexOf("\n\n", section.indexOf("\n\n") + 2));
     const exportsMap = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { exports: Record<string, unknown> }).exports;
     const names = Object.keys(exportsMap).map((key) => (key === "." ? "district-assurance" : `district-assurance/${key.slice(2)}`));
