@@ -1677,6 +1677,17 @@ export class Engine {
       if (stored === null) throw new EngineError("unknown_call", "no such call");
       const record = stored.record as unknown as CallRecord;
       if (record.state.phase !== "ended") throw new EngineError("precondition_failed", "the call has not ended; end it before removing its record");
+      // A duress alert or a contact notice still owed is sent by sweepAlerts, which needs the record.
+      if (badge.owedDuressAlerts(record).length > 0 || trace.noticeDue(record)) {
+        throw new EngineError("precondition_failed", "the call still owes a notification; sweepAlerts sends it, then remove the record");
+      }
+      // A filed record whose confirmed mark is still owed is marked first, or the record is kept.
+      if (((record.modules[dossier.DOSSIER] as unknown as dossier.DossierSlice | undefined)?.marksOwed ?? []).length > 0) {
+        await dossier.settleOwedMarks(this.#rt, callId).catch(() => {
+          throw new EngineError("precondition_failed", "a confirmed record is not yet marked in the record store; the call record is kept until it is");
+        });
+        continue;
+      }
       if (record.outbox.length > 0) {
         if (flushed) throw new EngineError("precondition_failed", "the call's ledger entries are not yet on the ledger; the record is kept until they are");
         // A ledger that refuses them leaves them pending, and the record is read again to see.

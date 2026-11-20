@@ -10,7 +10,7 @@ import { deliverRecord } from "../src/file/delivery.ts";
 import { MemoryDocumentStore, createUploadLink } from "../src/file/upload.ts";
 import { FakeRecordDelivery, MemoryRecordStore, TEST_KNOWLEDGE_KEY, testSubject, type TestEngine } from "../src/testing/index.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, heard, rejects, setup, verifiedCall } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, heard, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
 const SUBJECT = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const destination = { destinationId: "crm", url: "https://hooks.example.test/records", secret: "whsec_flag_test_not_a_secret" };
@@ -56,6 +56,68 @@ describe("intake records: the confirmed flag", () => {
     const erased = await t.engine.eraseSubject({ workspaceId: "ws_test", subjectKey: SUBJECT });
     assert.deepEqual([...erased.recordIds].sort(), [record.recordId, "rec_left"].sort());
     assert.equal(await t.records.getIntakeRecord("ws_test", "rec_left"), null);
+  });
+
+  it("keeps the mark owed on the call when the commit's ledger append fails, and removeCall makes it before the record goes", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "Leaking tap");
+    const readBack = await heard(t, callId);
+    // The filing write commits, then its ledger append fails: confirmIntake throws before the mark.
+    const append = t.ledger.append.bind(t.ledger);
+    let down = true;
+    t.ledger.append = async (input) => {
+      if (down && input.event === "intake.confirmed") throw new Error("ledger down");
+      return append(input);
+    };
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack }), /ledger down/);
+    const [stored] = await t.records.listIntakeRecords("ws_test", SUBJECT);
+    assert.equal(await t.records.isIntakeRecordConfirmed("ws_test", stored!.recordId), false);
+    down = false;
+    await t.engine.endCall(callId);
+    assert.deepEqual(await t.engine.removeCall(callId), { removed: true });
+    assert.equal(await t.records.isIntakeRecordConfirmed("ws_test", stored!.recordId), true, "marked before the call record went");
+  });
+
+  it("answers a confirmation retried on a call an older build filed, which names no owed mark", async () => {
+    const t = setup();
+    const { callId, record } = await confirmed(t);
+    const stored = (await t.sessions.get("ws_test", callId))!;
+    const old = structuredClone(stored.record) as { modules: { dossier: { marksOwed?: string[] } } };
+    delete old.modules.dossier.marksOwed;
+    assert.deepEqual(await t.sessions.compareAndSet("ws_test", callId, stored.version, old as never), { ok: true, version: stored.version + 1 });
+    assert.deepEqual(await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: "ignored on a retry" }), record);
+  });
+
+  it("removes a call on an engine with Dossier off", async () => {
+    const t = setup({ config: testConfig((c) => (c.modules.dossier = { enabled: false })) });
+    const { callId } = await t.engine.startCall();
+    await t.engine.endCall(callId);
+    assert.deepEqual(await t.engine.removeCall(callId), { removed: true });
+  });
+
+  it("keeps the call record while an owed mark cannot be made", async () => {
+    class Down extends MemoryRecordStore {
+      down = false;
+      override async confirmIntakeRecord(workspaceId: string, recordId: string): Promise<void> {
+        if (this.down) throw new Error("store down");
+        return super.confirmIntakeRecord(workspaceId, recordId);
+      }
+    }
+    const records = new Down();
+    const t = setup({ adapters: { records } });
+    records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB }, pin: PIN }));
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "Leaking tap");
+    records.down = true;
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), /store down/);
+    await t.engine.endCall(callId);
+    await assert.rejects(t.engine.removeCall(callId), rejects("precondition_failed", /confirmed record is not yet marked/));
+    assert.notEqual(await t.sessions.get("ws_test", callId), null);
+    records.down = false;
+    assert.deepEqual(await t.engine.removeCall(callId), { removed: true });
   });
 
   it("keeps a filing whose mark failed unconfirmed, and a confirmation asked again marks it and gives the same record", async () => {

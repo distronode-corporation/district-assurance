@@ -1065,8 +1065,10 @@ described where they are written.
 **Removing a call record.** A host removes a call record only through `removeCall(callId)`, never
 in its session store directly: the store's optional `remove(workspaceId, callId, expectedVersion)`
 removes only the version the engine checked, with its pending mark. `removeCall` is refused
-(`precondition_failed`) for a call that has not ended and for one whose outbox still holds entries
-after it tried to flush them (the ledger refused them): the record is kept, and `flushPending` keeps
+(`precondition_failed`) for a call that has not ended, for one that still owes a duress alert or a
+contact notice (`sweepAlerts` sends it), for one with a filed record whose confirmed mark it could
+not make (the call keeps the marks it owes in `marksOwed` until the record store has them), and for
+one whose outbox still holds entries after it tried to flush them (the ledger refused them): the record is kept, and `flushPending` keeps
 listing it, until they are appended, so no pending entry (a `consent.recorded` written while the
 ledger was down) is ever lost with its record. A write that lands before the removal is read
 again, up to three times (`conflict` after that); an unknown call is `unknown_call`, and a store
@@ -1630,8 +1632,9 @@ deleted), and `isIntakeRecordConfirmed(workspaceId, recordId)` reads the mark. T
 beside the record, never in it. `deliverRecord`, `exportSubject` and `createUploadLink` read only
 marked records: a row no confirmation committed (one a refusal after the write left behind when its
 delete failed) is never delivered, exported or given an upload link, and an erasure still deletes
-it. A mark that fails makes `confirmIntake` throw after the filing committed; confirming again marks
-the record and returns the same one. `getIntakeRecord` and `listIntakeRecords` return records
+it. The call keeps each mark it owes until the store has it, so a mark lost to a failed store or a
+failed ledger append after the commit is made by a confirmation asked again, which returns the same
+record, or by `removeCall` before the call record goes. `getIntakeRecord` and `listIntakeRecords` return records
 whether marked or not. `endCall` is refused while
 a record is being filed. Provider idempotency keys are JSON tuples of the workspace, the call and the
 operation, so workspaces sharing an adapter never share a key. A flow attached to a running call

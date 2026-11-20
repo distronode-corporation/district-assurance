@@ -246,6 +246,26 @@ describe("receipt link text", () => {
   });
 });
 
+describe("removeCall and an owed contact notice (CodeRabbit, local review)", () => {
+  it("keeps a call that still owes its notice, and removes it once sweepAlerts sent it", async () => {
+    const t = engine();
+    const send = t.messages.sendText.bind(t.messages);
+    let down = true;
+    t.messages.sendText = async (input) => {
+      if (down && input.purpose === "contact_changed") throw new Error("texts down");
+      return send(input);
+    };
+    const callId = await verified(t, "change");
+    await changePhone(t, callId).catch(() => undefined);
+    await t.engine.endCall(callId).catch(() => undefined);
+    assert.equal((await t.engine.state(callId)).phase, "ended");
+    await assert.rejects(t.engine.removeCall(callId), rejects("precondition_failed", /still owes a notification/));
+    down = false;
+    assert.deepEqual((await t.engine.sweepAlerts()).failed, []);
+    assert.deepEqual(await t.engine.removeCall(callId), { removed: true });
+  });
+});
+
 describe("contact change security notice", () => {
   it("goes to the number on file when the call started, and so does the receipt link", async () => {
     const t = engine();

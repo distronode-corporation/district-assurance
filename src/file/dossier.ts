@@ -55,6 +55,11 @@ export interface DossierSlice {
   records: Array<{ recordId: string; formId: string; digest: string }>;
   /** The record the last confirmation filed, until another intake starts: a retried confirmation gets it back. */
   confirmed: IntakeRecord | null;
+  /**
+   * Records filed on this call whose confirmed mark the RecordStore may not hold yet: set by the
+   * write that files one, cleared once the mark is made. `removeCall` makes them before the record goes.
+   */
+  marksOwed?: string[];
 }
 
 const FORM_ID = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -360,7 +365,7 @@ export async function confirmIntake(
   if ("refused" in reserved) throw reserved.refused;
   // Filed already: the mark is made again (a confirmation whose mark failed is asked again).
   if (reserved.form === null) {
-    await records.confirmIntakeRecord(rt.workspaceId, reserved.record.recordId);
+    await settleOwedMarks(rt, callId);
     return reserved.record;
   }
   // Encrypted on every attempt: a cipher may answer differently each time, and the digest does not
@@ -456,6 +461,8 @@ export async function confirmIntake(
     s.intake = null;
     s.confirmed = kept;
     s.records.push({ recordId: record.recordId, formId: record.formId, digest: record.digest });
+    // Owed until made: a commit whose ledger append fails throws before the mark below.
+    s.marksOwed = [...(s.marksOwed ?? []), record.recordId];
     draft.emit("intake.confirmed", "caller", { recordId: record.recordId, formId: record.formId, digest: record.digest, confirmedBy: record.confirmedBy });
     return "filed";
   });
@@ -469,8 +476,25 @@ export async function confirmIntake(
   if (kept === null) throw new EngineError("precondition_failed", "the subject was erased while this record was filed; nothing was filed");
   // The confirmation committed: the stored record is marked confirmed, and only then delivered or
   // exported. A mark that fails throws; confirming again marks it and gives the same record back.
-  await records.confirmIntakeRecord(rt.workspaceId, kept.recordId);
+  await settleOwedMarks(rt, callId);
   return kept;
+}
+
+/**
+ * Makes the confirmed marks a call still owes the RecordStore, then clears them on the call. A mark
+ * that fails throws and stays owed. Idempotent: a mark already made is made again harmlessly.
+ */
+export async function settleOwedMarks(rt: EngineRuntime, callId: string): Promise<void> {
+  // Absent on a call an older build filed: it owes nothing it can name.
+  const owed = ((await rt.read(callId)).modules[DOSSIER] as unknown as DossierSlice).marksOwed ?? [];
+  if (owed.length === 0) return;
+  const records = rt.adapter("records");
+  for (const recordId of owed) await records.confirmIntakeRecord(rt.workspaceId, recordId);
+  await rt.update(callId, (draft) => {
+    const s = draft.slice<DossierSlice>(DOSSIER);
+    // Never removed once set, so still there: only the marks made here are cleared.
+    s.marksOwed = s.marksOwed!.filter((id) => !owed.includes(id));
+  });
 }
 
 /**
