@@ -138,12 +138,14 @@ export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: 
     // The two are keyed apart and salted apart, so they are equal only on a subject imported wrongly.
     brokenSubject = onFile?.pinDigest !== undefined && onFile.pinDigest === onFile.duressDigest;
     // Rehash on a match (ADR-29): the record that matched, if it is of the earlier format, becomes an
-    // Argon2id record, only while it is still the one on file. A miss changes nothing.
+    // Argon2id record, only while it is still the one on file. A miss changes nothing. The upgrade is
+    // best effort: a write that fails leaves the earlier record, which still verifies, for the next
+    // match to upgrade, and never changes the outcome of an entry already judged.
     upgrade = async (outcome) => {
       const field = outcome === "duress" ? "duressDigest" : "pinDigest";
       const check = outcome === "duress" ? duressCheck : pinCheck;
       if (outcome === "fail" || !check.upgrade) return;
-      await records.upgradePinDigest(input.workspaceId, subjectKey, field, onFile![field]!, await hashPinRecord(keyed[field]));
+      await records.upgradePinDigest(input.workspaceId, subjectKey, field, onFile![field]!, await hashPinRecord(keyed[field])).catch(() => false);
     };
   }
   // A subject on file implies a keypad-shaped account or a host's subject key, never the stand-in.

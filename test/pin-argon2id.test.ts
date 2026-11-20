@@ -8,6 +8,7 @@ import type { FlowConfig } from "../src/core/config.ts";
 import { hmacSha256Hex } from "../src/core/hash.ts";
 import { duressDigest, type PinSettings } from "../src/verify/factors.ts";
 import { pinDigest, subjectKeyFor } from "../src/verify/knowledge.ts";
+import { readPinTag } from "../src/verify/pin.ts";
 import { PIN_HASH_CEILING, PIN_HASH_PARAMETERS, checkPinRecord, hashPinRecord, hashPinRecordSync } from "../src/verify/pin-hash.ts";
 import { FakeDuressNotifier, MemoryRecordStore, TEST_KNOWLEDGE_KEY } from "../src/testing/index.ts";
 import { ACCOUNT, PHONE_ON_FILE, PIN, pinOnFile, setup, testConfig, waitOut } from "./helpers.ts";
@@ -115,6 +116,27 @@ describe("PIN records: Argon2id over the keyed HMAC", () => {
     assert.deepEqual(await login(t, PIN), { matched: true, locked: false });
     assert.equal(records.upgrades, 1);
     assert.equal((await t.records.getSubject("ws_test", OWNER))!.pinDigest, keyedPin(PIN));
+  });
+
+  it("keeps a verified outcome when the upgrade's write fails, and tries again on the next match (CodeRabbit #143)", async () => {
+    class Failing extends MemoryRecordStore {
+      failing = true;
+      override async upgradePinDigest(...args: Parameters<MemoryRecordStore["upgradePinDigest"]>): Promise<boolean> {
+        if (this.failing) throw new Error("record store down");
+        return super.upgradePinDigest(...args);
+      }
+    }
+    const records = new Failing();
+    const t = legacySetup({ duress: true, records });
+    assert.deepEqual(await login(t, PIN), { matched: true, locked: false }, "the PIN still passes");
+    assert.deepEqual(await login(t, DURESS), { matched: true, locked: false }, "the duress PIN still looks like a pass");
+    const tags = (await t.ledger.list()).filter((e) => e.event === "verification.factor").map((e) => readPinTag((d) => hmacSha256Hex(TEST_KNOWLEDGE_KEY, d), e));
+    assert.deepEqual(tags, ["pass", "duress"], "and the ledger's keyed tags say a pass, then a duress entry");
+    const onFile = (await records.getSubject("ws_test", OWNER))!;
+    assert.deepEqual([onFile.pinDigest, onFile.duressDigest], [keyedPin(PIN), keyedPin(DURESS, "duress")], "both records are left as they were");
+    records.failing = false;
+    assert.deepEqual(await login(t, PIN), { matched: true, locked: false });
+    assert.match((await records.getSubject("ws_test", OWNER))!.pinDigest!, RECORD, "the next match upgrades it");
   });
 
   it("refuses a record whose parameters, salt, tag or spelling were changed", async () => {

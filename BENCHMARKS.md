@@ -67,8 +67,9 @@ config validates in about a millisecond, at save time.
 That run predates PIN records in Argon2id (ADR-29), which make the PIN the one deliberately slow
 step. One run on the same machine with the PIN record check, while other jobs shared it (so every
 case read slower than above): `PIN record check` 30.2 ms mean (p99 32.2 ms), and `owner-command
-flow` 40.8 ms mean (p99 45.4 ms), its two PIN record checks running at once. The other cases do
-not touch a PIN record.
+flow` 40.8 ms mean (p99 45.4 ms), its two PIN record checks running at once. On CI's
+`ubuntu-24.04` runner (4 cores, Node 24.19, five runs each) they were 20.8 ms and 25.7 ms. The
+other cases do not touch a PIN record.
 
 ## The results file
 

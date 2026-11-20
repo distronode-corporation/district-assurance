@@ -428,7 +428,8 @@ string. A record is read strictly: a cost below today's (a downgrade) or above a
 Every check is one Argon2id run (on a stand-in at today's cost when no usable record is on file)
 and a constant-time compare of the tag. A record of the earlier format, the bare 64-hex HMAC, still
 verifies, and on a match the PIN factor replaces it with an Argon2id record through
-`RecordStore.upgradePinDigest`, a compare-and-set on the old value (rehash on login). Lockouts,
+`RecordStore.upgradePinDigest`, a compare-and-set on the old value (rehash on login), best effort:
+a failed write keeps the outcome and leaves the earlier record for the next match. Lockouts,
 counters and answers are unchanged. Keypad knowledge stays a keyed HMAC.
 **Why.** The keyed HMAC alone kept records useless without the knowledge key, but anyone holding
 both the store and the key could try every PIN at HMAC speed; OpenSSF's `crypto_password_storage`
@@ -441,8 +442,9 @@ forbids runtime dependencies, so it is `node:crypto`'s Argon2, which sets the No
 The cost is OWASP's minimum for Argon2id (19 MiB, 2 passes, 1 lane), chosen for a phone call: the
 PIN factor runs two at once per entry (the PIN's and the duress PIN's, so the time never says
 whether a duress PIN is on file), off the main thread on libuv's pool. The `PIN record check`
-benchmark measures one run: about 30 ms on a 2018 laptop core (BENCHMARKS.md), and the two runs
-of an entry overlap, so a PIN entry costs about 40 ms. The bar for a verify step is the pause a
+benchmark measures one run: about 21 ms on CI's `ubuntu-24.04` runner (4 cores, Node 24.19)
+and about 30 ms on a 2018 laptop core (BENCHMARKS.md), and the two runs of an entry overlap, so
+the whole owner-command flow, one PIN entry included, takes about 26 ms on the runner. The bar for a verify step is the pause a
 caller hears after the last digit; that sits well inside the hundreds of milliseconds a carrier
 and a speech engine already take, and an enrolment pays three runs. Records are not deterministic, so
 the stores compare them as opaque strings and never look one up by value.
