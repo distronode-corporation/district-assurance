@@ -171,7 +171,7 @@ mode before it goes live.
 | Cancel and expire open links (PAY-3) | `src/pay/paylink.ts`, `src/engine.ts` | `cancelPaymentLink`, `expirePaymentLinks`, a link expired when the call ends (`test/engine.test.ts`, `test/pay-close-hostile.test.ts`) |
 | Live card-number detector (PAY-5) | `src/core/live-detector.ts`, `src/core/redaction.ts` | partial and spoken numbers over the shared corpus in `test/corpus/` (`test/redaction.test.ts`, `test/redaction-hostile.test.ts`) |
 | Refunds and disputes in platform mode (PAY-8) | `src/pay/refunds.ts` | `test/pay-refunds.test.ts`, `test/pay-refunds-hostile.test.ts` |
-| A pending refund's later outcome (PAY-9, #132) | `src/pay/refunds.ts`, `src/webhooks/stripe.ts` | `test/pay-refund-updates.test.ts` |
+| A refund's later outcome, a late failure after success included (PAY-9, #117, #132) | `src/pay/refunds.ts`, `src/webhooks/stripe.ts` | `test/pay-refund-updates.test.ts` |
 | Stripe Checkout in platform mode (part of PAY-1) | `examples/reference-server/src/stripe-adapters.ts` | `StripeCheckoutLinks` against a local fake (`test/stripe-adapters.test.ts`), and `npm run demo:e2e` with a real Checkout Session in test mode |
 
 **Proven by:** Unit tests at 100%; the Checkout adapter against a local fake, and in Stripe test

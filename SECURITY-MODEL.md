@@ -954,9 +954,10 @@ block, allowing only the endpoints the first real publish run's audit log shows.
   and records their disputes (above), but who bears a lost dispute, and on what terms between the
   platform and the business, is a legal and payment provider question that is not decided.
   A `pending` refund counts against the payment until the provider's signed refund update
-  (`refund.updated`, `refund.failed`, `charge.refund.updated`) brings it to its final status
-  (`applyRefundOutcome`): one that failed is released and can be refunded again. A provider that
-  never sends the update leaves it pending.
+  (`refund.updated`, `refund.failed`, `charge.refund.updated`) says how it ended
+  (`applyRefundOutcome`): one that failed is released and can be refunded again. Following Stripe,
+  `succeeded` is not final: a refund that succeeded and later fails is released too, and only
+  `failed` is final. A provider that never sends the update leaves it pending.
 
 ## STRIDE tables
 
