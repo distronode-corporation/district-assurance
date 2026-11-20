@@ -274,6 +274,8 @@ All notable changes to this project are documented here. The format follows
   thresholds in Badge's `syntheticVoice` setting stop spoken answers counting or hold the call to
   level 1, at once and for grants already issued; the ledger records the vendor and band, never the
   score, and the receipt neither.
+- README badges for the OpenSSF Scorecard, the licence and CI on main, and a section in
+  CONTRIBUTING.md on reporting bugs and asking for features through GitHub issues.
 
 ### Changed
 
