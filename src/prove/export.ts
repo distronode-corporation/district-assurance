@@ -158,14 +158,15 @@ export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<st
   if ((await pointAt(ledger, head.seq))?.hash !== head.hash) throw new EngineError("precondition_failed", "exportLedger: the ledger head does not match its last entry");
   const from = await startPoint(cursor === undefined ? { ledger, fromSeq } : { ledger, cursor }, head);
   const last = Math.min(head.seq, from.seq + (limit ?? Number.MAX_SAFE_INTEGER));
-  // The run's entries, asked for as one page of exactly the run; an adapter that hands back more is
-  // cut to the run, and one that hands back fewer ("at most limit") is asked again for the rest,
-  // until a read brings nothing.
+  // The run's entries, in reads of at most EXPORT_WALK_PAGE: an adapter that hands back more is cut
+  // to what was asked, and one that hands back fewer ("at most limit") is asked again for the
+  // rest, until a read brings nothing. Each entry is appended on its own, never spread as arguments.
   const entries: AuditEntry[] = [];
   for (let next = from.seq + 1; next <= last; ) {
-    const page = (await ledger.list(next, last - next + 1)).filter((e) => e.seq >= next && e.seq <= last);
+    const count = Math.min(EXPORT_WALK_PAGE, last - next + 1);
+    const page = (await ledger.list(next, count)).filter((e) => e.seq >= next && e.seq < next + count);
     if (page.length === 0) break;
-    entries.push(...page);
+    for (const entry of page) entries.push(entry);
     next = page.at(-1)!.seq + 1;
   }
   const check = verifyChain(entries, from);

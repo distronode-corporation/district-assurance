@@ -234,6 +234,21 @@ describe("synthetic voice: the ledger and the receipt", () => {
     assert.deepEqual(after, before, "the same receipt either way");
   });
 
+  it("drops a method the band stopped counting from the receipt even when the level stays", async () => {
+    // Level 1 by the keypad alone or a spoken answer alone; the call passes both, so a spoken_off
+    // band leaves it at level 1 and only the keypad still counts.
+    const t = setup({ config: voiceConfig(spokenPolicy) });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await recordPassed(t, callId, ["spoken_knowledge"]);
+    assert.equal((await t.engine.finishVerification(callId)).level, 1);
+    await t.engine.reportSyntheticVoice(callId, { score: 0.6, vendor: "acme" });
+    assert.equal((await t.engine.state(callId)).level, 1, "the level stays");
+    const shown = (await t.engine.endCall(callId))!.body.verification as { methods: string[] };
+    assert.deepEqual(shown.methods, ["keypad_knowledge"]);
+  });
+
   it("records the vendor and the band, never the score, and the receipt carries neither", async () => {
     const t = setup({ config: voiceConfig() });
     const callId = await verifiedCall(t);

@@ -690,6 +690,15 @@ describe("ledger export", () => {
     }
   });
 
+  it("reads a long run in pages of at most EXPORT_WALK_PAGE entries, never one unbounded page", async () => {
+    const inner = await ledgerOf(EXPORT_WALK_PAGE + 5);
+    const asked: Array<[number | undefined, number | undefined]> = [];
+    const paged: AuditLedger = { append: (i) => inner.append(i), head: () => inner.head(), list: async (f, l) => (asked.push([f, l]), inner.list(f, l)) };
+    const check = verifyLedgerExport(await run(paged, { fromSeq: 1 }), keys);
+    assert.equal(check.ok && check.entries.length, EXPORT_WALK_PAGE + 5);
+    assert.equal(asked.every(([, limit]) => limit !== undefined && limit <= EXPORT_WALK_PAGE), true, JSON.stringify(asked.slice(-3)));
+  });
+
   it("walks to the head in pages of at most EXPORT_WALK_PAGE entries", async () => {
     const inner = await ledgerOf(EXPORT_WALK_PAGE + 5);
     const asked: Array<[number | undefined, number | undefined]> = [];
