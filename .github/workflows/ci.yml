@@ -94,4 +94,7 @@ jobs:
       # a run this short mean little; the release workflow compares releases on full runs.
       - name: Benchmarks, short
         shell: bash
-        run: npm run bench -- --budget-ms 25 --out "$RUNNER_TEMP/bench.json"
+        run: |
+          npm run bench -- --budget-ms 25 --out "$RUNNER_TEMP/bench.json"
+          # A run that skipped its main() would exit 0 too: the results file must be there.
+          test -s "$RUNNER_TEMP/bench.json"

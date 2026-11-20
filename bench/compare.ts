@@ -9,6 +9,7 @@
 // reported and skipped.
 import { appendFileSync, readFileSync } from "node:fs";
 
+import { isEntryPoint } from "../src/cli/simulate.ts";
 import { RESULTS_FORMAT, type BenchResults } from "./main.ts";
 
 /** A case this much slower than before (as a fraction of the previous mean) is reported. */
@@ -131,4 +132,5 @@ function main(): void {
   if (summary !== undefined && summary !== "") appendFileSync(summary, `${report}\n`);
 }
 
-if (import.meta.main) main();
+// Not `import.meta.main`, which Node.js 24.2 sets false for a .ts entry: the path check the CLI uses.
+if (isEntryPoint(process.argv[1], import.meta.url)) main();

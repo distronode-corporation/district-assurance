@@ -9,6 +9,8 @@ import { writeFileSync } from "node:fs";
 import { arch, cpus, platform, release, type } from "node:os";
 import { parseArgs } from "node:util";
 
+import { isEntryPoint } from "../src/cli/simulate.ts";
+
 import { cases } from "./cases.ts";
 import { measure, resultsTable, type CaseResult } from "./harness.ts";
 
@@ -78,4 +80,5 @@ async function main(): Promise<void> {
   }
 }
 
-if (import.meta.main) await main();
+// Not `import.meta.main`, which Node.js 24.2 sets false for a .ts entry: the path check the CLI uses.
+if (isEntryPoint(process.argv[1], import.meta.url)) await main();
