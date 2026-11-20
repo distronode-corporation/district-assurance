@@ -4,6 +4,7 @@ import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import type { AddressInfo } from "node:net";
+import { PassThrough } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, it, type TestContext } from "node:test";
 
@@ -160,7 +161,7 @@ async function startServe(ctx: TestContext, nodeArgs: string[] = []) {
   let stderr = "";
   child.stderr.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
   const banner = await new Promise<string>((resolve, reject) => {
-    child.stdout.once("data", (c: Buffer) => resolve(c.toString("utf8")));
+    firstLine(child.stdout).then(resolve, reject);
     child.once("exit", () => reject(new Error(`exited early: ${stderr}`)));
   });
   const port = Number(/^reference server on http:\/\/127\.0\.0\.1:(\d+) /.exec(banner)?.[1]);
@@ -180,7 +181,30 @@ registerHooks({
 });
 `)}`;
 
+/** The stream's first line, without its newline: chunks are buffered until one arrives. */
+function firstLine(stream: NodeJS.ReadableStream): Promise<string> {
+  return new Promise((resolve) => {
+    let text = "";
+    const onData = (c: Buffer): void => {
+      text += c.toString("utf8");
+      const end = text.indexOf("\n");
+      if (end === -1) return;
+      stream.off("data", onData);
+      resolve(text.slice(0, end));
+    };
+    stream.on("data", onData);
+  });
+}
+
 describe("npm run serve's banner", () => {
+  it("is read through its newline, even when standard output splits it across chunks", async () => {
+    const stream = new PassThrough();
+    const line = firstLine(stream);
+    stream.write("reference server on http://127.0.0.1:");
+    await new Promise((resolve) => setImmediate(resolve));
+    stream.write("4321 (pre-alpha)\nnext");
+    assert.equal(await line, "reference server on http://127.0.0.1:4321 (pre-alpha)");
+  });
   it("names the port the server bound, so PORT=0 gives a port that answers", { timeout: 30_000 }, async (ctx) => {
     const { child, port, banner, stderr } = await startServe(ctx);
     assert.ok(Number.isInteger(port) && port > 0, banner);
