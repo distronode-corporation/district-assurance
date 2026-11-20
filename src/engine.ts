@@ -557,7 +557,12 @@ export class Engine {
         outcome,
       );
     } catch (error) {
-      if (outcome.write === "none" || (outcome.write === "unknown" && !(await this.#holdsFlow(callId, name, start)))) await this.#uncount(start);
+      if (outcome.write === "none" || (outcome.write === "unknown" && !(await this.#holdsFlow(callId, name, start)))) {
+        // A refused take-back is reported beside the start's own error, which comes first.
+        await this.#uncount(start).catch((cleanup: unknown) => {
+          throw new AggregateError([error, cleanup], "the flow did not start, and taking back its count failed");
+        });
+      }
       throw error;
     }
     if (start.over !== null) throw new RateLimitedError(callId);
@@ -592,10 +597,17 @@ export class Engine {
     }
   }
 
-  /** Takes back the starts a start recorded, once the call refused it: one entry per counter, at the time it was recorded. */
+  /**
+   * Takes back the starts a start recorded, once the call refused it: one entry per counter, at the
+   * time it was recorded. Each is tried on its own, so a refused one never keeps another counter's
+   * slot; the first refusal is thrown after all were tried (the refused start stays, fail closed).
+   */
   async #uncount(start: FlowStart): Promise<void> {
     if (start.recorded === null) return;
-    for (const key of start.recorded.keys) await this.#adapters.counters!.removeFailure(key, start.recorded.at);
+    const { keys, at } = start.recorded;
+    const refused: unknown[] = [];
+    for (const key of keys) await this.#adapters.counters!.removeFailure(key, at).catch((e: unknown) => refused.push(e));
+    if (refused.length > 0) throw refused[0];
   }
 
   /**
@@ -818,7 +830,10 @@ export class Engine {
   async requestCallback(callId: string): Promise<void> {
     const plan = await callback.requestCallback(this.#rt, callId);
     const first = await this.#read(callId);
-    if (first.state.phase !== "ended") {
+    // An ended call that still owes its receipt (the signer failed on an earlier request) gets it
+    // before the callback dials: endCall completes it without ending again.
+    const owesReceipt = trace.wantsReceipt(this.#rt, first) && trace.receiptOf(first) === null;
+    if (first.state.phase !== "ended" || owesReceipt) {
       try {
         await this.endCall(callId);
       } catch (e) {

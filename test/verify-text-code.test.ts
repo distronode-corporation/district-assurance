@@ -56,11 +56,13 @@ function wrong(code: string): string {
 /**
  * Whether a stored value holds the code: as a string or number field value, or as a whole token
  * inside a string. Not a substring test of its JSON: a random 6-digit code can turn up inside a
- * timestamp, a hash or an id by chance, which made the substring test flaky.
+ * timestamp, a hash or an id by chance, which made the substring test flaky. An integer field
+ * matches at the code's width, so a code with a leading zero stored as a number is still caught.
  */
 function holdsCode(value: unknown, code: string): boolean {
   if (typeof value === "string") return new RegExp(`(?<![0-9A-Za-z_])${code}(?![0-9A-Za-z_])`).test(value);
-  if (typeof value === "number") return String(value) === code;
+  // A number drops a leading zero, so an integer is compared at the code's width.
+  if (typeof value === "number") return Number.isInteger(value) && value >= 0 && String(value).padStart(code.length, "0") === code;
   if (Array.isArray(value)) return value.some((v) => holdsCode(v, code));
   if (typeof value === "object" && value !== null) return Object.entries(value).some(([k, v]) => holdsCode(k, code) || holdsCode(v, code));
   return false;
@@ -118,6 +120,21 @@ describe("texted codes", () => {
     await sendCode(t, clean);
     await t.engine.checkTextCode(clean, lastCode(t));
     assert.equal((await t.engine.finishVerification(clean)).level, 2);
+
+    // Level 2 only through the code: the keypad and carrier pair is not a level-2 rule here, so a
+    // clean carrier answer alone gives level 1, and the matched code is what makes it 2.
+    const onlyCode = codeSetup((c) => {
+      c.policy.levels[1]!.anyOf = c.policy.levels[1]!.anyOf.filter((rule) => !rule.includes("carrier_identity_match"));
+    });
+    const without = await matchedCall(onlyCode);
+    await onlyCode.engine.checkCarrier(without);
+    assert.equal((await onlyCode.engine.finishVerification(without)).level, 1, "no code: the carrier answer alone is not level 2");
+    const counted = await matchedCall(onlyCode);
+    await onlyCode.engine.checkCarrier(counted);
+    onlyCode.clock.advance(MINUTE);
+    await sendCode(onlyCode, counted);
+    assert.deepEqual(await onlyCode.engine.checkTextCode(counted, lastCode(onlyCode)), { matched: true, locked: false });
+    assert.equal((await onlyCode.engine.finishVerification(counted)).level, 2, "the code counted toward level 2");
   });
 
   it("checks the code's absence by value and token, not as a substring of the ledger JSON (the old check could flake)", async () => {
@@ -135,6 +152,7 @@ describe("texted codes", () => {
     // It still catches the code written as a value, a number, a key, or a token in text.
     assert.equal(holdsCode({ detail: { code: forced } }, forced), true);
     assert.equal(holdsCode([482913], "482913"), true);
+    assert.equal(holdsCode([12345], "012345"), true, "a code with a leading zero, stored as a number");
     assert.equal(holdsCode({ [forced]: true }, forced), true);
     assert.equal(holdsCode({ note: `sent ${forced}.` }, forced), true);
     assert.equal(holdsCode({ hash: `ab${forced}cd`, id: `ev_${forced}`, at: Number(`1${forced}`), none: null }, forced), false);
