@@ -1,6 +1,7 @@
 # district-assurance
 
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/distronode-corporation/district-assurance/badge)](https://scorecard.dev/viewer/?uri=github.com/distronode-corporation/district-assurance)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16957/badge)](https://www.bestpractices.dev/projects/16957)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/distronode-corporation/district-assurance/blob/main/LICENSE)
 [![CI](https://github.com/distronode-corporation/district-assurance/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/distronode-corporation/district-assurance/actions/workflows/ci.yml?query=branch%3Amain)
 
