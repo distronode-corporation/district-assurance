@@ -10,9 +10,14 @@ export function isStringArray(value: unknown): value is string[] {
   return isDenseArray(value) && value.every((item) => typeof item === "string");
 }
 
-/** An array with no holes (`every` and `forEach` skip holes, so check before using them). */
+/**
+ * An array with no holes (`every` and `forEach` skip holes, so check before using them): an own
+ * element at every index. Counting keys is not enough, since a named key can stand in for a hole.
+ */
 export function isDenseArray(value: unknown): value is unknown[] {
-  return Array.isArray(value) && Object.keys(value).length === value.length;
+  if (!Array.isArray(value)) return false;
+  for (let i = 0; i < value.length; i++) if (!Object.hasOwn(value, i)) return false;
+  return true;
 }
 
 export function isIntegerIn(value: unknown, min: number, max: number): value is number {

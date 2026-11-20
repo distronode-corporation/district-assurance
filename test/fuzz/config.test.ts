@@ -92,6 +92,8 @@ describe("fuzz: validateConfig", () => {
       ["levels[0]", (c) => void (c.policy.levels[0]!.anyOf.length += 1)],
       ["levels[0]", (c) => void (c.policy.levels[0]!.anyOf[0]!.length += 1)],
       ["keypadFields", (c) => void (c.policy.keypadFields.length += 1)],
+      // A hole hidden by an extra named key: as many own keys as the length, still a hole.
+      ["keypadFields", (c) => void (c.policy.keypadFields = Object.assign(new Array<string>(1), { extra: "account" }))],
     ];
     for (const [where, punch] of holes) {
       const config = defaultConfig();
