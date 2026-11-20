@@ -1258,7 +1258,7 @@ a failing signer never leaves a consumer with entries and no valid trailer. Each
 A run starts at `fromSeq` (1 or more, at most the head plus one) or right after `cursor`
 (`<seq>.<hash>` of a previous trailer's `through`), never both, and stops at the head read when the
 export starts, or after `limit` entries; it asks the ledger for that one page (`list(from + 1,
-count)`). A run that stops short of the head is signed only once the chain is walked from its end
+count)`), and again for the rest when a read hands back fewer entries than asked. A run that stops short of the head is signed only once the chain is walked from its end
 to the head, in reads of at most `EXPORT_WALK_PAGE` (1,000) entries, and verifies there; so an
 export reads the ledger from the run to the head, and a run that reaches the head reads only
 itself. A walk that fails is refused with `precondition_failed`, before anything is yielded. The run is complete when `through` equals `head`; otherwise

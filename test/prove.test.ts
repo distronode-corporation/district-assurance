@@ -668,6 +668,28 @@ describe("ledger export", () => {
     assert.equal(check.ok && check.entries.length, 1);
   });
 
+  it("cuts entries before the asked seq that an adapter hands back, and still reads the run", async () => {
+    const inner = await ledgerOf(10);
+    // A page read (more than one entry asked) starts two entries early, 4 at most: only entries from
+    // the asked seq count. Single-entry reads (the head and start checks) are exact.
+    const early: AuditLedger = {
+      append: (i) => inner.append(i),
+      head: () => inner.head(),
+      list: async (f, l) => (l === 1 ? inner.list(f, l) : (await inner.list(Math.max(1, (f ?? 1) - 2))).slice(0, 4)),
+    };
+    const check = verifyLedgerExport(await run(early, { fromSeq: 3, limit: 5 }), keys);
+    assert.equal(check.ok && check.entries.map((e) => e.seq).join(","), "3,4,5,6,7");
+  });
+
+  it("reads a run past a read that hands back fewer entries than asked, as a ledger may", async () => {
+    const inner = await ledgerOf(201);
+    const capped: AuditLedger = { append: (i) => inner.append(i), head: () => inner.head(), list: async (f, l) => inner.list(f, Math.min(l ?? 100, 100)) };
+    for (const limit of [201, 150, undefined]) {
+      const check = verifyLedgerExport(await run(capped, { fromSeq: 1, ...(limit === undefined ? {} : { limit }) }), keys);
+      assert.equal(check.ok && check.entries.length, limit ?? 201, String(limit));
+    }
+  });
+
   it("walks to the head in pages of at most EXPORT_WALK_PAGE entries", async () => {
     const inner = await ledgerOf(EXPORT_WALK_PAGE + 5);
     const asked: Array<[number | undefined, number | undefined]> = [];
@@ -694,10 +716,11 @@ describe("ledger export", () => {
   it("refuses a run read short of, or past a rewrite of, its end", async () => {
     const ledger = await ledgerOf(3);
     const refused = (e: unknown) => e instanceof EngineError && e.code === "precondition_failed" && e.message.endsWith("expected end");
-    // The head check reads list(3); the run is the next list call. Edit only that one.
+    // The head check reads list(3); every read after it is the run's (a short read is asked again
+    // for the rest) or the walk's. Edit all of them, so a dropped entry stays dropped.
     const onRunRead = (edit: (es: AuditEntry[]) => AuditEntry[]) => {
       let calls = 0;
-      return new EditedLedger(ledger, { list: (es) => (++calls === 2 ? edit(es) : es) });
+      return new EditedLedger(ledger, { list: (es) => (++calls >= 2 ? edit(es) : es) });
     };
     await assert.rejects(run(onRunRead((es) => es.filter((e) => e.seq !== 3)), { fromSeq: 1 }), refused, "a verified prefix short of the head");
     await assert.rejects(run(onRunRead((es) => es.filter((e) => e.seq !== 2)), { fromSeq: 1, limit: 2 }), refused, "a limited run short of its end");

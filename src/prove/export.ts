@@ -101,7 +101,8 @@ async function walkToHead(ledger: AuditLedger, point: ChainPoint, head: ChainPoi
   let at = point;
   while (at.seq < head.seq) {
     const count = Math.min(EXPORT_WALK_PAGE, head.seq - at.seq);
-    const page = (await ledger.list(at.seq + 1, count)).filter((e) => e.seq <= at.seq + count);
+    // Only the entries asked for: one before them or past them is no part of this read.
+    const page = (await ledger.list(at.seq + 1, count)).filter((e) => e.seq > at.seq && e.seq <= at.seq + count);
     const check = verifyChain(page, at);
     if (!check.ok) return check.seq;
     // A ledger may hand back fewer entries than asked ("at most limit"): the walk goes on from
@@ -157,8 +158,16 @@ export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<st
   if ((await pointAt(ledger, head.seq))?.hash !== head.hash) throw new EngineError("precondition_failed", "exportLedger: the ledger head does not match its last entry");
   const from = await startPoint(cursor === undefined ? { ledger, fromSeq } : { ledger, cursor }, head);
   const last = Math.min(head.seq, from.seq + (limit ?? Number.MAX_SAFE_INTEGER));
-  // One page of exactly the run's entries; an adapter that hands back more is cut to the run.
-  const entries = last === from.seq ? [] : (await ledger.list(from.seq + 1, last - from.seq)).filter((e) => e.seq <= last);
+  // The run's entries, asked for as one page of exactly the run; an adapter that hands back more is
+  // cut to the run, and one that hands back fewer ("at most limit") is asked again for the rest,
+  // until a read brings nothing.
+  const entries: AuditEntry[] = [];
+  for (let next = from.seq + 1; next <= last; ) {
+    const page = (await ledger.list(next, last - next + 1)).filter((e) => e.seq >= next && e.seq <= last);
+    if (page.length === 0) break;
+    entries.push(...page);
+    next = page.at(-1)!.seq + 1;
+  }
   const check = verifyChain(entries, from);
   if (!check.ok) throw new EngineError("precondition_failed", `exportLedger: the ledger chain does not verify at seq ${check.seq}`);
   // A verified prefix is not enough: the run must reach the end it was meant to, and at the head
