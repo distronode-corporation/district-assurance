@@ -270,6 +270,10 @@ All notable changes to this project are documented here. The format follows
   in ARCHITECTURE.md.
 - A JSON Schema (2020-12) for FlowConfig version 1, `schema/flow-config.v1.json`, published with the
   package; tested against the TypeScript types and never stricter than `validateConfig` (MOD-2).
+- A synthetic voice signal (VER-14): `reportSyntheticVoice(callId, {score, vendor})` and per-vendor
+  thresholds in Badge's `syntheticVoice` setting stop spoken answers counting or hold the call to
+  level 1, at once and for grants already issued; the ledger records the vendor and band, never the
+  score, and the receipt neither.
 
 ### Changed
 

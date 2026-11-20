@@ -307,6 +307,25 @@ must call `contactChanged()` in the change that changes contact details (the eng
 change made in the host's own systems otherwise); running `sweepAlerts()` on a schedule; and
 keeping call records at least until their alerts are sent.
 
+### Cloned and synthetic voices
+
+A cloned voice answers spoken questions in the account holder's voice. No factor uses the voice
+itself (no voice biometrics), so a clone gains nothing from sounding right. **Controls:** a host
+whose speech vendor scores how likely a voice is synthetic passes the score in
+(`reportSyntheticVoice`), judged against that vendor's own two thresholds in Badge's settings.
+Above the first, a spoken answer stops counting toward a level; above the second, the call is
+held to level 1, so no money, contact or access scope is reachable. The cap applies at once, to a
+grant already issued too; the call keeps its highest band, so a later, lower score lifts nothing;
+and a score can only lower a level, never raise one or stand in for a factor (tested). The ledger
+records the vendor and the band, never the audio or the score; the receipt records neither,
+because a receipt can reach the caller and would tell an attacker their voice was caught, and a
+capped call's receipt lists only the methods that support the level it shows, so it reads like an
+honestly lower-level one; the ledger, which the business sees and the caller does not, keeps every
+counted method (tested). A caller who remembers doing more can still tell the receipt shows less.
+**Left to the host:** choosing a vendor, its thresholds, and scoring the audio; no score means no
+cap. A host that refuses an action should speak the same fixed line whatever the reason, though a
+caller can still see that a capped grant does less than the factors they gave would reach.
+
 ### Text flooding and SMS pumping
 
 Repeated calls triggering texts to a real customer, or to premium numbers. **Controls:** texts go

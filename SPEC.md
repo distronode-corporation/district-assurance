@@ -5,8 +5,9 @@ marked *planned* names its ROADMAP.md issue.
 
 ## 1. Session state machine
 
-A session has a **phase** and, orthogonal to it, a **sensitive** flag, a **tainted** flag, the
-recorded **factors**, the current **level** and an optional **grant**.
+A session has a **phase** and, orthogonal to it, a **sensitive** flag, a **tainted** flag, a
+**synthetic voice** band (`clear`, `spoken_off` or `level_1`, section 4), the recorded
+**factors**, the current **level** and an optional **grant**.
 
 ```
             verification_started                 intake_started
@@ -36,6 +37,7 @@ recorded **factors**, the current **level** and an optional **grant**.
 | `payment_requested {paymentId}` | open | phase `paying`, sensitive `payment`, payment id appended |
 | `payment_settled {paymentId}` | paying | phase `open`, sensitive cleared |
 | `untrusted_content {source}` | any but ended | tainted (sticky), level 0, grant dropped; a verification open when it lands is void (below) |
+| `synthetic_voice_scored {band, ceiling, scopes}` | any but ended | band raised to `band` if higher (never lowered); level held to `ceiling`; a grant above `ceiling` lowered to it with only the `scopes` it reaches, or dropped at 0 |
 | `call_ended {at}` | any but ended | phase `ended`, grant dropped, sensitive cleared |
 
 A taint during an open verification fails that verification (Sean, 2026-11-19). `finishVerification`
@@ -265,8 +267,31 @@ the callback factor already proves possession of that line.
 Badge's settings turn factors on (`factors`, at least one), set the grant lifetime
 (`grantTtlSeconds`, default 900, at most 3600), the lockouts across calls and the hourly limits
 on flow starts (`lockout`, section 6)
-and, when `pin` is on, the PIN settings (section 6).
+and, when `pin` is on, the PIN settings (section 6), and optionally the synthetic voice thresholds
+below (`syntheticVoice`).
 A factor that is off is refused at every entry point. A planned factor cannot be turned on.
+
+**Synthetic voice** (VER-14). `syntheticVoice` maps a vendor name (1 to 32 of `a-z`, `0-9`, `-`,
+`_`, starting with a letter) to `{spokenKnowledgeAbove, levelOneAbove}`, numbers from 0 to 1 with
+`levelOneAbove` not below `spokenKnowledgeAbove`; vendors' scores are not comparable, so each has
+its own. `reportSyntheticVoice(callId, {score, vendor})` takes a score from 0 to 1 at any point in
+a call that has not ended, in a flow or not; an input that is not an object, a vendor that is not
+a string naming a vendor with thresholds, or a score that is not a number from 0 to 1, is refused (`invalid_input`). A call
+stored before VER-14 has no band, and reads as `clear`. Its band is `level_1` above `levelOneAbove`,
+`spoken_off` above `spokenKnowledgeAbove`, else `clear`. The call keeps its highest band, so a
+later, lower score lifts nothing, and a taint or a new verification does not reset it. Under
+`spoken_off` or `level_1`, `spoken_knowledge` does not count toward a level; under `level_1`, a
+verification finishes at level 1 at most. A band applies at once: in the score's own write, the
+level and the grant are lowered to what the last verification's counted methods reach under the
+band (re-judged under the policy only when a method stops counting), and a grant lowered to 0 is
+dropped. A score never raises a level, never counts as a factor, and without a score there is no
+cap. The score is not stored: the call record keeps the band, the ledger the vendor and the band.
+The receipt keeps neither, and a call a band holds below what its counted methods reach shows on
+its receipt the level it holds with only the methods that support it (those in a policy set at
+that level or below that the call passed in full), so it reads exactly like a call that honestly
+reached that level; `verification.finished` in the ledger keeps every counted method. A caller ID
+attestation cap (VER-10) trims the receipt's methods the same way (decision 11). The band and the
+cap are each a ceiling on the level the factors reached, so their order does not change the level.
 
 **Step-up rules** (`stepUp`, VER-13) raise one scope's minimum for one request. A rule is `{name,
 scope, level}` plus exactly one condition:
@@ -985,7 +1010,8 @@ answer on file, a phone number, a link or card data.
 | `identity.link_sent` | none |
 | `verification.code_sent` | none |
 | `verification.code_refused` | `reason`: `country`, `subject_limit`, `number_limit` or `send_failed` |
-| `verification.finished` | `level` (after any attestation cap), `methods`, `discounted`, `capped` (true when a cap lowered the level), `policyVersion`, `configRevision`; `voidedByTaint: true` when a taint landed in that verification |
+| `verification.finished` | `level` (after any attestation cap), `methods`, `discounted`, `capped` (true when an attestation cap or a synthetic voice band lowered the level), `policyVersion`, `configRevision`; `voidedByTaint: true` when a taint landed in that verification |
+| `verification.synthetic_voice` | `vendor`, `band` (never the score) |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt`, `policyVersion`, `configRevision` |
 | `pin.enrolled` | none (never the digits, the digest or their length) |
 | `pin.reset` | `subjectKey`; actor `member`, `callId` null |
@@ -1289,7 +1315,8 @@ or not the flow finished), or, for a call that ran no flow, when Trace's `receip
 false. `endCall` returns it, or null. `verification` comes from Badge, `records` from Dossier,
 `payments` from Paylink and `consents` from Trace (`answer` is `yes`, `no`, or `not_recorded` for
 a consent still being stored when the call ended, section 21); a module that is off contributes an
-empty part. `verification.policyVersion` and `verification.configRevision` name the policy and the
+empty part. A receipt never carries a synthetic voice band, vendor or score, since a receipt can
+reach the caller (SRV-3). `verification.policyVersion` and `verification.configRevision` name the policy and the
 FlowConfig revision that judged the call's last finished verification (whatever level it reached);
 both are absent when no verification finished on the call. They are optional, so the format stays
 at `v: 1`, and a reader that does not know them still checks the signature over the whole body.

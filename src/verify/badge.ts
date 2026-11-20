@@ -20,9 +20,10 @@ import {
   type CarrierSignalReport,
   type FactorKind,
   type ScopeClass,
+  type VerificationPolicy,
 } from "../core/policy.ts";
 import type { CallDraft, CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
-import { canApply, type SessionState } from "../core/session.ts";
+import { canApply, higherBand, type SessionState, type SyntheticVoiceBand } from "../core/session.ts";
 import { isIntegerIn, isObject, isStringArray, unknownKeys } from "../core/shape.ts";
 import type { IdentityOutcome } from "../webhooks/stripe.ts";
 import {
@@ -107,6 +108,12 @@ export interface BadgeSlice {
   finished: number;
   lastLevel: AssuranceLevel;
   lastMethods: FactorKind[];
+  /**
+   * The methods the receipt shows when a synthetic voice band holds the call below what its counted
+   * methods reach (VER-14): only those that support the level shown, so a capped receipt reads like
+   * an honestly lower one. Null (or absent) otherwise. The ledger keeps every counted method.
+   */
+  receiptMethods?: FactorKind[] | null;
   /** The policy version and config revision that judged the last one; null until one finished. */
   lastJudgedBy: JudgedBy | null;
   /**
@@ -197,6 +204,18 @@ export type OutcomeResult = { applied: false } | { applied: true; callId: string
  */
 export type BeginVerificationInput = ({ accountNumber: string } | { subjectKey: string }) & { callingNumber?: string };
 
+/**
+ * One speech vendor's two thresholds, each from 0 to 1 (VER-14). Vendors' scores are not
+ * comparable, so each vendor has its own. A score above `spokenKnowledgeAbove` stops
+ * `spoken_knowledge` counting toward a level; above `levelOneAbove`, the call is held to level 1.
+ */
+export interface SyntheticVoiceThresholds {
+  spokenKnowledgeAbove: number;
+  levelOneAbove: number;
+}
+
+/** Badge's settings with the synthetic voice thresholds, by vendor name. No vendor listed: no score is taken. */
+export type BadgeVoiceSettings = BadgeSettings & { syntheticVoice?: Record<string, SyntheticVoiceThresholds> };
 
 /** The keypad timeouts of one call, for the host's `KeypadCollector` (VER-11). */
 export interface KeypadTiming {
@@ -207,9 +226,11 @@ export interface KeypadTiming {
 /** How long a caller may pause between tones before the buffer is dropped, by default (VER-11). */
 export const DEFAULT_KEYPAD_IDLE_SECONDS = 10;
 
-const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin", "lockout", "accessibility"];
+const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin", "lockout", "syntheticVoice", "accessibility"];
 const ACCESSIBILITY_KEYS = ["spokenKeypadFields", "keypadIdleSeconds", "maxKeypadIdleSeconds"];
 const PIN_KEYS = ["mode", "minDigits", "maxDigits", "maxAttemptsPerCall", "duress"];
+const THRESHOLD_KEYS = ["spokenKnowledgeAbove", "levelOneAbove"];
+const VENDOR_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 
 /** The subject whose number links may go to: only once a keypad or PIN factor matched. */
 export function matchedSubject(record: CallRecord): SubjectRecord {
@@ -296,6 +317,7 @@ export class BadgeModule implements AssuranceModule {
     }
     if (settings.accessibility !== undefined) errors.push(...accessibilityErrors(settings.accessibility, settings.factors));
     errors.push(...lockoutSettingsErrors(settings.lockout));
+    if (settings.syntheticVoice !== undefined) errors.push(...syntheticVoiceErrors(settings.syntheticVoice));
     return errors;
   }
 
@@ -425,7 +447,7 @@ export class BadgeModule implements AssuranceModule {
       if (typeof judged.policyVersion === "string") by.policyVersion = judged.policyVersion;
       if (typeof judged.configRevision === "string") by.configRevision = judged.configRevision;
     }
-    return { verification: { ...by, level: state.level, methods: state.level === 0 ? [] : badge.lastMethods } };
+    return { verification: { ...by, level: state.level, methods: state.level === 0 ? [] : (badge.receiptMethods ?? badge.lastMethods) } };
   }
 }
 
@@ -521,6 +543,59 @@ export function owedDuressAlerts(record: CallRecord): DuressAlertRecord[] {
 export function acknowledgeDuressAlert(record: CallRecord, alertId: string): void {
   const s = record.modules[BADGE] as unknown as BadgeSlice;
   s.duressAlerts = s.duressAlerts!.filter((a) => a.alertId !== alertId);
+}
+
+function syntheticVoiceErrors(vendors: unknown): string[] {
+  if (!isObject(vendors)) return ["syntheticVoice must map each vendor's name to its thresholds"];
+  const errors: string[] = [];
+  for (const [vendor, thresholds] of Object.entries(vendors)) {
+    const at = `syntheticVoice.${vendor}`;
+    if (!VENDOR_NAME.test(vendor)) errors.push(`syntheticVoice vendor ${JSON.stringify(vendor)} must be 1 to 32 lower-case letters, digits, "-" or "_", starting with a letter`);
+    if (!isObject(thresholds)) {
+      errors.push(`${at} must be {spokenKnowledgeAbove, levelOneAbove}`);
+      continue;
+    }
+    errors.push(...unknownKeys(thresholds, THRESHOLD_KEYS).map((k) => `${at}.${k} is not a threshold`));
+    const bad = THRESHOLD_KEYS.filter((k) => !isScore(thresholds[k]));
+    for (const k of bad) errors.push(`${at}.${k} must be a number from 0 to 1`);
+    if (bad.length === 0 && (thresholds.levelOneAbove as number) < (thresholds.spokenKnowledgeAbove as number)) {
+      errors.push(`${at}.levelOneAbove must not be below spokenKnowledgeAbove`);
+    }
+  }
+  return errors;
+}
+
+/** A number from 0 to 1. NaN, infinities and strings are not. */
+function isScore(value: unknown): value is number {
+  return typeof value === "number" && value >= 0 && value <= 1;
+}
+
+/** A call's band. A call stored before VER-14 has none, and no score was reported on it: `clear`. */
+function bandOf(state: SessionState): SyntheticVoiceBand {
+  return state.syntheticVoice ?? "clear";
+}
+
+/** Whether a factor kind still counts toward a level under a call's synthetic voice band. */
+function countsUnder(kind: string, band: SyntheticVoiceBand): boolean {
+  return kind !== "spoken_knowledge" || band === "clear";
+}
+
+/**
+ * The methods that support a level: those in a set of the policy, at that level or below, whose
+ * every factor is among `methods`. A receipt held below its methods' level lists only these.
+ */
+function supportingMethods(policy: VerificationPolicy, methods: readonly FactorKind[], level: AssuranceLevel): FactorKind[] {
+  const support = new Set<FactorKind>();
+  for (const rule of policy.levels) {
+    if (rule.level > level) continue;
+    for (const set of rule.anyOf) if (set.every((kind) => methods.includes(kind))) for (const kind of set) support.add(kind);
+  }
+  return methods.filter((kind) => support.has(kind));
+}
+
+/** A level held to a band: at most 1 in `level_1`. */
+function heldLevel(level: AssuranceLevel, band: SyntheticVoiceBand): AssuranceLevel {
+  return band === "level_1" ? (Math.min(level, 1) as AssuranceLevel) : level;
 }
 
 // ---- runtime -------------------------------------------------------------------------------
@@ -1006,23 +1081,60 @@ export async function applyIdentityOutcome(rt: EngineRuntime, outcome: IdentityO
   });
 }
 
-/** Computes the level from the recorded factors (only the step's, in a flow) and issues the grant. */
+/**
+ * A speech vendor's score of how likely the caller's voice is synthetic (VER-14), at any point in
+ * the call, in or out of a flow. It is judged against that vendor's thresholds in Badge's settings
+ * and kept only as a band; the call keeps its highest band. It can only lower what the call may do:
+ * above the first threshold `spoken_knowledge` stops counting, above the second the call is held to
+ * level 1, and a level or grant already issued is lowered at once. The ledger gets the vendor and
+ * the band, never the score.
+ */
+export async function reportSyntheticVoice(rt: EngineRuntime, callId: string, input: { score: number; vendor: string }): Promise<void> {
+  // Read the input once, before any wait, so a caller changing it during the update cannot split
+  // the vendor whose thresholds set the band from the vendor the ledger names.
+  if (!isObject(input)) throw new EngineError("invalid_input", "a synthetic voice report is { score and vendor }");
+  const { score, vendor } = input;
+  const vendors = rt.settings<BadgeVoiceSettings>(BADGE).syntheticVoice ?? {};
+  // A string only: Object.hasOwn coerces its key, so ["acme"] would find acme's thresholds and
+  // put an array (or any object naming a vendor) into the ledger entry.
+  const thresholds = typeof vendor === "string" && Object.hasOwn(vendors, vendor) ? vendors[vendor] : undefined;
+  if (thresholds === undefined) throw new EngineError("invalid_input", "this vendor has no synthetic voice thresholds in the badge settings");
+  if (!isScore(score)) throw new EngineError("invalid_input", "score must be a number from 0 to 1");
+  const band: SyntheticVoiceBand = score > thresholds.levelOneAbove ? "level_1" : score > thresholds.spokenKnowledgeAbove ? "spoken_off" : "clear";
+  await rt.update(callId, (draft) => {
+    const s = draft.slice<BadgeSlice>(BADGE);
+    const highest = higherBand(bandOf(draft.record.state), band);
+    // What the last verification reaches without the factors the band stops counting. Its other
+    // methods are judged again only when one was dropped, so a score never moves a level otherwise.
+    const kept = s.lastMethods.filter((kind) => countsUnder(kind, highest));
+    const reached = kept.length === s.lastMethods.length ? 3 : evaluateAssurance(rt.policy, kept.map((kind) => ({ kind, passed: true, at: rt.now() })), s.carrier).level;
+    const ceiling = heldLevel(reached, highest);
+    draft.apply({ type: "synthetic_voice_scored", band, ceiling, scopes: scopesForLevel(rt.policy, ceiling) });
+    // Held below what the last verification's methods reach: the receipt shows only those that support the level it shows.
+    if (draft.record.state.level < s.lastLevel) s.receiptMethods = supportingMethods(rt.policy, s.lastMethods, draft.record.state.level);
+    draft.emit("verification.synthetic_voice", "system", { vendor, band });
+  });
+}
+
+/** Computes the level from the recorded factors (only the step's, in a flow, and only those the synthetic voice band counts), held to the band, and issues the grant. */
 export async function finishVerification(rt: EngineRuntime, callId: string): Promise<VerificationResult> {
   const ttlMs = (rt.settings<BadgeSettings>(BADGE).grantTtlSeconds ?? 900) * 1000;
   return rt.update(callId, (draft) => {
     const step = stepOfType<BadgeVerifyStep>(draft.record, "badge.verify");
     const s = draft.slice<BadgeSlice>(BADGE);
+    const band = bandOf(draft.record.state);
     // A taint landed in this verification: it fails, with no level (Sean, 2026-11-19).
     const voidedByTaint = s.voidedEpoch === s.epoch;
-    const factors = voidedByTaint ? [] : draft.record.state.factors.filter((f) => step === null || step.factors.includes(f.kind));
+    const factors = voidedByTaint ? [] : draft.record.state.factors.filter((f) => (step === null || step.factors.includes(f.kind)) && countsUnder(f.kind, band));
     // The policy and revision in force now judge, read together inside this write.
     const policy = rt.policy;
     const judgedBy: JudgedBy = { policyVersion: policy.version, configRevision: rt.revision };
     const result = evaluateAssurance(policy, factors, s.carrier);
-    // The call's caller ID attestation can only lower the level the factors reached, never raise it.
-    // A call stored before VER-10 has no attestation, and reads as none; a callback call the engine
-    // dialled is never capped (decision 10).
-    const level = capCallLevel(policy, result.level, draft.record);
+    // The synthetic voice band (VER-14) and the call's caller ID attestation can each only lower
+    // the level the factors reached, never raise it; each is a ceiling, so either order gives the
+    // same level. A call stored before VER-10 has no attestation, and reads as none; a callback
+    // call the engine dialled is never capped (decision 10).
+    const level = capCallLevel(policy, heldLevel(result.level, band), draft.record);
     const scopes = scopesForLevel(policy, level).filter((scope) => step?.scopes === undefined || step.scopes.includes(scope));
     const issuedAt = rt.clock.now();
     const grant =
@@ -1041,6 +1153,9 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
     s.lastLevel = level;
     s.lastMethods = result.counted;
     s.lastJudgedBy = judgedBy;
+    // Held below what its counted methods reach, by a band or an attestation cap (decision 11): the
+    // receipt shows only the methods that support the level it shows. The ledger keeps them all.
+    s.receiptMethods = level < result.level ? supportingMethods(policy, result.counted, level) : null;
     draft.emit("verification.finished", "code", {
       level,
       methods: result.counted,

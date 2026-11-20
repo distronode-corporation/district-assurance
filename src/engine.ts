@@ -901,6 +901,15 @@ export class Engine {
     return pin.readPinTagWith(this.#hmac, entry);
   }
 
+  /**
+   * The host's speech vendor scored how likely the caller's voice is synthetic, from 0 to 1. At any
+   * point in the call; it can only lower the level and the grant, at once, never raise them. The
+   * ledger keeps the vendor and the band, never the score; the receipt keeps neither.
+   */
+  reportSyntheticVoice(callId: string, input: { score: number; vendor: string }): Promise<void> {
+    return badge.reportSyntheticVoice(this.#rt, callId, input);
+  }
+
   // ---- Dossier (file) ----------------------------------------------------------------------
 
   startIntake(callId: string, formId: string): Promise<void> {
