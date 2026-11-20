@@ -17,6 +17,7 @@ import {
 } from "../src/file/intake.ts";
 import { MAX_LINK_AMOUNT_MINOR, settlementFor, validateAmount } from "../src/pay/payment.ts";
 import { isKeypadEntry, judgeKeypadFactors, knowledgeDigest, knowledgeHmac, pinDigest, subjectKeyFor } from "../src/verify/knowledge.ts";
+import { pinOnFile } from "./helpers.ts";
 
 const KEY = "0123456789abcdef-test";
 
@@ -57,7 +58,8 @@ describe("verify: keypad knowledge", () => {
     const kms = async (data: string): Promise<string> => createHmac("sha256", KEY).update(data).digest("hex");
     assert.equal(await subjectKeyFor(kms, "12345678"), subject.subjectKey);
     assert.equal(await knowledgeDigest(kms, "dob", "19850214"), subject.knowledge.dob);
-    assert.equal(await pinDigest(kms, subject.subjectKey, "4826"), pinDigest(KEY, subject.subjectKey, "4826"));
+    // A PIN record is salted afresh each time: both forms give records of the same PIN.
+    for (const stored of [await pinDigest(kms, subject.subjectKey, "4826"), pinDigest(KEY, subject.subjectKey, "4826")]) assert.ok(await pinOnFile(stored, subject.subjectKey, "4826", "pin", KEY));
     assert.equal(await judgeKeypadFactors(kms, subject, ["dob", "zip"], { dob: "19850214", zip: "90210" }), true);
     assert.equal(await judgeKeypadFactors(kms, subject, ["dob", "zip"], { dob: "19850214", zip: "90211" }), false);
     assert.equal(await judgeKeypadFactors(kms, subject, ["dob"], { dob: "abc" }), false);

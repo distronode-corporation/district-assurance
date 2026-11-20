@@ -12,7 +12,7 @@ The design: a small core (the session state machine on a shared session store, t
 its levels, redaction, the module registry and the audit ledger) and modules around it: Badge
 (verify), Dossier (file), Paylink (pay), Trace (prove), Gate (entry), step-up (web sign-in), and
 any outside module a host adds. Every module can be turned on, turned off, added and removed per workspace config,
-and flows are config, not code. DECISIONS.md, ADR-13 to ADR-28, says why.
+and flows are config, not code. DECISIONS.md, ADR-13 to ADR-29, says why.
 
 ## How work is proven
 

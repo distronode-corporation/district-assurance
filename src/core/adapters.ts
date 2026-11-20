@@ -193,9 +193,13 @@ export interface SubjectRecord {
   phoneOnFile: string;
   /** Field name to the HMAC of its value (`knowledgeDigest`). */
   knowledge: Record<string, string>;
-  /** The HMAC of the subject's PIN (`pinDigest`), for the PIN factor in `keyed_hash` mode. */
+  /**
+   * The record of the subject's PIN (`pinDigest`), for the PIN factor in `keyed_hash` mode: Argon2id
+   * over the keyed HMAC, its parameters and salt in the string (ADR-29). A bare 64-hex HMAC of the
+   * earlier format still verifies, and is replaced on the next match.
+   */
   pinDigest?: string;
-  /** The HMAC of the subject's duress PIN (`duressDigest`), set only by the business (VER-12). */
+  /** The record of the subject's duress PIN (`duressDigest`), the same format, set only by the business (VER-12). */
   duressDigest?: string;
   /**
    * Which enrolment stored `pinDigest` (VER-6): written with it by `putPinDigest`, so a call
@@ -468,6 +472,14 @@ export interface RecordStore {
    * rest of the subject record, which is the host's. Idempotent.
    */
   deletePinDigest(workspaceId: string, subjectKey: string): Promise<void>;
+  /**
+   * Replaces a subject's `pinDigest` or `duressDigest` with `to`, a stronger record of the same PIN
+   * (the Argon2id record of an earlier keyed HMAC, ADR-29), only if it is still exactly `from`, in
+   * one atomic step; the answer says whether it replaced. Changes nothing else (`pinEnrolmentId`
+   * and the other digest stay). A subject the store does not have, or whose field is missing or
+   * holds anything else, is left alone, and the answer is false. Never given the PIN itself.
+   */
+  upgradePinDigest(workspaceId: string, subjectKey: string, field: "pinDigest" | "duressDigest", from: string, to: string): Promise<boolean>;
 }
 
 /** How a consent was given or revoked: on the call, by text, or on the host's dashboard. */

@@ -1,11 +1,11 @@
 // PIN enrolment and reset (VER-6).
 //
 // A caller who verified to level 2 or above on this call chooses a PIN: keyed twice, each entry
-// hashed the way the PIN factor hashes it and the two compared in constant time, then the digest
-// is stored through `RecordStore.putPinDigest`. The digits are never kept, logged or written to
-// the ledger. Changing a PIN on file is the business's call (`resetPin`, from the host's code), not
-// the caller's: a caller enrols only when no PIN is on file. In `verifier` mode the host's own PIN
-// store enrols and resets, and the engine refuses.
+// hashed the way the PIN factor hashes it and the two compared in constant time, then an Argon2id
+// record of the keyed PIN (pin-hash.ts, ADR-29) is stored through `RecordStore.putPinDigest`. The
+// digits are never kept, logged or written to the ledger. Changing a PIN on file is the business's
+// call (`resetPin`, from the host's code), not the caller's: a caller enrols only when no PIN is on
+// file. In `verifier` mode the host's own PIN store enrols and resets, and the engine refuses.
 //
 // The duress PIN (VER-12): a second PIN the business enrols for a subject, which a caller made to
 // call under pressure enters instead. It passes like the PIN everywhere the caller can reach, while
@@ -20,6 +20,7 @@ import { BADGE, type BadgeSlice } from "./badge.ts";
 import { hiddenCounterKey } from "./duress-flag.ts";
 import { PIN_OUTCOMES, pinTag, type BadgeSettings, type PinOutcome, type PinSettings } from "./factors.ts";
 import { isKeypadEntry } from "./knowledge.ts";
+import { checkPinRecord, hashPinRecord } from "./pin-hash.ts";
 
 /** The level a caller must reach on this call before choosing a PIN. */
 export const PIN_ENROLMENT_LEVEL = 2;
@@ -60,8 +61,8 @@ export async function pinEnrolmentProblem(
   if (!wellFormedPin(settings, pin) || !wellFormedPin(settings, confirm)) return "malformed";
   const digest = await hmac(`pin:${subject.subjectKey}:${pin}`);
   if (!hexDigestsEqual(digest, await hmac(`pin:${subject.subjectKey}:${confirm}`))) return "mismatch";
-  // A duress PIN on file (VER-12) is never also the PIN.
-  const duress = hexDigestsEqual(await hmac(`duress:${subject.subjectKey}:${pin}`), subject.duressDigest ?? "");
+  // A duress PIN on file (VER-12) is never also the PIN. One Argon2id run whether or not one is on file.
+  const duress = (await checkPinRecord(subject.duressDigest, await hmac(`duress:${subject.subjectKey}:${pin}`))).match;
   return (await knowledgeOnFile(hmac, subject, pin)) || duress || isWeakPin(pin) ? "weak" : null;
 }
 
@@ -88,7 +89,7 @@ export async function duressPinProblem(
   pin: string,
 ): Promise<"malformed" | "weak" | null> {
   if (!wellFormedPin(settings, pin)) return "malformed";
-  const samePin = hexDigestsEqual(await hmac(`pin:${subject.subjectKey}:${pin}`), subject.pinDigest);
+  const samePin = (await checkPinRecord(subject.pinDigest, await hmac(`pin:${subject.subjectKey}:${pin}`))).match;
   return (await knowledgeOnFile(hmac, subject, pin)) || samePin || isWeakPin(pin) ? "weak" : null;
 }
 
@@ -154,12 +155,12 @@ export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: 
   const records = rt.adapter("records");
   const subject = await records.getSubject(rt.workspaceId, reserved.subjectKey);
   if (subject === null) throw new EngineError("precondition_failed", "the verified subject is not on file");
-  const digest = await rt.hmac(`pin:${reserved.subjectKey}:${pin}`);
+  const keyedPin = await rt.hmac(`pin:${reserved.subjectKey}:${pin}`);
   // A PIN on file is refused, unless the store says this call's own try stored it (by its id, kept
   // with the digest) and the call has not recorded it yet: the session write after the store's
   // write failed, and the same PIN again finishes that enrolment. Another call's enrolment of the
   // same PIN, or one after a reset, never passes for this call's.
-  const stored = subject.pinDigest !== undefined && hexDigestsEqual(subject.pinDigest, digest) ? subject.pinEnrolmentId : undefined;
+  const stored = subject.pinDigest !== undefined && (await checkPinRecord(subject.pinDigest, keyedPin)).match ? subject.pinEnrolmentId : undefined;
   const mine = (p: { subjectKey: string; enrolmentId: string }) => p.enrolmentId === stored && p.subjectKey === reserved.subjectKey;
   // Recorded by this call, and its ledger entry failed after the write that recorded it (this
   // try's write appended it): the same PIN again is that enrolment, finished.
@@ -172,6 +173,8 @@ export async function enrolPin(rt: EngineRuntime, callId: string, input: { pin: 
   let enrolmentId = stored!;
   if (!resuming) {
     enrolmentId = reserved.enrolmentId!;
+    // A new Argon2id record, salted afresh (ADR-29); the digits are never kept.
+    const digest = await hashPinRecord(keyedPin);
     // Recorded before the store's write, so a retry can finish an enrolment whose last write failed.
     // Each try adds its own entry, so two tries at once on this call never overwrite each other's.
     // Only while the call can still choose a PIN for this subject: it may have ended, lost its grant
@@ -263,7 +266,7 @@ export async function enrolDuressPin(rt: EngineRuntime, subjectKey: string, pin:
   if (problem !== null) return { enrolled: false, reason: problem };
   // Stored only if the PIN checked against is still the one on file: a reset and a new PIN since the
   // read could otherwise leave the duress PIN equal to the PIN, raising the alarm on every login.
-  if (!(await records.putDuressDigest(rt.workspaceId, subjectKey, await rt.hmac(`duress:${subjectKey}:${pin}`), pinDigest))) {
+  if (!(await records.putDuressDigest(rt.workspaceId, subjectKey, await hashPinRecord(await rt.hmac(`duress:${subjectKey}:${pin}`)), pinDigest))) {
     throw new EngineError("conflict", "the PIN changed while the duress PIN was being stored; try again");
   }
   return { enrolled: true };

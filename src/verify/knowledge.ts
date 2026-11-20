@@ -11,6 +11,7 @@
 import { EngineError } from "../core/errors.ts";
 import { hexDigestsEqual, hmacSha256Hex } from "../core/hash.ts";
 import type { SubjectRecord } from "../core/adapters.ts";
+import { hashPinRecord, hashPinRecordSync } from "./pin-hash.ts";
 
 const KEYPAD_DIGITS = /^\d{1,32}$/;
 const HMAC_HEX = /^[0-9a-f]{64}$/;
@@ -63,13 +64,16 @@ export function knowledgeDigest(knowledgeKey: KnowledgeKey, field: string, value
 }
 
 /**
- * The stored digest of a subject's PIN, for the PIN factor in `keyed_hash` mode. Bound to the
- * subject, so two subjects with the same PIN have different digests. Asynchronous with an HMAC function.
+ * The stored record of a subject's PIN, for the PIN factor in `keyed_hash` mode: Argon2id over the
+ * keyed HMAC of `pin:<subjectKey>:<pin>`, with a fresh random salt (pin-hash.ts, ADR-29). Bound to
+ * the subject and salted, so the same PIN gives a new record each time. With bytes it returns at
+ * once after one Argon2id run on this thread; with an HMAC function it is asynchronous.
  */
 export function pinDigest(knowledgeKey: KnowledgeKeyBytes, subjectKey: string, pin: string): string;
 export function pinDigest(knowledgeKey: KnowledgeHmac, subjectKey: string, pin: string): Promise<string>;
 export function pinDigest(knowledgeKey: KnowledgeKey, subjectKey: string, pin: string): string | Promise<string> {
-  return keyed(knowledgeKey, `pin:${subjectKey}:${pin}`);
+  const keyedPin = keyed(knowledgeKey, `pin:${subjectKey}:${pin}`);
+  return typeof keyedPin === "string" ? hashPinRecordSync(keyedPin) : keyedPin.then(hashPinRecord);
 }
 
 /** Whether a string is something a keypad could have produced. */

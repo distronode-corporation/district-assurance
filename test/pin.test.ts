@@ -13,7 +13,7 @@ import { isWeakPin } from "../src/verify/pin.ts";
 import type { FlowConfig } from "../src/core/config.ts";
 import type { AttemptCounterKey } from "../src/core/adapters.ts";
 import { MemoryAttemptCounters, TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine, type TestEngineOptions } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PIN, rejects, setup, testConfig, waitOut } from "./helpers.ts";
+import { ACCOUNT, DOB, PIN, pinOnFile, rejects, setup, testConfig, waitOut } from "./helpers.ts";
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 
@@ -80,8 +80,10 @@ describe("PIN factor, keyed hash", () => {
     assert.equal((await t.engine.state(callId)).factors.length, 3, "each was judged, none refused by a wait");
   });
 
-  it("binds the digest to the subject", () => {
-    assert.notEqual(pinDigest(TEST_KNOWLEDGE_KEY, "a".repeat(64), PIN), pinDigest(TEST_KNOWLEDGE_KEY, "b".repeat(64), PIN));
+  it("binds the digest to the subject", async () => {
+    const record = pinDigest(TEST_KNOWLEDGE_KEY, "a".repeat(64), PIN);
+    assert.equal(await pinOnFile(record, "a".repeat(64), PIN), true);
+    assert.equal(await pinOnFile(record, "b".repeat(64), PIN), false, "the same PIN does not match for another subject");
   });
 
   it("lets a PIN match unlock the photo ID link, as a keypad match does", async () => {
@@ -628,7 +630,7 @@ describe("PIN enrolment and reset (VER-6)", () => {
     const t = enrolSetup();
     const callId = await verified(t);
     assert.deepEqual(await t.engine.enrolPin(callId, { pin: CHOSEN, confirm: CHOSEN }), { enrolled: true });
-    assert.equal((await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest, pinDigest(TEST_KNOWLEDGE_KEY, NEW_SUBJECT, CHOSEN));
+    assert.ok(await pinOnFile((await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest, NEW_SUBJECT, CHOSEN));
     const entries = await t.ledger.list();
     const enrolled = entries.filter((e) => e.event === "pin.enrolled");
     assert.equal(enrolled.length, 1);
@@ -699,7 +701,7 @@ describe("PIN enrolment and reset (VER-6)", () => {
       return put(workspaceId, subjectKey, digest, enrolmentId);
     };
     assert.deepEqual(await t.engine.enrolPin(callId, { pin: CHOSEN, confirm: CHOSEN }), { enrolled: true });
-    assert.equal((await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest, pinDigest(TEST_KNOWLEDGE_KEY, NEW_SUBJECT, CHOSEN));
+    assert.ok(await pinOnFile((await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest, NEW_SUBJECT, CHOSEN));
   });
 
   it("lets one of two enrolments at once win, and refuses the other without replacing the PIN", async () => {
@@ -716,7 +718,7 @@ describe("PIN enrolment and reset (VER-6)", () => {
       return put(workspaceId, subjectKey, digest, enrolmentId);
     };
     await assert.rejects(t.engine.enrolPin(loser, { pin: CHOSEN, confirm: CHOSEN }), rejects("precondition_failed", /only the business/));
-    assert.equal((await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest, pinDigest(TEST_KNOWLEDGE_KEY, NEW_SUBJECT, "6094"));
+    assert.ok(await pinOnFile((await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest, NEW_SUBJECT, "6094"));
     assert.equal((await t.ledger.list()).filter((e) => e.event === "pin.enrolled").length, 1);
   });
 
@@ -734,8 +736,8 @@ describe("PIN enrolment and reset (VER-6)", () => {
     };
     await assert.rejects(t.engine.enrolPin(callId, { pin: CHOSEN, confirm: CHOSEN }), /session store down/);
     t.records.putPinDigest = put;
-    const stored = pinDigest(TEST_KNOWLEDGE_KEY, NEW_SUBJECT, CHOSEN);
-    assert.equal((await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest, stored);
+    const stored = (await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest;
+    assert.ok(await pinOnFile(stored, NEW_SUBJECT, CHOSEN));
     const enrolledEvents = async () => (await t.ledger.list()).filter((e) => e.event === "pin.enrolled").length;
     assert.equal(await enrolledEvents(), 0);
     await assert.rejects(t.engine.enrolPin(callId, { pin: "6094", confirm: "6094" }), rejects("precondition_failed", /only the business/), "another PIN");
@@ -841,7 +843,7 @@ describe("PIN enrolment and reset (VER-6)", () => {
         release();
       }
       await assert.rejects(other, rejects("precondition_failed", /only the business/));
-      assert.equal((await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest, pinDigest(TEST_KNOWLEDGE_KEY, NEW_SUBJECT, CHOSEN));
+      assert.ok(await pinOnFile((await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest, NEW_SUBJECT, CHOSEN));
       assert.equal((await t.ledger.list()).filter((e) => e.event === "pin.enrolled").length, 1, "the stored PIN is in the ledger, once");
       const stored = (await t.sessions.get("ws_test", callId))!.record as { modules: { badge: { pinPending?: unknown[] } } };
       assert.deepEqual(stored.modules.badge.pinPending, [], "nothing left pending");
@@ -884,7 +886,7 @@ describe("PIN enrolment and reset (VER-6)", () => {
       adapters: { counters: resetRecorder(resets) },
     });
     await t.engine.resetPin(OWNER);
-    assert.equal((await t.records.getSubject("ws_test", OWNER))!.pinDigest, pinDigest(TEST_KNOWLEDGE_KEY, OWNER, PIN));
+    assert.ok(await pinOnFile((await t.records.getSubject("ws_test", OWNER))!.pinDigest, OWNER, PIN));
     assert.deepEqual(resets, [
       { workspaceId: "ws_test", factor: "pin", scope: "subject", key: OWNER },
       { workspaceId: "ws_test", factor: "duress.hidden.pin", scope: "subject", key: OWNER },

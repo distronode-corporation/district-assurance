@@ -29,7 +29,7 @@ updates:
     open-pull-requests-limit: 5
     versioning-strategy: increase
     ignore:
-      # @types/node follows the oldest Node the package supports (engines: >=24.2). A new
+      # @types/node follows the oldest Node the package supports (engines: >=24.19). A new
       # major comes with a deliberate engines change, not from a bot.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
