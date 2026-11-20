@@ -40,8 +40,9 @@ and Canadian French (urgency, authority, "skip it", partial answers, account pro
 flooding, injection in business data) through a scripted host in `npm test`, and checks after
 every turn that no grant comes without factors, no text goes out before a match, an unknown
 account answers like a wrong answer, and a tainted session holds no grant (tested). A new tactic
-or a newly built factor fails the suite until it has scripts in both languages. Texted codes get
-their scripts with VER-2; until then the suite floods with photo ID and payment links.
+or a newly built factor fails the suite until it has scripts in both languages. Every built factor
+has them, texted codes, callbacks and spoken answers included, and the flooding script floods
+with photo ID links, payment links and texted codes.
 
 ### Account probing
 
@@ -74,35 +75,34 @@ the attempt, and an attempt that finds a lock another engine just set is refused
 two engines racing). A locked line answers `locked` even to the right PIN, on any call and either
 engine, until the window passes or a member of the business lifts the lock with `unlock`
 (INT-7, below), which clears that one counter entirely (tested). A pass takes off the subject's
-failures recorded up to it (a later one, by another call, stays) but takes only its own failure off the number's: a line's failures against other accounts
-stay through a pass on its own account, so alternating with that pass does not escape the lock per
-calling number (tested). Taking it off is one atomic step of the store
-(`removeFailure`), so a failure another call records on the same number meanwhile is never lost
-(tested, two engines). Only a member's `unlock`
-clears a number's counter outright, failures against other accounts included, so that is the
-business's deliberate act, recorded in the ledger.
+failures recorded up to it (a later one, by another call, stays) but takes only its own failure
+off the number's: a line's failures against other accounts stay through a pass on its own
+account, so alternating with that pass does not escape the lock per calling number (tested).
+Taking it off is one atomic step of the store (`removeFailure`), so a failure another call
+records on the same number meanwhile is never lost (tested, two engines). Only a member's
+`unlock` clears a number's counter outright, failures against other accounts included, so that
+is the business's deliberate act, recorded in the ledger.
 
 Lockout alerts (INT-7): after a `verification.locked` entry is written, the host's `Notifier` is
 told the counter (the subject key, or the keyed hash of the calling number), the factor kind and
-when the lock ends, never a value or a phone number (tested). A notice is told once per lock,
-across engines, and a workspace gets at most 20 an hour of hard locks and, apart, 20 of waits
-after a failure, the last of each marked `capped`, so an attack locking subject after subject cannot
-flood the owner, and waits, which come cheap, cannot use up the hard locks' notices to hide one
-(tested); every lock stays in the ledger (tested). The
-notifier is best effort and never awaited: one that throws, rejects or hangs never blocks the call
-or the ledger (tested). `unlock` is a host call with no call id, so no call path reaches it; it
-clears one counter (one factor kind, one scope, one key) and nothing else, writes
-`verification.unlocked` with the member's opaque id and the counter as a keyed digest (never the
-key) before clearing, and grants nothing: the caller still
-verifies from no factors (tested). An unlock gives whoever is calling a fresh set of tries on
-that counter, so who may make it is the host's. Without this, a
-4-digit PIN with 3 attempts per call fell within about 3,300 calls; now an attacker gets at most
-10 guesses per subject per 24 hours, about 3,650 a year against 10,000 PINs, so a 4-digit PIN
-still needs watching (`verification.locked` in the ledger) and a longer PIN where the risk is
-high. In `verifier` mode the host's PIN store is asked for every attempt, with a stand-in for a
-malformed entry, so timing does not tell them apart. A PIN a caller chooses (`enrolPin`) is refused when every digit is the same, when it is
-a run (1234, 4321, 7890), or when it equals the account number or any keypad knowledge on file,
-with one answer (`weak`) for all three, so a try never says which value is on file (tested).
+when the lock ends, never a value or a phone number (tested). A notice is told once per lock, across
+engines, and a workspace gets at most 20 an hour of hard locks and, apart, 20 of waits after a
+failure, the last of each marked `capped`, so an attack locking subject after subject cannot flood
+the owner, and waits, which come cheap, cannot use up the hard locks' notices to hide one (tested);
+every lock stays in the ledger (tested). The notifier is best effort and never awaited: one that
+throws, rejects or hangs never blocks the call or the ledger (tested). `unlock` is a host call with
+no call id, so no call path reaches it; it clears one counter (one factor kind, one scope, one key)
+and nothing else, writes `verification.unlocked` with the member's opaque id and the counter as a
+keyed digest (never the key) before clearing, and grants nothing: the caller still verifies from no
+factors (tested). An unlock gives whoever is calling a fresh set of tries on that counter, so who
+may make it is the host's. Without this, a 4-digit PIN with 3 attempts per call fell within about
+3,300 calls; now an attacker gets at most 10 guesses per subject per 24 hours, about 3,650 a year
+against 10,000 PINs, so a 4-digit PIN still needs watching (`verification.locked` in the ledger) and
+a longer PIN where the risk is high. In `verifier` mode the host's PIN store is asked for every
+attempt, with a stand-in for a malformed entry, so timing does not tell them apart. A PIN a caller
+chooses (`enrolPin`) is refused when every digit is the same, when it is a run (1234, 4321, 7890),
+or when it equals the account number or any keypad knowledge on file, with one answer (`weak`) for
+all three, so a try never says which value is on file (tested).
 
 ### PIN enrolment and reset
 
@@ -116,9 +116,8 @@ tools (tested). The store writes a digest only if none is on file, in one atomic
 enrolments at once one wins and the other is refused without replacing it, and a retry of the loser
 is refused too, even when its take-back write failed, because a retry finishes only an enrolment
 whose id, stored with the digest, is the retrying call's own; whichever try stored the PIN writes
-`pin.enrolled`, once, even when two tries on one
-call race or the session write after the store's fails on the call's last try (tested). The PIN factor
-reads both digests (the PIN's and the duress PIN's) from the store on every attempt, so after a
+`pin.enrolled`, once, even when two tries on one call race or the session write after the store's
+fails on the call's last try (tested). The PIN factor reads both digests (the PIN's and the duress PIN's) from the store on every attempt, so after a
 reset or a removed duress PIN the old one fails even on a call that began verification before it
 (tested). In `verifier` mode the engine never enrols. `pin.enrolled` and `pin.reset` carry no
 digits (tested). Who may call `resetPin`, and how the business confirms the request first, is the
@@ -134,11 +133,11 @@ English and French transcripts, misrecognitions included, is tested). **Limit:**
 only the transcript, not what the caller said. At level 1 a spoken answer is accepted when its
 transcript is the stored value in the field's format; if speech-to-text turns a wrong answer into
 the stored value, the engine cannot tell and the factor passes. Speech-to-text accuracy is outside
-this engine and belongs to the host's speech handling. The engine offers no host control for such
-a substitution; a host that needs one must provide it (for example, reading the value back for the
+this engine and belongs to the host's speech handling. The engine offers no host control for such a
+substitution; a host that needs one must provide it (for example, reading the value back for the
 caller to confirm, or requiring another factor), or keep spoken answers off. The value is compared
-like a keypad field, as a keyed digest in constant time, and never stored or logged. A spoken answer counts on
-its own only at level 1; above it, the policy needs another factor that is not knowledge
+like a keypad field, as a keyed digest in constant time, and never stored or logged. A spoken answer
+counts on its own only at level 1; above it, the policy needs another factor that is not knowledge
 (tested). A spoken match does not unlock texts to the number on file (tested). A policy without
 spoken fields never judges one (tested). Left to the host: passing the caller's answer from its
 speech pipeline in a code path, never through the model, and keeping it out of stored transcripts.
@@ -165,97 +164,97 @@ start limit, since it forgets only the failures of its own factor kind (`forgetP
 
 ### Coercion (duress PIN)
 
-An owner made to call under pressure, with the person forcing them listening beside them.
-**Controls (VER-12, off unless Badge's `pin.duress` is set):** the business enrols a second,
-duress PIN for the subject with a host call, never a caller one, stored as its own keyed digest
-and refused when it equals the PIN, the account number or any keypad knowledge (tested). Every PIN
-entry is compared with both digests, whether or not a duress PIN is on file, so the work, the time
-and the answer are the same (tested). A duress entry gets the same answer, level, grant, events
-and receipt as the PIN (tested); the duress state is kept only in the call record. On that call
-`authorize` refuses every money, contact and access scope and the scopes the business lists in
-`refuseScopes` (for example `owner.command`), with the same `false` as a scope with no grant
-(tested). Every duress entry owes an alert, written in the same write as the entry, and recorded
-against the call even if verification restarted or the call ended while it was judged (tested).
-The engine sends it to the host's `DuressNotifier` after that write, off the caller's response path
-(so a slow notifier delays nothing the caller hears), even when the ledger append fails (tested),
-and keeps it owed until `notify` resolves: the call's next write, `flushLedger` and the host's sweep
-`deliverDuressAlerts` retry it, at least once by `alertId`, which the call's id and entry number
-make unique across engines (tested); after a crash `sweepAlerts` finds every call that still owes
-one without knowing its id (tested). A notifier that fails changes
-nothing on the call (tested). `putDuressDigest` stores only while the PIN checked against is still on
-file, so a reset and a new PIN meanwhile can never make the duress PIN equal the PIN (tested); a
-reset removes the PIN and the duress PIN in one store step, so it never removes a duress PIN
-enrolled against a newer PIN (tested); and an entry that matches both, on an imported subject or in
-the host's verifier's answer, or any entry on a subject whose two digests are equal, is refused like
-a wrong PIN, neither a login nor an alarm (tested). A duress entry flags its subject until the
-business clears it (`clearDuress`, written to the ledger with an opaque member id and a keyed
-digest of the subject, so neither the ledger nor an export shows who was under duress): every
-later pass on the subject, on any call, is a duress entry, refused the same scopes, and alerted
-once a call (tested). The flag holds after a config turns the duress PIN off, refusing every scope
-(tested); a lost write of the flag is made good when the entry's alert is delivered, never over a
-clearing that came after the entry (tested), though a clearing that lands during that delivery may
-need repeating; a duress PIN entry whose own write fails still flags its subject (tested); a clearing that lands while a pass is judged stays
-cleared (tested). A duress
+An owner made to call under pressure, with the person forcing them listening beside them. **Controls
+(VER-12, off unless Badge's `pin.duress` is set):** the business enrols a second, duress PIN for the
+subject with a host call, never a caller one, stored as its own keyed digest and refused when it
+equals the PIN, the account number or any keypad knowledge (tested). Every PIN entry is compared
+with both digests, whether or not a duress PIN is on file, so the work, the time and the answer are
+the same (tested). A duress entry gets the same answer, level, grant, events and receipt as the PIN
+(tested); the duress state is kept only in the call record. On that call `authorize` refuses every
+money, contact and access scope and the scopes the business lists in `refuseScopes` (for example
+`owner.command`), with the same `false` as a scope with no grant (tested). Every duress entry owes
+an alert, written in the same write as the entry, and recorded against the call even if verification
+restarted or the call ended while it was judged (tested). The engine sends it to the host's
+`DuressNotifier` after that write, off the caller's response path (so a slow notifier delays nothing
+the caller hears), even when the ledger append fails (tested), and keeps it owed until `notify`
+resolves: the call's next write, `flushLedger` and the host's sweep `deliverDuressAlerts` retry it,
+at least once by `alertId`, which the call's id and entry number make unique across engines
+(tested); after a crash `sweepAlerts` finds every call that still owes one without knowing its id
+(tested). A notifier that fails changes nothing on the call (tested). `putDuressDigest` stores only
+while the PIN checked against is still on file, so a reset and a new PIN meanwhile can never make
+the duress PIN equal the PIN (tested); a reset removes the PIN and the duress PIN in one store step,
+so it never removes a duress PIN enrolled against a newer PIN (tested); and an entry that matches
+both, on an imported subject or in the host's verifier's answer, or any entry on a subject whose two
+digests are equal, is refused like a wrong PIN, neither a login nor an alarm (tested). A duress
+entry flags its subject until the business clears it (`clearDuress`, written to the ledger with an
+opaque member id and a keyed digest of the subject, so neither the ledger nor an export shows who
+was under duress): every later pass on the subject, on any call, is a duress entry, refused the same
+scopes, and alerted once a call (tested). The flag holds after a config turns the duress PIN off,
+refusing every scope (tested); a lost write of the flag is made good when the entry's alert is
+delivered, never over a clearing that came after the entry (tested), though a clearing that lands
+during that delivery may need repeating; a duress PIN entry whose own write fails still flags its
+subject (tested); a clearing that lands while a pass is judged stays cleared (tested). A duress
 entry resets the visible counters as any pass does, but the subject's failures are also counted
-where only a pass not under duress resets them, and their hard lock holds: an attacker who knows
-the duress PIN gets no more guesses at the real PIN than one who does not, and the real PIN, when
-it passes, alerts (tested, 20 wrong guesses between duress entries over 10 calls). Every PIN ledger entry carries a
-`tag` keyed to its event id and outcome, and the event ids of a duress call run as a normal call's
-(an alert's acknowledgement is not counted), so only the holder of the knowledge key can tell a
-duress pass from a normal one (tested); enrolling or removing a duress PIN writes nothing to the ledger.
-A PIN reset removes the duress PIN too.
+where only a pass not under duress resets them, and their hard lock holds: an attacker who knows the
+duress PIN gets no more guesses at the real PIN than one who does not, and the real PIN, when it
+passes, alerts (tested, 20 wrong guesses between duress entries over 10 calls). Every PIN ledger
+entry carries a `tag` keyed to its event id and outcome, and the event ids of a duress call run as a
+normal call's (an alert's acknowledgement is not counted), so only the holder of the knowledge key
+can tell a duress pass from a normal one (tested); enrolling or removing a duress PIN writes nothing
+to the ledger. A PIN reset removes the duress PIN too.
 
 **Limits.** It does not stop someone who knows both PINs, or who makes the owner say which is
 which. The code is public, so an attacker can learn exactly how a duress call behaves. A refused
 action can itself be noticed by someone watching: the host speaks the same fixed line it uses for
 any scope without a grant, but a payment that never happens is still visible. The notifier is best
-effort; who it alerts, and how fast, is the host's. Anything the host sends after the call (PRV-10)
-must follow the same rule as on a normal call, or it gives the duress away.
+effort; who it alerts, and how fast, is the host's. Anything the host sends after the call must
+follow the same rule as on a normal call, or it gives the duress away.
 
 ### The accessible path
 
 Callers who cannot use a keypad, or need more time, must be able to verify without the bar being
 lowered for anyone, and a mark that says a caller uses a relay or a TTY can reveal a disability.
-**Controls:** a keypad field said instead of keyed (Badge's `spokenKeypadFields`) is judged in
-the `spoken_knowledge` factor, so it reaches only what the policy gives a spoken answer, under the
+**Controls:** a keypad field said instead of keyed (Badge's `spokenKeypadFields`) is judged in the
+`spoken_knowledge` factor, so it reaches only what the policy gives a spoken answer, under the
 spoken attempt limit, and never unlocks texts; without spoken fields in the policy it is never
 judged (tested). It also uses a keypad attempt, so saying a field never adds guesses at it: the
-keypad and the voice share one budget per call, and across calls it counts as a keypad failure too, so alternating keyed and spoken guesses reach the same lock (tested). The PIN is never taken by speech: the
-setting refuses it and a spoken entry carrying one is refused before it is counted (tested). A
-keypad `repeat` or `slower` request hands the host no digits, so it never uses, adds or gives back
-an attempt (tested). A call marked relay or TTY gets a longer keypad timeout, up to Badge's limit,
-and nothing else: the same steps, factors, attempt limits and level, the same ledger entries and
-the same receipt, with no trace of the mark (tested).
+keypad and the voice share one budget per call, and across calls it counts as a keypad failure too,
+so alternating keyed and spoken guesses reach the same lock (tested). The PIN is never taken by
+speech: the setting refuses it and a spoken entry carrying one is refused before it is counted
+(tested). A keypad `repeat` or `slower` request hands the host no digits, so it never uses, adds or
+gives back an attempt (tested). A call marked relay or TTY gets a longer keypad timeout, up to
+Badge's limit, and nothing else: the same steps, factors, attempt limits and level, the same ledger
+entries and the same receipt, with no trace of the mark (tested).
 
 ### SIM swap and port-out
 
 An attacker who took over the number on file receives the texted code or link. **Controls:** a
 carrier answer makes a texted code count only when it covered SIM changes (`simSwapChecked`) and
-reported no SIM change inside the policy window (72 hours by default), and no port inside it when
-it reports ports; an answer that did not cover SIM changes never makes one count, whatever the
-policy says (tested). Without a carrier answer, a texted code counts only when the policy allows
-it (`trustTextCodeWithoutCarrierCheck`, off by default). Gap: a report with no port age (Twilio
-gives none) is not checked for ports, so a port-out that the carrier does not show as a SIM change
-is not caught by this rule. A texted code is never a factor alone, and level 3 requires a photo ID plus
-selfie, which a stolen SIM alone does not pass. Contact and payout scopes default to level 3.
-A callback (VER-9) has the same weaknesses and the same controls: the policy refuses it alone or
-with only a texted code, the carrier rule discounts it, and level 3 still needs photo ID (tested).
+reported no SIM change inside the policy window (72 hours by default), and no port inside it when it
+reports ports; an answer that did not cover SIM changes never makes one count, whatever the policy
+says (tested). Without a carrier answer, a texted code counts only when the policy allows it
+(`trustTextCodeWithoutCarrierCheck`, off by default). Gap: a report with no port age (Twilio gives
+none) is not checked for ports, so a port-out that the carrier does not show as a SIM change is not
+caught by this rule. A texted code is never a factor alone, and level 3 requires a photo ID plus
+selfie, which a stolen SIM alone does not pass. Contact and payout scopes default to level 3. A
+callback (VER-9) has the same weaknesses and the same controls: the policy refuses it alone or with
+only a texted code, the carrier rule discounts it, and level 3 still needs photo ID (tested).
 
 ### Spoofed caller ID and the callback
 
 Caller ID can be spoofed, so it is never a factor. A callback rings the number on file, whatever
-number the first call came from. **Controls:** the first call is ended, never held, and never
-gains a level, a factor or a grant from the callback (tested). The callback is its own call, for
-the subject the first call matched (not a factor), and `callback` is recorded there only when the
-dialer reports that the number on file answered and the person keyed the confirmation: keys, not
-speech, so voicemail or an answering machine never passes (tested). It is possession of the line
-only, so the callback call needs a PIN or keypad match too, under the policy. The number rung is
-read from the store when it is dialed and on every retry, so a number the business changed (after
-a SIM swap is reported, say) is never bypassed by a copy taken earlier (tested). A request is
-refused without a keypad or PIN match or a number on file, or on a call untrusted content entered,
-and a refused request returns the same and ends the first call the same way as a placed one, as
-does a placed one whose dial failed, so neither a caller nor the code asking can tell them apart;
-only the ledger says which (tested). Left to the host: call forwarding and someone else answering the line on file, which
+number the first call came from. **Controls:** the first call is ended, never held, and never gains
+a level, a factor or a grant from the callback (tested). The callback is its own call, for the
+subject the first call matched (not a factor), and `callback` is recorded there only when the dialer
+reports that the number on file answered and the person keyed the confirmation: keys, not speech, so
+voicemail or an answering machine never passes (tested). It is possession of the line only, so the
+callback call needs a PIN or keypad match too, under the policy. The number rung is read from the
+store when it is dialed and on every retry, so a number the business changed (after a SIM swap is
+reported, say) is never bypassed by a copy taken earlier (tested). A request is refused without a
+keypad or PIN match or a number on file, or on a call untrusted content entered, and a refused
+request returns the same and ends the first call the same way as a placed one, as does a placed one
+whose dial failed, so neither a caller nor the code asking can tell them apart; only the ledger says
+which (tested). Left to the host: call forwarding and someone else answering the line on file, which
 the carrier rule does not see.
 
 The reference carrier adapters (Twilio Lookup, Telnyx Number Lookup) fail closed: a timeout, an
@@ -265,13 +264,13 @@ without a usable time counts as just now, Twilio's `swapped_period` (the window 
 only a lower bound when it reports no change inside it, and hours are rounded down (tested against
 replayed responses). They refuse a plain-http `baseUrl` other than loopback, so credentials never
 cross a network in clear text (plain http to a loopback host, for a local fake, stays on the host
-but is still unencrypted). Their failure reports carry the vendor's status and error code, never the number or
-the identity on file. Telnyx reports no SIM change, so its report says `simSwapChecked: false` and a
-texted code never counts on it (tested); a host that turns texted codes on (VER-2) takes the SIM
-swap signal from Twilio. Twilio Identity Match sends the identity on file to Twilio, in the
-request's query string. Twilio Lookup reports no port age, so on Twilio a texted
-code or a callback counts without a port check: a port-out with no SIM change Twilio detects is not
-seen (Sean, 2026-11-19). A host that needs ports checked for high levels uses a port-aware lookup
+but is still unencrypted). Their failure reports carry the vendor's status and error code, never
+the number or the identity on file. Telnyx reports no SIM change, so its report says
+`simSwapChecked: false` and a texted code never counts on it (tested); a host that turns texted
+codes on takes the SIM swap signal from Twilio. Twilio Identity Match sends the identity on file
+to Twilio, in the request's query string. Twilio Lookup reports no port age, so on Twilio a texted
+code or a callback counts without a port check: a port-out with no SIM change Twilio detects is
+not seen. A host that needs ports checked for high levels uses a port-aware lookup
 (Telnyx's port date beside Twilio's SIM swap, for example) or requires another factor there.
 
 ### Caller ID spoofing
@@ -289,23 +288,23 @@ and reporting `none` when it has no result.
 
 ### Account takeover by a contact change
 
-Someone who passed verification changes the phone number on file, so the real customer hears
-nothing from then on. **Controls:** each flow step that needs a contact-class scope, and each
-change an outside module marks with `contactChanged()` (in a flow or outside one), makes the call
-owe a security notice, saved in the same write as the change and sent right after it to the
-changed subject's number on file as Badge read it before the change, whatever the caller answered
-about receipt texts. A notice whose text failed stays owed and is retried by the call's next write,
-by `endCall`, and by `sweepAlerts()`, which the host runs on a schedule, so an attacker who changes
-the number and never lets the call end still triggers it (tested); a call that changes two
-subjects, or the same subject under two numbers, sends one to each, and never two to the same
-subject's same number. Nobody on the call can turn it off. The receipt link of that call goes to
-the earlier number only when it was kept for the subject the receipt link is for; a number kept
-for another subject is never used (tested in `prove-receipt-text.test.ts`). A notice texted but not
-yet logged (a ledger outage) is logged by the next `endCall`, which neither texts nor ends again. A config with such a step is refused without a `messages` adapter.
-The notice carries no values, not even which detail changed. Left to the host: an outside module
-must call `contactChanged()` in the change that changes contact details (the engine cannot see a
-change made in the host's own systems otherwise); running `sweepAlerts()` on a schedule; and
-keeping call records at least until their alerts are sent.
+Someone who passed verification changes the phone number on file, so the real customer hears nothing
+from then on. **Controls:** each flow step that needs a contact-class scope, and each change an
+outside module marks with `contactChanged()` (in a flow or outside one), makes the call owe a
+security notice, saved in the same write as the change and sent right after it to the changed
+subject's number on file as Badge read it before the change, whatever the caller answered about
+receipt texts. A notice whose text failed stays owed and is retried by the call's next write, by
+`endCall`, and by `sweepAlerts()`, which the host runs on a schedule, so an attacker who changes the
+number and never lets the call end still triggers it (tested); a call that changes two subjects, or
+the same subject under two numbers, sends one to each, and never two to the same subject's same
+number. Nobody on the call can turn it off. The receipt link of that call goes to the earlier number
+only when it was kept for the subject the receipt link is for; a number kept for another subject is
+never used (tested in `prove-receipt-text.test.ts`). A notice texted but not yet logged (a ledger
+outage) is logged by the next `endCall`, which neither texts nor ends again. A config with such a
+step is refused without a `messages` adapter. The notice carries no values, not even which detail
+changed. Left to the host: an outside module must call `contactChanged()` in the change that changes
+contact details (the engine cannot see a change made in the host's own systems otherwise); running
+`sweepAlerts()` on a schedule; and keeping call records at least until their alerts are sent.
 
 ### Cloned and synthetic voices
 
@@ -329,24 +328,25 @@ caller can still see that a capped grant does less than the factors they gave wo
 ### Text flooding and SMS pumping
 
 Repeated calls triggering texts to a real customer, or to premium numbers. **Controls:** texts go
-only to the number on file, only after a keypad or PIN match, and at most one photo ID link per
-call (tested). A receipt link goes at most once per call, only after a money, contact or access step,
-with the caller's consent (the latest answer for the purpose: a later "no" withdraws a "yes") and
-a standing keypad or PIN match; a contact change notice at most once per subject and number
-(tested). Texted codes go only to the country calling codes the policy lists, none without a
-list (tested); at most 5 per subject and 10 per calling number in 24 hours, 60 seconds apart,
-counted across calls and engines in the shared `CodeStore` before the text goes out (tested). A
-refused send answers exactly like a sent one, with a code that never matches and the same tries
-and expiry, and in the same steps: the answer never waits for the SMS adapter, which runs after the
-reply, so its time cannot tell a sent code from a refused one (tested). The line never tells a
-caller that a limit was hit or which one (tested); the ledger says why. A withheld calling number
-is held to the per-subject limit only. One-time access codes count against the same per-subject
-limit in the same `CodeStore`, so the two share a budget; a limited request texts nothing
-(tested). Callbacks ring a real customer's line, so they are limited too: one per call, only after
-a keypad or PIN match, at most 3 placed per subject in 24 hours on any call or engine, and each
-counted as a failure before it is dialed, under the subject and the first call's calling number, so
-failed callbacks bring the same waits and hard lock as wrong PINs (tested, including two requests
-racing for the last one).
+only to the number on file, only after a keypad or PIN match, and at most one photo ID link per call
+(tested). A receipt link goes at most once per call, only after a money, contact or access step,
+with the caller's consent (the latest answer for the purpose: a later "no" withdraws a "yes") and a
+standing keypad or PIN match; a contact change notice at most once per subject and number (tested).
+Texted codes go only to the country calling codes the policy lists, none without a list (tested); at
+most 5 per subject and 10 per calling number in 24 hours, 60 seconds apart, counted across calls and
+engines in the shared `CodeStore` before the text goes out (tested). A refused send answers exactly
+like a sent one, with a code that never matches and the same tries and expiry, and in the same
+steps: the answer never waits for the SMS adapter, which runs after the reply, so its time cannot
+tell a sent code from a refused one (tested). The line never tells a caller that a limit was hit or
+which one (tested); the ledger says why. A withheld calling number is held to the per-subject limit
+only. One-time access codes count against the same per-subject limit in the same `CodeStore`, so the
+two kinds of code share one budget; a limited request texts nothing (tested). Access codes are not
+held to the per-number limit or the country list: they go only to the number on file of a subject
+verified for `entry.open`. Callbacks ring a real customer's line, so they are limited too: one per
+call, only after a keypad or PIN match, at most 3 placed per subject in 24 hours on any call or
+engine, and each counted as a failure before it is dialed, under the subject and the first call's
+calling number, so failed callbacks bring the same waits and hard lock as wrong PINs (tested,
+including two requests racing for the last one).
 
 ### Guessing a texted code
 
@@ -360,12 +360,12 @@ about 1 in 40,000.
 Replayed webhooks, reused links, replayed tones. **Controls:** Stripe signatures are checked with a
 300-second window and constant-time comparison (tested); the reference server applies each event
 id once while it remembers it, 4 days and 10,000 ids at most so a flood of events cannot exhaust
-its memory (tested); the engine applies each identity session and each payment settlement once (tested).
-Record deliveries are signed in the same scheme, each attempt with its own time, and carry one
-idempotency key per record and destination inside the signed body; the reference server's sample
-receiver checks the signature first and applies each key once (tested).
-Telnyx signatures (Ed25519) cover the timestamp and are refused outside a 300-second window
-(tested). Twilio signatures (HMAC-SHA1, compared in constant time) cover the URL and the body but
+its memory (tested); the engine applies each identity session and each payment settlement once
+(tested). Record deliveries are signed in the same scheme, each attempt with its own time, and
+carry one idempotency key per record and destination inside the signed body; the reference
+server's sample receiver checks the signature first and applies each key once (tested). Telnyx
+signatures (Ed25519) cover the timestamp and are refused outside a 300-second window (tested).
+Twilio signatures (HMAC-SHA1, compared in constant time) cover the URL and the body but
 no timestamp, so a captured Twilio request verifies again when replayed; the reference server only
 acknowledges carrier webhooks today, and a host that acts on one must apply each event once itself
 (left to the host). The identity is the event, not the call or message: one call sends several
@@ -373,30 +373,31 @@ callbacks with the same call id, so a host keys on the carrier's event id where 
 on `CallSid` plus `SequenceNumber` for Twilio call-progress callbacks. An unsigned or wrongly
 signed carrier request is refused, and a carrier with no key configured refuses everything
 (tested).
+
 Identity links are single-use by the provider. The reference server's Stripe Identity adapter
 sends the engine's idempotency key with every create, so a retried `startPhotoId` gets the same
 session and link, never a second one (tested against a local fake). It never logs the link, and its
 errors carry a status and Stripe's error type and code only, never the link, the key or Stripe's
 message (tested). It takes a restricted key only, never a secret key, and `npm run serve` takes a
-test-mode one only (tested); the key comes from the environment. It refuses an API base
-that is not `https:`, except `http:` on a loopback host for a local fake, so the key never crosses a
-network in cleartext (tested). A document upload link is single use by an atomic
-claim in the `DocumentStore`: of two uploads at once, one is stored (tested); it expires after 30
-minutes and is bound to one call and one confirmed record of that call (tested). Left to the
-host: whether keypad tones arrive as out-of-band events or as in-band audio on each carrier
-bridge, since in-band tones can be replayed acoustically and can reach speech-to-text.
+test-mode one only (tested); the key comes from the environment. It refuses an API base that is
+not `https:`, except `http:` on a loopback host for a local fake, so the key never crosses a
+network in cleartext (tested). A document upload link is single use by an atomic claim in the
+`DocumentStore`: of two uploads at once, one is stored (tested); it expires after 30 minutes and
+is bound to one call and one confirmed record of that call (tested). Left to the host: whether
+keypad tones arrive as out-of-band events or as in-band audio on each carrier bridge, since
+in-band tones can be replayed acoustically and can reach speech-to-text.
 
 ### Flooding the reference server
 
 Large or slow requests, many requests from one address, and logs that leak what a request carried.
-**Controls (reference server, SPEC.md, "Reference server limits and logs"):** a body limit per route, refused on the declared
+**Controls (reference server, SPEC.md section 29):** a body limit per route, refused on the declared
 length before reading and cut off while streaming; deadlines to receive a request (408) and to
-answer it (503); a fixed-window rate limit per socket address, an IPv6 address counted by its /64
-so one subscriber cannot rotate through it, that ignores `X-Forwarded-For` and tracks a bounded
-number of addresses; and one structured log entry per request that names the route pattern, never
-the path, and holds no header, query string or body, so signatures, call ids, receipt link tokens
-and upload link tokens stay out of the logs (tested). Left to the host: limits in front of the
-server (a proxy shares one address for all its callers here), and limits across replicas.
+answer it (503); a fixed-window rate limit per socket address, an IPv6 address counted by its /64 so
+one subscriber cannot rotate through it, that ignores `X-Forwarded-For` and tracks a bounded number
+of addresses; and one structured log entry per request that names the route pattern, never the path,
+and holds no header, query string or body, so signatures, call ids, receipt link tokens and upload
+link tokens stay out of the logs (tested). Left to the host: limits in front of the server (a proxy
+shares one address for all its callers here), and limits across replicas.
 
 ### Skipping steps and widening grants
 
@@ -406,10 +407,10 @@ only the step's factors count toward its level; once a call's flow has ended (co
 abandoned), no step work runs on that call at all, so a failed PIN cannot be followed by a fresh
 verification outside the flow (tested). With the default `require: "yes"`, a consent answered "no"
 fails its step, so the flow never reaches a payment after a refusal (tested); a step set to
-`require: "answer"` moves on either way, by the config's choice. An outside module's step is held to the scope its
-manifest needs by the engine itself (tested). An issued grant is checked against today's minimum
-too, so a stricter config applies at once (tested). A `badge.verify` step can name the scopes
-its grant covers, and the demo flows do, so a caller verified for a deposit never holds
+`require: "answer"` moves on either way, by the config's choice. An outside module's step is held to
+the scope its manifest needs by the engine itself (tested). An issued grant is checked against
+today's minimum too, so a stricter config applies at once (tested). A `badge.verify` step can name
+the scopes its grant covers, and the demo flows do, so a caller verified for a deposit never holds
 `owner.command` (tested). `validateConfig` refuses a flow whose step needs a scope its earlier
 verification does not reach or grant, and the policy's floors hold whatever a config says: every
 scope has a class (by its name, a module's manifest, or the policy's `scopeClasses`, the strictest
@@ -434,26 +435,25 @@ is never asked to confirm, or to consent to, words they were not read in their l
 ### Config tampering
 
 Someone who can edit a workspace's FlowConfig. **Controls:** the engine refuses any config with a
-problem, Trace (the ledger) cannot be turned off, the floors cannot be lowered (`entry.open` is
-an access scope, never below level 2), planned factors cannot be turned on, a payment link can
+problem, Trace (the ledger) cannot be turned off, the floors cannot be lowered (`entry.open` is an
+access scope, never below level 2), an entry for a factor that is off is refused, a payment link can
 offer only instant methods and live 5 to 60 minutes, connect mode cannot run without a connected
-account, and every call's ledger entries carry the config revision
-it ran under. Every grant, its `verification.finished` and `grant.issued` entries and the signed
-receipt name the policy version and the config revision that judged the caller, so a verification
-judged under a config changed mid-call is told apart from one judged under the call's own (tested).
-A form's text `pattern` cannot stall the engine on a caller's value: a
-backreference, a repeated group that repeats or alternates, and a pattern with more than 100,000
-ways to try a value are refused (tested). A `showIf` cycle is refused, and a `showIf` cannot
-depend on a sensitive field, whose value the questions asked would otherwise tell (tested); a
-hidden field's value is never read back or filed (tested).
-Who may edit a config, and how its history is kept, is the host's (left to the host).
-A factor added after the engine was built (`engine.useFactor`, or an outside module's factor and
-judge with `engine.use`) is off until a config turns it on in Badge's settings; adding one never
-changes the config in force (tested). The registry refuses a factor whose kind another module
-provides or is a name for caller ID, from a plug-in and from any module's manifest alike (tested).
-A module cannot be removed while the config in force names a factor it supplies (tested).
-The JSON Schema for FlowConfig is a convenience for editors, not a control: a config that passes it
-can still be refused, and only `validateConfig` decides (SPEC.md, section 7).
+account, and every call's ledger entries carry the config revision it ran under. Every grant, its
+`verification.finished` and `grant.issued` entries and the signed receipt name the policy version
+and the config revision that judged the caller, so a verification judged under a config changed
+mid-call is told apart from one judged under the call's own (tested). A form's text `pattern` cannot
+stall the engine on a caller's value: a backreference, a repeated group that repeats or alternates,
+and a pattern with more than 100,000 ways to try a value are refused (tested). A `showIf` cycle is
+refused, and a `showIf` cannot depend on a sensitive field, whose value the questions asked would
+otherwise tell (tested); a hidden field's value is never read back or filed (tested). Who may edit a
+config, and how its history is kept, is the host's (left to the host). A factor added after the
+engine was built (`engine.useFactor`, or an outside module's factor and judge with `engine.use`) is
+off until a config turns it on in Badge's settings; adding one never changes the config in force
+(tested). The registry refuses a factor whose kind another module provides or is a name for caller
+ID, from a plug-in and from any module's manifest alike (tested). A module cannot be removed while
+the config in force names a factor it supplies (tested). The JSON Schema for FlowConfig is a
+convenience for editors, not a control: a config that passes it can still be refused, and only
+`validateConfig` decides (SPEC.md, section 7).
 
 ### Races across processes
 
@@ -501,7 +501,7 @@ owns every access grant (ADR-25): it reserves it, signs it, computes its digest,
 controller once and records the controller's actual answer, all in its own writes. Gate is a
 built-in module, so no module code can reach a grant (`updateModule` refuses it) and there is no
 outcome API to write one: a forged delivery, a re-pointed or lowered grant, a second settlement or
-a digest the engine did not compute has no path in (tested, for every attack of the PR 2 reviews).
+a digest the engine did not compute has no path in (tested, for each such attack).
 A grant needs a verification grant covering `entry.open` (level 2 or more), checked on every
 request, in a flow and outside one, and once more right before the door is asked, so a call tainted
 or a grant expired while it was signed sends nothing (tested). An access grant is signed with
@@ -512,34 +512,32 @@ public key, so taking a relay over does not let anyone mint grants, and one chan
 workspaces that share a key and a controller name never open each other's doors (tested). The
 example relay refuses a grant id it has seen (`SeenGrants`, tested in the demo). A call never ends
 while a signed grant may still be acted on (at its door, or sent with its answer lost): the end
-waits for the answer, or for the grant's expiry, so no access outcome follows the receipt and no grant reaches a door after it
-while it can still open one (tested). Left as a limit, stated plainly: a door controller that does
-not check a grant's expiry could act on a request delayed past it, after the call ended; the relay
-contract requires the check, and the record would then say `unknown`, never `delivered`. The access
-signer must be its own key (refused when it is the receipt signer's), and a host's module can never
-take Gate's name, even after Gate was removed (tested). Outside modules' `updateModule` is held by the engine to their manifest's
-scopes on every call, outside a flow too (tested).
+waits for the answer, or for the grant's expiry, so no access outcome follows the receipt and no
+grant reaches a door after it while it can still open one (tested). Left as a limit, stated
+plainly: a door controller that does not check a grant's expiry could act on a request delayed
+past it, after the call ended; the relay contract requires the check, and the record would then
+say `unknown`, never `delivered`. The access signer must be its own key (refused when it is the
+receipt signer's), and a host's module can never take Gate's name, even after Gate was removed
+(tested). Outside modules' `updateModule` is held by the engine to their manifest's scopes on
+every call, outside a flow too (tested).
+
 **An unlock is never retried:** one grant in flight per call, sent once, no redirects followed;
 a lost answer (a timeout, a dropped connection, a 5xx) is recorded as `unknown`, and opening again
 is a fresh request with a new grant, up to `maxGrantsPerCall` (tested). The answer is recorded
 even if the caller's grant expired while the door answered (tested); one that arrives after the
-call ended is not (the grant was settled `unknown` at the end). The ledger
-holds each grant's digest and outcome, never the grant. The Seam adapter (`seamAccessController`)
-keeps the same rule: Seam documents no idempotency key on unlock, so it sends the unlock once and
-never again, only after Seam says the device can unlock remotely, and only while the grant has at
-least the request timeout left (which bounds the send and the client's wait, not the network);
-every request stays on the configured host (tested); any failure
-before the unlock is `refused` (nothing was sent), a lost or unreadable answer to the unlock, or an
-attempt Seam reports failed, is `unknown`, and `confirmed` only when Seam reports that the device
-confirmed the unlock (tested against a local server replaying Seam's answers). Its API key goes only in the
-authorization header, never into a result, an error or the ledger (tested). Seam itself is
-trusted to unlock only the device it was asked to, as any controller is, and to act on an attempt
-promptly: an attempt still pending at Seam when its grant expires may move the lock later. Left to
-the host: a relay that keeps seen
-grant ids across restarts (or refuses every grant for 15 minutes plus the verifier's clock skew
-after one), a relay clock kept in sync with the engine's (a grant's expiry is strict, so a relay
-running behind accepts it that much longer), and the door's own safety
-holds each grant's digest and outcome, never the grant.
+call ended is not (the grant was settled `unknown` at the end). The ledger holds each grant's
+digest and outcome, never the grant. The Seam adapter (`seamAccessController`) keeps the same
+rule: Seam documents no idempotency key on unlock, so it sends the unlock once and never again,
+only after Seam says the device can unlock remotely, and only while the grant has at least the
+request timeout left (which bounds the send and the client's wait, not the network); every
+request stays on the configured host (tested); any failure before the unlock is `refused`
+(nothing was sent), a lost or unreadable answer to the unlock, or an attempt Seam reports failed,
+is `unknown`, and `confirmed` only when Seam reports that the device confirmed the unlock (tested
+against a local server replaying Seam's answers). Its API key goes only in the authorization
+header, never into a result, an error or the ledger (tested). Seam itself is trusted to unlock
+only the device it was asked to, as any controller is, and to act on an attempt promptly: an
+attempt still pending at Seam when its grant expires may move the lock later.
+
 **Direct vendor adapters** (Kisi, Verkada) are weaker on one point: the vendor cannot check the
 signed grant, so the vendor's API key opens the door on its own, and whoever holds it can open
 every door it reaches. The adapter sends nothing for a target its grant does not name or that is
@@ -562,66 +560,66 @@ access to those doors only), and the door's own safety
 
 Someone reads a code store, guesses a code at the keypad, uses a code twice or at another door, or
 has a code sent to a number they hold. **Controls:** a code is issued only through Gate's grant
-path, so every control above holds (`entry.open` at level 2 or more, checked again before the
-text, one in flight, the per-call limit, the ledger) and it lives no longer than its access grant
-(at most 15 minutes, never past the verification grant) (tested). It is texted only to the number
-on file of the subject Badge matched by keypad or PIN, never the calling number (tested). The
-engine stores only an HMAC of the code under the codes' own key, bound to the workspace, the
-controller and the door, with the unsigned grant body: a stolen store yields neither a code nor a
-grant a relay accepts (tested). Redeeming removes the code in the same step (single use), refuses
-it at another door, in another workspace, or after the grant's expiry, and answers the same for
-every refusal (tested); `revoke` removes a code early. The code is never in the ledger, an event,
-an error or the store (tested). A text that fails takes its code back, and its grant is `refused` only when that proves the
-code unused, else `unknown`, since the text may have arrived (tested). A signer that fails at
-redemption leaves the code redeemable, and a code is taken only after it is signed (tested). 8 digits give one
-chance in 100 million per live code per guess, and 5 wrong guesses at a door (configurable, 1 to
-10) spend every code live there, recorded as `access.code_spent` without the guess (tested). The
-trade-off: someone at the keypad can spend the codes of a door with a few wrong guesses, and the
-caller then asks for a new one. A `newCode` that is not exactly 8 digits fails the issue before
-anything is stored (tested). Left to the host: a keypad that slows after wrong entries, a durable
-`AccessCodeStore` whose `take` and `miss` are atomic across processes, and
-keeping the codes' key in a key store. A code's grant is `delivered` once texted, so the call can
-end and its receipt be issued while the code is still live: unlike a relay grant, it may open the
-door after the receipt, until its expiry, and that redemption is not in the call's ledger (the
-host revokes a code it no longer wants, and logs redemptions at the door). A code is texted only
-to the call whose in-flight grant has the digest the engine recorded, never one matched on its
-grant id alone (tested).
+path, so every control above holds (`entry.open` at level 2 or more, checked again before the text,
+one in flight, the per-call limit, the ledger) and it lives no longer than its access grant (at most
+15 minutes, never past the verification grant) (tested). It is texted only to the number on file of
+the subject Badge matched by keypad or PIN, never the calling number (tested). The engine stores
+only an HMAC of the code under the codes' own key, bound to the workspace, the controller and the
+door, with the unsigned grant body: a stolen store yields neither a code nor a grant a relay accepts
+(tested). Redeeming removes the code in the same step (single use), refuses it at another door, in
+another workspace, or after the grant's expiry, and answers the same for every refusal (tested);
+`revoke` removes a code early. The code is never in the ledger, an event, an error or the store
+(tested). A text that fails takes its code back, and its grant is `refused` only when that proves
+the code unused, else `unknown`, since the text may have arrived (tested). A signer that fails at
+redemption leaves the code redeemable, and a code is taken only after it is signed (tested). 8
+digits give one chance in 100 million per live code per guess, and 5 wrong guesses at a door
+(configurable, 1 to 10) spend every code live there, recorded as `access.code_spent` without the
+guess (tested). The trade-off: someone at the keypad can spend the codes of a door with a few wrong
+guesses, and the caller then asks for a new one. A `newCode` that is not exactly 8 digits fails the
+issue before anything is stored (tested). Left to the host: a keypad that slows after wrong entries,
+a durable `AccessCodeStore` whose `take` and `miss` are atomic across processes, and keeping the
+codes' key in a key store. A code's grant is `delivered` once texted, so the call can end and its
+receipt be issued while the code is still live: unlike a relay grant, it may open the door after the
+receipt, until its expiry, and that redemption is not in the call's ledger (the host revokes a code
+it no longer wants, and logs redemptions at the door). A code is texted only to the call whose
+in-flight grant has the digest the engine recorded, never one matched on its grant id alone
+(tested).
 
 ### Web sign-in step-up: stolen, replayed or misdirected tokens
 
-Someone replays a step-up token, uses one meant for another person or site, or keeps using one
-after the call turned untrusted. **Controls:** a token is issued only with a verification grant
-covering `entry.sign_in` (level 2 or more), checked by the engine on every request and once more
-after signing, so a call tainted, verified again, ended or expired while it was signed gets
-nothing (tested). Step-up is built in (ADR-25): the engine issues every token and records its
-exchange, and no module code can write a token or its outcome (tested). It is an ES256 JWT under
-its own key (`stepUpSigner`), which the engine refuses to share with the receipt or access signer,
-by key id or key material (tested); it lives 2 to 5 minutes and never past the verification grant
-(tested). It is bound to the site's audience, to
-the subject the verification grant was issued for (never one the host or the model names, and
-none while a new verification runs), to the grant itself and to the nonce the site showed
-(tested). The web sign-in exchanges it through the engine, which accepts only the exact bytes the
-call issued, once: the exchange settles the token in the engine's own write, so a second one is
-refused, on any process (tested). An exchange after the call was tainted, while a new verification runs on it, after the call was verified again,
-after expiry, or for another site, subject or nonce is refused and uses the token up; a forged or
-altered token is refused without using up the real one (tested). The ledger holds the token's
-digest and outcome, never the token, the nonce or the subject handle, and the call record keeps
-no nonce (tested). `sub` is a handle per site, so a `sub` alone cannot link one person across sites (tested); `sid` (the call) and `grant` are the same in every token of one call, so two sites given tokens from the same call can link those tokens.
-Hanging up never revives a token: the write that ends the call refuses every issued token whose
-call is tainted, has a new verification running or no longer holds the token's grant (verified
+Someone replays a step-up token, uses one meant for another person or site, or keeps using one after
+the call turned untrusted. **Controls:** a token is issued only with a verification grant covering
+`entry.sign_in` (level 2 or more), checked by the engine on every request and once more after
+signing, so a call tainted, verified again, ended or expired while it was signed gets nothing
+(tested). Step-up is built in (ADR-25): the engine issues every token and records its exchange, and
+no module code can write a token or its outcome (tested). It is an ES256 JWT under its own key
+(`stepUpSigner`), which the engine refuses to share with the receipt or access signer, by key id or
+key material (tested); it lives 2 to 5 minutes and never past the verification grant (tested). It is
+bound to the site's audience, to the subject the verification grant was issued for (never one the
+host or the model names, and none while a new verification runs), to the grant itself and to the
+nonce the site showed (tested). The web sign-in exchanges it through the engine, which accepts only
+the exact bytes the call issued, once: the exchange settles the token in the engine's own write, so
+a second one is refused, on any process (tested). An exchange after the call was tainted, while a
+new verification runs on it, after the call was verified again, after expiry, or for another site,
+subject or nonce is refused and uses the token up; a forged or altered token is refused without
+using up the real one (tested). The ledger holds the token's digest and outcome, never the token,
+the nonce or the subject handle, and the call record keeps no nonce (tested). `sub` is a handle per
+site, so a `sub` alone cannot link one person across sites (tested); `sid` (the call) and `grant`
+are the same in every token of one call, so two sites given tokens from the same call can link those
+tokens. Hanging up never revives a token: the write that ends the call refuses every issued token
+whose call is tainted, has a new verification running or no longer holds the token's grant (verified
 again, as that subject or another), since the ended call holds no grant to judge it by later
 (tested). Only a token for the grant the call still holds as it ends stays exchangeable, until it
-expires (at most 5 minutes; whether it should is a pending decision), its exchange written before
-or after `receipt.issued` and never changing the receipt; the receipt lists the call's tokens as the end left them
-(tested). A refused exchange is final, so anyone holding a token can use it up with a wrong nonce
-and deny that one sign-in (it starts again with a new nonce); a guessed nonce never gets a second
-try (tested). Published key sets carry only public key members, whatever a signer returns
-(tested).
-Left to the host: exchanging every token through the engine (checking the JWS against the JWKS
-alone gives neither the single use nor the refusal after taint), handing the token only to the
-browser session that showed the nonce, a nonce of at least 6 digits that lives no longer than
-the token, and the words the caller hears before keying it ("you are signing in to ... on the
-web"), since a person can be talked into keying someone else's nonce.
+expires (at most 5 minutes; whether it should is a pending decision), its exchange written before or
+after `receipt.issued` and never changing the receipt; the receipt lists the call's tokens as the
+end left them (tested). A refused exchange is final, so anyone holding a token can use it up with a
+wrong nonce and deny that one sign-in (it starts again with a new nonce); a guessed nonce never gets
+a second try (tested). Published key sets carry only public key members, whatever a signer returns
+(tested). Left to the host: exchanging every token through the engine (checking the JWS against the
+JWKS alone gives neither the single use nor the refusal after taint), handing the token only to the
+browser session that showed the nonce, a nonce of at least 6 digits that lives no longer than the
+token, and the words the caller hears before keying it ("you are signing in to ... on the web"),
+since a person can be talked into keying someone else's nonce.
 
 ### A risky request on a verification made for a small one
 
@@ -695,18 +693,22 @@ who in the business may ask for a refund, and answering a dispute with evidence 
 ### Card data and PCI DSS scope
 
 **Controls:** Pay is by a hosted payment page; the engine sees a link id and a status, never a card
-number. Card numbers in transcripts are detected (Luhn, digits, and English or French number words
-read digit by digit, as numbers such as "forty two" or "quarante-deux", or with "double") and
-replaced, and the host is told to interrupt (tested over a shared JSON corpus). While the caller
-is still reading, the live detector tells the host to interrupt once a run reaches 8 digits, before
-a whole number has been spoken (tested over the same corpus); it keeps only the open run in memory
-and never returns it. Over-redaction and over-interrupting (a phone number read aloud) are
-accepted. Speech-to-text that renders a number in a way the corpus does not cover can still slip
-past both; the host's sensitive pause around payment stays the main control. Intake refuses a value carrying a card
-number, and the ledger refuses detail carrying one (tested). Keypad card capture is planned only
-through a PCI-certified carrier service on a call path where tones never reach this engine
-(PAY-6), after an assessor's scoping. Nothing here is a PCI DSS attestation; a host's scope
-depends on its whole call path.
+number. Card numbers in transcripts are detected (SPEC.md section 24: the Luhn check over digits
+in any script and over spoken numbers, read digit by digit, as numbers such as "forty two",
+"quarante-deux" or "cuarenta y dos", or with "double" and "triple") and replaced, and the host is
+told to interrupt (tested over a shared JSON corpus). English and French number words are read on
+every call, since callers switch between them; Spanish ones on a Spanish call, and on text
+redacted with no call, since some Spanish numbers are English words ("once", "dos") (tested).
+While the caller is still reading, the live detector reads runs the same way and tells the host
+to interrupt once a run reaches 8 digits, before a whole number has been spoken (tested over the
+same corpus); it keeps only the open run in memory and never returns it. Over-redaction and
+over-interrupting (a phone number read aloud) are accepted. Speech-to-text that renders a number
+in a way the corpus does not cover can still slip past both, and so can Spanish number words on
+an English or French call; the host's sensitive pause around payment stays the main control.
+Intake refuses a value carrying a card number, and the ledger refuses detail carrying one
+(tested). Keypad card capture is not built: it is planned only through a PCI-certified carrier
+service on a call path where tones never reach this engine (PAY-6), after an assessor's scoping.
+Nothing here is a PCI DSS attestation; a host's scope depends on its whole call path.
 
 ### Hostile documents
 
@@ -729,56 +731,54 @@ still verifies after it (tested). The ring publishes only public P-256 members a
 with a private part, two keys with one kid, or a kid that matches no signer (tested). Anyone can
 check a receipt without this package with `scripts/verify-receipt.mjs`, which has no dependencies,
 refuses a key set fetched over plain http from another machine, and reports a tampered receipt as
-invalid (tested).
-A step's ledger entries are saved with the step itself (an outbox in the call record) and
-appended by event id, once each; a ledger that fails leaves them pending, and the next write or
-`flushLedger` appends them, so no saved step is ever missing from the ledger for good (tested).
-A call nobody writes again is caught up by `flushPending`, a background flush the host schedules,
-over the calls its session store lists as pending (tested). The ledger is the record, never the
-`onEvent` listener: the listener hears of an entry only after the ledger has it, may hear of it
-twice (same `eventId`) or not at all, and its failures go to `onListenerError` without stopping
-the call or the ledger (tested). A listener gets the same detail as the ledger, never a value.
-A durable ledger must pass `auditLedgerContract`: append-only, one valid chain under concurrent
-appends, each `eventId` once, copies in and out, and card data refused (tested on
-`MemoryAuditLedger`).
-The reference server's optional SQLite ledger (SRV-4) adds triggers that refuse any UPDATE or
-DELETE of an entry, and any INSERT (such as INSERT OR REPLACE) over a stored `seq` or `eventId`,
-from any connection, and takes the database's write lock for each append, so
-two processes on one file keep one chain (tested). The triggers stop mistakes, not an attacker: any
+invalid (tested). A step's ledger entries are saved with the step itself (an outbox in the call
+record) and appended by event id, once each; a ledger that fails leaves them pending, and the next
+write or `flushLedger` appends them, so no saved step is ever missing from the ledger for good
+(tested). A call nobody writes again is caught up by `flushPending`, a background flush the host
+schedules, over the calls its session store lists as pending (tested). The ledger is the record,
+never the `onEvent` listener: the listener hears of an entry only after the ledger has it, may hear
+of it twice (same `eventId`) or not at all, and its failures go to `onListenerError` without
+stopping the call or the ledger (tested). A listener gets the same detail as the ledger, never a
+value. A durable ledger must pass `auditLedgerContract`: append-only, one valid chain under
+concurrent appends, each `eventId` once, copies in and out, and card data refused (tested on
+`MemoryAuditLedger`). The reference server's optional SQLite ledger (SRV-4) adds triggers that
+refuse any UPDATE or DELETE of an entry, and any INSERT (such as INSERT OR REPLACE) over a stored
+`seq` or `eventId`, from any connection, and takes the database's write lock for each append, so two
+processes on one file keep one chain (tested). The triggers stop mistakes, not an attacker: any
 connection can drop them, and anyone who can write the file can rewrite it; the hash chain and
-signed receipts are what detect that.
-Monthly reports are signed with the receipt key under domain separation: the signed bytes start
-with a line naming the document type, so a signed report never verifies as a receipt, a receipt
-never as a report, and a JSON report never as a CSV one (tested). A report carries counts and
-totals only, and counts an entry for a workspace only when its `eventId` names that workspace;
-an entry without one is reported as unattributed, so one business never sees another's calls
-(tested). An entry whose time does not read is counted as malformed, by its `seq` only, for no
-workspace: one tenant's bad entry never stops another tenant's report (tested).
+signed receipts are what detect that. Monthly reports are signed with the receipt key under domain
+separation: the signed bytes start with a line naming the document type, so a signed report never
+verifies as a receipt, a receipt never as a report, and a JSON report never as a CSV one (tested). A
+report carries counts and totals only, and counts an entry for a workspace only when its `eventId`
+names that workspace; an entry without one is reported as unattributed, so one business never sees
+another's calls (tested). An entry whose time does not read is counted as malformed, by its `seq`
+only, for no workspace: one tenant's bad entry never stops another tenant's report (tested).
 `exportLedger` copies the ledger out as NDJSON with an ES256-signed trailer naming where the run
 starts and ends and the head; it checks the chain before signing, and refuses a ledger whose
-entries, head or cursor entry no longer match (tested). A run that stops short of the head is signed only
-after the chain is walked from its end to the head, so a page that verifies on its own but is not
-the start of the head's chain (a first entry swapped for another chain's) is refused, not signed
-(tested). `verifyLedgerExport` detects a changed,
-removed, added or replaced entry, a changed trailer and a run that does not continue the previous
-one (tested). The signed bytes start with a fixed context line, so a trailer signature cannot pass
-as a receipt signature under the same key, or the other way round (tested). A run that starts at a
-`fromSeq` above 1 is anchored on the entry before it as the host's ledger holds it; only a chain of
-runs from seq 1, each checked with the previous trailer, ties an export to the genesis. Entries
-carry no values, so neither does the export.
+entries, head or cursor entry no longer match (tested). A run that stops short of the head is signed
+only after the chain is walked from its end to the head, so a page that verifies on its own but is
+not the start of the head's chain (a first entry swapped for another chain's) is refused, not signed
+(tested). `verifyLedgerExport` detects a changed, removed, added or replaced entry, a changed
+trailer and a run that does not continue the previous one (tested). The signed bytes start with a
+fixed context line, so a trailer signature cannot pass as a receipt signature under the same key, or
+the other way round (tested). A run that starts at a `fromSeq` above 1 is anchored on the entry
+before it as the host's ledger holds it; only a chain of runs from seq 1, each checked with the
+previous trailer, ties an export to the genesis. Entries carry no values, so neither does the
+export.
 
 ### Reading someone else's receipt
 
 Call ids are not secrets, and a receipt says how a caller was verified, what they filed and paid.
 **Controls:** the reference server serves a receipt only at `/r/<token>`, where the token is 256
 random bits issued for that call; it keeps only the token's SHA-256, so its store never holds a
-working link (the demo UI's in-memory run state does hold its own run's token, to show the
-link; a host would send it and drop it); an unknown, malformed or not yet usable token gives the same `404`; there is no
-route by call id (tested). The page carries no script, is never cached or indexed, and sends no
-Referer, so the token does not leak to another site (tested). `textReceiptLink` sends the host's
-link only to the number on file and never writes the link to the ledger (tested). Left to the
-host: issuing the token and building the link, rate limits on `/r/` (SRV-2), a durable store for the hashes (SRV-4),
-and expiry or revocation of a link, which are not built.
+working link (the demo UI's in-memory run state does hold its own run's token, to show the link; a
+host would send it and drop it); an unknown, malformed or not yet usable token gives the same `404`;
+there is no route by call id (tested). The page carries no script, is never cached or indexed, and
+sends no Referer, so the token does not leak to another site (tested). `textReceiptLink` sends the
+host's link only to the number on file and never writes the link to the ledger (tested). `/r/` is
+under the server's per-address rate limit, like every route. Left to the host: issuing the token and
+building the link, a durable store for the hashes (the reference server keeps them in memory, so its
+links end with the process), and expiry or revocation of a link, which are not built.
 
 ### Consent that outlives its withdrawal
 
@@ -798,26 +798,28 @@ plugging in a `ConsentStore` wherever consents are recorded (without one, consen
 revoked through the engine), deciding which consents an inbound STOP revokes, checking the store
 before every text it sends on a consent, and who may revoke from a dashboard.
 
+### Rebuilding the ledger
+
 Whoever holds the ledger could rebuild the whole chain. **Control (PRV-9):** `anchorLedger` fixes
-the head in time with a third party, and `verifyAnchor` checks it offline against the host's copy
-of the authority's certificate chain and Rekor's key: an entry an anchor covers cannot change
-afterwards without the change showing, and a rebuilt chain fails as `imprint` (tested; both
-adapters are tested on answers built locally in the services' formats with throwaway keys, not yet
-on an answer recorded from a real authority or log). Every certificate above the authority's own
-must be a CA allowed to issue (cA true, keyCertSign, pathLen), so a leaf under the trusted root
-cannot stand in as an issuer (tested). The token must name the authority's signing certificate in a
-signed SigningCertificate or SigningCertificateV2 attribute, so a token cannot be passed off under
-another certificate (tested). The reference authority adapter asks with a fresh nonce for a SHA-256
-imprint and refuses an answer that does not echo the nonce, so a recorded token is not taken as a
-new answer, and both reference adapters cap a reply's size (tested). It does not prove the chain was honest before it was
-anchored, nor anything after the last anchor. With a time-stamp authority alone, the authority
-sees only a hash and only the proofs the operator keeps exist, so an operator could drop an
-inconvenient one. With Rekor, everyone can see every head the operator anchored, so a missing
-anchor shows too. A public log shows each anchored head (a hash), the key that signed it and the
-signature, and nothing else: no entry, no call and no workspace. The time is not in the log; it
-is in the authority's token, which the operator keeps. The anchor payload is domain-separated,
-so a head signed for the log can never verify as a receipt, even under the receipt key (tested).
-The time always comes from the authority, since Rekor v2 keeps none.
+the head in time with a third party, and `verifyAnchor` checks it offline against the host's copy of
+the authority's certificate chain and Rekor's key: an entry an anchor covers cannot change
+afterwards without the change showing, and a rebuilt chain fails as `imprint` (tested; both adapters
+are tested on answers built locally in the services' formats with throwaway keys, not yet on an
+answer recorded from a real authority or log). Every certificate above the authority's own must be a
+CA allowed to issue (cA true, keyCertSign, pathLen), so a leaf under the trusted root cannot stand
+in as an issuer (tested). The token must name the authority's signing certificate in a signed
+SigningCertificate or SigningCertificateV2 attribute, so a token cannot be passed off under another
+certificate (tested). The reference authority adapter asks with a fresh nonce for a SHA-256 imprint
+and refuses an answer that does not echo the nonce, so a recorded token is not taken as a new
+answer, and both reference adapters cap a reply's size (tested). It does not prove the chain was
+honest before it was anchored, nor anything after the last anchor. With a time-stamp authority
+alone, the authority sees only a hash and only the proofs the operator keeps exist, so an operator
+could drop an inconvenient one. With Rekor, everyone can see every head the operator anchored, so a
+missing anchor shows too. A public log shows each anchored head (a hash), the key that signed it and
+the signature, and nothing else: no entry, no call and no workspace. The time is not in the log; it
+is in the authority's token, which the operator keeps. The anchor payload is domain-separated, so a
+head signed for the log can never verify as a receipt, even under the receipt key (tested). The time
+always comes from the authority, since Rekor v2 keeps none.
 
 ### Breach of stored data
 
@@ -827,20 +829,20 @@ fields are encrypted by the host's `FieldCipher` before the record reaches the `
 a config with one is refused without a cipher; an engine without one refuses to file such a
 record (tested). The record's digest, which receipts and the ledger carry, covers a sensitive
 value only as an HMAC under the knowledge key, so a receipt cannot be used to test guesses at a
-short value such as a policy number (tested, ADR-27). A cipher that throws, or answers with nothing or with
-the value itself, is refused and never holds a call open: the filing is released as failed, the
-draft and its values are dropped, `record.filing_failed` names only the fields and a reason code,
-and the cipher's own error, which may quote the value, is never passed on (tested). Left open: while a draft is open or being filed, its sensitive values
-sit in the clear in the call record, so a durable `SessionStore` holds them until the record is
-filed or abandoned, or the call ends, which drops an open draft (tested). PINs on file are
-HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode). A delivered
-record goes only to a destination in the host's configuration, over `https:` (or `http:` to a
-loopback host) and never to a URL with credentials in it; its `delivery.attempted` ledger entries
-carry the record id, the destination's id, the attempt, the outcome and the status, never a field
-value, the URL or the secret (tested). A texted code
-is kept only as an HMAC bound to its call, and a calling number only as an HMAC. Upload link
-tokens are 256 random bits and only their SHA-256 is stored, so a copy of the `DocumentStore`
-yields no working link (tested).
+short value such as a policy number (tested, ADR-27). A cipher that throws, or answers with
+nothing or with the value itself, is refused and never holds a call open: the filing is released
+as failed, the draft and its values are dropped, `record.filing_failed` names only the fields and
+a reason code, and the cipher's own error, which may quote the value, is never passed on
+(tested). Left open: while a draft is open or being filed, its sensitive values sit in the clear
+in the call record, so a durable `SessionStore` holds them until the record is filed or
+abandoned, or the call ends, which drops an open draft (tested). PINs on file are HMACs bound to
+their subject, or stay in the host's own PIN store (`verifier` mode). A delivered record goes
+only to a destination in the host's configuration, over `https:` (or `http:` to a loopback host)
+and never to a URL with credentials in it; its `delivery.attempted` ledger entries carry the
+record id, the destination's id, the attempt, the outcome and the status, never a field value,
+the URL or the secret (tested). A texted code is kept only as an HMAC bound to its call, and a
+calling number only as an HMAC. Upload link tokens are 256 random bits and only their SHA-256 is
+stored, so a copy of the `DocumentStore` yields no working link (tested).
 The reference server's optional SQLite stores (SRV-4) keep subjects (HMACs and the number on
 file), confirmed intake values and the ledger in one file, unencrypted, created readable and
 writable by its owner only (created exclusively with mode 0600), with SQLite's WAL and
@@ -856,56 +858,92 @@ left to the host.
 **Controls:** neither key has to be in the engine's process. The knowledge key can be an opaque,
 asynchronous HMAC function that calls the host's key management service; the engine, the built-in
 factors and plug-ins all hash through that one function, an answer that is not a 64-character
-lower-case hex digest is refused without being quoted, and a key store that rejects fails closed:
-no factor, the attempt counted, nothing it was asked written to the ledger (tested). The receipt
-key stays behind `ReceiptSigner`; a signer that returns anything but a 64-byte P1363 signature is
-refused, and `derToP1363` converts a key store's DER answer, checked
-against `node:crypto` (tested). An HMAC function does not stop a process that can call it from
-computing digests, so who may call the key store remains the host's control. A receipt key that
-leaked is removed from the key set, not retired, so the receipts it signed stop verifying. A
-retired key is published with its `retiredAt`, and a receipt it says it issued at or after that
-time is invalid (tested), but `issuedAt` is written by whoever holds the key, so retiring a key
-does not limit what a thief can sign with it. A key set saved to a file does not see that removal: verifying against a
-saved copy keeps accepting the leaked key, so a holder who needs current trust verifies against
-the key set URL or refreshes the copy.
+lower-case hex digest is refused without being quoted, and a key store that rejects fails closed: no
+factor, the attempt counted, nothing it was asked written to the ledger (tested). The receipt key
+stays behind `ReceiptSigner`; a signer that returns anything but a 64-byte P1363 signature is
+refused, and `derToP1363` converts a key store's DER answer, checked against `node:crypto` (tested).
+An HMAC function does not stop a process that can call it from computing digests, so who may call
+the key store remains the host's control. A receipt key that leaked is removed from the key set, not
+retired, so the receipts it signed stop verifying. A retired key is published with its `retiredAt`,
+and a receipt it says it issued at or after that time is invalid (tested), but `issuedAt` is written
+by whoever holds the key, so retiring a key does not limit what a thief can sign with it. A key set
+saved to a file does not see that removal: verifying against a saved copy keeps accepting the leaked
+key, so a holder who needs current trust verifies against the key set URL or refreshes the copy.
 
 ### Other identity and banking numbers in transcripts
 
 A caller reads a social insurance number, a health card number or bank details aloud, and the
-transcript is stored or sent on. **Controls:** `sinRedactor` (9 digits, Luhn),
-`healthCardRedactor` (Ontario, British Columbia and Quebec formats with their checks) and
-`bankAccountRedactor` (3 or more digits after a bank word) find these in digits and in English or
-French digit words, and replace them (tested over the shared corpus in `test/corpus/`). They are
-off unless the host composes them in. Limits: bank numbers have no check digit, so one read with
-no bank word before it is missed; other provinces' health card numbers are missed; intake values
-and ledger detail are checked for card numbers only.
+transcript is stored or sent on. **Controls:** `sinRedactor` (9 digits, Luhn), `healthCardRedactor`
+(Ontario, British Columbia and Quebec formats with their checks) and `bankAccountRedactor` (3 or
+more digits after a bank word) find these in digits and in spoken numbers, read as card numbers are
+(English and French on every call, Spanish on a Spanish call, with each language's bank words read
+on the same calls), and replace them (tested over the shared corpus in `test/corpus/`). They are off
+unless the host composes them in. Limits: bank numbers have no check digit, so one read with no bank
+word before it is missed; other provinces' health card numbers are missed; intake values and ledger
+detail are checked for card numbers only.
 
 ### Access and deletion requests
 
-A person asks the business what it holds about them, or asks it to delete that (PIPEDA, and
-Quebec's private-sector law as amended by Law 25). **Controls:** `exportSubject` and `eraseSubject`
-are host calls the business makes with a subject key; they take no call id and no flow step names
-them, so nothing a caller or the model says reaches them. An intake record carries the subject the
-call matched by keypad or PIN, never a subject only claimed, so one caller cannot file records into
-another person's export. A consent likewise carries the subject matched when it was recorded, and
-an export lists only that subject's consents, so a call that later matches another subject never
-discloses that person's consents in the first one's export (tested). The export says whether a PIN digest is on file and never carries the
-digest; it is signed with the receipt key under its own domain (the signed bytes name the document
-type), so an export never verifies as a receipt and a receipt never as an export (tested). The
-erase deletes the subject's records, the call's copy of their values and the PIN digest through the
-stores, appends `subject.erased` (record ids and whether a PIN digest goes; no subject key) and
-`subject.erasure_completed`, and a deleted record id is never stored again, so a confirmation still
-writing when the erase ran cannot bring the values back (tested). It
-never changes a ledger entry or a receipt, so the chain and every signature still verify (tested).
+A person asks the business what it holds about them, or asks it to delete that (PIPEDA, and Quebec's
+private-sector law as amended by Law 25). **Controls:** `exportSubject` and `eraseSubject` are host
+calls the business makes with a subject key; they take no call id and no flow step names them, so
+nothing a caller or the model says reaches them. An intake record carries the subject the call
+matched by keypad or PIN, never a subject only claimed, so one caller cannot file records into
+another person's export. A consent likewise carries the subject matched when it was recorded, and an
+export lists only that subject's consents, so a call that later matches another subject never
+discloses that person's consents in the first one's export (tested). The export says whether a PIN
+digest is on file and never carries the digest; it is signed with the receipt key under its own
+domain (the signed bytes name the document type), so an export never verifies as a receipt and a
+receipt never as an export (tested). The erase deletes the subject's records, the call's copy of
+their values and the PIN digest through the stores, appends `subject.erased` (record ids and whether
+a PIN digest goes; no subject key) and `subject.erasure_completed`, and a deleted record id is never
+stored again, so a confirmation still writing when the erase ran cannot bring the values back
+(tested). It never changes a ledger entry or a receipt, so the chain and every signature still
+verify (tested).
 
 **What stays, plainly:** the ledger entries and receipts keep each record's SHA-256 digest, as
 integrity records for the retention period: changing them would break the chain and the
-signatures. They hold no value, but the digest is unkeyed, so a short or guessable record (a
-yes/no answer, a date, a short phrase) can be confirmed by anyone who holds the ledger or a
-receipt, guesses the values and hashes them. Treat the ledger and receipts as personal
-information for retention and access control. The export lists these as kept, with that reason.
-Records filed on a call with no matched subject cannot be found by subject; the export says so.
-Consents stay in their call records until PRV-3's `ConsentStore`; the erase resets the failure counters kept under the subject's key (VER-1).
+signatures. They hold no value, and a sensitive value enters the digest only keyed (ADR-27), but
+the rest of the digest is unkeyed, so a short or guessable record (a yes/no answer, a date, a
+short phrase) can be confirmed by anyone who holds the ledger or a receipt, guesses the values
+and hashes them. Treat the ledger and receipts as personal information for retention and access
+control. The export lists these as kept, with that reason. Records filed on a call with no
+matched subject cannot be found by subject; the export says so. Consents stay in their call
+records, and in the host's `ConsentStore` when there is one, where a later revocation finds them.
+The erase resets the subject's counters across calls (each factor's failures and lock notices,
+the hidden duress count, flow starts, callbacks placed and the duress flag); the calling number's
+counters are not the subject's and stay until their window passes.
+
+### Supply chain and releases
+
+A compromised dependency, action or build, or a release nobody meant to make. **Controls:** the
+package has no runtime dependency. Every workflow action is pinned by full commit SHA, every
+workflow's top-level token is read-only or empty with each job granted only the scopes it uses,
+and no package-manager cache is restored. npm audit and osv-scanner check the lockfile on every
+pull request, weekly, and on each release tag (`supply-chain.yml`). Nothing has been published:
+`"private": true` makes `npm publish` refuse until a release is decided (ADR-12), and the release
+workflow (`release.yml`) has not yet had its dry run on a tag in a fork. In that workflow a tag
+push is only ever a dry run, publishing needs a person to start the workflow by hand on a tag
+with `publish` ticked, and the publish job waits for the `npm-publish` environment's reviewers;
+its first step stops unless that environment has a required reviewer and a deployment rule, so
+an environment created without protection never lets a publish through. It runs only in this
+repository, on a tagged commit that is on main, after CI and the supply-chain checks pass on the
+tag. The tarball must be byte-identical across two builds and a third on a fresh runner, holds
+only `dist/` and the listed documents, and passes an unpack-and-import smoke test before it is
+published. There is no npm token: trusted publishing uses the publish job's short-lived OIDC
+token, the only job granted `id-token: write`, and npm provenance ties the tarball to the commit
+and workflow that built it. The same job writes a CycloneDX SBOM of the published package,
+refuses it if it names any runtime dependency, and signs an SBOM attestation for the tarball
+through Sigstore before publishing; a separate job with `contents: write` and no OIDC token
+attaches the tarball, the SBOM and the attestation's bundle to the tag's GitHub release. The
+release files are kept before the publish, and a rerun after npm accepted the version publishes
+nothing again when the registry serves the very bytes checked (npm's sha512 integrity), and fails
+when it serves other bytes under that version (tested). `npm audit signatures` and
+`gh attestation verify` check a release (README.md, "Checking a release"). One maintainer can
+approve a publish today, so the environment does not prevent self-review; once there is a second
+maintainer, a second reviewer is required (the environment's "prevent self-review" on). The
+runners' egress is audited, not blocked (harden-runner); before the second publish it switches to
+block, allowing only the endpoints the first real publish run's audit log shows.
 
 ## Open questions
 
@@ -963,14 +1001,14 @@ registry, flows, redaction, canonical JSON and hashing (`src/core/`, `src/engine
 | core-11 | T | Two encodings of the same data hash or sign differently, or a value JSON cannot carry is signed. | Canonical JSON sorts keys and refuses values it cannot carry faithfully. | covered | `core.test.ts`: "sorts keys, drops whitespace and serialises like JSON.stringify"; `core.test.ts`: "refuses values JSON cannot carry faithfully, naming the path" |
 | core-12 | I | Comparison timing tells a caller how much of a digest matched. | Digests are compared in constant time. | covered | `core.test.ts`: "compares digests in constant time and refuses anything that is not lower-case hex" |
 | core-13 | I | A card number read aloud reaches the transcript, the model or a log. | The redactor finds card numbers in digits and English or French digit words, and the engine counts findings without logging the text. | covered | `redaction.test.ts`: "finds numbers spoken as digit words in English and French"; `engine.test.ts`: "redacts text and counts findings by kind, without logging the text" |
-| core-14 | I | A card number spoken in pieces, or only partly, slips past the redactor. | A live detector for partial and spoken numbers. | open | PAY-5 |
-| core-15 | I | Other identifiers (social insurance, health card and bank account numbers) reach the transcript. | More redactors. | open | PRV-6 |
+| core-14 | I | A card number spoken in pieces, or only partly, slips past the redactor. | `LiveCardNumberDetector` reads a transcript a chunk at a time, as redaction reads runs, and says to interrupt once a run reaches 8 digits, keeping only the open run and never returning it. | covered | `redaction.test.ts`: "interrupts at 8 digits by default and refuses another threshold out of range"; `redaction.test.ts`: "agrees with a reader that keeps the whole open run"; `redaction.test.ts`: "never returns the text it heard" |
+| core-15 | I | Other identifiers (social insurance, health card and bank account numbers) reach the transcript. | `sinRedactor`, `healthCardRedactor` and `bankAccountRedactor`, off unless the host composes them in, find these in digits and spoken numbers and replace them. | covered | `redaction.test.ts`: "replaces a SIN with its marker and reports offsets"; `redaction.test.ts`: "replaces a health card number with its marker, letters and all for Quebec"; `redaction.test.ts`: "replaces a bank number with its marker" |
 | core-16 | I | An outside module's ledger detail carries a card number. | The entry is refused before anything is saved. | covered | `flows.test.ts`: "refuses an outside module's entry that carries a card number, before anything is saved" |
 | core-17 | D | A host's event listener that throws or rejects stops the call or the ledger. | Listener failures are caught; the ledger is written regardless. | covered | `engine.test.ts`: "keeps writing the ledger when the listener throws"; `engine.test.ts`: "catches a listener's rejected promise" |
 | core-18 | R | A host's listener misses an event and nobody is told. | Defined delivery semantics: the ledger is the record, and the listener is told at least once, after each append, with the entry's `eventId` and `seq`; a throw or rejection goes to `onListenerError`; `flushPending` appends and re-delivers what a failed append left pending. A notice lost when the process stops right after an append is not re-sent; the ledger still holds the event. | covered | `engine.test.ts`: "tells the listener after each append, with the entry's event id and seq"; `engine.test.ts`: "reports a listener's throw and rejection to onListenerError, and the call and the ledger go on"; `engine.test.ts`: "tells the listener again, with the same event id and seq, of an entry a lost clear left pending"; `engine.test.ts`: "flushes in the background the calls whose ledger entries are pending, and only those"; `event-delivery-hostile.test.ts`: "A4: a write that lands between flushPending's read and its unmark keeps the call marked" |
-| core-19 | E | The model is talked into acting for someone else (urgency, authority, "calling for my mother"). | An adversarial evaluation set in English and French gating each release. The model already has no path to a factor, a level or a grant (core-1). | open | VER-7 |
+| core-19 | E | The model is talked into acting for someone else (urgency, authority, "calling for my mother"). | The model has no path to a factor, a level or a grant: scoped work needs a grant code issued, and untrusted text drops it. The adversarial suite in `test/adversarial/` runs scripted dialogues in English and French in `npm test`. | covered | `engine.test.ts`: "refuses unknown scopes, ended calls, missing and expired grants"; `engine.test.ts`: "drops the grant when untrusted text enters, and re-verification starts from nothing" |
 | core-20 | I | A host keeps forwarding audio or transcript to the model while keypad digits or a payment are in progress. | `forwardingFor(state)`, the one helper that says what a host may forward for the current session: nothing while `sensitive` is set or after the call, and nothing for a state it cannot read. The host must still ask it and obey (Left to the host). | covered | `session.test.ts`: "holds the transcript, both audio paths and listen-in through keypad entry and payment, and after the call"; `session.test.ts`: "fails closed with no state, or one the engine never writes"; `forwarding-hostile.test.ts`: "W4: nothing the host can call while paying lifts the hold before the payment settles" |
-| core-21 | T | An outside module's validators throw on garbage, or its step status is not pure, and a bad config passes. | A contract suite for outside modules. | open | MOD-1 |
+| core-21 | T | An outside module's validators throw on garbage, or its step status is not pure, and a bad config passes. | `moduleContract`, a contract suite for outside modules, which the example module passes and which catches a module that breaks it. | covered | `module-contract.test.ts`: "the example Callback module passes the module contract"; `module-contract.test.ts`: "the module contract catches" |
 
 ### Badge
 
@@ -988,9 +1026,9 @@ Who is calling, in levels (`src/verify/`).
 | badge-8 | E | A result judged for one subject (a factor, a carrier report, a photo ID outcome) is applied after verification restarted for another. | Results are bound to the subject they were judged for, and late outcomes are ignored. | covered | `pin.test.ts`: "never applies a factor judged for a verification that restarted for another subject"; `flows.test.ts`: "ignores a photo ID outcome that arrives after the flow moved on"; `engine.test.ts`: "ignores a photo ID outcome for a link sent before the taint" |
 | badge-9 | E | A caller who failed for one account keeps those factors after switching to another. | Factors are kept for a step-up on the same account and dropped for another. | covered | `engine.test.ts`: "keeps factors for a step-up on the same account and drops them for another"; `engine.test.ts`: "starts over on another account number" |
 | badge-10 | E | A caller enters a factor that is turned off, or one the caller does not enter. | Such entries are refused. | covered | `engine.test.ts`: "refuses factors that are turned off, and entries for factors the caller does not enter" |
-| badge-11 | S | A weakly verified caller chooses or resets the owner's PIN on the line. | Enrolment only at level 2 on the call, weak PINs refused, reset by the business only. Today there is no enrolment at all. | open | VER-6 |
-| badge-12 | S | A spoken answer is misheard or injected into speech-to-text. | Spoken answers normalised by code, with their own limits. | open | VER-3 |
-| badge-13 | I | Keypad digits leak from the host's buffer into a log or a string. | A keypad collector that exposes no digits. | open | INT-1 |
+| badge-11 | S | A weakly verified caller chooses or resets the owner's PIN on the line. | `enrolPin` needs level 2 or above on the same call and a subject with no PIN on file, refuses weak PINs, and counts each try; only the business resets a PIN (`resetPin`). | covered | `pin.test.ts`: "needs a verification at level 2 or above on this call, on an open call"; `pin.test.ts`: "refuses weak, mismatched and malformed PINs, counting each try, and locks after the PIN's limit"; `pin.test.ts`: "stores the digest submitPin compares, writes pin.enrolled without the digits, and refuses a second PIN" |
+| badge-12 | S | A spoken answer is misheard or injected into speech-to-text. | Spoken answers are normalised by code, exactly or not at all, have their own attempt limit, count alone only at level 1 and never unlock texts. | covered | `verify-spoken.test.ts`: "counts an unusable or wrong answer as an attempt, then stops judging, even the right answer"; `verify-spoken.test.ts`: "can use spoken_knowledge alone at level 1, and only with a factor that is not knowledge above it"; `verify-spoken.test.ts`: "does not unlock texts to the number on file" |
+| badge-13 | I | Keypad digits leak from the host's buffer into a log or a string. | `KeypadCollector` shows no digit, nor how many, through `toString`, JSON or `util.inspect`, and wipes its buffer before its callback runs. | covered | `keypad.test.ts`: "shows no digit, nor how many, through toString, JSON or inspect"; `keypad.test.ts`: "wipes the buffer before the callback runs, even when it throws" |
 
 ### Dossier
 
@@ -1003,9 +1041,9 @@ Intake the caller confirms (`src/file/`).
 | dossier-3 | I | A caller reads a card number into an intake field. | Intake refuses a value that carries a card number. | covered | `modules.test.ts`: "normalises each field type" |
 | dossier-4 | I | A sensitive field (a social insurance number) is stored in the clear. | A sensitive value is encrypted by the host's `fieldCipher` before the record is stored, and kept in the clear nowhere else; without the cipher the config is refused and nothing is filed. | covered | `engine.test.ts`: "sensitive fields"; `field-cipher-hostile.test.ts`: "G3: the plaintext is in no ledger entry, receipt, stored record or session after filing"; `field-cipher-hostile.test.ts`: "G5: an engine without the cipher on the same stores refuses to file, and the engine with it files the same record" |
 | dossier-5 | T | A form edited in the middle of a draft changes what the caller is confirming. | A draft keeps the form it started with. | covered | `flows.test.ts`: "keeps the form a draft started with when the config changes the form" |
-| dossier-6 | R | A caller disputes a value because it was never read back to them. | Read-backs in English and French before confirmation. | open | FIL-1 |
-| dossier-7 | T | A record delivered to the business is forged, changed or replayed on the way. | Signed delivery webhooks with retries and idempotency. | open | FIL-3 |
-| dossier-8 | S | A document upload link is guessed or reused. | Single-use upload links. | open | FIL-5 |
+| dossier-6 | R | A caller disputes a value because it was never read back to them. | `buildReadBack` reads the draft back in the call's language, and `confirmIntake` files only a draft that still reads back to the digest the caller heard. | covered | `file-readback.test.ts`: "builds the whole line in form order, skips fields without a value, and ends with the fixed prompt"; `file-readback.test.ts`: "digests the text with the record digest, so any change shows, a sensitive one included"; `intake-readback-hostile.test.ts`: "I3: a value changed after the read-back is refused; changed back, the same read-back files" |
+| dossier-7 | T | A record delivered to the business is forged, changed or replayed on the way. | `deliverRecord` signs each attempt in the Stripe scheme, retries with one idempotency key per record and destination, and the sample receiver checks the signature and applies each key once. | covered | `file-delivery.test.ts`: "posts the record once, signed in the Stripe scheme, and records the attempt without the payload"; `file-delivery.test.ts`: "keeps one idempotency key per record and destination, whoever delivers and how often"; `file-delivery.test.ts`: "verifies the signature, applies each record once, and answers a duplicate with 200" |
+| dossier-8 | S | A document upload link is guessed or reused. | Upload links are 256-bit tokens stored only as a hash, bound to one call and record, expire after 30 minutes and are single use by an atomic claim. | covered | `file-upload.test.ts`: "returns a capability token with a 30-minute expiry, and stores only its hash, bound to the call and record"; `file-upload.test.ts`: "stores one document and spends the link: single use"; `file-upload.test.ts`: "lets only one of two uploads at once through" |
 
 ### Paylink
 
@@ -1019,10 +1057,10 @@ Payment by a link texted to the number on file (`src/pay/`).
 | paylink-4 | S | A payment link goes to the calling number or one the model supplied. | The link goes to the number on file only. | covered | `engine.test.ts`: "texts a link to the number on file and settles only on paid" |
 | paylink-5 | T | A failed, expired or forged outcome settles a payment. | A payment settles only on `paid`, and once. | covered | `modules.test.ts`: "settles as paid only when the provider says paid"; `flows.test.ts`: "refuses the wrong form or consent purpose for the step, and fails on an unpaid link" |
 | paylink-6 | E | A caller who refused consent is still taken to a payment. | A consent of no fails its step before any money step. | covered | `flows.test.ts`: "fails the flow on a consent of no, before any money step (review blocker 2)" |
-| paylink-7 | E | A link stays payable after the call or after it should have been withdrawn. | Cancel and expire open links. | open | PAY-3 |
+| paylink-7 | E | A link stays payable after the call or after it should have been withdrawn. | Open links are expired when the call ends and at the engine's own deadline, and can be cancelled; money that moves after is recorded and flagged late. | covered | `engine.test.ts`: "expires an open link when the call ends, and records a late payment as paid, flagged"; `engine.test.ts`: "cancels a link through expireLink, once, and the session leaves paying"; `paylink-modes.test.ts`: "expires a texted link at its deadline, at the provider first, and fails the flow" |
 | paylink-8 | E | A payment lands in the wrong Stripe account (the business's or the platform's). | `connect` and `platform` modes: a connect payment is made on the business's account and settles only on an outcome from that account. | covered | `paylink-modes.test.ts`: "takes a connect payment on the business's account, and its receipt says so"; `paylink-modes.test.ts`: "never lets an outcome from another account settle a payment, and writes down one that reaches it"; `paylink-modes.test.ts`: "keeps two connected accounts' payments apart even when their providers give the same link id" |
-| paylink-9 | I | Card numbers keyed on the phone reach the engine. | Keypad card capture only through a certified carrier service, gated on an assessor's scoping. Today there is no keypad card capture at all. | open | PAY-6 |
-| paylink-10 | E | A saved card is charged for a weakly verified caller. | Saved-card charges gated on level 2 and amounts from code. Not built. | open | PAY-4 |
+| paylink-9 | I | Card numbers keyed on the phone reach the engine. | Keypad card capture only through a certified carrier service, gated on an assessor's scoping. Not built: `startKeypadCardCapture` throws. | open | PAY-6 |
+| paylink-10 | E | A saved card is charged for a weakly verified caller. | Saved-card charges gated on level 2 and amounts from code. Not built: `chargeSavedCard` throws. | open | PAY-4 |
 
 ### Trace
 
@@ -1037,11 +1075,11 @@ The hash-chained ledger, receipts and consent (`src/prove/`).
 | trace-5 | R | A caller disputes what they consented to. | The wording is fingerprinted, and a call keeps the wording it started with. | covered | `prove.test.ts`: "fingerprints purpose, version and both texts"; `engine.test.ts`: "keeps the consent wordings a call started with when the config changes" |
 | trace-6 | T | Two workspaces' entries mix on one shared ledger. | Entries are keyed by workspace as well as call. | covered | `session-store.test.ts`: "keeps two workspaces' entries apart on one shared ledger, even with the same call id" |
 | trace-7 | R | Two overlapping retries of `endCall`, or a failed signing, publish two different receipts. | One receipt and one ledger head per call. | covered | `races.test.ts`: "publishes one receipt and keeps one ledger head when two endCall retries overlap"; `engine.test.ts`: "issues the receipt of an ended call when signing failed the first time, with the same ledger head" |
-| trace-8 | R | A receipt does not say which policy and config revision judged the caller. | Policy version and config revision in grants and receipts. | open | VER-8 |
-| trace-9 | S | A leaked or retired signing key keeps signing receipts that verify. | Receipt key sets and rotation. | open | PRV-1 |
-| trace-10 | R | An outside party cannot check a receipt without this engine. | A stand-alone receipt verifier. | open | PRV-2 |
+| trace-8 | R | A receipt does not say which policy and config revision judged the caller. | The grant, its ledger entries and the receipt name the policy version and the config revision that judged the caller. | covered | `engine.test.ts`: "names the policy version and config revision that judged the caller in the grant, the events and the receipt"; `engine.test.ts`: "names the policy that judged a verification that reached no level" |
+| trace-9 | S | A leaked or retired signing key keeps signing receipts that verify. | Key rings: a receipt a retired key says it issued at or after `retiredAt` is invalid, and a leaked key is removed from the key set, so its receipts stop verifying. A thief can still backdate `issuedAt` while the key is published. | covered | `prove.test.ts`: "marks a retired key in the key set, and says a receipt it signed before retiring is valid under a retired key"; `receipt-rotation-hostile.test.ts`: "K3: a receipt that names a retired key and claims an issue time before retirement fails when the body was signed later"; `prove.test.ts`: "fails on any change, a wrong key, an unknown kid or a malformed signature" |
+| trace-10 | R | An outside party cannot check a receipt without this engine. | `scripts/verify-receipt.mjs`, a stand-alone verifier with no dependencies. | covered | `verifier.test.ts`: "prints valid for a receipt and its key set, from a file, standard input or the key set URL"; `verifier.test.ts`: "prints invalid, and exits 1, for a tampered receipt or one the key set cannot verify" |
 | trace-11 | R | A caller withdraws consent and nothing records it. | `revokeConsent` records a revocation by voice, text or dashboard in the `ConsentStore` and the ledger, once, even after the call is gone. | covered | `engine.test.ts`: "stores each consent, and revokes one by text after the call ended, once, in the ledger"; `engine.test.ts`: "never writes consent.revoked before its consent.recorded, even with the recorded entry still pending" |
-| trace-12 | R | An auditor cannot take the ledger out in a verifiable form. | Ledger export as signed NDJSON with a cursor. | open | PRV-4 |
+| trace-12 | R | An auditor cannot take the ledger out in a verifiable form. | `exportLedger` writes NDJSON with an ES256-signed trailer and a cursor, and `verifyLedgerExport` detects a changed, removed or replaced entry and a run that does not continue the previous one. | covered | `prove.test.ts`: "yields one canonical entry per line and a signed trailer with the head"; `prove.test.ts`: "detects a changed, removed or replaced entry, and a changed trailer"; `prove.test.ts`: "refuses a run that does not continue the previous one" |
 
 ### Gate
 
@@ -1091,7 +1129,7 @@ Webhook signature checks and event mapping (`src/webhooks/`).
 | server-4 | D | A large body exhausts memory. | A body limit on every route that reads one. | covered | `reference-server.test.ts`: "refuses a body over its route's limit, declared or streamed"; `reference-server.test.ts`: "gives every route that reads a body its own limit"; `reference-ui.test.ts`: "refuses a body over the limit" |
 | server-5 | D | Slow or repeated requests tie the server up. | Per-route limits, request timeouts and a per-address rate limit. | covered | `reference-server.test.ts`: "limits each address to a number of requests per window, on the rate limit's clock"; `reference-server.test.ts`: "answers 503 when a request takes longer than its deadline"; `reference-server.test.ts`: "disconnects a client that sends its headers too slowly with a 408, in JSON, and logs it" |
 | server-6 | I | An error answer leaks engine detail. | 500 without detail; a demo run names an engine refusal and hides anything else. | covered | `reference-server.test.ts`: "answers 500 without detail when the engine fails"; `reference-ui.test.ts`: "ends a run on a step that throws, naming an engine refusal and hiding anything else" |
-| server-7 | I | Anyone who knows or guesses a call id fetches its receipt. | Receipt links by capability token. | open | SRV-3 |
+| server-7 | I | Anyone who knows or guesses a call id fetches its receipt. | Receipts are served only at `/r/<token>`, a 256-bit token kept only as its hash; there is no route by call id. | covered | `reference-server.test.ts`: "serves a receipt only by its link token: the page, the JSON, and one 404 for everything else"; `reference-server.test.ts`: "are 256 random bits in base64url, and only their hash is kept" |
 | server-8 | S | A web page reaches the local demo through DNS rebinding. | The Host header must name this machine and port, on every route. | covered | `reference-ui.test.ts`: "refuses a Host header that is not this machine (DNS rebinding), and accepts the local names"; `reference-ui.test.ts`: "with the UI on, refuses a foreign Host on every route, the webhooks, receipts and key set included" |
 | server-9 | I | A request reads a file outside the UI's allow-list. | A fixed allow-list; traversal, encodings and case tricks are refused. | covered | `reference-ui.test.ts`: "serves nothing outside the allow-list: traversal, encodings, case, other files" |
 | server-10 | E | Script injected into the demo page runs. | A strict CSP, no inline script, style or handlers, and hardening headers. | covered | `reference-ui.test.ts`: "keeps the page free of inline script, inline style and inline handlers, so the CSP holds"; `reference-ui.test.ts`: "serves every allow-listed file with its content type, the strict CSP and the hardening headers" |
@@ -1104,12 +1142,13 @@ What is published, and how.
 
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
-| release-1 | T | A published package differs from the reviewed source, or cannot be traced to it. | A release workflow with a reproducible pack, an exports smoke test and npm provenance. Nothing is published today (`private: true`). | open | SRV-5 |
+| release-1 | T | A published package differs from the reviewed source, or cannot be traced to it. | A release workflow (`release.yml`) with a reproducible pack, an exports smoke test and npm provenance. Nothing is published (`"private": true`), and the workflow has not had its dry run on a tag in a fork. | open | SRV-5 |
 | release-2 | E | A host imports a runtime function of a module that was meant to stay internal. | The root entry point keeps the modules' runtime functions out. | covered | `entry-points.test.ts`: "keeps the runtime functions of the modules out of the root" |
 
 ### SessionStore
 
-The shared call record, written by compare-and-set (`src/core/session-store.ts`, the host's own store).
+The shared call record, written by compare-and-set (`src/core/session-store.ts`, the host's own
+store).
 
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
@@ -1149,13 +1188,13 @@ The host's own PIN store, in `verifier` mode.
 
 ### IdentityProvider
 
-Photo ID plus selfie by a texted link (Stripe Identity, planned).
+Photo ID plus selfie by a texted link (the reference server's Stripe Identity adapter is one).
 
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
 | identityprovider-1 | S | An identity outcome is applied to the wrong call, twice, or outside verification. | Outcomes are bound to their session, applied once and only while verifying; unknown sessions are ignored. | covered | `engine.test.ts`: "applies identity outcomes once, only while verifying, and ignores unknown sessions"; `pin.test.ts`: "drops a pending photo ID check when the subject changes, and resumes a link after a failure" |
 | identityprovider-2 | E | A link reserved before a taint is created after it and still counts. | The reserved link is voided. | covered | `engine.test.ts`: "voids a photo ID link reserved before the taint and created after it"; `pin.test.ts`: "voids a reserved link when the subject changes before it was created" |
-| identityprovider-3 | S | The real provider adapter mishandles sessions or outcomes. | The Stripe Identity adapter, tested against recorded responses. | open | VER-5 |
+| identityprovider-3 | S | The real provider adapter mishandles sessions or outcomes. | The reference server's Stripe Identity adapter, tested against a local fake replaying Stripe's answers: one session per idempotency key, an answer it cannot trust refused, and a signed verified event applied end to end. | covered | `stripe-identity.test.ts`: "is the engine's identity adapter: a retry after a failed text resumes with the same key and session"; `stripe-identity.test.ts`: "refuses an answer that is not a session with an https link, without echoing it"; `stripe-identity.test.ts`: "creates the trial call's check in Stripe and applies the signed verified event end to end" |
 
 ### CarrierSignals
 
@@ -1165,7 +1204,7 @@ SIM change, port and identity match on the number on file.
 |---|---|---|---|---|---|
 | carriersignals-1 | S | A carrier report checked for one subject is stored for another. | A report is stored only for the subject it checked. | covered | `pin.test.ts`: "never stores a carrier report for a subject other than the one it checked" |
 | carriersignals-2 | S | No carrier answer is treated as a clean one. | Without an answer a texted code does not count unless the policy says so. | covered | `policy.test.ts`: "needs a carrier answer by default" |
-| carriersignals-3 | S | The real carrier lookups mishandle answers. | Twilio Lookup and Telnyx Number Lookup adapters. | open | VER-4 |
+| carriersignals-3 | S | The real carrier lookups mishandle answers. | The reference server's Twilio Lookup and Telnyx Number Lookup adapters fail closed on anything they cannot read, tested against replayed responses. | covered | `carrier-adapters.test.ts`: "maps SIM Swap to hours since the last change, with basic auth and only sim_swap asked"; `carrier-adapters.test.ts`: "fails closed on an unsupported country, an invalid number and malformed answers"; `carrier-adapters.test.ts`: "maps a port to hours from the last moment its day ends, and returns the carrier" |
 
 ### MessageSender
 
@@ -1179,13 +1218,13 @@ Texts to the number on file.
 
 ### PaymentLinks
 
-Hosted payment links (Stripe Checkout, planned).
+Hosted payment links (the reference server's minimal Stripe Checkout adapter is one).
 
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
 | paymentlinks-1 | T | A retry after a failure creates a second link for one request. | The request stays open and resumes with the same idempotency keys. | covered | `engine.test.ts`: "keeps a request open when creating or texting its link fails, and resumes it with the same keys"; `entry-points.test.ts`: "payment links honour idempotency keys" |
 | paymentlinks-2 | I | Two workspaces' idempotency keys collide at the provider. | Keys are scoped to the workspace. | covered | `races.test.ts`: "scopes provider idempotency keys to the workspace" |
-| paymentlinks-3 | S | The real provider adapter mishandles links or outcomes. | The Stripe Checkout adapter, tested against recorded responses. | open | PAY-1 |
+| paymentlinks-3 | S | The real provider adapter mishandles links or outcomes. | A minimal Stripe Checkout adapter (`StripeCheckoutLinks`) in the reference server, tested against a local fake and proven in Stripe test mode in platform mode only; it sends the `Stripe-Account` header for connect mode, but that is not proven live. | open | PAY-1 |
 
 ### ReceiptSigner
 
@@ -1194,7 +1233,7 @@ The receipt signing key, in process or in a key store.
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
 | receiptsigner-1 | T | A signer on the wrong curve or key type signs receipts. | Signers are P-256 only. | covered | `prove.test.ts`: "builds a signer from a PEM or a JWK, P-256 only" |
-| receiptsigner-2 | I | The signing key and the knowledge key sit in process memory, where a process compromise reads them. | Key store contracts: a KMS signer and the knowledge key as an opaque HMAC function. | open | INT-4 |
+| receiptsigner-2 | I | The signing key and the knowledge key sit in process memory, where a process compromise reads them. | Neither has to: the knowledge key can be an opaque HMAC function whose answer is checked, and the receipt key stays behind `ReceiptSigner`, whose signature is checked, with `derToP1363` for a key store's DER answer. | covered | `knowledge-key-hostile.test.ts`: "K2 an HMAC function's answer is refused unless it is 64 lower-case hex, and the answer is never quoted"; `knowledge-key-hostile.test.ts`: "K4 matches node's own P1363 form for real signatures, and never throws anything but a TypeError on junk"; `knowledge-key-hostile.test.ts`: "K6 refuses a 64-byte signature that does not verify against the signer's own key, so no receipt is issued that cannot verify" |
 
 ### AmountSource
 
@@ -1299,35 +1338,6 @@ Tells the business that someone is locked out, best effort; the ledger stays the
 | notifier-2 | I | A notice carries an account number, a phone number or what the caller keyed. | A notice names the counter and its keyed hash, never a value. | covered | `verify-lockout-alerts.test.ts`: "tell the business once per lock, however many attempts and engines it refuses, with the counter and never a value"; `verify-lockout-alerts.test.ts`: "name the calling number by its keyed hash, and tell a wait after a failure as well as a hard lock" |
 | notifier-3 | D | An attacker runs up waits so a hard lock's notice is lost in the noise. | Hard locks' notices are kept apart from waits'. | covered | `verify-lockout-alerts.test.ts`: "keep the hard locks' notices apart from the waits', so waits an attacker runs up never hide a hard lock (review)" |
 
-### Supply chain and releases
-
-A compromised dependency, action or build, or a release nobody meant to make. **Controls:** the
-package has no runtime dependency. Every workflow action is pinned by full commit SHA, every workflow's
-top-level token is read-only or empty with each job granted only the scopes it uses, and no
-package-manager cache is restored. npm audit and
-osv-scanner check the lockfile on every pull request, weekly, and on each release tag
-(`supply-chain.yml`). Nothing publishes on its own: `"private": true` makes `npm publish` refuse
-until a release is decided (ADR-12), a tag push is only ever a dry run, publishing needs a person
-to start the workflow by hand on a tag with `publish` ticked, and the publish job waits for the
-`npm-publish` environment's reviewers. It runs only in this repository, on a tagged commit that
-is on main, after CI and the supply-chain checks pass on the tag. The tarball must be
-byte-identical across two builds and a third on a fresh runner, holds only `dist/` and the listed
-documents, and passes an unpack-and-import smoke test before it is published (`release.yml`).
-There is no npm token: trusted publishing uses the publish job's short-lived OIDC token, the only
-job granted `id-token: write`, and npm provenance ties the tarball to the commit and workflow
-that built it. The same job writes a CycloneDX SBOM of the published package, refuses it if it
-names any runtime dependency, and signs an SBOM attestation for the tarball through Sigstore
-before publishing; a separate job with `contents: write` and no OIDC token attaches the tarball,
-the SBOM and the attestation's bundle to the tag's GitHub release. The release files are kept before the
-publish, and a rerun after npm accepted the version publishes nothing again when the registry
-serves the very bytes checked (npm's sha512 integrity), and fails when it serves other bytes
-under that version (tested). `npm audit signatures` and
-`gh attestation verify` check them (README.md, "Checking a release"). Today one maintainer can
-approve a publish, so the environment does not prevent self-review; once there is a second
-maintainer, a second reviewer is required (the environment's "prevent self-review" on). The
-runners' egress is audited, not blocked (harden-runner); before the second publish it switches to
-block, allowing only the endpoints the first real publish run's audit log shows.
-
 ## Left to the host
 
 - Routing keypad tones to a buffer outside the model, never logging them or the string its
@@ -1336,85 +1346,82 @@ block, allowing only the endpoints the first real publish run's audit log shows.
   `toString`, JSON or `util.inspect`, discards an entry that is too long, idle or ends in an
   unexpected tone (ignoring the rest of it until `#` or `*`, so no tail is submitted), and gives
   the digits only to its one callback (tested). JavaScript cannot wipe a string, so the buffer is
-  dropped, not overwritten.
-- Authorizing the member behind `clearDuress` and `resetPin`: the engine takes the member id as
-  given, so only the host's staff tools, after their own sign-in, may call them.
+  dropped, not overwritten. The engine answers what may be forwarded in one place,
+  `forwardingFor(state)`, which holds the transcript, both audio paths and listen-in together while
+  `sensitive` is set and after the call ends (tested); acting on that answer on every path, and
+  forwarding nothing when the state cannot be read, is the host's.
+- Keeping every key in a key store, each apart from the others, and limiting who may call it: the
+  knowledge key (behind a `KnowledgeHmac` function), the receipt signing key (behind a
+  `ReceiptSigner`), the access signing key, the access code key, the step-up signing key and each
+  record delivery destination's signing secret.
+- Rotating receipt keys (publish the next key, then switch, then retire), keeping retired public
+  keys as long as their receipts matter, and removing a key that leaked.
+- Authorizing the member behind `clearDuress`, `resetPin` and `unlock`: the engine takes the
+  member id as given, so only the business's own staff tools, after their own sign-in, may call
+  them, never a path a caller or the model can reach. `resetPin` comes only after the business has
+  confirmed the request.
 - Repeating a `clearDuress` that raced an alert's delivery: the counters store has no
   compare-and-set, so a clearing that lands while an earlier entry's alert is delivered may be
   undone, leaving the subject flagged (fail closed) until the business clears it again (tested).
 - Accepting that the hidden counter shows in the hard lock: because a duress entry never clears
   earlier wrong guesses, a caller who counts guesses can see the hard lock come sooner after a
   duress entry than after a real pass; waits and answers are unchanged (a kept trade-off).
-- Buffering keypad digits outside the model, never logging them, and cutting audio to
-  speech-to-text and the model while `sensitive` is set. The engine answers what may be forwarded
-  in one place, `forwardingFor(state)`, which holds the transcript, both audio paths and listen-in
-  together while `sensitive` is set and after the call ends (tested); acting on that answer on
-  every path, and forwarding nothing when the state cannot be read, is the host's.
-- Keeping the knowledge key, the receipt signing key, the access signing key, the access code key
-  and the step-up signing key in a key store, each apart from the others, behind a `KnowledgeHmac`
-  function and `ReceiptSigner`s, and limiting who may call them.
-- A door keypad that slows after wrong access codes, and a durable `AccessCodeStore` whose
-  `take` and `miss` are atomic across processes.
+- A door keypad that slows after wrong access codes, and a durable `AccessCodeStore` whose `take`
+  and `miss` are atomic across processes.
 - Exchanging each step-up token through the engine (`exchangeStepUpToken`), and only for the
   browser session that showed its nonce.
 - Calling `expirePaymentLinks` at each link's `expiresAt` (a timer or a sweep); until it does, or
   the call ends, a link lives as long as the provider keeps it. Calling `endCall` again when it
   failed at the provider, so the call's open links are expired and its receipt issued.
 - Refunding a late payment (one flagged `late` in the ledger) when the business does not want it.
-- Rotating receipt keys (publish the next key, then switch, then retire), keeping retired public
-  keys as long as their receipts matter, and removing a key that leaked.
 - A `FieldCipher` with authenticated encryption under a key the host keeps in a key store, binding
   the context (workspace, record, field) so a ciphertext moved elsewhere fails to decrypt; and
   protecting a durable `SessionStore` as it would the records, since an open draft is in the clear.
 - Scheduling `anchorLedger` (daily, for example), keeping the authority's certificate chain and
   Rekor's key from a source it trusts, and choosing the authority and the log.
-- Durable `SessionStore`, `RecordStore` and `AuditLedger` implementations that keep the same
-  guarantees: they must pass `sessionStoreContract`, `recordStoreContract` and
+- Durable stores that keep the same guarantees: `SessionStore`, `RecordStore` and `AuditLedger`
+  implementations that pass `sessionStoreContract`, `recordStoreContract` and
   `auditLedgerContract` from `district-assurance/testing`, as the memory adapters do (tested); one
-  durable `AttemptCounters` store shared by every process of a workspace
-  (`attemptCountersContract`), and a durable `CodeStore` shared by every engine of a workspace that passes `codeStoreContract`. The reference server's
+  `AttemptCounters` store shared by every process of a workspace (`attemptCountersContract`); a
+  `CodeStore` shared by every engine of a workspace (`codeStoreContract`); and scheduling
+  `flushPending` on a session store with `pendingCalls`. The reference server's
   `SqliteRecordStore` and `SqliteAuditLedger` (SRV-4) are an example that passes the record and
-  ledger suites, not a production store. Scheduling `flushPending` on a session store with
-  `pendingCalls`.
+  ledger suites, not a production store.
 - Passing the calling number from the carrier to `beginVerification`, never one the caller or the
   model gives, so the per-number limits apply. Caller ID can be spoofed, so the number's counter is
   a brake on one line, not a control; the subject's counter is what bounds guessing, and a withheld
   number skips the number's counter.
 - Speaking the same line, at the same moment, whether a code was sent or not.
 - A lockout is also a way to lock someone out: anyone who knows a subject (the owner of a line)
-  can spend its 10 failures. The engine tells a `Notifier` of each lock (INT-7, below); acting on
-  notices, the person path for a locked caller, who among the business's members may call
-  `unlock`, and checking that the caller is real before doing so are the host's. `unlock` must be
-  reachable only from the business's own tools, never from a call's tool paths.
+  can spend its 10 failures. The engine tells a `Notifier` of each lock (INT-7, under Guessing);
+  acting on notices, the person path for a locked caller, who among the business's members may
+  call `unlock`, and checking that the caller is real before doing so are the host's.
 - A `CallbackDialer` that dials only the number the engine gives, honours the idempotency key,
   plays a fixed prompt, and reports `confirmed` only for the confirmation key, never for speech or
   a machine. Speaking the same "we will call you back" line and hanging up whatever
   `requestCallback` decides, without waiting on it, so its timing tells the caller nothing.
 - Choosing the subject when it starts verification with a subject key (for example the owner of
   the line it was called on). That choice is not a factor: the PIN or other factors still decide.
-- A `PinVerifier` that answers the same way, in the same time, for an unknown subject.
-- Calling `resetPin` only from the business's own staff tools, after the business has confirmed
-  the request, never from a path a caller or the model can reach; and a `RecordStore.putPinDigest`
-  that stores only the digest it is given, and only if the subject has none, atomically. The same
-  for `enrolDuressPin`, `removeDuressPin` and `putDuressDigest`, which stores only the duress
-  digest it is given, replaces one on file (only the business sets it), and only while the PIN
-  digest on file is the one given, atomically.
+- A `PinVerifier` that answers the same way, in the same time, for an unknown subject, and, in
+  `verifier` mode, for a duress PIN as for any other entry.
+- A `RecordStore` whose `putPinDigest` stores only the digest it is given, and only if the subject
+  has none, atomically, and whose `putPinDigest(null)` also removes the duress digest in the same
+  step; the same care for `enrolDuressPin`, `removeDuressPin` and `putDuressDigest`, which stores
+  only the duress digest it is given, replaces one on file (only the business sets it), and only
+  while the PIN digest on file is the one given, atomically.
 - A `DuressNotifier` that alerts someone the business named, away from the call, and never
   through anything the caller or the person beside them can see; that never blocks (it queues the
   alert and returns); that drops repeats by `alertId`; and a sweep calling `sweepAlerts` (with a
   session store that lists the calls owing alerts) or `deliverDuressAlerts` for recent calls, in
-  case a process stopped with an alert owed; a `RecordStore` whose `putPinDigest(null)` also
-  removes the duress digest in the same step; and, in `verifier` mode, a
-  `PinVerifier` that answers a duress PIN in the same time as any other entry.
+  case a process stopped with an alert owed.
 - Who may edit a workspace's FlowConfig, and keeping its revisions.
 - Keeping `refundPayment` on the business's side (a back office, staff tools), never on a tool the
   model can call, and deciding who in the business may ask for a refund.
-- Record delivery: keeping each destination's signing secret in a key store, a `RecordDelivery`
-  adapter with a timeout that does not follow redirects, calling `deliverRecord` again (from a
-  durable queue) for a record that was not delivered, and a receiver that checks the signature and
-  applies each idempotency key once.
-- Until the engine sends upload links itself: texting an upload link only to the number on file,
-  never logging its token, and a `DocumentStore` whose `claimUploadLink` is atomic.
+- Record delivery: a `RecordDelivery` adapter with a timeout that does not follow redirects,
+  calling `deliverRecord` again (from a durable queue) for a record that was not delivered, and a
+  receiver that checks the signature and applies each idempotency key once.
+- Texting an upload link (the engine does not send one) only to the number on file, never logging
+  its token, and a `DocumentStore` whose `claimUploadLink` is atomic.
 - Outside modules: their code runs inside the engine's writes and is part of the host's security
   model. So do factor judges, the host's plug-ins and those an outside module supplies: the
   engine counts and limits their attempts, but whether a judge answers the same way for an unknown
