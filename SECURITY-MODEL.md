@@ -170,9 +170,10 @@ subject with a host call, never a caller one, stored as its own keyed digest and
 equals the PIN, the account number or any keypad knowledge (tested). Every PIN entry is compared
 with both digests, whether or not a duress PIN is on file, so the work, the time and the answer are
 the same (tested). A duress entry gets the same answer, level, grant, events and receipt as the PIN
-(tested); the duress state is kept only in the call record. On that call `authorize` refuses every
-money, contact and access scope and the scopes the business lists in `refuseScopes` (for example
-`owner.command`), with the same `false` as a scope with no grant (tested). Every duress entry owes
+(tested); the call's duress state is kept in the call record, and the subject's flag (below) in the
+attempt counters store. On that call `authorize` refuses every money, contact and access scope
+and the scopes the business lists in `refuseScopes` (for example `owner.command`), with the same
+`false` as a scope with no grant (tested). Every duress entry owes
 an alert, written in the same write as the entry, and recorded against the call even if verification
 restarted or the call ended while it was judged (tested). The engine sends it to the host's
 `DuressNotifier` after that write, off the caller's response path (so a slow notifier delays nothing
@@ -572,9 +573,12 @@ another workspace, or after the grant's expiry, and answers the same for every r
 (tested). A text that fails takes its code back, and its grant is `refused` only when that proves
 the code unused, else `unknown`, since the text may have arrived (tested). A signer that fails at
 redemption leaves the code redeemable, and a code is taken only after it is signed (tested). 8
-digits give one chance in 100 million per live code per guess, and 5 wrong guesses at a door
-(configurable, 1 to 10) spend every code live there, recorded as `access.code_spent` without the
-guess (tested). The trade-off: someone at the keypad can spend the codes of a door with a few wrong
+digits from the default generator (`randomInt` from node:crypto) give one chance in 100 million
+per live code per guess (the engine checks only the shape of a code, so a host that supplies
+`newCode` must draw each code uniformly at random, or these odds do not hold), and 5 wrong
+guesses at a door (configurable, 1 to 10) spend every code live there, recorded as
+`access.code_spent` without the guess (tested). The trade-off: someone at the keypad can spend the
+codes of a door with a few wrong
 guesses, and the caller then asks for a new one. A `newCode` that is not exactly 8 digits fails the
 issue before anything is stored (tested). Left to the host: a keypad that slows after wrong entries,
 a durable `AccessCodeStore` whose `take` and `miss` are atomic across processes, and keeping the

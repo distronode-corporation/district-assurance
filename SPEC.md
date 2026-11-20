@@ -605,7 +605,10 @@ is a subject key, and the number's when there is a number.
   judged even if the first is still being judged. There is no free guess either way, since every
   entry records its own failure before it is judged, and only a pass takes it back. If the first
   passes, its pass takes off the subject's failures up to the pass and the second may enter again at
-  once; if it fails, both failures stand and the second waits the longer wait for two.
+  once. If it fails, its failure stands. A second that saw the first's failure when it read the
+  counters recorded none of its own, so it waits the wait for one failure; one that saw it only in
+  the list `recordFailure` returned has its own failure recorded too, unjudged, so both stand and it
+  waits the longer wait for two.
 - The cleanup a pass owes (`forgetPass`, and with the duress PIN on its hidden counter) is saved
   with the pass, on the call, so a write that fails after the pass was saved (its ledger entry)
   still gets it, in the same `submitKeypad` or `submitPin` or before the call's next factor; a pass
