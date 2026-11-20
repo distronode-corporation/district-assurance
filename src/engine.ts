@@ -676,7 +676,8 @@ export class Engine {
     // Takes back these counters' counts (none was made when a counter was already at its limit).
     const giveBack = (back: readonly AttemptCounterKey[]) => this.#uncount({ over, counted: null, recorded: at === null ? null : { keys: back, at } });
     const outcome: WriteOutcome = { write: "none" };
-    // The counters another verification on this call took first, as the last write attempt found them.
+    // The counters another verification on this call took first, as the last write attempt found
+    // them: the attempt that saved, kept when the write fails after saving.
     let taken: AttemptCounterKey[] = [];
     try {
       await this.#update(
@@ -698,8 +699,10 @@ export class Engine {
         outcome,
       );
     } catch (error) {
-      // Saved nothing: every count is given back. A write with no answer keeps them.
+      // Saved nothing: every count is given back. Saved, then failed (a ledger append): only the
+      // ones another verification took first. A write with no answer keeps them.
       if (outcome.write === "none") await giveBack(keys);
+      if (outcome.write === "saved") await giveBack(taken);
       throw error;
     }
     // Counters another verification on this call took first: this count is the extra one.
