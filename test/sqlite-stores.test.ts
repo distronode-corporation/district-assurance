@@ -190,3 +190,69 @@ describe("SQLite stores", () => {
     assert.equal(statSync(path).mode & 0o777, 0o600);
   });
 });
+
+// VER-6 (#74) and VER-12 (#124) writes in the SQLite store (#95): each reads and writes the subject
+// in one immediate transaction, so two connections on one file never both pass the check.
+describe("SQLite PIN and duress writes on two connections", () => {
+  const S = "s".repeat(64);
+  const subject = { subjectKey: S, phoneOnFile: "+15555550100", knowledge: { dob: "a".repeat(64) } };
+  const two = () => {
+    const path = newFile();
+    const a = openStores(path);
+    a.records.putSubject("w", subject);
+    return { a: a.records, b: openStores(path).records };
+  };
+
+  it("two enrolments at once keep one PIN digest, and both connections read it", async () => {
+    const { a, b } = two();
+    const answers = await Promise.all([a.putPinDigest("w", S, "1".repeat(64), "enr_a"), b.putPinDigest("w", S, "2".repeat(64), "enr_b")]);
+    assert.deepEqual(answers.toSorted(), [false, true], "one stores, the other replaces nothing");
+    const kept = await a.getSubject("w", S);
+    assert.deepEqual(await b.getSubject("w", S), kept);
+    assert.equal(kept!.pinDigest, answers[0] ? "1".repeat(64) : "2".repeat(64));
+    assert.equal(kept!.pinEnrolmentId, answers[0] ? "enr_a" : "enr_b", "the digest with its own enrolment id");
+  });
+
+  it("refuses a duress PIN keyed against a PIN the other connection reset and replaced", async () => {
+    const { a, b } = two();
+    const old = "1".repeat(64);
+    assert.equal(await a.putPinDigest("w", S, old), true);
+    // The business resets the PIN and the subject enrols a new one, on the other connection.
+    assert.equal(await b.putPinDigest("w", S, null), true);
+    assert.equal(await b.putPinDigest("w", S, "2".repeat(64)), true);
+    assert.equal(await a.putDuressDigest("w", S, "3".repeat(64), old), false, "a stale PIN digest stores nothing");
+    assert.equal("duressDigest" in (await b.getSubject("w", S))!, false);
+    assert.equal(await a.putDuressDigest("w", S, "3".repeat(64), "2".repeat(64)), true);
+    assert.equal((await b.getSubject("w", S))!.duressDigest, "3".repeat(64));
+  });
+
+  it("a deletion and a duress put at once leave no digest, in either order", async () => {
+    for (const deleteFirst of [true, false]) {
+      const { a, b } = two();
+      const pin = "1".repeat(64);
+      assert.equal(await a.putPinDigest("w", S, pin), true);
+      const remove = () => a.deletePinDigest("w", S);
+      const duress = () => b.putDuressDigest("w", S, "3".repeat(64), pin);
+      await Promise.all(deleteFirst ? [remove(), duress()] : [duress(), remove()]);
+      for (const store of [a, b]) {
+        const got = (await store.getSubject("w", S))!;
+        assert.deepEqual([got.pinDigest, got.duressDigest], [undefined, undefined], `deleteFirst=${deleteFirst}`);
+        assert.deepEqual(got.knowledge, subject.knowledge, "the rest of the subject is kept");
+      }
+    }
+  });
+
+  it("a write the other connection's lock times out changes nothing, and the connection stays usable", async () => {
+    const path = newFile();
+    openStores(path).records.putSubject("w", subject);
+    const blocker = openDatabase(path);
+    blocker.exec("BEGIN IMMEDIATE");
+    const { DatabaseSync } = await import("node:sqlite");
+    const impatient = new SqliteRecordStore(track(new DatabaseSync(path, { timeout: 1 })));
+    await assert.rejects(impatient.putPinDigest("w", S, "1".repeat(64)));
+    await assert.rejects(impatient.deletePinDigest("w", S));
+    blocker.exec("ROLLBACK");
+    assert.equal("pinDigest" in (await impatient.getSubject("w", S))!, false);
+    assert.equal(await impatient.putPinDigest("w", S, "1".repeat(64)), true, "no transaction left open");
+  });
+});
