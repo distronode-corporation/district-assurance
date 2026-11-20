@@ -43,6 +43,8 @@ async function recordPassed(t: TestEngine, callId: string, kinds: string[]): Pro
 
 /** A policy where a spoken answer counts: alone at level 1, with a carrier match at level 2. */
 const spokenPolicy = (c: FlowConfig) => {
+  // #84 built spoken_knowledge: a policy that counts it names its spoken fields.
+  c.policy.spoken = { fields: { postal_code: "ca_postal_code" }, maxAttemptsPerCall: 2 };
   c.policy.levels[0]!.anyOf.push(["spoken_knowledge"], ["carrier_identity_match"]);
   c.policy.levels[1]!.anyOf.push(["spoken_knowledge", "carrier_identity_match"]);
 };
@@ -204,7 +206,7 @@ describe("synthetic voice: the ledger and the receipt", () => {
 
     const shown = async (t: TestEngine, callId: string) => (await t.engine.endCall(callId))!.body.verification;
     const expected = await shown(honest, honestCall);
-    assert.deepEqual(expected, { level: 1, methods: ["keypad_knowledge"] });
+    assert.deepEqual(expected, { level: 1, methods: ["keypad_knowledge"], policyVersion: "default-1", configRevision: "default" });
     assert.deepEqual(await shown(late, lateCall), expected, "capped after finishing");
     assert.deepEqual(await shown(early, earlyCall), expected, "capped before finishing");
     for (const t of [late, early]) {
