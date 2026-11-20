@@ -516,9 +516,10 @@ the duress PIN is off unless it is set.
   `RecordStore.upgradePinDigest(workspaceId, subjectKey, field, from, to)`, which writes only while
   the field is still `from`, in one atomic step; a miss, a lock or a lost race changes nothing, and
   the answer to the caller is the same either way. The upgrade is best effort, and the entry keeps its outcome
-  whatever happens to it: if hashing the new record fails, or the store's write fails before it
-  commits, the earlier record stays for the next match; a write that commits and then errors (a
-  lost acknowledgement) leaves the new record, which the next match verifies. Lockouts and counters are unchanged.
+  whatever happens to it. As far as the upgrade goes, a failed hash, or a write that fails before
+  it commits, leaves the earlier record, and a write that commits and then errors (a lost
+  acknowledgement) leaves the Argon2id one. A reset or an enrolment meanwhile wins, since the
+  upgrade writes only over the value it read; the next match checks whatever is on file. Lockouts and counters are unchanged.
 - `verifier` mode: the host's `PinVerifier.verify({workspaceId, subjectKey, pin})` decides; the
   PIN is passed once and kept nowhere. It is asked for every attempt: for a malformed entry or an
   account a keypad cannot produce, with a stand-in (`minDigits` zeros, an HMAC subject key) whose
