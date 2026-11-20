@@ -733,6 +733,15 @@ totals only, and counts an entry for a workspace only when its `eventId` names t
 an entry without one is reported as unattributed, so one business never sees another's calls
 (tested). An entry whose time does not read is counted as malformed, by its `seq` only, for no
 workspace: one tenant's bad entry never stops another tenant's report (tested).
+`exportLedger` copies the ledger out as NDJSON with an ES256-signed trailer naming where the run
+starts and ends and the head; it checks the chain before signing, and refuses a ledger whose
+entries, head or cursor entry no longer match (tested). `verifyLedgerExport` detects a changed,
+removed, added or replaced entry, a changed trailer and a run that does not continue the previous
+one (tested). The signed bytes start with a fixed context line, so a trailer signature cannot pass
+as a receipt signature under the same key, or the other way round (tested). A run that starts at a
+`fromSeq` above 1 is anchored on the entry before it as the host's ledger holds it; only a chain of
+runs from seq 1, each checked with the previous trailer, ties an export to the genesis. Entries
+carry no values, so neither does the export.
 
 ### Reading someone else's receipt
 

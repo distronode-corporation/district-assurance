@@ -262,6 +262,9 @@ All notable changes to this project are documented here. The format follows
   on `fast-check` (a development dependency only), in CI and nightly (`fuzz.yml`); they found, and
   this fixes, `parseStripeEvent` reading event types like `constructor` from `Object.prototype` and
   `verifyChain` throwing on a stored entry changed to hold `1e999` instead of reporting the break.
+- Ledger export (PRV-4): `exportLedger` yields the ledger as NDJSON from a `fromSeq` or a cursor,
+  closed by an ES256-signed trailer with the run's start, end and the head; `verifyLedgerExport`
+  checks a run and that it continues the previous one.
 
 ### Changed
 
@@ -339,6 +342,9 @@ All notable changes to this project are documented here. The format follows
 - `sensitive_closed` (`closeSensitive`) is refused while a payment is open (`invalid_transition`):
   the payment hold ends only when the payment settles or fails, or the call ends, so a host cannot
   resume forwarding while the caller may be reading out card details.
+- `AuditLedger.list(fromSeq?, limit?)` takes a page size, and a ledger adapter must honour it
+  (breaking for adapter authors): `MemoryAuditLedger` does, and `exportLedger` reads each run as
+  one page instead of the rest of the ledger.
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

@@ -1169,6 +1169,57 @@ that fixes in time that the ledger was still there, unchanged, and each grows th
   `MAX_REPLY_BYTES`, 256 KiB), cancel the rest and refuse it, and refuse an error answer without
   reading its body.
 
+### Export
+
+`exportLedger({ledger, signer, clock, ledgerId, fromSeq | cursor, limit?})` is an async generator of
+newline-delimited JSON lines, each ending in `\n`: one line per entry, in canonical JSON and in
+order, then one signed trailer line.
+
+```json
+{
+  "trailer": {
+    "v": 1, "type": "ledger_export", "ledgerId": "ws_123",
+    "from":    { "seq": 0,  "hash": "<64 zeros, or the hash of the entry before the first line>" },
+    "through": { "seq": 17, "hash": "<hash of the last line's entry; equal to from when empty>" },
+    "count": 17,
+    "head":    { "seq": 17, "hash": "<the ledger head when the export was taken>" },
+    "exportedAt": "...",
+    "cursor": "17.<through.hash>"
+  },
+  "alg": "ES256",
+  "kid": "...",
+  "signature": "<base64url of the 64-byte r||s signature over the payload>"
+}
+```
+
+The payload is the bytes of `district-assurance ledger export v1\n` followed by
+`canonicalJson(trailer)`, so a trailer signature and a receipt signature can never stand in for each
+other. The signer is a `ReceiptSigner`, and the receipt key set verifies trailers by `kid`. The
+trailer is signed before the first line is yielded, and a signature that is not 64 bytes (P1363),
+or that does not verify against the signer's own `publicJwk()`, is refused with `invalid_input`, so
+a failing signer never leaves a consumer with entries and no valid trailer. Each input is read once.
+
+A run starts at `fromSeq` (1 or more, at most the head plus one) or right after `cursor`
+(`<seq>.<hash>` of a previous trailer's `through`), never both, and stops at the head read when the
+export starts, or after `limit` entries; it asks the ledger for that one page only
+(`list(from + 1, count)`). The run is complete when `through` equals `head`; otherwise
+the next run takes `cursor`. Refused with `invalid_input`: neither or both of `fromSeq` and
+`cursor`, a `fromSeq` or `limit` that is not an integer of 1 or more, a `fromSeq` past the head, an
+empty `ledgerId`, a cursor that is malformed or past the head. Refused with `precondition_failed`,
+before anything is yielded: a head the ledger does not hold, a cursor whose entry the ledger no
+longer holds with that hash, a missing entry before `fromSeq`, and a run that fails `verifyChain`
+from its start. `ledgerId` is the host's name for the ledger, for example the workspace id.
+
+`verifyLedgerExport(ndjson, keys, after?)` checks a whole run and never throws, whatever its
+arguments are (a text that is not a string is `malformed`, a key set that is not a list of keys
+fails `signature`, an `after` that is not a trailer fails `continuity`). It returns
+`{ok: true, entries, trailer}`, or `{ok: false, reason}` with `reason`: `malformed` (a line that is
+not JSON, no final newline, a trailer that is missing or inconsistent, an entry line that is not an
+object), `signature` (unknown `kid`, wrong `alg`, a signature that does not verify), `continuity`
+(given the previous run's trailer as `after`: a different `ledgerId`, or a start other than its
+cursor) or `chain` (`verifyChain` from `from` fails, with its `seq`, or the run does not end on
+`through`).
+
 ## 11. Canonical JSON
 
 Object keys sorted by UTF-16 code units, no whitespace, strings and numbers as ECMAScript
