@@ -17,7 +17,7 @@ import { canonicalJson } from "../core/canonical.ts";
 import { checkManifest, type AssuranceModule, type FlowStep, type StepContext, type StepView } from "../core/module.ts";
 import { defaultVerificationPolicy, type VerificationPolicy } from "../core/policy.ts";
 import { newSession, type Grant, type SessionState } from "../core/session.ts";
-import { isObject } from "../core/shape.ts";
+import { isDenseArray, isObject } from "../core/shape.ts";
 import { builtInModules } from "../modules.ts";
 
 export interface ContractCase {
@@ -867,7 +867,8 @@ function mustNotThrow<T>(what: string, fn: () => T): T {
 }
 
 function assertSentences(value: unknown, what: string): void {
-  assert.ok(Array.isArray(value) && value.every((s) => typeof s === "string"), `${what} must return a list of strings, got ${show(value)}`);
+  // Dense only: every() skips a hole, which is no sentence.
+  assert.ok(isDenseArray(value) && value.every((s) => typeof s === "string"), `${what} must return a list of strings, got ${show(value)}`);
 }
 
 function assertJson(value: unknown, what: string): string {
@@ -904,8 +905,8 @@ export function moduleContract(module: AssuranceModule, options: ModuleContractO
   const policy = options.policy ?? defaultVerificationPolicy();
   const installed = options.installed ?? builtInModules();
   const goodContext = (): StepContext =>
-    Object.freeze({ settings: frozen(settings), policy: frozen(policy), adapters: new Set(module.requiredAdapters(frozen(settings))), capabilities: {} });
-  const emptyContext = (): StepContext => Object.freeze({ settings: null, policy: null, adapters: new Set<string>(), capabilities: {} });
+    Object.freeze({ settings: frozen(settings), policy: frozen(policy), adapters: new Set(module.requiredAdapters(frozen(settings))), capabilities: Object.freeze({}) });
+  const emptyContext = (): StepContext => Object.freeze({ settings: null, policy: null, adapters: new Set<string>(), capabilities: Object.freeze({}) });
   /** validateStep on a frozen context. A host shares its adapter set, so a change to it fails the case. */
   const validateStep = (step: FlowStep, ctx: StepContext, what: string): string[] => {
     const before = [...ctx.adapters];
@@ -998,6 +999,14 @@ export function moduleContract(module: AssuranceModule, options: ModuleContractO
         const slice = module.initCall(frozen(settings));
         if (module.cannotRunStep !== undefined) {
           for (const step of steps) assertNullOrString(mustNotThrow("cannotRunStep", () => module.cannotRunStep!(frozen(step), frozen(slice), "en")), "cannotRunStep");
+        }
+        // validateConfig calls both without catching, and only once the settings are valid: each
+        // must answer sentences for the sample settings and steps, and change nothing.
+        if (module.validateFlow !== undefined) {
+          assertSentences(mustNotThrow("validateFlow", () => module.validateFlow!(frozen(steps), goodContext())), "validateFlow");
+        }
+        if (module.checkAdapters !== undefined) {
+          assertSentences(mustNotThrow("checkAdapters", () => module.checkAdapters!(frozen(settings), Object.freeze({}))), "checkAdapters");
         }
         if (module.blocksEnd !== undefined) assertNullOrString(mustNotThrow("blocksEnd", () => module.blocksEnd!(frozen(slice), new Date("2026-01-01T00:00:00.000Z"))), "blocksEnd");
         if (module.onUntrusted !== undefined) assertJson(mustNotThrow("onUntrusted", () => module.onUntrusted!(frozen(slice))), "onUntrusted");

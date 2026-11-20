@@ -147,8 +147,9 @@ includes the manifest's adapters; that `validateSettings`, `validateStep`, `step
 `stepGrants` never throw on garbage (every JSON type, `__proto__` and method-named keys, a long
 string, lone UTF-16 surrogates, deep nesting, a sparse array, a missing value, at every path of the samples) and answer
 with the right types (`stepLevel` a level from 0 to 3, or null); that `initCall` and `enterStep` return canonical JSON, the same each time;
-that `stepStatus` answers the same for the same view, in any order; and that none of these, nor
-`cannotRunStep` (asked for an English call), `blocksEnd` (given a fixed `now`, as the engine passes
+that `stepStatus` answers the same for the same view, in any order; that `validateFlow` and
+`checkAdapters`, when a module has them, answer sentences for the sample settings and steps; and
+that none of these, nor `cannotRunStep` (asked for an English call), `blocksEnd` (given a fixed `now`, as the engine passes
 its clock's time), `onUntrusted` or `receiptPart`, changes a (frozen) input. Every built-in module
 passes it, Gate and step-up included. `examples/modules/callback.ts` is an example outside module
 that passes it.

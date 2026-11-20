@@ -238,6 +238,13 @@ describe("the module contract catches", () => {
     ["an onUntrusted that is not JSON", broken({ onUntrusted: () => new Map() as unknown as JsonValue }), /onUntrusted must return JSON/],
     ["a receiptPart that is not an object", broken({ receiptPart: () => [] as unknown as { [key: string]: JsonValue } }), /receiptPart must return an object/],
     ["a receiptPart that is not JSON", broken({ receiptPart: () => ({ x: undefined }) as unknown as { [key: string]: JsonValue } }), /receiptPart must return JSON/],
+    ["a validateFlow that throws", broken({ validateFlow: () => { throw new Error("boom"); } }), /validateFlow threw: boom/],
+    ["a validateFlow that is not a list", broken({ validateFlow: () => "fine" as unknown as string[] }), /validateFlow must return a list of strings/],
+    ["a validateFlow that changes its steps", broken({ validateFlow: (steps) => { (steps as FlowStep[]).pop(); return []; } }), /validateFlow threw/],
+    ["a checkAdapters that throws", broken({ checkAdapters: () => { throw new Error("boom"); } }), /checkAdapters threw: boom/],
+    ["a checkAdapters with a hole for a sentence", broken({ checkAdapters: () => new Array<string>(1) }), /checkAdapters must return a list of strings/],
+    ["settings validation with a hole for a sentence", broken({ validateSettings: (s) => (s === null ? new Array<string>(1) : []) }), /validateSettings with settings spoiled, as null, must return a list of strings/],
+    ["step validation that changes the capabilities", broken({ validateStep: (_step, ctx) => { (ctx.capabilities as Record<string, unknown>).changed = true; return []; } }), /validateStep\(callback.book\) threw: Cannot add property changed/],
   ];
 
   for (const [name, module, expected, options] of CATCHES) {

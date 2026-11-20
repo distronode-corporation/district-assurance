@@ -124,12 +124,19 @@ with a `callback.book` step that needs the `callback.book` scope. The rules:
 5. **Run time.** The host's code changes the part with `engine.updateModule`, through pure helpers
    the module exports (Callback's `bookCallback`). Ledger detail from `call.emit` carries what
    happened, never a value the caller gave, a phone number or a link.
-6. **Check it.** Run `moduleContract(module, { settings, steps })` from
-   `district-assurance/testing` under your test runner, with sample settings and a sample of each
-   step. It checks the manifest against the built-in modules, feeds the validators garbage, and
-   checks that `initCall` and `enterStep` return JSON, that `stepStatus` is pure, and that the
-   optional hooks return what they promise. `test/contracts.test.ts` runs it on Callback and on
-   the built-in modules.
+6. **Check it.** `moduleContract(module, { settings, steps })` from `district-assurance/testing`
+   returns the contract's cases, each with a `name` and a `run()`; it runs nothing itself, so
+   register each case with your test runner, with sample settings and a sample of each step:
+
+   ```ts
+   for (const c of moduleContract(callbackModule, { settings, steps })) it(c.name, c.run);
+   ```
+
+   It checks the manifest against the built-in modules, feeds the validators garbage, and checks
+   that `initCall` and `enterStep` return JSON and that `stepStatus` is pure. Of the optional
+   hooks it calls `validateFlow` and `checkAdapters` (sentences, never a throw, on the sample
+   settings and steps), `cannotRunStep`, `blocksEnd`, `onUntrusted` and `receiptPart`, each on
+   frozen inputs. `test/module-contract.test.ts` runs it on Callback and on the built-in modules.
 
 ## One call, step by step
 
