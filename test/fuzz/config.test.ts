@@ -13,6 +13,9 @@ import { builtInModules, defaultConfig } from "../../src/modules.ts";
 import { testConfig } from "../helpers.ts";
 import { fuzz, int, jsonValue, mutate, pick } from "./harness.ts";
 
+/** A list of length 1 with a hole where its one item would be. */
+const holed = (): string[] => Object.assign([], { length: 1 });
+
 // Every adapter the engine takes: the Record type fails to compile when one is added and not listed.
 const ADAPTERS: Record<AdapterName, true> = {
   ledger: true,
@@ -93,7 +96,7 @@ describe("fuzz: validateConfig", () => {
       ["levels[0]", (c) => void (c.policy.levels[0]!.anyOf[0]!.length += 1)],
       ["keypadFields", (c) => void (c.policy.keypadFields.length += 1)],
       // A hole hidden by an extra named key: as many own keys as the length, still a hole.
-      ["keypadFields", (c) => void (c.policy.keypadFields = Object.assign(new Array<string>(1), { extra: "account" }))],
+      ["keypadFields", (c) => void (c.policy.keypadFields = Object.assign(holed(), { extra: "account" }))],
     ];
     for (const [where, punch] of holes) {
       const config = defaultConfig();

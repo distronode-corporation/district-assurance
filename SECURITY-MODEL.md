@@ -1315,7 +1315,10 @@ job granted `id-token: write`, and npm provenance ties the tarball to the commit
 that built it. The same job writes a CycloneDX SBOM of the published package, refuses it if it
 names any runtime dependency, and signs an SBOM attestation for the tarball through Sigstore
 before publishing; a separate job with `contents: write` and no OIDC token attaches the tarball,
-the SBOM and the attestation's bundle to the tag's GitHub release. `npm audit signatures` and
+the SBOM and the attestation's bundle to the tag's GitHub release. The release files are kept before the
+publish, and a rerun after npm accepted the version publishes nothing again when the registry
+serves the very bytes checked (npm's sha512 integrity), and fails when it serves other bytes
+under that version (tested). `npm audit signatures` and
 `gh attestation verify` check them (README.md, "Checking a release"). Today one maintainer can
 approve a publish, so the environment does not prevent self-review; once there is a second
 maintainer, a second reviewer is required (the environment's "prevent self-review" on). The

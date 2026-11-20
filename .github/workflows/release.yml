@@ -15,8 +15,10 @@ name: Release
 #   publish       this repository only, on a manual run on a tag with `publish` ticked, and only
 #                 after the `npm-publish` environment's reviewers approve. It rebuilds, requires
 #                 the pack job's SHA-256, writes and checks a CycloneDX SBOM of the published
-#                 package, signs an SBOM attestation for the tarball through Sigstore, and
-#                 publishes that tarball.
+#                 package, signs an SBOM attestation for the tarball through Sigstore, keeps the
+#                 release files, and publishes that tarball. A rerun after npm accepted it
+#                 publishes nothing again when the registry serves the very same bytes, and
+#                 fails when it serves other bytes under the version.
 #   github-release  after publish: a GitHub release on the tag with the tarball, the SBOM and
 #                 the attestation's Sigstore bundle attached.
 #   dry-run       everything else (a tag push, a fork, or a manual run without `publish`): the
@@ -364,18 +366,9 @@ jobs:
         with:
           subject-path: ${{ runner.temp }}/release/${{ needs.pack.outputs.filename }}
           sbom-path: ${{ steps.sbom.outputs.path }}
-      # A version with a pre-release part goes to the `next` dist-tag, never to `latest`.
-      - name: npm publish
-        env:
-          FILE: ${{ needs.pack.outputs.filename }}
-          VERSION: ${{ needs.pack.outputs.version }}
-        run: |
-          set -euo pipefail
-          tag=latest
-          case "$VERSION" in *-*) tag=next ;; esac
-          npm publish "$RUNNER_TEMP/release/$FILE" --provenance --access public --tag "$tag" --ignore-scripts
-      # The files the github-release job attaches. It gets no OIDC token and this job gets no
-      # write access to the repository's contents.
+      # The files the github-release job attaches, kept before anything is published: a run whose
+      # publish went through always has them. It gets no OIDC token and this job gets no write
+      # access to the repository's contents. A rerun replaces the first attempt's files.
       - name: Collect the release files
         env:
           FILE: ${{ needs.pack.outputs.filename }}
@@ -390,6 +383,47 @@ jobs:
           path: ${{ runner.temp }}/release/
           if-no-files-found: error
           retention-days: 30
+          overwrite: true
+      # Whether the registry already has this version (a rerun after npm accepted it, when a later
+      # step failed). Not there: publish. There with these very bytes (npm's sha512 integrity):
+      # publish nothing again. There with other bytes, or no answer from the registry: fail.
+      - name: Registry check
+        id: registry
+        env:
+          FILE: ${{ needs.pack.outputs.filename }}
+          VERSION: ${{ needs.pack.outputs.version }}
+        run: |
+          set -euo pipefail
+          integrity="$(node -e 'const fs = require("node:fs"); const crypto = require("node:crypto"); console.log("sha512-" + crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"))' "$RUNNER_TEMP/release/$FILE")"
+          if published="$(npm view "district-assurance@$VERSION" dist.integrity 2> "$RUNNER_TEMP/npm-view.err")"; then
+            :
+          elif grep -q 'E404' "$RUNNER_TEMP/npm-view.err"; then
+            published=""
+          else
+            cat "$RUNNER_TEMP/npm-view.err"
+            echo "::error::The registry could not be asked whether district-assurance $VERSION is published."
+            exit 1
+          fi
+          if [ -z "$published" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [ "$published" = "$integrity" ]; then
+            echo "district-assurance $VERSION is already published with these bytes ($integrity): not publishing again." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::district-assurance $VERSION is already published with other bytes ($published, not $integrity)."
+            exit 1
+          fi
+      # A version with a pre-release part goes to the `next` dist-tag, never to `latest`.
+      - name: npm publish
+        if: steps.registry.outputs.publish == 'true'
+        env:
+          FILE: ${{ needs.pack.outputs.filename }}
+          VERSION: ${{ needs.pack.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag=latest
+          case "$VERSION" in *-*) tag=next ;; esac
+          npm publish "$RUNNER_TEMP/release/$FILE" --provenance --access public --tag "$tag" --ignore-scripts
 
   # The tag's GitHub release, with what was published and signed. A separate job so that
   # `contents: write` and `id-token: write` are never held together.
@@ -506,9 +540,39 @@ jobs:
           path: ${{ runner.temp }}/release/district-assurance-${{ needs.pack.outputs.version }}.cdx.json
           if-no-files-found: error
           retention-days: 30
+      # Whether the registry already has this version (a rerun after npm accepted it, when a later
+      # step failed). Not there: publish. There with these very bytes (npm's sha512 integrity):
+      # publish nothing again. There with other bytes, or no answer from the registry: fail.
+      - name: Registry check
+        id: registry
+        env:
+          FILE: ${{ needs.pack.outputs.filename }}
+          VERSION: ${{ needs.pack.outputs.version }}
+        run: |
+          set -euo pipefail
+          integrity="$(node -e 'const fs = require("node:fs"); const crypto = require("node:crypto"); console.log("sha512-" + crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"))' "$RUNNER_TEMP/release/$FILE")"
+          if published="$(npm view "district-assurance@$VERSION" dist.integrity 2> "$RUNNER_TEMP/npm-view.err")"; then
+            :
+          elif grep -q 'E404' "$RUNNER_TEMP/npm-view.err"; then
+            published=""
+          else
+            cat "$RUNNER_TEMP/npm-view.err"
+            echo "::error::The registry could not be asked whether district-assurance $VERSION is published."
+            exit 1
+          fi
+          if [ -z "$published" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [ "$published" = "$integrity" ]; then
+            echo "district-assurance $VERSION is already published with these bytes ($integrity): not publishing again." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::district-assurance $VERSION is already published with other bytes ($published, not $integrity)."
+            exit 1
+          fi
       # While the package is private (ADR-12) a real run would stop at the publish job's
       # private check, so the dry run ends at the comparison above and says so.
       - name: npm publish --dry-run
+        if: steps.registry.outputs.publish == 'true'
         env:
           FILE: ${{ needs.pack.outputs.filename }}
           VERSION: ${{ needs.pack.outputs.version }}
@@ -549,21 +613,31 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      # The version tag just below this one (a pre-release sorts before its release), or none.
+      # The nearest version tag below this one (a pre-release sorts before its release) that has a
+      # published GitHub release with its files: a tag pushed only for a dry run is no baseline.
+      # Asked of GitHub's API, so the job needs no registry access. None: nothing is compared.
       - name: The previous release
         id: previous
         env:
           REF_NAME: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           previous=""
           found=false
           for tag in $(git -c versionsort.suffix=- tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname); do
-            if [ "$found" = true ]; then previous="$tag"; break; fi
+            if [ "$found" = true ]; then
+              released="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,assets --jq '(.isDraft | not) and (.assets | length > 0)' 2> /dev/null || echo false)"
+              if [ "$released" = "true" ]; then previous="$tag"; break; fi
+              echo "$tag has no published GitHub release with its files: not a baseline."
+            fi
             if [ "$tag" = "$REF_NAME" ]; then found=true; fi
           done
           echo "Previous release: ${previous:-none}"
           echo "tag=$previous" >> "$GITHUB_OUTPUT"
+          if [ -z "$previous" ]; then
+            echo "No earlier tag has a published GitHub release with its files: the benchmarks are not compared." >> "$GITHUB_STEP_SUMMARY"
+          fi
       # The previous release's own benchmark code on its own sources. A release from before
       # benchmarks has none, and the comparison says so.
       - name: Benchmarks, previous release
@@ -582,6 +656,7 @@ jobs:
       - name: Benchmarks, this release
         run: node bench/main.ts --out "$RUNNER_TEMP/bench-current.json"
       - name: Compare with the previous release
+        if: steps.previous.outputs.tag != ''
         run: node bench/compare.ts "$RUNNER_TEMP/bench-previous.json" "$RUNNER_TEMP/bench-current.json"
       # Both result files (CPU, system, Node version and commit inside), kept with the run.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

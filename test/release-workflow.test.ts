@@ -1,6 +1,6 @@
 // Hostile-pass regressions for #119 (SRV-5): the release workflow's own checks, run as they are written in it.
 import { strict as assert } from "node:assert";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -102,6 +102,7 @@ describe("hostile #119: what the workflow can be made to run", () => {
     assert.match(publish, /inputs\.publish/);
     assert.match(publish, /environment: npm-publish/);
     assert.doesNotMatch(workflow.slice(0, workflow.indexOf("jobs:")), /id-token: write/, "no OIDC scope outside the publish job");
-    assert.equal(execFileSync(process.execPath, ["-p", "require(process.argv[1]).private", join(process.cwd(), "package.json")], { encoding: "utf8" }).trim(), "true", "still private (ADR-12)");
+    // The private guard is tested on fixture manifests (test/release-steps.test.ts), so the pull
+    // request that removes "private" for the first release (ADR-12) does not have to edit this file.
   });
 });
