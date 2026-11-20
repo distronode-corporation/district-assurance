@@ -75,6 +75,22 @@ type WriteOutcome = { write: "none" | "saved" | "unknown" };
 
 const counterId = (key: { scope: string; key: string }): string => `${key.scope}:${key.key}`;
 
+/**
+ * The flow-start counters a call's limited flow has counted, or null when it runs no limited flow.
+ * A flow started before `counted` existed (undefined) was never counted: it stays as it was. [] is a new limited flow.
+ */
+function lateCounted(record: CallRecord): readonly string[] | null {
+  const counted = record.flow?.counted;
+  return counted === undefined ? null : counted;
+}
+
+/** A verification start's subject write found a limited flow it was not counted on: count, then write again. */
+class LateCountNeeded extends EngineError {
+  constructor() {
+    super("conflict", "a limited flow started on the call while verification was starting");
+  }
+}
+
 
 export interface EngineOptions {
   workspaceId: string;
@@ -660,17 +676,39 @@ export class Engine {
     // on the call (`counted`). A count is given back only once it is known not to have been taken:
     // another overlapping verification took that counter first, or the write saved nothing. A crash
     // in between leaves it counted, at most one too many: the safe side.
+    await this.#admitVerification(callId, resolved);
+    // Inside the subject's write: a limited flow attached since the count (startFlow found no subject
+    // to count) refuses it, and the start is counted again, as for a flow found first, then written.
+    const admit = (draft: CallDraft, slice: badge.BadgeSlice) => {
+      const counted = lateCounted(draft.record);
+      if (counted !== null && this.#lateKeys(slice, resolved, counted).length > 0) throw new LateCountNeeded();
+    };
+    try {
+      await badge.startVerification(this.#rt, callId, resolved, admit);
+    } catch (error) {
+      if (!(error instanceof LateCountNeeded)) throw error;
+      // A flow attaches once per call, and this count takes its keys: a second refusal cannot come
+      // from another attachment, and would reach the host as a conflict.
+      await this.#admitVerification(callId, resolved);
+      await badge.startVerification(this.#rt, callId, resolved, admit);
+    }
+  }
+
+  /** Counts the start on the call's limited flow, if it runs one (`beginVerification`). */
+  async #admitVerification(callId: string, resolved: badge.ResolvedVerification): Promise<void> {
     const record = await this.#read(callId);
-    const flow = record.flow;
-    // A flow started before `counted` existed (undefined) was never counted: it stays as it was. [] is a new limited flow.
-    if (flow !== null && flow.counted !== null && flow.counted !== undefined) await this.#countLateStarts(callId, record, flow.counted, resolved);
-    await badge.startVerification(this.#rt, callId, resolved);
+    const counted = lateCounted(record);
+    if (counted !== null) await this.#countLateStarts(callId, record, counted, resolved);
+  }
+
+  /** The flow-start counters a verification start brings that the call's flow has not counted. */
+  #lateKeys(slice: badge.BadgeSlice, resolved: badge.ResolvedVerification, counted: readonly string[]): AttemptCounterKey[] {
+    return counterKeys(this.workspaceId, FLOW_START, badge.verificationKeys(slice, resolved)).filter((key) => !counted.includes(counterId(key)));
   }
 
   /** Counts a running limited flow's starts on the counters a verification start brings (`beginVerification`). */
   async #countLateStarts(callId: string, record: CallRecord, counted: readonly string[], resolved: badge.ResolvedVerification): Promise<void> {
-    const slice = this.#slice(record.modules, badge.BADGE) as unknown as badge.BadgeSlice;
-    const keys = counterKeys(this.workspaceId, FLOW_START, badge.verificationKeys(slice, resolved)).filter((key) => !counted.includes(counterId(key)));
+    const keys = this.#lateKeys(this.#slice(record.modules, badge.BADGE) as unknown as badge.BadgeSlice, resolved, counted);
     if (keys.length === 0) return;
     const { over, at } = await this.#countStarts(keys);
     // Takes back these counters' counts (none was made when a counter was already at its limit).

@@ -584,7 +584,9 @@ it), per calling number and per subject.
   number given only then), once per counter per call: a restart for the same subject counts nothing.
   This count comes before the subject is written on the call: over the limit, the flow fails and
   `beginVerification` throws `rate_limited` with the subject never written, so no factor is judged
-  for it in between. The count is the reservation: each counter is counted first, then taken on the
+  for it in between. A limited flow started on the call after the count found none (`startFlow`,
+  with no subject yet to count) is seen by the subject's write, which then counts the start the same
+  way before it writes; a subject is never written on a limited flow that has not counted it. The count is the reservation: each counter is counted first, then taken on the
   call in one write (which also checks the call can start verification now), then the subject is
   written. A count is taken back (`removeFailure` at its time) only once it is known not to have been
   taken: an overlapping `beginVerification` on the call took that counter first, or the write saved

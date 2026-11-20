@@ -599,11 +599,15 @@ export function verificationKeys(slice: BadgeSlice, resolved: ResolvedVerificati
   return { subjectKey: resolved.subjectKey, numberKey: resolved.numberKey ?? slice.numberKey };
 }
 
-/** Writes a resolved verification start on the call. */
-export async function startVerification(rt: EngineRuntime, callId: string, resolved: ResolvedVerification): Promise<void> {
+/**
+ * Writes a resolved verification start on the call. `admit` runs inside the write, on the call as it
+ * is then, before anything changes, and throws to refuse it (the engine's late flow count).
+ */
+export async function startVerification(rt: EngineRuntime, callId: string, resolved: ResolvedVerification, admit: (draft: CallDraft, slice: BadgeSlice) => void): Promise<void> {
   const { subjectKey, numberKey, subject, byHost } = resolved;
   await rt.update(callId, (draft) => {
     const s = assertCanBegin(draft);
+    admit(draft, s);
     const reset = subjectKey !== s.subjectKey;
     draft.apply({ type: "verification_started", reset });
     s.epoch++;
