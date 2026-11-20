@@ -5,7 +5,9 @@
 //
 // Environment, all optional:
 // - DA_FUZZ_MS: the time budget of each property in milliseconds, after its first cases (default
-//   200, CI's bar). The scheduled fuzz workflow sets it much higher.
+//   200, CI's bar). The scheduled fuzz workflow sets it much higher. The first cases and the order
+//   of the later ones are fixed by the seed; how many later batches fit in the budget depends on
+//   the machine, so a failure found only on a faster runner needs the seed and path it printed.
 // - DA_FUZZ_SEED: the run's seed (default fixed, so CI is repeatable). fast-check uses its low 32
 //   bits, and a failure prints the seed it used.
 // - DA_FUZZ_PATH: with DA_FUZZ_SEED, replays the one case a failure printed (`path: "..."`). Run
@@ -35,22 +37,33 @@ export interface FuzzOptions<Ts> {
   maxRuns?: number;
 }
 
+/** Cases per batch in the timed phase: each batch runs to its end, so no case is left running. */
+const BATCH = 10;
+
 /**
- * Runs a fast-check property: its examples and `minRuns` cases on the run's seed, then more cases
- * on the next seed until DA_FUZZ_MS is spent (or `maxRuns` cases ran). With DA_FUZZ_PATH set, it
- * replays that one case instead.
+ * Runs a fast-check property: its examples and `minRuns` cases on the run's seed, then batches of
+ * more cases on the next seeds until DA_FUZZ_MS is spent (or `maxRuns` cases ran). Every run of
+ * fast-check carries the examples first, and fast-check counts them inside `numRuns`, so each run
+ * asks for its cases plus the examples. A batch is awaited in full: a case still running when the
+ * budget is spent finishes and its failure is reported, and the budget only stops new batches.
+ * With DA_FUZZ_PATH set, it replays that one case on the stream of the run that printed it (the
+ * printed seed, its examples first).
  */
 export async function fuzz<Ts>(property: fc.IProperty<Ts> | fc.IAsyncProperty<Ts>, options: FuzzOptions<Ts> = {}): Promise<void> {
   const raw = property as fc.IRawProperty<Ts>;
+  const examples = options.examples ?? [];
   if (FUZZ_PATH !== undefined) {
-    await fc.assert(raw, { seed: FUZZ_SEED, path: FUZZ_PATH, endOnFailure: true });
+    await fc.assert(raw, { seed: FUZZ_SEED, path: FUZZ_PATH, endOnFailure: true, examples });
     return;
   }
   const minRuns = options.minRuns ?? 20;
   const maxRuns = options.maxRuns ?? Number.MAX_SAFE_INTEGER;
-  await fc.assert(raw, { seed: FUZZ_SEED, numRuns: minRuns, examples: options.examples ?? [] });
-  if (maxRuns > minRuns && FUZZ_MS > 0) {
-    await fc.assert(raw, { seed: (FUZZ_SEED + 1) | 0, numRuns: maxRuns - minRuns, plugins: [fc.interruptAfterTimeLimit(FUZZ_MS)] });
+  await fc.assert(raw, { seed: FUZZ_SEED, numRuns: minRuns + examples.length, examples });
+  const deadline = Date.now() + FUZZ_MS;
+  for (let ran = minRuns, batch = 1; FUZZ_MS > 0 && ran < maxRuns && Date.now() < deadline; batch++) {
+    const runs = Math.min(BATCH, maxRuns - ran);
+    await fc.assert(raw, { seed: (FUZZ_SEED + batch) | 0, numRuns: runs + examples.length, examples });
+    ran += runs;
   }
 }
 

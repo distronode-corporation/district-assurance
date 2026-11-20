@@ -14,6 +14,12 @@ const REASONS = new Set(["missing_header", "malformed_header", "no_secret", "tim
 const NOW = new Date("2026-11-18T12:00:00.000Z");
 const NOW_SECONDS = Math.floor(NOW.getTime() / 1000);
 
+/**
+ * Header noise without commas: a comma inside a value starts a new element, so `k=,t=0` placed
+ * last would set the timestamp to 0, a correct refusal the accepting property must not draw.
+ */
+const noise = (maxLength: number): fc.Arbitrary<string> => printableString(maxLength).map((s) => s.replaceAll(",", ""));
+
 const secret: fc.Arbitrary<string> = nastyString(16).map((s) => `whsec_test_${s}_not_a_secret`);
 
 function assertShape(result: SignatureCheck): void {
@@ -96,7 +102,7 @@ describe("fuzz: verifyStripeSignature", () => {
         const timestamp = NOW_SECONDS + int(g, -tolerance, tolerance);
         const v1 = signStripePayload(body, pick(g, secrets), timestamp).split(",")[1]!;
         const parts = [`t=${timestamp}`, v1];
-        for (let n = int(g, 0, 3); n > 0; n--) parts.push(pick(g, [`v1=${"0".repeat(64)}`, `v0=${g(printableString, 8)}`, "noise", `k=${g(printableString, 4)}`, ""]));
+        for (let n = int(g, 0, 3); n > 0; n--) parts.push(pick(g, [`v1=${"0".repeat(64)}`, `v0=${g(noise, 8)}`, "noise", `k=${g(noise, 4)}`, ""]));
         const header = g(fc.shuffledSubarray, parts, { minLength: parts.length })
           .map((p) => (int(g, 0, 4) === 0 ? ` ${p} ` : p))
           .join(",");
