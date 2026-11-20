@@ -144,7 +144,8 @@ export interface BadgeSlice {
  * write that fails after the pass was saved (its ledger entry) still gets the cleanup, in the same
  * call to `submitFactor` or the call's next. `id` is unique on the call (`forgetSeq`; 0 for one
  * saved before ids). `hidden` is the duress PIN's hidden counter (VER-12), when it is on; absent on
- * a pass saved before it was kept here. `claimed` is set on the call before the removals that are
+ * a pass saved before it was kept here. `hidden.shared` is the hidden keypad counter a shared spoken
+ * answer (VER-11) was also counted on. `claimed` is set on the call before the removals that are
  * not safe to run twice (the number's own failure, the hidden counter's) run, so a replay skips them;
  * `claimToken` names the run that claimed it (absent on a claim saved before it was kept: no run's).
  */
@@ -152,7 +153,7 @@ export interface OwedCleanup {
   id: number;
   keys: AttemptCounterKey[];
   at: string;
-  hidden?: { key: AttemptCounterKey; duress: boolean };
+  hidden?: { key: AttemptCounterKey; duress: boolean; shared?: AttemptCounterKey };
   claimed?: true;
   claimToken?: string;
 }
@@ -245,7 +246,18 @@ export type OutcomeResult = { applied: false } | { applied: true; callId: string
  */
 export type BeginVerificationInput = ({ accountNumber: string } | { subjectKey: string }) & { callingNumber?: string };
 
-const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin", "lockout"];
+
+/** The keypad timeouts of one call, for the host's `KeypadCollector` (VER-11). */
+export interface KeypadTiming {
+  idleTimeoutMs: number;
+  maxIdleTimeoutMs: number;
+}
+
+/** How long a caller may pause between tones before the buffer is dropped, by default (VER-11). */
+export const DEFAULT_KEYPAD_IDLE_SECONDS = 10;
+
+const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin", "lockout", "accessibility"];
+const ACCESSIBILITY_KEYS = ["spokenKeypadFields", "keypadIdleSeconds", "maxKeypadIdleSeconds"];
 const PIN_KEYS = ["mode", "minDigits", "maxDigits", "maxAttemptsPerCall", "duress"];
 
 /** The subject whose number links may go to: only once a keypad or PIN factor matched. */
@@ -331,6 +343,7 @@ export class BadgeModule implements AssuranceModule {
     if (settings.grantTtlSeconds !== undefined && !isIntegerIn(settings.grantTtlSeconds, 1, 3600)) {
       errors.push("grantTtlSeconds must be an integer from 1 to 3600");
     }
+    if (settings.accessibility !== undefined) errors.push(...accessibilityErrors(settings.accessibility, settings.factors));
     errors.push(...lockoutSettingsErrors(settings.lockout));
     return errors;
   }
@@ -361,6 +374,12 @@ export class BadgeModule implements AssuranceModule {
     const settings = ctx.settings as BadgeSettings | null;
     if (settings !== null) {
       for (const kind of step.factors) if (!settings.factors.includes(kind)) errors.push(`factor ${kind} is turned off in the badge settings`);
+      if (ctx.policy !== null && step.factors.includes("spoken_knowledge")) {
+        const keypadFields = ctx.policy.keypadFields;
+        for (const field of settings.accessibility?.spokenKeypadFields ?? []) {
+          if (!keypadFields.includes(field)) errors.push(`spoken keypad field ${field} is not one of the policy's keypad fields`);
+        }
+      }
     }
     if (ctx.policy !== null && isStepLevel(step.level)) {
       const factors = step.factors;
@@ -484,6 +503,28 @@ export function assertSameVerification(s: BadgeSlice, epoch: number): void {
   if (s.epoch !== epoch) throw new EngineError("precondition_failed", "verification restarted while this result was on its way; it does not count");
 }
 
+function accessibilityErrors(a: unknown, factors: unknown): string[] {
+  if (!isObject(a)) return ["accessibility must be an object"];
+  const errors = unknownKeys(a, ACCESSIBILITY_KEYS).map((k) => `accessibility.${k} is not an accessibility setting`);
+  if (a.spokenKeypadFields !== undefined) {
+    const fields = a.spokenKeypadFields;
+    if (!isStringArray(fields) || fields.length === 0) {
+      errors.push("accessibility.spokenKeypadFields must list at least one keypad field");
+    } else {
+      if (new Set(fields).size !== fields.length) errors.push("accessibility.spokenKeypadFields has duplicates");
+      // A spoken PIN reaches speech-to-text, so the PIN is only ever keyed.
+      if (fields.includes("pin")) errors.push("accessibility.spokenKeypadFields cannot hold the PIN: a PIN is never taken by speech");
+      if (!isStringArray(factors) || !factors.includes("spoken_knowledge")) errors.push("accessibility.spokenKeypadFields needs the spoken_knowledge factor on");
+    }
+  }
+  const idle = a.keypadIdleSeconds ?? DEFAULT_KEYPAD_IDLE_SECONDS;
+  if (!isIntegerIn(idle, 5, 60)) errors.push("accessibility.keypadIdleSeconds must be an integer from 5 to 60");
+  else if (a.maxKeypadIdleSeconds !== undefined && !isIntegerIn(a.maxKeypadIdleSeconds, idle, 300)) {
+    errors.push("accessibility.maxKeypadIdleSeconds must be an integer from keypadIdleSeconds to 300");
+  }
+  return errors;
+}
+
 function pinSettingsErrors(pin: unknown): string[] {
   if (!isObject(pin)) return ["pin settings are required when the pin factor is on"];
   const errors = unknownKeys(pin, PIN_KEYS).map((k) => `pin.${k} is not a pin setting`);
@@ -582,7 +623,15 @@ export async function resolveVerification(rt: EngineRuntime, input: BeginVerific
   const number = input.callingNumber;
   if (number !== undefined && !isCallingNumber(number)) throw new EngineError("invalid_input", "callingNumber must be E.164; leave it out when the number is withheld");
   const numberKey = number === undefined ? null : await rt.hmac(`number:${number}`);
-  const subject = subjectKey === null ? null : await rt.adapter("records").getSubject(rt.workspaceId, subjectKey);
+  const onFile = subjectKey === null ? null : await rt.adapter("records").getSubject(rt.workspaceId, subjectKey);
+  // The call keeps no copy of the PIN digest: the PIN is judged against the store on every attempt,
+  // so a digest erased or reset since verification began never counts, and no call record holds it.
+  const subject = onFile === null ? null : structuredClone(onFile);
+  // Nor of the duress PIN digest (VER-12), judged against the store the same way: an erase removes both.
+  if (subject !== null) {
+    delete subject.pinDigest;
+    delete subject.duressDigest;
+  }
   return { subjectKey, numberKey, subject, byHost };
 }
 
@@ -658,6 +707,10 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   const builtIn = BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS];
   const plugin = module.plugin(kind);
   if (builtIn?.entered !== true && plugin === undefined) throw new EngineError("invalid_input", `${kind} is not a factor the caller enters`);
+  // A spoken PIN has already reached speech-to-text. It is refused before it is counted or judged (VER-11).
+  if (kind === "spoken_knowledge" && isObject(entry) && Object.hasOwn(entry, "pin")) {
+    throw new EngineError("invalid_input", "a PIN is never taken by speech: it is keyed, with submitPin");
+  }
   const before = await rt.read(callId);
   allowFactor(rt, before, kind);
   const current = before.modules[BADGE] as unknown as BadgeSlice | undefined;
@@ -666,27 +719,46 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   // A pass this call saved earlier whose cleanup did not run (its write failed after saving it).
   for (const owed of owedCleanups(current)) await settleForget(rt, callId, owed.id);
   const lockout = lockoutOf(rt.settings<BadgeSettings>(BADGE).lockout);
-  const keys = counterKeys(rt.workspaceId, kind, current);
+  // A spoken answer that carries keypad fields (VER-11) is a guess at those fields too: it also
+  // uses a keypad_knowledge attempt, so the keypad and the voice share one budget per call, and
+  // across calls it is counted, locked and forgiven under both factors, so alternating keyed and
+  // spoken entries never doubles the guesses before a lock.
+  // Read once, for both the budget and the judging: a config changed while this attempt waits
+  // never has it judge a keypad field it was not charged for.
+  const spokenFields = kind === "spoken_knowledge" ? spokenKeypadFields(rt) : [];
+  const shared = spokenFields.length > 0;
+  const keys = shared
+    ? [...counterKeys(rt.workspaceId, kind, current), ...counterKeys(rt.workspaceId, "keypad_knowledge", current)]
+    : counterKeys(rt.workspaceId, kind, current);
   const settings = rt.settings<BadgeSettings>(BADGE);
   // With the duress PIN on, a subject's failures are also counted where a duress entry never
   // resets them, and the hard lock they reach holds (duress-flag.ts).
   const duressOn = settings.pin?.duress !== undefined;
   const hidden = duressOn && current.subjectKey !== null ? hiddenCounterKey(rt.workspaceId, kind, current.subjectKey) : null;
+  // A shared spoken answer is a keypad guess under the hidden counter too: held by its hard lock,
+  // and a failure counted there, as on the visible counters.
+  const hiddenKeypad = hidden !== null && shared ? hiddenCounterKey(rt.workspaceId, "keypad_knowledge", current.subjectKey!) : null;
   // The flag is read for every subject, the duress PIN on or off: a subject flagged while it was on
   // stays under duress after a config turns it off, until the business clears it.
   const flag = current.subjectKey !== null ? duressFlagKey(rt.workspaceId, current.subjectKey) : null;
+  // No await for a key that is not there: the round trips stay those of an attempt without it.
   const lock =
     (await currentLock(counters, lockout, keys, rt.clock.now())) ??
-    (hidden === null ? null : hiddenHardLock(lockout, await counters.get(hidden, hiddenWindowStart(lockout, rt.clock.now())), rt.clock.now()));
+    (hidden === null ? null : hiddenHardLock(lockout, await counters.get(hidden, hiddenWindowStart(lockout, rt.clock.now())), rt.clock.now())) ??
+    (hiddenKeypad === null ? null : hiddenHardLock(lockout, await counters.get(hiddenKeypad, hiddenWindowStart(lockout, rt.clock.now())), rt.clock.now()));
   if (lock !== null) return refuseLocked(rt, callId, kind, current.epoch, lock);
   const reserved = await rt.update(callId, (draft) => {
     const s = assertAttempt(rt, draft, kind, current.epoch);
     const max = maxAttempts(rt, module, kind);
     // Own keys only: an inherited one (`constructor`) must never stand in for a count.
     const used = Object.hasOwn(s.attempts, kind) ? s.attempts[kind]! : 0;
-    if (used >= max) return null;
+    const keypadMax = rt.policy.maxKeypadAttemptsPerCall;
+    const keypadUsed = Object.hasOwn(s.attempts, "keypad_knowledge") ? s.attempts.keypad_knowledge! : 0;
+    if (used >= max || (shared && keypadUsed >= keypadMax)) return null;
     s.attempts[kind] = used + 1;
-    return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch, locale: draft.record.locale, taints: s.taints };
+    if (shared) s.attempts.keypad_knowledge = keypadUsed + 1;
+    const last = used + 1 >= max || (shared && keypadUsed + 1 >= keypadMax);
+    return { subjectKey: s.subjectKey, subject: s.subject, last, epoch: s.epoch, locale: draft.record.locale, taints: s.taints, shared };
   });
   if (reserved === null) return { matched: false, locked: true };
   const at = rt.clock.now();
@@ -697,10 +769,12 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     await rt.update(callId, (draft) => {
       const s = draft.slice<BadgeSlice>(BADGE);
       s.attempts[kind] = Math.max(0, s.attempts[kind]! - 1);
+      if (reserved.shared) s.attempts.keypad_knowledge = Math.max(0, s.attempts.keypad_knowledge! - 1);
     });
     return refuseLocked(rt, callId, kind, reserved.epoch, recorded.raced);
   }
   const hiddenAfter = hidden === null ? null : await counters.recordFailure(hidden, at.toISOString(), hiddenWindowStart(lockout, at));
+  const keypadAfter = hiddenKeypad === null ? null : await counters.recordFailure(hiddenKeypad, at.toISOString(), hiddenWindowStart(lockout, at));
   const input = { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey, subject: reserved.subject, entry, hmac: (d: string) => rt.hmac(d), locale: reserved.locale };
   let outcome: PinOutcome;
   try {
@@ -710,7 +784,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
         kind === "keypad_knowledge"
           ? await judgeKeypad(rt.policy, input)
           : kind === "spoken_knowledge"
-            ? await judgeSpoken(rt.policy.spoken!, input)
+            ? await judgeSpoken(rt.policy.spoken!, input, spokenFields)
             : (await plugin!.judge(input)) === true;
       outcome = passed ? "pass" : "fail";
     }
@@ -742,7 +816,8 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   // events, the receipt and the counters across calls. Only the call record's `duress` and the PIN
   // entry's keyed tag differ.
   const passed = outcome !== "fail";
-  const hard = passed ? null : (recorded.hard ?? (hiddenAfter === null ? null : hiddenHardLock(lockout, hiddenAfter, at)));
+  const hard =
+    passed ? null : (recorded.hard ?? (hiddenAfter === null ? null : hiddenHardLock(lockout, hiddenAfter, at)) ?? (keypadAfter === null ? null : hiddenHardLock(lockout, keypadAfter, at)));
   let stale: EngineError | null = null;
   let failed: { error: unknown } | null = null;
   // The id the pass's cleanup was saved under, from the write's last run.
@@ -786,7 +861,10 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
         owedId = (s.forgetSeq ?? 0) + 1;
         s.forgetSeq = owedId;
         const owed: OwedCleanup = { id: owedId, keys: structuredClone(keys), at: at.toISOString() };
-        if (hidden !== null) owed.hidden = { key: structuredClone(hidden), duress: outcome === "duress" };
+        if (hidden !== null) {
+          owed.hidden = { key: structuredClone(hidden), duress: outcome === "duress" };
+          if (hiddenKeypad !== null) owed.hidden.shared = structuredClone(hiddenKeypad);
+        }
         keepOwed(s, [...owedCleanups(s), owed]);
       }
       draft.emit("verification.factor", "code", { kind, passed }, kind === "pin" ? outcome : undefined);
@@ -839,8 +917,12 @@ async function settleForget(rt: EngineRuntime, callId: string, id: number): Prom
     if (!(await claimOnCall(rt, callId, take, (s, token) => owedOn(s)?.claimToken === token))) return;
     await removeOwnOnNumbers(counters, keys, new Date(at));
     // The hidden counter forgets up to the pass only on a pass that is not under duress; a duress
-    // entry takes off its own failure, as a pass does, and keeps the rest (forgetHidden).
-    if (hidden !== undefined) await forgetHidden(counters, hidden.key, at, hidden.duress);
+    // entry takes off its own failure, as a pass does, and keeps the rest (forgetHidden). A shared
+    // spoken answer (VER-11) was also counted on the hidden keypad counter, which forgets the same way.
+    if (hidden !== undefined) {
+      await forgetHidden(counters, hidden.key, at, hidden.duress);
+      if (hidden.shared !== undefined) await forgetHidden(counters, hidden.shared, at, hidden.duress);
+    }
   }
   await rt
     .update(callId, (draft) => {
@@ -894,6 +976,35 @@ export async function clearDuress(rt: EngineRuntime, module: BadgeModule, subjec
   // Every installed factor's hidden counter, outside modules' included, not only those on now: a
   // factor turned off while the subject is cleared keeps no hidden lock to hold when it is turned on again.
   for (const kind of module.installedFactors()) await counters.reset(hiddenCounterKey(rt.workspaceId, kind, subjectKey));
+}
+
+/**
+ * The keypad fields Badge's settings let a caller say instead of key (VER-11). One spoken_knowledge
+ * answer gives them with the policy's spoken fields; each is read as 1 to 32 digits and compared
+ * like the keypad field it is.
+ */
+function spokenKeypadFields(rt: EngineRuntime): string[] {
+  const keypadFields = rt.policy.keypadFields;
+  const fields = rt.settings<BadgeSettings>(BADGE).accessibility?.spokenKeypadFields ?? [];
+  // A field the policy does not key (a typo, "dobb") is refused, never dropped: dropped, the answer
+  // would be judged without the keypad evidence or its shared attempt budget. A config with no flow
+  // using spoken_knowledge is not checked against the policy when it is saved, so it is checked here.
+  const unknown = fields.find((f) => !keypadFields.includes(f));
+  if (unknown !== undefined) throw new EngineError("precondition_failed", `spoken keypad field ${unknown} is not one of the policy's keypad fields`);
+  return fields;
+}
+
+/**
+ * The keypad timeouts of a call, for the host's `KeypadCollector` (INT-1, VER-11): Badge's
+ * `keypadIdleSeconds`, or its `maxKeypadIdleSeconds` on a call marked relay or TTY, and that maximum
+ * as the limit `lengthenIdleTimeout` may reach. Timeouts only: the mark changes no step, factor or attempt.
+ */
+export async function keypadTiming(rt: EngineRuntime, callId: string): Promise<KeypadTiming> {
+  const a = rt.settings<BadgeSettings>(BADGE).accessibility;
+  const idle = a?.keypadIdleSeconds ?? DEFAULT_KEYPAD_IDLE_SECONDS;
+  const max = a?.maxKeypadIdleSeconds ?? idle;
+  const record = await rt.read(callId);
+  return { idleTimeoutMs: (record.access === undefined ? idle : max) * 1000, maxIdleTimeoutMs: max * 1000 };
 }
 
 /** Asks the carrier about the number on file, never the calling number. Only after a keypad or PIN match. */
@@ -1041,6 +1152,7 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
 export const IDENTITY_TEXT: Record<Locale, (url: string) => string> = {
   en: (url) => `Your one-time identity check link: ${url}`,
   fr: (url) => `Votre lien de vérification d'identité, à usage unique : ${url}`,
+  es: (url) => `Su enlace de verificación de identidad, de un solo uso: ${url}`,
 };
 
 function identityText(locale: Locale, url: string): string {

@@ -9,7 +9,7 @@ import { MemorySessionStore } from "../src/core/session-store.ts";
 import { MAX_WRITE_ATTEMPTS, createEngine } from "../src/engine.ts";
 import { buildAmountReadBack } from "../src/pay/amount.ts";
 import { TEST_KNOWLEDGE_KEY, generateTestSigner, sessionStoreContract } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, rejects, setup, testConfig } from "./helpers.ts";
+import { ACCOUNT, DOB, heard, rejects, setup, testConfig } from "./helpers.ts";
 
 describe("MemorySessionStore passes the SessionStore contract", () => {
   for (const c of sessionStoreContract(() => new MemorySessionStore())) it(c.name, c.run);
@@ -112,10 +112,11 @@ describe("compare-and-set conflicts", () => {
       await put(record);
       sessions.losses = MAX_WRITE_ATTEMPTS;
     };
-    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("conflict"));
-    await assert.rejects(t.engine.abandonIntake(callId), rejects("precondition_failed"), "the draft stays reserved for its record");
+    const readBack = await heard(t, callId);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack }), rejects("conflict"));
+    await assert.rejects(t.engine.setIntakeField(callId, "issue", "changed"), rejects("precondition_failed"), "the draft stays reserved for its record");
     t.records.putIntakeRecord = put;
-    const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack });
     assert.equal(record.recordId, "rec_1");
     assert.equal(record.confirmedBy, "voice", "the same record, not a second one");
     assert.deepEqual((await t.engine.state(callId)).recordIds, ["rec_1"]);

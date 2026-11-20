@@ -137,9 +137,10 @@ export interface AssuranceModule {
   stepStatus(step: FlowStep, view: StepView): StepStatus;
   /**
    * Why a step cannot run on this call, given what the call kept when it started (a form or a
-   * wording it does not have), or null. Checked when a flow is attached to a running call.
+   * wording it does not have, or one with no text in the call's locale), or null. Checked when a
+   * flow is attached to a call.
    */
-  cannotRunStep?(step: FlowStep, slice: JsonValue): string | null;
+  cannotRunStep?(step: FlowStep, slice: JsonValue, locale: Locale): string | null;
   /** Why the call cannot end now (work in progress that would be lost, or still to be recorded), or null. `now` is the engine's clock. */
   blocksEnd?(slice: JsonValue, now: Date): string | null;
   /** Untrusted text entered the call: drop anything that relied on trust. Returns the new slice. */

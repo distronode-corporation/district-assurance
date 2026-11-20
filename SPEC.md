@@ -56,11 +56,19 @@ enforces it.
 ## 2. The call record and the SessionStore
 
 A call is one JSON record: `{v: 1, state, locale, revision, attestation, flow, modules}`, where
+`state` is the session above, `locale` the call's language (`en`, `fr` or `es`, default `en`;
+`startCall` refuses any other with `invalid_input`), `revision` the FlowConfig revision the call
+started under, `attestation` its caller ID attestation (section 4, set once by `startCall`; a call
+stored before it existed has none, and reads as `none` for caps and the receipt), `flow` the cursor of the
+flow it runs (or null), and `modules` each enabled module's own part, created by its `initCall`
+when the call starts. A module turned on after a call started has no part in it and is refused on
 `state` is the session above, `revision` the FlowConfig revision the call started under,
 `attestation` its caller ID attestation (section 4, set once by `startCall`; a call stored before
 it existed has none, and reads as `none` for caps and the receipt), `flow` the cursor of the
-flow it runs (or null), and `modules` each enabled module's own part, created by its `initCall`
-when the call starts. A module turned on after a call started has no part in it and is refused on
+flow it runs (or null), `modules` each enabled module's own part, created by its `initCall`
+when the call starts, and, once a step-up rule needs them, `signals` (the host signals raised on
+the call) and `stepUps` (the rules already ledgered; section 4; a call stored before them has
+neither, and reads as having none). A module turned on after a call started has no part in it and is refused on
 that call (`module_disabled`).
 
 The record lives in a `SessionStore`:
@@ -79,7 +87,12 @@ then throws `EngineError("conflict")`. Ledger entries and listener events for a 
 only after its write succeeded. Steps with side effects use two writes or more: an attempt is
 counted before it is judged; a photo ID link and a payment link are reserved before the provider
 is called. `sessionStoreContract(factory)` in `district-assurance/testing` is the suite a store
-must pass; `MemorySessionStore` is the reference.
+must pass; `MemorySessionStore` is the reference. It also checks that every write copies its
+record in, that two creates of one id or two binds of one reference at once leave exactly one
+winner, and that a reference bound in one workspace never blocks the same reference in another.
+Every keyed store's contract (session, ledger,
+record) includes keys that differ only in a lone UTF-16 surrogate, and the replacement character
+U+FFFD: a store that encodes keys as UTF-8 (SQLite with a TEXT key) collapses them, and must not.
 
 ## 3. Modules
 
@@ -107,9 +120,9 @@ factor the config in force names (in the policy or Badge's `factors`).
 | Built-in | Steps | Needs | Adapters |
 |---|---|---|---|
 | `badge` | `badge.verify` | | `records`; `counters` with any factor the caller enters (`keypad_knowledge`, `pin`, plug-ins); `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `messages`, `codes` with `text_code`; `dialer`, `counters` with `callback`; `pinVerifier` with `pin` in verifier mode; `duressNotifier` with `pin.duress` |
-| `dossier` | `dossier.collect` | `intake.file` | `records` |
+| `dossier` | `dossier.collect` | `intake.file` | `records`; `fieldCipher` once a form has a sensitive field |
 | `paylink` | `paylink.request` | `payment.request` | `payments`, `messages`; `amounts` for a step with `amountRef` |
-| `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false |
+| `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false; `consents` (optional) to revoke consents (section 21) |
 | `gate` | `gate.grant` | `entry.open` | `access` (door controllers by name), `accessSigner` |
 
 Gate (section 17) is off in `defaultConfig()`: it needs doors in its settings and the two access
@@ -173,6 +186,7 @@ of its sets has passed. `validatePolicy(policy, knownFactors)` refuses:
   `us_zip_code` or `reference`, none of them a keypad field, and `maxAttemptsPerCall` is 1 to 5.
   So a spoken answer counts on its own only at level 1; above it, the rules above need another
   factor, and one that is not knowledge.
+- a `timeZone` that is not an IANA time zone, and a malformed step-up rule (below);
 - a `textCodeCountryCodes` that is not a list of distinct E.164 country calling codes (1 to 6
   digits, no `+`), each starting with a country code ITU-T has assigned to a country or geographic
   area (`E164_COUNTRY_CODES`; `"4"` and `"42"` are refused, `"44"` and `"4420"` accepted; spare
@@ -222,13 +236,38 @@ on flow starts (`lockout`, section 6)
 and, when `pin` is on, the PIN settings (section 6).
 A factor that is off is refused at every entry point. A planned factor cannot be turned on.
 
+**Step-up rules** (`stepUp`, VER-13) raise one scope's minimum for one request. A rule is `{name,
+scope, level}` plus exactly one condition:
+
+- `amountOverMinor: {<currency>: <minor units>}`: the amount the request moves is over the
+  threshold for its currency. A currency the rule does not list, or an amount not known, counts as
+  over. Money scopes only. A payment's amount is the one read back (PAY-2): a read-back for an
+  `amountRef` is judged once the AmountSource answered.
+- `localTime: {from: "HH:MM", to: "HH:MM"}`: the time of day in the policy's `timeZone` (required
+  with such a rule) is in the window, `from` included and `to` excluded; when `from` is later than
+  `to` the window runs past midnight (`18:00` to `08:00` is after hours).
+- `signal: <name>`: the host's code raised that signal on the call with `raiseSignal(callId,
+  name)`. A signal no rule uses is refused; a raised signal is never cleared for the rest of the
+  call (not by a new verification, a new subject or a config change).
+
+`validatePolicy` refuses a rule whose name is not snake_case or is repeated, whose scope the policy
+does not list, whose level is outside 1 to 3 or not above the scope's minimum (rules only raise, so
+no rule brings a level below a floor), with no condition or more than one, or with a malformed
+condition. A scope's minimum for a request is the highest of its own and the levels of the rules
+that hold (`raiseMinimum`), and a duress call (VER-12) and an attestation cap still apply under it.
+
 A **grant** carries the level, the scopes at or below it (narrowed to the verify step's `scopes`
 when the step lists them), an expiry, and what judged it: `policyVersion` (the policy's `version`)
 and `configRevision` (the `revision` of the FlowConfig in force when the verification finished,
 newer than the call's own `revision` when the config changed during the call).
-`authorize(callId, scope)` is true only for a scope the policy lists, on a call that has not
-ended, whose minimum is 0 or whose grant includes it, has not expired, and has a level at or
-above the scope's minimum under the config in force now.
+`authorize(callId, scope, amount?)` is true only for a scope the policy lists, on a call that has
+not ended, whose minimum is 0 or whose grant includes it, has not expired, and has a level at or
+above the scope's minimum under the config in force now, raised by the step-up rules that hold now
+(section 4; `amount` is `{amountMinor, currency}`, in a flow by default the current step's). The
+steps' own checks (a payment, an intake, an outside module's step, Gate's door) use the same raised
+minimum, for the request's own amount, so a grant already issued is held to it. The first time a
+rule raises a minimum on a call, it is written to the ledger by name (`policy.step_up`), never with
+the amount, the time or the signal's cause; `authorize` writes then.
 On a
 duress call (section 6) it is also false for every scope whose class is not `none` and for every
 scope in the duress `refuseScopes`.
@@ -351,6 +390,49 @@ transcript per field in the policy's `spoken.fields`: `submitFactor(callId, "spo
   the policy, every submission is `locked` and nothing is judged. A host can call
   `normaliseSpokenAnswer` itself first to ask again before an attempt is used.
 - A spoken match does not unlock texts to the number on file (section 4).
+- A spoken entry with a `pin` field is refused (`invalid_input`) before it is counted or judged:
+  a PIN is only ever keyed.
+
+## 5a. The accessible path
+
+Badge's optional `accessibility` settings (VER-11): `{spokenKeypadFields?, keypadIdleSeconds?,
+maxKeypadIdleSeconds?}`.
+
+- `spokenKeypadFields`: keypad fields a caller may say instead of key. At least one, no
+  duplicates, never `pin`, and only with the `spoken_knowledge` factor on; a `badge.verify` step
+  that lists `spoken_knowledge` refuses a field that is not one of the policy's `keypadFields`.
+  These fields join the policy's spoken fields in the `spoken_knowledge` factor: one answer gives
+  all of them, judged together as in section 5. A keypad field is read with the same exact rules
+  (`normaliseSpokenKeypadEntry({transcript, locale})`, English and French; Spanish is refused
+  until a reviewed vocabulary exists), and the result must be 1 to 32 digits. It is compared as
+  `HMAC-SHA256(knowledgeKey, "field:" + field + ":" + value)`. The factor recorded is
+  `spoken_knowledge`, never `keypad_knowledge`: it reaches only what the policy's sets give
+  `spoken_knowledge`, under `spoken.maxAttemptsPerCall`. Each such answer is also a guess at the
+  keypad fields, so it uses a `keypad_knowledge` attempt too (`maxKeypadAttemptsPerCall`): the
+  keypad and the voice share one budget per call, and a spoken answer is refused, even the right
+  one, once either limit is used up. The cross-call counters (section 5, VER-1) count it under
+  both `spoken_knowledge` and `keypad_knowledge`: a lock or wait on either refuses it, a failure
+  counts toward both, and a pass forgets both.
+- `keypadIdleSeconds` (5 to 60, default 10) is a call's keypad idle timeout;
+  `maxKeypadIdleSeconds` (`keypadIdleSeconds` to 300, default `keypadIdleSeconds`) is the most it
+  may be lengthened to. `keypadTiming(callId)` returns `{idleTimeoutMs, maxIdleTimeoutMs}` for
+  the call: the idle timeout, or the maximum on a call marked relay or TTY.
+- `startCall({access: "relay" | "tty"})` marks the call (read once, with the rest of the input).
+  The mark is kept in the call record (`access`) and does one thing: the longer timeout above.
+  Every step, factor, attempt limit and level is the same as on any call, and the mark is never in
+  an event, the ledger, the session state or the receipt. Any other value is refused
+  (`invalid_input`).
+
+**The keypad collector** (`KeypadCollector`, `src/core/keypad.ts`, INT-1) takes the timing as it
+comes: `new KeypadCollector({ maxDigits, ...await engine.keypadTiming(callId), onDigits, clock })`.
+VER-11 adds two options. `maxIdleTimeoutMs` (`idleTimeoutMs` to 600,000, default
+`idleTimeoutMs`) is the most `lengthenIdleTimeout(ms)` may make the idle timeout, for the rest of
+the call; `idleTimeoutMs` reads the timeout in force. `requestKeys` maps `*` or `A` to `D` to
+`repeat` or `slower`: such a key drops the unfinished entry (an overlong or rejected one too) and
+`press` returns `{status: "request", request}` instead of digits. A `*` listed there is a request,
+no longer "start over"; a key not listed keeps INT-1's meaning. A request is never an attempt:
+nothing reaches the engine, so no attempt is used, added or given back, and the host replays its
+fixed line (slower for `slower`). A caller who asks aloud to repeat or slow down is the host's too.
 
 ## 6. PIN
 
@@ -365,6 +447,11 @@ the duress PIN is off unless it is set.
   read from the `RecordStore` at every attempt (not from the call's copy of the subject), so a
   reset or an enrolment since verification began counts. The entry is hashed the same way and compared in constant time; an unknown subject, a subject without
   a digest and a malformed entry do the same work and give the same answer.
+  `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`, in `SubjectRecord.pinDigest`. The
+  entry is hashed the same way and compared in constant time; an unknown subject, a subject without
+  a digest and a malformed entry do the same work and give the same answer. The digest is read from
+  the `RecordStore` on every attempt, and the call record's copy of the subject never holds it, so
+  a digest erased (section 17) or changed since verification began counts at once.
 - `verifier` mode: the host's `PinVerifier.verify({workspaceId, subjectKey, pin})` decides; the
   PIN is passed once and kept nowhere. It is asked for every attempt: for a malformed entry or an
   account a keypad cannot produce, with a stand-in (`minDigits` zeros, an HMAC subject key) whose
@@ -744,9 +831,13 @@ unknown fields at every level, the policy's shape and then its rules against the
 factors, every module's switch and settings, every adapter an enabled module's settings need,
 every step's module (installed and on) and the step itself, and, walking each flow in order, that
 every step needing a scope comes after a `badge.verify` step whose level reaches that scope's
-minimum and whose `scopes`, if listed, include it, and that no flow has more `step-up.issue` steps
-than step-up's `maxTokensPerCall` (each completes only on a token of its own, so such a flow could
-never finish; a module's optional `validateFlow` makes such whole-flow checks). Cross-checks against a module's settings or the
+minimum and whose `scopes`, if listed, include it, that a step whose amount is sure to trigger an
+amount rule on that scope (over the threshold, a currency the rule does not list, or no amount, as
+for an `amountRef`) comes after a `badge.verify` step that reaches the rule's level, that the engine
+has the `messages` adapter when a step needs a contact-class scope (its security notice, section
+16), and that no flow has more `step-up.issue` steps than step-up's `maxTokensPerCall` (each
+completes only on a token of its own, so such a flow could never finish; a module's optional
+`validateFlow` makes such whole-flow checks). Cross-checks against a module's settings or the
 policy are skipped when those did not validate (their own problems are reported). The engine
 refuses a config with any problem (`ConfigError`, code `invalid_input`, with `problems`).
 
@@ -756,25 +847,39 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 | `dossier.collect` | `form`, a form id in Dossier's settings |
 | `paylink.request` | `amountMinor` and `currency`, or instead `amountRef` (1 to 64 of letters, digits, `.`, `:`, `-`, `_`; needs the `amounts` adapter), never both; `description`, `amountSource` (section 14); optional `mode` (`connect` or `platform`; connect needs Paylink's `connectedAccountId`), `linkLifeMinutes` (5 to 60), `paymentMethods` (instant methods only) |
 | `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
-| `trace.receipt` | none; needs the `signer` adapter |
+| `trace.receipt` | optional `textLink: {consent}`, a wording purpose in Trace's settings, which also needs Trace's `businessName` and the `messages` adapter (section 16); needs the `signer` adapter |
 | `gate.grant` | `target`, a target id in Gate's settings; optional `lifetimeSeconds` (10 to 900, default 60) |
 | `step-up.issue` | `site`, a site id in step-up's settings; optional `lifetimeSeconds` (120 to 300, default 120) |
 
-Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique, no sensitive field
-until FIL-2); Paylink `{maxAmountMinor?, mode?, connectedAccountId?, linkLifeMinutes?, paymentMethods?}`
+Settings: Badge (section 4 and 6); Dossier `{forms}` (section 13, ids unique; a sensitive field
+needs the `fieldCipher` adapter; field rules as section 13 lists); Paylink `{maxAmountMinor?, mode?, connectedAccountId?, linkLifeMinutes?, paymentMethods?}`
 (`maxAmountMinor` 1 to 1,000,000; `mode` default `platform`, and `connect` needs
 `connectedAccountId`, 1 to 255 letters, digits, `-` or `_`; a `connectedAccountId` needs an
 explicit `mode`, so a business account never quietly defaults to the platform's; the other two are the defaults for steps
 that name none and for payments outside a flow, 15 minutes and card, Apple Pay, Google Pay and
 Link); Gate `{targets, maxGrantsPerCall?}` (section 17); step-up `{issuer, sites, maxTokensPerCall?}`
-(section 18); Trace `{receipts?, wordings?}`
-(`receipts` default true; wordings `{purpose (snake_case), version, text: {en, fr}}`, purposes
-unique).
+(section 18); Trace `{receipts?, wordings?, businessName?}` (`receipts` default true; wordings
+`{purpose (snake_case), version, text: {en, fr, es?}}`, purposes unique, `en` and `fr` non-empty,
+`es` optional and non-empty when given, no other key in `text`, no purpose or version that reads
+as a card number, since both go into the ledger; `businessName` 1 to 64 characters
+on one line, with no lone surrogate and no bidirectional embedding, override or isolate, kept by a
+call when it starts, like the wordings, so a flow with `textLink` cannot be attached to a call that
+kept none).
+
+**Spanish is optional** (FIL-6). Forms and wordings always have English and French; Spanish only
+where the workspace wrote it. A call in `es` is refused (`precondition_failed`) when its flow, at
+`startCall` or `startFlow`, has a `dossier.collect` step whose form lacks a Spanish label on any
+field, or a `trace.consent` step whose wording has no Spanish text. Outside a flow, the same call
+is refused at `startIntake` for such a form and at `recordConsent` for such a wording, and
+`buildReadBack` refuses such a form in Spanish. Spanish spoken answers are refused until a reviewed vocabulary exists: the
+engine takes no spoken "sí" and no voice confirmation on a Spanish call, and a host recording a
+Spanish caller's consent (`recordConsent`, whose `answer` the host maps) must take it on the keypad
+too, never from a spoken answer, until then.
 
 ## 8. Flow execution
 
 `startCall` refuses (`invalid_input`, nothing saved) a `callId` that is not 1 to 200 characters the
-ledger can carry (no lone surrogate), a `locale` not in `SUPPORTED_LOCALES` (`en`, `fr`), and a `flow` that is not a
+ledger can carry (no lone surrogate), a `locale` not in `SUPPORTED_LOCALES` (`en`, `fr`, `es`), and a `flow` that is not a
 name; the engine refuses a `workspaceId` with a lone surrogate. These enter the ledger directly, so
 no host value can block a call's ledger. `startCall({flow})` or `startFlow(callId, name)`, on an
 open call that has not run a flow, copies
@@ -805,7 +910,11 @@ it), a consent for another purpose. During a `badge.verify` step, only its facto
 the level. Once the flow has ended (completed, failed or abandoned), every step method is refused
 on that call, an identity outcome is ignored, and an outside module's `updateModule` is refused;
 grants the flow issued stand, and a payment link already sent can still settle. An outside
-module's step is held by the engine to the scope its manifest needs. A step whose module was
+module's step is held by the engine to the scope its manifest needs. A flow cannot branch to ask
+for more (ADR-14): a step whose scope step-up rules raise above the level the call's verification
+reached fails (`flow.failed` with `rules`, the rules' names). This is checked when the step is
+entered, when a signal is raised, and by the step's own work (`requestPayment`, `startIntake`,
+`confirmIntake`, `updateModule`), which then also throws `scope_denied` naming the rules. A step whose module was
 removed while the call ran fails. `endCall` abandons a running
 flow (`flow.abandoned`). `flowPosition(callId)` returns `{flow, revision, status, index, step}`.
 
@@ -819,7 +928,9 @@ answer on file, a phone number, a link or card data.
 |---|---|
 | `call.started` | `locale`, `revision`, `attestation` |
 | `flow.started` | `flow`, `revision`, `steps` (count) |
-| `flow.step_completed` / `flow.failed` | `flow`, `step` (index), `type` |
+| `flow.step_completed` / `flow.failed` | `flow`, `step` (index), `type`; `flow.failed` adds `rules` when step-up rules failed it |
+| `signal.raised` | `signal` (the name the policy's rule uses) |
+| `policy.step_up` | `rule`, `scope`, `level`: once per rule per call, the first time it raises a minimum |
 | `flow.completed` | `flow`, `steps` |
 | `flow.abandoned` | `flow`, `step` |
 | `flow.rate_limited` | `flow`, `scope` (`subject` or `number`): never the subject key, the number or its hash |
@@ -844,6 +955,8 @@ answer on file, a phone number, a link or card data.
 | `intake.started` | `formId`, `version` |
 | `intake.confirmed` | `recordId`, `formId`, `digest`, `confirmedBy` |
 | `intake.abandoned` | none |
+| `record.filing_failed` | `recordId`, `formId`, `fields` (the form's sensitive field names), `reason` (`cipher_error` or `no_ciphertext`) |
+| `delivery.attempted` | `recordId`, `destination` (the destination's id), `attempt`, `outcome` (`delivered`, `retry`, `failed`), `status` (HTTP, an integer from 100 to 599, or null for no answer, which is also what an adapter answer without such a status counts as); actor `system` |
 | `redaction.applied` | `kinds` (counts per kind) |
 | `payment.amount_read_back` | `amountMinor`, `currency`, `amountSource`, `digest` (never the `amountRef`) |
 | `payment.amount_confirmed` | `digest`, `confirmedBy` |
@@ -855,6 +968,8 @@ answer on file, a phone number, a link or card data.
 | `payment.refunded` | `paymentId`, `refundId`, `providerRef`, `amountMinor`, `currency`, `reason`, `status` (`pending`, `succeeded` or `failed`) |
 | `payment.disputed` | `paymentId`, `disputeId`, `status`, `amountMinor`, `currency` |
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
+| `consent.revoked` | `consentId`, `purpose`, `wordingVersion`, `via` (`call`, `text` or `web`) |
+| `consent.unrecorded` | `purpose` (a consent still being stored when the call ended: no consent) |
 | `call.ended` | none |
 | `receipt.issued` | `receiptId`, `digest`, `kid` |
 | `access.issued` | `grantId`, `target`, `controller`, `scope`, `level`, `verificationGrantId`, `expiresAt` (section 17) |
@@ -862,7 +977,12 @@ answer on file, a phone number, a link or card data.
 | `access.code_spent` | `grantId`, `reason` (`wrong_guesses`), `guesses`: a one-time code spent by wrong guesses at its door, never the guess |
 | `stepup.issued` | `tokenId`, `site`, `scope`, `level`, `verificationGrantId`, `expiresAt` (section 18) |
 | `stepup.exchanged` / `stepup.refused` / `stepup.failed` | `tokenId`, `digest` (and `kid` when signed), `reason` when refused or failed (written by the engine only) |
+| `receipt.link_texted` | `actions` (the classes: `money`, `contact`, `access`) |
+| `contact.notice_owed` | none: saved in the same write as the contact change that owes it |
+| `contact.notice_sent` | none |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
+| `subject.erased` | `recordIds`, `pinDigest` (whether one is deleted): the erasure's plan; `callId` null, actor `member` (section 17) |
+| `subject.erasure_completed` | `erasureSeq` (the `subject.erased` entry it completes); `callId` null, actor `member` (section 17) |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
 A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
@@ -878,7 +998,9 @@ surrogate) is refused before it is saved, so it can never block a call's ledger;
 a further write if nobody wrote since. A failed append leaves them pending, and the next write or
 `flushLedger(callId)` appends them. A ledger appends an `eventId` once (a second append returns the
 first entry), so nothing is lost or doubled. The listener is told after each append, at least once
-and best effort.
+and best effort. `consent.revoked` is the one entry written outside a call's write, since a consent
+can be revoked after its call: its `eventId` is `[workspaceId, callId, "consent.revoked",
+consentId]`, so a consent is revoked in the ledger once (section 17).
 
 ## 10. Audit ledger
 
@@ -886,7 +1008,23 @@ Entry: `{seq, prevHash, eventId?, callId, actor, event, at, detail, hash}`. `seq
 `prevHash` is 64 zeros; `hash` is SHA-256 over the canonical JSON of every other field.
 `verifyChain(entries, from?)` reports the first entry whose `seq`, `prevHash` or `hash` is wrong.
 `chainEntry` refuses a detail in which any string (other than a 64-character hex digest) contains
-a card number.
+a card number. An `AuditLedger` lists `list(fromSeq?, limit?)`: the entries with `seq` at or after
+`fromSeq`, in order, at most `limit` (an integer of 1 or more) when it is given, read as one page,
+so a large ledger is walked page by page; `MemoryAuditLedger` throws a TypeError for any other
+`limit`.
+
+`auditLedgerContract(factory)` in `district-assurance/testing` is the suite a ledger must pass:
+it starts at seq 0 and the genesis hash, appends one seq at a time with each entry exactly as
+`chainEntry` builds it, `list(fromSeq)` returns entries in order as a slice that continues the
+chain, `list(fromSeq, limit)` returns at most `limit` of them as one page and refuses a `limit`
+that is not an integer of 1 or more, entries are copied in and out and never change once appended, an `eventId` is appended
+once (a second append, concurrent or not, returns a copy of the first entry, and eventIds that differ only
+in a lone surrogate are distinct), a detail carrying a card number
+is refused with nothing stored, and concurrent appends stay one valid chain.
+`recordStoreContract(factory)` is the suite a `RecordStore` must pass: subjects (seeded by the
+factory, since the engine only reads them) and intake records are copied in and out, workspaces
+never share a key, keys that differ only in a lone surrogate stay apart, and `putIntakeRecord` is idempotent by `recordId`, also concurrently.
+`MemoryAuditLedger` and `MemoryRecordStore` pass both.
 
 ## 11. Canonical JSON
 
@@ -926,8 +1064,9 @@ lone surrogate in any string or key.
 A call gets a receipt when its flow has a `trace.receipt` step (wherever it is, and whether
 or not the flow finished), or, for a call that ran no flow, when Trace's `receipts` setting is not
 false. `endCall` returns it, or null. `verification` comes from Badge, `records` from Dossier,
-`payments` from Paylink and `consents` from Trace; a module that is off contributes an empty
-part. `verification.policyVersion` and `verification.configRevision` name the policy and the
+`payments` from Paylink and `consents` from Trace (`answer` is `yes`, `no`, or `not_recorded` for
+a consent still being stored when the call ended, section 21); a module that is off contributes an
+empty part. `verification.policyVersion` and `verification.configRevision` name the policy and the
 FlowConfig revision that judged the call's last finished verification (whatever level it reached);
 both are absent when no verification finished on the call. They are optional, so the format stays
 at `v: 1`, and a reader that does not know them still checks the signature over the whole body.
@@ -1006,10 +1145,12 @@ node scripts/verify-receipt.mjs <receipt.json | -> <keys.json | https://host/.we
 A key set URL must be `https`, or `http` on `127.0.0.1`, `localhost` or `[::1]`, because a key set
 fetched in the clear could be swapped for one that makes a forged receipt look valid. Redirects are
 refused. A worked example, against the demo server on this machine (`npm run ui`, after the
-`deposit` flow has run to its end in the page, which makes `call_1` with a payment of 15000):
+`deposit` flow has run to its end in the page, which makes `call_1` with a payment of 15000). The
+finished run's view carries the receipt's capability link as `receiptLink` (`/r/<token>`, the
+page opens it); `<token>` below is that token, and `/r/<token>.json` is the signed receipt:
 
 ```sh
-$ curl -s http://127.0.0.1:8787/receipts/call_1 > receipt.json
+$ curl -s http://127.0.0.1:8787/r/<token>.json > receipt.json
 $ node scripts/verify-receipt.mjs receipt.json http://127.0.0.1:8787/.well-known/receipt-keys.json
 valid
 $ curl -s http://127.0.0.1:8787/.well-known/receipt-keys.json > keys.json   # or keep a copy
@@ -1027,29 +1168,147 @@ with it. A saved key set therefore preserves historical verification only; it sa
 key's current status. When current trust matters, verify against the key set URL, or refresh the
 saved copy from it first.
 
-Record digests are `SHA-256(canonicalJson({formId, version, values}))`; wording digests are
-`SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`.
+Record digests are `SHA-256(canonicalJson({formId, version, values}))` over the values the caller
+confirmed, where each sensitive value is replaced by
+`HMAC-SHA256(knowledgeKey, canonicalJson(["intake", recordId, field, value]))`, hex (section 13);
+wording digests are `SHA-256(canonicalJson({purpose, version, text: {en, fr}}))`, or `text: {en, fr, es}` for a
+wording with a Spanish text, so a wording without one keeps the digest it had before Spanish.
+
+**Receipt links.** A call id is not a secret, so a receipt is shared by a capability link.
+`newReceiptLinkToken()` returns a `token` (32 random bytes, base64url, 43 characters) and its
+`hash`, `SHA-256("receipt-link:" + token)` in hex; the host sends the token once and stores only
+the hash with the call id. `receiptLinkTokenHash(token)` gives the hash to look up, or null for a
+string that is not a token. The reference server keeps the hashes in `ReceiptLinks` and serves:
+
+| Route | |
+|---|---|
+| `GET /r/:token` | an HTML page, in English or French (`?lang=en` or `?lang=fr`, else the browser's first `Accept-Language`, else English): the signature check against the server's key set, the verification level and methods, records, payments, consents and the ledger head |
+| `GET /r/:token.json` | the signed receipt |
+
+An unknown token, a malformed one and a call without a receipt yet all answer the same `404`. The
+page has no script, style or form, every value is escaped, and it is sent with `no-store`,
+`Referrer-Policy: no-referrer` and `noindex`. There is no route by call id. `ReceiptLinks` keeps
+every link it issues, in memory, for the life of the process, with no limit and no expiry: the host
+bounds how many links it issues and how long it keeps them (a durable store with expiry in its place).
 
 ## 13. Intake values
 
 | Type | Accepted | Stored as |
 |---|---|---|
-| `text` | trimmed, non-empty, well-formed Unicode (no lone surrogate), at most `maxLength` (500), and no card number | string |
-| `number` | `-?\d+(\.\d+)?` | number |
-| `date` | `YYYY-MM-DD` naming a real day | string |
-| `yes_no` | `yes`, `y`, `oui` / `no`, `n`, `non`, any case | boolean |
+| `text` | trimmed, non-empty, Unicode text (a lone surrogate is `not_text`), at most `maxLength` (500), no card number, and matching `pattern` whole if set (`no_match`) | string |
+| `number` | `-?\d+(\.\d+)?`, from `min` to `max` if set (`below_min`, `above_max`) | number |
+| `date` | `YYYY-MM-DD` naming a real day, from `min` to `max` if set | string |
+| `yes_no` | `yes`, `y`, `oui`, `sí`, `si` / `no`, `n`, `non`, any case, in every locale | boolean |
 
 Forms live in Dossier's settings: a `formId` (lower case, digits, `-`, `_`), a `version` and
-fields with snake_case unique keys, a known type and an English and a French label.
-`validateConfig` refuses fields marked `sensitive` until field encryption exists (FIL-2).
-`setIntakeField` refuses (`invalid_input`) a value with a lone surrogate, which speech-to-text or a
-model can produce and a record's digest cannot hash. `startIntake(callId, formId)` names the form,
+fields with snake_case unique keys, a known type and an English and a French label, plus an
+optional Spanish one (`label: {en, fr, es?}`; `es` non-empty when given, no other key).
+A field marked `sensitive` is stored encrypted: `validateConfig` refuses a form with one unless
+the engine has the `fieldCipher` adapter (`modules.dossier: needs the fieldCipher adapter, which
+the engine does not have`). `confirmIntake` computes the digest (section 12) when it reserves the
+record, then, on every attempt to store it, asks `FieldCipher.encrypt(text, {workspaceId,
+recordId, field})` for each sensitive value given (a number or a yes/no as JSON writes it) and
+stores and returns the record with the ciphertext in its place; the engine never decrypts. The
+digest does not depend on the ciphertext, so it is the same when a retry encrypts again. An
+engine without a cipher (another process on the same SessionStore) refuses to file such a record
+(`precondition_failed`) and leaves it reserved for an engine that has one. A cipher that throws
+(`cipher_error`) or answers with an empty string, a non-string or the value itself
+(`no_ciphertext`) never holds the call open: the reserved filing is released as failed, the draft
+is dropped with its values (phase back to `open`, nothing kept in the clear), the ledger gets
+`record.filing_failed {recordId, formId, fields, reason}` (the form's sensitive field names and the
+reason code, never a value), and `confirmIntake` throws `precondition_failed` with the reason code;
+the cipher's own error is never passed on. Nothing was stored, since the cipher runs before the
+record store, so `endCall` can go ahead and the host collects the record again if it wants it. If
+another process sealed and filed the same record meanwhile, that record is returned instead. A
+process that sealed the record claims the filing before it writes it (`writers`, each write by its
+own token, by the same compare-and-set as every write): while any claim is live, a process whose
+cipher fails releases nothing and logs nothing, and `confirmIntake` throws `conflict` ("another
+process is writing this record; confirm again for its outcome"), so a retry returns the winner's
+record. A write whose write fails gives up only its own claim; a claim older than two minutes
+(`WRITE_CLAIM_MS`) is taken as a writer that died. A release first marks the filing `releasing`
+(no write claims or files it from then on), then deletes the record by id
+(`RecordStore.deleteIntakeRecords`, which also makes a later write of that id store nothing), then
+drops the draft and logs `record.filing_failed`: so a write the store kept before failing, or one
+that outlived its claim, never leaves a stored record behind a released filing, and a writer that
+finds the filing released files nothing and throws the same `precondition_failed`. A release
+whose delete failed is carried on by the next confirmation, with the reason it began with. Until the
+record is filed, abandoned or the call ends (`endCall` drops an open draft, before `call.ended`
+and the receipt's ledger head, writing no event), the draft in the call record holds sensitive
+values in the clear; afterwards the call record keeps only the encrypted record.
+`setIntakeField` refuses (`invalid_input`) a value that is not a string, and refuses a value with a
+lone surrogate, which speech-to-text or a model can produce and a record's digest cannot hash, as
+`not_text`. `startIntake(callId, formId)` names the form,
 and the draft keeps the form as it was then, so a
+
+Field rules (FIL-4), each checked by `validateConfig`, which reports every bad one:
+
+- A field has only `key`, `label`, `type`, `required`, `sensitive`, `maxLength`, `showIf`, `min`,
+  `max` and `pattern`.
+- No field's key or label (any language; case, accents and dots ignored) names a card, its
+  number or a national identity number: the words `card`, `carte`, `tarjeta`, `cardholder`, `cvv`,
+  `cvc`, `pan`, `cc`, `sin`, `nas`, `ssn`, `nss`, `social insurance`, `assurance sociale`, `social
+  security`, `seguro social` or `seguridad social`, each a whole part of the name split at spaces,
+  `_`, `-` and camelCase humps (`panNumber`), never a piece of a longer word (`account`, `pancake`,
+  `nasal` pass), or one of them run into one word with a number or kind (`creditcard`, `cardno`,
+  `numerocarte`, `numerotarjeta`, `sinnumber`, `ssnumber`, `nssnumero`, `pannumber`, `ccno`). The
+  card-number check on values still applies whatever a field is called.
+- `min` and `max` only on number fields (finite numbers) and date fields (`YYYY-MM-DD` dates),
+  inclusive, with `min` at most `max`.
+- `pattern` only on text fields: a regular expression of 1 to 200 characters, valid in Unicode
+  mode, matched against the whole value. It must not use a backreference or repeat a group that
+  repeats or alternates, and the product of the choices its repetitions and alternatives give
+  (`?` and `|` count 2, `*` and `+` the field's `maxLength` plus 1, `{m,n}` `n - m + 1`) must be
+  at most 100,000, so no pattern can stall the engine on a caller's value.
+- `showIf: {field, equals}` names another field of the form, not a sensitive one, and a value that
+  field can hold. A field is **shown** while that field's value equals `equals` and that field is
+  shown itself; one without `showIf` always is. A chain of `showIf` that comes back to a field is
+  refused.
+
+Only shown fields are asked: `setIntakeField` on a hidden one is refused (`precondition_failed`).
+Only shown fields are required, read back and filed: a value given while a field was shown stays in
+the draft but out of the record, its digest and the read-back if the field is hidden again.
+
+**Read-back** (FIL-1, FIL-6). `buildReadBack(form, values, locale)` builds, in English, French or
+Spanish, what the host speaks before the caller confirms: an opening, one sentence per shown field
+with a value, in form order, and the fixed confirm prompt. `text` is all three, one space apart;
+`lines` and `prompt` are its parts. Another locale is refused (`invalid_input`), and Spanish is
+refused (`precondition_failed`) for a form with any field that has no Spanish label.
+
+| Type | English | French | Spanish (United States) |
+|---|---|---|---|
+| `text` | `Issue: Leak.` (as given; a full stop unless it ends in `.`, `!` or `?`) | `Problème : Leak.` | `Problema: Leak.` |
+| `number` | `1,234.5`, `minus 2` (never in exponent form) | `1 234,5` (a non-breaking space), `moins 2` | `1,234.5`, `menos 2` |
+| `date` | `Tuesday, September 1, 2026` | `le mardi 1er septembre 2026` | `el martes primero de septiembre de 2026`, `el jueves 29 de febrero de 2024` |
+| `yes_no` | `yes` / `no` | `oui` / `non` | `sí` / `no` |
+| sensitive | `Label: given, and not read aloud for your security.` | `Libellé : fourni, mais pas lu à voix haute, pour votre sécurité.` | `Etiqueta: se proporcionó, pero no se lee en voz alta por su seguridad.` |
+
+Opening: "Here is what will be filed." / "Voici ce que nous allons enregistrer." / "Esto es lo que
+vamos a registrar." Prompt: "Is that correct? Say yes or press 1 to confirm." / "Est-ce exact?
+Dites oui ou appuyez sur le 1 pour confirmer." / "¿Es correcto? Oprima el 1 para confirmar." (the
+keypad only: Spanish spoken answers are refused until a reviewed vocabulary exists, so a yes/no
+field takes no "sí" and a Spanish call's read-back is confirmed with `confirmedBy: "keypad"`). Every string code builds exists in every locale (`LOCALES`), and a parity test fails
+when one is missing or copies another locale's. A sensitive field's value is never in the read-back, its text or its lines. The
+`digest` is `SHA-256(canonicalJson({v: 1, locale, text, record}))`, where `record` is the record
+digest of the values that would be filed (section 12), so a change to any of them, a sensitive one
+included, changes it.
+`intakeReadBack(callId)` builds the read-back of the open draft in the call's locale.
+`confirmIntake(callId, {confirmedBy, readBack})` takes the digest of the read-back the caller
+heard, and refuses with `precondition_failed` unless the draft reads back to that digest now; a
+confirmation retried after its record was filed returns that record.
+
+`startIntake(callId, formId)` names the form, and the draft keeps the form as it was then, so a
 config change mid-intake never changes what is filed; a call also keeps the forms (and Trace the
 wordings) in force when it started. A draft being filed refuses changes. A filing that failed
 after its reservation (the store refused it, or the last write was lost) stays reserved and
 resumes with the same record on the next `confirmIntake`, so `RecordStore.putIntakeRecord` must be
-idempotent by `recordId`; two confirmations at once file one record. A confirmation retried after its record was
+idempotent by `recordId`; two confirmations at once file one record. A record carries the
+`subjectKey` Badge matched on the call when it was filed (a keypad or PIN match), or null when
+none had. A resume needs `intake.file`
+again, as a first confirmation does: refused (`scope_denied`), the filing stays reserved.
+`abandonIntake` releases a reserved filing: it deletes the record by id first
+(`RecordStore.deleteIntakeRecords`, which also makes a later write of that id store nothing), then
+drops the draft, so the call can end; a confirmation whose write was in flight then fails
+(`precondition_failed`) and files nothing. A confirmation retried after its record was
 filed (its ledger entry failed) returns the same record. `endCall` is refused while a record is
 being filed. Provider idempotency keys are JSON tuples of the workspace, the call and the
 operation, so workspaces sharing an adapter never share a key. A flow attached to a running call
@@ -1057,7 +1316,8 @@ is refused when a step needs a form or a wording the call did not keep.
 
 ## 14. Payments
 
-`requestPayment` needs `payment.request`, a confirmed amount read-back (below), a positive integer amount in minor units up to
+`requestPayment` needs `payment.request` at its minimum for the amount asked (step-up rules,
+section 4; the amount read back, or the request being resumed), a confirmed amount read-back (below), a positive integer amount in minor units up to
 Paylink's `maxAmountMinor` (at most 1,000,000), a lower-case ISO 4217 currency, a 1 to 200
 character description and an `amountSource` (`intake_record`, `business_endpoint` or
 `price_list`). In a flow they come from the `paylink.request` step and the host passes none;
@@ -1279,7 +1539,9 @@ recordIds})` returns `{amountMinor, currency}` or null. `source` is the step's `
   against the limit in force. A read-back for another subject than the one matched now is
   refused. A call with a link already out is refused as before (`invalid_transition`). A request
   still being sent resumes with no input, the same amount, or the same `amountRef` request it was
-  made for, without a new read-back. The mode, link life and payment methods still come from the
+  made for, without a new read-back. The scope is checked again right before the text, so a signal
+  raised or a window opened while the link was created means the link is not texted
+  (`scope_denied`; the link id is kept). The mode, link life and payment methods still come from the
   step and the settings when the link is reserved.
 
 ## 15. Stripe webhooks
@@ -1328,20 +1590,68 @@ constructor, never quoting the value.
 ## 16. Texts
 
 Code builds every text, in the call's locale, one of `SUPPORTED_LOCALES` (exported, a frozen
-`["en", "fr"]` whose members are the `Locale` type; `isSupportedLocale` checks a host's value).
+`["en", "fr", "es"]` whose members are the `Locale` type; `isSupportedLocale` checks a host's value).
 Each catalog of code-built words is a `Record<Locale, ...>`: `IDENTITY_TEXT`, `PAYMENT_TEXT`,
 `AMOUNT_REGION` (where amounts are formatted) and `DIGIT_WORDS_BY_LOCALE` (the spoken digits the
 card-number detector reads, every locale's always on). A test fails when a catalog lacks a
 supported locale, when a `Record<Locale, ...>` in `src/` is not one it checks, or when code picks
 words by comparing a locale instead, so a new locale grows every catalog. The destination is always the
 subject's number on file. Identity link: "Your one-time identity check link: URL" / "Votre lien
-de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
-AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
-the currency's own decimals. Texted code: "Your one-time verification code: CODE. It expires in 10
+de vérification d'identité, à usage unique : URL" / "Su enlace de verificación de identidad, de un
+solo uso: URL". Payment link: "Your secure payment link for AMOUNT: URL" / "Votre lien de paiement
+sécurisé pour AMOUNT : URL" / "Su enlace de pago seguro por AMOUNT: URL", with the amount formatted
+in the currency's own decimals, as in `en-CA`, `fr-CA` and `es-US` (`$1,500.50` in Spanish for US
+dollars). Texted code: "Your one-time verification code: CODE. It expires in 10
 minutes. Do not share it." / "Votre code de vérification à usage unique : CODE. Il expire dans 10
 minutes. Ne le communiquez à personne." Access code (section 17): "Your one-time door code: CODE. It works
 once, within N min." / "Votre code de porte, à usage unique : CODE. Valable une fois, dans les N
 min.", N being the minutes left on the access grant, rounded up, at least 1.
+
+**Actions.** When a flow step whose needed scope is of class money, contact or access completes
+(section 4), the call notes the class, once each. An outside module that changes contact details,
+in a flow or outside one, calls `contactChanged()` on its `ModuleCallView` in that same
+`updateModule` change, which notes a contact action the same way; with no keypad or PIN match
+standing it is refused (`precondition_failed`) and the module's change is not saved, since there
+is no number to alert. Each contact action also keeps the matched subject and its number on file
+as Badge read it when verification started, before the change, unless the call already kept that
+same subject with that same number; Badge's keypad or PIN match always stands then, since such a
+step follows a level 2 verification. Keeping one writes `contact.notice_owed` in the same write.
+
+**Receipt link** (purpose `receipt_link`). `textReceiptLink(callId, url)` texts the host's
+capability link to an ended call's receipt (section 12, an `https` URL of at most 512 characters
+with no whitespace, no control or format character (such as NEL, a zero-width space or a bidi
+override) and no lone surrogate, else `invalid_input`; a call not ended or without its receipt yet: `precondition_failed`). It
+returns `{texted: true}` only when the flow's `trace.receipt` step has `textLink`, an action was
+noted, the caller's latest answer to `textLink.consent` is "yes" (a later "no" withdraws an
+earlier "yes"), a keypad or PIN match still stands (or the call kept a number for Badge's current
+subject before a contact change), and no link was texted on this call yet; otherwise
+`{texted: false}` and nothing is sent. It goes to the first number kept for Badge's current subject
+before a contact change, else that subject's number on file; a number kept for another subject is
+never used. "Receipt from BUSINESS for ACTIONS on your call: URL" / "Reçu de BUSINESS
+pour ACTIONS lors de votre appel : URL", where ACTIONS lists, in order, "a payment", "a change to
+your contact details", "an access request" / "un paiement", "une modification de vos coordonnées",
+"une demande d'accès". No amount, code or personal value. A retry after a failure sends with the
+same idempotency key; the ledger gets one `receipt.link_texted`.
+
+**Contact change notice** (purpose `contact_changed`). Each subject and number a contact step kept
+is owed a security notice, whatever the caller answered about receipts: it is not a receipt and
+has no setting. Each is sent, in order, to the number kept before the change, with one
+idempotency key per notice, as soon as the write that owes it is saved; a failed text leaves it
+owed (the change itself still succeeds), and the call's next write, `endCall` or `sweepAlerts()`
+sends it. `endCall` sends any still owed before signing the receipt; if a text fails there,
+`endCall` throws, and calling it again sends the notices still owed (and the receipt) without
+ending the call again. `sweepAlerts()` (the host runs it on a schedule) is the one sweep for
+contact notices and duress alerts (section 6): a call that owes either is stored with `owesAlerts:
+true`, the session store lists those calls (`listCallsOwingAlerts`, required by the sweep), and it
+sends what each still owes, ended or not, so a call that is never ended still alerts; it returns
+`{sent, failed}` (call ids; a failed one stays owed, and a call the host's session retention
+removed is reported as failed). A
+call that ended with ledger entries still pending (a notice or receipt saved, then not appended)
+is finished the same way: `endCall` appends them and returns the kept receipt, or null. "BUSINESS: the contact details on your account were changed during a call.
+If it was not you, contact us right away." / "BUSINESS : les coordonnées de votre compte ont été
+modifiées pendant un appel. Si ce n'était pas vous, communiquez avec nous sans tarder.", with
+"Security notice" / "Avis de sécurité" in place of BUSINESS when Trace has no `businessName`. It
+never says which detail changed or to what. The ledger gets one `contact.notice_sent` per notice.
 
 ## 17. Gate and access grants
 
@@ -1791,3 +2101,325 @@ holds a grant, or when a text-flooding script never sends a text (so "no text be
 never vacuous). Every built factor has scripts in both languages: a texted code in text flooding
 (it reaches a text and nothing else), a callback in authority (only a keypad or PIN match rings,
 and only the number on file), and a spoken answer in partial answers (its match opens no text).
+
+## 20. Keypad collector
+
+`KeypadCollector` is a helper for the host's keypad path (INT-1): it buffers the tones of one entry
+outside the model and hands them to the engine. It is pure: no timers and no I/O, time from the
+injected clock. Options: `maxDigits` (1 to 32), `idleTimeoutMs` (1 to 600,000), `onDigits` (the one
+callback) and an optional `clock` (an object with `now()`); anything else is refused with `EngineError("invalid_input")`.
+`press(tone)` returns a status and never a digit:
+
+| Tone | Status | Effect |
+|---|---|---|
+| `0` to `9`, under `maxDigits` buffered | `buffering` | appended; the idle timeout restarts |
+| `0` to `9`, `maxDigits` already buffered | `overflow` | the entry is discarded |
+| anything but `#` or `*`, after `overflow` or `rejected` in the same entry | `discarding` | ignored; the idle timeout restarts |
+| `#`, digits buffered | `submitted` | the buffer is emptied, then `onDigits(digits)` runs once; its return value is `result` |
+| `#`, nothing buffered | `empty` | none |
+| `*` | `cleared` | the entry is discarded |
+| anything else (`A` to `D`, several characters, not a string) | `rejected` | the entry is discarded |
+
+Before each tone, an entry whose last tone is `idleTimeoutMs` old or older, or later than now (a
+clock set back), is discarded, and the result says `timedOut: true`; the tone is then taken as the
+first of a new entry. A discarded entry
+(after `overflow` or `rejected`) lasts until `#` (`empty`), `*`, `clear()` or the idle timeout ends
+it, so no tail of it is ever submitted: with `maxDigits` 4, `123456#` submits nothing. `expire()` does
+the same from the host's own timer and says whether it discarded anything; `clear()` discards the
+entry at once. A discarded entry never reaches the callback. `toString`, `toJSON` and
+`util.inspect` show no digit and not how many are buffered.
+
+## 21. Consent revocation
+
+A consent is revoked by voice, text or dashboard with `revokeConsent({consentId, via})`, where
+`via` is `call`, `text` or `web`, during its call or after it. It needs the host's `ConsentStore`
+(the `consents` adapter):
+
+- `putConsent(workspaceId, record)` keeps a `ConsentRecord`; idempotent by `consentId`.
+- `getConsent(workspaceId, consentId)` returns `{consent, revoked}` (`revoked` is null or the
+  revocation), or null.
+- `revokeConsent(workspaceId, {consentId, via, at})` keeps a revocation beside the consent; the
+  first one wins and is returned to every later call.
+
+`recordConsent` takes `answer` `yes` or `no` and `channel` `call`, `text` or `web` (default `call`)
+only: anything else is `invalid_input`, before anything is reserved, stored or ledgered.
+With the adapter, `recordConsent` reserves the consent on the call, writes it to the store and
+then records it (`consent.recorded`, and the flow step judged). If the store write fails the
+consent stays reserved: a consent with another purpose or answer is refused
+(`precondition_failed`), and the next `recordConsent` with the same purpose and answer resumes it
+with the same record. A store outage never keeps the call from ending: at `endCall` a consent
+still reserved settles as not recorded, which is no consent (fail closed). The ledger gets
+`consent.unrecorded` with the purpose only, before `call.ended`, and the receipt lists it with
+`answer: "not_recorded"`. A `recordConsent` still writing it when the call ended records nothing
+and throws `precondition_failed`; one after the end is refused (`invalid_transition`). Without the adapter, consents live on the call record only and
+`revokeConsent` is refused (`precondition_failed`).
+
+`revokeConsent` refuses an empty id or an unknown `via` (`invalid_input`), a consent the store does
+not have for this workspace (`invalid_input`), a consent answered "no", and a consent that is not
+recorded on its call, still being stored or settled as not recorded (`precondition_failed`). So
+that `consent.revoked` never precedes `consent.recorded`, it appends the call's pending ledger
+entries first. When the host has removed the call record, the revocation is still stored (a yes
+in the store never outlives the caller's no) and `consent.revoked` is always appended; when this
+workspace's ledger holds no `consent.recorded` entry for the consent (read page by page), its detail
+adds `priorRecord: false`. Otherwise it
+stores the revocation, appends `consent.revoked` (actor `member` for `web`, else
+`caller`) at the revocation's time, tells the listener, and returns the revocation. A second
+revocation, or a retry after the ledger failed, returns the first one and completes its entry
+without writing a second. Revoking does not change the call record or a receipt already signed:
+the receipt proves what was answered then, and the ledger proves the revocation.
+
+`isStopRequest(text)` is true when a text or a spoken answer, apart from spaces and a closing `.`
+or `!`, is one of the standard carrier opt-out words STOP, STOPALL, UNSUBSCRIBE, CANCEL, END and
+QUIT, or the French ARRÊT, ARRÊTE, ARRÊTER, in any case, with or without accents. A word inside a
+longer message ("don't stop", "cancel my order") is not a match, and a value that is not a string
+is false. A host may treat more words as a stop on its own. The host decides which consents a
+match revokes (for example every consent texted to that number) and calls `revokeConsent` for
+each.
+
+## 22. Record delivery
+
+`deliverRecord({ workspaceId, recordId, destination, records, delivery, ledger, clock, sleep?,
+retry? })` posts a confirmed record, read from the `RecordStore`, to one destination through the
+host's `RecordDelivery` adapter, which makes one HTTP request per call and never retries itself.
+It is a library call the host makes after `confirmIntake` (for example from a job queue), not a
+flow step. A destination is `{ destinationId, url, secret }` from the host's own configuration:
+the id is lower case, digits, `-` and `_` (it goes in the ledger, the URL never does), the URL is
+`https:`, or `http:` on `localhost`, `127.0.0.1` or `[::1]`, without credentials, and the secret
+is a string of at least 16 characters; a destination that is not an object, or a field of the
+wrong type, is refused like a bad value.
+
+The body is the canonical JSON of `{ v: 1, type: "record.confirmed", idempotencyKey,
+destinationId, record }`, the same bytes on every attempt. The idempotency key is
+`SHA-256(JSON.stringify([workspaceId, "delivery", recordId, destinationId]))` in hex: one key per
+record and destination, the same however often the record is delivered. Headers:
+`content-type: application/json`, `idempotency-key`, and `district-signature:
+t=<unix seconds>,v1=<HMAC-SHA256(secret, t + "." + body)>`, the scheme of section 15, so
+`verifyStripeSignature` checks it; each attempt is signed with its own time. A receiver checks the
+signature, then reads the key from the signed body and applies it once.
+
+Retries: a 2xx delivers; no answer (the adapter rejects), 408, 429 or 5xx waits
+`min(maxDelayMs, baseDelayMs * 2^(attempt - 1))` and tries again, up to `maxAttempts`; any other
+status fails at once. Defaults: 5 attempts, 1 second, 60 seconds; allowed: 1 to 10 attempts, a
+base from 0 to 600,000 ms and a cap from the base to 3,600,000 ms. Each attempt appends one
+`delivery.attempted` entry on the record's call, after the post, straight to the `ledger` it is
+given: no engine is involved, so an engine's `onEvent` listener does not see these entries. `deliverRecord` returns
+`{ delivered, attempts, status, idempotencyKey }`; it throws `invalid_input` for a bad destination
+or retry setting or an unknown record, before posting, and passes a ledger failure through.
+de vérification d'identité, à usage unique : URL". Payment link: "Your secure payment link for
+AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
+the currency's own decimals.
+
+## 17. Document uploads
+
+A caller adds a photo or a PDF to a record they confirmed through a single-use link
+(`src/file/upload.ts`). The functions take a context: the workspace id, a `DocumentStore` and the
+clock, plus the `RecordStore` to create a link and an id generator and a `DocumentScanner` to
+accept an upload.
+
+- `createUploadLink({callId, recordId, locale?, allowedTypes?, maxBytes?})` (`callId` and `recordId`
+  non-empty strings; a token that is not a string is a link not usable, never an error) refuses
+  (`invalid_input`) an empty id, a locale other than `en` or `fr`, `allowedTypes` that is empty,
+  repeats a type or names one outside `image/jpeg`, `image/png`, `application/pdf`, and a
+  `maxBytes` outside 1 to 26,214,400 (25 MiB); defaults are every type and 10 MiB. It refuses
+  (`precondition_failed`) a record the `RecordStore` does not have or that another call confirmed.
+  It returns `{token, expiresAt, allowedTypes, maxBytes}`: the token is `upl_` and 32 random bytes
+  in base64url, and expires 30 minutes (`UPLOAD_LINK_TTL_SECONDS`) after creation.
+- The store keeps `{workspaceId, tokenHash, callId, recordId, locale, allowedTypes, maxBytes,
+  createdAt, expiresAt, usedAt}`, where `tokenHash` is the SHA-256 hex of the token. The token is
+  never stored.
+- `openUploadLink(token)` returns `{locale, allowedTypes, maxBytes, expiresAt}` for a link that
+  exists in the workspace, is unused and has not expired (now before `expiresAt`), else null.
+  Reading an expired link calls `DocumentStore.purgeExpiredUploadLinks(workspaceId, now)`, which
+  removes every expired link of the workspace; `sweepUploadLinks(context)` does the same from a
+  host's own timer.
+- `acceptUpload({token, contentType, bytes})` throws `invalid_input` when `bytes` is not a
+  `Uint8Array` or `contentType` not a string, and refuses a body over 25 MiB (`too_large`) before
+  copying it. It then checks, in order: the link is usable
+  (`link_not_usable`, for an unknown, malformed, used or expired token alike); the declared type,
+  without parameters and in any case, is one the link allows (`type_not_allowed`); the file is not
+  empty (`empty`) and at most `maxBytes` (`too_large`); the bytes start with the type's signature
+  (`FF D8 FF`, the PNG signature, `%PDF-`; else `content_mismatch`). None of these spends the
+  link. Then `DocumentStore.claimUploadLink` sets `usedAt` if it is still null and `usedAt` is
+  before `expiresAt`, and only the one claim that did goes on (a lost or late claim is
+  `link_not_usable`); the scanner is asked, anything but `clean: true` is `scan_refused`, and a
+  scanner that throws is `scan_failed`, its error never passed on; the document is stored as `{documentId, workspaceId, callId,
+  recordId, contentType, size, digest, receivedAt}` with `digest` the SHA-256 hex of the bytes.
+  From the claim on, the link is spent whatever happens.
+
+`MemoryDocumentStore` is the reference store. The reference server, given `uploads`, serves
+`GET /u/:token` (the upload page, in the link's language or `?lang=en|fr`, with a switch to the
+other) and `POST /u/:token` (a `multipart/form-data` body with a part named `file`, read up to the
+link's `maxBytes` plus 16 KiB). Answers: 201 received, 400 no file, 410 link not usable, 413 too
+large, 415 type, 422 scan refused, 503 scan failed, each as a page in the same language. Creating the link, texting
+it to the number on file and writing ledger entries for it are not wired into the engine yet.
+## 17. Card numbers in transcripts
+
+**Runs of digits.** `digitRuns(text)` reads a text into runs of digits. A run is numerals and spoken
+numbers in English, French or Spanish with only separators between them (Spanish hundreds,
+`doscientos` and the rest, are whole numbers no count multiplies): spaces, any dash (hyphen, en and
+em dashes, the non-breaking hyphen), the minus sign, dots, commas, slashes, underscores, middle
+dots, and the characters a reader never sees (zero-width spaces and joiners, soft hyphens, bidi
+controls, combining marks: `SEPARATOR_CLASS`). A numeral is any run of Unicode decimal digits
+(fullwidth, Arabic-Indic and the rest), read by its values for the checks, and the original span
+is what is removed. English and French number words are read on every call, since callers switch
+between them; Spanish words only on a Spanish call (`Engine.redact` and a `LiveCardNumberDetector`
+given its `locale`), so on an English call "once" and "y" are words. A call started with
+`locale: "es"` is a Spanish call. Text redacted with no call reads every language. Any other word or punctuation ends a run. Joining this widely can join things
+that are not one number (a date beside an amount); over-redaction is the safe side, since the risk
+is a number reaching storage. Spoken numbers are read as people say them:
+
+| Spoken | Digits |
+|---|---|
+| digit by digit: `four two`, `oh`, `zéro`, `un`, `une` | `42`, `0`, `0`, `1`, `1` |
+| tens and units: `forty two`, `quarante-deux`, `vingt et un`, `soixante et onze`, `soixante-douze`, `quatre-vingt-dix-sept`, `septante`, `nonante` | `42`, `42`, `21`, `71`, `72`, `97`, `70`, `90` |
+| teens: `twelve`, `dix-sept` | `12`, `17` |
+| `double` and `triple` before one digit: `double four`, `triple 0` | `44`, `000` |
+| scales: `four hundred and two`, `forty two hundred`, `cent deux`, `deux mille vingt` | `402`, `4200`, `102`, `2020` |
+| Spanish: `cero`, `cuarenta y uno`, `veintidós`, `dieciséis`, `ciento once`, `doscientos`, `cuatro mil ciento once` | `0`, `41`, `22`, `16`, `111`, `200`, `4111` |
+
+Words are compared in Unicode NFC, lower case, with their combining marks, so `zéro` written
+decomposed (`e` and U+0301) is still a number word. Units do not combine (`four two` is 4 then 2). `quatre-vingts` and `deux cents` end a number,
+since French writes the plural only there. `double` or `triple` before anything but one digit is
+an ordinary word.
+
+**Redaction.** `findCardNumbers` looks, in each run, for 13 to 19 digits that pass the Luhn check,
+starting and ending on a numeral or spoken number, leftmost first and longest at each position,
+never overlapping; `cardNumberRedactor` replaces each with `[card number removed]`.
+
+**Live detection.** `LiveCardNumberDetector` is fed a call's transcript one chunk at a time
+(`push(chunk)`; chunks are joined with a space, so each must end at a word boundary). It answers
+`{interrupt, digits}`: `interrupt` is true when a run the chunk added to holds `minDigits` digits
+or more (8 by default; an integer from 4 to 19, otherwise `invalid_input`), and `digits` counts the
+digits of the run still open at the end. There is no Luhn check, since a partial number cannot
+pass one, so a phone number read aloud interrupts too. A chunk that does not extend the run does
+not interrupt again. A run continues across chunks, also after a trailing `and`, `et`, `double` or
+`triple`. The detector keeps only the open run's text, without trailing separators, so empty or
+separator-only chunks never grow what it keeps; it never returns it, and forgets it on `reset()`. The host owns one detector per call and speaks its fixed line on `interrupt`.
+
+**Corpus.** `test/corpus/card-numbers.json` holds the cases for runs, redaction and live detection
+as plain JSON, so an implementation in another language can be tested against the same cases.
+## 17. Redaction
+
+Each detector is its own `Redactor`; a host composes the ones it wants with `composeRedactors`,
+card numbers first, then health card numbers, SINs and bank numbers (a 10-digit health card number
+can start with a valid SIN, so the health card pass must see it whole). Composed findings report
+offsets into the original input, in the order the redactors ran; `applyFindings(text, findings)`
+takes findings in any order (it sorts them by position and merges overlapping ones, marked with
+the kind of the one that starts first), so a host can apply composed findings to the original
+text as they come. The engine's default redactor
+is `cardNumberRedactor`. `Engine.redact` sets `interrupt` on any finding, whichever redactor found
+it, and returns `line`, the fixed line for the kind found (`INTERRUPT_LINES`, in the call's
+language; a card number first, then a health card number, a SIN, banking details; null when
+nothing was found). Only the card number line offers a payment link. A match is replaced by its
+kind's marker; `redaction.applied` counts findings per kind.
+
+Digits are read in runs: digit groups or single digit words (English and French) with only
+separators between them: spaces, any dash, the minus sign, dots, commas, slashes, underscores,
+middle dots, and the characters a reader never sees (zero-width spaces and joiners, soft hyphens,
+bidi controls, combining marks: `SEPARATOR_CLASS`). A numeral is any run of Unicode decimal digits
+(fullwidth, Arabic-Indic and the rest), read by its values for every check, and the original span
+is what is removed. Joining this widely can join things that are not one number; over-redaction is
+the safe side, since the risk is a number reaching storage. In each run, matches are taken leftmost first,
+longest at each position, never overlapping. A format with groups accepts a written number only
+when its groups break where the format's do, or not at all; single digits (spoken digit words, or
+digits read one by one) may break anywhere.
+
+| Kind | Redactor | Matches | Marker |
+|---|---|---|---|
+| `card_number` | `cardNumberRedactor` | 13 to 19 digits, Luhn | `[card number removed]` |
+| `sin` | `sinRedactor` | 9 digits, Luhn, groups 3-3-3 | `[SIN removed]` |
+| `health_card` | `healthCardRedactor` | Ontario: 10 digits, Luhn, groups 4-3-3 (a version code after it is kept). British Columbia: 10 digits starting with 9, mod 11 check digit (weights 2, 4, 8, 5, 10, 9, 7, 3 on digits 2 to 9), groups 4-3-3. Quebec: four letters right before the run, as one word or spelled one by one (at most 8 separators in each gap and before the digits, so only the last 48 characters before a run are read), then 8 digits whose 3rd to 6th give a month (or month plus 50) and a day, groups 4-4; the letters are removed too | `[health card number removed]` |
+| `bank_account` | `bankAccountRedactor` | a whole run of 3 or more digits with a bank word among the last 4 words before it, counting only words after the previous run. English: bank, branch, transit, institution, account; French: banque, bancaire, succursale, compte, folio; Spanish: banco, bancaria, bancario, sucursal, cuenta, tránsito, institución, with or without accents; each also in the plural; read in the languages `numberLanguagesFor` gives the call: English and French always, Spanish on a Spanish call and on text with no call | `[banking details removed]` |
+
+Bank numbers carry no check digit, so a bank word is what marks them; an account number read
+with no bank word before it is not found. Health card numbers of other provinces are not found
+yet. Number words ("forty two", "quarante-deux") and "double" forms are planned (PAY-5). The test
+corpus is shared JSON in `test/corpus/`, one file per kind: each case gives a text, its language
+and the exact substrings a redactor must find, in order.
+## 17. Subject requests: access and deletion
+
+Two `Engine` methods the business calls from its own code, for one person's access or deletion
+request. They take no call id and are no flow step, so nothing on a call reaches them. Both take
+`{workspaceId, subjectKey}`: the engine's own workspace and a 64 lower-case hex subject key (a
+string: an array or other object holding the key is refused), each read once, else `invalid_input`
+(also for a request that is not an object); both need the `records` adapter, else `precondition_failed`. What the law requires
+in a given case is the business's to decide.
+
+The `RecordStore` lists a subject's intake records (`listIntakeRecords(workspaceId, subjectKey)`),
+deletes records by id (`deleteIntakeRecords(workspaceId, recordIds)`) and removes a subject's PIN
+digest, keeping the rest of the subject record (`deletePinDigest(workspaceId, subjectKey)`); the
+deletes are idempotent. A record filed under no subject is never listed. The store remembers each
+deleted record id (the id alone) and a later `putIntakeRecord` of it stores nothing, so a
+confirmation whose write was still in flight when the subject was erased cannot bring the values
+back. It also counts each subject's erasures (`markSubjectErased`, `subjectErasures`; the subject key
+alone): `confirmIntake` reads the count before it reserves a record and passes it to
+`putIntakeRecord(record, erasuresSeen)`, which stores nothing once the subject was erased more
+times than that, so a filing reserved before an erasure the listing missed stays out too. The
+confirmation then reads the record back: when the store kept nothing, the call files nothing
+either, drops the draft and its values (`intake.abandoned`), and the confirmation fails with
+`precondition_failed`. A call whose subject changed between that read and the reservation is
+refused with `conflict`, to be confirmed again.
+
+`exportSubject({workspaceId, subjectKey, kept?})` needs the `signer` adapter and returns:
+
+```json
+{
+  "body": {
+    "v": 1, "type": "subject_export", "exportId": "...", "workspaceId": "...", "subjectKey": "...", "issuedAt": "...",
+    "intakeRecords": [{ "recordId": "...", "subjectKey": "...", "values": {}, "...": "..." }],
+    "pinDigestOnFile": true,
+    "consents": [{ "consentId": "...", "callId": "...", "subjectKey": "<64 hex>", "purpose": "...", "answer": "yes", "...": "..." }],
+    "revocations": [{ "consentId": "...", "via": "text", "at": "..." }],
+    "calls": ["..."],
+    "ledgerEntries": [{ "seq": 12, "hash": "...", "event": "intake.confirmed", "callId": "..." }],
+    "receipts": [{ "receiptId": "...", "callId": "..." }],
+    "heldByHost": [{ "what": "subject record", "reason": "..." }],
+    "kept": [{ "what": "ledger entries", "reason": "..." }],
+    "limits": ["..."]
+  },
+  "alg": "ES256", "kid": "...", "signature": "<base64url of the 64-byte r||s signature>"
+}
+```
+
+- `intakeRecords` are the subject's, values included; `pinDigestOnFile` says whether a digest is
+  on file, never the digest.
+- `calls` are the calls those records name. `consents` and `receipts` are the ones those call
+  records hold (a call record that is gone is skipped), so a consent recorded on a call that filed
+  no record of the subject is not listed (the `ConsentStore` is read by consent id, never by
+  subject); `limits` says so. A consent carries the `subjectKey` Badge
+  matched on the call when it was recorded (or null), and only those recorded under this subject
+  are listed: a call can match another subject later, and their consents are not this subject's. A
+  consent keeps its original answer; `revocations` holds the revocation the `ConsentStore` keeps for
+  each listed consent (by `consentId`), so a yes since withdrawn reads as withdrawn. Without a
+  `ConsentStore` nothing can be revoked and the list is empty.
+- `ledgerEntries` are this workspace's entries (by the workspace in their `eventId`) whose
+  `detail.recordId`, `detail.consentId` or `detail.receiptId` names one of the above: ids only.
+- `heldByHost` lists the subject record, which is the host's data, and a PIN in the host's own
+  PIN store (`verifier` mode), which the engine never reads or deletes. `kept` lists, with the reason,
+  what an erase keeps: ledger entries and receipts (append-only and signed; they hold ids and
+  digests, kept as integrity records for the retention period; an unkeyed SHA-256 of a short value
+  can be confirmed by guessing), call records and consents, then each `{what, reason}` the business
+  passes in `kept` (non-empty text, else `invalid_input`). `limits` says what the export cannot
+  find, including a record filed on a call with no matched subject.
+- The signature is ES256 over `"district-assurance/subject-export/v1\n" + canonicalJson(body)`.
+  The signed bytes name the document type, so an export never verifies as a receipt (signed over
+  `canonicalJson(body)`, which starts with `{`) and a receipt never as an export.
+  `verifySubjectExport(exported, keys)` checks it as `verifyReceipt` checks a receipt.
+
+`eraseSubject({workspaceId, subjectKey})` reads the ledger once. Each erasure of a subject is
+numbered from 0, and its event ids are keyed (HMAC under the knowledge key) on the subject and that
+number. If the subject's last erasure has a `subject.erased` entry but no
+`subject.erasure_completed`, a delete failed part way: the erase carries out that entry's plan (the
+same record ids, the PIN digest if the plan says so) and appends the completion, under the same
+entry, whatever was already deleted. It then lists the subject's records and whether a PIN digest
+is on file, after counting the erasure (`markSubjectErased`, first, so a filing reserved before it
+is guarded whether or not the listing sees it). With neither, it does nothing more and returns `{erased: false}` (or the finished
+erasure). Otherwise it drops each named call record's copy of the last confirmed record (refused
+with `precondition_failed` while one of the subject's records is still being filed on a call; a
+call record that is gone is skipped), appends `subject.erased` under the next number, deletes the
+records and the PIN digest, then appends `subject.erasure_completed`. A later erasure (for example
+of a PIN digest the host put back) gets an entry of its own; two erasures at once append one plan,
+and both carry it out. It never changes
+or removes a ledger entry or a receipt, so `verifyChain` and every receipt still verify. The
+listener is not told (the entry names no call). Attempt counts live per call in the call record;
+counters per subject across calls are VER-1's, and the erase resets them once they exist.

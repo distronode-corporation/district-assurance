@@ -20,6 +20,8 @@ describe("entry points", () => {
       "reduce",
       "cardNumberRedactor",
       "luhnValid",
+      "digitRuns",
+      "LiveCardNumberDetector",
       "judgeKeypadFactors",
       "normaliseFieldValue",
       "settlementFor",
@@ -50,6 +52,8 @@ describe("entry points", () => {
       "duressFlagKey",
       "PAYMENT_MODES",
       "formatAmount",
+      "KeypadCollector",
+      "isStopRequest",
     ]) {
       assert.ok(name in root, name);
     }
@@ -70,13 +74,17 @@ describe("entry points", () => {
       "TEST_KNOWLEDGE_KEY",
       "FakePinVerifier",
       "sessionStoreContract",
+      "auditLedgerContract",
+      "recordStoreContract",
+      "MemoryConsentStore",
+      "recordStoreErasureContract",
     ]) {
       assert.ok(name in testing, name);
     }
   });
 
   it("keeps the runtime functions of the modules out of the root", () => {
-    for (const name of ["submitFactor", "beginVerification", "requestPayment", "startIntake", "recordConsent"]) assert.equal(name in root, false, name);
+    for (const name of ["submitFactor", "beginVerification", "requestPayment", "startIntake", "recordConsent", "revokeConsent"]) assert.equal(name in root, false, name);
   });
 
   it("event names are unique and dotted", () => {

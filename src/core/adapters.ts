@@ -1,6 +1,8 @@
 // The adapter interfaces: everything the engine needs from the outside world. A host plugs in its
 // own (a carrier, Stripe, its database, its key store); `district-assurance/testing` has
 // in-memory and fake versions for tests and the demo. None of these ever carries card data.
+// Records that a core adapter carries (intake records, consents) are defined here, since the core
+// imports no module.
 import type { JsonWebKey } from "node:crypto";
 
 import type { JsonValue } from "./canonical.ts";
@@ -44,7 +46,12 @@ export interface CallbackDialer {
   }>;
 }
 
-export type MessagePurpose = "identity_link" | "payment_link" | "one_time_code" | "reference";
+/**
+ * Why a text is sent. `receipt_link`: a link to the call's receipt after a money, contact or access
+ * step, with the caller's consent. `contact_changed`: the security notice after a contact change,
+ * which the caller cannot turn off. Neither carries an amount, a code or a personal value.
+ */
+export type MessagePurpose = "identity_link" | "payment_link" | "one_time_code" | "reference" | "receipt_link" | "contact_changed";
 
 /**
  * Texts sent by code. The destination is always the number on file, resolved by the engine.
@@ -358,6 +365,12 @@ export interface IntakeRecord {
   recordId: string;
   workspaceId: string;
   callId: string;
+  /**
+   * The subject Badge matched on the call (a keypad or PIN match) when the record was filed, or
+   * null when none had. A record filed under null cannot be found for a subject's access or
+   * deletion request.
+   */
+  subjectKey: string | null;
   formId: string;
   formVersion: string;
   values: Record<string, string | number | boolean>;
@@ -370,9 +383,17 @@ export interface IntakeRecord {
 /** The host's records: subjects to verify against, and the intake records callers confirm. */
 export interface RecordStore {
   getSubject(workspaceId: string, subjectKey: string): Promise<SubjectRecord | null>;
-  /** Idempotent by `recordId`: the engine retries a write whose outcome it could not see, with the same record. */
-  putIntakeRecord(record: IntakeRecord): Promise<void>;
+  /**
+   * Idempotent by `recordId`: the engine retries a write whose outcome it could not see, with the
+   * same record. Stores nothing for a `recordId` that `deleteIntakeRecords` deleted, nor, given
+   * `erasuresSeen` (what `subjectErasures` answered before the record was reserved), when its
+   * subject has been marked erased more times than that since: a confirmation still in flight when
+   * its subject was erased must not bring the values back, whether or not the erasure saw it.
+   */
+  putIntakeRecord(record: IntakeRecord, erasuresSeen?: number): Promise<void>;
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
+  /** The intake records filed under a subject key. Records filed under null are never listed. */
+  listIntakeRecords(workspaceId: string, subjectKey: string): Promise<IntakeRecord[]>;
   /**
    * Stores a subject's PIN digest (`pinDigest`) with the id of the enrolment that chose it
    * (`pinEnrolmentId`), or removes both with null (a reset by the business), and the duress PIN
@@ -391,6 +412,147 @@ export interface RecordStore {
    * subject the store does not have is left alone, and the answer is false.
    */
   putDuressDigest(workspaceId: string, subjectKey: string, digest: string | null, ifPinDigest?: string): Promise<boolean>;
+  /**
+   * Deletes intake records by id, and remembers each id (the id alone, no value) so a later
+   * `putIntakeRecord` of it stores nothing. Idempotent: an id already gone is skipped.
+   */
+  deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void>;
+  /**
+   * Counts one erasure of a subject, atomically (the subject key alone is kept, no value). Every
+   * `eraseSubject` marks it before it looks for the subject's records.
+   */
+  markSubjectErased(workspaceId: string, subjectKey: string): Promise<void>;
+  /** How many times a subject was marked erased: 0 for one never erased. */
+  subjectErasures(workspaceId: string, subjectKey: string): Promise<number>;
+  /**
+   * Removes the subject's `pinDigest` and `duressDigest` (a duress PIN left alone would still pass,
+   * VER-12) and keeps the rest of the subject record, which is the host's. Idempotent.
+   */
+  deletePinDigest(workspaceId: string, subjectKey: string): Promise<void>;
+}
+
+/** How a consent was given or revoked: on the call, by text, or on the host's dashboard. */
+export type ConsentChannel = "call" | "text" | "web";
+
+/** A consent as code captured it: the wording read (by version and digest, never the words), the answer, when. */
+export interface ConsentRecord {
+  consentId: string;
+  callId: string;
+  /**
+   * The subject Badge matched on the call (a keypad or PIN match) when the consent was recorded, or
+   * null when none had. A subject's export lists only the consents recorded under its key (PRV-7).
+   */
+  subjectKey: string | null;
+  purpose: string;
+  wordingVersion: string;
+  wordingDigest: string;
+  locale: Locale;
+  answer: "yes" | "no";
+  channel: ConsentChannel;
+  at: string;
+}
+
+export interface ConsentRevocation {
+  consentId: string;
+  via: ConsentChannel;
+  /** ISO 8601. */
+  at: string;
+}
+
+/**
+ * The host's consent records, so a consent given on a call can be revoked later by voice, text or
+ * dashboard, after the call is gone. Revocations are kept beside the consent, never in place of it.
+ */
+export interface ConsentStore {
+  /** Idempotent by `consentId`: the engine retries a write whose outcome it could not see, with the same record. */
+  putConsent(workspaceId: string, record: ConsentRecord): Promise<void>;
+  getConsent(workspaceId: string, consentId: string): Promise<{ consent: ConsentRecord; revoked: ConsentRevocation | null } | null>;
+  /**
+   * Records a revocation of a stored consent, unless it has one: the first revocation wins and is
+   * returned to every later call, so a retry never moves its time or channel.
+   */
+  revokeConsent(workspaceId: string, revocation: ConsentRevocation): Promise<ConsentRevocation>;
+}
+
+/**
+ * Posts a signed record delivery to a business's endpoint (for example with `fetch`, with a
+ * timeout). One request per call, no retries of its own: `deliverRecord` signs, retries and
+ * records each attempt. Resolves with the HTTP status of any answer, and rejects only when no
+ * answer came (a refused connection, a timeout). It does not follow redirects: a redirect would
+ * resend the signed body and its headers to another origin.
+ */
+export interface RecordDelivery {
+  post(input: { url: string; headers: Record<string, string>; body: string }): Promise<{ status: number }>;
+}
+
+/** The document types an upload link can take: a photo or a PDF. */
+export type DocumentType = "image/jpeg" | "image/png" | "application/pdf";
+
+/**
+ * A single-use upload link, as stored. The capability token itself is never stored: only its
+ * SHA-256, which is also the key the link is found by.
+ */
+export interface UploadLinkRecord {
+  workspaceId: string;
+  /** SHA-256 hex of the token. */
+  tokenHash: string;
+  callId: string;
+  /** The confirmed intake record the document is attached to. */
+  recordId: string;
+  /** The language of the upload page. */
+  locale: Locale;
+  allowedTypes: DocumentType[];
+  maxBytes: number;
+  /** ISO 8601. */
+  createdAt: string;
+  /** ISO 8601, 30 minutes after `createdAt`. */
+  expiresAt: string;
+  /** ISO 8601 once an upload claimed the link, null before. */
+  usedAt: string | null;
+}
+
+/** A document received through an upload link, as stored next to its bytes. */
+export interface DocumentRecord {
+  documentId: string;
+  workspaceId: string;
+  callId: string;
+  recordId: string;
+  contentType: DocumentType;
+  /** Bytes. */
+  size: number;
+  /** SHA-256 hex of the bytes. */
+  digest: string;
+  /** ISO 8601. */
+  receivedAt: string;
+}
+
+/**
+ * Where upload links and the documents they bring in live. `claimUploadLink` is the one place a
+ * link is spent, so it must be atomic: of two claims at once, one wins. Expired links are removed
+ * by `purgeExpiredUploadLinks`, which the engine calls whenever it reads one and a host may call
+ * from its own sweep (`sweepUploadLinks`).
+ */
+export interface DocumentStore {
+  /** Stores a new link. False, and nothing written, when a link with that token hash exists. */
+  putUploadLink(link: UploadLinkRecord): Promise<boolean>;
+  getUploadLink(workspaceId: string, tokenHash: string): Promise<UploadLinkRecord | null>;
+  /**
+   * Sets `usedAt` only if the link exists, is unused and has not expired at `usedAt` (`usedAt`
+   * before `expiresAt`), in one atomic step. True for the one claim that did.
+   */
+  claimUploadLink(workspaceId: string, tokenHash: string, usedAt: string): Promise<boolean>;
+  /** Removes the workspace's links whose `expiresAt` is at or before `now` (ISO 8601). Returns how many. */
+  purgeExpiredUploadLinks(workspaceId: string, now: string): Promise<number>;
+  putDocument(document: DocumentRecord, bytes: Uint8Array): Promise<void>;
+}
+
+/**
+ * The host's scanning hook (an antivirus, a content filter), asked about every document after its
+ * type, size and leading bytes passed and before it is stored. Anything but `clean: true` refuses it.
+ */
+export interface DocumentScanner {
+  /** A scanner that throws refuses the document as `scan_failed`; the error never reaches the caller. */
+  scan(input: { workspaceId: string; documentId: string; contentType: DocumentType; bytes: Uint8Array }): Promise<{ clean: boolean }>;
 }
 
 export interface AuditInput {
@@ -416,8 +578,12 @@ export interface AuditEntry extends AuditInput {
 export interface AuditLedger {
   append(input: AuditInput): Promise<AuditEntry>;
   head(): Promise<{ seq: number; hash: string }>;
-  /** Entries with seq >= fromSeq, in order. */
-  list(fromSeq?: number): Promise<AuditEntry[]>;
+  /**
+   * Entries with seq >= fromSeq, in order, at most `limit` of them (an integer of 1 or more) when
+   * it is given. A durable ledger reads only that page, so an export or an audit tool can walk a
+   * large ledger page by page.
+   */
+  list(fromSeq?: number, limit?: number): Promise<AuditEntry[]>;
 }
 
 /** Signs receipt payloads. The private key stays with the host (a KMS, an HSM, a file). */

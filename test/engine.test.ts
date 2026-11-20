@@ -2,20 +2,29 @@ import { strict as assert } from "node:assert";
 import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
 
-import type { PaymentLinks } from "../src/core/adapters.ts";
-import type { JsonValue } from "../src/core/canonical.ts";
+import type { IntakeRecord, PaymentLinks } from "../src/core/adapters.ts";
+import { canonicalJson, type JsonValue } from "../src/core/canonical.ts";
 import { ConfigError } from "../src/core/config.ts";
+import { hmacSha256Hex } from "../src/core/hash.ts";
 import type { EngineEvent } from "../src/core/events.ts";
+import { MemorySessionStore } from "../src/core/session-store.ts";
 import { defaultVerificationPolicy } from "../src/core/policy.ts";
+import { INTERRUPT_LINES, bankAccountRedactor, cardNumberRedactor, composeRedactors, healthCardRedactor, sinRedactor } from "../src/core/redaction.ts";
 import { createEngine } from "../src/engine.ts";
+import { intakeDigest, type IntakeForm } from "../src/file/intake.ts";
 import { defaultConfig } from "../src/modules.ts";
 import { formatAmount } from "../src/pay/paylink.ts";
-import { MemorySessionStore } from "../src/core/session-store.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import { verifyReceipt } from "../src/prove/receipt.ts";
-import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryAttemptCounters, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
+import { isStopRequest } from "../src/prove/consent.ts";
+import { FakeCarrierSignals, FakeFieldCipher, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryAttemptCounters, MemoryConsentStore, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine } from "../src/testing/index.ts";
-import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig, verifiedCall, waitOut } from "./helpers.ts";
+import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, form, heard, rejects, setup, testConfig, verifiedCall, waitOut } from "./helpers.ts";
+
+/** The digest of the read-back the caller heard, or any digest once no draft is open (a filed or released intake asks for none). */
+async function readBackOf(t: { engine: { intakeReadBack(callId: string): Promise<{ digest: string }> } }, callId: string): Promise<string> {
+  return t.engine.intakeReadBack(callId).then((r) => r.digest, () => "0".repeat(64));
+}
 
 describe("Engine construction", () => {
   it("refuses a short key, an empty workspace, a missing ledger and a bad config", () => {
@@ -221,10 +230,28 @@ describe("Engine sessions", () => {
     assert.equal((await t.engine.state(callId)).sensitive, null);
   });
 
+  it("speaks the line for what was found, in the call's language", async () => {
+    const redactor = composeRedactors(cardNumberRedactor, healthCardRedactor, sinRedactor, bankAccountRedactor);
+    const t = setup({ redactor });
+    const en = (await t.engine.startCall()).callId;
+    const fr = (await t.engine.startCall({ locale: "fr" })).callId;
+    assert.equal((await t.engine.redact(en, "my SIN is 046 454 286")).line, INTERRUPT_LINES.en.sin);
+    assert.equal((await t.engine.redact(fr, "mon NAS est le 046 454 286")).line, INTERRUPT_LINES.fr.sin);
+    assert.equal((await t.engine.redact(fr, "carte santé 1234 567 897")).line, INTERRUPT_LINES.fr.health_card);
+    assert.equal((await t.engine.redact(en, "account 1234567")).line, INTERRUPT_LINES.en.bank_account);
+    assert.equal((await t.engine.redact(en, "account 1234567, card 4242 4242 4242 4242")).line, INTERRUPT_LINES.en.card_number, "a card number's line comes first");
+    assert.equal((await t.engine.redact(en, "nothing here")).line, null);
+    for (const kind of Object.keys(INTERRUPT_LINES.en) as Array<keyof typeof INTERRUPT_LINES.en>) {
+      const said = [INTERRUPT_LINES.en[kind], INTERRUPT_LINES.fr[kind], INTERRUPT_LINES.es[kind]];
+      assert.ok(said.every((line) => line !== "") && new Set(said).size === said.length);
+    }
+    assert.equal(INTERRUPT_LINES.en.sin.includes("card"), false, "no card wording for a SIN");
+  });
+
   it("redacts text and counts findings by kind, without logging the text", async () => {
     const t = setup();
     const { callId } = await t.engine.startCall();
-    assert.deepEqual(await t.engine.redact(callId, "hello"), { text: "hello", findings: [], interrupt: false });
+    assert.deepEqual(await t.engine.redact(callId, "hello"), { text: "hello", findings: [], interrupt: false, line: null });
     const result = await t.engine.redact(callId, "4242424242424242 and 5555 5555 5555 4444");
     assert.equal(result.text, "[card number removed] and [card number removed]");
     assert.equal(result.interrupt, true);
@@ -536,10 +563,11 @@ describe("Engine file: text the record cannot carry", () => {
     const t = setup();
     const callId = await verifiedCall(t);
     await t.engine.startIntake(callId, "repair");
-    await assert.rejects(t.engine.setIntakeField(callId, "issue", "leak \ud83d"), rejects("invalid_input", /lone surrogate/));
+    // #76: a lone surrogate is a refused answer (`not_text`), not a host error.
+    assert.deepEqual(await t.engine.setIntakeField(callId, "issue", "leak \ud83d"), { ok: false, reason: "not_text" });
     await assert.rejects(t.engine.setIntakeField(callId, "issue", 7 as never), rejects("invalid_input"));
     assert.deepEqual(await t.engine.setIntakeField(callId, "issue", "leak \ud83d\ude00"), { ok: true, value: "leak \ud83d\ude00" }, "a valid pair is fine");
-    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     assert.equal(record.values.issue, "leak \ud83d\ude00");
   });
 });
@@ -550,16 +578,73 @@ describe("Engine file", () => {
     const callId = await verifiedCall(t);
     await t.engine.startIntake(callId, "repair");
     assert.deepEqual(await t.engine.setIntakeField(callId, "issue", "4242 4242 4242 4242"), { ok: false, reason: "card_number" });
-    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /required fields missing: issue/);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), /required fields missing: issue/);
     assert.deepEqual(await t.engine.setIntakeField(callId, "issue", " Leak under sink "), { ok: true, value: "Leak under sink" });
     await t.engine.setIntakeField(callId, "urgent", "yes");
     await assert.rejects(t.engine.setIntakeField(callId, "nope", "x"), rejects("invalid_input"));
-    const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack: await heard(t, callId) });
     assert.deepEqual(record.values, { issue: "Leak under sink", urgent: true });
     assert.deepEqual(await t.records.getIntakeRecord("ws_test", record.recordId), record);
     assert.equal(await t.records.getIntakeRecord("ws_test", "rec_404"), null);
     assert.deepEqual((await t.engine.state(callId)).recordIds, [record.recordId]);
     await assert.rejects(t.engine.setIntakeField(callId, "issue", "x"), rejects("invalid_transition"));
+  });
+
+  it("reads the draft back in the call's locale, and refuses a confirmation of a draft changed since", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t, "fr");
+    await assert.rejects(t.engine.intakeReadBack(callId), rejects("invalid_transition"));
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "Fuite");
+    const before = await t.engine.intakeReadBack(callId);
+    assert.equal(before.text, "Voici ce que nous allons enregistrer. Problème : Fuite. Est-ce exact? Dites oui ou appuyez sur le 1 pour confirmer.");
+    await t.engine.setIntakeField(callId, "urgent", "oui");
+    const changed = rejects("precondition_failed", /changed since the caller heard its read-back/);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: before.digest }), changed);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: before.digest.toUpperCase() }), changed);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: undefined as unknown as string }), changed);
+    assert.deepEqual((await t.engine.state(callId)).recordIds, [], "nothing filed");
+    assert.equal((await t.ledger.list()).some((e) => e.event === "intake.confirmed"), false);
+    const after = await t.engine.intakeReadBack(callId);
+    assert.match(after.text, /Urgent : oui\./);
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: after.digest });
+    assert.deepEqual(record.values, { issue: "Fuite", urgent: true });
+    assert.equal(record.digest, intakeDigest(form, record.values));
+  });
+
+  it("asks, reads back and files a conditional field only while its showIf holds", async () => {
+    const branching: IntakeForm = {
+      formId: "repair",
+      version: "1",
+      fields: [
+        ...form.fields,
+        { key: "since", label: { en: "Since", fr: "Depuis" }, type: "date", required: true, showIf: { field: "urgent", equals: true }, min: "2026-01-01" },
+      ],
+    };
+    const t = setup({ config: testConfig((c) => (c.modules.dossier = { settings: { forms: [branching] } as unknown as JsonValue })) });
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    await assert.rejects(t.engine.setIntakeField(callId, "since", "2026-09-01"), rejects("precondition_failed", /since is not asked/));
+    await t.engine.setIntakeField(callId, "urgent", "yes");
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), rejects("invalid_input", /required fields missing: since/));
+    assert.deepEqual(await t.engine.setIntakeField(callId, "since", "2025-12-31"), { ok: false, reason: "below_min" });
+    await t.engine.setIntakeField(callId, "since", "2026-09-01");
+    assert.match((await t.engine.intakeReadBack(callId)).text, /Since: Tuesday, September 1, 2026\./);
+    await t.engine.setIntakeField(callId, "urgent", "no");
+    const readBack = await t.engine.intakeReadBack(callId);
+    assert.doesNotMatch(readBack.text, /Since/, "a hidden field is not read back");
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: readBack.digest });
+    assert.deepEqual(record.values, { issue: "leak", urgent: false }, "nor filed");
+    assert.equal(record.digest, intakeDigest(branching, record.values));
+  });
+
+  it("refuses a read-back on a call that started without Dossier", async () => {
+    const t = setup({ config: testConfig((c) => (c.modules.dossier = { enabled: false })) });
+    const { callId } = await t.engine.startCall();
+    await assert.rejects(t.engine.intakeReadBack(callId), rejects("module_disabled", /turned off/));
+    t.engine.configure(testConfig());
+    await assert.rejects(t.engine.intakeReadBack(callId), rejects("module_disabled", /was off when this call started/));
   });
 
   it("refuses intake without the scope, an unknown form, and abandons", async () => {
@@ -572,7 +657,7 @@ describe("Engine file", () => {
     await t.engine.startIntake(verified, "repair");
     await t.engine.abandonIntake(verified);
     assert.equal((await t.engine.state(verified)).phase, "open");
-    await assert.rejects(t.engine.confirmIntake(verified, { confirmedBy: "voice" }), rejects("invalid_transition"));
+    await assert.rejects(t.engine.confirmIntake(verified, { confirmedBy: "voice", readBack: "0".repeat(64) }), rejects("invalid_transition"));
   });
 
   it("files one record when two confirmations of the same draft run at once", async () => {
@@ -586,12 +671,12 @@ describe("Engine file", () => {
     t.records.putIntakeRecord = async (record) => {
       // The first write waits for a second confirmation, which resumes the same record and files it first.
       if (++calls === 1) {
-        second = t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
+        second = t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack: await heard(t, callId) });
         await second;
       }
       return put(record);
     };
-    const first = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
+    const first = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
     assert.deepEqual(await second, first, "the second one resumed the same record");
     assert.deepEqual((await t.engine.state(callId)).recordIds, ["rec_1"]);
     assert.equal((await t.ledger.list()).filter((e) => e.event === "intake.confirmed").length, 1);
@@ -603,7 +688,7 @@ describe("Engine file", () => {
     await t.engine.startIntake(callId, "repair");
     await t.engine.setIntakeField(callId, "issue", "leak");
     t.clock.advance(15 * 60_000);
-    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), rejects("scope_denied"));
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), rejects("scope_denied"));
   });
 
   it("holds the draft while it is filed, and keeps it reserved for the same record when the store fails", async () => {
@@ -614,15 +699,223 @@ describe("Engine file", () => {
     const put = t.records.putIntakeRecord.bind(t.records);
     let during: unknown[] = [];
     t.records.putIntakeRecord = async () => {
-      during = await Promise.allSettled([t.engine.setIntakeField(callId, "issue", "x"), t.engine.abandonIntake(callId)]);
+      during = await Promise.allSettled([t.engine.setIntakeField(callId, "issue", "x")]);
       throw new Error("database down");
     };
-    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice" }), /database down/);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), /database down/);
     assert.ok(during.every((r) => (r as PromiseSettledResult<unknown>).status === "rejected" && rejects("precondition_failed")((r as PromiseRejectedResult).reason)));
     t.records.putIntakeRecord = put;
     await assert.rejects(t.engine.setIntakeField(callId, "issue", "changed"), rejects("precondition_failed"), "still reserved after the failed write");
-    const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad" });
+    const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack: await heard(t, callId) });
     assert.deepEqual([record.recordId, record.values.issue, record.confirmedBy], ["rec_1", "leak", "voice"], "the same record, written again");
+  });
+
+  it("re-checks the grant before a reserved filing resumes; abandoning releases it and the call ends", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const put = t.records.putIntakeRecord.bind(t.records);
+    // The store holds the record, but the answer is lost: the filing stays reserved.
+    let written: IntakeRecord | null = null;
+    t.records.putIntakeRecord = async (record) => {
+      written = record;
+      await put(record);
+      throw new Error("answer lost");
+    };
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), /answer lost/);
+    t.records.putIntakeRecord = put;
+    t.clock.advance(15 * 60_000);
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), rejects("scope_denied"), "the grant expired since the reservation");
+    assert.notEqual(await t.records.getIntakeRecord("ws_test", "rec_1"), null);
+    await t.engine.abandonIntake(callId);
+    assert.equal(await t.records.getIntakeRecord("ws_test", "rec_1"), null, "the record the store held is deleted");
+    await t.records.putIntakeRecord(written!);
+    assert.equal(await t.records.getIntakeRecord("ws_test", "rec_1"), null, "and a late write of it stores nothing");
+    await t.engine.endCall(callId);
+    assert.equal((await t.engine.state(callId)).phase, "ended");
+    assert.equal((await t.ledger.list()).some((e) => e.event === "intake.confirmed"), false);
+  });
+
+  it("abandoning while a filing is written deletes it first, so the write stores nothing and the confirmation fails", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const put = t.records.putIntakeRecord.bind(t.records);
+    t.records.putIntakeRecord = async (record) => {
+      await t.engine.abandonIntake(callId);
+      return put(record);
+    };
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), rejects("precondition_failed", /abandoned while it was written/));
+    assert.equal(await t.records.getIntakeRecord("ws_test", "rec_1"), null);
+    assert.deepEqual((await t.engine.state(callId)).recordIds, []);
+    await t.engine.endCall(callId);
+    assert.equal((await t.engine.state(callId)).phase, "ended");
+  });
+
+  it("refuses to abandon a filing reserved after it read the call, since that record was not deleted", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const del = t.records.deleteIntakeRecords.bind(t.records);
+    const put = t.records.putIntakeRecord.bind(t.records);
+    let confirming: Promise<unknown> | null = null;
+    t.records.putIntakeRecord = async () => {
+      throw new Error("database down");
+    };
+    // Nothing is reserved when abandon reads, so it deletes nothing; a confirmation reserves meanwhile.
+    t.records.deleteIntakeRecords = async (ws, ids) => del(ws, ids);
+    const readBack = await heard(t, callId);
+    const read = t.sessions.get.bind(t.sessions);
+    let reads = 0;
+    t.sessions.get = async (ws, id) => {
+      const got = await read(ws, id);
+      if (++reads === 1) {
+        confirming = t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack }).catch(() => undefined);
+        await confirming;
+      }
+      return got;
+    };
+    await assert.rejects(t.engine.abandonIntake(callId), rejects("precondition_failed", /being filed/));
+    t.sessions.get = read;
+    t.records.putIntakeRecord = put;
+    assert.equal((await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) })).recordId, "rec_1", "the reservation stands and resumes");
+  });
+
+  describe("sensitive fields", () => {
+    // Not a SIN: #76 refuses a field that names one, so FIL-2 is shown on a policy number (rehearsal).
+    const SIN = "046 454 286"; // a made-up number, not a secret
+    const secure: IntakeForm = {
+      formId: "secure",
+      version: "1",
+      fields: [
+        { key: "issue", label: { en: "Issue", fr: "Problème" }, type: "text", required: true },
+        { key: "policy", label: { en: "Policy number", fr: "Numéro de police" }, type: "text", required: true, sensitive: true },
+        { key: "pets", label: { en: "Pets", fr: "Animaux" }, type: "number", required: false, sensitive: true },
+      ],
+    };
+    const withSecure = () => testConfig((c) => (c.modules.dossier = { settings: { forms: [structuredClone(form), structuredClone(secure)] } as unknown as JsonValue }));
+    /** The digest the engine must give: the plaintext, with each sensitive value as an HMAC bound to the record and field. */
+    const expectedDigest = (recordId: string, values: Record<string, string | number>) => {
+      const covered: Record<string, string | number> = { ...values };
+      for (const key of ["policy", "pets"]) if (key in values) covered[key] = hmacSha256Hex(TEST_KNOWLEDGE_KEY, canonicalJson(["intake", recordId, key, values[key]!]));
+      return intakeDigest(secure, covered);
+    };
+
+    it("stores ciphertext, with a digest that does not depend on it and that stays the same on a retry", async () => {
+      const cipher = new FakeFieldCipher();
+      const t = setup({ config: withSecure(), adapters: { fieldCipher: cipher } });
+      const callId = await verifiedCall(t);
+      await t.engine.startIntake(callId, "secure");
+      await t.engine.setIntakeField(callId, "issue", "Leak");
+      await t.engine.setIntakeField(callId, "policy", SIN);
+      const put = t.records.putIntakeRecord.bind(t.records);
+      const attempts: IntakeRecord[] = [];
+      t.records.putIntakeRecord = async (record) => {
+        attempts.push(structuredClone(record));
+        if (attempts.length === 1) throw new Error("database down");
+        return put(record);
+      };
+      await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await readBackOf(t, callId) }), /database down/);
+      const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await readBackOf(t, callId) });
+      assert.equal(record.values.issue, "Leak", "a field that is not sensitive stays in the clear");
+      assert.equal(Object.hasOwn(record.values, "pets"), false, "an optional sensitive field left empty is not encrypted");
+      assert.match(String(record.values.policy), /^fake-cipher:2:/);
+      assert.equal(cipher.decrypt(String(record.values.policy)), SIN);
+      assert.deepEqual(cipher.encrypted, [1, 2].map(() => ({ workspaceId: "ws_test", recordId: record.recordId, field: "policy" })), "encrypted again on the retry");
+      assert.notEqual(attempts[0]!.values.policy, attempts[1]!.values.policy, "a different ciphertext each time");
+      assert.equal(attempts[0]!.digest, attempts[1]!.digest, "the same digest each time");
+      assert.equal(record.digest, expectedDigest(record.recordId, { issue: "Leak", policy: SIN }));
+      assert.notEqual(record.digest, intakeDigest(secure, { issue: "Leak", policy: SIN }), "a receipt is no oracle for the plain value");
+      assert.notEqual(record.digest, intakeDigest(secure, { issue: "Leak", policy: String(record.values.policy) }), "nor the ciphertext");
+      assert.deepEqual(await t.records.getIntakeRecord("ws_test", record.recordId), record);
+      // Filed: the intake is closed, so no read-back is asked for (any digest).
+      assert.equal(await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: "0".repeat(64) }).then((r) => r.values.policy), record.values.policy, "a retry after filing returns the stored record");
+      const receipt = (await t.engine.endCall(callId))!;
+      assert.equal(receipt.body.records[0]!.digest, record.digest);
+      const stored = JSON.stringify([await t.sessions.get("ws_test", callId), await t.ledger.list(), receipt]);
+      assert.equal(stored.includes(SIN), false, "the call record, the ledger and the receipt keep no plain value");
+    });
+
+    it("drops an open draft's plain values when the call ends before it is filed", async () => {
+      const t = setup({ config: withSecure(), adapters: { fieldCipher: new FakeFieldCipher() } });
+      const callId = await verifiedCall(t);
+      await t.engine.startIntake(callId, "secure");
+      await t.engine.setIntakeField(callId, "policy", SIN);
+      const before = (await t.ledger.list()).map((e) => e.event);
+      await t.engine.endCall(callId);
+      const stored = JSON.stringify([await t.sessions.get("ws_test", callId), await t.ledger.list()]);
+      assert.equal(stored.includes(SIN), false, "the ended call record keeps no plain value");
+      assert.deepEqual((await t.ledger.list()).map((e) => e.event).slice(before.length), ["call.ended", "receipt.issued"], "dropping the draft writes no event of its own");
+      await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: "0".repeat(64) }));
+    });
+
+    it("refuses to file when the cipher answers with nothing or with the plain value, and names no value", async () => {
+      for (const answer of ["", SIN, undefined]) {
+        const cipher = new FakeFieldCipher();
+        cipher.encrypt = async () => answer as string;
+        const t = setup({ config: withSecure(), adapters: { fieldCipher: cipher } });
+        const callId = await verifiedCall(t);
+        await t.engine.startIntake(callId, "secure");
+        await t.engine.setIntakeField(callId, "issue", "Leak");
+        await t.engine.setIntakeField(callId, "policy", SIN);
+        await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), (e: unknown) => {
+          assert.ok(e instanceof Error && e.message.includes("(no_ciphertext)") && !e.message.includes(SIN), String(answer));
+          return true;
+        });
+        assert.equal(await t.records.getIntakeRecord("ws_test", "rec_1"), null, "nothing stored");
+      }
+    });
+
+    it("encrypts a number as text", async () => {
+      const cipher = new FakeFieldCipher();
+      const t = setup({ config: withSecure(), adapters: { fieldCipher: cipher } });
+      const callId = await verifiedCall(t);
+      await t.engine.startIntake(callId, "secure");
+      for (const [key, value] of [["issue", "Leak"], ["policy", SIN], ["pets", "2"]]) await t.engine.setIntakeField(callId, key!, value!);
+      const record = await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack: await heard(t, callId) });
+      assert.deepEqual([cipher.decrypt(String(record.values.policy)), cipher.decrypt(String(record.values.pets))], [SIN, "2"]);
+      assert.equal(record.digest, expectedDigest(record.recordId, { issue: "Leak", policy: SIN, pets: 2 }));
+    });
+
+    it("files a form whose optional sensitive field is named like an Object property and left empty", async () => {
+      const proto: IntakeForm = {
+        formId: "proto",
+        version: "1",
+        fields: [
+          { key: "issue", label: { en: "Issue", fr: "Problème" }, type: "text", required: true },
+          { key: "constructor", label: { en: "Note", fr: "Note" }, type: "text", required: false, sensitive: true },
+        ],
+      };
+      const config = testConfig((c) => (c.modules.dossier = { settings: { forms: [structuredClone(form), proto] } as unknown as JsonValue }));
+      const cipher = new FakeFieldCipher();
+      const t = setup({ config, adapters: { fieldCipher: cipher } });
+      const callId = await verifiedCall(t);
+      await t.engine.startIntake(callId, "proto");
+      await t.engine.setIntakeField(callId, "issue", "Leak");
+      const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await readBackOf(t, callId) });
+      assert.equal(Object.hasOwn(record.values, "constructor"), false);
+      assert.deepEqual(cipher.encrypted, []);
+      assert.equal(record.digest, intakeDigest(proto, { issue: "Leak" }));
+    });
+
+    it("refuses a sensitive form without the cipher, and an engine without one never files it", async () => {
+      assert.throws(() => setup({ config: withSecure() }), (e: unknown) => e instanceof ConfigError && e.problems.includes("modules.dossier: needs the fieldCipher adapter, which the engine does not have"));
+      // Two engines on one store: the call keeps the secure form, the second engine has no cipher.
+      const a = setup({ config: withSecure(), adapters: { fieldCipher: new FakeFieldCipher() } });
+      const b = setup({ adapters: { sessions: a.sessions, records: a.records } });
+      const callId = await verifiedCall(a);
+      await a.engine.startIntake(callId, "secure");
+      await a.engine.setIntakeField(callId, "issue", "Leak");
+      await a.engine.setIntakeField(callId, "policy", SIN);
+      await assert.rejects(b.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(b, callId) }), rejects("precondition_failed", /needs the fieldCipher adapter/));
+      assert.equal(await a.records.getIntakeRecord("ws_test", "rec_1"), null, "nothing stored");
+      const record = await a.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await readBackOf(a, callId) });
+      assert.equal(record.recordId, "rec_1", "the reservation is resumed by an engine with a cipher");
+      assert.notEqual((await a.records.getIntakeRecord("ws_test", "rec_1"))!.values.policy, SIN);
+    });
   });
 });
 
@@ -1232,5 +1525,309 @@ describe("Engine prove", () => {
     for (const secret of [ACCOUNT, DOB, PHONE_ON_FILE, "identity.example.test", "pay.example.test"]) {
       assert.equal(ledgerText.includes(secret), false, secret);
     }
+  });
+});
+
+describe("Engine in Spanish (FIL-6)", () => {
+  const spanishForm: IntakeForm = {
+    ...form,
+    fields: form.fields.map((f) => ({ ...f, label: { ...f.label, es: f.key === "issue" ? "Problema" : "Urgente" } })),
+  };
+  const englishAndFrench = { en: "May we text you?", fr: "Pouvons-nous vous texter?" };
+  const spanishWording = { purpose: "texts", version: "1", text: { ...englishAndFrench, es: "¿Podemos enviarle mensajes de texto?" } };
+  /** A level 1 flow with a form and a wording; `spanish` says which of them have Spanish text. */
+  const flowSetup = (spanish: { form: boolean; wording: boolean }) =>
+    setup({
+      config: testConfig((c) => {
+        c.modules.dossier = { settings: { forms: [structuredClone(spanish.form ? spanishForm : form)] } as unknown as JsonValue };
+        c.modules.trace = { settings: { receipts: true, wordings: [spanish.wording ? structuredClone(spanishWording) : { ...spanishWording, text: englishAndFrench }] } };
+        c.flows = {
+          intake: { steps: [{ type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }, { type: "dossier.collect", form: "repair" }, { type: "trace.consent", purpose: "texts" }] },
+          verify: { steps: [{ type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }] },
+        };
+      }),
+    });
+
+  it("starts a call in en, fr or es and refuses any other locale", async () => {
+    const t = setup();
+    await assert.rejects(t.engine.startCall({ locale: "de" as "en" }), rejects("invalid_input", /locale must be one of en, fr, es/));
+    await t.engine.startCall({ callId: "call_es", locale: "es" });
+    assert.deepEqual((await t.ledger.list()).map((e) => [e.event, e.detail.locale]), [["call.started", "es"]]);
+  });
+
+  it("refuses a Spanish call whose flow needs a form or a wording with no Spanish text, and runs it when both have it", async () => {
+    await assert.rejects(
+      flowSetup({ form: false, wording: true }).engine.startCall({ locale: "es", flow: "intake" }),
+      rejects("precondition_failed", /dossier\.collect cannot run on this call: form repair has no es label/),
+    );
+    await assert.rejects(
+      flowSetup({ form: true, wording: false }).engine.startCall({ locale: "es", flow: "intake" }),
+      rejects("precondition_failed", /trace\.consent cannot run on this call: the wording for texts has no es text/),
+    );
+    // Spanish is optional: English and French calls run the same flow without it.
+    for (const locale of ["en", "fr"] as const) assert.equal((await flowSetup({ form: false, wording: false }).engine.startCall({ locale, flow: "intake" })).phase, "open");
+    // A flow that needs neither runs in Spanish; one attached later is held to the same rule.
+    const t = flowSetup({ form: false, wording: false });
+    assert.equal((await t.engine.startCall({ locale: "es", flow: "verify" })).phase, "open");
+    const { callId } = await t.engine.startCall({ locale: "es" });
+    await assert.rejects(t.engine.startFlow(callId, "intake"), rejects("precondition_failed", /no es label/));
+    const both = flowSetup({ form: true, wording: true });
+    const started = await both.engine.startCall({ locale: "es" });
+    assert.equal((await both.engine.startFlow(started.callId, "intake")).status, "running");
+  });
+
+  it("files and consents in Spanish: a keypad yes, a Spanish read-back, the call's locale on the consent", async () => {
+    const t = flowSetup({ form: true, wording: true });
+    const { callId } = await t.engine.startCall({ locale: "es", flow: "intake" });
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "Fuga bajo el fregadero");
+    assert.deepEqual(await t.engine.setIntakeField(callId, "urgent", "yes"), { ok: true, value: true });
+    const readBack = await t.engine.intakeReadBack(callId);
+    assert.equal(readBack.text, "Esto es lo que vamos a registrar. Problema: Fuga bajo el fregadero. Urgente: sí. ¿Es correcto? Oprima el 1 para confirmar.");
+    await t.engine.confirmIntake(callId, { confirmedBy: "keypad", readBack: readBack.digest });
+    const consent = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    assert.equal(consent.locale, "es");
+    assert.equal((await t.engine.flowPosition(callId))!.status, "completed");
+  });
+
+  it("refuses, outside a flow, a Spanish intake or consent with no Spanish text", async () => {
+    const t = flowSetup({ form: false, wording: false });
+    const callId = await verifiedCall(t, "es");
+    await assert.rejects(t.engine.startIntake(callId, "repair"), rejects("precondition_failed", /form repair has no es label for every field/));
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), rejects("precondition_failed", /the wording for texts has no es text/));
+    assert.equal((await t.engine.state(callId)).phase, "open");
+  });
+
+  it("texts identity and payment links in Spanish, with the amount as a Spanish speaker in the United States reads it", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t, "es");
+    assert.match(t.messages.sent[0]!.body, /^Su enlace de verificación de identidad, de un solo uso: https:/);
+    const deposit = { amountMinor: 150050, currency: "usd", description: "Depósito", amountSource: "price_list" } as const;
+    await confirmAmount(t.engine, callId, deposit);
+    await t.engine.requestPayment(callId, deposit);
+    assert.equal(t.messages.sent.at(-1)!.body, "Su enlace de pago seguro por $1,500.50: https://pay.example.test/c/cs_fake_1");
+  });
+});
+
+describe("Engine consent revocation", () => {
+  /** A ConsentStore whose next `putConsent` calls fail, or wait for `release`. */
+  function gatedStore(): MemoryConsentStore & { failNext: number; hold: boolean; release: () => void } {
+    const store = new MemoryConsentStore() as MemoryConsentStore & { failNext: number; hold: boolean; release: () => void };
+    const put = store.putConsent.bind(store);
+    const waiting: Array<() => void> = [];
+    store.failNext = 0;
+    store.hold = false;
+    store.release = () => waiting.splice(0).forEach((go) => go());
+    store.putConsent = async (workspaceId, record) => {
+      if (store.failNext > 0) {
+        store.failNext--;
+        throw new Error("consent store down");
+      }
+      if (store.hold) await new Promise<void>((go) => waiting.push(go));
+      return put(workspaceId, record);
+    };
+    return store;
+  }
+
+  const flowWithConsent = () => testConfig((c) => (c.flows = { f: { steps: [{ type: "trace.consent", purpose: "texts" }, { type: "trace.receipt" }] } }));
+
+  it("maps the standard opt-out words and their French forms to revocation, and nothing else", () => {
+    for (const text of ["STOP", "stop", " Stop. ", "STOP!", "STOPALL", "Unsubscribe", "cancel", "END", "quit!", "ARRÊT", "arret", "Arrête", "ARRETER", "arrêter !"]) assert.equal(isStopRequest(text), true, text);
+    for (const text of ["", "yes", "oui", "don't stop", "stop texting me please", "stopper", "arrêt maintenant", "ST0P", "stop all", "cancel my order", "the end", "unsub"]) assert.equal(isStopRequest(text), false, text);
+    // From a host's webhook, anything at all: not text is never a stop, and never throws.
+    for (const value of [null, undefined, 42, ["STOP"], { text: "STOP" }]) assert.equal(isStopRequest(value as unknown as string), false, String(value));
+    assert.equal(isStopRequest("STOP\uD800"), false, "a lone surrogate is not part of a stop word");
+  });
+
+  it("stores each consent, and revokes one by text after the call ended, once, in the ledger", async () => {
+    const consents = new MemoryConsentStore();
+    const events: EngineEvent[] = [];
+    const t = setup({ adapters: { consents }, onEvent: (e) => events.push(e) });
+    const callId = await verifiedCall(t);
+    const yes = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    assert.deepEqual(await consents.getConsent("ws_test", yes.consentId), { consent: yes, revoked: null });
+    const receipt = (await t.engine.endCall(callId))!;
+    t.clock.advance(86_400_000);
+    assert.equal(isStopRequest("ARRÊT"), true);
+    const revoked = await t.engine.revokeConsent({ consentId: yes.consentId, via: "text" });
+    assert.deepEqual(revoked, { consentId: yes.consentId, via: "text", at: "2026-01-02T00:00:00.000Z" });
+    assert.deepEqual((await consents.getConsent("ws_test", yes.consentId))!.revoked, revoked);
+    // A second revocation, from the dashboard, returns the first and writes nothing more.
+    t.clock.advance(1000);
+    assert.deepEqual(await t.engine.revokeConsent({ consentId: yes.consentId, via: "web" }), revoked);
+    const entries = await t.ledger.list();
+    assert.equal(verifyChain(entries).ok, true);
+    const revocations = entries.filter((e) => e.event === "consent.revoked");
+    assert.equal(revocations.length, 1);
+    assert.deepEqual(
+      { callId: revocations[0]!.callId, actor: revocations[0]!.actor, at: revocations[0]!.at, detail: revocations[0]!.detail },
+      { callId, actor: "caller", at: revoked.at, detail: { consentId: yes.consentId, purpose: "texts", wordingVersion: "1", via: "text" } },
+    );
+    assert.equal(events.at(-1)!.name, "consent.revoked", "the listener is told");
+    assert.equal(verifyReceipt(receipt, t.engine.receiptKeys()), true, "the receipt still proves what was answered then");
+    const ledgerText = JSON.stringify(entries);
+    for (const secret of [ACCOUNT, DOB, PHONE_ON_FILE]) assert.equal(ledgerText.includes(secret), false, secret);
+  });
+
+  it("records a dashboard revocation as a member's, during the call", async () => {
+    const t = setup({ adapters: { consents: new MemoryConsentStore() } });
+    const { callId } = await t.engine.startCall();
+    const yes = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await t.engine.revokeConsent({ consentId: yes.consentId, via: "web" });
+    const entry = (await t.ledger.list()).at(-1)!;
+    assert.deepEqual([entry.event, entry.actor, entry.detail.via], ["consent.revoked", "member", "web"]);
+  });
+
+  it("refuses a revocation without a store, a bad input, an unknown consent, a no, and another workspace's consent", async () => {
+    const consents = new MemoryConsentStore();
+    const t = setup({ adapters: { consents } });
+    const { callId } = await t.engine.startCall();
+    const no = await t.engine.recordConsent(callId, { purpose: "texts", answer: "no" });
+    const yes = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await assert.rejects(t.engine.revokeConsent({ consentId: "", via: "text" }), rejects("invalid_input", /consentId/));
+    await assert.rejects(t.engine.revokeConsent(null as never), rejects("invalid_input", /consentId/));
+    await assert.rejects(t.engine.revokeConsent({ consentId: yes.consentId, via: "fax" as never }), rejects("invalid_input", /via/));
+    await assert.rejects(t.engine.revokeConsent({ consentId: "cns_404", via: "text" }), rejects("invalid_input", /no such consent/));
+    await assert.rejects(t.engine.revokeConsent({ consentId: no.consentId, via: "text" }), rejects("precondition_failed", /nothing to revoke/));
+    const other = createTestEngine({ workspaceId: "ws_other", config: testConfig(), adapters: { consents } });
+    await assert.rejects(other.engine.revokeConsent({ consentId: yes.consentId, via: "text" }), rejects("invalid_input", /no such consent/));
+    const bare = setup();
+    const { callId: bareCall } = await bare.engine.startCall();
+    const kept = await bare.engine.recordConsent(bareCall, { purpose: "texts", answer: "yes" });
+    await assert.rejects(bare.engine.revokeConsent({ consentId: kept.consentId, via: "call" }), rejects("precondition_failed", /consents adapter/));
+    await assert.rejects(consents.revokeConsent("ws_test", { consentId: "cns_404", via: "text", at: "x" }), /no such consent/);
+    assert.equal((await t.ledger.list()).some((e) => e.event === "consent.revoked"), false);
+  });
+
+  it("keeps a consent reserved when the store fails, and resumes it with the same record", async () => {
+    const consents = gatedStore();
+    const t = setup({ adapters: { consents }, config: flowWithConsent() });
+    const { callId } = await t.engine.startCall({ flow: "f" });
+    consents.failNext = 1;
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), /consent store down/);
+    assert.equal((await t.engine.flowPosition(callId))!.index, 0, "not recorded yet");
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "no" }), rejects("precondition_failed", /being stored/));
+    const consent = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    assert.equal(consent.consentId, "cns_1");
+    assert.equal((await t.engine.flowPosition(callId))!.status, "completed");
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "consent.recorded").length, 1);
+    assert.notEqual(await consents.getConsent("ws_test", "cns_1"), null);
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.deepEqual(receipt.body.consents.map((c) => c.answer), ["yes"], "the normal path: recorded, nothing unrecorded");
+    assert.equal((await t.ledger.list()).some((e) => e.event === "consent.unrecorded"), false);
+  });
+
+  it("ends a call whose consent store is down: the consent settles as not recorded, which is no consent", async () => {
+    const consents = gatedStore();
+    const t = setup({ adapters: { consents }, config: flowWithConsent() });
+    const { callId } = await t.engine.startCall({ flow: "f" });
+    consents.failNext = 1;
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), /consent store down/);
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.deepEqual(receipt.body.consents, [{ purpose: "texts", wordingVersion: "1", wordingDigest: receipt.body.consents[0]!.wordingDigest, answer: "not_recorded" }]);
+    assert.equal(verifyReceipt(receipt, t.engine.receiptKeys()), true);
+    const entries = (await t.ledger.list()).filter((e) => e.callId === callId);
+    const events = entries.map((e) => e.event);
+    assert.deepEqual(events.slice(events.indexOf("consent.unrecorded")), ["consent.unrecorded", "flow.abandoned", "call.ended", "receipt.issued"]);
+    assert.deepEqual(entries.find((e) => e.event === "consent.unrecorded")!.detail, { purpose: "texts" });
+    assert.equal(events.includes("consent.recorded"), false);
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), rejects("invalid_transition", /ended/), "a retry after the end is refused");
+  });
+
+  it("records nothing, and refuses its revocation, when the store answers after the call ended", async () => {
+    const consents = gatedStore();
+    const t = setup({ adapters: { consents } });
+    const { callId } = await t.engine.startCall();
+    consents.hold = true;
+    const late = t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await new Promise((resolve) => setImmediate(resolve));
+    await t.engine.endCall(callId);
+    consents.release();
+    await assert.rejects(late, rejects("precondition_failed", /call ended before the consent was stored/));
+    const stored = await consents.getConsent("ws_test", "cns_1");
+    assert.notEqual(stored, null, "the store has it, but the call never recorded it");
+    await assert.rejects(t.engine.revokeConsent({ consentId: "cns_1", via: "text" }), rejects("precondition_failed", /not recorded on its call/));
+    const events = (await t.ledger.list()).map((e) => e.event);
+    assert.equal(events.includes("consent.recorded") || events.includes("consent.revoked"), false);
+  });
+
+  it("never writes consent.revoked before its consent.recorded, even with the recorded entry still pending", async () => {
+    const ledger = new MemoryAuditLedger();
+    let failRecorded = true;
+    const flaky = Object.assign(Object.create(ledger) as MemoryAuditLedger, {
+      append: async (input: Parameters<MemoryAuditLedger["append"]>[0]) => {
+        if (input.event === "consent.recorded" && failRecorded) {
+          failRecorded = false;
+          throw new Error("ledger down");
+        }
+        return ledger.append(input);
+      },
+    });
+    const t = setup({ adapters: { consents: new MemoryConsentStore(), ledger: flaky } });
+    const { callId } = await t.engine.startCall();
+    // The consent is recorded on the call, but its ledger entry is still in the call's outbox.
+    await assert.rejects(t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" }), /ledger down/);
+    await t.engine.revokeConsent({ consentId: "cns_1", via: "text" });
+    const events = (await ledger.list()).map((e) => e.event);
+    assert.deepEqual(events.filter((e) => e.startsWith("consent.")), ["consent.recorded", "consent.revoked"]);
+    assert.equal(verifyChain(await ledger.list()).ok, true);
+  });
+
+  it("revokes from the store alone once the host removed the call record, and passes a session store failure through", async () => {
+    const consents = new MemoryConsentStore();
+    const t = setup({ adapters: { consents } });
+    const { callId } = await t.engine.startCall();
+    const yes = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    // Another engine of the workspace whose session store no longer has the call.
+    const later = createTestEngine({ config: testConfig(), adapters: { consents, ledger: t.ledger } });
+    assert.equal((await later.engine.revokeConsent({ consentId: yes.consentId, via: "web" })).via, "web");
+    const fresh = new MemoryConsentStore();
+    await fresh.putConsent("ws_test", yes);
+    const sessions = new MemorySessionStore();
+    sessions.get = async () => {
+      throw new Error("session store down");
+    };
+    const broken = createTestEngine({ config: testConfig(), adapters: { consents: fresh, ledger: t.ledger, sessions } });
+    await assert.rejects(broken.engine.revokeConsent({ consentId: yes.consentId, via: "text" }), /session store down/);
+  });
+
+  it("records one consent when two processes resume it at once", async () => {
+    const consents = gatedStore();
+    const t = setup({ adapters: { consents } });
+    const { callId } = await t.engine.startCall();
+    consents.hold = true;
+    const first = t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    const second = t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await new Promise((resolve) => setImmediate(resolve));
+    consents.release();
+    const [a, b] = await Promise.all([first, second]);
+    assert.equal(a.consentId, b.consentId);
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "consent.recorded").length, 1);
+  });
+
+  it("completes a revocation whose ledger entry failed, with its first time and channel", async () => {
+    const ledger = new MemoryAuditLedger();
+    let failRevocation = true;
+    const flaky = Object.assign(Object.create(ledger) as MemoryAuditLedger, {
+      append: async (input: Parameters<MemoryAuditLedger["append"]>[0]) => {
+        if (input.event === "consent.revoked" && failRevocation) {
+          failRevocation = false;
+          throw new Error("ledger down");
+        }
+        return ledger.append(input);
+      },
+    });
+    const t = setup({ adapters: { consents: new MemoryConsentStore(), ledger: flaky } });
+    const { callId } = await t.engine.startCall();
+    const yes = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await assert.rejects(t.engine.revokeConsent({ consentId: yes.consentId, via: "call" }), /ledger down/);
+    t.clock.advance(5000);
+    const revoked = await t.engine.revokeConsent({ consentId: yes.consentId, via: "web" });
+    assert.deepEqual([revoked.via, revoked.at], ["call", "2026-01-01T00:00:00.000Z"]);
+    const entry = (await ledger.list()).find((e) => e.event === "consent.revoked")!;
+    assert.deepEqual([entry.actor, entry.at, entry.detail.via], ["caller", revoked.at, "call"]);
   });
 });

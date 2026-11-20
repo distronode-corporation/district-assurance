@@ -28,6 +28,7 @@ import {
 } from "../../../src/index.ts";
 import { FixedClock, TEST_KNOWLEDGE_KEY, createTestEngine, generateTestSigner, testSubject, type TestEngine } from "../../../src/testing/index.ts";
 import { createDoorRelay } from "./door-relay.ts";
+import { ReceiptLinks } from "./app.ts";
 import { demoConfig } from "./flows.ts";
 
 /** The demo's webhook signing secret. Not a secret: it is published here on purpose. */
@@ -93,6 +94,8 @@ export interface DemoWorld {
   config: FlowConfig;
   /** Every link a real payments adapter created, oldest first (the fake keeps its own list). */
   links: CreatedLink[];
+  /** The receipt links the host issues when a call ends with a receipt; give them to the server. */
+  receiptLinks: ReceiptLinks;
 }
 
 /**
@@ -197,6 +200,7 @@ export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
     engine: t.engine,
     other,
     base: "",
+    receiptLinks: new ReceiptLinks(),
     lobby,
     doorsOpened,
     openedFor,
@@ -262,6 +266,8 @@ export interface ScriptRun {
   grantId?: string;
   /** The engine's deadline for this call's link, once texted (the live demo's payment wait). */
   paymentExpiresAt?: string | null;
+  /** The capability token of the receipt's link (`/r/<token>`), once the call ended with one. */
+  receiptToken: string | null;
 }
 
 /** What a step did, in one line, and whether the demo's check on it held. */
@@ -379,7 +385,9 @@ const deposit: ScriptStep[] = [
       await w.engine.startIntake(call.callId, "maintenance");
       await w.engine.setIntakeField(call.callId, "issue", "Water leak under the kitchen sink");
       await w.engine.setIntakeField(call.callId, "urgent", "yes");
-      const record = await w.engine.confirmIntake(call.callId, { confirmedBy: "voice" });
+      // The host speaks the read-back's text, and the caller's yes confirms the digest of what they heard.
+      const readBack = await w.engine.intakeReadBack(call.callId);
+      const record = await w.engine.confirmIntake(call.callId, { confirmedBy: "voice", readBack: readBack.digest });
       return pass(`${record.recordId}, digest ${record.digest.slice(0, 16)}...`);
     },
   },
@@ -434,7 +442,10 @@ const deposit: ScriptStep[] = [
     async run(w, call) {
       const done = await w.engine.flowPosition(call.callId);
       call.receipt = await w.engine.endCall(call.callId);
-      return { detail: `flow ${done!.status} (${done!.index} steps), receipt ${call.receipt === null ? "MISSING" : "signed"}`, ok: call.receipt !== null };
+      // The host would text this link to the caller. The link store keeps only the token's hash;
+      // this demo run keeps the raw token in memory to show the link, which a host would not do.
+      call.receiptToken = call.receipt === null ? null : w.receiptLinks.issue(call.callId);
+      return { detail: `flow ${done!.status} (${done!.index} steps), receipt ${call.receipt === null ? "MISSING" : "signed, link issued"}`, ok: call.receipt !== null };
     },
   },
 ];

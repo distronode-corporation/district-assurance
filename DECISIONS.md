@@ -365,3 +365,42 @@ who is speaking, so it can make a call count for less but never for more. In Can
 States, `C` or no attestation is common for genuine callers (calls from abroad, and calls whose
 signature was lost on an older, non-IP network), so caps on by default would turn genuine callers
 away. **Revisit** if carriers' coverage makes a missing or `C` attestation rare for genuine callers.
+
+## ADR-27. A record's digest covers the plaintext, with sensitive values keyed (FIL-2)
+
+**Decided.** A sensitive intake value is encrypted by the host's `FieldCipher` before the record
+is stored; the engine never decrypts. The record's digest, which the ledger and the receipt
+carry, covers the values the caller confirmed, not the ciphertext, and each sensitive value
+enters it as `HMAC-SHA256(knowledgeKey, canonicalJson(["intake", recordId, field, value]))`.
+**Why.** A digest over the ciphertext would change whenever the cipher does: a fresh nonce on a
+retried filing, a host re-encrypting its records under a new key. Receipts already issued would
+then point at nothing, and the digest would vouch for bytes rather than for what the caller
+heard and confirmed. A digest over the bare plaintext would be stable, but a receipt is handed to
+the caller and may travel further, and a short value (a nine-digit SIN with a check digit, a date
+of birth) could be found by hashing every candidate with the other values. Keying it under the
+workspace's knowledge key removes that, as it does for reference values (SPEC.md, section 5).
+Binding it to the record and the field keeps two records with the same value apart, and the JSON
+tuple keeps it apart from the `subject:`, `field:` and `pin:` digests, so it never equals a value
+on file. A host checks a record against its receipt by decrypting it and computing the same HMAC.
+Rotating the knowledge key makes old receipts uncheckable against their records, since the old
+key is needed to recompute each sensitive value's HMAC; a host that rotates it keeps the old key
+for checking.
+**Revisit** if a third party without the knowledge key must check a record against its receipt:
+that needs a per-record salt published with the record instead.
+## ADR-21. Subject erasure deletes values and keeps digests (PRV-7)
+
+**Decided.** `eraseSubject` deletes a subject's intake records, the copy of their values a call
+record keeps, and their PIN digest, through the stores, and appends `subject.erased`. It never
+changes or removes a ledger entry or a receipt. The record digests already in the ledger and in
+receipts stay, as integrity records kept for the retention period, and `exportSubject` lists them
+as kept, with that reason. The export is signed with the receipt key under its own domain (the
+signed bytes start with `district-assurance/subject-export/v1`), so it never verifies as a receipt.
+**Why.** The ledger is append-only and hash-chained and receipts are signed: removing an entry or
+editing a digest would break every hash after it and every signature that covers it, and the
+record of what happened is what the business needs to show later. Neither holds a value, only ids
+and digests (SPEC.md sections 9 and 12). But a digest is not anonymous: it is an unkeyed SHA-256,
+and a short or guessable value (a yes/no answer, a date, a short phrase) can be confirmed by
+anyone who guesses it and hashes it. So the ledger and receipts stay personal information for
+retention and access control, and the business decides, case by case, what the law lets it keep.
+**Would change it.** Keyed or salted record digests whose key can be destroyed per subject (a
+change to the receipt format, so a new version), or a regulator's guidance that the digests must go.

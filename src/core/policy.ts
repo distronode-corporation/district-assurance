@@ -4,7 +4,7 @@
 // from them here, and a scope is allowed only when the level reaches the scope's minimum. Caller
 // ID is not a factor kind at all, so no policy can count it, and no factor plug-in may take a name
 // that means it (FORBIDDEN_FACTOR_KINDS).
-import { isIntegerIn, isObject, isStringArray, unknownKeys } from "./shape.ts";
+import { isDenseArray, isIntegerIn, isObject, isStringArray, unknownKeys } from "./shape.ts";
 
 export type AssuranceLevel = 0 | 1 | 2 | 3;
 
@@ -100,6 +100,56 @@ export interface VerificationPolicy {
    * attestation is recorded and changes nothing.
    */
   attestationCaps?: Partial<Record<Attestation, AssuranceLevel>>;
+  /** The business's time zone (IANA, for example `America/Toronto`), for step-up rules on the time of day. */
+  timeZone?: string;
+  /** Rules that raise a scope's minimum for one request: a large amount, after hours, a signal the host raised (VER-13). */
+  stepUp?: StepUpRule[];
+}
+
+/**
+ * Raises one scope's minimum level when its condition holds. A rule has exactly one condition.
+ * Rules only raise: `validatePolicy` refuses a rule whose level is not above the scope's minimum,
+ * so no rule brings a level below the policy's floors.
+ */
+export interface StepUpRule {
+  /** snake_case, unique in the policy. Written to the ledger when the rule applies; its values never are. */
+  name: string;
+  scope: string;
+  level: 1 | 2 | 3;
+  /**
+   * Currency (lower-case ISO 4217) to a threshold in minor units: the rule holds for an amount over
+   * it. A currency not listed, or an amount that is not known, counts as over. Money scopes only.
+   */
+  amountOverMinor?: Record<string, number>;
+  /**
+   * `HH:MM` to `HH:MM` in the policy's `timeZone`, from included, to excluded. When `from` is later
+   * than `to` the window runs past midnight (`{ from: "18:00", to: "08:00" }` is after hours).
+   */
+  localTime?: { from: string; to: string };
+  /** A signal the host's code raises on the call (`Engine.raiseSignal`). Raised signals are never cleared. */
+  signal?: string;
+}
+
+/**
+ * What a step-up rule is judged on: the amount the request moves (undefined when not known, which
+ * counts as over every amount rule; null when no amount is asked yet, which skips amount rules),
+ * the time, the call's signals.
+ */
+export interface StepUpFacts {
+  amount?: StepUpAmount | undefined | null;
+  at: Date;
+  signals: readonly string[];
+}
+
+export interface StepUpAmount {
+  amountMinor: number;
+  currency: string;
+}
+
+/** A scope's minimum on one request, and the rules that raised it above the policy's (empty when none did). */
+export interface RaisedMinimum {
+  level: AssuranceLevel;
+  rules: Array<{ name: string; level: 1 | 2 | 3 }>;
 }
 
 /** The formats a spoken answer is normalised to (src/verify/spoken.ts). */
@@ -303,6 +353,7 @@ export function validatePolicy(
     }
   }
   errors.push(...attestationCapErrors(p.attestationCaps));
+  errors.push(...checkStepUp(p, isObject(p.scopeClasses) ? p.scopeClasses : {}, declaredClasses));
   return errors;
 }
 
@@ -374,6 +425,112 @@ export function scopeClass(
   if ((SCOPE_CLASSES as readonly unknown[]).includes(own)) found.push(own as ScopeClass);
   if (found.length === 0) return null;
   return found.reduce((a, b) => (STRICTNESS[b] > STRICTNESS[a] ? b : a));
+}
+
+const RULE_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+const CLOCK_TIME = /^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/;
+const CURRENCY = /^[a-z]{3}$/;
+const RULE_FIELDS = ["name", "scope", "level", "amountOverMinor", "localTime", "signal"];
+const CONDITIONS = ["amountOverMinor", "localTime", "signal"];
+
+/** Every problem with the time zone and the step-up rules. A rule only ever raises its scope's minimum. */
+function checkStepUp(p: Record<string, unknown>, policyClasses: Readonly<Record<string, unknown>>, declaredClasses: Readonly<Record<string, ScopeClass>>): string[] {
+  const errors: string[] = [];
+  if (p.timeZone !== undefined && !isTimeZone(p.timeZone)) errors.push("timeZone must be an IANA time zone, for example America/Toronto");
+  if (p.stepUp === undefined) return errors;
+  if (!isDenseArray(p.stepUp)) return [...errors, "stepUp must be a list of rules"];
+  const scopes = isObject(p.scopes) ? p.scopes : {};
+  const names = new Set<unknown>();
+  p.stepUp.forEach((rule, index) => {
+    const at = `stepUp[${index}]`;
+    if (!isObject(rule)) {
+      errors.push(`${at} must be { name, scope, level } and one of amountOverMinor, localTime or signal`);
+      return;
+    }
+    const named = typeof rule.name === "string" && RULE_NAME.test(rule.name);
+    const label = named ? `stepUp ${rule.name as string}` : at;
+    if (!named) errors.push(`${at}: name must be 1 to 64 of a-z, 0-9 and _, starting with a letter`);
+    else if (names.has(rule.name)) errors.push(`${label} is defined twice`);
+    names.add(rule.name);
+    for (const key of unknownKeys(rule, RULE_FIELDS)) errors.push(`${label}: ${key} is not a step-up rule field`);
+    const scope = typeof rule.scope === "string" && Object.hasOwn(scopes, rule.scope) ? rule.scope : null;
+    if (scope === null) errors.push(`${label}: scope must be a scope the policy lists`);
+    const base = scope === null ? undefined : scopes[scope];
+    if (!isIntegerIn(rule.level, 1, 3)) errors.push(`${label}: level must be 1, 2 or 3`);
+    else if (typeof base === "number" && rule.level <= base) errors.push(`${label}: level ${rule.level} does not raise ${scope} above its minimum of ${base}; a rule only raises`);
+    if (CONDITIONS.filter((key) => rule[key] !== undefined).length !== 1) errors.push(`${label}: needs exactly one of amountOverMinor, localTime or signal`);
+    if (rule.amountOverMinor !== undefined) {
+      const limits = rule.amountOverMinor;
+      if (!isObject(limits) || Object.keys(limits).length === 0 || !Object.entries(limits).every(([c, v]) => CURRENCY.test(c) && Number.isSafeInteger(v) && (v as number) >= 0)) {
+        errors.push(`${label}: amountOverMinor must map lower-case currency codes to whole amounts in minor units`);
+      }
+      if (scope !== null && scopeClass(scope, policyClasses, declaredClasses) !== "money") errors.push(`${label}: an amount rule applies only to a money scope`);
+    }
+    if (rule.localTime !== undefined) {
+      const window = rule.localTime;
+      if (!isObject(window) || unknownKeys(window, ["from", "to"]).length > 0 || !isClockTime(window.from) || !isClockTime(window.to) || window.from === window.to) {
+        errors.push(`${label}: localTime must be { from: "HH:MM", to: "HH:MM" }, two different times`);
+      }
+      if (p.timeZone === undefined) errors.push(`${label}: a localTime rule needs the policy's timeZone`);
+    }
+    if (rule.signal !== undefined && !(typeof rule.signal === "string" && RULE_NAME.test(rule.signal))) {
+      errors.push(`${label}: signal must be 1 to 64 of a-z, 0-9 and _, starting with a letter`);
+    }
+  });
+  return errors;
+}
+
+function isClockTime(value: unknown): boolean {
+  return typeof value === "string" && CLOCK_TIME.test(value);
+}
+
+function isTimeZone(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  try {
+    return new Intl.DateTimeFormat("en-GB", { timeZone: value }).resolvedOptions().timeZone !== "";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A scope's minimum for one request: the policy's, raised by every step-up rule on the scope whose
+ * condition holds. Never lower than the policy's minimum, so never below a floor. The scope must
+ * be one the policy lists.
+ */
+export function raiseMinimum(policy: VerificationPolicy, scope: string, facts: StepUpFacts): RaisedMinimum {
+  const rules = (policy.stepUp ?? []).filter((rule) => rule.scope === scope && ruleHolds(policy, rule, facts)).map((rule) => ({ name: rule.name, level: rule.level }));
+  return { level: rules.reduce<AssuranceLevel>((max, rule) => (rule.level > max ? rule.level : max), policy.scopes[scope]!), rules };
+}
+
+function ruleHolds(policy: VerificationPolicy, rule: StepUpRule, facts: StepUpFacts): boolean {
+  if (rule.amountOverMinor !== undefined) return facts.amount !== null && amountOver(rule.amountOverMinor, facts.amount);
+  if (rule.localTime !== undefined) return withinLocalTime(rule.localTime, policy.timeZone!, facts.at);
+  return facts.signals.includes(rule.signal!);
+}
+
+/**
+ * Whether an amount is over a rule's threshold. A currency the rule does not list, or an amount not
+ * known, counts as over, and so does anything a host passes that is not `{ amountMinor, currency }`
+ * with a number and a string.
+ */
+export function amountOver(limits: Readonly<Record<string, number>>, amount: StepUpAmount | undefined): boolean {
+  if (!isObject(amount)) return true;
+  // Read once: the amount and currency type-checked are the ones compared with the limit.
+  const { amountMinor, currency } = amount;
+  if (typeof amountMinor !== "number" || typeof currency !== "string" || !Object.hasOwn(limits, currency)) return true;
+  return !(amountMinor <= limits[currency]!);
+}
+
+/** Whether an instant falls in a daily window of local times, `from` included, `to` excluded, wrapping past midnight. */
+export function withinLocalTime(window: { from: string; to: string }, timeZone: string, at: Date): boolean {
+  const local = new Intl.DateTimeFormat("en-GB", { timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(at);
+  return window.from < window.to ? window.from <= local && local < window.to : local >= window.from || local < window.to;
+}
+
+/** The amount a flow step moves, when it names one (`amountMinor` and `currency`); an `amountRef` step's is not known yet. */
+export function stepAmount(step: Readonly<Record<string, unknown>> | null): StepUpAmount | undefined {
+  return step !== null && typeof step.amountMinor === "number" && typeof step.currency === "string" ? { amountMinor: step.amountMinor, currency: step.currency } : undefined;
 }
 
 /** The floor for a scope key by its name alone: the class its prefix implies, or 0. */

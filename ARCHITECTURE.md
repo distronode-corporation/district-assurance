@@ -60,6 +60,9 @@ engine, its inputs or its answers; it hears fixed lines the host speaks on the e
 | Paylink | `src/pay/paylink.ts`, `payment.ts` | the `paylink.request` step, payments in `connect` or `platform` mode, the engine's link deadline | `payment.request` | `payments`, `messages` |
 | Trace | `src/prove/trace.ts`, `ledger.ts`, `receipt.ts`, `consent.ts` | the ledger (always on), the `trace.consent` and `trace.receipt` steps, receipts, consents | | `ledger`, and `signer` while receipts are on |
 | Gate | `src/gate/gate.ts`, `access.ts`, `relay.ts` | the `gate.grant` step, signed access grants whose outcomes the engine records, the signed-webhook relay | `entry.open` | `access`, `accessSigner` |
+| Paylink | `src/pay/paylink.ts`, `payment.ts` | the `paylink.request` step, payments | `payment.request` | `payments`, `messages` |
+| Trace | `src/prove/trace.ts`, `ledger.ts`, `receipt.ts`, `consent.ts` | the ledger (always on), the `trace.consent` and `trace.receipt` steps, receipts, consents | | `ledger`, `signer` while receipts are on, and optionally `consents` to revoke consents |
+| Gate | `src/gate/` | planned (GAT-1): the `gate.grant` step, signed access grants | `entry.*` | `accessController` |
 
 Each module is an object with a manifest and a few pure functions: `validateSettings`,
 `requiredAdapters`, `validateStep`, `initCall` (its part of a new call record), `enterStep` and
@@ -88,6 +91,9 @@ authorized, and can write `module.event` ledger entries; the engine holds every 
 module's scopes whatever `fn` does (the current step's in a flow, all its manifest's outside one).
 A running flow moves on when the module's `stepStatus` says its step is complete. Built-in modules'
 parts are never reachable this way.
+state, can ask whether a scope is authorized, can write `module.event` ledger entries, and says
+when its change changed contact details (`contactChanged`), so the call owes a security notice. A
+running flow moves on when the module's `stepStatus` says its step is complete.
 
 ## One call, step by step
 
@@ -117,6 +123,10 @@ parts are never reachable this way.
    the door's controller and records the controller's answer (delivered, refused or unknown).
 8. `endCall` closes the session (abandoning a flow still running, and settling an access grant not
    yet signed as unknown; it waits while a signed grant is at its door) and, when the call gets a
+7. Trace: `recordConsent(purpose)` fingerprints the configured wording and stores the answer (in
+   the host's `ConsentStore` too, when it has one); `revokeConsent` withdraws it later by voice,
+   text or dashboard and writes `consent.revoked`.
+8. `endCall` closes the session (abandoning a flow still running) and, when the call gets a
    receipt, takes the ledger head and signs it.
 
 Every step appends to the `AuditLedger`, and the optional `onEvent` listener sees the same event.

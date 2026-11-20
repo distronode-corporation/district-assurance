@@ -16,7 +16,9 @@ npm run demo:e2e  # the UI with a real Stripe Checkout in test mode (STRIPE_TEST
 `npm run ui`, then open `http://127.0.0.1:8787/`. Pick a flow, then run its scripted steps one at
 a time (or the rest in one go). After each step the page shows the call's session state, its
 entries in the audit ledger, and whether the whole ledger's hash chain is intact. When a flow with
-a `trace.receipt` step ends, the page fetches the receipt from `/receipts/:callId` and the key set
+a `trace.receipt` step ends, the script issues the receipt's capability link (`/r/:token`; the
+link store keeps only the token's hash, but the demo run itself holds the raw token in memory so
+later views of the run can show the link, which a real host would not do), and the page fetches the receipt from `/r/:token.json` and the key set
 from `/.well-known/receipt-keys.json` and checks the ES256 signature itself, with Web Crypto, over
 its own canonical JSON of the body; a button changes one character and checks again, which fails.
 The page also recomputes each ledger entry's hash.
@@ -55,6 +57,10 @@ How the page is kept small and safe:
   only the demo's published secret, so point `stripe listen` at `npm run serve` instead.
 - The server keeps the newest 20 runs. Like the rest of this server it is a local demo, not hardened
   for production.
+- The sample receiver of record deliveries (`POST /webhooks/records`) keeps the idempotency keys it
+  has received in memory only, so a restart forgets them and a redelivered record is applied again.
+  A real receiver must store them durably, and mark a key received in the same transaction that
+  applies the record.
 
 ## Files
 
@@ -62,6 +68,8 @@ How the page is kept small and safe:
 |---|---|
 | `src/app.ts` | `createReferenceServer({ engine, stripeSecrets, clock })`: the routes |
 | `src/script.ts` | the scripted calls, one step at a time, and the demo's records, engines and door relay |
+| `src/app.ts` | `createReferenceServer({ engine, stripeSecrets, clock, receiptLinks })`: the routes, `ReceiptLinks` and the receipt page |
+| `src/script.ts` | the scripted calls, one step at a time, and the demo's records and engines |
 | `src/demo.ts` | `npm run demo`: every step in a row; `runDemo(false)` is also run by the test suite |
 | `src/demo-runs.ts` | the UI's runs: one step per request, and the run's state, ledger and chain check |
 | `src/static.ts` | the UI's file allow-list and its headers |

@@ -7,9 +7,11 @@ import type {
   AttemptCounterKey,
   AttemptCounters,
   AuditLedger,
+  AuditInput,
   CallbackDialer,
   CarrierSignals,
   CodeStore,
+  ConsentStore,
   DuressNotifier,
   IdentityProvider,
   MessageSender,
@@ -24,7 +26,8 @@ import type { JsonValue } from "./canonical.ts";
 import type { Clock, IdGenerator } from "./clock.ts";
 import type { Actor, EngineEventName } from "./events.ts";
 import type { FlowStep } from "./module.ts";
-import type { Attestation, VerificationPolicy } from "./policy.ts";
+import type { Attestation, StepUpAmount, VerificationPolicy } from "./policy.ts";
+import type { EngineError } from "./errors.ts";
 import type { SessionEvent, SessionState } from "./session.ts";
 
 /**
@@ -32,13 +35,37 @@ import type { SessionEvent, SessionState } from "./session.ts";
  * the amounts it formats, the spoken digits it redacts) is a `Record<Locale, ...>` with one entry
  * for each, and a test checks it: adding a locale here makes every catalog grow with it.
  */
-export const SUPPORTED_LOCALES = Object.freeze(["en", "fr"] as const);
+export const SUPPORTED_LOCALES = Object.freeze(["en", "fr", "es"] as const);
 
 export type Locale = (typeof SUPPORTED_LOCALES)[number];
+
+/** The same list, by the name #122 (I18N) gave it. */
+export const LOCALES = SUPPORTED_LOCALES;
 
 /** Whether a host's value is a supported locale. */
 export function isSupportedLocale(value: unknown): value is Locale {
   return (SUPPORTED_LOCALES as readonly unknown[]).includes(value);
+}
+
+/**
+ * Words a workspace writes (a form's labels, a consent wording): English and French always,
+ * Spanish when the workspace offers it. A call in Spanish can use only those that have it.
+ */
+export interface LocalisedText {
+  en: string;
+  fr: string;
+  es?: string;
+}
+
+/**
+ * Encrypts a sensitive intake value before the record is stored, with the host's key (for example
+ * a KMS data key). The engine never decrypts: the host reads its records with its own key. The
+ * context names the value's place, so a host can bind it as additional authenticated data and a
+ * ciphertext moved to another record or field fails to decrypt. An answer may differ on every call
+ * (a fresh nonce); the record's digest does not depend on it.
+ */
+export interface FieldCipher {
+  encrypt(plain: string, context: { workspaceId: string; recordId: string; field: string }): Promise<string>;
 }
 
 /**
@@ -74,9 +101,16 @@ export interface EngineAdapters {
   notifier?: Notifier;
   /** Told of a duress PIN entry (VER-12). Needed while Badge's `pin.duress` is set. */
   duressNotifier?: DuressNotifier;
+  /** Needed by Dossier once a form has a sensitive field. */
+  fieldCipher?: FieldCipher;
+  /** Where consents are kept so they can be revoked after the call. Without it, `revokeConsent` is refused. */
+  consents?: ConsentStore;
 }
 
 export type AdapterName = keyof EngineAdapters;
+
+/** A call the host marked at its start: a relay service, or a TTY (VER-11). */
+export type CallAccess = "relay" | "tty";
 
 export type FlowStatus = "running" | "completed" | "failed" | "abandoned";
 
@@ -112,6 +146,15 @@ export interface CallRecord {
   flow: FlowCursor | null;
   /** Each module's own part, by module name. */
   modules: Record<string, JsonValue>;
+  /**
+   * Set when the host marked the call as relay or TTY at its start (VER-11). It lengthens keypad
+   * timeouts and nothing else, and it is never written to the ledger or a receipt: it can reveal a disability.
+   */
+  access?: CallAccess;
+  /** Signals the host's code raised on the call, for step-up rules (VER-13). Raised, never cleared. Absent on a call saved before them. */
+  signals?: string[];
+  /** Step-up rules already written to the ledger for this call, by name. Absent on a call saved before them. */
+  stepUps?: string[];
   /** Ledger entries saved with a change and not yet known to be appended. */
   outbox: Array<{
     eventId: string;
@@ -166,8 +209,29 @@ export interface EngineRuntime {
   /** One step: read the call, change it with `fn`, write it with compare-and-set, retrying from a fresh read on conflict. */
   update<R>(callId: string, fn: (draft: CallDraft) => R): Promise<R>;
   read(callId: string): Promise<CallRecord>;
+  /**
+   * Appends one ledger entry that belongs to no write of a call record (a consent revoked after
+   * the call), then tells the listener. Idempotent by `eventId`, like every append.
+   */
+  append(entry: AuditInput & { eventId: string; callId: string }): Promise<void>;
+  /** Appends a call's pending ledger entries, in order. */
+  flushLedger(callId: string): Promise<void>;
   /** Whether the call's grant covers a scope now. */
-  authorized(record: CallRecord, scope: string): boolean;
+  /**
+   * Whether the call's grant covers a scope now, at the minimum the policy's step-up rules raise it
+   * to for `amount` (VER-13; left out, the current step's amount; null, no amount asked yet, so
+   * amount rules are skipped). Inside a change, a rule applied for the first time is ledgered.
+   */
+  authorized(record: CallRecord, scope: string, amount?: StepUpAmount | null): boolean;
+  /**
+   * Holds a step's own work to a scope at the minimum the step-up rules raise it to for `amount`.
+   * Null when the grant covers it. When step-up rules are why it does not, the running flow fails
+   * naming them and the refusal is returned, to be thrown once the change is saved, so the ledger
+   * keeps both. A refusal the grant earns without any rule is returned too when a rule applies
+   * (naming it, so a first `policy.step_up` is kept; the flow is not failed); one no rule touches
+   * throws `scope_denied` at once.
+   */
+  requireScope(draft: CallDraft, scope: string, amount: StepUpAmount | undefined | null): EngineError | null;
   bindRef(ref: string, callId: string): Promise<void>;
   /** An idempotency key for a provider call, unique across workspaces and stable across retries. */
   idempotencyKey(callId: string, ...parts: string[]): string;

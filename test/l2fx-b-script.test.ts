@@ -11,7 +11,7 @@ async function untilRefused(flow: DemoFlow) {
   const w = createDemoWorld();
   try {
     for (let i = 0; i < 20; i++) {
-      const call: ScriptRun = { callId: "", linkId: "", receipt: null };
+      const call: ScriptRun = { callId: "", linkId: "", receipt: null, receiptToken: null };
       await SCRIPTS[flow][0]!.run(w, call);
       const outcome = await SCRIPTS[flow][1]!.run(w, call);
       if (!outcome.ok) return { outcome, state: await w.engine.state(call.callId), position: await w.engine.flowPosition(call.callId), callId: call.callId, attempt: i };
@@ -36,7 +36,7 @@ describe("reference script: a rate-limited verification ends its call", () => {
   it("an error that is not a rate limit still reaches the runner", async () => {
     const w = createDemoWorld();
     try {
-      const call: ScriptRun = { callId: "no-such-call", linkId: "", receipt: null };
+      const call: ScriptRun = { callId: "no-such-call", linkId: "", receipt: null, receiptToken: null };
       await assert.rejects(SCRIPTS.deposit[1]!.run(w, call), (error) => error instanceof EngineError && !(error instanceof RateLimitedError));
       await assert.rejects(SCRIPTS.entry[1]!.run(w, call), (error) => error instanceof EngineError && !(error instanceof RateLimitedError));
     } finally {

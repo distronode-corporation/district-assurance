@@ -7,8 +7,10 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { SUPPORTED_LOCALES, isSupportedLocale } from "../src/engine.ts";
-import { DIGIT_WORDS_BY_LOCALE } from "../src/core/redaction.ts";
+import { BANK_WORDS, INTERRUPT_LINES, NUMBER_CONNECTORS, NUMBER_LANGUAGES_BY_LOCALE } from "../src/core/redaction.ts";
 import { AMOUNT_READBACK_TEXT } from "../src/pay/amount.ts";
+import { READBACK_WORDING } from "../src/file/readback.ts";
+import { ACTION_WORDS, CONTACT_NOTICE_TEXT, LIST_REGION, RECEIPT_LINK_TEXT } from "../src/prove/trace.ts";
 import { AMOUNT_REGION, PAYMENT_TEXT } from "../src/pay/paylink.ts";
 import { IDENTITY_TEXT } from "../src/verify/badge.ts";
 import { ACCESS_CODE_TEXT } from "../src/gate/codes.ts";
@@ -16,7 +18,7 @@ import { TEXT_CODE_TEXT } from "../src/verify/text-code.ts";
 import { rejects, setup } from "./helpers.ts";
 
 /** Every catalog in src/, by its exported name. The source scan below fails when one is missing here. */
-const CATALOGS: Record<string, Record<string, unknown>> = { IDENTITY_TEXT, PAYMENT_TEXT, AMOUNT_READBACK_TEXT, AMOUNT_REGION, DIGIT_WORDS_BY_LOCALE, ACCESS_CODE_TEXT, TEXT_CODE_TEXT };
+const CATALOGS: Record<string, Record<string, unknown>> = { IDENTITY_TEXT, PAYMENT_TEXT, AMOUNT_READBACK_TEXT, AMOUNT_REGION, NUMBER_LANGUAGES_BY_LOCALE, NUMBER_CONNECTORS, INTERRUPT_LINES, BANK_WORDS, ACCESS_CODE_TEXT, TEXT_CODE_TEXT, READBACK_WORDING, ACTION_WORDS, LIST_REGION, RECEIPT_LINK_TEXT, CONTACT_NOTICE_TEXT };
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -30,18 +32,18 @@ const SOURCES = sourceFiles(fileURLToPath(new URL("../src", import.meta.url))).m
 const DEMO_SOURCES = sourceFiles(fileURLToPath(new URL("../examples/reference-server/src", import.meta.url))).map((path) => ({ path, text: readFileSync(path, "utf8") }));
 
 describe("supported locales", () => {
-  it("are en and fr, in one frozen list", () => {
-    assert.deepEqual([...SUPPORTED_LOCALES], ["en", "fr"]);
+  it("are en, fr and es, in one frozen list", () => {
+    assert.deepEqual([...SUPPORTED_LOCALES], ["en", "fr", "es"]);
     assert.ok(Object.isFrozen(SUPPORTED_LOCALES));
     for (const locale of SUPPORTED_LOCALES) assert.equal(isSupportedLocale(locale), true);
-    for (const value of ["es", "EN", "", "en-CA", undefined, null, 1, ["en"]]) assert.equal(isSupportedLocale(value), false, String(value));
+    for (const value of ["de", "EN", "", "en-CA", "es-US", undefined, null, 1, ["en"]]) assert.equal(isSupportedLocale(value), false, String(value));
   });
 
   it("are what startCall takes, and nothing else", async () => {
     const t = setup();
     for (const locale of SUPPORTED_LOCALES) assert.equal((await t.engine.startCall({ callId: `call_${locale}`, locale })).callId, `call_${locale}`);
-    for (const locale of ["es", "EN", "", "en-CA", 1]) {
-      await assert.rejects(t.engine.startCall({ locale: locale as "en" }), rejects("invalid_input", /locale must be one of en, fr/), String(locale));
+    for (const locale of ["de", "EN", "", "en-CA", 1]) {
+      await assert.rejects(t.engine.startCall({ locale: locale as "en" }), rejects("invalid_input", /locale must be one of en, fr, es/), String(locale));
     }
   });
 

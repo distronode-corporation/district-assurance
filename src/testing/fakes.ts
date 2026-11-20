@@ -11,6 +11,9 @@ import type {
   CodeStore,
   DuressAlert,
   DuressNotifier,
+  ConsentRecord,
+  ConsentRevocation,
+  ConsentStore,
   IdentityProvider,
   IntakeRecord,
   LockNotice,
@@ -24,12 +27,13 @@ import type {
   PaymentRefundRequest,
   PinVerifier,
   ReceiptSigner,
+  RecordDelivery,
   RecordStore,
   SubjectRecord,
 } from "../core/adapters.ts";
 import type { Clock, IdGenerator } from "../core/clock.ts";
 import type { CarrierSignalReport } from "../core/policy.ts";
-import type { Locale } from "../core/runtime.ts";
+import type { FieldCipher, Locale } from "../core/runtime.ts";
 import type { AccessController, SignedAccessGrant, UnlockResult } from "../gate/access.ts";
 import { keyPairSigner } from "../prove/receipt.ts";
 import { duressDigest } from "../verify/factors.ts";
@@ -215,31 +219,57 @@ export class FakeAccessController implements AccessController {
   }
 }
 
+/** A map key for an id within a workspace that no two pairs share, whatever either holds ("/" included). */
+function scoped(workspaceId: string, id: string): string {
+  return JSON.stringify([workspaceId, id]);
+}
+
+/** Keys are JSON tuples, so no pair of workspace and id can collide with another (`"a/b", "c"` is not `"a", "b/c"`). */
 export class MemoryRecordStore implements RecordStore {
   readonly #subjects = new Map<string, SubjectRecord>();
   readonly #records = new Map<string, IntakeRecord>();
+  /** Ids of deleted records: a late write of one stores nothing. */
+  readonly #deleted = new Set<string>();
+  /** Erasures counted per subject: a write reserved before the latest stores nothing. */
+  readonly #erasures = new Map<string, number>();
 
   putSubject(workspaceId: string, subject: SubjectRecord): void {
-    this.#subjects.set(`${workspaceId}/${subject.subjectKey}`, structuredClone(subject));
+    this.#subjects.set(scoped(workspaceId, subject.subjectKey), structuredClone(subject));
   }
 
   async getSubject(workspaceId: string, subjectKey: string): Promise<SubjectRecord | null> {
-    const subject = this.#subjects.get(`${workspaceId}/${subjectKey}`);
+    const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
     return subject === undefined ? null : structuredClone(subject);
   }
 
-  async putIntakeRecord(record: IntakeRecord): Promise<void> {
-    this.#records.set(`${record.workspaceId}/${record.recordId}`, structuredClone(record));
+  async putIntakeRecord(record: IntakeRecord, erasuresSeen?: number): Promise<void> {
+    const key = scoped(record.workspaceId, record.recordId);
+    if (this.#deleted.has(key)) return;
+    // Checked and stored in one step, with no await between: an erasure or a delete that starts
+    // while this write is in the adapter either sees the record or keeps it out.
+    if (erasuresSeen !== undefined && record.subjectKey !== null && (this.#erasures.get(scoped(record.workspaceId, record.subjectKey)) ?? 0) > erasuresSeen) return;
+    this.#records.set(key, structuredClone(record));
   }
 
   async getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null> {
-    const record = this.#records.get(`${workspaceId}/${recordId}`);
+    const record = this.#records.get(scoped(workspaceId, recordId));
     return record === undefined ? null : structuredClone(record);
+  }
+
+  async listIntakeRecords(workspaceId: string, subjectKey: string): Promise<IntakeRecord[]> {
+    return [...this.#records.values()].filter((r) => r.workspaceId === workspaceId && r.subjectKey === subjectKey).map((r) => structuredClone(r));
+  }
+
+  async deleteIntakeRecords(workspaceId: string, recordIds: readonly string[]): Promise<void> {
+    for (const recordId of recordIds) {
+      this.#records.delete(scoped(workspaceId, recordId));
+      this.#deleted.add(scoped(workspaceId, recordId));
+    }
   }
 
   async putPinDigest(workspaceId: string, subjectKey: string, digest: string | null, enrolmentId?: string): Promise<boolean> {
     // No await: one atomic step.
-    const subject = this.#subjects.get(`${workspaceId}/${subjectKey}`);
+    const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
     if (subject === undefined) return false;
     if (digest === null) {
       delete subject.pinDigest;
@@ -255,12 +285,70 @@ export class MemoryRecordStore implements RecordStore {
 
   async putDuressDigest(workspaceId: string, subjectKey: string, digest: string | null, ifPinDigest?: string): Promise<boolean> {
     // No await: one atomic step.
-    const subject = this.#subjects.get(`${workspaceId}/${subjectKey}`);
+    const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
     if (subject === undefined) return false;
     if (digest === null) delete subject.duressDigest;
     else if (subject.pinDigest !== ifPinDigest) return false;
     else subject.duressDigest = digest;
     return true;
+  }
+
+  async markSubjectErased(workspaceId: string, subjectKey: string): Promise<void> {
+    const key = scoped(workspaceId, subjectKey);
+    this.#erasures.set(key, (this.#erasures.get(key) ?? 0) + 1);
+  }
+
+  async subjectErasures(workspaceId: string, subjectKey: string): Promise<number> {
+    return this.#erasures.get(scoped(workspaceId, subjectKey)) ?? 0;
+  }
+
+  async deletePinDigest(workspaceId: string, subjectKey: string): Promise<void> {
+    const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
+    // The duress PIN is a PIN too: left alone, it would still pass for the subject (VER-12).
+    delete subject?.pinDigest;
+    delete subject?.duressDigest;
+  }
+}
+
+/** Consents and their revocations, in memory. The first revocation of a consent wins. */
+export class MemoryConsentStore implements ConsentStore {
+  readonly #consents = new Map<string, { consent: ConsentRecord; revoked: ConsentRevocation | null }>();
+
+  async putConsent(workspaceId: string, record: ConsentRecord): Promise<void> {
+    const key = JSON.stringify([workspaceId, record.consentId]);
+    if (!this.#consents.has(key)) this.#consents.set(key, { consent: structuredClone(record), revoked: null });
+  }
+
+  async getConsent(workspaceId: string, consentId: string): Promise<{ consent: ConsentRecord; revoked: ConsentRevocation | null } | null> {
+    const stored = this.#consents.get(JSON.stringify([workspaceId, consentId]));
+    return stored === undefined ? null : structuredClone(stored);
+  }
+
+  async revokeConsent(workspaceId: string, revocation: ConsentRevocation): Promise<ConsentRevocation> {
+    const stored = this.#consents.get(JSON.stringify([workspaceId, revocation.consentId]));
+    if (stored === undefined) throw new Error("no such consent");
+    stored.revoked ??= structuredClone(revocation);
+    return structuredClone(stored.revoked);
+  }
+}
+
+/**
+ * Answers record deliveries from a script: each queued answer is used once, a status or `"no_answer"`
+ * (the post rejects, as a refused connection or a timeout would), then 200 for every post after.
+ */
+export class FakeRecordDelivery implements RecordDelivery {
+  readonly posts: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
+  readonly #script: Array<number | "no_answer">;
+
+  constructor(script: Array<number | "no_answer"> = []) {
+    this.#script = [...script];
+  }
+
+  async post(input: { url: string; headers: Record<string, string>; body: string }): Promise<{ status: number }> {
+    this.posts.push(structuredClone(input));
+    const next = this.#script.shift() ?? 200;
+    if (next === "no_answer") throw new Error("no answer");
+    return { status: next };
   }
 }
 
@@ -274,17 +362,17 @@ export class FakePinVerifier implements PinVerifier {
   readonly #duress = new Map<string, string>();
 
   set(workspaceId: string, subjectKey: string, pin: string): void {
-    this.#pins.set(`${workspaceId}/${subjectKey}`, pin);
+    this.#pins.set(scoped(workspaceId, subjectKey), pin);
   }
 
   /** The subject's duress PIN (VER-12). */
   setDuress(workspaceId: string, subjectKey: string, pin: string): void {
-    this.#duress.set(`${workspaceId}/${subjectKey}`, pin);
+    this.#duress.set(scoped(workspaceId, subjectKey), pin);
   }
 
   async verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean; duress?: boolean }> {
     this.asked.push(input.subjectKey);
-    const key = `${input.workspaceId}/${input.subjectKey}`;
+    const key = scoped(input.workspaceId, input.subjectKey);
     return { matched: this.#pins.get(key) === input.pin, duress: this.#duress.get(key) === input.pin };
   }
 }
@@ -375,6 +463,23 @@ export class FakeNotifier implements Notifier {
 /** A JSON tuple, so no two keys share an id whatever their parts contain. */
 function counterId(key: AttemptCounterKey): string {
   return JSON.stringify([key.workspaceId, key.factor, key.scope, key.key]);
+}
+
+/**
+ * A field cipher that does not encrypt: it wraps the value in base64url with a counter, so every
+ * answer differs, like a real cipher with a fresh nonce, and `decrypt` reads it back. Tests only.
+ */
+export class FakeFieldCipher implements FieldCipher {
+  readonly encrypted: Array<{ workspaceId: string; recordId: string; field: string }> = [];
+
+  async encrypt(plain: string, context: { workspaceId: string; recordId: string; field: string }): Promise<string> {
+    this.encrypted.push({ ...context });
+    return `fake-cipher:${this.encrypted.length}:${Buffer.from(plain, "utf8").toString("base64url")}`;
+  }
+
+  decrypt(ciphertext: string): string {
+    return Buffer.from(ciphertext.split(":")[2]!, "base64url").toString("utf8");
+  }
 }
 
 /** A subject record built from plain values, hashed the way the engine compares them. */

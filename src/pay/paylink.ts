@@ -24,6 +24,7 @@ import type { AmountSource, InstantPaymentMethod, PaymentLinkCapabilities, Payme
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
+import { stepAmount, type StepUpAmount } from "../core/policy.ts";
 import { hexDigestsEqual } from "../core/hash.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
 import type { CallDraft, CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
@@ -295,10 +296,20 @@ export const paylinkModule: AssuranceModule = {
 
 // ---- runtime -------------------------------------------------------------------------------
 
-/** The checks every payment entry point makes: the flow's step, the scope, and the subject Badge matched. */
-function requestContext(rt: EngineRuntime, record: CallRecord, input: PaymentInput | undefined): { step: PaylinkRequestStep | null; subject: SubjectRecord } {
+/**
+ * The checks every payment entry point makes: the flow's step, the scope, and the subject Badge
+ * matched. The scope is held at the minimum the step-up rules raise it to for `amount` (VER-13;
+ * null when no amount is known yet, so amount rules wait for it); `requestPayment` holds it itself
+ * (`requireScope`), so the flow fails and the ledger keeps the rule, and passes `false`.
+ */
+function requestContext(
+  rt: EngineRuntime,
+  record: CallRecord,
+  input: PaymentInput | undefined,
+  amount: StepUpAmount | null | false,
+): { step: PaylinkRequestStep | null; subject: SubjectRecord } {
   const step = stepOfType<PaylinkRequestStep>(record, "paylink.request");
-  if (!rt.authorized(record, "payment.request")) throw new EngineError("scope_denied", "the grant does not cover payment.request");
+  if (amount !== false && !rt.authorized(record, "payment.request", amount)) throw new EngineError("scope_denied", "the grant does not cover payment.request");
   if (step !== null && input !== undefined) throw new EngineError("invalid_input", "the flow step sets the amount; pass no input");
   return { step, subject: matchedSubject(record) };
 }
@@ -312,8 +323,14 @@ function specKey(spec: PaymentInput): string {
 }
 
 /** The amount request in force on an open call, checked: the flow step's, or outside a flow the host's. */
-function readBackSpec(rt: EngineRuntime, record: CallRecord, input: PaymentInput | undefined, maxMinor: number | undefined): { spec: PaymentInput; subject: SubjectRecord } {
-  const { step, subject } = requestContext(rt, record, input);
+function readBackSpec(
+  rt: EngineRuntime,
+  record: CallRecord,
+  input: PaymentInput | undefined,
+  maxMinor: number | undefined,
+  amount: StepUpAmount | null,
+): { spec: PaymentInput; subject: SubjectRecord } {
+  const { step, subject } = requestContext(rt, record, input, amount);
   if (record.state.phase !== "open") throw new EngineError("invalid_transition", `an amount is read back on an open call, not while ${record.state.phase}`);
   // validateConfig let a step through with a fixed amount or an amountRef, never neither.
   const spec = (step as PaymentInput | null) ?? input;
@@ -335,7 +352,9 @@ export async function readBackPayment(rt: EngineRuntime, callId: string, given?:
   // host changing its object (an amountRef) while the amount is looked up changes nothing.
   const input = given === undefined ? undefined : ({ ...given } as PaymentInput);
   const before = await rt.read(callId);
-  const { spec, subject } = readBackSpec(rt, before, input, settings.maxAmountMinor);
+  // An amount not looked up yet waits for its answer before the step-up rules on amounts judge it.
+  const known = input === undefined ? stepAmount(stepOfType<PaylinkRequestStep>(before, "paylink.request")) : stepAmount(input as unknown as Record<string, unknown>);
+  const { spec, subject } = readBackSpec(rt, before, input, settings.maxAmountMinor, known ?? null);
   const named = spec as Partial<FixedPaymentInput & ReferencedPaymentInput>;
   let amount = { amountMinor: named.amountMinor!, currency: named.currency! };
   if (named.amountRef !== undefined) {
@@ -359,8 +378,9 @@ export async function readBackPayment(rt: EngineRuntime, callId: string, given?:
   // read-back (a second deposit of the same amount) never confirms this one.
   const readBack = buildAmountReadBack(before.locale, { ...amount, description: spec.description.trim() }, rt.ids.next("amt"));
   return rt.update(callId, (draft) => {
-    // Checked again: the call can have moved on while the amount was looked up.
-    const now = readBackSpec(rt, draft.record, input, settings.maxAmountMinor);
+    // Checked again: the call can have moved on while the amount was looked up, and now on the
+    // amount the caller will hear (a step-up rule on amounts judges it here, VER-13).
+    const now = readBackSpec(rt, draft.record, input, settings.maxAmountMinor, amount);
     if (now.subject.subjectKey !== subject.subjectKey) {
       throw new EngineError("precondition_failed", "the matched subject changed while the amount was looked up; read it back again");
     }
@@ -396,7 +416,7 @@ export async function confirmPaymentAmount(rt: EngineRuntime, callId: string, in
   if (typeof digest !== "string") throw new EngineError("invalid_input", "digest must be the read-back's digest");
   if (!CONFIRMED_BY.includes(confirmedBy)) throw new EngineError("invalid_input", "confirmedBy must be voice or keypad");
   await rt.update(callId, (draft) => {
-    requestContext(rt, draft.record, undefined);
+    requestContext(rt, draft.record, undefined, null);
     // A call saved before PAY-2 has no quote field: the same as no read-back.
     const quote = draft.slice<PaylinkSlice>(PAYLINK).quote ?? null;
     if (quote === null) throw new EngineError("precondition_failed", "no amount was read back on this call");
@@ -438,11 +458,18 @@ export async function requestPayment(
 ): Promise<{ paymentId: string; status: PaymentStatus; expiresAt: string | null }> {
   const settings = rt.settings<PaylinkSettings | undefined>(PAYLINK) ?? {};
   const reserved = await rt.update(callId, (draft) => {
-    const { step, subject } = requestContext(rt, draft.record, input);
-    const where = { phone: subject.phoneOnFile, locale: draft.record.locale };
     const slice = draft.slice<PaylinkSlice>(PAYLINK);
     const last = slice.payments.at(-1);
-    if (draft.record.state.phase === "paying" && last !== undefined && last.status === "open" && last.textedAt === null) {
+    const resuming = draft.record.state.phase === "paying" && last !== undefined && last.status === "open" && last.textedAt === null;
+    // The scope is held to its minimum for this amount first, as every scope check (VER-13): the
+    // request being resumed, else the amount the caller confirmed, else the one named (an amountRef
+    // not read back yet has none, and is refused below for want of a read-back).
+    const named = (stepOfType<PaylinkRequestStep>(draft.record, "paylink.request") ?? input ?? null) as Readonly<Record<string, unknown>> | null;
+    const refused = rt.requireScope(draft, "payment.request", resuming ? last : (slice.quote ?? stepAmount(named) ?? null));
+    if (refused !== null) return { refused };
+    const { step, subject } = requestContext(rt, draft.record, input, false);
+    const where = { phone: subject.phoneOnFile, locale: draft.record.locale };
+    if (resuming) {
       const named = input as Partial<FixedPaymentInput & ReferencedPaymentInput> | undefined;
       // A resume names nothing, the same amount, or the same amountRef request it was made for.
       const same =
@@ -490,6 +517,7 @@ export async function requestPayment(
     draft.slice<PaylinkSlice>(PAYLINK).payments.push(request);
     return { request, ...where };
   });
+  if ("refused" in reserved) throw reserved.refused;
   const { request } = reserved;
   // A link not known to exist yet must be created with at least the provider's shortest life left,
   // or the provider refuses it, every retry included. Too late for that: the request is expired
@@ -582,10 +610,19 @@ export async function requestPayment(
     // the write is saved.
     const held = claimedAt;
     let renewed = held;
-    const still = await rt.update(callId, (draft): "ok" | "closed" | "taken" => {
+    let hold: EngineError | null = null;
+    const still = await rt.update(callId, (draft): "ok" | "closed" | "taken" | "held" => {
       const pending = find(draft, request.paymentId);
       if (pending.status !== "open" || draft.record.state.phase === "ended" || pending.closingSince !== undefined) return "closed";
       if (pending.textedAt !== null || pending.sendingSince !== held) return "taken";
+      // Checked again before the text: a signal raised, or a time window opened, while the link was
+      // being created holds the request (VER-13). The link id is kept, so a resume finds the same link.
+      try {
+        hold = rt.requireScope(draft, "payment.request", request);
+      } catch (e) {
+        hold = e as EngineError;
+      }
+      if (hold !== null) return "held";
       renewed = rt.now();
       pending.sendingSince = renewed;
       return "ok";
@@ -596,6 +633,7 @@ export async function requestPayment(
       throw new EngineError("precondition_failed", "the payment request was closed while its link was being sent; the link was expired and never texted");
     }
     if (still === "taken") throw new EngineError("precondition_failed", "another process took over texting this payment link");
+    if (still === "held") throw hold!;
     // And the life left, once more: the renewal can take time too.
     if (leftMs() < MIN_LINK_LIFE_MINUTES * 60_000) await closeLate();
     await rt.adapter("messages").sendText({
@@ -788,6 +826,7 @@ export async function expirePaymentLinks(rt: EngineRuntime, callId: string): Pro
 export const PAYMENT_TEXT: Record<Locale, (amount: string, url: string) => string> = {
   en: (amount, url) => `Your secure payment link for ${amount}: ${url}`,
   fr: (amount, url) => `Votre lien de paiement sécurisé pour ${amount} : ${url}`,
+  es: (amount, url) => `Su enlace de pago seguro por ${amount}: ${url}`,
 };
 
 /**

@@ -26,6 +26,9 @@ added and removed per workspace config.
 | **Paylink** (pay) | Payment by a secure link texted to the number on file (a hosted page such as Stripe Checkout), on the business's own account (`connect`) or the platform's (`platform`), chosen per flow. Only methods that settle during the call; the link lives 15 minutes after it is texted by default, and the host calls `expirePaymentLinks` at that deadline (a timer or a sweep) so the engine expires it. The engine never handles card numbers. | Built on fakes, both modes. The Stripe adapter is planned. |
 | **Trace** (prove) | The hash-chained audit ledger, which is always on and cannot be turned off, plus optional signed receipts (ES256 over canonical JSON) and consent records with fingerprinted wording. | Built, in memory. Export, key rotation and revocation are planned. |
 | **Gate** (entry) | The outcome after verification: a signed, time-limited access grant for a door, never sent twice, whose outcome the engine itself records from the door controller's answer. | Built, with the signed-webhook relay adapter and a fake. One-time codes, web sign-in step-up, Seam and direct vendor adapters are planned. |
+| **Paylink** (pay) | Payment by a secure link texted to the number on file (a hosted page such as Stripe Checkout). The engine never handles card numbers. | Built on fakes. The Stripe adapter and the `connect` and `platform` modes are planned. |
+| **Trace** (prove) | The hash-chained audit ledger, which is always on and cannot be turned off, plus optional signed receipts (ES256 over canonical JSON) and consent records with fingerprinted wording. | Built, in memory, with consent revocation through a host `ConsentStore`. Export and key rotation are planned. |
+| **Gate** (entry) | The outcome after verification: a signed, time-limited access grant for a door controller, a one-time access code or a web sign-in step-up. | Planned (GAT-1), next. |
 
 Outside modules plug in with `engine.use(module)`. A module declares what it provides (factors,
 flow steps, outcomes), the scopes it grants or needs, the adapters it requires and a validator for
@@ -170,7 +173,7 @@ state machine, the config, the events and the formats.
 | `POST /webhooks/stripe/payments` | Stripe Checkout outcomes on the platform's account, signature checked first, each event applied once |
 | `POST /webhooks/stripe/connect` | Stripe Checkout outcomes from connected accounts (connect mode), with their own signing secret |
 | `POST /webhooks/twilio`, `/telnyx` | `501` until carrier signature checks are built |
-| `GET /receipts/:callId` | a call's signed receipt (demo only: real receipt links need capability tokens) |
+| `GET /r/:token` | a receipt page in English and French, with its signature check, by a capability token the host issued (`/r/:token.json`: the signed receipt) |
 | `GET /.well-known/receipt-keys.json` | the public key set for receipts |
 | `GET /healthz` | liveness |
 

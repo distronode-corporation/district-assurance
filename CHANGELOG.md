@@ -22,6 +22,17 @@ All notable changes to this project are documented here. The format follows
   `lockout` setting as defaults and floors; a `verification.locked` event. Badge needs `counters`
   when a factor the caller enters is on. A pass takes its own failure off the calling number with
   `AttemptCounters.removeFailure`, one atomic step. `recordSubjectFailure` is gone.
+- The accessible verification path (VER-11): keypad fields said instead of keyed through
+  `spoken_knowledge` (never the PIN; read as 1 to 32 digits with `normaliseSpokenKeypadEntry`;
+  each spoken try also uses a keypad attempt), `repeat` and `slower` request keys and a lengthened
+  idle timeout on INT-1's `KeypadCollector` (`requestKeys`, `maxIdleTimeoutMs`,
+  `lengthenIdleTimeout`; `Engine.keypadTiming`), and relay or TTY calls
+  (`startCall({access})`) with longer timeouts and no other change.
+- Risk-based step-up rules (VER-13): the policy's `stepUp` raises a scope's minimum on the amount, the
+  time of day in its `timeZone`, or a signal the host raises with `raiseSignal`; `authorize(callId,
+  scope, amount?)` and every step's own check (`requireScope`) use the raised minimum, a flow step it
+  lifts fails naming the rule, and `policy.step_up` records the rule by name. The JSON Schema gains
+  `timeZone`, `stepUp` and `stepUpRule`.
 - Amounts from code, read back first (PAY-2): an `AmountSource` adapter (`amounts`, reference
   `PriceListAmounts`) resolves a `paylink.request` step's `amountRef`; `readBackPayment` builds the
   amount read-back in the call's locale (`AMOUNT_READBACK_TEXT`) and `confirmPaymentAmount` records
@@ -137,6 +148,67 @@ All notable changes to this project are documented here. The format follows
   result (`A`, `B`, `C`, `failed`, default `none`) in `call.started` and the receipt (an optional
   field, format version 1), and the policy's optional `attestationCaps` can only lower a level. A
   callback call, which the engine dialled, is never capped.
+- `KeypadCollector` (INT-1): a pure buffer for keypad tones until `#`, with a maximum length and an
+  idle timeout, that shows no digit through `toString`, JSON or `util.inspect` and hands each entry
+  to one callback. An overflowed or rejected entry is ignored to its end, and unknown options are
+  refused.
+- `auditLedgerContract` and `recordStoreContract` in `district-assurance/testing` (PRV-5), which
+  the memory adapters pass; `MemoryRecordStore` now keys by JSON tuples, so two workspace and id
+  pairs can no longer share a key. The session, ledger and record contracts keep keys that differ
+  only in a lone UTF-16 surrogate apart, which a store encoding keys as UTF-8 would collapse.
+  `AuditLedger.list(fromSeq?, limit?)` reads one page of at most `limit` entries, and the ledger
+  contract checks it: a ledger that ignores `limit`, or takes one that is not an integer of 1 or
+  more, now fails `auditLedgerContract`.
+- Read-backs in English and French (FIL-1): `buildReadBack` and `engine.intakeReadBack` speak each
+  field by type (dates in full, yes and no, numbers) with a fixed confirm prompt and never read a
+  sensitive value; `confirmIntake` refuses a draft changed since the caller heard it.
+- Conditional fields and validation rules (FIL-4): `showIf` (asked, read back and filed only while
+  another field holds a value), `min` and `max` for numbers and dates, and a bounded `pattern` for
+  text; `validateConfig` refuses unknown field settings, `showIf` cycles, and fields that name a card or a SIN.
+- Spanish (FIL-6): an `es` locale for read-backs (US numbers and dates), identity and payment texts (amounts as `es-US`), optional Spanish form labels and consent wordings (a wording without one keeps its digest), Spanish digit words in card redaction, no Spanish spoken answers (a yes/no field takes no `sí`, and a Spanish call confirms its read-back on the keypad, until a reviewed Spanish vocabulary exists), a call in `es` refused when its flow needs a form or wording without Spanish, `startCall` refusing an unknown locale, and a parity test over every code-built string.
+- Receipt links by capability token (SRV-3): `newReceiptLinkToken` and `receiptLinkTokenHash`; the
+  reference server keeps only token hashes and serves `GET /r/:token`, a receipt page in English
+  and French with its signature check, and `/r/:token.json`. `GET /receipts/:callId` is removed.
+- Receipt link texted to the caller (PRV-10): `textReceiptLink(callId, url)` after a money, contact
+  or access step, when the flow's `trace.receipt` step has `textLink` and the caller consented, at
+  most once, to the number on file; each contact change always texts a security notice to the
+  changed subject's number on file before the change, never twice to the same subject and number.
+  The notice is owed in the same write as the change (a flow step, or an outside module's
+  `ModuleCallView.contactChanged()` in or outside a flow), sent right after it, and retried by the
+  call's next write, `endCall` and `Engine.sweepAlerts()`, so a call that never ends still alerts.
+  New message purposes `receipt_link` and `contact_changed`, Trace's `businessName` setting, events
+  `receipt.link_texted`, `contact.notice_owed` and `contact.notice_sent`.
+- Encrypted sensitive intake fields (FIL-2): a `fieldCipher` adapter (`FieldCipher`, now in the
+  core, and `FakeFieldCipher`) that Dossier needs once a form has a sensitive field; values are
+  encrypted before `putIntakeRecord`, and the record digest keys them (ADR-27). A cipher that
+  throws, or answers empty, not a string or the value itself, releases the filing as failed
+  (`record.filing_failed`, field names and a reason code only) and drops the draft, so it never
+  holds a call open; `endCall` drops an open draft, so its values never outlive the call in the clear.
+- Consent revocation (PRV-3): `Engine.revokeConsent` by voice, text or dashboard through a new
+  `ConsentStore` adapter (`consents`; `MemoryConsentStore` in the fakes), a `consent.revoked`
+  ledger event written once per consent and never before its `consent.recorded`, and
+  `isStopRequest` for STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT, ARRÊT, ARRÊTE and ARRÊTER. A
+  consent still being stored when its call ends settles as not recorded (no consent):
+  `consent.unrecorded` in the ledger, `answer: "not_recorded"` on the receipt.
+- Record delivery (FIL-3): `deliverRecord` posts a confirmed record through a `RecordDelivery`
+  adapter, signed in the `t=,v1=` HMAC scheme used for Stripe, retried with capped exponential
+  backoff under one idempotency key per record and destination, with a `delivery.attempted` ledger
+  entry per attempt and no payload in it; `FakeRecordDelivery` in `district-assurance/testing`;
+  a sample receiver on the reference server at `POST /webhooks/records`.
+- Documents by text (FIL-5): `createUploadLink` makes a single-use, 30-minute link bound to a call
+  and a confirmed record, with allowed types and a size cap, storing only its token's hash;
+  `acceptUpload` checks type, size and leading bytes, spends the link and asks the host's
+  `DocumentScanner`; a `DocumentStore` adapter with `MemoryDocumentStore`; the reference server
+  serves an upload page in English and French at `/u/:token`.
+- Access and deletion requests for one subject (PRV-7): intake records carry the matched
+  `subjectKey`, `RecordStore` gains `listIntakeRecords`, `deleteIntakeRecords`,
+  `deletePinDigest`, `markSubjectErased` and `subjectErasures` (with `recordStoreErasureContract` in
+  `district-assurance/testing`), and `putIntakeRecord` an optional `erasuresSeen`, `Engine.exportSubject` returns a signed export (its own domain, never a
+  receipt; `verifySubjectExport`), and `Engine.eraseSubject` deletes the records and the PIN digest
+  and appends `subject.erased`, leaving the ledger and receipts whole (ADR-21). A consent carries
+  the matched `subjectKey` and an export lists only that subject's consents; a deleted record id
+  is never stored again; each erasure gets its own entry, closed by `subject.erasure_completed`,
+  and a retry after a partial delete finishes the same one.
 
 ### Changed
 
@@ -166,6 +238,49 @@ All notable changes to this project are documented here. The format follows
   `validateConfig` refuses a config holding one.
 - A taint now voids the keypad or PIN match made before it: `startPhotoId`, `checkCarrier` and a
   payment link refuse until a fresh verification matches (found by the adversarial suite).
+- `confirmIntake` requires `readBack`, the digest of the read-back the caller heard (FIL-1), and
+  the `buildReadBack` stub in `file/later.ts` is replaced by `file/readback.ts`. A host that
+  confirmed without a read-back must call `intakeReadBack` first.
+- A text field value holding a lone surrogate is refused with the new normalise reason `not_text`
+  (`NormaliseResult`), since no record, digest or read-back can hold it faithfully: a host that
+  switches over the reasons must add it.
+- The `revokeConsent` stub in `prove/consent.ts` is replaced by `Engine.revokeConsent`, and
+  `ConsentRecord` moves to the adapter types (still exported from the root).
+- The `deliverRecord` stub in `file/later.ts` is replaced by `deliverRecord` in `file/delivery.ts`,
+  which takes the destination, the stores, the clock and the retry settings (SPEC.md, Record
+  delivery).
+- A live card-number detector (`LiveCardNumberDetector`, PAY-5) that tells the host to interrupt
+  once a run of 8 or more digits is read, numerals or spoken; redaction now reads spoken numbers
+  ("forty two", "quarante-deux", "double four") through `digitRuns`, tested over a shared JSON
+  corpus, `test/corpus/card-numbers.json`.
+- Spanish number words in redaction and the live detector: digit words, 10 to 29, the tens with
+  "y", the hundreds and "mil" ("cuarenta y uno", "cuatro mil ciento once"), for #122's Spanish
+  calls (PAY-5).
+- `SEPARATOR_CLASS`, the characters that may lie between the groups of one number (spaces, any
+  dash, the minus sign, dots, commas, slashes, underscores, middle dots, format characters and
+  combining marks), and `NUMBER_LANGUAGES`, `NUMBER_CONNECTORS`, `numberLanguagesFor` and `NumberLanguage`, exported
+  from `district-assurance`. `LEXEME` matches every script's decimal digits, read by their values.
+- `RedactionContext`: `Redactor.redact(text, context?)` takes the call's `locale`, and
+  `LiveCardNumberDetector` a `locale` option.
+
+- English and French number words are read on every call; Spanish words only on a Spanish call, so
+  on an English call "once", "dos" and "y" are words, not numbers (`Engine.redact` passes the
+  call's locale, `numberLanguagesFor`). Text redacted with no call reads every language, the safe
+  side.
+- More redactors (PRV-6): `sinRedactor`, `healthCardRedactor` (Ontario, British Columbia, Quebec)
+  and `bankAccountRedactor`, each its own `Redactor` over digits and English or French digit
+  words, tested over a shared JSON corpus in `test/corpus/`; compose health card numbers before
+  SINs. Bank words are English, French and Spanish, read in the languages the call reads number words in: English and French on every call, Spanish on a Spanish call and on text with no call.
+
+- `Engine.redact` also returns `line`, the fixed interrupt line for the kind found, in English or
+  French (`INTERRUPT_LINES`), so a SIN or banking details never get the card number wording (PRV-6).
+- `composeRedactors` reports finding offsets into the original input, no longer into the text each
+  redactor saw (PRV-6).
+- `applyFindings` takes findings in any order: it sorts them by position and merges overlapping
+  ones before it applies them (PRV-6).
+- `abandonIntake` releases a reserved filing: it deletes the record by id first
+  (`RecordStore.deleteIntakeRecords`), so a later write of that id stores nothing, then drops the
+  draft. A reserved filing resumes only while `intake.file` is still granted (VER-13 with FIL-1).
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

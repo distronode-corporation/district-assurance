@@ -37,8 +37,11 @@ export interface AmountReadBack {
   description: string;
 }
 
-/** Where each supported locale's amounts are formatted: English and French as in Canada. */
-export const AMOUNT_REGION: Record<Locale, string> = { en: "en-CA", fr: "fr-CA" };
+/**
+ * Where each locale's amounts are formatted: English and French as in Canada, Spanish as in the
+ * United States (`$1,500.50`, a period before the cents).
+ */
+export const AMOUNT_REGION: Record<Locale, string> = { en: "en-CA", fr: "fr-CA", es: "es-US" };
 
 /** Formats an amount in minor units with the currency's own number of decimals. */
 export function formatAmount(locale: Locale, amountMinor: number, currency: string): string {
@@ -51,6 +54,7 @@ export function formatAmount(locale: Locale, amountMinor: number, currency: stri
 export const AMOUNT_READBACK_TEXT: Record<Locale, (amount: string, description: string) => string> = {
   en: (amount, description) => `The amount to pay is ${amount}, for ${description}. Is that correct?`,
   fr: (amount, description) => `Le montant à payer est de ${amount}, pour ${description}. Est-ce exact ?`,
+  es: (amount, description) => `El importe a pagar es de ${amount}, por ${description}. ¿Es correcto?`,
 };
 
 /**

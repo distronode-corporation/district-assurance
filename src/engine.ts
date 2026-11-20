@@ -10,7 +10,7 @@
 // throws NotImplementedError. SPEC.md describes the flow.
 import { createPublicKey, type JsonWebKey } from "node:crypto";
 
-import type { AccessController, AttemptCounterKey, AuditEntry, IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
+import type { AccessController, AttemptCounterKey, AuditEntry, AuditInput, ConsentChannel, ConsentRecord, ConsentRevocation, IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
 import { canonicalJson, hasLoneSurrogate, type JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
@@ -18,23 +18,24 @@ import { EngineError, RateLimitedError } from "./core/errors.ts";
 import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
 import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
-import { ATTESTATIONS, capCallLevel, scopeClass, scopesForLevel, type AssuranceLevel, type Attestation, type ScopeClass, type VerificationPolicy } from "./core/policy.ts";
-import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
-import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
+import { ATTESTATIONS, capCallLevel, raiseMinimum, scopeClass, scopesForLevel, stepAmount, type AssuranceLevel, type Attestation, type ScopeClass, type StepUpAmount, type VerificationPolicy } from "./core/policy.ts";
+import { cardNumberRedactor, interruptLine, type RedactionFinding, type Redactor } from "./core/redaction.ts";
+import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallAccess, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
 import * as dossier from "./file/dossier.ts";
 import * as gate from "./gate/gate.ts";
 import * as stepUp from "./gate/step-up.ts";
 import type { NormaliseResult } from "./file/intake.ts";
+import type { ReadBack } from "./file/readback.ts";
 import { BUILT_IN_MODULES, builtInModules, defaultConfig } from "./modules.ts";
 import type { AmountReadBack } from "./pay/amount.ts";
 import * as paylink from "./pay/paylink.ts";
 import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
 import * as refunds from "./pay/refunds.ts";
-import type { ConsentRecord } from "./prove/consent.ts";
 import { detailCarriesCardNumber } from "./prove/ledger.ts";
 import { receiptKeySet, type ReceiptBody, type SignedReceipt } from "./prove/receipt.ts";
+import * as subject from "./prove/subject.ts";
 import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
 import * as callback from "./verify/callback.ts";
@@ -48,7 +49,7 @@ import * as textCode from "./verify/text-code.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
 export { SUPPORTED_LOCALES, isSupportedLocale } from "./core/runtime.ts";
-export type { EngineAdapters, Locale } from "./core/runtime.ts";
+export type { CallAccess, EngineAdapters, Locale } from "./core/runtime.ts";
 export type { KeypadResult, OutcomeResult, VerificationResult } from "./verify/badge.ts";
 export type { DuressEnrolmentResult, PinEnrolmentResult } from "./verify/pin.ts";
 
@@ -158,6 +159,13 @@ export interface ModuleCallView {
   authorized(scope: string): boolean;
   /** A ledger entry `module.event` with `{ module, event, detail }`. Never put a value the caller keyed in it. */
   emit(event: string, detail: { [key: string]: JsonValue }): void;
+  /**
+   * Call this in the same change that changes the matched subject's contact details, in a flow or
+   * outside one: the call then owes the security notice (PRV-10) to the number on file before the
+   * change, saved by this same write and sent right after it. Refused (`precondition_failed`, the
+   * whole change with it) when no keypad or PIN match stands, since there is no number to alert.
+   */
+  contactChanged(): void;
 }
 
 interface QueuedEvent {
@@ -170,6 +178,13 @@ interface QueuedEvent {
   /** A PIN outcome to tag the entry with (VER-12). Never saved. */
   tag?: string | undefined;
 }
+
+/**
+ * An amount a host gave as null: not known, so over every amount rule (`amountOver` counts a
+ * number that is not one and a currency no rule lists as over). Distinct from an amount left out,
+ * which in a flow is the current step's.
+ */
+const UNKNOWN_AMOUNT: StepUpAmount = Object.freeze({ amountMinor: Number.NaN, currency: "" });
 
 /** A member of the business lifting one lock early: the counter a lock notice named, and who did it. */
 export interface UnlockInput {
@@ -213,6 +228,8 @@ export class Engine {
   readonly #sendScheduled = new Map<string, string>();
   #receiptModules: readonly AssuranceModule[];
   #config: FlowConfig;
+  /** The draft of each record being changed, so a scope check inside a change can write its step-up rules to the ledger (VER-13). */
+  readonly #drafts = new WeakMap<CallRecord, CallDraft>();
 
   constructor(options: EngineOptions) {
     const errors: string[] = [];
@@ -370,7 +387,7 @@ export class Engine {
    * attestation the host's carrier reported (default `none`), set once here: it can only cap the
    * call's level under the policy's `attestationCaps`, never raise it.
    */
-  async startCall(input: { callId?: string; locale?: Locale; flow?: string; callingNumber?: string; attestation?: Attestation } = {}): Promise<SessionState> {
+  async startCall(input: { callId?: string; locale?: Locale; flow?: string; callingNumber?: string; attestation?: Attestation; access?: CallAccess } = {}): Promise<SessionState> {
     // Each read once: a getter read again (the flow, after an await) could change a value after it was checked or counted.
     const {
       callId: givenId,
@@ -378,13 +395,17 @@ export class Engine {
       flow,
       callingNumber,
       attestation: givenAttestation,
-    }: { callId?: unknown; locale?: unknown; flow?: unknown; callingNumber?: unknown; attestation?: unknown } = input;
+      access,
+    }: { callId?: unknown; locale?: unknown; flow?: unknown; callingNumber?: unknown; attestation?: unknown; access?: unknown } = input;
+    // A relay or TTY mark (VER-11) lengthens keypad timeouts only, and stays out of the ledger.
+    if (access !== undefined && access !== "relay" && access !== "tty") throw new EngineError("invalid_input", "access must be relay or tty");
     // Everything the host gives here enters the ledger as it is, not through emit's checks: checked
     // now, before anything is saved, so no call's ledger can be blocked by a value it cannot hash.
     if (givenId !== undefined && (typeof givenId !== "string" || givenId === "" || givenId.length > 200 || hasLoneSurrogate(givenId))) {
       throw new EngineError("invalid_input", "callId must be 1 to 200 characters the ledger can carry (no lone surrogate)");
     }
-    if (locale !== undefined && !isSupportedLocale(locale)) throw new EngineError("invalid_input", `locale must be one of ${SUPPORTED_LOCALES.join(", ")}`);
+    // null is taken as absent, as undefined is (#122): the default locale, never an unchecked one.
+    if (locale !== undefined && locale !== null && !isSupportedLocale(locale)) throw new EngineError("invalid_input", `locale must be one of ${SUPPORTED_LOCALES.join(", ")}`);
     if (flow !== undefined && typeof flow !== "string") throw new EngineError("invalid_input", "flow must name a flow");
     const attestation = givenAttestation === undefined ? "none" : givenAttestation;
     if (!(ATTESTATIONS as readonly unknown[]).includes(attestation)) throw new EngineError("invalid_input", "attestation must be A, B, C, failed or none");
@@ -392,7 +413,7 @@ export class Engine {
     const numberKey = await this.#numberKey(callingNumber as string | undefined);
     const flowName = flow as string | undefined;
     const attached = flowName === undefined ? null : { name: flowName, steps: this.#flowDefinition(flowName).steps, revision: this.#config.revision };
-    const start = await this.#create(callId, (locale as Locale | undefined) ?? "en", this.#config.revision, attached, () => undefined, { numberKey, countStart: true, attestation: attestation as Attestation });
+    const start = await this.#create(callId, (locale as Locale | undefined) ?? "en", this.#config.revision, attached, () => undefined, { numberKey, countStart: true, attestation: attestation as Attestation, ...(access === undefined ? {} : { access: access as CallAccess }) });
     if (start === null) throw new EngineError("invalid_input", "a call with that id exists");
     // With the call's id: the call is open, its flow failed, and the host ends it.
     if (start.over !== null) throw new RateLimitedError(callId);
@@ -412,7 +433,7 @@ export class Engine {
     revision: string,
     flow: { name: string; steps: FlowStep[]; revision: string } | null,
     then: (draft: CallDraft) => void,
-    options: { numberKey?: string | null; countStart?: boolean; attestation?: Attestation; attestationExempt?: true } = {},
+    options: { numberKey?: string | null; countStart?: boolean; attestation?: Attestation; attestationExempt?: true; access?: CallAccess } = {},
   ): Promise<FlowStart | null> {
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
@@ -426,6 +447,7 @@ export class Engine {
       revision,
       attestation: options.attestation ?? "none",
       ...(options.attestationExempt === true ? { attestationExempt: true as const } : {}),
+      ...(options.access === undefined ? {} : { access: options.access }),
       flow: null,
       modules,
       outbox: [],
@@ -530,24 +552,61 @@ export class Engine {
   }
 
   /**
-   * Redacts text before the host stores or forwards it. `interrupt` tells the host to speak its
-   * fixed "please don't read card numbers" line.
+   * Redacts text before the host stores or forwards it. `interrupt` tells the host to speak `line`,
+   * the fixed line for what was found (a card number, a health card number, a SIN or banking
+   * details), in the call's language; `line` is null when nothing was found.
    */
-  async redact(callId: string, text: string): Promise<{ text: string; findings: RedactionFinding[]; interrupt: boolean }> {
-    const result = this.#redactor.redact(text);
-    if (result.findings.length === 0) {
-      await this.#read(callId);
-    } else {
+  async redact(callId: string, text: string): Promise<{ text: string; findings: RedactionFinding[]; interrupt: boolean; line: string | null }> {
+    // The call's language decides whose number words are read: English and French always, Spanish
+    // only on a Spanish call ("once" is a number only in Spanish), and the line's language.
+    let { locale } = await this.#read(callId);
+    const result = this.#redactor.redact(text, { locale });
+    if (result.findings.length > 0) {
       const kinds: Record<string, number> = {};
       for (const f of result.findings) kinds[f.kind] = (kinds[f.kind] ?? 0) + 1;
-      await this.#update(callId, (draft) => draft.emit("redaction.applied", "code", { kinds }));
+      locale = await this.#update(callId, (draft) => {
+        draft.emit("redaction.applied", "code", { kinds });
+        return draft.record.locale;
+      });
     }
-    return { ...result, interrupt: result.findings.length > 0 };
+    return { ...result, interrupt: result.findings.length > 0, line: interruptLine(result.findings, locale) };
   }
 
-  /** Whether the call's grant covers a scope now. A scope the policy does not list is refused. */
-  async authorize(callId: string, scope: string): Promise<boolean> {
-    return this.#authorized(await this.#read(callId), scope);
+  /**
+   * Whether the call's grant covers a scope now. A scope the policy does not list is refused. The
+   * scope's minimum is raised by the policy's step-up rules that hold (VER-13): pass the amount a
+   * money scope is for (in a flow, the current step's amount is the default; an amount not known
+   * counts as over every amount rule). A rule that applies for the first time on the call is
+   * written to the ledger by name, so this can write.
+   */
+  async authorize(callId: string, scope: string, given?: StepUpAmount): Promise<boolean> {
+    // Read once, before the wait: both checks judge the amount the host passed at the call, as a
+    // plain copy, so a getter or a change to the object meanwhile cannot answer each differently.
+    // A null from the host is no amount (over every amount rule), never the internal "not asked yet"
+    // and never the step's amount, which only an amount left out stands for.
+    const amount = typeof given === "object" && given !== null ? { amountMinor: given.amountMinor, currency: given.currency } : given === null ? UNKNOWN_AMOUNT : given;
+    const record = await this.#read(callId);
+    const check = this.#cover(record, scope, amount);
+    // A rule in `applied` was walked by #cover, which set `stepUps` on this read copy (`??=`).
+    if (check.applied.every((name) => record.stepUps!.includes(name))) return check.ok;
+    return this.#update(callId, (draft) => this.#authorized(draft.record, scope, amount));
+  }
+
+  /**
+   * Raises a named signal on the call (for example `fraud_suspected`), for the policy's step-up
+   * rules. The host's code raises it; a signal stays raised for the rest of the call. In a flow, a
+   * current step whose scope it raises above the call's verification fails, naming the rule.
+   */
+  async raiseSignal(callId: string, signal: string): Promise<void> {
+    if (!(this.#config.policy.stepUp ?? []).some((rule) => rule.signal === signal)) throw new EngineError("invalid_input", "no step-up rule uses that signal");
+    await this.#update(callId, (draft) => {
+      if (draft.record.state.phase === "ended") throw new EngineError("invalid_transition", "the call has ended");
+      const signals = (draft.record.signals ??= []);
+      if (signals.includes(signal)) return;
+      signals.push(signal);
+      draft.emit("signal.raised", "code", { signal });
+      this.#holdStep(draft);
+    });
   }
 
   // ---- flows -------------------------------------------------------------------------------
@@ -687,7 +746,7 @@ export class Engine {
         const slice = record.modules[owner];
         if (slice === undefined) throw new EngineError("module_disabled", `${owner} was off when this call started`);
         if (!this.isEnabled(owner)) throw new EngineError("module_disabled", `the ${owner} module is turned off`);
-        const reason = module.cannotRunStep?.(step, slice) ?? null;
+        const reason = module.cannotRunStep?.(step, slice, record.locale) ?? null;
         if (reason !== null) throw new EngineError("precondition_failed", `${step.type} cannot run on this call: ${reason}`);
       }
       if (start.over !== null) {
@@ -701,6 +760,7 @@ export class Engine {
       const mark = firstOwner.enterStep(first, record.modules[firstOwner.manifest.name]!);
       record.flow = { name, revision, steps, index: 0, mark, status: "running", counted: start.counted };
       draft.emit("flow.started", "code", { flow: name, revision, steps: steps.length });
+      this.#holdStep(draft);
     }
   }
 
@@ -828,6 +888,14 @@ export class Engine {
   /** Judges an entry for any factor the caller enters, a host's plug-in included. */
   submitFactor(callId: string, kind: string, entry: FactorEntry): Promise<badge.KeypadResult> {
     return badge.submitFactor(this.#rt, this.#badge, callId, kind, entry);
+  }
+
+  /**
+   * The call's keypad timeouts, for a `KeypadCollector` (VER-11): longer on a call marked relay or
+   * TTY, and the limit to which the host may lengthen them when the caller asks to slow down.
+   */
+  keypadTiming(callId: string): Promise<badge.KeypadTiming> {
+    return badge.keypadTiming(this.#rt, callId);
   }
 
   checkCarrier(callId: string): Promise<{ textCodeTrusted: boolean }> {
@@ -1005,8 +1073,14 @@ export class Engine {
     return dossier.setIntakeField(this.#rt, callId, key, raw);
   }
 
-  confirmIntake(callId: string, input: { confirmedBy: "voice" | "keypad" }): Promise<IntakeRecord> {
-    return dossier.confirmIntake(this.#rt, callId, input);
+  /** The read-back of the open draft in the call's locale: speak `text`, then pass `digest` to `confirmIntake`. */
+  intakeReadBack(callId: string): Promise<ReadBack> {
+    return dossier.intakeReadBack(this.#rt, callId);
+  }
+
+  /** Files the draft the caller confirmed. `readBack` is the digest of the read-back they heard; a draft changed since is refused. */
+  confirmIntake(callId: string, input: { confirmedBy: "voice" | "keypad"; readBack: string }): Promise<IntakeRecord> {
+    return dossier.confirmIntake(this.#rt, callId, input, matchedSubjectKey);
   }
 
   abandonIntake(callId: string): Promise<void> {
@@ -1130,20 +1204,32 @@ export class Engine {
 
   // ---- Trace (prove) -----------------------------------------------------------------------
 
-  recordConsent(callId: string, input: { purpose: string; answer: "yes" | "no"; channel?: ConsentRecord["channel"] }): Promise<ConsentRecord> {
-    return trace.recordConsent(this.#rt, callId, input);
+  recordConsent(callId: string, input: { purpose: string; answer: "yes" | "no"; channel?: ConsentChannel }): Promise<ConsentRecord> {
+    return trace.recordConsent(this.#rt, callId, input, matchedSubjectKey);
+  }
+
+  /**
+   * Revokes a consent by voice (`call`), text or dashboard (`web`), during its call or after it.
+   * Needs the `consents` adapter. Returns the revocation in force: a second one changes nothing.
+   */
+  revokeConsent(input: { consentId: string; via: ConsentChannel }): Promise<ConsentRevocation> {
+    return trace.revokeConsent(this.#rt, input);
   }
 
   /**
    * Ends the call. A running flow is abandoned, and every payment link still open is expired, at
    * the provider first, so the receipt shows it `expired`. Returns the signed receipt when the call
-   * gets one, else null.
+   * gets one, else null. A call that changed contact details first texts its security notice to the
+   * number on file before the change; if that text fails, `endCall` again sends it, without ending again.
    */
   async endCall(callId: string): Promise<SignedReceipt | null> {
-    // A call that ended without its receipt (the signer failed) or with a link left open (the
-    // provider failed) gets them now, without ending again.
+    // A call that ended without its receipt (the signer failed), with a link left open (the provider
+    // failed) or with its notice owed gets them now, without ending again.
     const before = await this.#read(callId);
-    const pending = before.state.phase === "ended" && ((trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null) || paylink.openPayments(before).length > 0);
+    const receiptPending = trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null;
+    // Ledger entries a failed append left behind (a notice or receipt saved, then not logged) count too.
+    const pending = before.state.phase === "ended" && (receiptPending || paylink.openPayments(before).length > 0 || trace.noticeDue(before) || before.outbox.length > 0);
+    if (pending) await this.flushLedger(callId);
     const ended = pending ? before : await this.#update(callId, (draft) => {
       // The built-in modules' guards run even after a module was removed, as their receipt parts do.
       const guards = [...this.#receiptModules, ...this.registry.list().filter((m) => !this.#receiptModules.includes(m))];
@@ -1161,6 +1247,13 @@ export class Engine {
       // Likewise a payment link being texted: the call ends once its text is recorded, so no text
       // goes out after the call ended.
       paylink.assertNoSendInFlight(this.#rt, draft.record);
+      // The engine, not a module hook, drops Dossier's open draft, so its sensitive values never
+      // outlive the call in the clear. It runs before call.ended and before the receipt's ledger
+      // head is taken, and writes no event and no outcome.
+      const files = draft.record.modules[dossier.DOSSIER];
+      if (files !== undefined) draft.record.modules[dossier.DOSSIER] = dossier.withoutOpenDraft(files);
+      // A consent whose store write is still reserved is settled as not recorded, before call.ended.
+      trace.settleUnrecorded(draft);
       draft.apply({ type: "call_ended", at: this.#now() });
       const flow = draft.record.flow;
       if (flow !== null && flow.status === "running") {
@@ -1170,6 +1263,7 @@ export class Engine {
       draft.emit("call.ended", "system", {});
       return structuredClone(draft.record);
     });
+    await this.#deliverAlerts(callId);
     // What an access controller still owes the ledger for this call is written now, before the
     // receipt's head is taken; one that fails is left to the next sweep (it opens nothing).
     for (const controller of Object.values(this.#adapters.access ?? {})) {
@@ -1184,6 +1278,8 @@ export class Engine {
     await paylink.expireOpenPayments(this.#rt, ended);
     const record = paylink.openPayments(ended).length === 0 ? ended : await this.#read(callId);
     if (!trace.wantsReceipt(this.#rt, record)) return null;
+    const issued = trace.receiptOf(record);
+    if (issued !== null) return structuredClone(issued);
     // The head must cover every entry the end wrote, an expired link's among them, even one left
     // pending by an earlier append that failed: they are appended first, or the receipt waits.
     await this.flushLedger(callId);
@@ -1197,9 +1293,37 @@ export class Engine {
     return trace.issueReceipt(this.#rt, record, head, parts);
   }
 
+  /**
+   * Texts the link to an ended call's receipt (`url`: the host's capability link, SRV-3) to the
+   * number on file, when the flow's `trace.receipt` step has `textLink`, a money, contact or access
+   * step completed, the caller consented and a keypad or PIN factor matched. At most once per call.
+   */
+  textReceiptLink(callId: string, url: string): Promise<{ texted: boolean }> {
+    return trace.textReceiptLink(this.#rt, callId, url, (record) => this.#currentSubject(record));
+  }
+
   async receipt(callId: string): Promise<SignedReceipt | null> {
     const slice = (await this.#read(callId)).modules[trace.TRACE] as unknown as trace.TraceSlice;
     return slice.receipt === null ? null : structuredClone(slice.receipt);
+  }
+
+  // ---- subject requests (the business's, never a call's) -----------------------------------
+
+  /**
+   * An access request: what the engine stored about one subject, signed as a subject export
+   * (never verifiable as a receipt). `kept` lists what the business must keep by law, with why.
+   */
+  exportSubject(input: subject.SubjectRequest & { kept?: subject.KeptItem[] }): Promise<subject.SignedSubjectExport> {
+    return subject.exportSubject(this.#rt, input);
+  }
+
+  /**
+   * A deletion request: the subject's intake records, PIN and duress PIN digests and the counters
+   * kept under their key go; the ledger and receipts stay whole.
+   */
+  eraseSubject(input: subject.SubjectRequest): Promise<subject.ErasureResult> {
+    const counters = { counters: this.#adapters.counters, factors: this.#badge.manifest.provides.factors };
+    return subject.eraseSubject(this.#rt, input, (callId, recordIds) => dossier.forgetRecords(this.#rt, callId, recordIds), counters);
   }
 
   /** The key set for verifying this engine's receipts: with a key ring, the retired keys too (empty without a signer). */
@@ -1230,16 +1354,22 @@ export class Engine {
   async updateModule(callId: string, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): Promise<JsonValue> {
     this.#outsideModule(name);
     const module = this.registry.get(name)!;
-    return this.#update(callId, (draft) => {
+    const out = await this.#update(callId, (draft): { refused: EngineError } | { next: JsonValue } => {
       assertFlowNotEnded(draft.record);
       const step = draft.step();
       if (step !== null && !module.manifest.provides.steps.includes(step.type)) {
         throw new EngineError("precondition_failed", `the flow is on step ${step.type}, not a step of ${name}`);
       }
       const needs = step === null ? Object.values(module.manifest.scopes.needs) : [module.manifest.scopes.needs[step.type]].filter((n) => n !== undefined);
-      for (const scope of needs) if (!this.#authorized(draft.record, scope)) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
-      return this.#applyModule(draft, name, fn);
+      // Held at the minimum the step-up rules raise each scope to for the step's amount (VER-13).
+      for (const scope of needs) {
+        const refused = this.#requireScope(draft, scope, stepAmount(step));
+        if (refused !== null) return { refused };
+      }
+      return { next: this.#applyModule(draft, name, fn) };
     });
+    if ("refused" in out) throw out.refused;
+    return out.next;
   }
 
   #applyModule(draft: CallDraft, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): JsonValue {
@@ -1251,6 +1381,7 @@ export class Engine {
       newId: (prefix) => this.#ids.next(prefix),
       authorized: (scope) => this.#authorized(draft.record, scope),
       emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
+      contactChanged: () => trace.noteAction(draft, "contact", () => badge.matchedSubject(draft.record)),
     };
     const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);
     draft.record.modules[name] = structuredClone(next);
@@ -1281,7 +1412,10 @@ export class Engine {
       adapter: <K extends AdapterName>(name: K) => this.#adapters[name]!,
       update: (callId, fn) => this.#update(callId, fn),
       read: (callId) => this.#read(callId),
-      authorized: (record, scope) => this.#authorized(record, scope),
+      append: (entry) => this.#append(entry),
+      flushLedger: (callId) => this.flushLedger(callId),
+      authorized: (record, scope, amount) => this.#authorized(record, scope, amount),
+      requireScope: (draft, scope, amount) => this.#requireScope(draft, scope, amount),
       bindRef: async (ref, callId) => {
         await this.#sessions.bindRef(this.workspaceId, ref, callId);
       },
@@ -1331,21 +1465,40 @@ export class Engine {
     return this.#clock.now().toISOString();
   }
 
-  #authorized(record: CallRecord, scope: string): boolean {
-    const min: AssuranceLevel | undefined = Object.hasOwn(this.#config.policy.scopes, scope) ? this.#config.policy.scopes[scope] : undefined;
-    if (min === undefined || record.state.phase === "ended") return false;
+  #authorized(record: CallRecord, scope: string, amount?: StepUpAmount | null): boolean {
+    return this.#cover(record, scope, amount).ok;
+  }
+
+  /**
+   * Whether the call's grant covers a scope now (`ok`), the step-up rules that raised its minimum
+   * (`applied`), and, when not covered, the rules the grant falls short of (`rules`; empty when
+   * the grant would not cover the scope anyway). Inside a change, a rule applied for the first time
+   * on the call is written to the ledger by name, never with the amount, the time or the signal.
+   * `amount` left out is the current step's; null skips amount rules (nothing is asked yet).
+   */
+  #cover(record: CallRecord, scope: string, amount: StepUpAmount | undefined | null = stepAmount(currentStep(record))): { ok: boolean; applied: string[]; rules: string[] } {
+    const policy = this.#config.policy;
+    const min: AssuranceLevel | undefined = Object.hasOwn(policy.scopes, scope) ? policy.scopes[scope] : undefined;
+    if (min === undefined || record.state.phase === "ended") return { ok: false, applied: [], rules: [] };
     // A duress call (VER-12) refuses money, contact and access, and the scopes Badge's settings named, as if ungranted.
-    if (badge.duressRefuses(record, scope, scopeClass(scope, this.#config.policy.scopeClasses, this.registry.scopeClasses()))) return false;
-    if (min === 0) return true;
+    if (badge.duressRefuses(record, scope, scopeClass(scope, policy.scopeClasses, this.registry.scopeClasses()))) return { ok: false, applied: [], rules: [] };
+    const now = this.#clock.now();
+    const raised = raiseMinimum(policy, scope, { amount, at: now, signals: record.signals ?? [] });
+    const draft = this.#drafts.get(record);
+    for (const rule of raised.rules) {
+      const ledgered = (record.stepUps ??= []);
+      if (draft === undefined || ledgered.includes(rule.name)) continue;
+      ledgered.push(rule.name);
+      draft.emit("policy.step_up", "code", { rule: rule.name, scope, level: rule.level });
+    }
+    const applied = raised.rules.map((rule) => rule.name);
+    if (raised.level === 0) return { ok: true, applied, rules: [] };
     const grant = record.state.grant;
-    // The grant's level is checked against today's minimum and today's attestation cap too, so a
-    // stricter config applies to grants already issued.
-    return (
-      grant !== null &&
-      grant.scopes.includes(scope) &&
-      capCallLevel(this.#config.policy, grant.level, record) >= min &&
-      this.#clock.now().getTime() < Date.parse(grant.expiresAt)
-    );
+    // The grant's level is checked against today's minimum, raised for this request, and today's
+    // attestation cap, so a stricter config or a step-up rule applies to grants already issued.
+    const reached = grant !== null && grant.scopes.includes(scope) && now.getTime() < Date.parse(grant.expiresAt) ? capCallLevel(policy, grant.level, record) : 0;
+    if (reached >= raised.level) return { ok: true, applied, rules: [] };
+    return { ok: false, applied, rules: reached < min ? [] : raised.rules.filter((rule) => rule.level > reached).map((rule) => rule.name) };
   }
 
   async #read(callId: string): Promise<CallRecord> {
@@ -1380,6 +1533,9 @@ export class Engine {
         // Saved, so owed duress alerts go out before the ledger is tried: one down or stalled never holds them.
         this.#sendDuressAlertsSoon(callId, record);
         await this.#flush(callId, version, record);
+        // An alert owed (a contact change notice) is sent once its debt is saved, on this write or
+        // the next one on the call; a failure leaves it owed for the next write, endCall or sweepAlerts.
+        if (trace.noticeDue(record)) await this.#deliverAlerts(callId).catch(() => false);
         return result;
       }
     }
@@ -1387,7 +1543,7 @@ export class Engine {
   }
 
   #draft(record: CallRecord, events: QueuedEvent[]): CallDraft {
-    return {
+    const draft: CallDraft = {
       record,
       slice: <T>(name: string): T => this.#slice(record.modules, name) as unknown as T,
       apply: (event) => {
@@ -1414,6 +1570,8 @@ export class Engine {
       },
       step: () => currentStep(record),
     };
+    this.#drafts.set(record, draft);
+    return draft;
   }
 
   /** Moves a running flow past every step that is now complete, and stops it on a failed one. */
@@ -1433,6 +1591,13 @@ export class Engine {
         return;
       }
       draft.emit("flow.step_completed", "code", detail);
+      // A money, contact or access step is what a receipt text names, and a contact one owes a notice.
+      // Such a step follows a level 2 verification, which a keypad or PIN match always unlocked. Only
+      // a contact step needs the match to stand (its notice goes to the matched subject's number):
+      // matchedSubject fails closed if it does not. A payment texted before a taint still completes
+      // when the provider reports it, without the match, which stays void.
+      const action = this.#actionClass(owner!, step.type);
+      if (action !== null) trace.noteAction(draft, action, () => badge.matchedSubject(record));
       flow.index++;
       const next = flow.steps[flow.index];
       if (next === undefined) {
@@ -1442,7 +1607,81 @@ export class Engine {
       }
       const nextOwner = this.registry.stepOwner(next.type);
       flow.mark = nextOwner === undefined ? null : nextOwner.enterStep(next, record.modules[nextOwner.manifest.name]!);
+      this.#holdStep(draft);
     }
+  }
+
+  /**
+   * Fails the running flow's current step when step-up rules raise the scope it needs above what
+   * the call's verification reached (VER-13). A flow cannot branch to ask for more (ADR-14), so it
+   * stops there, naming the rules. Checked when a step is entered and when a signal is raised; the
+   * step's own work checks again (`#requireScope`), for the time of day.
+   */
+  #holdStep(draft: CallDraft): void {
+    const step = draft.step();
+    if (step === null) return;
+    const scope = this.registry.stepOwner(step.type)?.manifest.scopes.needs[step.type];
+    if (scope === undefined) return;
+    const { rules } = this.#cover(draft.record, scope, stepAmount(step));
+    if (rules.length > 0) this.#failStep(draft, rules);
+  }
+
+  #failStep(draft: CallDraft, rules: string[]): void {
+    const flow = draft.record.flow!;
+    // Only a running flow has a current step to fail (both callers checked it is on one).
+    flow.status = "failed";
+    draft.emit("flow.failed", "code", { flow: flow.name, step: flow.index, type: flow.steps[flow.index]!.type, rules });
+  }
+
+  /** See `EngineRuntime.requireScope`. */
+  #requireScope(draft: CallDraft, scope: string, amount: StepUpAmount | undefined | null): EngineError | null {
+    const { ok, applied, rules } = this.#cover(draft.record, scope, amount);
+    if (ok) return null;
+    if (rules.length === 0) {
+      // A denial no rule affects throws at once. When a rule applies, the refusal is returned, so
+      // the change is saved and a rule applied for the first time stays on the ledger. The flow is
+      // not failed: without the rule the grant would not cover the scope either.
+      if (applied.length === 0) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
+      return new EngineError("scope_denied", `the grant does not cover ${scope}; the step-up rule(s) ${applied.join(", ")} also apply`);
+    }
+    if (currentStep(draft.record) !== null) this.#failStep(draft, rules);
+    return new EngineError("scope_denied", `the grant does not cover ${scope} at the level the step-up rule(s) ${rules.join(", ")} require`);
+  }
+
+  /** Calls whose alerts are being sent by this engine now, so sending (which writes) does not send again. */
+  readonly #delivering = new Set<string>();
+
+  /** Sends the call's owed alerts; false when this engine is already sending them (that send finishes them). */
+  async #deliverAlerts(callId: string): Promise<boolean> {
+    if (this.#delivering.has(callId)) return false;
+    this.#delivering.add(callId);
+    try {
+      // Bounded like a duress notify: a messages adapter that never answers neither stalls the
+      // sweep nor keeps this engine from trying again (same idempotency key per notice).
+      await this.#withinNotifyTimeout(trace.sendContactNotice(this.#rt, callId), "the messages adapter");
+      return true;
+    } finally {
+      this.#delivering.delete(callId);
+    }
+  }
+
+  /** The class of the scope a step needs when it is money, contact or access, else null. */
+  #actionClass(owner: AssuranceModule, type: string): trace.ActionClass | null {
+    const scope = owner.manifest.scopes.needs[type];
+    if (scope === undefined) return null;
+    const cls = scopeClass(scope, this.#config.policy.scopeClasses, this.registry.scopeClasses());
+    return cls === "none" || cls === null ? null : cls;
+  }
+
+  /**
+   * The subject Badge holds now, and the number texts may go to: its number on file, as Badge read
+   * it when verification started, or null when no keypad or PIN match stands (a later verification
+   * started from nothing). Only asked about a call whose flow completed a scoped step, so Badge's
+   * part exists.
+   */
+  #currentSubject(record: CallRecord): { subjectKey: string | null; numberOnFile: string | null } {
+    const s = record.modules[badge.BADGE] as unknown as badge.BadgeSlice;
+    return { subjectKey: s.subject?.subjectKey ?? null, numberOnFile: s.knowledgeMatched ? s.subject!.phoneOnFile : null };
   }
 
   /**
@@ -1453,18 +1692,23 @@ export class Engine {
   async #flush(callId: string, version: number, record: CallRecord): Promise<void> {
     if (record.outbox.length === 0) return;
     for (const queued of record.outbox) {
-      await this.#adapters.ledger.append({ eventId: queued.eventId, callId, actor: queued.actor, event: queued.name, at: queued.at, detail: queued.detail });
-        // A listener is told, at least once and best effort; its failure, thrown or rejected, never stops the ledger (INT-5).
-      try {
-        const told: unknown = this.#onEvent?.({ name: queued.name, callId, actor: queued.actor, at: queued.at, detail: queued.detail });
-        if (told instanceof Promise) told.catch(() => undefined);
-      } catch {
-        // Ignored by design: the ledger is the record.
-      }
+      await this.#append({ eventId: queued.eventId, callId, actor: queued.actor, event: queued.name, at: queued.at, detail: queued.detail });
       // Not awaited: a notice store that stalls holds up neither the rest of the outbox nor the call. It never rejects.
       if (queued.counter !== undefined) void this.#notifyLock(queued.counter, queued.detail);
     }
     await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue);
+  }
+
+  /** Appends one entry, then tells the listener. */
+  async #append(entry: AuditInput & { callId: string }): Promise<void> {
+    await this.#adapters.ledger.append(entry);
+    // A listener is told, at least once and best effort; its failure, thrown or rejected, never stops the ledger (INT-5).
+    try {
+      const told: unknown = this.#onEvent?.({ name: entry.event, callId: entry.callId, actor: entry.actor, at: entry.at, detail: entry.detail });
+      if (told instanceof Promise) told.catch(() => undefined);
+    } catch {
+      // Ignored by design: the ledger is the record.
+    }
   }
 
   /**
@@ -1542,8 +1786,9 @@ export class Engine {
   }
 
   /**
-   * Sends the alerts every call of this workspace still owes (VER-12), for a host after a crash or
-   * on a schedule, without knowing the call ids: the session store lists them
+   * Sends the alerts every call of this workspace still owes (VER-12 duress alerts, PRV-10 contact
+   * change notices), ended or not, for a host after a crash or on a schedule, without knowing the
+   * call ids: the session store lists them
    * (`listCallsOwingAlerts`). `sent`: calls that owe nothing now; `failed`: calls that still owe one.
    */
   async sweepAlerts(): Promise<{ sent: string[]; failed: string[] }> {
@@ -1554,8 +1799,12 @@ export class Engine {
     const owed = await Promise.all(
       callIds.map(async (callId) => {
         try {
-          await this.#sendDuressAlerts(callId);
-          return badge.owedDuressAlerts(await this.#read(callId)).length > 0;
+          // One outbox for both kinds (#112's contact notices, #124's duress alerts): the index lists a
+          // call while it owes either (decision 8). The two run apart: a contact notice that fails or
+          // never answers never holds back a duress alert, nor the other way round.
+          await Promise.allSettled([this.#deliverAlerts(callId), this.#sendDuressAlerts(callId)]);
+          const now = await this.#read(callId);
+          return badge.owedDuressAlerts(now).length > 0 || trace.noticeDue(now);
         } catch {
           // A call the store cannot read now, or no longer holds, is reported, and the sweep goes on.
           return true;
@@ -1698,6 +1947,13 @@ function publicMembers(jwk: JsonWebKey & { kid?: string }): JsonWebKey {
   return kept as JsonWebKey;
 }
 
+/** The subject Badge matched on a call (a keypad or PIN match), or null: what an intake record or a consent is filed under. */
+function matchedSubjectKey(record: CallRecord): string | null {
+  const slice = record.modules[badge.BADGE] as unknown as badge.BadgeSlice | undefined;
+  // A keypad or PIN factor passes only against a subject on file, so a match always has one.
+  return slice?.knowledgeMatched === true ? slice.subject!.subjectKey : null;
+}
+
 export function createEngine(options: EngineOptions): Engine {
   return new Engine(options);
 }
@@ -1719,6 +1975,6 @@ function untrustedLabel(source: unknown): string {
 
 /** Marks a record that owes an alert, so a session store can list it for a sweep, and unmarks one that does not. */
 function markOwedAlerts(record: CallRecord): void {
-  if (badge.owedDuressAlerts(record).length > 0) record.owesAlerts = true;
+  if (badge.owedDuressAlerts(record).length > 0 || trace.noticeDue(record)) record.owesAlerts = true;
   else delete record.owesAlerts;
 }

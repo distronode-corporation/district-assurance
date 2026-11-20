@@ -4,10 +4,27 @@ import type { JsonWebKey } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 
-import { SEEN_EVENT_MAX, SEEN_EVENT_TTL_MS, SeenEvents, createReferenceServer } from "../examples/reference-server/src/app.ts";
+import { ReceiptLinks, SEEN_EVENT_MAX, SEEN_EVENT_TTL_MS, SeenEvents, createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { runDemo } from "../examples/reference-server/src/demo.ts";
 import { createDoorRelay } from "../examples/reference-server/src/door-relay.ts";
-import { canonicalJson, receiptKeyRing, signDocument, signStripePayload, verifyReceipt, type Engine } from "../src/index.ts";
+import {
+  MemoryDocumentStore,
+  canonicalJson,
+  createUploadLink,
+  formatAmount,
+  newReceiptLinkToken,
+  receiptKeyRing,
+  receiptLinkTokenHash,
+  sha256Hex,
+  signDocument,
+  signReceipt,
+  signStripePayload,
+  verifyReceipt,
+  type Engine,
+  type FactorKind,
+  type ReceiptBody,
+  type SignedReceipt,
+} from "../src/index.ts";
 import { FixedClock, createTestEngine, generateTestSigner, type TestEngine } from "../src/testing/index.ts";
 
 /** When k1 stopped signing: after the test clock's receipts (2026-01-01), so they predate it. */
@@ -18,10 +35,11 @@ describe("reference server", () => {
   let t: TestEngine;
   let base = "";
   let close: () => Promise<void>;
+  const links = new ReceiptLinks();
 
   before(async () => {
     t = createTestEngine();
-    const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [SECRET], payments: [] }, clock: t.clock, maxBodyBytes: 1024 });
+    const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [SECRET], payments: [] }, clock: t.clock, maxBodyBytes: 1024, receiptLinks: links });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     close = () => new Promise((resolve) => server.close(() => resolve()));
@@ -177,21 +195,91 @@ describe("reference server", () => {
     assert.deepEqual([res.status, await res.json()], [501, { error: "not_implemented", issue: "SRV-1", carrier: "twilio" }]);
   });
 
-  it("serves a receipt once the call ended, 404 before and for unknown calls", async () => {
+  it("serves a receipt only by its link token: the page, the JSON, and one 404 for everything else", async () => {
     const { callId } = await t.engine.startCall();
-    assert.equal((await fetch(`${base}/receipts/${callId}`)).status, 404);
+    const early = links.issue(callId);
+    const notFound = async (path: string) => {
+      const res = await fetch(`${base}${path}`);
+      assert.deepEqual([res.status, await res.json()], [404, { error: "not_found" }], path);
+    };
+    await notFound(`/r/${early}`); // the call has no receipt yet
+    const receipt = (await t.engine.endCall(callId))!;
+    const token = links.issue(callId);
+    assert.match(token, /^[A-Za-z0-9_-]{43}$/);
+    assert.notEqual(token, early);
+
+    const json = await fetch(`${base}/r/${token}.json`);
+    assert.equal(json.headers.get("cache-control"), "no-store");
+    assert.deepEqual(await json.json(), receipt);
+    assert.deepEqual(await (await fetch(`${base}/r/${early}.json`)).json(), receipt, "a token issued before the call ended works once it has its receipt");
+
+    const page = await fetch(`${base}/r/${token}`);
+    assert.equal(page.status, 200);
+    assert.equal(page.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.equal(page.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(page.headers.get("cache-control"), "no-store");
+    assert.equal(page.headers.get("x-robots-tag"), "noindex, nofollow");
+    assert.equal(page.headers.get("content-security-policy"), "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+    const html = await page.text();
+    assert.match(html, /<html lang="en">/);
+    assert.match(html, /<h1>Call receipt<\/h1>/);
+    assert.ok(html.includes(`Signature valid: signed with key ${receipt.kid}`));
+    assert.ok(html.includes(`<dd>${receipt.body.receiptId}</dd>`));
+    assert.ok(html.includes("<dt>Identity check</dt><dd>not verified</dd>"));
+    assert.ok(html.includes(`<a href="${token}.json">`));
+    assert.ok(html.includes('<a href="?lang=fr" hreflang="fr" lang="fr">Français</a>'));
+
+    // The route by call id is gone, and nothing but an issued token finds a receipt.
+    await notFound(`/receipts/${callId}`);
+    await notFound(`/r/${callId}`);
+    await notFound(`/r/${newReceiptLinkToken().token}`);
+    await notFound(`/r/${token.slice(1)}`);
+    await notFound(`/r/${token}A`);
+    await notFound(`/r/${token}.txt`);
+    await notFound(`/r/${links.issue("call_404")}`);
+    assert.equal((await post(`/r/${token}`, "")).status, 405);
+  });
+
+  it("serves the page in French on ?lang=fr or when the browser asks for French first", async () => {
+    const { callId } = await t.engine.startCall();
     await t.engine.endCall(callId);
-    const receipt = (await (await fetch(`${base}/receipts/${callId}`)).json()) as { body: { callId: string } };
-    assert.equal(receipt.body.callId, callId);
-    assert.equal((await fetch(`${base}/receipts/call_404`)).status, 404);
-    assert.equal((await fetch(`${base}/receipts/bad%20id`)).status, 404);
+    const token = links.issue(callId);
+    const lang = async (query: string, acceptLanguage?: string) => {
+      const html = await (await fetch(`${base}/r/${token}${query}`, acceptLanguage === undefined ? {} : { headers: { "accept-language": acceptLanguage } })).text();
+      return /<html lang="(en|fr)">/.exec(html)![1];
+    };
+    assert.equal(await lang("?lang=fr"), "fr");
+    assert.equal(await lang("", "fr-CA,fr;q=0.9,en;q=0.8"), "fr");
+    assert.equal(await lang("", "fr"), "fr");
+    assert.equal(await lang("", "en-CA,fr;q=0.9"), "en");
+    assert.equal(await lang("", "fra"), "en");
+    assert.equal(await lang("?lang=en", "fr-CA"), "en");
+    assert.equal(await lang("?lang=de", "fr-CA"), "fr");
+    assert.equal(await lang(""), "en");
+    const html = await (await fetch(`${base}/r/${token}?lang=fr`)).text();
+    assert.match(html, /<h1>Reçu d&#39;appel<\/h1>/);
+    assert.ok(html.includes("Signature valide : signé avec la clé"));
+    assert.ok(html.includes("<dt>Vérification d&#39;identité</dt><dd>non vérifiée</dd>"));
+    assert.ok(html.includes('<a href="?lang=en" hreflang="en" lang="en">English</a>'));
+  });
+
+  it("without receipt links, answers 404 for every token", async () => {
+    const { callId } = await t.engine.startCall();
+    await t.engine.endCall(callId);
+    const token = links.issue(callId);
+    const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [], payments: [] }, clock: t.clock });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/r/${token}`);
+    assert.deepEqual([res.status, await res.json()], [404, { error: "not_found" }]);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
   it("answers 500 without detail when the engine fails", async () => {
     const broken = { receipt: () => { throw new Error("boom"); } } as unknown as Engine;
-    const server = createReferenceServer({ engine: broken, stripeSecrets: { identity: [], payments: [] }, clock: t.clock });
+    const brokenLinks = new ReceiptLinks();
+    const server = createReferenceServer({ engine: broken, stripeSecrets: { identity: [], payments: [] }, clock: t.clock, receiptLinks: brokenLinks });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/receipts/c1`);
+    const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/r/${brokenLinks.issue("c1")}`);
     assert.deepEqual([res.status, await res.json()], [500, { error: "internal" }]);
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
@@ -265,6 +353,256 @@ describe("example door relay", () => {
     } finally {
       await new Promise<void>((resolve) => relay.close(() => resolve()));
     }
+  });
+});
+
+describe("reference server: the receipt page", () => {
+  const signer = generateTestSigner("page-key");
+  const body: ReceiptBody = {
+    v: 1,
+    receiptId: "rcpt_1",
+    callId: "call_1",
+    workspaceId: "ws_test",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    endedAt: "2026-01-01T00:05:00.000Z",
+    issuedAt: "2026-01-01T00:05:00.000Z",
+    verification: { level: 2, methods: ["carrier_identity_match", "keypad_knowledge", "badge_scan" as FactorKind] },
+    records: [{ recordId: "rec_1", formId: "maintenance", digest: "a".repeat(64) }],
+    payments: [
+      { paymentId: "pay_1", status: "paid", amountMinor: 15000, currency: "cad", mode: "platform", providerRef: "cs_1" },
+      { paymentId: "pay_2", status: "refunded", amountMinor: 500, currency: "jpy", mode: "platform", providerRef: "cs_2" },
+    ],
+    consents: [
+      { purpose: "repair_texts", wordingVersion: "1", wordingDigest: "b".repeat(64), answer: "yes" },
+      { purpose: "x<script>&\"'", wordingVersion: "1", wordingDigest: "c".repeat(64), answer: "no" },
+    ],
+    ledger: { seq: 17, hash: "d".repeat(64) },
+  };
+
+  async function page(receipt: SignedReceipt, keys: unknown[], lang: "en" | "fr"): Promise<string> {
+    const pageLinks = new ReceiptLinks();
+    const engine = { receipt: async () => receipt, receiptKeys: () => keys } as unknown as Engine;
+    const server = createReferenceServer({ engine, stripeSecrets: { identity: [], payments: [] }, clock: new FixedClock(), receiptLinks: pageLinks });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      return await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/r/${pageLinks.issue("call_1")}?lang=${lang}`)).text();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  it("shows the verification, records, payments, consents and ledger head, every value escaped", async () => {
+    const receipt = await signReceipt(signer, body);
+    const en = await page(receipt, [signer.publicJwk()], "en");
+    assert.ok(en.includes("Signature valid: signed with key page-key, and not one byte has changed since."));
+    assert.ok(en.includes("<dd>level 2, by the carrier&#39;s match on the number on file, answers keyed on the phone, badge_scan</dd>"));
+    assert.ok(en.includes(`<dd>maintenance, fingerprint ${"a".repeat(64)}</dd>`));
+    assert.ok(en.includes(`<dd>${formatAmount("en", 15000, "cad")}, paid; ${formatAmount("en", 500, "jpy")}, refunded</dd>`));
+    assert.ok(en.includes("<dd>repair_texts: yes; x&#60;script&#62;&#38;&#34;&#39;: no</dd>"));
+    assert.ok(en.includes(`<dd>entry 17, hash ${"d".repeat(64)}</dd>`));
+    assert.equal(en.includes("<script>"), false);
+
+    const fr = await page(receipt, [signer.publicJwk()], "fr");
+    assert.ok(fr.includes("<dd>niveau 2, par la correspondance de l&#39;opérateur pour le numéro au dossier, réponses saisies au clavier, badge_scan</dd>"));
+    assert.ok(fr.includes(`<dd>maintenance, empreinte ${"a".repeat(64)}</dd>`));
+    assert.ok(fr.includes(`<dd>${formatAmount("fr", 15000, "cad")}, payé; ${formatAmount("fr", 500, "jpy")}, refunded</dd>`));
+    assert.ok(fr.includes("<dd>repair_texts: oui; x&#60;script&#62;&#38;&#34;&#39;: non</dd>"));
+    assert.ok(fr.includes(`<dd>entrée 17, empreinte ${"d".repeat(64)}</dd>`));
+  });
+
+  it("says when the signature does not hold, in both languages", async () => {
+    const receipt = await signReceipt(signer, body);
+    const changed = structuredClone(receipt);
+    changed.body.payments[0]!.amountMinor = 1;
+    assert.ok((await page(changed, [signer.publicJwk()], "en")).includes("Signature not valid: do not rely on this receipt."));
+    assert.ok((await page(receipt, [], "fr")).includes("Signature non valide : ne vous fiez pas à ce reçu."));
+  });
+
+  it("shows every built-in method in both languages", async () => {
+    const all: FactorKind[] = ["keypad_knowledge", "pin", "carrier_identity_match", "photo_id", "text_code", "spoken_knowledge"];
+    const receipt = await signReceipt(signer, { ...body, verification: { level: 3, methods: all } });
+    const en = await page(receipt, [signer.publicJwk()], "en");
+    assert.ok(en.includes("level 3, by answers keyed on the phone, PIN, the carrier&#39;s match on the number on file, photo ID and selfie, texted code, spoken answers"));
+    const fr = await page(receipt, [signer.publicJwk()], "fr");
+    assert.ok(fr.includes("niveau 3, par réponses saisies au clavier, NIP, la correspondance de l&#39;opérateur pour le numéro au dossier, pièce d&#39;identité avec photo et égoportrait, code reçu par texto, réponses de vive voix"));
+  });
+});
+
+describe("receipt link tokens", () => {
+  it("are 256 random bits in base64url, and only their hash is kept", () => {
+    const fixed = newReceiptLinkToken(() => new Uint8Array(32));
+    assert.deepEqual(fixed, { token: "A".repeat(43), hash: sha256Hex(`receipt-link:${"A".repeat(43)}`) });
+    assert.equal(receiptLinkTokenHash(fixed.token), fixed.hash);
+    const a = newReceiptLinkToken();
+    const b = newReceiptLinkToken();
+    assert.notEqual(a.token, b.token);
+    assert.match(a.token, /^[A-Za-z0-9_-]{43}$/);
+    assert.match(a.hash, /^[0-9a-f]{64}$/);
+    assert.equal(a.hash.includes(a.token), false);
+    assert.throws(() => newReceiptLinkToken(() => new Uint8Array(16)), RangeError, "a short random source fails closed");
+  });
+
+  it("hash only a well-formed token, and never throw", () => {
+    const { token } = newReceiptLinkToken();
+    for (const bad of ["", token.slice(1), `${token}A`, `${token.slice(1)}+`, `${token.slice(1)}=`, `${token.slice(1)}/`, `${token.slice(2)}\n`]) {
+      assert.equal(receiptLinkTokenHash(bad), null, JSON.stringify(bad));
+    }
+  });
+
+  it("are resolved by ReceiptLinks to the call they were issued for", () => {
+    const store = new ReceiptLinks();
+    const one = store.issue("call_1");
+    const two = store.issue("call_2");
+    assert.equal(store.callFor(one), "call_1");
+    assert.equal(store.callFor(two), "call_2");
+    assert.equal(store.callFor(newReceiptLinkToken().token), null);
+    assert.equal(store.callFor("call_1"), null);
+  });
+});
+
+describe("reference server: document uploads", () => {
+  const JPEG = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+  let t: TestEngine;
+  let documents: MemoryDocumentStore;
+  let scanner: { clean: boolean; scan(): Promise<{ clean: boolean }> };
+  let base = "";
+  let close: () => Promise<void>;
+
+  before(async () => {
+    t = createTestEngine();
+    documents = new MemoryDocumentStore();
+    scanner = {
+      clean: true,
+      async scan() {
+        return { clean: this.clean };
+      },
+    };
+    await t.records.putIntakeRecord({ recordId: "rec_1", workspaceId: t.engine.workspaceId, callId: "call_1", subjectKey: null, formId: "f", formVersion: "1", values: {}, digest: "0".repeat(64), confirmedBy: "voice", confirmedAt: "2026-01-01T00:00:00.000Z" });
+    const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [], payments: [] }, clock: t.clock, uploads: { documents, scanner, ids: t.ids } });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    close = () => new Promise((resolve) => server.close(() => resolve()));
+  });
+  after(() => close());
+
+  const link = async (input: { locale?: "en" | "fr"; maxBytes?: number; allowedTypes?: Array<"image/jpeg" | "image/png" | "application/pdf"> } = {}) =>
+    (await createUploadLink({ callId: "call_1", recordId: "rec_1", ...input }, { workspaceId: t.engine.workspaceId, documents, clock: t.clock, records: t.records })).token;
+  const send = (token: string, bytes: Uint8Array, type = "image/jpeg", query = "") => {
+    const body = new FormData();
+    body.append("note", "ignored");
+    body.append("file", new Blob([bytes], { type }), "photo.jpg");
+    return fetch(`${base}/u/${token}${query}`, { method: "POST", body });
+  };
+
+  it("serves the upload page in the link's language, with a switch, and strict headers", async () => {
+    const token = await link({ locale: "fr" });
+    let res = await fetch(`${base}/u/${token}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.equal(res.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(res.headers.get("cache-control"), "no-store");
+    assert.match(res.headers.get("content-security-policy")!, /default-src 'none';.*form-action 'self'; frame-ancestors 'none'/);
+    let html = await res.text();
+    assert.match(html, /<html lang="fr">/);
+    assert.match(html, /Ajouter un document/);
+    assert.match(html, /Acceptés : JPEG, PNG, PDF, jusqu'à 10 Mo\./);
+    assert.match(html, /accept="image\/jpeg,image\/png,application\/pdf"/);
+    assert.match(html, /href="\?lang=en"/);
+    assert.ok(!html.includes(token), "the page never repeats the token");
+    res = await fetch(`${base}/u/${token}?lang=en`);
+    html = await res.text();
+    assert.match(html, /<html lang="en">/);
+    assert.match(html, /Add a document/);
+    assert.match(html, /Accepted: JPEG, PNG, PDF, up to 10 MB\./);
+    html = await (await fetch(`${base}/u/${await link({ maxBytes: 2000, allowedTypes: ["application/pdf"] })}?lang=xx`)).text();
+    assert.match(html, /Accepted: PDF, up to 2 KB\./);
+  });
+
+  it("takes one upload per link, then answers that the link is used", async () => {
+    const token = await link();
+    let res = await send(token, JPEG);
+    assert.equal(res.status, 201);
+    assert.match(await res.text(), /Your document was received/);
+    assert.deepEqual([...documents.documents().at(-1)!.bytes], [...JPEG]);
+    res = await send(token, JPEG);
+    assert.equal(res.status, 410);
+    assert.match(await res.text(), /expired or was already used/);
+    res = await fetch(`${base}/u/${token}?lang=fr`);
+    assert.equal(res.status, 410);
+    assert.match(await res.text(), /Ce lien a expiré ou a déjà été utilisé/);
+  });
+
+  it("refuses an expired or unknown link the same way", async () => {
+    const token = await link();
+    t.clock.advance(30 * 60 * 1000);
+    for (const path of [`/u/${token}`, "/u/upl_unknown", "/u/"]) {
+      const res = await fetch(`${base}${path}`);
+      assert.equal(res.status, 410, path);
+    }
+    assert.equal((await send(token, JPEG)).status, 410);
+  });
+
+  it("refuses a wrong type, a mismatch, an empty or missing file and one over the cap, in the page's language", async () => {
+    const token = await link({ locale: "fr", maxBytes: JPEG.length, allowedTypes: ["image/jpeg"] });
+    let res = await send(token, JPEG, "image/png");
+    assert.equal(res.status, 415);
+    assert.match(await res.text(), /Ce type de fichier n'est pas accepté ici/);
+    res = await send(token, Uint8Array.from([1, 2, 3]), "image/jpeg", "?lang=en");
+    assert.equal(res.status, 415);
+    assert.match(await res.text(), /This type of file is not accepted here/);
+    assert.equal((await send(token, new Uint8Array(0))).status, 400);
+    assert.equal((await send(token, Uint8Array.from([...JPEG, 0]))).status, 413);
+    res = await fetch(`${base}/u/${token}`, { method: "POST", body: new Uint8Array(JPEG.length + 20 * 1024) });
+    assert.equal(res.status, 413);
+    assert.match(await res.text(), /Ce fichier est trop volumineux/);
+    for (const [type, body] of [
+      ["text/plain", "x"],
+      ["multipart/form-data; boundary=b", "nothing here"],
+      ["multipart/form-data; boundary=b", "--b\r\nno end of headers"],
+      ["multipart/form-data; boundary=b", "--b\r\ncontent-disposition: form-data; name=\"file\"\r\n\r\nno closing boundary"],
+      ["multipart/form-data; boundary=\"b\"", "--b\r\ncontent-disposition: form-data; name=\"other\"\r\n\r\nx\r\n--b--\r\n"],
+    ] as const) {
+      res = await fetch(`${base}/u/${token}`, { method: "POST", body, headers: { "content-type": type } });
+      assert.equal(res.status, 400, body);
+      assert.match(await res.text(), /Choisissez d'abord un fichier/);
+    }
+    assert.equal((await fetch(`${base}/u/${token}`, { method: "PUT" })).status, 405);
+    assert.equal((await send(token, JPEG)).status, 201, "none of those spent the link");
+  });
+
+  it("refuses what the scanner does not pass, and spends the link", async () => {
+    const token = await link();
+    scanner.clean = false;
+    const res = await send(token, JPEG);
+    scanner.clean = true;
+    assert.equal(res.status, 422);
+    const html = await res.text();
+    assert.match(html, /could not be accepted/);
+    assert.doesNotMatch(html, /<form/);
+    assert.equal((await send(token, JPEG)).status, 410);
+  });
+
+  it("answers a page, not a 500, when the scanner throws, and the link is spent", async () => {
+    const token = await link({ locale: "fr" });
+    const scan = scanner.scan;
+    scanner.scan = async () => {
+      throw new Error("scanner internals");
+    };
+    const res = await send(token, JPEG);
+    scanner.scan = scan;
+    assert.equal(res.status, 503);
+    const html = await res.text();
+    assert.match(html, /n'a pas pu être vérifié/);
+    assert.doesNotMatch(html, /internals|<form/);
+    assert.equal((await send(token, JPEG)).status, 410);
+  });
+
+  it("is off without the uploads option", async () => {
+    const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [], payments: [] }, clock: t.clock });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/u/${await link()}`);
+    assert.deepEqual([res.status, await res.json()], [404, { error: "not_found" }]);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 });
 
