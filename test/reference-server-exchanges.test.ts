@@ -164,3 +164,70 @@ describe("a malformed request pipelined behind one still being answered", () => 
     assert.deepEqual(statuses(answer), [503, 400], answer);
   });
 });
+
+describe("a full store of kept upload outcomes", () => {
+  const JPEG = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+
+  async function setup(ctx: TestContext) {
+    const t = createTestEngine();
+    const documents = new MemoryDocumentStore();
+    await t.records.putIntakeRecord({ recordId: "rec_1", workspaceId: t.engine.workspaceId, callId: "call_1", subjectKey: null, formId: "f", formVersion: "1", values: {}, digest: "0".repeat(64), confirmedBy: "voice", confirmedAt: "2026-01-01T00:00:00.000Z" });
+    const finishes: Array<() => void> = [];
+    const scanner = { scan: () => new Promise<{ clean: boolean }>((resolve) => finishes.push(() => resolve({ clean: true }))) };
+    const s = await serve(ctx, { uploads: { documents, scanner, ids: t.ids, keptMax: 1 }, timeoutMs: 100 }, t);
+    const link = async () => (await createUploadLink({ callId: "call_1", recordId: "rec_1" }, { workspaceId: t.engine.workspaceId, documents, clock: t.clock, records: t.records })).token;
+    const send = async (token: string) => {
+      const body = new FormData();
+      body.append("file", new Blob([JPEG], { type: "image/jpeg" }), "photo.jpg");
+      const res = await fetch(`${s.base}/u/${token}`, { method: "POST", body });
+      return { status: res.status, retryAfter: res.headers.get("retry-after"), html: await res.text() };
+    };
+    return { t, documents, link, send, finishes };
+  }
+
+  it("refuses a new upload before it claims its link, and the link works once room frees", async (ctx) => {
+    const u = await setup(ctx);
+    const first = await u.link();
+    u.t.clock.advance(10 * 60 * 1000);
+    const second = await u.link();
+    const sent = u.send(first);
+    await sleep(20);
+    u.finishes[0]!();
+    assert.equal((await sent).status, 201);
+    const refused = await u.send(second);
+    assert.deepEqual([refused.status, refused.retryAfter], [503, String(20 * 60)], "until the first link's outcome expires");
+    assert.match(refused.html, /cannot take your document right now/);
+    assert.match(refused.html, /<form/, "the link is not spent: the page still offers the form");
+    assert.equal(u.finishes.length, 1, "no scan");
+    u.t.clock.advance(20 * 60 * 1000);
+    const later = u.send(second);
+    await sleep(20);
+    u.finishes[1]!();
+    assert.equal((await later).status, 201);
+    assert.equal(u.documents.documents().length, 2);
+  });
+
+  it("keeps a running upload's outcome when the store is full, so its retry gets the 201", async (ctx) => {
+    const u = await setup(ctx);
+    const first = await u.link();
+    const second = await u.link();
+    assert.equal((await u.send(first)).status, 503, "the deadline answers while the scan runs");
+    assert.equal((await u.send(second)).status, 503, "no room for a second");
+    assert.equal(u.finishes.length, 1, "the second was never scanned");
+    u.finishes[0]!();
+    await sleep(50);
+    const retry = await u.send(first);
+    assert.equal(retry.status, 201);
+    assert.ok(retry.html.includes(u.documents.documents()[0]!.document.documentId));
+  });
+
+  it("refuses a cap that is not a whole number from 1", () => {
+    const t = createTestEngine();
+    for (const keptMax of [0, -1, 1.5, Number.NaN]) {
+      assert.throws(
+        () => createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [], payments: [] }, clock: t.clock, uploads: { documents: new MemoryDocumentStore(), scanner: { scan: async () => ({ clean: true }) }, keptMax } }),
+        /uploads.keptMax must be a whole number from 1/,
+      );
+    }
+  });
+});

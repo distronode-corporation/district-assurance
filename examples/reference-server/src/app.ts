@@ -109,7 +109,17 @@ export interface ReferenceServerOptions {
   /** The receipt links the host issued. Absent: `/r/:token` answers 404 for every token. */
   receiptLinks?: ReceiptLinks;
   /** Document uploads by single-use link: serves `/u/:token`. Off when absent. */
-  uploads?: { documents: DocumentStore; scanner: DocumentScanner; ids?: IdGenerator };
+  uploads?: {
+    documents: DocumentStore;
+    scanner: DocumentScanner;
+    ids?: IdGenerator;
+    /**
+     * How many upload outcomes are kept at once, each until its link would have expired, so a
+     * retry after a lost answer gets the outcome. Default 10,000. When it is full, a new upload is
+     * refused (503, `retry-after`) before it spends its link; a kept outcome is never dropped early.
+     */
+    keptMax?: number;
+  };
   /** The host's own security.txt. No route when absent: there is no default. */
   securityTxt?: SecurityTxtSettings;
   /** Where start-up warnings go. Default `console.warn`. */
@@ -776,7 +786,9 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     const started = keptUpload(key);
     if (started !== undefined) return keptUploadPage(started, lang ?? started.locale);
     const kept: KeptUpload = { expires: Date.parse(link.expiresAt), locale, result: null };
-    keepUpload(key, kept);
+    // No room: refused before the link is claimed, so it is left unspent and nothing is scanned.
+    const full = keepUpload(key, kept);
+    if (full !== null) return { ...uploadPage(503, locale, "busy", link), headers: { "retry-after": String(full) } };
     let result: UploadResult;
     try {
       result = await acceptUpload({ token, contentType: file.contentType, bytes: file.bytes }, { ...context, ids: uploads.ids ?? randomIds, scanner: uploads.scanner });
@@ -795,8 +807,9 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
    * The outcome of each upload that spent its link, by the token's hash, until the link would have
    * expired: an upload can outlast the deadline after its link is spent, and the client's retry
    * with the same link then gets that outcome, not "link used". `result` is null while the upload
-   * still runs. At most `KEPT_UPLOADS_MAX` at once.
+   * still runs. At most `keptMax` at once.
    */
+  const keptMax = options.uploads === undefined ? KEPT_UPLOADS_MAX : wholeFrom1("uploads.keptMax", options.uploads.keptMax ?? KEPT_UPLOADS_MAX);
   const keptUploads = new Map<string, KeptUpload>();
 
   function keptUpload(key: string): KeptUpload | undefined {
@@ -806,14 +819,23 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     return undefined;
   }
 
-  function keepUpload(key: string, kept: KeptUpload): void {
-    if (keptUploads.size >= KEPT_UPLOADS_MAX) {
+  /**
+   * Keeps `kept`, after dropping the expired outcomes when the store is full. Never drops one still
+   * in time (its upload may be running, or its retry still to come): when none has expired, keeps
+   * nothing and answers the whole seconds until the first one does.
+   */
+  function keepUpload(key: string, kept: KeptUpload): number | null {
+    if (keptUploads.size >= keptMax) {
       const now = options.clock.now().getTime();
-      for (const [k, v] of keptUploads) if (now >= v.expires) keptUploads.delete(k);
+      let first = Number.POSITIVE_INFINITY;
+      for (const [k, v] of keptUploads) {
+        if (now >= v.expires) keptUploads.delete(k);
+        else first = Math.min(first, v.expires);
+      }
+      if (keptUploads.size >= keptMax) return Math.max(1, Math.ceil((first - now) / 1000));
     }
-    // Then the oldest; one still running is then answered as any spent link is.
-    if (keptUploads.size >= KEPT_UPLOADS_MAX) keptUploads.delete(keptUploads.keys().next().value!);
     keptUploads.set(key, kept);
+    return null;
   }
 
   function forgetUpload(key: string, kept: KeptUpload): void {
@@ -1251,7 +1273,7 @@ interface KeptUpload {
   result: UploadResult | null;
 }
 
-/** Kept outcomes at once; a link lives 30 minutes, so this is a rate of uploads, not a total. */
+/** Kept outcomes at once by default; a link lives 30 minutes, so this is a rate of uploads, not a total. */
 const KEPT_UPLOADS_MAX = 10_000;
 
 /** The page for an upload's result: a spent link shows no form. */
@@ -1271,7 +1293,7 @@ const REFUSAL_STATUS: Readonly<Record<UploadRefusal, number>> = {
   scan_failed: 503,
 };
 
-type PageMessage = UploadRefusal | "received" | "in_progress";
+type PageMessage = UploadRefusal | "received" | "in_progress" | "busy";
 
 const UPLOAD_TEXT = {
   en: {
@@ -1286,6 +1308,7 @@ const UPLOAD_TEXT = {
     messages: {
       received: "Thank you. Your document was received. You can close this page.",
       in_progress: "Your document is still being checked. Try again in a moment.",
+      busy: "We cannot take your document right now. Try again later.",
       link_not_usable: "This link has expired or was already used. Ask for a new one.",
       type_not_allowed: "This type of file is not accepted here.",
       content_mismatch: "This type of file is not accepted here.",
@@ -1307,6 +1330,7 @@ const UPLOAD_TEXT = {
     messages: {
       received: "Merci. Votre document a bien été reçu. Vous pouvez fermer cette page.",
       in_progress: "Votre document est encore en cours de vérification. Réessayez dans un instant.",
+      busy: "Nous ne pouvons pas recevoir votre document pour le moment. Réessayez plus tard.",
       link_not_usable: "Ce lien a expiré ou a déjà été utilisé. Demandez-en un nouveau.",
       type_not_allowed: "Ce type de fichier n'est pas accepté ici.",
       content_mismatch: "Ce type de fichier n'est pas accepté ici.",

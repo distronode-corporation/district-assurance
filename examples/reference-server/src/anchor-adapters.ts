@@ -41,6 +41,13 @@ async function readCapped(response: Response, limit: number, who: string): Promi
   }
 }
 
+/** The reply cap a constructor was given: a positive safe integer, else a TypeError (NaN or Infinity would leave no cap). */
+function replyCap(value: unknown, who: string): number {
+  if (value === undefined) return MAX_REPLY_BYTES;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) throw new TypeError(`${who}: maxReplyBytes must be a positive safe integer`);
+  return value;
+}
+
 /** A refused reply: its body is cancelled, never read. */
 async function refuse(response: Response, message: string): Promise<never> {
   await response.body?.cancel();
@@ -88,7 +95,7 @@ export class TimestampAuthorityAnchor implements Anchor {
     this.#chain = options.chain;
     this.#fetch = options.fetch ?? (fetch as Fetch);
     this.#nonce = options.nonce ?? randomNonce;
-    this.#maxReplyBytes = options.maxReplyBytes ?? MAX_REPLY_BYTES;
+    this.#maxReplyBytes = replyCap(options.maxReplyBytes, "TimestampAuthorityAnchor");
   }
 
   /**
@@ -164,7 +171,7 @@ export class RekorAnchor implements Anchor {
     this.#log = options.log;
     this.#timestamps = options.timestamps;
     this.#fetch = options.fetch ?? (fetch as Fetch);
-    this.#maxReplyBytes = options.maxReplyBytes ?? MAX_REPLY_BYTES;
+    this.#maxReplyBytes = replyCap(options.maxReplyBytes, "RekorAnchor");
   }
 
   async anchor(input: { seq: number; hash: string; payload: Uint8Array }): Promise<AnchorProof> {

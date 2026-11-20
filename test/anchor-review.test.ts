@@ -445,3 +445,23 @@ describe("review #133: the Rekor adapter stamps first, then logs", () => {
     assert.equal(rekor.requests.length, 1);
   });
 });
+
+describe("review #133: maxReplyBytes must be a positive safe integer", () => {
+  const bad: unknown[] = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -1, 1.5, 2 ** 53, "1024", null, 1n];
+
+  it("the time-stamp authority adapter refuses any other cap at construction", () => {
+    for (const maxReplyBytes of bad) {
+      assert.throws(() => new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain: recordedChain, maxReplyBytes: maxReplyBytes as number }), TypeError, String(maxReplyBytes));
+    }
+    assert.doesNotThrow(() => new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain: recordedChain, maxReplyBytes: 1 }));
+  });
+
+  it("the Rekor adapter refuses any other cap at construction", () => {
+    const timestamps = new TimestampAuthorityAnchor({ url: "https://tsa.example.test/", chain: recordedChain });
+    const signingKey = fixtureSigner().privateKey;
+    for (const maxReplyBytes of bad) {
+      assert.throws(() => new RekorAnchor({ url: "https://rekor.example.test/", signingKey, log: recordedLog, timestamps, maxReplyBytes: maxReplyBytes as number }), TypeError, String(maxReplyBytes));
+    }
+    assert.doesNotThrow(() => new RekorAnchor({ url: "https://rekor.example.test/", signingKey, log: recordedLog, timestamps, maxReplyBytes: 1 }));
+  });
+});

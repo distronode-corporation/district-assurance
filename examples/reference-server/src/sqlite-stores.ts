@@ -12,7 +12,8 @@
 // IMMEDIATE), so several processes on one file also keep one chain; a process waits up to the busy
 // timeout for another's lock, blocking its event loop meanwhile. Fine for a reference server, not
 // tuned for production.
-import { closeSync, lstatSync, openSync, type Stats } from "node:fs";
+import { closeSync, linkSync, lstatSync, mkdtempSync, openSync, rmSync, rmdirSync, type Stats } from "node:fs";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { GENESIS_HASH, chainEntry, type AuditEntry, type AuditInput, type AuditLedger, type IntakeRecord, type RecordStore, type SubjectRecord } from "../../../src/index.ts";
@@ -32,28 +33,26 @@ export const SQLITE_BUSY_TIMEOUT_MS = 5_000;
  *
  * An existing file is checked by path and never opened here: on Linux and macOS, closing any
  * descriptor on a file drops every POSIX lock this process holds on it, including those of another
- * SQLite connection to it, which could then corrupt its WAL. A new file is created exclusively, so
- * no connection can hold a lock on it yet. A symbolic link is refused, at the database path and
+ * SQLite connection to it, which could then corrupt its WAL. A new file is created, exclusively
+ * and owner-only, under a private name in a directory made beside it (so on its filesystem), closed
+ * there, and then linked into place: no descriptor is ever opened or closed on the database path
+ * outside SQLite, even while another thread or process opens the path. A symbolic link is refused, at the database path and
  * beside it: SQLite follows it and uses the target's WAL and shared-memory files, not the ones
  * checked here. Any other file type (a directory, a FIFO) is refused too.
  *
- * On Windows a file is refused: the owner-only mode sets no ACL there, so the file would be as
- * readable as its directory makes it. There is no option to allow it; open `":memory:"` there.
+ * POSIX only: on Windows a file is refused, since the owner-only mode sets no ACL there and the
+ * file would be as readable as its directory makes it. There is no option to allow it; a Windows
+ * host uses another store (or `":memory:"`, which keeps nothing across a restart).
  */
 export function openSqliteDatabase(path: string): DatabaseSync {
   if (/^file:/i.test(path)) throw new Error("openSqliteDatabase takes a filesystem path, not a file: URI");
   if (path !== ":memory:") {
     if (process.platform === "win32") {
-      throw new Error("openSqliteDatabase refuses a database file on Windows, where an owner-only mode sets no ACL; open \":memory:\" instead");
+      throw new Error("openSqliteDatabase refuses a database file on Windows, where an owner-only mode sets no ACL: the file-backed stores are POSIX only, so a Windows host uses another store");
     }
     let info = lstatIfExists(path);
     if (info === undefined) {
-      try {
-        closeSync(openSync(path, "wx", 0o600));
-      } catch (error) {
-        // Another process created it since the look: it is checked as any existing file is.
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      }
+      createOwnerOnly(path);
       info = lstatSync(path);
     }
     assertOwnerOnlyFile(path, info);
@@ -72,6 +71,39 @@ export function openSqliteDatabase(path: string): DatabaseSync {
     throw error;
   }
   return db;
+}
+
+/**
+ * Creates an empty owner-only file at `path`, or leaves alone one another thread or process created
+ * there first (the caller checks it as any existing file). The descriptor that creates it is on a
+ * private name in a new owner-only directory beside `path`, and is closed before the file is linked
+ * into place; then the private name and directory are removed, also when a step fails.
+ */
+function createOwnerOnly(path: string): void {
+  const staging = mkdtempSync(join(dirname(path), ".sqlite-create-"));
+  const staged = join(staging, "database");
+  const cleanUp = () => {
+    rmSync(staged, { force: true });
+    rmdirSync(staging);
+  };
+  try {
+    closeSync(openSync(staged, "wx", 0o600));
+    try {
+      linkSync(staged, path);
+    } catch (error) {
+      // Created there since the look: checked as any existing file is.
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  } catch (error) {
+    try {
+      cleanUp();
+    } catch {
+      // The error that stopped the create says more than the cleanup's.
+    }
+    throw error;
+  }
+  // A private directory left behind is an error too.
+  cleanUp();
 }
 
 /** The file's own status (a symbolic link's, not its target's), or undefined if there is none. */

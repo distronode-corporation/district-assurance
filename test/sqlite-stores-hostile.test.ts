@@ -4,7 +4,7 @@ import { strict as assert } from "node:assert";
 import fs, { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { after, describe, it, mock } from "node:test";
 
@@ -33,23 +33,29 @@ const track = <T extends { close(): void }>(c: T): T => {
 };
 const onFile = { skip: process.platform === "win32" ? "file-backed storage is refused on Windows" : false };
 
-/** Spies on the fs functions sqlite-stores.ts imports, for the length of `body`. */
-function spyOnFs<T>(body: (calls: { open: unknown[][]; close: number }) => T, lstat?: (real: typeof fs.lstatSync, file: fs.PathLike) => fs.Stats): T {
-  const calls = { open: [] as unknown[][], close: 0 };
-  const realOpen = fs.openSync;
-  const realClose = fs.closeSync;
-  const realLstat = fs.lstatSync;
-  const spies = [
-    mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
-      calls.open.push(args);
-      return realOpen(...args);
-    }),
-    mock.method(fs, "closeSync", (fd: number) => {
-      calls.close++;
-      realClose(fd);
-    }),
-    ...(lstat === undefined ? [] : [mock.method(fs, "lstatSync", (file: fs.PathLike) => lstat(realLstat, file))]),
-  ];
+type FsCall = { fn: string; path: string; flags?: unknown };
+const SPIED = ["openSync", "closeSync", "linkSync", "lstatSync", "mkdtempSync", "rmSync", "rmdirSync"] as const;
+
+/**
+ * Spies on the fs functions sqlite-stores.ts imports, for the length of `body`. Each call is recorded
+ * with the path it acts on (a close with the path its descriptor was opened on, a link with the new
+ * name), then `hook` may throw in its place, then the real function runs.
+ */
+function spyOnFs<T>(body: (calls: FsCall[]) => T, hook?: (call: FsCall) => void): T {
+  const calls: FsCall[] = [];
+  const opened = new Map<number, string>();
+  const spies = SPIED.map((fn) => {
+    const real = fs[fn] as (...args: unknown[]) => unknown;
+    return mock.method(fs, fn, (...args: unknown[]) => {
+      const call: FsCall =
+        fn === "closeSync" ? { fn, path: opened.get(args[0] as number) ?? "?" } : fn === "linkSync" ? { fn, path: String(args[1]) } : fn === "openSync" ? { fn, path: String(args[0]), flags: args[1] } : { fn, path: String(args[0]) };
+      calls.push(call);
+      hook?.(call);
+      const result = real(...args);
+      if (fn === "openSync") opened.set(result as number, call.path);
+      return result;
+    });
+  });
   syncBuiltinESMExports();
   try {
     return body(calls);
@@ -58,6 +64,12 @@ function spyOnFs<T>(body: (calls: { open: unknown[][]; close: number }) => T, ls
     syncBuiltinESMExports();
   }
 }
+
+/** The descriptors opened and closed, by path. */
+const descriptorCalls = (calls: FsCall[]) => calls.filter((c) => c.fn === "openSync" || c.fn === "closeSync");
+const fsError = (code: string, call: FsCall) => Object.assign(new Error(`${code}: refused by the test, ${call.fn} '${call.path}'`), { code });
+/** The private creating directories openSqliteDatabase left in the test directory: none, always. */
+const stagingLeft = () => readdirSync(dir).filter((name) => name.startsWith(".sqlite-create-"));
 
 /** How many of this process's descriptors are open on `path` or its WAL and shared-memory files (Linux). */
 const descriptorsOn = (path: string): number =>
@@ -140,21 +152,34 @@ describe("attack: file modes", { skip: process.platform === "win32" }, () => {
       return seen;
     });
     busy.exec("ROLLBACK");
-    assert.deepEqual(calls, { open: [], close: 0 }, "checked by path, with no descriptor of its own");
+    assert.deepEqual(descriptorCalls(calls), [], "checked by path, with no descriptor of its own");
+    assert.deepEqual(calls.map((c) => c.fn), ["lstatSync", "lstatSync", "lstatSync", "lstatSync"], "the file and its three sidecars, looked at by path");
     assert.equal(verifyChain(await holder.ledger.list()).ok, true);
   });
 
-  it("a new database file is created exclusively, owner-only, before SQLite opens it", () => {
+  it("a new database file is created owner-only in a private directory beside it and linked into place, so no descriptor is ever on its path", () => {
     const path = newFile();
     const calls = spyOnFs((seen) => {
       track(openSqliteDatabase(path)).close();
       return seen;
     });
-    assert.deepEqual(calls, { open: [[path, "wx", 0o600]], close: 1 });
+    const descriptors = descriptorCalls(calls);
+    assert.deepEqual(
+      descriptors.filter((c) => c.path === path),
+      [],
+      "never opened or closed on the database path",
+    );
+    const [open, close] = descriptors;
+    assert.equal(descriptors.length, 2);
+    assert.deepEqual([open!.flags, close!.path], ["wx", open!.path], "created exclusively, and closed, under its private name");
+    assert.equal(dirname(dirname(open!.path)), dir, "in a directory beside the database, on its filesystem");
+    assert.ok(calls.findIndex((c) => c.fn === "closeSync") < calls.findIndex((c) => c.fn === "linkSync" && c.path === path), "closed before it is linked into place");
+    assert.deepEqual(stagingLeft(), [], "the private name and its directory are removed");
     assert.equal(statSync(path).mode & 0o777, 0o600);
+    assert.equal(statSync(path).nlink, 1, "one name, the database path");
   });
 
-  it("a database file another process creates between the check and the create is checked as an existing one", () => {
+  it("a database file another process or thread creates between the check and the link is checked as an existing one", () => {
     const path = newFile();
     writeFileSync(path, "", { mode: 0o644 });
     chmodSync(path, 0o644);
@@ -165,15 +190,50 @@ describe("attack: file modes", { skip: process.platform === "win32" }, () => {
         assert.throws(() => track(openSqliteDatabase(path)), /readable or writable by others/);
         return seen;
       },
-      (real, file) => {
-        if (file === path && first) {
+      (call) => {
+        if (call.fn === "lstatSync" && call.path === path && first) {
           first = false;
-          throw Object.assign(new Error(`ENOENT: no such file or directory, lstat '${path}'`), { code: "ENOENT" });
+          throw fsError("ENOENT", call);
         }
-        return real(file);
       },
     );
-    assert.deepEqual(calls, { open: [[path, "wx", 0o600]], close: 0 }, "the exclusive create failed, so nothing was opened");
+    assert.deepEqual(descriptorCalls(calls).filter((c) => c.path === path), [], "nothing opened on the database path");
+    assert.ok(calls.some((c) => c.fn === "linkSync" && c.path === path), "the link found the file there (EEXIST)");
+    assert.deepEqual(stagingLeft(), []);
+    assert.equal(statSync(path).mode & 0o777, 0o644, "the other process's file is left as it is");
+  });
+
+  it("a create that fails partway leaves no private directory behind, and throws the failure's own error", () => {
+    for (const [fn, code] of [["openSync", "EACCES"], ["linkSync", "EPERM"], ["mkdtempSync", "EACCES"]] as const) {
+      const path = newFile();
+      spyOnFs(
+        () => assert.throws(() => openSqliteDatabase(path), { code }, fn),
+        (call) => {
+          if (call.fn === fn) throw fsError(code, call);
+        },
+      );
+      assert.deepEqual(stagingLeft(), [], fn);
+      assert.equal(existsSync(path), false, `${fn}: no database file`);
+    }
+  });
+
+  it("a cleanup that fails keeps the error that made it necessary, and fails the open when nothing else did", () => {
+    const failed = newFile();
+    spyOnFs(
+      () => assert.throws(() => openSqliteDatabase(failed), { code: "EPERM" }, "the link's error, not the cleanup's"),
+      (call) => {
+        if (call.fn === "linkSync") throw fsError("EPERM", call);
+        if (call.fn === "rmdirSync") throw fsError("EBUSY", call);
+      },
+    );
+    const path = newFile();
+    spyOnFs(
+      () => assert.throws(() => openSqliteDatabase(path), { code: "EBUSY" }, "a directory left behind is not ignored"),
+      (call) => {
+        if (call.fn === "rmdirSync") throw fsError("EBUSY", call);
+      },
+    );
+    for (const left of stagingLeft()) rmSync(join(dir, left), { recursive: true, force: true });
   });
 
   it("a path in a missing directory, or under a file, fails with the filesystem's error", () => {

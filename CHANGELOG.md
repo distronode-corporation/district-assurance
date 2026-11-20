@@ -384,7 +384,9 @@ All notable changes to this project are documented here. The format follows
     it; `npm run serve` registers `guardLogStream`, so an error on standard output stops logging
     instead of ending the process. An upload that spent its link keeps its outcome until the link
     expires, so a retry gets the same answer (a received page names the document), and a retry
-    while the first upload still runs gets 503 with `Retry-After`. A request whose connection
+    while the first upload still runs gets 503 with `Retry-After`. Kept outcomes are never evicted
+    before they expire: when `uploads.keptMax` (default 10,000) are held, a new upload gets 503
+    with `Retry-After` before it claims its link, and is not scanned. A request whose connection
     closes before its answer is neither answered nor logged later. A client error behind
     pipelined requests waits for their answers. A `tel:` security.txt contact must be `+` and
     digits (with `-`, `.`, `(`, `)`), and a `warn` that throws no longer breaks the route.

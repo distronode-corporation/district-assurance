@@ -2434,8 +2434,10 @@ link's `maxBytes` plus 16 KiB). Answers: 201 received (the page gives the docume
 reference), 400 no file, 410 link not usable, 413 too large, 415 type, 422 scan refused, 503 scan
 failed, each as a page in the same language. An upload can outlast the request deadline after it
 spent its link, so the server keeps the outcome of each upload that spent one (stored, scan
-refused, scan failed) by the token's hash until the link would have expired, at most 10,000 at
-once (expired ones dropped first, then the oldest): a retry with the same link gets that same
+refused, scan failed) by the token's hash until the link would have expired, at most
+`uploads.keptMax` (default 10,000) at once. One is never dropped before it expires: when the
+store is still full after expired ones go, a new upload gets 503 with `Retry-After` (whole
+seconds until the first kept outcome expires) before it claims its link, and is not scanned. A retry with the same link gets that same
 answer, not "link not usable", and a retry while the first upload still runs gets 503 with
 `Retry-After` (the timeout in whole seconds) and is never scanned a second time. Creating the link, texting
 it to the number on file and writing ledger entries for it are not wired into the engine yet.
