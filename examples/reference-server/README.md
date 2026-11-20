@@ -134,7 +134,9 @@ opens on every platform but keeps nothing across a restart: it is for tests only
 
 The file holds subjects and records, so it is kept owner-only:
 
-- A new file is created exclusively, with mode 0600, before SQLite opens it. An existing file, or a `-wal`,
+- A new file is created exclusively, with mode 0600, in a private folder beside it and hard-linked
+  into place before SQLite opens it, so a new database file needs a filesystem with hard links
+  (one without them, such as exFAT, is refused). An existing file, or a `-wal`,
   `-shm` or `-journal` file beside it, that group or others can read or write is refused (chmod 600
   first).
 - A symbolic link, at the path or beside it, is refused: SQLite would use the files beside the
