@@ -360,6 +360,11 @@ All notable changes to this project are documented here. The format follows
   at most `maxReplyBytes` of a reply (`MAX_REPLY_BYTES`, 256 KiB) and never read an error answer's
   body; `RekorAnchor` asks the authority before Rekor, so a refused time-stamp writes nothing to the
   public log.
+- Breaking for hosts, before v1: `refundPayment` requires a `sequence` (the refund's number for the
+  payment, an integer of 1 or more; anything else is `invalid_input` before any write): the
+  refund's key is the payment and that number, saved before the provider is asked, so a retry after
+  a lost answer resumes the same key or gets the saved result back, and refunds once, when the
+  retry reuses the same number.
 - `PaymentLinks.createLink` takes a `PaymentLinkRequest` (mode, connected account, payment methods,
   expiry); `requestPayment` also returns `expiresAt`; receipts' payments carry `mode`.
 - `canonicalJson` refuses a string or property name holding a lone surrogate (RFC 8785, section
@@ -474,9 +479,6 @@ All notable changes to this project are documented here. The format follows
   `callId`, so two calls that share a grant id never lose each other's records or codes. A failed
   `access.code_spent` append is also made when the call ends and on `engine.sweepAccess()`
   (`AccessController.flush`, `AccessCodeStore.spent`).
-- `refundPayment` takes an optional `sequence`: the refund's key is the payment and that number,
-  saved before the provider is asked, so a retry after a lost answer resumes the same key or gets
-  the saved result back, and refunds once.
 - A newer dispute snapshot that changes nothing still moves its time on; a Stripe event whose
   `created` is past what a `Date` holds is malformed, not a throw.
 - `requestPayment` checks a saved step's mode and link life against this engine's adapter, returns

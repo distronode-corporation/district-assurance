@@ -7,7 +7,7 @@ from the repository root. Not hardened for production (ROADMAP.md, M8).
 ```sh
 npm run demo    # owner-command, deposit in each mode and entry, on fake adapters and loopback servers, then exits
 npm run ui      # the same scripted calls in a browser, one step at a time, on 127.0.0.1:8787
-npm run serve   # the server on 127.0.0.1:8787 until stopped, for your own Stripe test events
+npm run serve   # the server on 127.0.0.1:8787 until stopped, for your own Stripe test events (PORT=0: any free port, named in the first line)
 npm run demo:e2e  # the UI with a real Stripe Checkout in test mode (STRIPE_TEST_SECRET_KEY=sk_test_...)
 ```
 
@@ -219,8 +219,9 @@ table does not list, a missing value and a value the host cannot read all map to
 
 `A`, `B` or `C` means the receiving carrier's check of the signature passed; never pass a level
 from a signature that was not checked, or whose check failed. A Twilio Passed value with
-`-Diverted` or `-Passthrough` is `none`: Twilio checked a diverting provider's signature, or one passed through,
-not the original signer's attestation end to end. A level reported without its check
+`-Diverted` is `none`: Twilio checked the diverting provider's signature on the forwarded call,
+not the original signer's. A Passed value with `-Passthrough` is `none` as policy, though Twilio checked
+the originating provider's signature: only the plain Passed values give a level. A level reported without its check
 result, such as `shaken_stir_attestation` in the Voice API's `call.initiated` screening result,
 is not listed here, so it maps to `none`; and a TeXML `ShakenStirAttestation` is never read
 without `ShakenStirValidated`. The Telnyx rows follow Telnyx's SIP header parameters page

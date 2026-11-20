@@ -465,10 +465,13 @@ function textsOf(record: CallRecord): TraceTexts {
  * identical texts to one number). The notice owed is saved in the same write as the change, and
  * `contact.notice_owed` goes to the ledger with it, so a sweep can find a call that never ends.
  */
-export function noteAction(draft: CallDraft, action: ActionClass, subject: { subjectKey: string; phoneOnFile: string }): void {
+export function noteAction(draft: CallDraft, action: ActionClass, subjectOf: () => { subjectKey: string; phoneOnFile: string }): void {
   const texts = textsOf(draft.record);
+  // A contact action owes a notice to its subject, so it needs one (subjectOf throws without);
+  // read before anything changes, so a refusal leaves the call as it was.
+  const subject = action === "contact" ? subjectOf() : null;
   if (!texts.actions.includes(action)) texts.actions.push(action);
-  if (action !== "contact") return;
+  if (subject === null) return;
   if (texts.notices.some((n) => n.subjectKey === subject.subjectKey && n.to === subject.phoneOnFile)) return;
   texts.notices.push({ subjectKey: subject.subjectKey, to: subject.phoneOnFile, sent: false });
   draft.emit("contact.notice_owed", "code", {});

@@ -37,7 +37,7 @@ describe("hostile #116: disputes", () => {
     for (const outcome of bad) await assert.rejects(t.engine.applyDisputeOutcome(outcome as never), rejects("invalid_input"), JSON.stringify(outcome));
     assert.equal((await t.ledger.list()).length, entries, "nothing ledgered");
     // A status that is not won or warning_closed would block refunds: the junk one must not have landed.
-    assert.equal((await t.engine.refundPayment({ callId, paymentId, reason: "requested_by_customer", amountMinor: 100 })).status, "succeeded");
+    assert.equal((await t.engine.refundPayment({ sequence: 1, callId, paymentId, reason: "requested_by_customer", amountMinor: 100 })).status, "succeeded");
   });
 
   it("a dispute for the same payment intent in another workspace stays in its own", async () => {
@@ -55,10 +55,10 @@ describe("hostile #116: refunds", () => {
       const { callId, paymentId } = await paidCall(t);
       const real = t.payments.refund.bind(t.payments);
       t.payments.refund = async () => answer as never;
-      await assert.rejects(t.engine.refundPayment({ callId, paymentId, reason: "requested_by_customer" }), rejects("precondition_failed", /provider/), JSON.stringify(answer));
+      await assert.rejects(t.engine.refundPayment({ sequence: 1, callId, paymentId, reason: "requested_by_customer" }), rejects("precondition_failed", /provider/), JSON.stringify(answer));
       assert.equal((await t.ledger.list()).some((e) => e.event === "payment.refunded"), false);
       t.payments.refund = real;
-      assert.equal((await t.engine.refundPayment({ callId, paymentId, reason: "requested_by_customer" })).status, "succeeded", "resumed with the same key");
+      assert.equal((await t.engine.refundPayment({ sequence: 1, callId, paymentId, reason: "requested_by_customer" })).status, "succeeded", "resumed with the same key");
     }
   });
 
@@ -66,9 +66,9 @@ describe("hostile #116: refunds", () => {
     const t = setup();
     const { callId, paymentId } = await paidCall(t);
     const results = await Promise.allSettled([
-      t.engine.refundPayment({ callId, paymentId, reason: "requested_by_customer", amountMinor: 10000 }),
-      t.engine.refundPayment({ callId, paymentId, reason: "requested_by_customer", amountMinor: 10000 }),
-      t.engine.refundPayment({ callId, paymentId, reason: "requested_by_customer", amountMinor: 9000 }),
+      t.engine.refundPayment({ sequence: 1, callId, paymentId, reason: "requested_by_customer", amountMinor: 10000 }),
+      t.engine.refundPayment({ sequence: 2, callId, paymentId, reason: "requested_by_customer", amountMinor: 10000 }),
+      t.engine.refundPayment({ sequence: 2, callId, paymentId, reason: "requested_by_customer", amountMinor: 9000 }),
     ]);
     const done = results.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
     const sent = t.payments.refunds.reduce((sum: number, r: { amountMinor: number }) => sum + r.amountMinor, 0);

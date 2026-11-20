@@ -96,7 +96,7 @@ export interface DeliveredEvent extends EngineEvent {
 
 /**
  * Told of each event after its ledger entry is appended (INT-5). The ledger is the record; the
- * listener is a notification, at least once and best effort: the same event can come again (after
+ * listener is a notification, best effort and possibly repeated: the same event can come again (after
  * a ledger outage, or from another process's flush), and one is missed if the process stops right
  * after the append. The engine calls it inline and never awaits it, so a listener with slow work
  * returns a promise instead of blocking. A throw or a rejection goes to `onListenerError` and never

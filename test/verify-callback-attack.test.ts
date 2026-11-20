@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 import type { AttemptCounterKey, CallbackDialer } from "../src/core/adapters.ts";
 import type { FlowConfig } from "../src/core/config.ts";
 import { CALLBACKS_PLACED } from "../src/verify/callback.ts";
-import { FakeCallbackDialer, MemoryAttemptCounters, TEST_KNOWLEDGE_KEY, testSubject, type TestEngine, type TestEngineOptions } from "../src/testing/index.ts";
+import { FakeCallbackDialer, MemoryAttemptCounters, generateTestSigner, TEST_KNOWLEDGE_KEY, testSubject, type TestEngine, type TestEngineOptions } from "../src/testing/index.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, setup, testConfig } from "./helpers.ts";
 
@@ -283,6 +283,19 @@ describe("zz attack: fixes held", () => {
     const t = world({ adapters: { signer: { keyId: "k", algorithm: "ES256", publicJwk: () => ({}), sign: async () => { throw new Error("kms down"); } } } });
     const first = await firstCall(t);
     await assert.rejects(t.engine.requestCallback(first), /kms down/);
+  });
+
+  it("issues the ended call's owed receipt before a retried request dials the callback", async () => {
+    const real = generateTestSigner();
+    let down = true;
+    const t = world({ adapters: { signer: { ...real, sign: (bytes) => (down ? Promise.reject(new Error("kms down")) : real.sign(bytes)) } } });
+    const first = await firstCall(t);
+    await assert.rejects(t.engine.requestCallback(first), /kms down/);
+    assert.equal(await t.engine.receipt(first), null, "ended, with its receipt still owed");
+    down = false;
+    await t.engine.requestCallback(first);
+    assert.equal(t.dialer.dialed.length, 1, "the retry dials");
+    assert.notEqual(await t.engine.receipt(first), null, "and the original call has its receipt");
   });
 });
 

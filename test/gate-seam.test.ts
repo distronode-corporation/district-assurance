@@ -246,7 +246,11 @@ describe("seamAccessController", () => {
       assert.equal(unlocks(target), 1, target);
     }
     const asked = polls("aa-stuck");
-    assert.ok(asked >= 1 && asked <= 10, `asked within the confirmation window, then stopped (${asked})`);
+    // Real timers (settle paces with setTimeout against performance.now, which mock timers do not
+    // drive), so the count is bounded, not exact. Fence post: a poll after each pause, at 10, 20, ...,
+    // 100 ms, and one more when the last pause is cut to a sliver of the window: ceil(100 / 10) + 1.
+    const maxPolls = Math.ceil(100 / 10) + 1;
+    assert.ok(asked >= 1 && asked <= maxPolls, `asked within the confirmation window, then stopped (${asked})`);
     // The whole wait is held to confirmWithinMs of elapsed time, however slow Seam answers.
     const started = performance.now();
     assert.deepEqual(await seam({ timeoutMs: 5000, confirmWithinMs: 100 }).unlock(input("dev-poll-slow")), { outcome: "delivered", providerRef: "aa-poll-slow", confirmed: false });
