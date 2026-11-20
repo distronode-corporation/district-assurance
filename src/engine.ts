@@ -1858,7 +1858,8 @@ export class Engine {
    * (`precondition_failed`) while the call has not ended, and while its outbox holds ledger entries
    * not yet appended: it flushes them first, and a ledger that still refuses them keeps the record
    * (and `flushPending` keeps listing it), so no pending entry, a `consent.recorded` among them, is
-   * lost with the record. Removes only the version it checked: a write that lands first is read
+   * lost with the record. Refused too while the call owes a notification, a confirmed mark or its
+   * receipt (a signing that failed after the call ended: endCall completes it). Removes only the version it checked: a write that lands first is read
    * again, up to three times (`conflict` after that). A host removes call records only through
    * this, never in its store directly. Needs a session store with `remove`.
    */
@@ -1887,6 +1888,10 @@ export class Engine {
         await this.flushLedger(callId).catch(() => undefined);
         flushed = true;
         continue;
+      }
+      // A receipt whose signing failed after the call ended is completed by endCall, which needs the record.
+      if (trace.wantsReceipt(this.#rt, record) && trace.receiptOf(record) === null) {
+        throw new EngineError("precondition_failed", "the call still owes its receipt; endCall signs it, then remove the record");
       }
       if (await this.#sessions.remove(this.workspaceId, callId, stored.version)) return { removed: true };
     }

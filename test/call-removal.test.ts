@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 import type { AuditInput } from "../src/core/adapters.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { MemoryAuditLedger } from "../src/prove/ledger.ts";
-import { sessionStoreContract, type TestEngine } from "../src/testing/index.ts";
+import { generateTestSigner, sessionStoreContract, type TestEngine } from "../src/testing/index.ts";
 import { rejects, setup, verifiedCall } from "./helpers.ts";
 
 class SwitchedLedger extends MemoryAuditLedger {
@@ -59,9 +59,13 @@ describe("removeCall", () => {
     assert.deepEqual(await t.engine.flushPending(), { flushed: [], failed: [callId] });
     assert.deepEqual(await sessions.pendingCalls("ws_test", 10), [callId], "still listed");
     ledger.down = false;
-    // The removal flushes first: the pending entries land, then the record goes.
-    assert.deepEqual(await t.engine.removeCall(callId), { removed: true });
+    // The removal flushes first: the pending entries land. The receipt the failed endCall could not
+    // sign is still owed, so the record stays until endCall signs it; then the record goes.
+    await assert.rejects(t.engine.removeCall(callId), rejects("precondition_failed", /receipt/));
     assert.ok((await ledger.list()).some((e) => e.event === "consent.recorded" && e.callId === callId), "the consent is on the ledger");
+    assert.notEqual(await sessions.get("ws_test", callId), null, "the record stays for its receipt");
+    await t.engine.endCall(callId);
+    assert.deepEqual(await t.engine.removeCall(callId), { removed: true });
     assert.equal(await sessions.get("ws_test", callId), null);
     assert.deepEqual(await sessions.pendingCalls("ws_test", 10), [], "no longer listed");
   });
@@ -93,6 +97,21 @@ describe("removeCall", () => {
     sessions.lose = 3;
     await assert.rejects(t.engine.removeCall(other), rejects("conflict"));
     assert.notEqual(await sessions.get("ws_test", other), null);
+  });
+
+  it("keeps an ended call that still owes its receipt, and removes it once endCall signs it (CodeRabbit #139)", async () => {
+    const real = generateTestSigner();
+    let down = true;
+    const t = setup({ adapters: { signer: { ...real, sign: (bytes) => (down ? Promise.reject(new Error("kms down")) : real.sign(bytes)) } } });
+    const callId = await verifiedCall(t);
+    await assert.rejects(t.engine.endCall(callId), /kms down/);
+    assert.equal(await t.engine.receipt(callId), null, "ended, with its receipt still owed");
+    await assert.rejects(t.engine.removeCall(callId), rejects("precondition_failed", /receipt/));
+    assert.notEqual(await t.sessions.get("ws_test", callId), null, "the record stays");
+    down = false;
+    await t.engine.endCall(callId);
+    assert.notEqual(await t.engine.receipt(callId), null);
+    assert.deepEqual(await t.engine.removeCall(callId), { removed: true });
   });
 
   it("needs a session store that can remove", async () => {

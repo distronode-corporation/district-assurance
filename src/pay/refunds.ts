@@ -355,7 +355,8 @@ export async function applyRefundOutcome(rt: EngineRuntime, outcome: RefundOutco
   }
   if (paymentIntentId === null) return { applied: false };
   const callId = await rt.resolveRef(paymentIntentRef(paymentIntentId));
-  if (callId === null) return { applied: false, unbound: true };
+  // A connected account's update is never the platform's to wait for: acknowledged, not retried.
+  if (callId === null) return account === undefined ? { applied: false, unbound: true } : { applied: false };
   return rt.update(callId, (draft) => {
     const slice = draft.slice<PaylinkSlice>(PAYLINK);
     const payment = slice.payments.find((p) => p.paymentIntentId === paymentIntentId)!;

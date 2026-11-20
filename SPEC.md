@@ -1088,7 +1088,8 @@ in its session store directly: the store's optional `remove(workspaceId, callId,
 removes only the version the engine checked, with its pending mark, and keeps the id so it is never
 created again (`startCall` refuses it): its ledger event ids are spent. `removeCall` is refused
 (`precondition_failed`) for a call that has not ended, for one that still owes a duress alert or a
-contact notice (`sweepAlerts` sends it), for one with a filed record whose confirmed mark it could
+contact notice (`sweepAlerts` sends it), for one that still owes its receipt (a signing that failed
+after the call ended; `endCall` signs it), for one with a filed record whose confirmed mark it could
 not make (the call keeps the marks it owes in `marksOwed` until the record store has them), and for
 one whose outbox still holds entries after it tried to flush them (the ledger refused them): the record is kept, and `flushPending` keeps
 listing it, until they are appended, so no pending entry (a `consent.recorded` written while the
@@ -1841,7 +1842,8 @@ intent, a refund the engine did not make (made by hand at the provider), or one 
 currency differs from what the engine asked, and `{applied: false, unbound: true}` while the payment
 intent is not bound or the engine's own answer for a refund of that payment is still on its way, so
 the host has the event delivered again. A connected account's event is ignored and written down
-(`payment.outcome_ignored`). Works after the call ended; the receipt is never changed.
+(`payment.outcome_ignored`); one whose payment intent is not bound is acknowledged with
+`{applied: false}`, never asked for again. Works after the call ended; the receipt is never changed.
 
 A platform payment paid late (after the engine closed its link) keeps its payment intent too, so
 its disputes and refunds land like any other's.

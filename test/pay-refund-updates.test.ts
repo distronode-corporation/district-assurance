@@ -125,6 +125,8 @@ describe("refund updates: a pending refund's later outcome", () => {
   it("asks for the event again while the payment is not bound, or while the engine's own refund answer is still on its way", async () => {
     const t = setup();
     assert.deepEqual(await t.engine.applyRefundOutcome(update({ paymentIntentId: "pi_unknown" })), { applied: false, unbound: true });
+    // A connected account's update is never the platform's to wait for: acknowledged, not retried (CodeRabbit #139).
+    assert.deepEqual(await t.engine.applyRefundOutcome(update({ paymentIntentId: "pi_unknown", account: "acct_1" })), { applied: false });
     const callId = await paidCall(t);
     const refund = t.payments.refund.bind(t.payments);
     t.payments.refund = async (input) => {

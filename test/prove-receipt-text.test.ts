@@ -278,6 +278,9 @@ describe("removeCall and an owed contact notice (CodeRabbit, local review)", () 
     await assert.rejects(t.engine.removeCall(callId), rejects("precondition_failed", /still owes a notification/));
     down = false;
     assert.deepEqual((await t.engine.sweepAlerts()).failed, []);
+    // The endCall that failed on the notice left the receipt owed too (CodeRabbit #139): it is signed first.
+    await assert.rejects(t.engine.removeCall(callId), rejects("precondition_failed", /owes its receipt/));
+    await t.engine.endCall(callId);
     assert.deepEqual(await t.engine.removeCall(callId), { removed: true });
   });
 });
