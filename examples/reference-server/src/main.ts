@@ -2,7 +2,8 @@
 // Stripe test-mode account (for example `stripe listen --forward-to localhost:8787/webhooks/stripe/identity`).
 //
 // Environment:
-//   PORT                              default 8787, bound to 127.0.0.1
+//   PORT                              default 8787, bound to 127.0.0.1 (0: any free port, named in
+//                                     the first line)
 //   STRIPE_IDENTITY_KEY               a restricted test-mode key (rk_test_...) that can write Identity
 //                                     VerificationSessions; turns on Stripe Identity and the trial call
 //   STRIPE_IDENTITY_WEBHOOK_SECRET    the signing secret of your Identity webhook endpoint
@@ -20,6 +21,7 @@
 // JSON line (route pattern, status, time; never a path, header or body). Everything else runs on fake adapters until its Stripe adapter is built (PAY-1).
 import { realpathSync } from "node:fs";
 import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 
 import { systemClock, type Clock, type MessagePurpose, type MessageSender } from "../../../src/index.ts";
@@ -143,7 +145,7 @@ if (isProgram(process.argv[1], import.meta.url)) {
   const port = Number(process.env.PORT ?? 8787);
   const { server, startTrialCall } = createServe({ env: process.env });
   server.listen(port, "127.0.0.1", () => {
-    console.log(`reference server on http://127.0.0.1:${port} (pre-alpha, fake adapters${startTrialCall === null ? "" : " but Stripe Identity"})`);
+    console.log(`reference server on http://127.0.0.1:${(server.address() as AddressInfo).port} (pre-alpha, fake adapters${startTrialCall === null ? "" : " but Stripe Identity"})`);
     startTrialCall?.().then(
       ({ callId, sessionId }) => console.log(`trial call ${callId}: Stripe Identity check ${sessionId} created, waiting for its webhook`),
       (error: unknown) => console.error(`trial call failed: ${error instanceof Error ? error.message : "unknown error"}`),

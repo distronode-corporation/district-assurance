@@ -1275,8 +1275,8 @@ to the head, in reads of at most `EXPORT_WALK_PAGE` (1,000) entries, and verifie
 export reads the ledger from the run to the head, and a run that reaches the head reads only
 itself. A walk that fails is refused with `precondition_failed`, before anything is yielded. The run is complete when `through` equals `head`; otherwise
 the next run takes `cursor`. Refused with `invalid_input`: neither or both of `fromSeq` and
-`cursor`, a `fromSeq` or `limit` that is not an integer of 1 or more, a `fromSeq` past the head, an
-empty `ledgerId`, a cursor that is malformed or past the head. Refused with `precondition_failed`,
+`cursor`, a `fromSeq` or `limit` that is not an integer of 1 or more, a `fromSeq` past the head plus
+one (on an empty ledger, more than 1), an empty `ledgerId`, a cursor that is malformed or past the head. Refused with `precondition_failed`,
 before anything is yielded: a head the ledger does not hold, a cursor whose entry the ledger no
 longer holds with that hash, a missing entry before `fromSeq`, and a run that fails `verifyChain`
 from its start. `ledgerId` is the host's name for the ledger, for example the workspace id.
