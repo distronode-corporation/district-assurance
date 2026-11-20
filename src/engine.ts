@@ -885,7 +885,11 @@ export class Engine {
         await this.endCall(callId);
       } catch (e) {
         // Two requests at once both reach here: the one that ended the call second is not an error.
-        if (!(e instanceof EngineError && e.code === "invalid_transition" && (await this.#read(callId)).state.phase === "ended")) throw e;
+        const won = e instanceof EngineError && e.code === "invalid_transition" ? await this.#read(callId) : null;
+        if (won === null || won.state.phase !== "ended") throw e;
+        // The request that ended it may still be signing its receipt, and may fail to: the receipt
+        // is completed here too (the first one stored is the call's), so the callback never dials first.
+        if (trace.wantsReceipt(this.#rt, won) && trace.receiptOf(won) === null) await this.endCall(callId);
       }
     }
     if (plan === null) return;
