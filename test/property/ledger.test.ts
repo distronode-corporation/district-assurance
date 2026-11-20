@@ -149,7 +149,7 @@ describe("property: the ledger's hash chain", () => {
         for (const { expected, input, outcome } of results) {
           if (expected.kind === "refused") {
             if (expected.because === "card") assert.ok(outcome instanceof EngineError && outcome.code === "invalid_input", "a detail with a card number is refused");
-            else assert.ok(outcome instanceof TypeError && /^canonicalJson: lone surrogate/.test(outcome.message), "a lone surrogate is refused, never stored");
+            else assert.ok(outcome instanceof TypeError && outcome.message.startsWith("canonicalJson: lone surrogate"), "a lone surrogate is refused, never stored");
             continue;
           }
           assert.ok(!(outcome instanceof Error), String(outcome));
