@@ -8,7 +8,7 @@ import { ConfigError, validateConfig, type FlowConfig } from "../src/core/config
 import type { AssuranceModule } from "../src/core/module.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { TEST_KNOWLEDGE_KEY } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig } from "./helpers.ts";
+import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const pay = { type: "paylink.request", amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" } as const;
@@ -152,6 +152,7 @@ describe("flows", () => {
         await assert.rejects(t.engine.requestPayment(callId), rejects("precondition_failed"));
         assert.equal(t.messages.sent.length, 0, "no link was texted");
       } else {
+        await confirmAmount(t.engine, callId);
         assert.equal((await t.engine.requestPayment(callId)).status, "open");
       }
     }
@@ -184,6 +185,7 @@ describe("flows", () => {
     await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
     assert.equal((await t.engine.flowPosition(callId))!.step!.type, "paylink.request");
     await assert.rejects(t.engine.requestPayment(callId, { amountMinor: 1, currency: "cad", description: "x", amountSource: "price_list" }), rejects("invalid_input", /flow step sets the amount/));
+    await confirmAmount(t.engine, callId);
     await t.engine.requestPayment(callId);
     assert.equal(t.payments.created[0]!.amountMinor, 15000);
     assert.equal((await t.engine.flowPosition(callId))!.step!.type, "paylink.request", "waits for the payment to settle");
@@ -193,7 +195,7 @@ describe("flows", () => {
     const done = await t.engine.flowPosition(callId);
     assert.deepEqual([done!.status, done!.index], ["completed", 5]);
     const receipt = await t.engine.endCall(callId);
-    assert.deepEqual(receipt!.body.verification, { level: 2, methods: ["carrier_identity_match", "keypad_knowledge"] });
+    assert.deepEqual(receipt!.body.verification, { level: 2, methods: ["carrier_identity_match", "keypad_knowledge"], policyVersion: "default-1", configRevision: "default" });
     assert.equal(receipt!.body.records.length, 1);
   });
 
@@ -219,6 +221,7 @@ describe("flows", () => {
     await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
     await assert.rejects(t.engine.recordConsent(callId, { purpose: "calls", answer: "yes" }), rejects("precondition_failed", /consent to texts/));
     await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await confirmAmount(t.engine, callId);
     await t.engine.requestPayment(callId);
     await t.engine.applyPaymentOutcome({ kind: "expired", linkId: "cs_fake_1" });
     assert.equal((await t.engine.flowPosition(callId))!.status, "failed");
@@ -257,6 +260,32 @@ describe("flows", () => {
     t.engine.configure(testConfig((c) => (c.modules.dossier = { settings: { forms: [{ formId: "repair", version: "2", fields: [{ key: "other", label: { en: "O", fr: "O" }, type: "text", required: true }] }] } })));
     const record = await t.engine.confirmIntake(callId, { confirmedBy: "voice" });
     assert.deepEqual([record.formVersion, record.values], ["1", { issue: "leak" }]);
+  });
+
+  it("refuses a confirmedBy other than voice or keypad before anything is written", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const before = (await t.sessions.get("ws_test", callId))!.version;
+    const entries = (await t.ledger.list()).length;
+    // What a host bug could pass through: a channel name, the caller's number, a name and a date of birth.
+    const hostile: unknown[] = ["sms", "", "Voice", " voice", 1, null, { toString: () => "voice" }, ["voice"], "\ud800", "a".repeat(10_000), PHONE_ON_FILE, `Jane Doe ${DOB}`];
+    for (const confirmedBy of hostile) {
+      await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy } as never), rejects("invalid_input", /confirmedBy/), String(confirmedBy));
+    }
+    await assert.rejects(t.engine.confirmIntake(callId, null as never), rejects("invalid_input"));
+    await assert.rejects(t.engine.confirmIntake(callId, undefined as never), rejects("invalid_input"));
+    assert.equal((await t.sessions.get("ws_test", callId))!.version, before, "no write");
+    assert.equal((await t.ledger.list()).length, entries, "no ledger entry");
+    // The call record holds the number on file (Badge's subject); the ledger never does.
+    const ledgerText = JSON.stringify(await t.ledger.list());
+    for (const value of [PHONE_ON_FILE, "Jane Doe", "sms"]) assert.equal(ledgerText.includes(value), false, value);
+    assert.equal(JSON.stringify((await t.sessions.get("ws_test", callId))!.record).includes("Jane Doe"), false);
+    assert.equal((await t.engine.confirmIntake(callId, { confirmedBy: "keypad" })).confirmedBy, "keypad");
   });
 
   it("completes a receipt step at once, and abandons a running flow when the call ends", async () => {
@@ -455,7 +484,8 @@ describe("outside modules", () => {
   it("refuses an outside module's entry that carries a card number, before anything is saved", async () => {
     const t = setup({ config: flowConfig(), modules: [loyaltyModule()] });
     t.engine.configure(flowConfig((c) => (c.modules.loyalty = {})));
-    const { callId } = await t.engine.startCall();
+    const callId = await verifiedCall(t);
+    const before = (await t.ledger.list()).length;
     await assert.rejects(
       t.engine.updateModule(callId, "loyalty", (slice, call) => {
         call.emit("note", { text: "card 4242 4242 4242 4242" });
@@ -463,7 +493,7 @@ describe("outside modules", () => {
       }),
       rejects("invalid_input", /card number/),
     );
-    assert.deepEqual((await t.ledger.list()).map((e) => e.event), ["call.started"]);
+    assert.equal((await t.ledger.list()).length, before, "nothing was saved");
   });
 
   it("fails a flow on the module's failed step, and guards the built-in and switched-off modules", async () => {

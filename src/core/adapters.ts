@@ -5,7 +5,7 @@ import type { JsonWebKey } from "node:crypto";
 
 import type { JsonValue } from "./canonical.ts";
 import type { Actor, EngineEventName } from "./events.ts";
-import type { CarrierSignalReport } from "./policy.ts";
+import type { AssuranceLevel, CarrierSignalReport } from "./policy.ts";
 
 /** Photo ID plus selfie by a link the caller opens on their phone (for example Stripe Identity). */
 export interface IdentityProvider {
@@ -24,25 +24,132 @@ export interface CarrierSignals {
 
 export type MessagePurpose = "identity_link" | "payment_link" | "one_time_code" | "reference";
 
-/** Texts sent by code. The destination is always the number on file, resolved by the engine. */
+/**
+ * Texts sent by code. The destination is always the number on file, resolved by the engine.
+ * `sendText` must settle (sent or failed) within 60 seconds: Paylink holds a payment link against a
+ * concurrent expiry for that long while it is being texted (its send lease).
+ */
 export interface MessageSender {
   sendText(input: { to: string; body: string; purpose: MessagePurpose; idempotencyKey: string }): Promise<{
     messageId: string;
   }>;
 }
 
-/** Hosted payment pages (for example Stripe Checkout on the business's own account). */
+/**
+ * Whose account takes the money. `connect`: the business's own account at the provider (for
+ * example a Stripe direct charge on a connected account); the business is the merchant.
+ * `platform`: the platform's own account; the platform is the merchant.
+ */
+export type PaymentMode = "connect" | "platform";
+
+/** Payment methods that settle while the caller is still on the call. Nothing else may be offered. */
+export type InstantPaymentMethod = "card" | "apple_pay" | "google_pay" | "link";
+
+export interface PaymentLinkRequest {
+  callId: string;
+  paymentId: string;
+  /** Integer, in the currency's minor unit (cents). */
+  amountMinor: number;
+  /** ISO 4217, lower case. */
+  currency: string;
+  description: string;
+  mode: PaymentMode;
+  /** The business's account at the provider. Present exactly when `mode` is `connect`. */
+  connectedAccountId?: string;
+  /** What the page may offer: only methods that settle at once. How a provider names them is the adapter's. */
+  paymentMethods: readonly InstantPaymentMethod[];
+  /**
+   * The latest the link may live (ISO 8601): twice the flow's link life from the request, kept
+   * within the adapter's declared `minLinkMinutes` and `maxLinkMinutes`, so a text sent late still
+   * gets its full life and the provider never refuses the time. The engine closes the link earlier,
+   * at its own deadline (the text plus the link life), by calling `expireLink`.
+   */
+  expiresAt: string;
+  idempotencyKey: string;
+}
+
+/**
+ * What a payment link adapter can do, declared by the adapter and checked when a config is saved.
+ * Stripe Checkout: both modes, and `expires_at` from 30 minutes to 24 hours after creation.
+ */
+export interface PaymentLinkCapabilities {
+  modes: readonly PaymentMode[];
+  /** The shortest link life the provider allows, in minutes. The engine expires links sooner itself. */
+  minLinkMinutes: number;
+  /** The longest link life the provider allows, in minutes. */
+  maxLinkMinutes: number;
+}
+
+/** What a texted code's send is counted against: one subject (its subject key) or one calling number (a keyed hash). */
+export interface CodeSendKey {
+  scope: "subject" | "number";
+  /** The subject key, or the keyed hash of the calling number. 64 lower-case hex characters, never a number. */
+  key: string;
+}
+
+/**
+ * The send limits for texted codes, across calls: every engine of a workspace shares one, as they
+ * share the SessionStore. It holds only when codes were sent, per subject and per calling number,
+ * never a code. `MemoryCodeStore` in `district-assurance/testing` is the reference. A stand-in
+ * copy of VER-2's interface (#79) for one-time access codes, until VER-2 lands with its contract
+ * suite.
+ */
+export interface CodeStore {
+  /**
+   * Counts one send against the key, atomically, only if the key had fewer than `max` sends in the
+   * `windowSeconds` up to `at` and none in the `minIntervalSeconds` up to `at`. True when it
+   * counted; false, and nothing counted, otherwise. Two concurrent calls never both count past a limit.
+   */
+  take(input: { workspaceId: string; key: CodeSendKey; at: string; max: number; windowSeconds: number; minIntervalSeconds: number }): Promise<boolean>;
+}
+
+/** Which link to close, on whose account. `connectedAccountId` is present exactly in connect mode. */
+export interface PaymentLinkClose {
+  linkId: string;
+  mode: PaymentMode;
+  connectedAccountId?: string;
+  idempotencyKey: string;
+}
+
+/** Hosted payment pages (for example Stripe Checkout, on the business's account or the platform's). */
 export interface PaymentLinks {
-  createLink(input: {
-    callId: string;
-    paymentId: string;
-    /** Integer, in the currency's minor unit (cents). */
-    amountMinor: number;
-    /** ISO 4217, lower case. */
-    currency: string;
-    description: string;
-    idempotencyKey: string;
-  }): Promise<{ linkId: string; url: string }>;
+  readonly capabilities: PaymentLinkCapabilities;
+  createLink(input: PaymentLinkRequest): Promise<{ linkId: string; url: string }>;
+  /**
+   * Expires an open link now (its deadline came, or the call ended). `expired` when it was open
+   * and is closed; `not_open` when the provider says it already completed or expired.
+   */
+  expireLink(input: PaymentLinkClose): Promise<{ state: "expired" | "not_open" }>;
+  /**
+   * Cancels an open link because the caller changed their mind, with the same answers as
+   * `expireLink`. Optional: without it the engine cancels with `expireLink` (Stripe Checkout has
+   * one call for both). A provider that keeps a cancelled link apart from an expired one has it.
+   */
+  cancel?(input: PaymentLinkClose): Promise<{ state: "expired" | "not_open" }>;
+  /**
+   * Refunds a paid platform payment on the platform's own account, in full or in part. Optional:
+   * no flow step needs it, so a config is valid without it, and `refundPayment` is refused at run
+   * time when it is absent; connect payments are refunded by the business on its own account,
+   * never here.
+   * A refund the provider refuses answers `failed`; only an answer that was lost (a timeout, a
+   * dropped connection) may throw, since the engine keeps a refund that threw in flight and resumes
+   * it, with the same key, until it gets an answer.
+   */
+  refund?(input: PaymentRefundRequest): Promise<{ refundId: string; status: "pending" | "succeeded" | "failed" }>;
+}
+
+export interface PaymentRefundRequest {
+  /** The hosted page the payment was taken on (for example a Checkout Session id). */
+  linkId: string;
+  /** The provider's payment intent, when the outcome named it. */
+  paymentIntentId?: string;
+  mode: "platform";
+  /** Integer, in the currency's minor unit; never more than is left of the payment. */
+  amountMinor: number;
+  currency: string;
+  reason: "requested_by_customer" | "duplicate" | "fraudulent";
+  /** One per refund: a resumed refund replays the first answer. */
+  idempotencyKey: string;
 }
 
 /** The person on record, as the engine sees them: keyed digests, never the values. */
@@ -55,6 +162,30 @@ export interface SubjectRecord {
   knowledge: Record<string, string>;
   /** The HMAC of the subject's PIN (`pinDigest`), for the PIN factor in `keyed_hash` mode. */
   pinDigest?: string;
+}
+
+/** What the engine asks an `AmountSource` for: the reference a step or the host's code named, and whose call it is. */
+export interface AmountLookup {
+  workspaceId: string;
+  callId: string;
+  /** Where the amount comes from: `intake_record`, `business_endpoint` or `price_list`. */
+  source: string;
+  /** The reference the `paylink.request` step (or the host's code) names, for example a price list entry. */
+  reference: string;
+  /** The subject Badge matched on this call (a keyed hash, never an account number). */
+  subjectKey: string;
+  /** The records filed on this call so far, oldest first. */
+  recordIds: readonly string[];
+}
+
+/**
+ * Resolves a payment amount from a reference: a record, the business's endpoint or a price list
+ * (PAY-2). Code asks it, never the model; the engine checks the answer like any other amount and
+ * reads it back to the caller before a link is sent.
+ */
+export interface AmountSource {
+  /** The amount in minor units and its currency, or null when the reference names none. */
+  resolve(input: AmountLookup): Promise<{ amountMinor: number; currency: string } | null>;
 }
 
 /**
@@ -150,4 +281,65 @@ export interface ReceiptSigner {
   sign(payload: Uint8Array): Promise<Uint8Array>;
   /** The public key, for publishing in a key set. */
   publicJwk(): JsonWebKey;
+}
+
+/** An access grant's signed body (Gate): what a door's relay checks. SPEC.md, section 17. */
+export interface AccessGrantBody {
+  v: 1;
+  kind: "access";
+  /** Unique per grant. A relay refuses an id it has seen until the grant expires. */
+  grantId: string;
+  /** The workspace that issued it. A relay checks it is its own. */
+  workspaceId: string;
+  /** The controller it is for: its name in the engine's `access` adapters. A relay checks it is its own. */
+  audience: string;
+  /** The door, lock or access point, as the controller names it. Set in config, never by the model. */
+  target: string;
+  action: "unlock";
+  /** The scope the call's verification grant covered. */
+  scope: string;
+  /** The level the caller was verified to. */
+  level: AssuranceLevel;
+  /** ISO 8601. */
+  issuedAt: string;
+  /** ISO 8601. Never later than the call's verification grant. */
+  expiresAt: string;
+}
+
+/** ES256 over the body's canonical JSON, the receipts' format. */
+export interface SignedAccessGrant {
+  body: AccessGrantBody;
+  alg: "ES256";
+  kid: string;
+  /** base64url of the 64-byte P1363 signature. */
+  signature: string;
+}
+
+/** What a door controller answered. A lost answer is a thrown error, never a value. */
+export type UnlockResult =
+  /** The controller took the request. `confirmed` only when it reports that the door actually moved. */
+  | { outcome: "delivered"; providerRef: string; confirmed: boolean }
+  /** The controller certainly did not act (it refused the grant, the door is offline). */
+  | { outcome: "refused"; reason: string };
+
+/**
+ * A door controller, lock or access system (Gate). The engine calls `unlock` once per grant and
+ * never retries: if the call throws or times out, the engine records "unknown", and opening again
+ * needs a fresh request (a new grant). An adapter must not retry on its own either.
+ */
+export interface AccessController {
+  unlock(input: { grant: SignedAccessGrant; target: string; idempotencyKey: string }): Promise<UnlockResult>;
+  /**
+   * Optional: withdraws a grant sent earlier that the door has not acted on yet (a code not yet
+   * redeemed, a credential not yet used). The engine asks once, when a call is tainted while one
+   * of its grants may still be acted on (SPEC.md, section 17). A door that already opened cannot
+   * be closed again by this: what was delivered and used stays done. A throw is recorded as failed.
+   */
+  revoke?(input: { grant: AccessGrantBody; target: string; callId: string; idempotencyKey: string }): Promise<void>;
+  /**
+   * Optional: writes what the controller still owes the ledger (access codes: a spent code's
+   * `access.code_spent` entry whose append failed). The engine calls it when a call ends (with its
+   * id) and from `sweepAccess` (the whole workspace), and never lets its failure stop either.
+   */
+  flush?(input: { workspaceId: string; callId?: string }): Promise<void>;
 }

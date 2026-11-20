@@ -2,6 +2,7 @@
 // step names a form by id and a host's config is checked before any call uses it.
 import type { IntakeRecord } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
+import { hasLoneSurrogate } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
@@ -142,6 +143,8 @@ export async function setIntakeField(rt: EngineRuntime, callId: string, key: str
     const intake = openIntake(draft.slice<DossierSlice>(DOSSIER));
     const field = intake.form.fields.find((f) => f.key === key);
     if (field === undefined) throw new EngineError("invalid_input", `the form has no field ${key}`);
+    // Speech-to-text and model text can carry a lone surrogate, which a record's digest cannot hash.
+    if (typeof raw !== "string" || hasLoneSurrogate(raw)) throw new EngineError("invalid_input", "the value must be text the record can carry (no lone surrogate)");
     const result = normaliseFieldValue(field, raw);
     if (result.ok) intake.values[key] = result.value;
     return result;
@@ -155,6 +158,11 @@ export async function setIntakeField(rt: EngineRuntime, callId: string, key: str
  */
 export async function confirmIntake(rt: EngineRuntime, callId: string, input: { confirmedBy: "voice" | "keypad" }): Promise<IntakeRecord> {
   rt.settings(DOSSIER);
+  // The host's value goes into the record and the ledger as it is: refused before anything is written.
+  // Read once: the checked value is the one filed, so a getter or a host changing the object while
+  // the update waits cannot swap it.
+  const confirmedBy: unknown = (input as { confirmedBy?: unknown } | null | undefined)?.confirmedBy;
+  if (confirmedBy !== "voice" && confirmedBy !== "keypad") throw new EngineError("invalid_input", "confirmedBy must be voice or keypad");
   const reserved = await rt.update(callId, (draft): { record: IntakeRecord; filed: boolean } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     const intake = s.intake;
@@ -174,7 +182,7 @@ export async function confirmIntake(rt: EngineRuntime, callId: string, input: { 
       formVersion: intake.form.version,
       values: structuredClone(intake.values),
       digest: intakeDigest(intake.form, intake.values),
-      confirmedBy: input.confirmedBy,
+      confirmedBy,
       confirmedAt: rt.now(),
     };
     intake.filing = built;

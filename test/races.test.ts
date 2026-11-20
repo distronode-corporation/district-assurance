@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import type { AuditInput } from "../src/core/adapters.ts";
 import { MemoryAuditLedger } from "../src/prove/ledger.ts";
 import { generateTestSigner } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
+import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
 class FlakyLedger extends MemoryAuditLedger {
   failures = 0;
@@ -104,9 +104,15 @@ describe("overlapping retries", () => {
     t.messages.sendText = async () => {
       throw new Error("carrier down");
     };
+    await confirmAmount(t.engine, callId, request);
     await assert.rejects(t.engine.requestPayment(callId, request), /carrier down/);
     t.messages.sendText = send;
-    await Promise.all([t.engine.requestPayment(callId, request), t.engine.requestPayment(callId, request)]);
+    // One resume takes the text; the other finds its lease live and is refused, never sending a
+    // second text over it (L1 review, T10).
+    const [a, b] = await Promise.allSettled([t.engine.requestPayment(callId, request), t.engine.requestPayment(callId, request)]);
+    assert.equal(a.status, "fulfilled");
+    assert.ok(b.status === "rejected" && rejects("precondition_failed", /another process is texting/)(b.reason));
+    assert.equal(t.messages.sent.filter((m) => m.purpose === "payment_link").length, 1, "texted once");
     assert.equal((await t.ledger.list()).filter((e) => e.event === "payment.link_sent").length, 1);
   });
 
@@ -188,6 +194,7 @@ describe("overlapping retries", () => {
       await t.engine.submitKeypad(callId, { dob: DOB });
       await t.engine.checkCarrier(callId);
       await t.engine.finishVerification(callId);
+      await confirmAmount(t.engine, callId, { amountMinor: t === a ? 100 : 200, currency: "cad", description: "x", amountSource: "price_list" });
       await t.engine.requestPayment(callId, { amountMinor: t === a ? 100 : 200, currency: "cad", description: "x", amountSource: "price_list" });
     }
     assert.deepEqual(a.payments.created.map((p) => p.amountMinor), [100, 200], "two links, one per workspace");

@@ -8,10 +8,10 @@
 // read when another process wrote first, so several processes can run one call. Every step writes
 // to the ledger, every refusal is an EngineError with a stable code, and every planned step
 // throws NotImplementedError. SPEC.md describes the flow.
-import type { JsonWebKey } from "node:crypto";
+import { createPublicKey, type JsonWebKey } from "node:crypto";
 
-import type { IntakeRecord, SessionStore } from "./core/adapters.ts";
-import type { JsonValue } from "./core/canonical.ts";
+import type { AccessController, IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
+import { canonicalJson, hasLoneSurrogate, type JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
 import { EngineError, NotImplementedError } from "./core/errors.ts";
@@ -21,14 +21,18 @@ import { hmacSha256Hex } from "./core/hash.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
 import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
-import type { AdapterName, CallDraft, CallRecord, EngineAdapters, EngineRuntime, FlowStatus, Locale } from "./core/runtime.ts";
+import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
 import { canApply, newSession, reduce, snapshot, type SensitiveReason, type SessionState } from "./core/session.ts";
 import * as dossier from "./file/dossier.ts";
+import * as gate from "./gate/gate.ts";
+import * as stepUp from "./gate/step-up.ts";
 import type { NormaliseResult } from "./file/intake.ts";
 import { BUILT_IN_MODULES, builtInModules, defaultConfig } from "./modules.ts";
+import type { AmountReadBack } from "./pay/amount.ts";
 import * as paylink from "./pay/paylink.ts";
 import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
+import * as refunds from "./pay/refunds.ts";
 import type { ConsentRecord } from "./prove/consent.ts";
 import { detailCarriesCardNumber } from "./prove/ledger.ts";
 import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
@@ -37,6 +41,7 @@ import * as badge from "./verify/badge.ts";
 import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
+export { SUPPORTED_LOCALES, isSupportedLocale } from "./core/runtime.ts";
 export type { EngineAdapters, Locale } from "./core/runtime.ts";
 export type { KeypadResult, OutcomeResult, VerificationResult } from "./verify/badge.ts";
 
@@ -75,6 +80,12 @@ export interface FlowPosition {
 /** What an outside module's update function sees of the call. */
 export interface ModuleCallView {
   state: SessionState;
+  /** The flow step the call is on (a copy), or null when no flow is running. */
+  step: FlowStep | null;
+  /** The engine's clock for this attempt, ISO 8601. */
+  now: string;
+  /** A new id from the engine's id source, `prefix_...`. A retried attempt draws a new one. */
+  newId(prefix: string): string;
   authorized(scope: string): boolean;
   /** A ledger entry `module.event` with `{ module, event, detail }`. Never put a value the caller keyed in it. */
   emit(event: string, detail: { [key: string]: JsonValue }): void;
@@ -106,8 +117,14 @@ export class Engine {
     const errors: string[] = [];
     const keyLength = typeof options.knowledgeKey === "string" ? Buffer.byteLength(options.knowledgeKey) : options.knowledgeKey.byteLength;
     if (keyLength < 16) errors.push("knowledgeKey must be at least 16 bytes");
-    if (options.workspaceId === "") errors.push("workspaceId is empty");
+    if (typeof options.workspaceId !== "string" || options.workspaceId === "" || hasLoneSurrogate(options.workspaceId)) {
+      errors.push("workspaceId must be a non-empty string the ledger can carry (no lone surrogate)");
+    }
     if ((options.adapters as Partial<EngineAdapters>).ledger === undefined) errors.push("the ledger adapter is required: the ledger is always on");
+    errors.push(...distinctSigners(options.adapters));
+    for (const module of options.modules ?? []) {
+      if ((BUILT_IN_MODULES as readonly string[]).includes(module.manifest.name)) errors.push(`${module.manifest.name} is the name of a built-in module`);
+    }
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     this.workspaceId = options.workspaceId;
     this.#key = options.knowledgeKey;
@@ -119,8 +136,21 @@ export class Engine {
     this.#onEvent = options.onEvent;
     this.#badge = options.badge ?? badge.badgeModule();
     const present = Object.entries(this.#adapters).filter(([, value]) => value !== undefined).map(([name]) => name);
+    // What each adapter declares it can do, so a config it cannot serve is refused when saved.
+    const capabilities: Record<string, unknown> = {};
+    // Every adapter the engine has gets an entry, undefined when it declares nothing, so the
+    // validator can tell "declared nothing" (refused where capabilities are required) from "unknown".
+    for (const [name, value] of Object.entries(this.#adapters)) {
+      if (value === undefined) continue;
+      // The access adapter is a map of controllers: what it declares is the names of those it can use
+      // (an `unlock` function, own or from a class), so a target naming anything else is refused at save.
+      capabilities[name] =
+        name === "access"
+          ? { controllers: Object.entries(value as Record<string, { unlock?: unknown } | undefined>).filter(([, c]) => typeof c?.unlock === "function").map(([n]) => n) }
+          : (value as { capabilities?: unknown }).capabilities;
+    }
     this.#receiptModules = builtInModules(this.#badge);
-    this.registry = new ModuleRegistry({ adapters: present, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
+    this.registry = new ModuleRegistry({ adapters: present, capabilities, reserved: BUILT_IN_MODULES, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
     this.#config = this.#prepare(options.config === undefined ? defaultConfig() : options.config);
     this.#rt = this.#runtime();
   }
@@ -143,6 +173,11 @@ export class Engine {
 
   /** Installs an outside module. It stays off until a config turns it on. */
   use(module: AssuranceModule): this {
+    // A built-in module's name stays the engine's, even after the module was removed: a host's
+    // module can never stand in for Gate's grants or Paylink's payments.
+    if ((BUILT_IN_MODULES as readonly string[]).includes(module.manifest.name)) {
+      throw new EngineError("invalid_input", `${module.manifest.name} is the name of a built-in module`);
+    }
     this.registry.use(module);
     return this;
   }
@@ -171,7 +206,16 @@ export class Engine {
 
   /** Opens a call. With `flow`, the call runs that flow from its first step. */
   async startCall(input: { callId?: string; locale?: Locale; flow?: string } = {}): Promise<SessionState> {
-    const callId = input.callId ?? this.#ids.next("call");
+    // Each read once: a getter read again could change a value after it was checked.
+    const { callId: givenId, locale, flow }: { callId?: unknown; locale?: unknown; flow?: unknown } = input;
+    // Everything the host gives here enters the ledger as it is, not through emit's checks: checked
+    // now, before anything is saved, so no call's ledger can be blocked by a value it cannot hash.
+    if (givenId !== undefined && (typeof givenId !== "string" || givenId === "" || givenId.length > 200 || hasLoneSurrogate(givenId))) {
+      throw new EngineError("invalid_input", "callId must be 1 to 200 characters the ledger can carry (no lone surrogate)");
+    }
+    if (locale !== undefined && !isSupportedLocale(locale)) throw new EngineError("invalid_input", `locale must be one of ${SUPPORTED_LOCALES.join(", ")}`);
+    if (flow !== undefined && typeof flow !== "string") throw new EngineError("invalid_input", "flow must name a flow");
+    const callId = (givenId as string | undefined) ?? this.#ids.next("call");
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
       const name = module.manifest.name;
@@ -180,7 +224,7 @@ export class Engine {
     const record: CallRecord = {
       v: 1,
       state: newSession(callId, this.workspaceId, this.#now()),
-      locale: input.locale ?? "en",
+      locale: (locale as Locale | undefined) ?? "en",
       revision: this.#config.revision,
       flow: null,
       modules,
@@ -189,9 +233,9 @@ export class Engine {
     // A call started with a flow is created with it attached, so no other process can start a
     // different flow on the same id in between.
     const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
-    if (input.flow !== undefined) {
+    if (flow !== undefined) {
       const draft = this.#draft(record, events);
-      this.#attachFlow(draft, input.flow, this.#flowDefinition(input.flow), this.#config.revision);
+      this.#attachFlow(draft, flow as string, this.#flowDefinition(flow as string), this.#config.revision);
       this.#advance(draft);
     }
     record.outbox = events.map((event, i) => ({ eventId: this.#eventId(callId, 1, i), ...event }));
@@ -207,15 +251,28 @@ export class Engine {
 
   /** Untrusted text (a business webhook reply, a document) entered the conversation. */
   async markUntrusted(callId: string, source: string): Promise<void> {
-    await this.#update(callId, (draft) => {
-      draft.apply({ type: "untrusted_content", source });
-      for (const module of this.registry.list()) {
-        const name = module.manifest.name;
-        const slice = draft.record.modules[name];
-        if (module.onUntrusted !== undefined && slice !== undefined) draft.record.modules[name] = module.onUntrusted(slice);
-      }
-      draft.emit("session.tainted", "code", { source });
-    });
+    // A grant that may still be acted on when the taint lands is written down with it, and its
+    // controller is asked to withdraw it where it can (Gate, SPEC.md section 17).
+    let tainted: gate.AccessRecord[] = [];
+    // A write saved whose ledger flush then failed still asks for the revokes: the taint stands
+    // either way, and the controllers hear of it once. The write's error is thrown after.
+    let failure: { error: unknown } | null = null;
+    try {
+      await this.#update(callId, (draft) => {
+        draft.apply({ type: "untrusted_content", source });
+        for (const module of this.registry.list()) {
+          const name = module.manifest.name;
+          const slice = draft.record.modules[name];
+          if (module.onUntrusted !== undefined && slice !== undefined) draft.record.modules[name] = module.onUntrusted(slice);
+        }
+        draft.emit("session.tainted", "code", { source });
+        tainted = gate.noteTaintedGrants(this.#rt, draft);
+      });
+    } catch (error) {
+      failure = { error };
+    }
+    await gate.revokeTainted(this.#rt, callId, tainted);
+    if (failure !== null) throw failure.error;
   }
 
   /** Keypad entry is open: the host pauses transcripts, cuts audio to the model and holds listen-in. */
@@ -324,6 +381,17 @@ export class Engine {
     return badge.checkCarrier(this.#rt, callId);
   }
 
+  /**
+   * Where a code text for this call goes: the subject Badge matched by keypad or PIN, its number
+   * on file and the call's locale, for a module that texts it (Gate's access codes). Throws
+   * `precondition_failed` before a match. Never the calling number.
+   */
+  async numberOnFile(callId: string): Promise<{ subjectKey: string; phoneOnFile: string; locale: Locale }> {
+    const record = await this.#read(callId);
+    const subject = badge.matchedSubject(record);
+    return { subjectKey: subject.subjectKey, phoneOnFile: subject.phoneOnFile, locale: record.locale };
+  }
+
   sendTextCode(callId: string): Promise<never> {
     return badge.sendTextCode(this.#rt, callId);
   }
@@ -360,12 +428,117 @@ export class Engine {
 
   // ---- Paylink (pay) -----------------------------------------------------------------------
 
-  requestPayment(callId: string, input?: paylink.PaymentInput): Promise<{ paymentId: string; status: PaymentStatus }> {
+  /** Builds the amount read-back the host speaks before a link: the step's (or host's) amount, or the one the AmountSource resolves (PAY-2). */
+  readBackPayment(callId: string, input?: paylink.PaymentInput): Promise<AmountReadBack> {
+    return paylink.readBackPayment(this.#rt, callId, input);
+  }
+
+  /** The caller confirmed the amount read back; `digest` is the read-back's. */
+  confirmPaymentAmount(callId: string, input: { digest: string; confirmedBy: "voice" | "keypad" }): Promise<void> {
+    return paylink.confirmPaymentAmount(this.#rt, callId, input);
+  }
+
+  /** Texts a payment link. `expiresAt` is the engine's deadline for it: call `expirePaymentLinks` then. */
+  requestPayment(callId: string, input?: paylink.PaymentInput): Promise<{ paymentId: string; status: PaymentStatus; expiresAt: string | null }> {
     return paylink.requestPayment(this.#rt, callId, input);
   }
 
-  applyPaymentOutcome(outcome: PaymentOutcome): Promise<{ applied: false } | { applied: true; callId: string; status: PaymentStatus }> {
+  /** Expires a call's texted links that are still open past their deadline (Paylink's link life). */
+  expirePaymentLinks(callId: string): Promise<{ expired: string[] }> {
+    return paylink.expirePaymentLinks(this.#rt, callId);
+  }
+
+  /** Cancels a payment's link (the caller changed their mind). It settles `expired`; a payment no longer open is left as it is. */
+  cancelPaymentLink(callId: string, paymentId: string): Promise<{ paymentId: string; status: PaymentStatus }> {
+    return paylink.cancelPaymentLink(this.#rt, callId, paymentId);
+  }
+
+  /**
+   * A provider's verified outcome. A payment the engine closed that is paid after all is recorded
+   * paid, flagged `late`. A platform payment's `paymentIntentId` is bound to the call, for its disputes.
+   * `unbound`: no call holds the link (yet); have the event delivered again.
+   */
+  applyPaymentOutcome(outcome: PaymentOutcome & { paymentIntentId?: string }): Promise<{ applied: false; unbound?: true } | { applied: true; callId: string; status: PaymentStatus }> {
     return paylink.applyPaymentOutcome(this.#rt, outcome);
+  }
+
+  /**
+   * Refunds a paid platform payment, in full or in part, for the business. A host call from the
+   * business's side (its back office or staff), never from a call's tool path: no grant reaches
+   * it, and the model must never be given it. Works after the call ended.
+   */
+  refundPayment(input: refunds.RefundInput): Promise<refunds.RefundResult> {
+    return refunds.refundPayment(this.#rt, input);
+  }
+
+  /** A verified dispute event (`charge.dispute.*`), recorded against the platform payment it names. */
+  applyDisputeOutcome(outcome: refunds.DisputeOutcome): Promise<refunds.DisputeApplied> {
+    return refunds.applyDisputeOutcome(this.#rt, outcome);
+  }
+
+  // ---- Gate (entry) ------------------------------------------------------------------------
+
+  /** Issues an access grant and sends it to its door controller, once (SPEC.md, section 17). */
+  grantAccess(callId: string, input?: { target: string; lifetimeSeconds?: number }, only?: { controller: AccessController }): Promise<gate.AccessResult> {
+    return gate.grantAccess(this.#rt, callId, input, only);
+  }
+
+  /**
+   * Has every access controller that owes the ledger something write it (`AccessController.flush`:
+   * a spent access code's entry whose append failed), for the whole workspace. Call it on a
+   * schedule. `failed`: the controllers that could not, to try again on the next sweep.
+   */
+  async sweepAccess(): Promise<{ failed: string[] }> {
+    const failed: string[] = [];
+    for (const [name, controller] of Object.entries(this.#adapters.access ?? {})) {
+      if (typeof controller.flush !== "function") continue;
+      // try, not .catch: a flush that throws before it returns a promise is a failure too.
+      try {
+        await controller.flush({ workspaceId: this.workspaceId });
+      } catch {
+        failed.push(name);
+      }
+    }
+    return { failed };
+  }
+
+  /** A call's access grants, as the engine recorded them. Never the signed grants themselves. */
+  async accessGrants(callId: string): Promise<gate.AccessRecord[]> {
+    const slice = (await this.#read(callId)).modules[gate.GATE] as unknown as gate.GateSlice | undefined;
+    return slice === undefined ? [] : structuredClone(slice.grants);
+  }
+
+  /** The key set door relays verify access grants with (empty without an access signer). */
+  accessKeys(): JsonWebKey[] {
+    const signer = this.#adapters.accessSigner;
+    // The published `kid` is the one every grant carries (the signer's keyId), whatever its JWK says:
+    // relays select the key by it, so a JWK without one would leave every grant unverifiable.
+    return signer === undefined ? [] : [{ ...publicMembers(signer.publicJwk()), kid: signer.keyId } as JsonWebKey];
+  }
+
+  // ---- Step-up (web sign-in) ---------------------------------------------------------------
+
+  /** Issues a web sign-in step-up token for the nonce the caller keyed (SPEC.md, section 18). Hand it to the waiting sign-in only. */
+  issueStepUpToken(callId: string, input: { nonce: string; site?: string; lifetimeSeconds?: number }): Promise<stepUp.StepUpToken> {
+    return stepUp.issueStepUpToken(this.#rt, callId, input);
+  }
+
+  /** The host's web sign-in exchanges a step-up token, once. Never throws for a bad token. */
+  exchangeStepUpToken(token: unknown, expect: { audience: string; subjectKey: string; nonce: string }): Promise<stepUp.StepUpExchange> {
+    return stepUp.exchangeStepUpToken(this.#rt, token, expect);
+  }
+
+  /** A call's step-up tokens, as the engine recorded them. Never the tokens or the nonces. */
+  async stepUpTokens(callId: string): Promise<stepUp.StepUpRecord[]> {
+    const slice = (await this.#read(callId)).modules[stepUp.STEP_UP] as unknown as stepUp.StepUpSlice | undefined;
+    return slice === undefined ? [] : structuredClone(slice.tokens);
+  }
+
+  /** The JWKS document for the step-up issuer's `/.well-known/jwks.json` (no keys without a step-up signer). */
+  stepUpKeys(): { keys: JsonWebKey[] } {
+    const signer = this.#adapters.stepUpSigner;
+    // The published `kid` is the one the tokens' header carries, whatever the signer's JWK says.
+    return { keys: signer === undefined ? [] : [{ ...publicMembers(signer.publicJwk()), kid: signer.keyId } as JsonWebKey] };
   }
 
   // ---- Trace (prove) -----------------------------------------------------------------------
@@ -374,12 +547,17 @@ export class Engine {
     return trace.recordConsent(this.#rt, callId, input);
   }
 
-  /** Ends the call. A running flow is abandoned. Returns the signed receipt when the call gets one, else null. */
+  /**
+   * Ends the call. A running flow is abandoned, and every payment link still open is expired, at
+   * the provider first, so the receipt shows it `expired`. Returns the signed receipt when the call
+   * gets one, else null.
+   */
   async endCall(callId: string): Promise<SignedReceipt | null> {
-    // A call that ended without its receipt (the signer failed) gets it now, without ending again.
+    // A call that ended without its receipt (the signer failed) or with a link left open (the
+    // provider failed) gets them now, without ending again.
     const before = await this.#read(callId);
-    const pending = before.state.phase === "ended" && trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null;
-    const record = pending ? before : await this.#update(callId, (draft) => {
+    const pending = before.state.phase === "ended" && ((trace.wantsReceipt(this.#rt, before) && trace.receiptOf(before) === null) || paylink.openPayments(before).length > 0);
+    const ended = pending ? before : await this.#update(callId, (draft) => {
       // The built-in modules' guards run even after a module was removed, as their receipt parts do.
       const guards = [...this.#receiptModules, ...this.registry.list().filter((m) => !this.#receiptModules.includes(m))];
       for (const module of guards) {
@@ -387,6 +565,15 @@ export class Engine {
         const reason = slice === undefined ? null : (module.blocksEnd?.(slice) ?? null);
         if (reason !== null) throw new EngineError("precondition_failed", `the call cannot end yet: ${reason}`);
       }
+      // Refused while a signed grant may still be acted on at its door; a grant reserved but not yet
+      // signed (or past its expiry) is settled now, as unknown, before the receipt's ledger head is
+      // taken: no access outcome can ever follow the receipt.
+      gate.settleInFlight(this.#rt, draft, "call_ended");
+      // Likewise a step-up token still being signed: it is failed, never handed out after the end.
+      stepUp.settleStepUpInFlight(draft);
+      // Likewise a payment link being texted: the call ends once its text is recorded, so no text
+      // goes out after the call ended.
+      paylink.assertNoSendInFlight(this.#rt, draft.record);
       draft.apply({ type: "call_ended", at: this.#now() });
       const flow = draft.record.flow;
       if (flow !== null && flow.status === "running") {
@@ -396,9 +583,25 @@ export class Engine {
       draft.emit("call.ended", "system", {});
       return structuredClone(draft.record);
     });
+    // What an access controller still owes the ledger for this call is written now, before the
+    // receipt's head is taken; one that fails is left to the next sweep (it opens nothing).
+    for (const controller of Object.values(this.#adapters.access ?? {})) {
+      if (typeof controller.flush !== "function") continue;
+      try {
+        await controller.flush({ workspaceId: this.workspaceId, callId });
+      } catch {
+        // Left to the next sweep: a spent code opens nothing meanwhile.
+      }
+    }
+    // No new payment can start once the call ended, so this closes every link the call will have.
+    await paylink.expireOpenPayments(this.#rt, ended);
+    const record = paylink.openPayments(ended).length === 0 ? ended : await this.#read(callId);
     if (!trace.wantsReceipt(this.#rt, record)) return null;
+    // The head must cover every entry the end wrote, an expired link's among them, even one left
+    // pending by an earlier append that failed: they are appended first, or the receipt waits.
+    await this.flushLedger(callId);
     const head = await trace.endedHead(this.#rt, record, () => this.#adapters.ledger.head());
-    const parts: Pick<ReceiptBody, "verification" | "records" | "payments"> = { verification: { level: 0, methods: [] }, records: [], payments: [] };
+    const parts: Pick<ReceiptBody, "verification" | "records" | "payments" | "stepUp"> = { verification: { level: 0, methods: [] }, records: [], payments: [] };
     // The built-in contributors, not the registry: a module removed after this call filed or paid still appears on its receipt.
     for (const module of this.#receiptModules) {
       const slice = record.modules[module.manifest.name];
@@ -414,7 +617,9 @@ export class Engine {
 
   /** The key set for verifying this engine's receipts (empty without a signer). */
   receiptKeys(): JsonWebKey[] {
-    return this.#adapters.signer === undefined ? [] : [this.#adapters.signer.publicJwk()];
+    const signer = this.#adapters.signer;
+    // The published `kid` is the one every receipt carries (the signer's keyId), whatever its JWK says.
+    return signer === undefined ? [] : [{ ...publicMembers(signer.publicJwk()), kid: signer.keyId } as JsonWebKey];
   }
 
   // ---- outside modules ---------------------------------------------------------------------
@@ -427,30 +632,39 @@ export class Engine {
 
   /**
    * Changes an outside module's part of a call, in one compare-and-set write (retried on conflict,
-   * so `fn` must be pure). A running flow moves on when the module's step completes.
+   * so `fn` must be pure). A running flow moves on when the module's step completes. The engine
+   * holds every call to the module's scopes, so a module that forgets to ask `authorized` still
+   * fails closed: in a flow, the scope its current step needs; outside a flow, every scope its
+   * manifest names. Built-in modules (Gate's grants included) are never reachable here.
    */
   async updateModule(callId: string, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): Promise<JsonValue> {
     this.#outsideModule(name);
     const module = this.registry.get(name)!;
     return this.#update(callId, (draft) => {
-      // An outside module does only its current step's work, and the engine itself holds that step
-      // to the scope its manifest needs: a module that forgets to ask `authorized` still fails closed.
       assertFlowNotEnded(draft.record);
       const step = draft.step();
-      if (step !== null) {
-        if (!module.manifest.provides.steps.includes(step.type)) throw new EngineError("precondition_failed", `the flow is on step ${step.type}, not a step of ${name}`);
-        const scope = module.manifest.scopes.needs[step.type];
-        if (scope !== undefined && !this.#authorized(draft.record, scope)) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
+      if (step !== null && !module.manifest.provides.steps.includes(step.type)) {
+        throw new EngineError("precondition_failed", `the flow is on step ${step.type}, not a step of ${name}`);
       }
-      const view: ModuleCallView = {
-        state: snapshot(draft.record.state),
-        authorized: (scope) => this.#authorized(draft.record, scope),
-        emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
-      };
-      const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);
-      draft.record.modules[name] = structuredClone(next);
-      return structuredClone(next);
+      const needs = step === null ? Object.values(module.manifest.scopes.needs) : [module.manifest.scopes.needs[step.type]].filter((n) => n !== undefined);
+      for (const scope of needs) if (!this.#authorized(draft.record, scope)) throw new EngineError("scope_denied", `the grant does not cover ${scope}`);
+      return this.#applyModule(draft, name, fn);
     });
+  }
+
+  #applyModule(draft: CallDraft, name: string, fn: (slice: JsonValue, call: ModuleCallView) => JsonValue): JsonValue {
+    const step = draft.step();
+    const view: ModuleCallView = {
+      state: snapshot(draft.record.state),
+      step: step === null ? null : structuredClone(step),
+      now: this.#now(),
+      newId: (prefix) => this.#ids.next(prefix),
+      authorized: (scope) => this.#authorized(draft.record, scope),
+      emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
+    };
+    const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);
+    draft.record.modules[name] = structuredClone(next);
+    return structuredClone(next);
   }
 
   // ---- internals ---------------------------------------------------------------------------
@@ -463,6 +677,9 @@ export class Engine {
       ids: this.#ids,
       get policy() {
         return config().policy;
+      },
+      get revision() {
+        return config().revision;
       },
       now: () => this.#now(),
       hmac: (data) => hmacSha256Hex(this.#key, data),
@@ -567,6 +784,13 @@ export class Engine {
         // to be appended later, and a caller changing its object afterwards changes nothing.
         const copy = structuredClone(detail);
         if (detailCarriesCardNumber(copy)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
+        // The ledger hashes every entry as canonical JSON: detail it could not hash (a lone surrogate,
+        // a value JSON cannot carry) is refused here, or it would block the call's ledger for good.
+        try {
+          canonicalJson(copy);
+        } catch {
+          throw new EngineError("invalid_input", "audit detail must be canonical JSON");
+        }
         events.push({ name, actor, at: this.#now(), detail: copy });
       },
       step: () => currentStep(record),
@@ -633,6 +857,54 @@ export class Engine {
     if (stored === null) throw new EngineError("unknown_call", "no such call");
     await this.#flush(callId, stored.version, structuredClone(stored.record) as unknown as CallRecord);
   }
+}
+
+/**
+ * The receipt, access and step-up signers must each be their own key: a receipt must never verify
+ * as an access grant or a step-up token, nor any of them as another. Refused by key id and by
+ * public key, for every pair the engine has.
+ */
+function distinctSigners(adapters: EngineAdapters): string[] {
+  // Compared as key material, not text: one key can be written with or without padding, in either
+  // base64 alphabet. A key that does not import is left for its signer to fail on.
+  const der = (jwk: JsonWebKey) => {
+    try {
+      return createPublicKey({ key: jwk, format: "jwk" }).export({ type: "spki", format: "der" });
+    } catch {
+      return null;
+    }
+  };
+  const named: Array<[string, ReceiptSigner | undefined]> = [
+    ["receipt signer", adapters.signer],
+    ["accessSigner", adapters.accessSigner],
+    ["stepUpSigner", adapters.stepUpSigner],
+  ];
+  const present = named.filter((n): n is [string, ReceiptSigner] => n[1] !== undefined);
+  const errors: string[] = [];
+  present.forEach(([later, b], j) => {
+    for (const [earlier, a] of present.slice(0, j)) {
+      if (a.keyId === b.keyId) {
+        errors.push(`${later} must have its own key id, not the ${earlier}'s`);
+        continue;
+      }
+      const x = der(a.publicJwk());
+      const y = der(b.publicJwk());
+      if (x !== null && y !== null && x.equals(y)) errors.push(`${later} must be its own key, not the ${earlier}'s`);
+    }
+  });
+  return errors;
+}
+
+/**
+ * Only the public members of an EC key, whatever a signer's `publicJwk` returns: a signer that
+ * hands back its private `d` (or anything else) never has it published in a key set.
+ */
+function publicMembers(jwk: JsonWebKey & { kid?: string }): JsonWebKey {
+  const kept: Record<string, unknown> = {};
+  for (const name of ["kty", "crv", "x", "y", "kid", "alg", "use"] as const) {
+    if (jwk[name as keyof typeof jwk] !== undefined) kept[name] = jwk[name as keyof typeof jwk];
+  }
+  return kept as JsonWebKey;
 }
 
 export function createEngine(options: EngineOptions): Engine {

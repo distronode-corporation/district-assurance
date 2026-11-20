@@ -11,6 +11,10 @@ export interface Grant {
   grantId: string;
   level: AssuranceLevel;
   scopes: string[];
+  /** The `version` of the policy that judged the verification. */
+  policyVersion: string;
+  /** The `revision` of the FlowConfig in force when the verification finished, which may be newer than the call's. */
+  configRevision: string;
   /** ISO 8601. */
   issuedAt: string;
   expiresAt: string;

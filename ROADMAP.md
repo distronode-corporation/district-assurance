@@ -9,9 +9,9 @@ ready to paste, in [ISSUES.md](ISSUES.md).
 
 The design: a small core (the session state machine on a shared session store, the policy and
 its levels, redaction, the module registry and the audit ledger) and modules around it: Badge
-(verify), Dossier (file), Paylink (pay), Trace (prove), Gate (entry, next), and any outside module
+(verify), Dossier (file), Paylink (pay), Trace (prove), Gate (entry), and any outside module
 a host adds. Every module can be turned on, turned off, added and removed per workspace config,
-and flows are config, not code. DECISIONS.md, ADR-13 to ADR-20, says why.
+and flows are config, not code. DECISIONS.md, ADR-13 to ADR-25, says why.
 
 ## How work is proven
 
@@ -38,7 +38,7 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-20, says why.
 | M0 Skeleton | The engine, real core pieces, stubs, reference server, demo, CI | done |
 | M1 Modular core | Module registry, Badge, Dossier, Paylink and Trace as modules, factor plug-ins and the PIN factor, FlowConfig with `validateConfig` and flow execution, the shared SessionStore, the ledger always on | done |
 | M2 Owner command | What the first live use (`owner-command`) still needs. VER-1 (lockouts across calls) is a hard gate before it goes live in any host. Also: policy and config revision in receipts, the keypad collector, key store contracts, ledger and record store contracts, PIN enrolment | VER-1, VER-8, INT-1, INT-4, PRV-5, VER-6 |
-| M3 Gate and payment modes | The Gate module with signed access grants on a fake controller; Paylink's `connect` and `platform` modes; real access adapters | GAT-1, PAY-7, GAT-2 to GAT-4 |
+| M3 Gate and payment modes | Done: the Gate module with signed access grants, the signed-webhook relay, Paylink's `connect` and `platform` modes, link life and instant methods; built, acceptance open: one-time codes, web step-up, Seam, direct vendor adapters | GAT-3 to GAT-6 |
 | M4 Badge | Texted codes, spoken answers, carrier and Stripe Identity adapters, adversarial suite | VER-2 to VER-5, VER-7 |
 | M5 Dossier | Read-backs, encrypted fields, delivery, conditional fields, documents by text | FIL-1 to FIL-5 |
 | M6 Paylink | Stripe Checkout, amounts from code, cancel and expiry, live detector; saved cards and keypad capture gated | PAY-1 to PAY-6 |
@@ -51,20 +51,18 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-20, says why.
 Milestones overlap; the order below is by dependency, owner-command first. Items in the same wave
 touch different files, so they can run in parallel.
 
-1. **Wave 1, owner-command and the second core pull request:** VER-1, VER-8, INT-1, INT-4, PRV-5,
-   GAT-1, PAY-7. **VER-1 is a hard gate:** no host runs owner-command, or any PIN factor, on a
+1. **Wave 1, owner-command:** VER-1, VER-8, INT-1, INT-4, PRV-5. **VER-1 is a hard gate:** no host runs owner-command, or any PIN factor, on a
    live line before VER-1 is merged.
 2. **Wave 2:** VER-6, VER-2, VER-4, VER-5, FIL-1, FIL-2, PAY-1, PAY-5, PRV-1, PRV-3, SRV-1, SRV-2,
    MOD-1.
-3. **Wave 3:** VER-3, VER-7, FIL-3, FIL-4, PAY-2, PAY-3, PRV-2, PRV-6, SRV-3, SRV-5, INT-2, GAT-2,
-   GAT-3, MOD-2, MOD-3.
-4. **Wave 4:** FIL-5, PAY-4, PRV-4, SRV-4, INT-5, GAT-4.
+3. **Wave 3:** VER-3, VER-7, FIL-3, FIL-4, PAY-2, PAY-3, PRV-2, PRV-6, SRV-3, SRV-5, INT-2, GAT-3,
+   GAT-5, MOD-2, MOD-3.
+4. **Wave 4:** FIL-5, PAY-4, PRV-4, SRV-4, INT-5, GAT-4, GAT-6.
 5. **Gated, not scheduled:** PAY-6 starts only after an assessor's scoping and a buyer who needs it.
 
 Dependencies: VER-2 and VER-6 need VER-1; VER-7 needs VER-2; FIL-3 and PAY-2 need FIL-1; FIL-5
-needs SRV-2; PAY-1 needs PAY-7; PAY-3 and PAY-6 need PAY-1; PAY-4 needs PAY-2; PRV-2, PRV-4 and
-SRV-3 need PRV-1; PRV-6 needs PAY-5; SRV-4 needs PRV-5; GAT-2, GAT-3 and GAT-4 need GAT-1, and
-GAT-3 also needs VER-2.
+needs SRV-2; PAY-3 and PAY-6 need PAY-1; PAY-4 needs PAY-2; PRV-2, PRV-4 and
+SRV-3 need PRV-1; PRV-6 needs PAY-5; SRV-4 needs PRV-5; GAT-3 needs VER-2.
 
 ## M0. Skeleton (done)
 
@@ -100,7 +98,7 @@ roadmap are done here.
 | Ledger always on | `src/prove/trace.ts`, `src/core/config.ts` | Trace cannot be turned off or removed, an engine without a ledger is refused (`test/config.test.ts`, `test/engine.test.ts`) |
 | Outside modules | `Engine.use`, `Engine.updateModule` | an outside step in a flow, its ledger events, guards (`test/flows.test.ts`) |
 | Demo | `examples/reference-server/src/demo.ts`, `flows.ts` | `owner-command` on two engines sharing one store, then `deposit` end to end (`test/reference-server.test.ts`, `npm run demo`) |
-| Demo UI | `examples/reference-server/src/script.ts`, `demo-runs.ts`, `static.ts`, `public/` | both flows step by step over a real socket, the file allow-list, traversal refused, CSP and host checks, the page's receipt and ledger checks against the engine's (`test/reference-ui.test.ts`) |
+| Demo UI | `examples/reference-server/src/script.ts`, `demo-runs.ts`, `static.ts`, `public/` | every demo flow step by step over a real socket, the file allow-list, traversal refused, CSP and host checks, the page's receipt and ledger checks against the engine's (`test/reference-ui.test.ts`) |
 
 ## Milestones and issues
 
@@ -194,53 +192,20 @@ The `pin` factor checks a PIN against a keyed hash on file or the host's own ver
 
 ### M3. Gate and payment modes
 
-The second pull request of the modular core: the Gate module on a fake AccessController with signed grants, and Paylink's `connect` and `platform` modes.
+The second pull request of the modular core built the first part (GAT-1, PAY-7, GAT-2):
 
-**Proven by:** Unit tests at 100%; a signed access grant verified with the public key only, a one-byte change rejected; an entry flow and a deposit in each mode in the demo.
+| Piece | Where | Proof |
+|---|---|---|
+| Gate module (GAT-1) | `src/gate/gate.ts`, `src/gate/access.ts`, `src/engine.ts` | the engine owns every grant and outcome (ADR-25); refused without `entry.open`, a grant verified with the public key only, a changed byte refused, never past the verification grant, every grant and outcome in the ledger (`test/gate.test.ts`) |
+| Unlocks never retried | `src/gate/gate.ts` | a lost answer is `unknown`, sent once, a fresh request is a new grant, one in flight per call, a limit per call (`test/gate.test.ts`) |
+| Signed-webhook relay (GAT-2) | `src/gate/relay.ts`, `examples/reference-server/src/door-relay.ts` | against a loopback HTTP server: 2xx, 4xx, 5xx, redirects, timeouts (`test/gate-relay.test.ts`); replay and tamper refused by the example relay (`npm run demo`) |
+| Payment modes (PAY-7) | `src/pay/paylink.ts`, `src/core/adapters.ts` | `connect` and `platform` per step, the account on the request, outcomes from another account ignored (`test/paylink-modes.test.ts`) |
+| Link life and instant methods | `src/pay/paylink.ts`, `src/pay/payment.ts` | 5 to 60 minutes (default 15) from the text, expired by the engine at its deadline; only card, Apple Pay, Google Pay and Link (`test/paylink-modes.test.ts`) |
+| Demo | `examples/reference-server/src/demo.ts` | a deposit in each mode and a Gate unlock through the relay (`npm run demo`) |
 
-#### **GAT-1** Gate module: signed, time-limited access grants through an AccessController
+Built, with their acceptance still open: one-time access codes, web sign-in step-up, the Seam adapter and direct vendor adapters. A momentary unlock that opened its door has nothing to revoke (ADR-22); a controller that can withdraw a grant not yet acted on offers the optional `revoke`, which the engine calls when a call is tainted (SPEC.md section 17), and access codes have it.
 
-Secure entry, physical and digital, is the outcome some flows exist for. Gate is the fifth built-in module: Badge says who is calling, Gate turns a verified call into access.
-
-*Acceptance*
-
-- `gateModule()` in `src/gate/` (it throws `NotImplementedError` today) with a `gate.grant` step: the access target, the scope it needs (for example `entry.open`, floor level 2), and a lifetime (at most 15 minutes).
-- A grant is refused without a valid verification grant covering the step's scope; an access grant is ES256 over canonical JSON (the code in `src/prove/`), with its own `kid`, and verifiable by the access side with the public key only.
-- Delivery through an `AccessController` adapter (`grant`, `revoke`); a fake in `district-assurance/testing`. The real adapters (GAT-2 to GAT-4) throw `NotImplementedError` with their ids.
-- Every grant, refusal and revocation goes to the ledger (`gate.granted`, `gate.refused`, `gate.revoked`), never the code or credential itself.
-- `validateConfig` checks the step, the adapter and the floor; the demo gets an `entry` flow.
-
-*Files:* `src/gate/gate.ts` (new), `src/gate/later.ts`, `src/core/adapters.ts`, `src/core/events.ts`, `src/modules.ts`, `src/testing/fakes.ts`, `examples/reference-server/src/flows.ts`  
-*Tests:* test/gate.test.ts: refused without a grant, signed grant verifies, a changed byte fails, expiry; test/flows.test.ts: an entry flow end to end on the fake  
-*Depends on:* none
-
-#### **PAY-7** Paylink payment modes: connect and platform
-
-Whose account takes the money is a per-flow choice: `connect` (the business's own Stripe account, direct charges, the business is the merchant) or `platform` (the platform's account, the platform is the merchant). `validateConfig` refuses a `mode` today.
-
-*Acceptance*
-
-- `mode` on a `paylink.request` step (`connect` or `platform`), with Paylink settings for the default mode and, for `connect`, where the connected account comes from.
-- One `PaymentLinks` adapter shape: the request carries the mode and an optional connected account. The engine still never sees card data.
-- `validateConfig` refuses a `connect` step without a connected account source, and a mode the host's adapter does not support.
-- The receipt and the `payment.link_sent` event say which mode took the payment.
-
-*Files:* `src/pay/paylink.ts`, `src/core/adapters.ts`, `src/testing/fakes.ts`, `SPEC.md`  
-*Tests:* test/engine.test.ts; test/config.test.ts; test/flows.test.ts  
-*Depends on:* none
-
-#### **GAT-2** Door controller webhook adapter
-
-The first physical-entry `AccessController`: a signed unlock request to a door controller's webhook.
-
-*Acceptance*
-
-- An adapter that POSTs the signed access grant to a configured URL with an HMAC header in the `t=,v1=` scheme, a short timeout and one retry, and fails closed.
-- Credentials from the environment only; tested against a local fake HTTP server.
-
-*Files:* `src/gate/later.ts`, `examples/reference-server/src/gate-adapters.ts` (new)  
-*Tests:* test/gate-adapters.test.ts  
-*Depends on:* GAT-1
+**Proven by:** Unit tests at 100%; each vendor adapter against a local fake HTTP server, and once by hand against the vendor's sandbox.
 
 #### **GAT-3** One-time access codes
 
@@ -248,25 +213,54 @@ Entry where no controller can be called live: a short code, texted to the number
 
 *Acceptance*
 
-- Codes stored only as keyed hashes, single use, bound to the access grant and its lifetime, texted only to the number on file.
+- `issueAccessCode` (it throws `NotImplementedError` today) through an `AccessController.issueCode` method: a code valid from `startsAt` to `endsAt`, single use where the lock supports it, bound to the access grant and its lifetime, texted only to the number on file and never written to the ledger.
+- Codes stored by the engine only as keyed hashes; `revoke` removes a code before its end, and revoking one already gone is success.
 - Send limits shared with texted codes (VER-2).
 
-*Files:* `src/gate/codes.ts` (new), `src/gate/later.ts`  
+*Files:* `src/gate/codes.ts` (new), `src/gate/access.ts`, `src/gate/later.ts`  
 *Tests:* test/gate.test.ts  
-*Depends on:* GAT-1, VER-2
+*Depends on:* VER-2
 
 #### **GAT-4** Web sign-in step-up
 
-Digital entry: a verified call lets the same person finish signing in on the web.
+Digital entry: a verified call lets the same person finish signing in on the web. Decided: an ES256 JWT, checked by the site against the engine's published JWKS, bound to a nonce the site showed.
 
 *Acceptance*
 
-- A step-up token the host's web sign-in exchanges once, bound to the subject and the access grant, short-lived, refused after the call is tainted.
-- Documented for an OpenID Connect `acr` step-up.
+- `issueStepUpToken` (it throws `NotImplementedError` today): a compact JWS (`alg: ES256`) with `iss`, `aud` (the site), `sub` (an opaque handle the site knows), `iat`, `exp` (2 to 5 minutes), `jti`, `acr` (the level) and the site's `nonce`, which the caller keys on the call.
+- A JWKS document of the step-up keys, its own `kid`, for `/.well-known/jwks.json`; checked with an off-the-shelf JOSE library in a test (development dependency only).
+- Delivered by a text to the number on file or a POST to the site's registered callback; refused after the call is tainted; each `jti` used once by the site.
 
 *Files:* `src/gate/step-up.ts` (new), `src/gate/later.ts`  
 *Tests:* test/gate.test.ts  
-*Depends on:* GAT-1
+*Depends on:* none
+
+#### **GAT-5** Seam adapter
+
+One public, self-serve API with a sandbox reaches August, Yale, Nuki, Salto KS, Kisi, Brivo and Avigilon Alta. Built after Seam's pricing and its handling of Canadian data are checked.
+
+*Acceptance*
+
+- `seamAccessController` (it throws `NotImplementedError` today): `unlock` through Seam's lock unlock call, checking the device can unlock remotely first; `confirmed` only when Seam reports that the device confirmed it.
+- No retries (Seam documents no idempotency key on unlock); a lost answer is `unknown`, as Gate requires.
+- Tested against a local fake HTTP server replaying recorded sandbox responses; proven once by hand in Seam's sandbox.
+
+*Files:* `src/gate/seam.ts` (new), `src/gate/later.ts`  
+*Tests:* test/gate-seam.test.ts  
+*Depends on:* none
+
+#### **GAT-6** Direct vendor adapters
+
+For access systems no aggregator reaches (Verkada, for example) or a host that has an account with one vendor only (Kisi).
+
+*Acceptance*
+
+- `vendorAccessController` (it throws `NotImplementedError` today) for Kisi and Verkada, each through the vendor's documented unlock call, with the same never-retry rule.
+- Each tested against a local fake HTTP server; proven once by hand on the vendor's own test setup.
+
+*Files:* `src/gate/vendors.ts` (new), `src/gate/later.ts`  
+*Tests:* test/gate-vendors.test.ts  
+*Depends on:* none
 
 ### M4. Badge
 
@@ -435,14 +429,17 @@ Pay runs on fakes today.
 
 *Acceptance*
 
-- `StripeCheckoutLinks.createLink` creates a Checkout Session in payment mode, cards only, the amount and currency from the engine, a 30-minute expiry, the payment id in metadata and the engine's idempotency key.
-- In `connect` mode, a direct charge on the connected account (the `Stripe-Account` header); in `platform` mode, on the platform's own account (PAY-7 carries the mode).
+- `StripeCheckoutLinks.createLink` creates a Checkout Session in payment mode with the engine's instant payment methods, the amount and currency from the engine, `expires_at` at the later of the engine's deadline and Stripe's 30-minute minimum, the payment id in metadata and the engine's idempotency key.
+- In `connect` mode, a direct charge on the connected account (the `Stripe-Account` header); in `platform` mode, on the platform's own account.
+- `expireLink` calls the session's expire endpoint (with `Stripe-Account` in connect mode) and answers `not_open` when Stripe says the session is no longer open.
+- How Apple Pay, Google Pay and Link map to Checkout's parameters is proven in test mode, not assumed.
+- Connect-mode events come from the Connect endpoint, with its own signing secret, and carry the connected account.
 - Never logs the URL; returns the session id as `linkId`.
 - The payments webhook settles it end to end with a real test-mode event.
 
 *Files:* `examples/reference-server/src/stripe-adapters.ts`, `examples/reference-server/src/main.ts`  
 *Tests:* test/stripe-adapters.test.ts against a local fake; A recorded manual run in Stripe test mode in the pull request  
-*Depends on:* PAY-7
+*Depends on:* none
 
 #### **PAY-2** Amounts from code, read back before the link is sent
 
@@ -457,14 +454,14 @@ The amount must come from a record, a price list or the business's endpoint, and
 *Tests:* test/engine.test.ts  
 *Depends on:* FIL-1
 
-#### **PAY-3** Cancel and expire open links
+#### **PAY-3** Cancel open links
 
-A link should not outlive its purpose.
+A link should not outlive its purpose. The engine already expires a link at its own deadline (`expirePaymentLinks`, through `PaymentLinks.expireLink`); this is the rest.
 
 *Acceptance*
 
-- `cancelPaymentLink` through a `PaymentLinks.cancel` method; open links are expired when the call ends, and the receipt shows them as expired.
-- A late `paid` after cancellation is still recorded as paid (the money moved) and flagged in the ledger.
+- `cancelPaymentLink` (the caller changed their mind) through `PaymentLinks.cancel` when the adapter has it, else `PaymentLinks.expireLink`; open links are expired when the call ends, and the receipt shows them as expired.
+- A late `paid` after cancellation is still recorded as paid and flagged in the ledger: the engine already does this for any request it expired (`late: true`); keep it for cancellations.
 
 *Files:* `src/pay/later.ts`, `src/pay/paylink.ts`, `src/core/adapters.ts`, `src/engine.ts`  
 *Tests:* test/engine.test.ts  

@@ -4,8 +4,10 @@ import { strict as assert } from "node:assert";
 import type { JsonValue } from "../src/core/canonical.ts";
 import type { FlowConfig } from "../src/core/config.ts";
 import { EngineError, type EngineErrorCode } from "../src/core/errors.ts";
+import type { Engine } from "../src/engine.ts";
 import type { IntakeForm } from "../src/file/intake.ts";
 import { defaultConfig } from "../src/modules.ts";
+import type { PaymentInput } from "../src/pay/paylink.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine, type TestEngineOptions } from "../src/testing/index.ts";
 
 export const ACCOUNT = "12345678";
@@ -48,6 +50,12 @@ export function setup(options: TestEngineOptions = {}): TestEngine {
 
 export const rejects = (code: EngineErrorCode, message?: RegExp) => (e: unknown) =>
   e instanceof EngineError && e.code === code && (message === undefined || message.test(e.message));
+
+/** Reads the amount back and has the caller confirm it, as every payment link needs (PAY-2). */
+export async function confirmAmount(engine: Engine, callId: string, input?: PaymentInput): Promise<void> {
+  const back = await engine.readBackPayment(callId, input);
+  await engine.confirmPaymentAmount(callId, { digest: back.digest, confirmedBy: "keypad" });
+}
 
 /** A call verified to level 3 by keypad and photo ID, in the open phase. */
 export async function verifiedCall(t: TestEngine, locale: "en" | "fr" = "en"): Promise<string> {

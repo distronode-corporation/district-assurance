@@ -69,6 +69,20 @@ export interface BadgeSlice {
   finished: number;
   lastLevel: AssuranceLevel;
   lastMethods: FactorKind[];
+  /** The policy version and config revision that judged the last one; null until one finished. */
+  lastJudgedBy: JudgedBy | null;
+  /**
+   * The epoch of the verification a taint landed in (Sean, 2026-11-19): that verification grants no
+   * level, whatever matched before or after the taint, and the caller must start a new one, which
+   * bumps the epoch. Absent on a call never tainted, and on a call stored before the rule.
+   */
+  voidedEpoch?: number;
+}
+
+/** Which policy and which FlowConfig revision judged a verification. */
+export interface JudgedBy {
+  policyVersion: string;
+  configRevision: string;
 }
 
 export interface KeypadResult {
@@ -214,6 +228,7 @@ export class BadgeModule implements AssuranceModule {
       finished: 0,
       lastLevel: 0,
       lastMethods: [],
+      lastJudgedBy: null,
     };
     return initial as unknown as JsonValue;
   }
@@ -230,12 +245,26 @@ export class BadgeModule implements AssuranceModule {
 
   onUntrusted(s: JsonValue): JsonValue {
     // A photo ID link sent before the taint no longer counts. One link per call still holds.
+    // The verification open now (or the last one) is void: it never grants a level. The next
+    // beginVerification bumps the epoch, so a new verification counts as usual.
     const badge = s as unknown as BadgeSlice;
-    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink) } as unknown as JsonValue;
+    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink), voidedEpoch: badge.epoch } as unknown as JsonValue;
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
-    return { verification: { level: state.level, methods: state.level === 0 ? [] : (s as unknown as BadgeSlice).lastMethods } };
+    const badge = s as unknown as BadgeSlice;
+    // No verification finished (or the record predates `lastJudgedBy`): the receipt names neither
+    // field. Only the two fields are taken, after level and methods are set, so nothing stored
+    // beside them can change what the receipt says about the verification.
+    // Each field only when the store holds it as text: a damaged record that lacks one (or holds
+    // something else) drops that field, never an undefined the receipt could not be signed with.
+    const judged: unknown = badge.lastJudgedBy;
+    const by: { policyVersion?: string; configRevision?: string } = {};
+    if (isObject(judged)) {
+      if (typeof judged.policyVersion === "string") by.policyVersion = judged.policyVersion;
+      if (typeof judged.configRevision === "string") by.configRevision = judged.configRevision;
+    }
+    return { verification: { ...by, level: state.level, methods: state.level === 0 ? [] : badge.lastMethods } };
   }
 }
 
@@ -282,12 +311,15 @@ function maxAttempts(rt: EngineRuntime, module: BadgeModule, kind: string): numb
  */
 export async function beginVerification(rt: EngineRuntime, callId: string, input: { accountNumber: string } | { subjectKey: string }): Promise<void> {
   rt.settings(BADGE);
+  // Read once: the key or account number checked is the one used, and the ledger names its source.
+  const byHost = "subjectKey" in input;
+  const given: unknown = byHost ? input.subjectKey : (input as { accountNumber: string }).accountNumber;
   let subjectKey: string | null;
-  if ("subjectKey" in input) {
-    if (!/^[0-9a-f]{64}$/.test(input.subjectKey)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
-    subjectKey = input.subjectKey;
+  if (byHost) {
+    if (typeof given !== "string" || !/^[0-9a-f]{64}$/.test(given)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
+    subjectKey = given;
   } else {
-    subjectKey = isKeypadEntry(input.accountNumber) ? rt.hmac(`subject:${input.accountNumber}`) : null;
+    subjectKey = typeof given === "string" && isKeypadEntry(given) ? rt.hmac(`subject:${given}`) : null;
   }
   const subject = subjectKey === null ? null : await rt.adapter("records").getSubject(rt.workspaceId, subjectKey);
   await rt.update(callId, (draft) => {
@@ -307,7 +339,7 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
     }
     s.subjectKey = subjectKey;
     s.subject = subject;
-    draft.emit("verification.started", "code", { subject: "subjectKey" in input ? "host" : "account" });
+    draft.emit("verification.started", "code", { subject: byHost ? "host" : "account" });
   });
 }
 
@@ -399,10 +431,10 @@ export async function startPhotoId(rt: EngineRuntime, callId: string): Promise<{
   const enrolled = await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
     if (s.identityLink === "void") return false;
-    if (s.identityLink === "reserved") {
-      s.identityLink = "sent";
-      s.identitySessions.push(check.sessionId);
-    }
+    if (s.identityLink === "reserved") s.identityLink = "sent";
+    // Every session whose link is about to be texted must be able to apply its outcome, even when
+    // a resume long after a failed text gets a new session (the provider pruned the old key).
+    if (!s.identitySessions.includes(check.sessionId)) s.identitySessions.push(check.sessionId);
     return true;
   });
   // Tainted while the check was created: the link would never count, so it is never sent.
@@ -418,21 +450,27 @@ export async function startPhotoId(rt: EngineRuntime, callId: string): Promise<{
 }
 
 /** The identity provider's verified webhook outcome. Unknown, late or tainted sessions are ignored. */
+const IDENTITY_STATUSES: readonly unknown[] = ["verified", "requires_input", "canceled"];
+
 export async function applyIdentityOutcome(rt: EngineRuntime, outcome: IdentityOutcome): Promise<OutcomeResult> {
-  const callId = await rt.resolveRef(`identity:${outcome.sessionId}`);
+  // Read once: the session looked up is the one consumed, and the status that passed is the one ledgered.
+  const { sessionId, status } = outcome;
+  // The status goes into the ledger as it is: anything but the provider's three is refused first.
+  if (!IDENTITY_STATUSES.includes(status)) throw new EngineError("invalid_input", "status must be verified, requires_input or canceled");
+  const callId = await rt.resolveRef(`identity:${sessionId}`);
   if (callId === null) return { applied: false };
   return rt.update(callId, (draft): OutcomeResult => {
     const s = draft.slice<BadgeSlice>(BADGE);
-    const factor = { kind: "photo_id", passed: outcome.status === "verified", at: rt.now() };
+    const factor = { kind: "photo_id", passed: status === "verified", at: rt.now() };
     const step = draft.step();
     // No flow at all, or a running flow on a step that uses photo ID. A flow that ended takes nothing more.
     const stepAllows = step === null ? draft.record.flow === null : step.type === "badge.verify" && (step.factors as string[]).includes("photo_id");
-    if (!s.identitySessions.includes(outcome.sessionId) || !canApply(draft.record.state, { type: "factor_recorded", factor }) || !stepAllows) {
+    if (!s.identitySessions.includes(sessionId) || !canApply(draft.record.state, { type: "factor_recorded", factor }) || !stepAllows) {
       return { applied: false };
     }
-    s.identitySessions = s.identitySessions.filter((id) => id !== outcome.sessionId);
+    s.identitySessions = s.identitySessions.filter((id) => id !== sessionId);
     draft.apply({ type: "factor_recorded", factor });
-    draft.emit("verification.factor", "system", { kind: factor.kind, passed: factor.passed, status: outcome.status });
+    draft.emit("verification.factor", "system", { kind: factor.kind, passed: factor.passed, status });
     return { applied: true, callId };
   });
 }
@@ -443,9 +481,14 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
   return rt.update(callId, (draft) => {
     const step = stepOfType<BadgeVerifyStep>(draft.record, "badge.verify");
     const s = draft.slice<BadgeSlice>(BADGE);
-    const factors = draft.record.state.factors.filter((f) => step === null || step.factors.includes(f.kind));
-    const result = evaluateAssurance(rt.policy, factors, s.carrier);
-    const scopes = scopesForLevel(rt.policy, result.level).filter((scope) => step?.scopes === undefined || step.scopes.includes(scope));
+    // A taint landed in this verification: it fails, with no level (Sean, 2026-11-19).
+    const voidedByTaint = s.voidedEpoch === s.epoch;
+    const factors = voidedByTaint ? [] : draft.record.state.factors.filter((f) => step === null || step.factors.includes(f.kind));
+    // The policy and revision in force now judge, read together inside this write.
+    const policy = rt.policy;
+    const judgedBy: JudgedBy = { policyVersion: policy.version, configRevision: rt.revision };
+    const result = evaluateAssurance(policy, factors, s.carrier);
+    const scopes = scopesForLevel(policy, result.level).filter((scope) => step?.scopes === undefined || step.scopes.includes(scope));
     const issuedAt = rt.clock.now();
     const grant =
       result.level === 0
@@ -454,6 +497,7 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
             grantId: rt.ids.next("grant"),
             level: result.level,
             scopes,
+            ...judgedBy,
             issuedAt: issuedAt.toISOString(),
             expiresAt: new Date(issuedAt.getTime() + ttlMs).toISOString(),
           };
@@ -461,12 +505,25 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
     s.finished++;
     s.lastLevel = result.level;
     s.lastMethods = result.counted;
-    draft.emit("verification.finished", "code", { level: result.level, methods: result.counted, discounted: result.discounted.map((d) => d.kind) });
-    if (grant !== null) draft.emit("grant.issued", "code", { grantId: grant.grantId, level: grant.level, scopes, expiresAt: grant.expiresAt });
+    s.lastJudgedBy = judgedBy;
+    draft.emit("verification.finished", "code", {
+      level: result.level,
+      methods: result.counted,
+      discounted: result.discounted.map((d) => d.kind),
+      ...judgedBy,
+      ...(voidedByTaint ? { voidedByTaint: true } : {}),
+    });
+    if (grant !== null) draft.emit("grant.issued", "code", { grantId: grant.grantId, level: grant.level, scopes, expiresAt: grant.expiresAt, ...judgedBy });
     return { level: result.level, scopes: grant === null ? [] : scopes };
   });
 }
 
+/** The identity link text, in every supported locale (SPEC.md section 16). */
+export const IDENTITY_TEXT: Record<Locale, (url: string) => string> = {
+  en: (url) => `Your one-time identity check link: ${url}`,
+  fr: (url) => `Votre lien de vérification d'identité, à usage unique : ${url}`,
+};
+
 function identityText(locale: Locale, url: string): string {
-  return locale === "fr" ? `Votre lien de vérification d'identité, à usage unique : ${url}` : `Your one-time identity check link: ${url}`;
+  return IDENTITY_TEXT[locale](url);
 }

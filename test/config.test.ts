@@ -109,7 +109,7 @@ describe("validateConfig: modules", () => {
   it("refuses unknown modules, malformed entries, unknown fields, and turning the ledger off", () => {
     const problems = validateConfig(
       config((c) => {
-        c.modules.gate = { enabled: true };
+        c.modules.vault = { enabled: true };
         c.modules.paylink = "on";
         c.modules.dossier = { enabled: "yes", settings: { forms: [] }, extra: 1 };
         c.modules.trace = { enabled: false };
@@ -121,7 +121,7 @@ describe("validateConfig: modules", () => {
       "modules.dossier.enabled: must be true or false",
       "modules.paylink: must be an object",
       "modules.trace: trace holds the audit ledger and cannot be turned off",
-      "modules.gate: no module named gate is installed",
+      "modules.vault: no module named vault is installed",
     ]);
   });
 
@@ -284,7 +284,7 @@ describe("validateConfig: flows", () => {
         "Bad Name": { steps: [{ type: "trace.receipt" }] },
         empty: { steps: [] },
         nosteps: "x",
-        odd: { summary: 1, extra: true, steps: ["x", { type: 1 }, { type: "gate.grant" }, { type: "paylink.request" }] },
+        odd: { summary: 1, extra: true, steps: ["x", { type: 1 }, { type: "vault.open" }, { type: "paylink.request" }] },
       }, new ModuleRegistry({ adapters: ALL_ADAPTERS, modules: builtInModules() })) .slice(0, 6),
       [
         "flows.Bad Name: a flow name is lower-case letters, digits and hyphens, at most 64",
@@ -298,14 +298,15 @@ describe("validateConfig: flows", () => {
     const off = validateConfig(
       config((c) => {
         c.modules.paylink.enabled = false;
-        c.flows = { odd: { steps: [{ type: 1 }, { type: "gate.grant" }, { type: "paylink.request" }] } };
+        c.flows = { odd: { steps: [{ type: 1 }, { type: "vault.open" }, { type: "gate.grant" }, { type: "paylink.request" }] } };
       }),
       registry(),
     );
     assert.deepEqual(off, [
       "flows.odd.steps[0]: a step is an object with a type",
-      "flows.odd.steps[1]: no installed module provides the step gate.grant",
-      "flows.odd.steps[2] (paylink.request): the paylink module is turned off",
+      "flows.odd.steps[1]: no installed module provides the step vault.open",
+      "flows.odd.steps[2] (gate.grant): the gate module is turned off",
+      "flows.odd.steps[3] (paylink.request): the paylink module is turned off",
     ]);
   });
 
@@ -379,8 +380,24 @@ describe("validateConfig: flows", () => {
     ]);
     const pay = { type: "paylink.request", amountMinor: 100, currency: "cad", description: "x", amountSource: "price_list" };
     assert.deepEqual(one({ ...pay, mode: "cash" }), ["(paylink.request): mode must be connect or platform"]);
-    assert.deepEqual(one({ ...pay, mode: "connect" }), ["(paylink.request): mode connect is not built yet (PAY-7)"]);
+    assert.deepEqual(one({ ...pay, mode: "connect" }), ["(paylink.request): connect mode needs connectedAccountId in the paylink settings"]);
     assert.deepEqual(one({ ...pay, amountMinor: 1_000_001 }), ["(paylink.request): amountMinor is above the limit"]);
+    // PAY-2: a reference the AmountSource resolves, instead of a fixed amount, never both.
+    const byRef = { type: "paylink.request", amountRef: "deposit.standard", description: "x", amountSource: "price_list" };
+    const withAmounts = registry([...ALL_ADAPTERS, "amounts"]);
+    const verify = { type: "badge.verify", level: 3, factors: ["keypad_knowledge", "photo_id"] };
+    assert.deepEqual(flows({ f: { steps: [verify, byRef] } }, withAmounts), []);
+    assert.deepEqual(one(byRef), ["(paylink.request): an amountRef needs the amounts adapter, which the engine does not have"]);
+    assert.deepEqual(
+      flows({ f: { steps: [verify, { ...byRef, amountMinor: 100, currency: "cad" }, { ...byRef, amountRef: "no spaces" }, { ...byRef, amountRef: 7 }, { ...byRef, amountRef: "x".repeat(65) }] } }, withAmounts),
+      [
+        "flows.f.steps[1] (paylink.request): name amountMinor and currency, or amountRef, not both",
+        "flows.f.steps[2] (paylink.request): amountRef must be 1 to 64 letters, digits, '.', ':', '-' or '_'",
+        "flows.f.steps[3] (paylink.request): amountRef must be 1 to 64 letters, digits, '.', ':', '-' or '_'",
+        "flows.f.steps[4] (paylink.request): amountRef must be 1 to 64 letters, digits, '.', ':', '-' or '_'",
+      ],
+    );
+    assert.deepEqual(flows({ f: { steps: [verify, { ...byRef, currency: "cad" }] } }, withAmounts), ["flows.f.steps[1] (paylink.request): name amountMinor and currency, or amountRef, not both"]);
     assert.deepEqual(one({ type: "trace.consent", x: 1 }), ["(trace.consent): x is not a field of this step", "(trace.consent): purpose must name a wording"]);
     assert.deepEqual(one({ type: "trace.consent", purpose: "nope" }), ["(trace.consent): no wording for nope in the trace settings"]);
     assert.deepEqual(one({ type: "trace.receipt", x: 1 }), ["(trace.receipt): x is not a field of this step"]);
@@ -417,7 +434,7 @@ describe("validateConfig: flows", () => {
     const door = outside("door", { scopes: { grants: [], needs: { "door.lookup": "door.open" }, classes: { "door.open": "access" } }, provides: { factors: [], steps: ["door.lookup"], outcomes: [] } });
     const lax = outside("lax", { scopes: { grants: [], needs: {}, classes: { "door.open": "none" } }, provides: { factors: [], steps: ["lax.lookup"], outcomes: [] } });
     const reg = registry(ALL_ADAPTERS, [door, lax]);
-    assert.deepEqual(reg.scopeClasses(), { "payment.request": "money", "intake.file": "none", "door.open": "access" });
+    assert.deepEqual(reg.scopeClasses(), { "payment.request": "money", "intake.file": "none", "entry.open": "access", "entry.sign_in": "access", "door.open": "access" });
     const problems = validateConfig(config((c) => (c.policy.scopes["door.open"] = 1)), reg);
     assert.deepEqual(problems, ["policy: scope door.open is access, and below its floor of level 2"]);
   });
@@ -460,7 +477,7 @@ describe("validateConfig: flows", () => {
 describe("module registry", () => {
   it("installs, lists, finds and removes modules", () => {
     const reg = registry(["ledger"], [outside("loyalty")]);
-    assert.deepEqual(reg.list().map((m) => m.manifest.name), ["badge", "dossier", "paylink", "trace", "loyalty"]);
+    assert.deepEqual(reg.list().map((m) => m.manifest.name), ["badge", "dossier", "paylink", "trace", "gate", "step-up", "loyalty"]);
     assert.equal(reg.stepOwner("loyalty.lookup")?.manifest.name, "loyalty");
     assert.equal(reg.stepOwner("nope.step"), undefined);
     assert.ok(reg.factorKinds().includes("pin"));

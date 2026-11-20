@@ -5,13 +5,27 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { request } from "node:http";
 import type { AddressInfo } from "node:net";
-import { after, before, describe, it } from "node:test";
+import { after, before, describe, it, mock } from "node:test";
 
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { DemoRuns, type RunView } from "../examples/reference-server/src/demo-runs.ts";
-import { DEMO_SECRET, SCRIPTS, createDemoWorld, isDemoFlow, type DemoWorld } from "../examples/reference-server/src/script.ts";
+import {
+  DEMO_CONNECT_SECRET,
+  DEMO_SECRET,
+  FIRST_FAILURE_WAIT_MS,
+  SCRIPTS,
+  createDemoWorld,
+  isDemoFlow,
+  recordLinks,
+  verifyToLevel2,
+  waitOutFailureWait,
+  type CreatedLink,
+  type DemoWorld,
+} from "../examples/reference-server/src/script.ts";
 import { STATIC_FILES, UI_CSP } from "../examples/reference-server/src/static.ts";
-import { EngineError, canonicalJson, signStripePayload, verifyReceipt, type AuditEntry, type SignedReceipt } from "../src/index.ts";
+import { EngineError, canonicalJson, signStripePayload, verifyReceipt, type AuditEntry, type PaymentLinks, type SignedReceipt } from "../src/index.ts";
+import { FixedClock, FakePaymentLinks } from "../src/testing/index.ts";
+import { confirmAmount } from "./helpers.ts";
 
 interface CheckResult {
   ok: boolean;
@@ -41,13 +55,21 @@ async function serve(ui = true): Promise<Served> {
   const server = createReferenceServer({
     engine: world.engine,
     clock: world.t.clock,
-    stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET] },
+    stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET], connect: [DEMO_CONNECT_SECRET] },
     ...(ui ? { ui: new DemoRuns(world) } : {}),
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   world.base = `http://127.0.0.1:${port}`;
-  return { world, base: world.base, port, close: () => new Promise((resolve) => server.close(() => resolve())) };
+  return {
+    world,
+    base: world.base,
+    port,
+    close: async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await world.close();
+    },
+  };
 }
 
 /** A raw request, so the path and the Host header go out exactly as written. */
@@ -167,7 +189,7 @@ describe("reference UI: static files", () => {
     const res = await raw(s.port, "/webhooks/stripe/payments", { host, "stripe-signature": signature, "content-type": "application/json" }, "POST", payload);
     assert.deepEqual([res.status, JSON.parse(res.body)], [403, { error: "host_not_allowed" }]);
     const local = await raw(s.port, "/webhooks/stripe/payments", { host: `127.0.0.1:${s.port}`, "stripe-signature": signature }, "POST", payload);
-    assert.deepEqual([local.status, JSON.parse(local.body)], [200, { received: true, applied: false }], "the same event on this machine's name is read");
+    assert.deepEqual([local.status, JSON.parse(local.body)], [503, { received: true, applied: false, retry: true }], "the same event on this machine's name is read (no call holds its link yet)");
   });
 
   it("answers 400 to a request target that is not a path", async () => {
@@ -218,9 +240,9 @@ describe("reference UI: demo routes", () => {
   };
   const next = (runId: string) => fetch(`${s.base}/demo/runs/${runId}/next`, { method: "POST", headers: json, body: "{}" });
 
-  it("lists the demo's two flows with their steps", async () => {
+  it("lists the demo's four flows with their steps", async () => {
     const { flows } = (await (await fetch(`${s.base}/demo/flows`)).json()) as { flows: Array<{ flow: string; summary: string; steps: string[] }> };
-    assert.deepEqual(flows.map((f) => [f.flow, f.steps.length]), [["owner-command", 6], ["deposit", 11]]);
+    assert.deepEqual(flows.map((f) => [f.flow, f.steps.length]), [["owner-command", 6], ["deposit", 12], ["deposit-connect", 6], ["entry", 6]]);
     assert.match(flows[1]!.summary, /deposit/);
     assert.equal((await fetch(`${s.base}/demo/flows`, { method: "POST", headers: json, body: "{}" })).status, 405);
   });
@@ -264,6 +286,34 @@ describe("reference UI: demo routes", () => {
     assert.deepEqual(last.results.map((r) => r.ok), [true, true, true, true, true, true]);
     assert.equal(last.done, true);
     assert.equal((await fetch(`${s.base}/receipts/${last.callId}`)).status, 404);
+  });
+
+  it("runs two entry calls that reach the door together: both wait for the relay, and each checks its own door (review of #50)", async () => {
+    const world = createDemoWorld();
+    const server = createReferenceServer({ engine: world.engine, clock: world.t.clock, stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET], connect: [DEMO_CONNECT_SECRET] }, ui: new DemoRuns(world) });
+    const runs = new DemoRuns(world);
+    try {
+      const a = await runs.start("entry");
+      const b = await runs.start("entry");
+      for (let i = 0; i < 2; i++) await Promise.all([runs.step(a.runId), runs.step(b.runId)]);
+      // Both reach the door at once, before the relay has started.
+      const [ra, rb] = await Promise.all([runs.step(a.runId), runs.step(b.runId)]);
+      for (const r of [ra, rb]) assert.ok(r.ok && r.view.results.at(-1)!.ok, JSON.stringify(r.ok ? r.view.results.at(-1) : r));
+      assert.equal(world.openedFor.size, 2);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await world.close();
+    }
+  });
+
+  it("runs deposit-connect and entry to the end, one step per request", async () => {
+    for (const flow of ["deposit-connect", "entry"] as const) {
+      const [, view] = await start(flow);
+      let last = view;
+      for (let i = 0; i < SCRIPTS[flow].length; i++) last = (await (await next(view.runId)).json()) as RunView;
+      assert.deepEqual(last.results.map((r) => [r.label, r.ok]), SCRIPTS[flow].map((step) => [step.label, true]), flow);
+      assert.equal(last.done, true);
+    }
   });
 
   it("refuses an unknown flow, bad JSON, a non-JSON body and another origin", async () => {
@@ -335,7 +385,7 @@ describe("reference UI: DemoRuns", () => {
       const runs = new DemoRuns(s.world);
       const a = await runs.start("deposit");
       const b = await runs.start("deposit");
-      const payAt = SCRIPTS.deposit.findIndex((step) => step.label.startsWith("pay:"));
+      const payAt = SCRIPTS.deposit.findIndex((step) => step.label.startsWith("pay: link"));
       for (let i = 0; i <= payAt; i++) {
         await runs.step(a.runId);
         await runs.step(b.runId);
@@ -385,8 +435,11 @@ describe("reference UI: DemoRuns", () => {
     assert.equal(answer.view.results[0]!.detail, "failed: internal error");
   });
 
-  it("knows only the two demo flows", () => {
-    assert.deepEqual([isDemoFlow("deposit"), isDemoFlow("owner-command"), isDemoFlow("toString"), isDemoFlow(1)], [true, true, false, false]);
+  it("knows only the four demo flows", () => {
+    assert.deepEqual(
+      [isDemoFlow("deposit"), isDemoFlow("owner-command"), isDemoFlow("deposit-connect"), isDemoFlow("entry"), isDemoFlow("toString"), isDemoFlow(1)],
+      [true, true, true, true, false, false],
+    );
   });
 });
 
@@ -467,5 +520,159 @@ describe("reference UI: the page's checks (receipt-check.js, no DOM)", () => {
     assert.equal(await check.sha256Hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     assert.equal(check.shortHash("a".repeat(64)), "aaaaaaaa...aaaaaaaa");
     assert.equal(check.shortHash("abc"), "abc");
+  });
+});
+
+describe("reference UI: the demo world's adapters and clock (review of #50)", () => {
+  /** A real adapter's shape: private state, and the optional `cancel` and `refund` of later PRs. */
+  class RealLinks {
+    readonly capabilities = new FakePaymentLinks().capabilities;
+    readonly #calls: string[] = [];
+    get calls(): readonly string[] {
+      return this.#calls;
+    }
+    async createLink(input: { paymentId: string }): Promise<{ linkId: string; url: string }> {
+      this.#calls.push(`create ${input.paymentId}`);
+      return { linkId: `cs_${input.paymentId}`, url: `https://checkout.example/cs_${input.paymentId}` };
+    }
+    async expireLink(input: { linkId: string }): Promise<{ state: "expired" }> {
+      this.#calls.push(`expire ${input.linkId}`);
+      return { state: "expired" };
+    }
+    async cancel(input: { linkId: string }): Promise<{ state: "cancelled" }> {
+      this.#calls.push(`cancel ${input.linkId}`);
+      return { state: "cancelled" };
+    }
+    async refund(input: { paymentIntentId: string }): Promise<{ state: "refunded" }> {
+      this.#calls.push(`refund ${input.paymentIntentId}`);
+      return { state: "refunded" };
+    }
+  }
+
+  it("passes cancel and refund through to the real adapter, on the adapter itself, and records each link", async () => {
+    const real = new RealLinks();
+    const links: CreatedLink[] = [];
+    const wrapped = recordLinks(real as unknown as PaymentLinks, links) as unknown as RealLinks;
+    assert.equal(wrapped.capabilities, real.capabilities);
+    assert.equal(typeof wrapped.cancel, "function");
+    assert.equal(typeof wrapped.refund, "function");
+    assert.deepEqual(await wrapped.createLink({ paymentId: "pay_1" }), { linkId: "cs_pay_1", url: "https://checkout.example/cs_pay_1" });
+    assert.deepEqual(await wrapped.expireLink({ linkId: "cs_pay_1" }), { state: "expired" });
+    assert.deepEqual(await wrapped.cancel({ linkId: "cs_pay_1" }), { state: "cancelled" });
+    assert.deepEqual(await wrapped.refund({ paymentIntentId: "pi_1" }), { state: "refunded" });
+    assert.deepEqual(real.calls, ["create pay_1", "expire cs_pay_1", "cancel cs_pay_1", "refund pi_1"]);
+    assert.deepEqual(links, [{ paymentId: "pay_1", linkId: "cs_pay_1", url: "https://checkout.example/cs_pay_1" }]);
+  });
+
+  it("wraps a frozen adapter too (L1 review round 2)", async () => {
+    const links: CreatedLink[] = [];
+    const fake = new FakePaymentLinks();
+    // An object-literal adapter, frozen: its methods are its own, non-writable and non-configurable.
+    const literal: PaymentLinks = { capabilities: fake.capabilities, createLink: (input) => fake.createLink(input), expireLink: (input) => fake.expireLink(input), refund: (input) => fake.refund(input) };
+    const frozen = Object.freeze(literal);
+    const wrapped = recordLinks(frozen, links);
+    assert.equal((await wrapped.createLink({ callId: "c", paymentId: "pay_1", amountMinor: 100, currency: "cad", description: "d", mode: "platform", paymentMethods: ["card"], expiresAt: new Date(Date.now() + 3_600_000).toISOString(), idempotencyKey: "k" })).linkId, "cs_fake_1");
+    assert.equal(links.length, 1);
+    assert.equal(typeof wrapped.refund, "function");
+  });
+
+  it("leaves an optional method missing when the real adapter lacks it", () => {
+    const plain: PaymentLinks = { capabilities: new FakePaymentLinks().capabilities, createLink: async () => ({ linkId: "l", url: "u" }), expireLink: async () => ({ state: "expired" }) };
+    const wrapped = recordLinks(plain, []) as PaymentLinks & { cancel?: unknown; refund?: unknown };
+    assert.equal("cancel" in wrapped, false);
+    assert.equal(wrapped.cancel, undefined);
+    assert.equal(wrapped.refund, undefined);
+  });
+
+  it("builds the demo world on the wrapped adapter, so a link the real one creates is recorded", async () => {
+    const real = new RealLinks();
+    const world = createDemoWorld({ payments: real as unknown as PaymentLinks });
+    const call = { callId: (await world.engine.startCall({ locale: "fr", flow: "deposit-connect" })).callId, linkId: "", receipt: null };
+    assert.ok((await verifyToLevel2(world, call, "payment.request")).ok);
+    await confirmAmount(world.engine, call.callId);
+    const payment = await world.engine.requestPayment(call.callId);
+    assert.deepEqual(real.calls, [`create ${payment.paymentId}`]);
+    assert.deepEqual(world.links.map((link) => link.paymentId), [payment.paymentId]);
+    await world.close();
+  });
+
+  it("starts the door relay once for callers that ask together (#47's shared startup)", async () => {
+    const world = createDemoWorld();
+    const [a, b] = await Promise.all([world.relayUrl(), world.relayUrl()]);
+    assert.equal(a, b);
+    assert.equal(await world.relayUrl(), a);
+    await world.close();
+  });
+
+  it("counts only a door opened for this run's own grant, never one opened for another grant", async () => {
+    const world = createDemoWorld();
+    const runs = new DemoRuns(world);
+    const first = await runs.start("entry");
+    for (let i = 0; i < 3; i++) await runs.step(first.runId);
+    assert.equal(world.doorsOpened.length, 1);
+    // The same world, but the record of which grants opened a door is lost: a door did open (for the
+    // first run), yet none for this run's grant, so the step must not pass.
+    const blind: DemoWorld = { ...world, openedFor: new Set<string>() };
+    const call = { callId: "", linkId: "", receipt: null };
+    const steps = SCRIPTS.entry;
+    for (const step of steps.slice(0, 2)) assert.ok((await step.run(blind, call)).ok);
+    const door = await steps[2]!.run(blind, call);
+    assert.equal(door.ok, false, door.detail);
+    assert.match(door.detail, /NO door opened for it/);
+    await world.close();
+  });
+
+  it("moves a fixed clock past VER-1's first wait, without a timer", async () => {
+    const clock = new FixedClock();
+    const before = clock.now().getTime();
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      await waitOutFailureWait(clock);
+    } finally {
+      mock.timers.reset();
+    }
+    assert.ok(clock.now().getTime() - before > FIRST_FAILURE_WAIT_MS);
+  });
+
+  it("waits VER-1's first wait out for real on any other clock (the live demo's wall clock)", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      let done = false;
+      const waiting = waitOutFailureWait({ now: () => new Date() }).then(() => (done = true));
+      await Promise.resolve();
+      mock.timers.tick(FIRST_FAILURE_WAIT_MS);
+      await Promise.resolve();
+      assert.equal(done, false, "resolved before the wait passed");
+      mock.timers.tick(100);
+      await waiting;
+      assert.equal(done, true);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("the owner-command step waits for the right PIN on a clock that cannot be moved", async () => {
+    const fixed = new FixedClock();
+    // A clock with the fixed clock's time but no advance(): only real time can pass for it.
+    const world = createDemoWorld({ clock: { now: () => fixed.now() } });
+    const call = { callId: "", linkId: "", receipt: null };
+    const steps = SCRIPTS["owner-command"];
+    for (const step of steps.slice(0, 2)) assert.ok((await step.run(world, call)).ok);
+    // Watch the right PIN itself, not the whole step: it must not be keyed before the wait passes.
+    const pins: string[] = [];
+    const submit = world.engine.submitPin.bind(world.engine);
+    world.engine.submitPin = (callId, pin) => (pins.push(pin), submit(callId, pin));
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const right = steps[2]!.run(world, call);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(pins, [], "keyed the right PIN before VER-1's wait passed");
+      mock.timers.tick(FIRST_FAILURE_WAIT_MS + 100);
+      assert.ok((await right).ok);
+      assert.equal(pins.length, 1, "keyed once, after the wait");
+    } finally {
+      mock.timers.reset();
+    }
+    await world.close();
   });
 });

@@ -84,7 +84,7 @@ function body(patch: Partial<ReceiptBody> = {}): ReceiptBody {
     issuedAt: at,
     verification: { level: 3, methods: ["keypad_knowledge", "photo_id"] },
     records: [{ recordId: "rec_1", formId: "repair", digest: "ab".repeat(32) }],
-    payments: [{ paymentId: "pay_1", status: "paid", amountMinor: 15000, currency: "cad", providerRef: "cs_1" }],
+    payments: [{ paymentId: "pay_1", status: "paid", amountMinor: 15000, currency: "cad", mode: "platform", providerRef: "cs_1" }],
     consents: [{ purpose: "texts", wordingVersion: "1", wordingDigest: "cd".repeat(32), answer: "yes" }],
     ledger: { seq: 9, hash: "ef".repeat(32) },
     ...patch,
@@ -101,6 +101,7 @@ describe("receipts", () => {
     const keys = [signer.publicJwk()];
     assert.equal("d" in keys[0]!, false, "the published key has no private part");
     assert.equal(verifyReceipt(receipt, keys), true);
+    for (const bad of [null, "x", 7, { ...receipt, signature: 1 }]) assert.equal(verifyReceipt(bad as never, keys), false, "never throws on a malformed envelope");
     assert.equal(new TextDecoder().decode(receiptPayload(body())).startsWith('{"callId":"c1","consents":'), true);
     assert.match(receiptDigest(body()), /^[0-9a-f]{64}$/);
   });
@@ -117,6 +118,21 @@ describe("receipts", () => {
     assert.equal(verifyReceipt({ ...receipt, alg: "HS256" as "ES256" }, keys), false);
     assert.equal(verifyReceipt({ ...receipt, signature: receipt.signature.slice(4) }, keys), false);
     assert.equal(verifyReceipt(receipt, [{ kid: "k1", kty: "EC", crv: "P-256", x: "bad", y: "bad" }]), false);
+  });
+
+  it("signs the policy version and config revision when the verification names them, and stays at version 1", async () => {
+    const signer = generateTestSigner("k1");
+    const keys = [signer.publicJwk()];
+    const judged = body({ verification: { level: 3, methods: ["keypad_knowledge", "photo_id"], policyVersion: "default-1", configRevision: "2026-11-18.1" } });
+    const receipt = await signReceipt(signer, judged);
+    assert.equal(receipt.body.v, 1);
+    assert.equal(verifyReceipt(receipt, keys), true);
+    assert.match(new TextDecoder().decode(receiptPayload(judged)), /"verification":\{"configRevision":"2026-11-18.1","level":3,"methods":\["keypad_knowledge","photo_id"\],"policyVersion":"default-1"\}/);
+    const swapped = { ...receipt, body: body({ verification: { ...judged.verification, policyVersion: "default-2" } }) };
+    assert.equal(verifyReceipt(swapped, keys), false, "the policy version is signed");
+    const dropped = { ...receipt, body: body() };
+    assert.equal(verifyReceipt(dropped, keys), false, "dropping the fields breaks the signature");
+    assert.notEqual(receiptDigest(judged), receiptDigest(body()));
   });
 
   it("builds a signer from a PEM or a JWK, P-256 only", async () => {

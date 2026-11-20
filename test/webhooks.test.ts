@@ -3,6 +3,7 @@ import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
 
 import { parseStripeEvent, signStripePayload, verifyStripeSignature } from "../src/webhooks/stripe.ts";
+import { rejects } from "./helpers.ts";
 
 const secret = "whsec_test_not_a_secret";
 const payload = '{"id":"evt_1","type":"checkout.session.completed"}';
@@ -39,6 +40,22 @@ describe("verifyStripeSignature", () => {
     assert.equal(check({ now: new Date(now.getTime() + 301_000), toleranceSeconds: 600 }).ok, true);
     assert.deepEqual(check({ payload: `${payload} ` }), { ok: false, reason: "no_matching_signature" });
     assert.deepEqual(check({ secrets: ["whsec_other"] }), { ok: false, reason: "no_matching_signature" });
+  });
+
+  it("refuses a tolerance or a clock that would accept any age, before checking anything", () => {
+    // A signature from a year ago: only a broken tolerance or clock would let it through.
+    const old = signStripePayload(payload, secret, t - 365 * 86_400);
+    const check = (patch: Partial<Parameters<typeof verifyStripeSignature>[0]>) => () =>
+      verifyStripeSignature({ payload, header: old, secrets: [secret], now, ...patch });
+    for (const toleranceSeconds of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 86_401, "300", null]) {
+      assert.throws(check({ toleranceSeconds: toleranceSeconds as number }), rejects("invalid_input", /toleranceSeconds/), String(toleranceSeconds));
+    }
+    for (const bad of [new Date(Number.NaN), new Date(8.64e15 + 1), null, undefined, 1_767_225_600_000, "2026-01-01"]) {
+      assert.throws(check({ now: bad as Date }), rejects("invalid_input", /now/), String(bad));
+    }
+    // The bounds themselves are fine: 0 accepts only this second, 86,400 a day either way.
+    assert.equal(verifyStripeSignature({ payload, header: signStripePayload(payload, secret, t), secrets: [secret], now, toleranceSeconds: 0 }).ok, true);
+    assert.deepEqual(verifyStripeSignature({ payload, header: old, secrets: [secret], now, toleranceSeconds: 86_400 }), { ok: false, reason: "timestamp_out_of_tolerance" });
   });
 });
 
@@ -77,6 +94,55 @@ describe("parseStripeEvent", () => {
       const parsed = parseStripeEvent(event(type, { id: "cs_1" }));
       assert.deepEqual(parsed, { eventId: "evt_1", livemode: false, kind: "payment", outcome: { kind, linkId: "cs_1" } });
     }
+  });
+
+  it("carries a Checkout Session's payment intent, which disputes name", () => {
+    assert.deepEqual(parseStripeEvent(event("checkout.session.completed", { id: "cs_1", payment_status: "paid", payment_intent: "pi_1" }))!, {
+      eventId: "evt_1",
+      livemode: false,
+      kind: "payment",
+      outcome: { kind: "completed", linkId: "cs_1", paymentStatus: "paid", paymentIntentId: "pi_1" },
+    });
+    assert.deepEqual(parseStripeEvent(event("checkout.session.async_payment_succeeded", { id: "cs_1", payment_intent: null }))!, {
+      eventId: "evt_1",
+      livemode: false,
+      kind: "payment",
+      outcome: { kind: "async_succeeded", linkId: "cs_1" },
+    });
+  });
+
+  it("maps dispute events: the dispute, its charge and payment intent, status and amount, never its evidence", () => {
+    const object = { id: "dp_1", object: "dispute", charge: "ch_1", payment_intent: "pi_1", status: "needs_response", amount: 15000, currency: "cad", reason: "fraudulent", evidence: { customer_name: "x" } };
+    for (const type of ["charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed", "charge.dispute.funds_withdrawn", "charge.dispute.funds_reinstated"]) {
+      assert.deepEqual(parseStripeEvent(event(type, object)), {
+        eventId: "evt_1",
+        livemode: false,
+        kind: "dispute",
+        outcome: { disputeId: "dp_1", chargeId: "ch_1", paymentIntentId: "pi_1", status: "needs_response", amountMinor: 15000, currency: "cad" },
+      });
+    }
+    assert.deepEqual(parseStripeEvent(event("charge.dispute.closed", { ...object, status: "won", payment_intent: null }, { account: "acct_1" }))!, {
+      eventId: "evt_1",
+      livemode: false,
+      kind: "dispute",
+      outcome: { disputeId: "dp_1", chargeId: "ch_1", paymentIntentId: null, status: "won", amountMinor: 15000, currency: "cad", account: "acct_1" },
+    });
+    for (const bad of [
+      { charge: undefined },
+      { charge: 7 },
+      { payment_intent: undefined },
+      { payment_intent: 7 },
+      { status: "maybe" },
+      { status: undefined },
+      { amount: -1 },
+      { amount: 1.5 },
+      { amount: "15000" },
+      { currency: "CAD" },
+      { currency: undefined },
+    ]) {
+      assert.equal(parseStripeEvent(event("charge.dispute.created", { ...object, ...bad })), null, JSON.stringify(bad));
+    }
+    assert.equal(parseStripeEvent(event("charge.dispute.something_new", object))!.kind, "ignored");
   });
 
   it("names other event types as ignored", () => {

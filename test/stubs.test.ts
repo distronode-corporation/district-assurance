@@ -5,10 +5,9 @@ import { describe, it } from "node:test";
 
 import { NotImplementedError } from "../src/core/errors.ts";
 import { buildReadBack, createUploadLink, deliverRecord } from "../src/file/later.ts";
-import { cancelPaymentLink, chargeSavedCard, startKeypadCardCapture } from "../src/pay/later.ts";
+import { chargeSavedCard, startKeypadCardCapture } from "../src/pay/later.ts";
 import { revokeConsent } from "../src/prove/consent.ts";
 import { exportLedger } from "../src/prove/later.ts";
-import { gateModule } from "../src/gate/later.ts";
 import { createTestEngine } from "../src/testing/index.ts";
 import { checkTextCode, enrolPin, normaliseSpokenAnswer, recordSubjectFailure, sendTextCode } from "../src/verify/later.ts";
 import { verifyTelnyxSignature, verifyTwilioSignature } from "../src/webhooks/carrier.ts";
@@ -25,19 +24,17 @@ const STUBS: Array<[string, () => unknown]> = [
   ["FIL-1", () => buildReadBack(form, {}, "fr")],
   ["FIL-3", () => deliverRecord({ workspaceId: "w", recordId: "r" })],
   ["FIL-5", () => createUploadLink({ callId: "c", recordId: "r" })],
-  ["PAY-3", () => cancelPaymentLink({ callId: "c", paymentId: "p" })],
   ["PAY-4", () => chargeSavedCard({ callId: "c", paymentId: "p" })],
   ["PAY-6", () => startKeypadCardCapture({ callId: "c", paymentId: "p" })],
   ["PRV-3", () => revokeConsent({ consentId: "x", via: "call" })],
   ["PRV-4", () => exportLedger({ fromSeq: 1 })],
   ["SRV-1", () => verifyTwilioSignature(hook)],
   ["SRV-1", () => verifyTelnyxSignature(hook)],
-  ["GAT-1", () => gateModule()],
   ["MOD-3", () => createTestEngine().engine.useFactor({ kind: "x_factor", summary: "x", maxAttemptsPerCall: 1, adapters: [], judge: async () => false })],
 ];
 
 /** Planned work a validator refuses by id (so a config can never reach it mid-call). */
-const REFUSED_BY_VALIDATORS = ["VER-2", "VER-3", "FIL-2", "PAY-7"];
+const REFUSED_BY_VALIDATORS = ["VER-2", "VER-3", "FIL-2"];
 
 /** One `new NotImplementedError(<string literal>, "<ID>")`, whatever the quotes, commas or escapes in the first argument. */
 const STUB_CALL = /new NotImplementedError\(\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)\s*,\s*["'`]([A-Z]{3}-\d+)["'`]\s*\)/g;

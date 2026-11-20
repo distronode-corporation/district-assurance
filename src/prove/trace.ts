@@ -128,12 +128,16 @@ export async function recordConsent(
   callId: string,
   input: { purpose: string; answer: "yes" | "no"; channel?: ConsentRecord["channel"] },
 ): Promise<ConsentRecord> {
+  // Read once: the purpose a wording was found for is the one the flow step is checked against.
+  const { purpose, answer, channel } = input;
+  // The answer goes into the record, the receipt and the ledger as it is: refused before any write.
+  if (answer !== "yes" && answer !== "no") throw new EngineError("invalid_input", "answer must be yes or no");
   return rt.update(callId, (draft) => {
-    const wording = draft.slice<TraceSlice>(TRACE).wordings.find((w) => w.purpose === input.purpose);
-    if (wording === undefined) throw new EngineError("invalid_input", `no wording for ${input.purpose} in this call's trace settings`);
+    const wording = draft.slice<TraceSlice>(TRACE).wordings.find((w) => w.purpose === purpose);
+    if (wording === undefined) throw new EngineError("invalid_input", `no wording for ${purpose} in this call's trace settings`);
     if (draft.record.state.phase === "ended") throw new EngineError("invalid_transition", "the call has ended");
     const step = stepOfType<TraceConsentStep>(draft.record, "trace.consent");
-    if (step !== null && step.purpose !== input.purpose) throw new EngineError("precondition_failed", `the flow step asks for consent to ${step.purpose}`);
+    if (step !== null && step.purpose !== purpose) throw new EngineError("precondition_failed", `the flow step asks for consent to ${step.purpose}`);
     const record: ConsentRecord = {
       consentId: rt.ids.next("cns"),
       callId,
@@ -141,8 +145,8 @@ export async function recordConsent(
       wordingVersion: wording.version,
       wordingDigest: wordingDigest(wording),
       locale: draft.record.locale,
-      answer: input.answer,
-      channel: input.channel ?? "call",
+      answer,
+      channel: channel ?? "call",
       at: rt.now(),
     };
     draft.slice<TraceSlice>(TRACE).consents.push(record);
@@ -187,7 +191,7 @@ export async function issueReceipt(
   rt: EngineRuntime,
   record: CallRecord,
   head: { seq: number; hash: string },
-  parts: Pick<ReceiptBody, "verification" | "records" | "payments">,
+  parts: Pick<ReceiptBody, "verification" | "records" | "payments" | "stepUp">,
 ): Promise<SignedReceipt> {
   const callId = record.state.callId;
   const body: ReceiptBody = {
@@ -207,6 +211,7 @@ export async function issueReceipt(
       wordingDigest: c.wordingDigest,
       answer: c.answer,
     })),
+    ...(parts.stepUp === undefined || parts.stepUp.length === 0 ? {} : { stepUp: parts.stepUp }),
     ledger: head,
   };
   const signer = rt.adapter("signer");

@@ -4,11 +4,17 @@ import { generateKeyPairSync } from "node:crypto";
 
 import type {
   CarrierSignals,
+  CodeSendKey,
+  CodeStore,
   IdentityProvider,
   IntakeRecord,
   MessagePurpose,
   MessageSender,
+  PaymentLinkCapabilities,
+  PaymentLinkRequest,
   PaymentLinks,
+  PaymentMode,
+  PaymentRefundRequest,
   PinVerifier,
   ReceiptSigner,
   RecordStore,
@@ -16,6 +22,7 @@ import type {
 } from "../core/adapters.ts";
 import type { Clock, IdGenerator } from "../core/clock.ts";
 import type { CarrierSignalReport } from "../core/policy.ts";
+import type { AccessController, SignedAccessGrant, UnlockResult } from "../gate/access.ts";
 import { keyPairSigner } from "../prove/receipt.ts";
 import { knowledgeDigest, pinDigest, subjectKeyFor } from "../verify/knowledge.ts";
 
@@ -93,26 +100,91 @@ export class FakeMessageSender implements MessageSender {
   }
 }
 
-/** Hands out one link per idempotency key, like a provider that honours idempotency keys. */
+/**
+ * Hands out one link per idempotency key, like a provider that honours idempotency keys, and
+ * expires an open link once. `created` records the mode, account, methods and expiry each link
+ * was asked for; `settle(linkId)` marks one as no longer open (paid or expired at the provider).
+ */
 export class FakePaymentLinks implements PaymentLinks {
-  readonly created: Array<{ linkId: string; paymentId: string; amountMinor: number; currency: string }> = [];
+  /** Stripe Checkout's by default: both modes, 30 minutes to 24 hours. */
+  readonly capabilities: PaymentLinkCapabilities;
+  readonly created: Array<Omit<PaymentLinkRequest, "callId" | "description" | "idempotencyKey"> & { linkId: string }> = [];
+  readonly expired: Array<{ linkId: string; mode: PaymentMode; connectedAccountId?: string }> = [];
+  readonly refunds: Array<Omit<PaymentRefundRequest, "idempotencyKey"> & { refundId: string }> = [];
+  refundStatus: "pending" | "succeeded" | "failed" = "succeeded";
   readonly #byKey = new Map<string, { linkId: string; url: string }>();
+  readonly #refundsByKey = new Map<string, { refundId: string; status: "pending" | "succeeded" | "failed" }>();
+  readonly #closed = new Set<string>();
 
-  async createLink(input: {
-    callId: string;
-    paymentId: string;
-    amountMinor: number;
-    currency: string;
-    description: string;
-    idempotencyKey: string;
-  }): Promise<{ linkId: string; url: string }> {
+  constructor(capabilities: Partial<PaymentLinkCapabilities> = {}) {
+    this.capabilities = { modes: ["connect", "platform"], minLinkMinutes: 30, maxLinkMinutes: 1440, ...capabilities };
+  }
+
+  async createLink(input: PaymentLinkRequest): Promise<{ linkId: string; url: string }> {
     const existing = this.#byKey.get(input.idempotencyKey);
     if (existing !== undefined) return existing;
     const linkId = `cs_fake_${this.created.length + 1}`;
     const link = { linkId, url: `https://pay.example.test/c/${linkId}` };
     this.#byKey.set(input.idempotencyKey, link);
-    this.created.push({ linkId, paymentId: input.paymentId, amountMinor: input.amountMinor, currency: input.currency });
+    const { callId: _c, description: _d, idempotencyKey: _k, ...asked } = input;
+    this.created.push({ ...structuredClone(asked), linkId });
     return link;
+  }
+
+  async expireLink(input: { linkId: string; mode: PaymentMode; connectedAccountId?: string; idempotencyKey: string }): Promise<{ state: "expired" | "not_open" }> {
+    if (this.#closed.has(input.linkId)) return { state: "not_open" };
+    this.#closed.add(input.linkId);
+    const { idempotencyKey: _k, ...asked } = input;
+    this.expired.push(asked);
+    return { state: "expired" };
+  }
+
+  /**
+   * Refunds once per idempotency key, like the provider: a repeated key returns the first answer.
+   * `refunds` records each refund asked for; `refundStatus` is what a new one answers.
+   */
+  async refund(input: PaymentRefundRequest): Promise<{ refundId: string; status: "pending" | "succeeded" | "failed" }> {
+    const existing = this.#refundsByKey.get(input.idempotencyKey);
+    if (existing !== undefined) return existing;
+    const answer = { refundId: `re_fake_${this.refunds.length + 1}`, status: this.refundStatus };
+    this.#refundsByKey.set(input.idempotencyKey, answer);
+    const { idempotencyKey: _k, ...asked } = input;
+    this.refunds.push({ ...structuredClone(asked), refundId: answer.refundId });
+    return answer;
+  }
+
+  /** The provider closed a link on its own (paid or expired): a later expireLink answers not_open. */
+  settle(linkId: string): void {
+    this.#closed.add(linkId);
+  }
+}
+
+/**
+ * A door controller for tests and the demo. `mode` says how it answers: `deliver` (took it),
+ * `confirm` (took it and the door moved), `refuse` (did not act), or `lose` (acted, then the
+ * answer was lost: the call throws). Every grant it received is in `received`.
+ */
+export class FakeAccessController implements AccessController {
+  readonly received: Array<{ grant: SignedAccessGrant; target: string; idempotencyKey: string }> = [];
+  mode: "deliver" | "confirm" | "refuse" | "lose";
+
+  constructor(mode: FakeAccessController["mode"] = "confirm") {
+    this.mode = mode;
+  }
+
+  async unlock(input: { grant: SignedAccessGrant; target: string; idempotencyKey: string }): Promise<UnlockResult> {
+    this.received.push(structuredClone(input));
+    const providerRef = `door_fake_${this.received.length}`;
+    switch (this.mode) {
+      case "deliver":
+        return { outcome: "delivered", providerRef, confirmed: false };
+      case "confirm":
+        return { outcome: "delivered", providerRef, confirmed: true };
+      case "refuse":
+        return { outcome: "refused", reason: "door_offline" };
+      case "lose":
+        throw new Error("the controller's answer was lost");
+    }
   }
 }
 
@@ -154,6 +226,26 @@ export class FakePinVerifier implements PinVerifier {
   async verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean }> {
     this.asked.push(input.subjectKey);
     return { matched: this.#pins.get(`${input.workspaceId}/${input.subjectKey}`) === input.pin };
+  }
+}
+
+/**
+ * The reference `CodeStore`: send times per key, in memory. Share one between the engines of a
+ * workspace, as a durable one is shared.
+ */
+export class MemoryCodeStore implements CodeStore {
+  readonly #sends = new Map<string, number[]>();
+
+  async take(input: { workspaceId: string; key: CodeSendKey; at: string; max: number; windowSeconds: number; minIntervalSeconds: number }): Promise<boolean> {
+    const id = JSON.stringify([input.workspaceId, input.key.scope, input.key.key]);
+    const at = Date.parse(input.at);
+    // Keep sends for the longer of the window and the interval; count only those in the window.
+    const kept = (this.#sends.get(id) ?? []).filter((t) => t > at - Math.max(input.windowSeconds, input.minIntervalSeconds) * 1000);
+    const inWindow = kept.filter((t) => t > at - input.windowSeconds * 1000).length;
+    if (inWindow >= input.max || kept.some((t) => t > at - input.minIntervalSeconds * 1000)) return false;
+    kept.push(at);
+    this.#sends.set(id, kept);
+    return true;
   }
 }
 

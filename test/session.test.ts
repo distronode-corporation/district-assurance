@@ -6,7 +6,7 @@ import { ALLOWED_PHASES, canApply, newSession, reduce, snapshot, type SessionEve
 
 const at = "2026-01-01T00:00:00.000Z";
 const factor = { kind: "keypad_knowledge" as const, passed: true, at };
-const grant = { grantId: "g1", level: 1 as const, scopes: ["status.read"], issuedAt: at, expiresAt: at };
+const grant = { grantId: "g1", level: 1 as const, scopes: ["status.read"], policyVersion: "p1", configRevision: "r1", issuedAt: at, expiresAt: at };
 
 /** One sample of every event type. */
 const SAMPLES: Record<SessionEvent["type"], SessionEvent> = {

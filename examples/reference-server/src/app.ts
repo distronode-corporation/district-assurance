@@ -1,22 +1,28 @@
 // The reference server: a small node:http server around one Engine. It receives the Stripe
-// webhooks that finish a photo ID check and a payment, serves receipts and the receipt key set,
-// and answers 501 on the carrier webhooks that are not built yet. With `ui`, it also serves the
-// demo's browser UI and the routes that run the scripted demo one step at a time. Not hardened
-// for production; ROADMAP.md, "Reference server", lists what that takes.
+// webhooks that finish a photo ID check and a payment (platform-mode payments on the account
+// endpoint, connect-mode payments on the Connect endpoint, each with its own signing secret),
+// serves receipts and the receipt key set, and answers 501 on the carrier webhooks that are not
+// built yet. With `ui`, it also serves the demo's browser UI and the routes that run the scripted
+// demo one step at a time. Not hardened for production; ROADMAP.md, "Reference server", lists
+// what that takes.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { EngineError, parseStripeEvent, verifyStripeSignature, type Clock, type Engine } from "../../../src/index.ts";
 import type { DemoRuns, RunAnswer } from "./demo-runs.ts";
-import { isDemoFlow } from "./script.ts";
 import { UI_HEADERS, loadStaticFiles, type StaticFile } from "./static.ts";
 
 export interface ReferenceServerOptions {
   engine: Engine;
-  /** Signing secrets per Stripe endpoint. Empty means the endpoint refuses everything. */
-  stripeSecrets: { identity: readonly string[]; payments: readonly string[] };
+  /**
+   * Signing secrets per Stripe endpoint. Empty means the endpoint refuses everything. `connect` is
+   * the Connect endpoint ("Events from: Connected accounts"), which has its own secret.
+   */
+  stripeSecrets: { identity: readonly string[]; payments: readonly string[]; connect?: readonly string[] };
   clock: Clock;
   /** Default 64 KiB. */
   maxBodyBytes?: number;
+  /** How long and how many Stripe event ids are remembered (`SeenEvents`). Defaults: 4 days, 10,000. */
+  seenEvents?: { ttlMs?: number; max?: number };
   /** The demo's runs: serves the browser UI and the `/demo/*` routes. Off when absent. */
   ui?: DemoRuns;
 }
@@ -42,6 +48,63 @@ function isLocalHost(host: string, port: number): boolean {
   return h === `127.0.0.1:${port}` || h === `localhost:${port}` || h === `[::1]:${port}`;
 }
 
+/** Stripe retries an undelivered event for up to 3 days, re-signed each time; ids are kept a day longer. */
+export const SEEN_EVENT_TTL_MS = 4 * 24 * 60 * 60 * 1000;
+export const SEEN_EVENT_MAX = 10_000;
+
+/**
+ * The webhook event ids applied recently, so a retried delivery is answered as a duplicate. Bounded
+ * two ways, so a stream of distinct signed events cannot grow it without end: an id is forgotten
+ * after `ttlMs` (longer than Stripe's retry window), and past `max` ids the least recently seen goes
+ * first. A forgotten id that comes back is applied again, which the engine answers once anyway.
+ */
+export class SeenEvents {
+  readonly #ttlMs: number;
+  readonly #max: number;
+  readonly #clock: Clock;
+  /** Id to the time it is forgotten, least recently seen first (a Map keeps insertion order). */
+  readonly #ids = new Map<string, number>();
+
+  constructor(clock: Clock, ttlMs = SEEN_EVENT_TTL_MS, max = SEEN_EVENT_MAX) {
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 1) throw new TypeError("SeenEvents: ttlMs must be an integer of 1 or more");
+    if (!Number.isSafeInteger(max) || max < 1) throw new TypeError("SeenEvents: max must be an integer of 1 or more");
+    this.#clock = clock;
+    this.#ttlMs = ttlMs;
+    this.#max = max;
+  }
+
+  get size(): number {
+    return this.#ids.size;
+  }
+
+  /** Whether the id was seen and not yet forgotten; a hit counts as a use, for the cap. */
+  has(id: string): boolean {
+    const now = this.#clock.now().getTime();
+    this.#expire(now);
+    const until = this.#ids.get(id);
+    if (until === undefined) return false;
+    this.#ids.delete(id);
+    if (until <= now) return false;
+    this.#ids.set(id, until);
+    return true;
+  }
+
+  add(id: string): void {
+    const now = this.#clock.now().getTime();
+    this.#ids.delete(id);
+    this.#ids.set(id, now + this.#ttlMs);
+    while (this.#ids.size > this.#max) this.#ids.delete(this.#ids.keys().next().value!);
+  }
+
+  /** Forgets expired ids from the least recently seen end, until the first one still in time. */
+  #expire(now: number): void {
+    for (const [id, until] of this.#ids) {
+      if (until > now) return;
+      this.#ids.delete(id);
+    }
+  }
+}
+
 class HttpError extends Error {
   readonly status: number;
   constructor(status: number, message: string) {
@@ -51,28 +114,52 @@ class HttpError extends Error {
 }
 
 export function createReferenceServer(options: ReferenceServerOptions): Server {
-  const processed = new Set<string>();
+  const processed = new SeenEvents(options.clock, options.seenEvents?.ttlMs, options.seenEvents?.max);
   const maxBody = options.maxBodyBytes ?? 64 * 1024;
   const files = options.ui === undefined ? new Map<string, StaticFile>() : loadStaticFiles();
 
-  async function stripeWebhook(req: IncomingMessage, route: "identity" | "payments"): Promise<[number, Json]> {
+  async function stripeWebhook(req: IncomingMessage, route: "identity" | "payments" | "connect"): Promise<[number, Json]> {
     const payload = await readBody(req, maxBody);
     const header = req.headers["stripe-signature"];
     const check = verifyStripeSignature({
       payload,
       header: Array.isArray(header) ? header[0] : header,
-      secrets: options.stripeSecrets[route],
+      secrets: options.stripeSecrets[route] ?? [],
       now: options.clock.now(),
     });
     if (!check.ok) return [400, { error: "signature", reason: check.reason }];
     const event = parseStripeEvent(payload);
     if (event === null) return [400, { error: "malformed_event" }];
+    // Only an event this endpoint handles is applied and remembered: one that reached the wrong
+    // endpoint (an unfiltered listener) is acknowledged and left for its own endpoint.
+    let apply: (() => Promise<{ applied: boolean; unbound?: true }>) | null = null;
+    if (route === "identity" && event.kind === "identity") {
+      const outcome = event.outcome;
+      apply = async () => ({ applied: (await options.engine.applyIdentityOutcome(outcome)).applied });
+    }
+    // The endpoint fixes the mode: Connect events always name a connected account, account events never do.
+    if (event.kind === "payment" && (route === "connect" ? event.outcome.account !== undefined : route === "payments" && event.outcome.account === undefined)) {
+      const outcome = event.outcome;
+      apply = () => options.engine.applyPaymentOutcome(outcome);
+    }
+    // Disputes of platform payments come to the platform's own endpoint; a connect payment's are the business's.
+    if (route === "payments" && event.kind === "dispute") {
+      if (processed.has(event.eventId)) return [200, { received: true, duplicate: true }];
+      const result = await options.engine.applyDisputeOutcome(event.outcome);
+      // A dispute for a payment not bound yet (its own event still on its way) is not acknowledged,
+      // so Stripe delivers it again; it is never remembered as processed.
+      if (!result.applied && result.unbound === true) return [503, { received: true, applied: false, retry: true }];
+      processed.add(event.eventId);
+      return [200, { received: true, applied: result.applied }];
+    }
+    if (apply === null) return [200, { received: true, applied: false, handled: false }];
     if (processed.has(event.eventId)) return [200, { received: true, duplicate: true }];
-    let applied = false;
-    if (route === "identity" && event.kind === "identity") applied = (await options.engine.applyIdentityOutcome(event.outcome)).applied;
-    if (route === "payments" && event.kind === "payment") applied = (await options.engine.applyPaymentOutcome(event.outcome)).applied;
+    const result = await apply();
+    // A payment event for a link no call holds yet (its reference still being bound) is not
+    // acknowledged either, so Stripe delivers it again once it is; never remembered as processed.
+    if (result.unbound === true) return [503, { received: true, applied: false, retry: true }];
     processed.add(event.eventId);
-    return [200, { received: true, applied }];
+    return [200, { received: true, applied: result.applied }];
   }
 
   async function demoRoute(req: IncomingMessage, runs: DemoRuns, path: string, method: string): Promise<Answer> {
@@ -106,7 +193,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       } catch {
         throw new HttpError(400, "malformed_json");
       }
-      if (!isDemoFlow(flow)) throw new HttpError(400, "unknown_flow");
+      if (typeof flow !== "string" || !runs.hasFlow(flow)) throw new HttpError(400, "unknown_flow");
       return [201, (await runs.start(flow)) as unknown as Json];
     }
     return [404, { error: "not_found" }];
@@ -128,9 +215,10 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       expect("GET");
       return [200, { keys: options.engine.receiptKeys() }];
     }
-    if (path === "/webhooks/stripe/identity" || path === "/webhooks/stripe/payments") {
+    const stripe = /^\/webhooks\/stripe\/(identity|payments|connect)$/.exec(path);
+    if (stripe !== null) {
       expect("POST");
-      return stripeWebhook(req, path.endsWith("identity") ? "identity" : "payments");
+      return stripeWebhook(req, stripe[1] as "identity" | "payments" | "connect");
     }
     const carrier = /^\/webhooks\/(twilio|telnyx)$/.exec(path);
     if (carrier !== null) {
