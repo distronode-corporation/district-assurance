@@ -62,7 +62,9 @@ export const ALLOWED_PHASES: Record<SessionEvent["type"], readonly SessionPhase[
   intake_confirmed: ["filing"],
   intake_abandoned: ["filing"],
   sensitive_opened: ["verifying"],
-  sensitive_closed: ["verifying", "paying"],
+  // Never while paying: the payment hold lasts until the payment settles, fails or the call ends,
+  // so a host cannot resume forwarding while the caller may be reading out card details.
+  sensitive_closed: ["verifying"],
   payment_requested: ["open"],
   payment_settled: ["paying"],
   untrusted_content: ["open", "verifying", "filing", "paying"],

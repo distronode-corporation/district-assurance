@@ -856,7 +856,10 @@ Consents stay in their call records until PRV-3's `ConsentStore`; counters acros
   earlier wrong guesses, a caller who counts guesses can see the hard lock come sooner after a
   duress entry than after a real pass; waits and answers are unchanged (a kept trade-off).
 - Buffering keypad digits outside the model, never logging them, and cutting audio to
-  speech-to-text and the model while `sensitive` is set.
+  speech-to-text and the model while `sensitive` is set. The engine answers what may be forwarded
+  in one place, `forwardingFor(state)`, which holds the transcript, both audio paths and listen-in
+  together while `sensitive` is set and after the call ends (tested); acting on that answer on
+  every path, and forwarding nothing when the state cannot be read, is the host's.
 - Keeping the knowledge key, the receipt signing key, the access signing key, the access code key
   and the step-up signing key in a key store, each apart from the others, behind a `KnowledgeHmac`
   function and `ReceiptSigner`s, and limiting who may call them.

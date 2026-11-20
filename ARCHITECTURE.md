@@ -40,6 +40,7 @@ engine, its inputs or its answers; it hears fixed lines the host speaks on the e
 | Path | Holds |
 |---|---|
 | `src/core/session.ts` | `SessionState`, the events, `reduce` (pure) |
+| `src/core/forwarding.ts` | `forwardingFor(state)`: the single place a host asks what it may forward (transcript, audio to speech-to-text, audio to the model, listen-in) |
 | `src/core/policy.ts` | factor kinds, levels, `validatePolicy`, `evaluateAssurance`, scope floors |
 | `src/core/redaction.ts` | `Redactor`, Luhn, card numbers in digits and en/fr digit words |
 | `src/core/module.ts` | the module interface (`AssuranceModule`, `ModuleManifest`) and `ModuleRegistry` |
@@ -101,7 +102,9 @@ running flow moves on when the module's `stepStatus` says its step is complete.
    copies that flow's steps into the record and enters the first one.
 2. Badge: `beginVerification` takes the keyed account number, or a subject key the host's code
    chose (for example the owner of the line). `openSensitive("keypad")` tells the host to pause its
-   transcript and cut audio to speech-to-text and the model.
+   transcript and cut audio to speech-to-text and the model. The host does not read the flag
+   itself: after each engine call it asks `forwardingFor(await engine.state(callId))`, the single
+   place that says what it may forward, and forwards nothing when it cannot read the state.
 3. `submitKeypad`, `submitPin` or `submitFactor` count the attempt in one write, judge it, and
    record one factor in the next. `checkCarrier` asks about the number on file; `startPhotoId`
    reserves the call's one link, creates the check and texts the link to the number on file, and

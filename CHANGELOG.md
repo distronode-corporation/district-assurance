@@ -215,6 +215,9 @@ All notable changes to this project are documented here. The format follows
   and keep their data across a restart. `SqliteAuditLedger.list(fromSeq?, limit?)` reads one page
   of at most `limit` rows and refuses a `limit` that is not an integer of 1 or more, as the
   hardened ledger contract (#73) asks.
+- `forwardingFor(state)` (INT-2): the single place a host asks whether it may forward the
+  transcript, audio to speech-to-text, audio to the model and listen-in; all held while `sensitive`
+  is set and after the call ends.
 
 ### Changed
 
@@ -287,6 +290,9 @@ All notable changes to this project are documented here. The format follows
 - `abandonIntake` releases a reserved filing: it deletes the record by id first
   (`RecordStore.deleteIntakeRecords`), so a later write of that id stores nothing, then drops the
   draft. A reserved filing resumes only while `intake.file` is still granted (VER-13 with FIL-1).
+- `sensitive_closed` (`closeSensitive`) is refused while a payment is open (`invalid_transition`):
+  the payment hold ends only when the payment settles or fails, or the call ends, so a host cannot
+  resume forwarding while the caller may be reading out card details.
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 

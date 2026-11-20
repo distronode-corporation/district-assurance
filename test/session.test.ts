@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import { EngineError } from "../src/core/errors.ts";
+import { forwardingFor } from "../src/core/forwarding.ts";
 import { ALLOWED_PHASES, canApply, newSession, reduce, snapshot, type SessionEvent, type SessionPhase, type SessionState } from "../src/core/session.ts";
 
 const at = "2026-01-01T00:00:00.000Z";
@@ -110,5 +111,55 @@ describe("session state machine", () => {
     const copy = snapshot(s);
     copy.recordIds.push("x");
     assert.deepEqual(s.recordIds, []);
+  });
+});
+
+describe("forwardingFor", () => {
+  const all = { transcript: true, speechToText: true, model: true, listenIn: true, heldFor: null };
+  const none = { transcript: false, speechToText: false, model: false, listenIn: false };
+
+  it("forwards everything while nothing is sensitive, tainted or not", () => {
+    const s = newSession("c1", "w1", at);
+    assert.deepEqual(forwardingFor(s), all);
+    assert.deepEqual(forwardingFor(reduce(s, SAMPLES.untrusted_content)), all);
+    for (const phase of ["open", "verifying", "filing"] as const) assert.deepEqual(forwardingFor(inPhase(phase)), all, phase);
+    // Paying without the payment hold is not a state the engine writes (see test/forwarding-hostile.test.ts).
+    assert.deepEqual(forwardingFor(inPhase("paying")), { ...none, heldFor: "unknown" });
+  });
+
+  it("holds the transcript, both audio paths and listen-in through keypad entry and payment, and after the call", () => {
+    let s = reduce(newSession("c1", "w1", at), SAMPLES.verification_started);
+    s = reduce(s, SAMPLES.sensitive_opened);
+    assert.deepEqual(forwardingFor(s), { ...none, heldFor: "keypad" });
+    s = reduce(s, SAMPLES.sensitive_closed);
+    assert.deepEqual(forwardingFor(s), all);
+    s = reduce(reduce(s, SAMPLES.sensitive_opened), SAMPLES.verification_finished);
+    assert.deepEqual(forwardingFor(s), all, "finishing verification releases the keypad hold");
+    s = reduce(s, SAMPLES.payment_requested);
+    assert.deepEqual(forwardingFor(s), { ...none, heldFor: "payment" });
+    s = reduce(s, SAMPLES.payment_settled);
+    assert.deepEqual(forwardingFor(s), all);
+    s = reduce(reduce(s, SAMPLES.payment_requested), SAMPLES.call_ended);
+    assert.deepEqual(forwardingFor(s), { ...none, heldFor: "ended" });
+  });
+
+  it("keeps the payment hold: sensitive_closed is refused while paying", () => {
+    const s = reduce(newSession("c1", "w1", at), SAMPLES.payment_requested);
+    assert.equal(s.phase, "paying");
+    assert.throws(() => reduce(s, SAMPLES.sensitive_closed), (e: unknown) => e instanceof EngineError && e.code === "invalid_transition");
+    assert.deepEqual(forwardingFor(s), { ...none, heldFor: "payment" });
+  });
+
+  it("fails closed with no state, or one the engine never writes", () => {
+    const held = { ...none, heldFor: "unknown" };
+    const s = newSession("c1", "w1", at);
+    for (const bad of [null, undefined, "open" as unknown, { ...s, sensitive: undefined }, { ...s, sensitive: "microphone" }, { ...s, phase: "closing" }, { ...s, phase: undefined }]) {
+      assert.deepEqual(forwardingFor(bad as SessionState), held, JSON.stringify(bad));
+    }
+  });
+
+  it("is exported from the package root", async () => {
+    const root = await import("../src/index.ts");
+    assert.equal(root.forwardingFor, forwardingFor);
   });
 });

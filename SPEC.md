@@ -29,7 +29,7 @@ recorded **factors**, the current **level** and an optional **grant**.
 | `factor_recorded {factor}` | verifying | factor appended |
 | `verification_finished {level, grant}` | verifying | phase `open`, level and grant set, sensitive cleared |
 | `sensitive_opened {reason: keypad}` | verifying | sensitive `keypad` |
-| `sensitive_closed` | verifying, paying | sensitive cleared |
+| `sensitive_closed` | verifying (never paying: the payment hold ends only when the payment settles or the call ends) | sensitive cleared |
 | `intake_started` | open | phase `filing` |
 | `intake_confirmed {recordId}` | filing | phase `open`, record id appended |
 | `intake_abandoned` | filing | phase `open` |
@@ -52,6 +52,17 @@ the only caller in the package.
 **Sensitive** means: the host pauses the live transcript and stored transcript, cuts audio to
 speech-to-text and the model, and holds staff listen-in. The engine tracks the flag; the host
 enforces it.
+
+`forwardingFor(state)` is the single place a host asks what it may forward. It returns
+`{transcript, speechToText, model, listenIn, heldFor}`: the four are all false while `sensitive`
+is set (`heldFor` is the reason, `keypad` or `payment`) and once the phase is `ended` (`heldFor`
+is `ended`), and all true otherwise (`heldFor` null). With no state (null or undefined, when the
+host could not read it) or a state the engine never writes (an unknown phase, a missing or unknown
+`sensitive`, `paying` without the `payment` hold as a call stored before the hold could no longer be
+lifted may hold, or fields that are not the state's own), all four are false and `heldFor` is
+`unknown`. Each field is read once. Taint does not change forwarding. The
+function is pure; the host asks again after each engine call and forwards nothing when it cannot
+read the state.
 
 ## 2. The call record and the SessionStore
 
