@@ -53,6 +53,19 @@ function wrong(code: string): string {
   return `${(Number(code[0]) + 1) % 10}${code.slice(1)}`;
 }
 
+/**
+ * Whether a stored value holds the code: as a string or number field value, or as a whole token
+ * inside a string. Not a substring test of its JSON: a random 6-digit code can turn up inside a
+ * timestamp, a hash or an id by chance, which made the substring test flaky.
+ */
+function holdsCode(value: unknown, code: string): boolean {
+  if (typeof value === "string") return new RegExp(`(?<![0-9A-Za-z_])${code}(?![0-9A-Za-z_])`).test(value);
+  if (typeof value === "number") return String(value) === code;
+  if (Array.isArray(value)) return value.some((v) => holdsCode(v, code));
+  if (typeof value === "object" && value !== null) return Object.entries(value).some(([k, v]) => holdsCode(k, code) || holdsCode(v, code));
+  return false;
+}
+
 async function events(t: TestEngine, name: string): Promise<unknown[]> {
   return (await t.ledger.list()).filter((e) => e.event === name).map((e) => e.detail);
 }
@@ -79,8 +92,8 @@ describe("texted codes", () => {
       const code = lastCode(t);
       assert.equal(t.messages.sent.at(-1)!.body, textCodeText(locale, code));
       assert.equal(t.messages.sent.at(-1)!.to, PHONE_ON_FILE);
-      const record = JSON.stringify(await t.sessions.get("ws_test", callId));
-      assert.equal(record.includes(code), false, "the call record holds the HMAC, never the code");
+      const record: unknown = JSON.parse(JSON.stringify(await t.sessions.get("ws_test", callId)));
+      assert.equal(holdsCode(record, code), false, "the call record holds the HMAC, never the code");
       t.clock.advance(MINUTE);
     }
     assert.match(t.messages.sent[0]!.body, /^Your one-time verification code: \d{6}\. It expires in 10 minutes\. Do not share it\.$/);
@@ -95,8 +108,8 @@ describe("texted codes", () => {
     const code = lastCode(t);
     assert.deepEqual(await t.engine.checkTextCode(callId, code), { matched: true, locked: false });
     assert.deepEqual((await t.engine.finishVerification(callId)).level, 1, "no carrier answer: the code does not count");
-    const ledger = JSON.stringify(await t.ledger.list());
-    assert.equal(ledger.includes(code), false, "the code is never written");
+    const ledger: unknown = JSON.parse(JSON.stringify(await t.ledger.list()));
+    assert.equal(holdsCode(ledger, code), false, "the code is never written");
     assert.deepEqual((await events(t, "verification.factor")).at(-1), { kind: "text_code", passed: true });
 
     const clean = await matchedCall(t);
@@ -105,6 +118,26 @@ describe("texted codes", () => {
     await sendCode(t, clean);
     await t.engine.checkTextCode(clean, lastCode(t));
     assert.equal((await t.engine.finishVerification(clean)).level, 2);
+  });
+
+  it("checks the code's absence by value and token, not as a substring of the ledger JSON (the old check could flake)", async () => {
+    const t = codeSetup();
+    const callId = await matchedCall(t);
+    await sendCode(t, callId);
+    await t.engine.checkTextCode(callId, lastCode(t));
+    await t.engine.finishVerification(callId);
+    const json = JSON.stringify(await t.ledger.list());
+    // A code forced to a 6-digit run already inside the ledger JSON (a timestamp, a hash, an id).
+    const forced = /\d{6}/.exec(json)?.[0];
+    assert.ok(forced !== undefined, "the ledger JSON holds a 6-digit run");
+    assert.equal(json.includes(forced), true, "the old substring assertion fails on this code");
+    assert.equal(holdsCode(JSON.parse(json), forced), false, "the new assertion passes: no field holds it");
+    // It still catches the code written as a value, a number, a key, or a token in text.
+    assert.equal(holdsCode({ detail: { code: forced } }, forced), true);
+    assert.equal(holdsCode([482913], "482913"), true);
+    assert.equal(holdsCode({ [forced]: true }, forced), true);
+    assert.equal(holdsCode({ note: `sent ${forced}.` }, forced), true);
+    assert.equal(holdsCode({ hash: `ab${forced}cd`, id: `ev_${forced}`, at: Number(`1${forced}`), none: null }, forced), false);
   });
 
   it("is single use and bound to its call", async () => {
