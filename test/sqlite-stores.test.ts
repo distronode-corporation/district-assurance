@@ -256,3 +256,45 @@ describe("SQLite PIN and duress writes on two connections", () => {
     assert.equal(await impatient.putPinDigest("w", S, "1".repeat(64)), true, "no transaction left open");
   });
 });
+
+// PRV-7 (#105) writes in the SQLite store: an erased record id is remembered in its own table, so a
+// filing on another connection, before or after, never brings the record back.
+describe("SQLite erasure writes on two connections", () => {
+  const S = "s".repeat(64);
+  const filed = (recordId: string): IntakeRecord => ({ ...record(recordId), subjectKey: S });
+
+  it("a record erased on one connection is gone on the other, and a later filing there stores nothing", async () => {
+    const path = newFile();
+    const a = openStores(path).records;
+    const b = openStores(path).records;
+    await a.putIntakeRecord(filed("rec_1"));
+    await a.putIntakeRecord(filed("rec_2"));
+    assert.deepEqual((await b.listIntakeRecords("w", S)).map((r) => r.recordId).toSorted(), ["rec_1", "rec_2"]);
+    await a.deleteIntakeRecords("w", ["rec_1", "rec_missing"]);
+    assert.equal(await b.getIntakeRecord("w", "rec_1"), null);
+    await b.putIntakeRecord(filed("rec_1"));
+    await b.putIntakeRecord(filed("rec_missing"));
+    assert.equal(await a.getIntakeRecord("w", "rec_1"), null, "the erased-records row is read by the other connection");
+    assert.equal(await a.getIntakeRecord("w", "rec_missing"), null, "an id erased before it was filed stays unfiled");
+    assert.deepEqual((await a.listIntakeRecords("w", S)).map((r) => r.recordId), ["rec_2"]);
+    // Another workspace with the same record id is not erased.
+    await b.putIntakeRecord({ ...filed("rec_1"), workspaceId: "w2" });
+    assert.deepEqual(await a.getIntakeRecord("w2", "rec_1"), { ...filed("rec_1"), workspaceId: "w2" });
+  });
+
+  it("an erasure and a filing at once leave no record, in either order, and the erasure survives a restart", async () => {
+    for (const eraseFirst of [true, false]) {
+      const path = newFile();
+      const a = openStores(path);
+      const b = openStores(path).records;
+      const erase = () => a.records.deleteIntakeRecords("w", ["rec_1"]);
+      const file = () => b.putIntakeRecord(filed("rec_1"));
+      await Promise.all(eraseFirst ? [erase(), file()] : [file(), erase()]);
+      assert.equal(await b.getIntakeRecord("w", "rec_1"), null, `eraseFirst=${eraseFirst}`);
+      a.close();
+      const reopened = openStores(path).records;
+      await reopened.putIntakeRecord(filed("rec_1"));
+      assert.equal(await reopened.getIntakeRecord("w", "rec_1"), null, "remembered after a restart");
+    }
+  });
+});
