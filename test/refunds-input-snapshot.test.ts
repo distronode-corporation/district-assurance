@@ -38,7 +38,7 @@ describe("refunds: inputs are read once", () => {
         sent.push(input.amountMinor);
         return refund(input);
       };
-      const input = flipping({ callId, paymentId, reason: "requested_by_customer" }, "amountMinor", 5000, swapped, 2);
+      const input = flipping({ callId, paymentId, reason: "requested_by_customer", sequence: 1 }, "amountMinor", 5000, swapped, 2);
       await t.engine.refundPayment(input as never);
       assert.deepEqual(sent, [5000], String(swapped));
     }
@@ -47,7 +47,7 @@ describe("refunds: inputs are read once", () => {
   it("records the reason it checked", async () => {
     const t = setup();
     const { callId, paymentId } = await paidCall(t);
-    const input = flipping({ callId, paymentId }, "reason", "requested_by_customer", "+15555550100");
+    const input = flipping({ callId, paymentId, sequence: 1 }, "reason", "requested_by_customer", "+15555550100");
     await t.engine.refundPayment(input as never);
     const record = (await t.sessions.get("ws_test", callId))!.record as { modules: { paylink: { payments: Array<{ refunds?: Array<{ reason: string }> }> } } };
     assert.deepEqual(record.modules.paylink.payments[0]!.refunds!.map((r) => r.reason), ["requested_by_customer"]);
@@ -61,7 +61,7 @@ describe("refunds: inputs are read once", () => {
     const disputed = (await t.ledger.list()).filter((e) => e.event === "payment.disputed").map((e) => (e.detail as { status: string }).status);
     assert.deepEqual(disputed, ["needs_response"]);
     // Won is final: had "won" been recorded, the refund below would be allowed.
-    await assert.rejects(t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "requested_by_customer" }), (e: unknown) => rejects("precondition_failed")(e) || rejects("invalid_input")(e));
+    await assert.rejects(t.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", reason: "requested_by_customer" }), (e: unknown) => rejects("precondition_failed")(e) || rejects("invalid_input")(e));
     const swappedIntent = flipping({ ...base, disputeId: "dp_2", status: "needs_response" }, "paymentIntentId", "pi_1", "pi_other", 2);
     assert.equal((await t.engine.applyDisputeOutcome(swappedIntent as never)).applied, true, "no TypeError from a payment intent that changed after its lookup");
   });

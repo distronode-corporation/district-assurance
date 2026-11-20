@@ -133,4 +133,14 @@ describe("hostile #107: step-up", () => {
     }
     assert.equal(await t.engine.authorize(callId, "payment.request", { amountMinor: -1, currency: "cad" }), true, "a negative amount is under (requestPayment refuses it on its own)");
   });
+
+  it("U5b: in a flow, an explicit null amount is unknown (over every amount rule), never the step's amount", async () => {
+    const t = stepUpSetup();
+    const callId = await level2Call(t, "deposit");
+    // The current step moves 15000, under the 50000 rule: left out, the step's amount is judged.
+    assert.equal(await t.engine.authorize(callId, "payment.request"), true, "omitted: the step's amount");
+    assert.equal(await t.engine.authorize(callId, "payment.request", { amountMinor: 100, currency: "cad" }), true, "a known amount under the rule");
+    assert.equal(await t.engine.authorize(callId, "payment.request", { amountMinor: 60000, currency: "cad" }), false, "a known amount over the rule");
+    assert.equal(await t.engine.authorize(callId, "payment.request", null as never), false, "null from an untyped host: an unknown amount");
+  });
 });

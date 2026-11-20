@@ -4,6 +4,8 @@
 // Every runtime function takes the engine's runtime and works in compare-and-set steps: an attempt
 // is counted in one write before it is judged, and a link is reserved in one write before it is
 // sent, so two processes running the same call can never get two attempts or two links for one.
+import { randomBytes } from "node:crypto";
+
 import type { AttemptCounterKey, SubjectRecord } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
@@ -40,7 +42,7 @@ import {
   type PinSettings,
 } from "./factors.ts";
 import { counterKeys, currentLock, isCallingNumber, lockoutOf, lockoutSettingsErrors, forgetPass, recordFailures, removeOwnOnNumbers, type Lock } from "./counters.ts";
-import { clearsSoFar, duressClearedData, duressFlagKey, flagDuress, hiddenCounterKey, hiddenHardLock, hiddenWindowStart, isUnderDuress, recordClear } from "./duress-flag.ts";
+import { clearsSoFar, duressClearedData, duressFlagKey, flagDuressUnlessCleared, forgetHidden, hiddenCounterKey, hiddenHardLock, hiddenWindowStart, isUnderDuress, recordClear } from "./duress-flag.ts";
 import { isKeypadEntry } from "./knowledge.ts";
 import type { TextCodeState } from "./text-code.ts";
 
@@ -69,6 +71,12 @@ export interface BadgeSlice {
    * (`pin.enrolled`), one entry per try. Never the digits. At most `maxAttemptsPerCall` entries.
    */
   pinPending?: Array<{ subjectKey: string; digest: string; enrolmentId: string }>;
+  /**
+   * The last enrolment this call recorded (`pin.enrolled`). While that entry is still waiting in
+   * the call's outbox (the ledger failed after the write), the same PIN again finishes as this
+   * enrolment, with no second entry. Never the digits. Absent until the first.
+   */
+  pinEnrolled?: { subjectKey: string; enrolmentId: string };
   /**
    * Set once a duress PIN passed on this call (VER-12), and never cleared: the scopes refused on
    * top of money, contact and access, as Badge's settings named them then. The only place the
@@ -100,9 +108,10 @@ export interface BadgeSlice {
   /**
    * The texted code sends whose ledger entries are not written yet (VER-2), one hold per send: the
    * call does not end while any is held, each until its own entry is written or its `until` passes,
-   * so no send's entry follows the receipt. Absent until the first send.
+   * so no send's entry follows the receipt. `sending` once the send claimed its dispatch to the SMS
+   * adapter, which renewed `until` from the claim. Absent until the first send.
    */
-  textSends?: Array<{ sendId: string; until: string }>;
+  textSends?: Array<{ sendId: string; until: string; sending?: true }>;
   /** How many verifications finished on this call, and the last one's level and counted methods. */
   finished: number;
   lastLevel: AssuranceLevel;
@@ -116,19 +125,49 @@ export interface BadgeSlice {
    */
   voidedEpoch?: number;
   /**
-   * An accepted pass whose counters are not yet cleaned up (`forgetPass`): saved with the pass, so a
-   * write that fails after the pass was saved (its ledger entry) still gets the cleanup, in the same
-   * call to `submitFactor` or the call's next. Absent when nothing is owed. `hidden` is the duress
-   * PIN's hidden counter (VER-12), when it is on: a pass not under duress resets it, a duress entry
-   * takes off only its own failure. Absent on a pass saved before it was kept here. `claimed` is set
-   * on the call before the removals that are not safe to run twice (the number's own failure, the
-   * hidden counter's) run, so a replay skips them.
+   * The accepted passes whose counters are not yet cleaned up (`forgetPass`), one each, so two
+   * factors passing at once on one call each get theirs. Absent when nothing is owed.
    */
-  forgetOwed?: { keys: AttemptCounterKey[]; at: string; hidden?: { key: AttemptCounterKey; duress: boolean; shared?: AttemptCounterKey }; claimed?: true };
+  forgetsOwed?: OwedCleanup[];
+  /** The last id an owed cleanup was given on this call. Absent until the first. */
+  forgetSeq?: number;
+  /** The one owed cleanup a call saved before they were kept one per pass: read with `owedCleanups`. */
+  forgetOwed?: Omit<OwedCleanup, "id">;
   /** The callback this call asked for, or the one it is (callback.ts). Absent on calls saved before: read it with `callbackOf`. */
   callback: CallbackState;
   /** Untrusted content seen on this call so far (onUntrusted counts it), so an entry judged across one is known. Absent on calls saved before. */
   taints?: number;
+}
+
+/**
+ * An accepted pass whose counters are not yet cleaned up (`forgetPass`): saved with the pass, so a
+ * write that fails after the pass was saved (its ledger entry) still gets the cleanup, in the same
+ * call to `submitFactor` or the call's next. `id` is unique on the call (`forgetSeq`; 0 for one
+ * saved before ids). `hidden` is the duress PIN's hidden counter (VER-12), when it is on; absent on
+ * a pass saved before it was kept here. `hidden.shared` is the hidden keypad counter a shared spoken
+ * answer (VER-11) was also counted on. `claimed` is set on the call before the removals that are
+ * not safe to run twice (the number's own failure, the hidden counter's) run, so a replay skips them;
+ * `claimToken` names the run that claimed it (absent on a claim saved before it was kept: no run's).
+ */
+export interface OwedCleanup {
+  id: number;
+  keys: AttemptCounterKey[];
+  at: string;
+  hidden?: { key: AttemptCounterKey; duress: boolean; shared?: AttemptCounterKey };
+  claimed?: true;
+  claimToken?: string;
+}
+
+/** The cleanups a call owes, the one saved before they were kept one per pass included (id 0). */
+function owedCleanups(s: BadgeSlice): OwedCleanup[] {
+  return [...(s.forgetOwed === undefined ? [] : [{ ...s.forgetOwed, id: 0 }]), ...(s.forgetsOwed ?? [])];
+}
+
+/** Keeps the call's owed cleanups as `list`, in one place, the field saved before ids gone. */
+function keepOwed(s: BadgeSlice, list: OwedCleanup[]): void {
+  delete s.forgetOwed;
+  if (list.length === 0) delete s.forgetsOwed;
+  else s.forgetsOwed = list;
 }
 
 /** Which policy and which FlowConfig revision judged a verification. */
@@ -168,12 +207,22 @@ export interface CallbackState {
    * on calls saved before it.
    */
   forgetClaimed?: true;
+  /** The token of the try that set `forgetClaimed` (absent on a claim saved before it was kept: no try's). */
+  forgetClaimToken?: string;
   /** On the callback call: the number the dial goes to, kept in the write that claims the dial, and the one the carrier check asks about. */
   to?: string;
   /** On the callback call: how often the number on file changed between tries of the dial. Each number gets its own idempotency key. */
   redials?: number;
   /** On the callback call: ISO 8601, when a dial resumed a day or more after `at` was counted toward the daily limit again. */
   countedAt?: string;
+  /**
+   * On the callback call: ISO 8601, the claim of the one try that counts a resumed dial toward the
+   * daily limit, at that time. Another try within the day counts nothing: it dials once that count
+   * is in the store, and otherwise leaves the dial to the try that claimed it.
+   */
+  admitting?: string;
+  /** The token of the try that saved `admitting` (absent on a claim saved before it was kept: no try's). */
+  admittingToken?: string;
 }
 
 export interface KeypadResult {
@@ -546,9 +595,18 @@ function maxAttempts(rt: EngineRuntime, module: BadgeModule, kind: string): numb
  * (hashed under the knowledge key) or a subject key the host's code chose, for example the owner
  * of the line. Choosing the subject is not a factor: only factors raise the level. With a calling
  * number, failures are also counted against that number across calls; a later restart that
- * leaves it out keeps it.
+ * leaves it out keeps it. A start is resolved (`resolveVerification`), then written
+ * (`startVerification`); the engine counts a running limited flow's starts in between.
  */
-export async function beginVerification(rt: EngineRuntime, callId: string, input: BeginVerificationInput): Promise<void> {
+export interface ResolvedVerification {
+  subjectKey: string | null;
+  numberKey: string | null;
+  subject: SubjectRecord | null;
+  byHost: boolean;
+}
+
+/** Checks a verification start's input and keys its subject and number, without writing. */
+export async function resolveVerification(rt: EngineRuntime, input: BeginVerificationInput): Promise<ResolvedVerification> {
   rt.settings(BADGE);
   // Read once: the key or account number checked is the one used, and the ledger names its source.
   const byHost = "subjectKey" in input;
@@ -574,9 +632,31 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
     delete subject.pinDigest;
     delete subject.duressDigest;
   }
+  return { subjectKey, numberKey, subject, byHost };
+}
+
+/** Refuses a verification start the call cannot take now (also checked by a write made just before it). */
+export function assertCanBegin(draft: CallDraft): BadgeSlice {
+  stepOfType(draft.record, "badge.verify");
+  const s = draft.slice<BadgeSlice>(BADGE);
+  draft.assertCan({ type: "verification_started", reset: true });
+  return s;
+}
+
+/** The counters a started verification keys: its subject, and its number or the one the call kept. */
+export function verificationKeys(slice: BadgeSlice, resolved: ResolvedVerification): { subjectKey: string | null; numberKey: string | null } {
+  return { subjectKey: resolved.subjectKey, numberKey: resolved.numberKey ?? slice.numberKey };
+}
+
+/**
+ * Writes a resolved verification start on the call. `admit` runs inside the write, on the call as it
+ * is then, before anything changes, and throws to refuse it (the engine's late flow count).
+ */
+export async function startVerification(rt: EngineRuntime, callId: string, resolved: ResolvedVerification, admit: (draft: CallDraft, slice: BadgeSlice) => void): Promise<void> {
+  const { subjectKey, numberKey, subject, byHost } = resolved;
   await rt.update(callId, (draft) => {
-    stepOfType(draft.record, "badge.verify");
-    const s = draft.slice<BadgeSlice>(BADGE);
+    const s = assertCanBegin(draft);
+    admit(draft, s);
     const reset = subjectKey !== s.subjectKey;
     draft.apply({ type: "verification_started", reset });
     s.epoch++;
@@ -637,7 +717,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
   if (current === undefined) throw new EngineError("module_disabled", `${BADGE} was off when this call started`);
   const counters = rt.adapter("counters");
   // A pass this call saved earlier whose cleanup did not run (its write failed after saving it).
-  if (current.forgetOwed !== undefined) await settleForget(rt, callId, current.forgetOwed.at);
+  for (const owed of owedCleanups(current)) await settleForget(rt, callId, owed.id);
   const lockout = lockoutOf(rt.settings<BadgeSettings>(BADGE).lockout);
   // A spoken answer that carries keypad fields (VER-11) is a guess at those fields too: it also
   // uses a keypad_knowledge attempt, so the keypad and the voice share one budget per call, and
@@ -740,8 +820,11 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     passed ? null : (recorded.hard ?? (hiddenAfter === null ? null : hiddenHardLock(lockout, hiddenAfter, at)) ?? (keypadAfter === null ? null : hiddenHardLock(lockout, keypadAfter, at)));
   let stale: EngineError | null = null;
   let failed: { error: unknown } | null = null;
+  // The id the pass's cleanup was saved under, from the write's last run.
+  let owedId = -1;
   try {
     stale = await rt.update(callId, (draft) => {
+      owedId = -1;
       const s = draft.slice<BadgeSlice>(BADGE);
       const now = rt.now();
       const factor = { kind, passed, at: now };
@@ -775,11 +858,14 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
       if (passed && KNOWLEDGE_FACTORS.includes(kind)) s.knowledgeMatched = true;
       // The cleanup is owed with the pass, in the same write: never for a pass that was not saved.
       if (passed) {
-        s.forgetOwed = { keys: structuredClone(keys), at: at.toISOString() };
+        owedId = (s.forgetSeq ?? 0) + 1;
+        s.forgetSeq = owedId;
+        const owed: OwedCleanup = { id: owedId, keys: structuredClone(keys), at: at.toISOString() };
         if (hidden !== null) {
-          s.forgetOwed.hidden = { key: structuredClone(hidden), duress: outcome === "duress" };
-          if (hiddenKeypad !== null) s.forgetOwed.hidden.shared = structuredClone(hiddenKeypad);
+          owed.hidden = { key: structuredClone(hidden), duress: outcome === "duress" };
+          if (hiddenKeypad !== null) owed.hidden.shared = structuredClone(hiddenKeypad);
         }
+        keepOwed(s, [...owedCleanups(s), owed]);
       }
       draft.emit("verification.factor", "code", { kind, passed }, kind === "pin" ? outcome : undefined);
       if (hard !== null) draft.emit("verification.locked", "code", { kind, scope: hard.scope, hard: true, until: hard.until });
@@ -791,52 +877,57 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     failed = { error };
   }
   // A duress PIN entry flags its subject, even a stale one: durable and hidden, before the visible reset.
-  if (pinDuress) await flagDuress(counters, flag!, at);
+  if (pinDuress) await flagDuressUnlessCleared(counters, rt.workspaceId, current.subjectKey!, clears);
   // A stale entry's failure stays counted across calls, as for any entry that was not accepted.
   if (stale !== null) throw stale;
   // Only once the result is saved: a write that failed after saving it (the ledger) still owes the
   // cleanup, a pass refused before saving owes none. The number keeps its failures but this
   // attempt's own: they may be against other accounts, so a pass on this one must not clear them.
-  if (passed) await settleForget(rt, callId, at.toISOString());
+  if (passed) await settleForget(rt, callId, owedId);
   if (failed !== null) throw failed.error;
   return { matched: passed, locked: !passed && (reserved.last || hard !== null) };
 }
 
 /**
- * Runs the counters cleanup a saved pass owes, if the call still owes the one made at `at`, then
+ * Runs the counters cleanup a saved pass owes, if the call still owes the one with `id`, then
  * takes it off the call; a failure to take it off leaves it owed for the call's next factor. The
  * subject's part is safe to run again. The rest is not (a removal by time can take another
  * failure of the same millisecond, a reset a later failure), so it is claimed on the call first
  * and runs at most once: a claim that is not saved runs none of it, and one that is saved and
  * then fails leaves those failures until they leave the window (fail closed).
  */
-async function settleForget(rt: EngineRuntime, callId: string, at: string): Promise<void> {
-  const owed = (await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice;
-  if (owed.forgetOwed?.at !== at) return;
+async function settleForget(rt: EngineRuntime, callId: string, id: number): Promise<void> {
+  const owedOn = (s: BadgeSlice): OwedCleanup | undefined => owedCleanups(s).find((o) => o.id === id);
+  const owed = owedOn((await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice);
+  if (owed === undefined) return;
   const counters = rt.adapter("counters");
-  const { keys, hidden } = owed.forgetOwed;
+  const { keys, hidden, at } = owed;
   await forgetPass(counters, keys, new Date(at));
-  if (owed.forgetOwed.claimed !== true) {
+  if (owed.claimed !== true) {
     // Not claimed (or claimed by another run first): this run leaves the rest to the run that holds it, or the next.
-    const take = (s: BadgeSlice): boolean => {
-      if (s.forgetOwed?.at !== at || s.forgetOwed.claimed === true) return false;
-      s.forgetOwed.claimed = true;
+    const take = (s: BadgeSlice, token: string): boolean => {
+      const list = owedCleanups(s);
+      const mine = list.find((o) => o.id === id);
+      if (mine === undefined || mine.claimed === true) return false;
+      mine.claimed = true;
+      mine.claimToken = token;
+      keepOwed(s, list);
       return true;
     };
-    if (!(await claimOnCall(rt, callId, take, (s) => s.forgetOwed?.at === at && s.forgetOwed.claimed === true))) return;
+    if (!(await claimOnCall(rt, callId, take, (s, token) => owedOn(s)?.claimToken === token))) return;
     await removeOwnOnNumbers(counters, keys, new Date(at));
-    // The hidden counter forgets only on a pass that is not under duress; a duress entry takes off its
-    // own failure, as a pass does, and keeps the rest. One write either way, so the round trips never
-    // tell a duress pass from another.
-    for (const key of hidden === undefined ? [] : [hidden.key, ...(hidden.shared === undefined ? [] : [hidden.shared])]) {
-      if (hidden!.duress) await counters.removeFailure(key, at);
-      else await counters.reset(key);
+    // The hidden counter forgets up to the pass only on a pass that is not under duress; a duress
+    // entry takes off its own failure, as a pass does, and keeps the rest (forgetHidden). A shared
+    // spoken answer (VER-11) was also counted on the hidden keypad counter, which forgets the same way.
+    if (hidden !== undefined) {
+      await forgetHidden(counters, hidden.key, at, hidden.duress);
+      if (hidden.shared !== undefined) await forgetHidden(counters, hidden.shared, at, hidden.duress);
     }
   }
   await rt
     .update(callId, (draft) => {
       const s = draft.slice<BadgeSlice>(BADGE);
-      if (s.forgetOwed?.at === at) delete s.forgetOwed;
+      keepOwed(s, owedCleanups(s).filter((o) => o.id !== id));
     })
     .catch(() => undefined);
 }
@@ -846,14 +937,17 @@ async function settleForget(rt: EngineRuntime, callId: string, at: string): Prom
  * the claim. `take` sets the claim on the slice and says whether it took it (false: not owed, or
  * claimed already); `held` says whether the call holds it. A write that saved and then failed (the
  * ledger, appended after the save) still claimed it, which the call says; one that did not save did not.
+ * `token` is this run's own, for `take` to save with the claim and `held` to compare: a claim another
+ * run saved after this run's write failed unsaved is never this run's.
  */
-export async function claimOnCall(rt: EngineRuntime, callId: string, take: (s: BadgeSlice) => boolean, held: (s: BadgeSlice) => boolean): Promise<boolean> {
+export async function claimOnCall(rt: EngineRuntime, callId: string, take: (s: BadgeSlice, token: string) => boolean, held: (s: BadgeSlice, token: string) => boolean): Promise<boolean> {
+  const token = randomBytes(12).toString("base64url");
   let mine = false;
   try {
-    return await rt.update(callId, (draft) => (mine = take(draft.slice<BadgeSlice>(BADGE))));
+    return await rt.update(callId, (draft) => (mine = take(draft.slice<BadgeSlice>(BADGE), token)));
   } catch {
     if (!mine) return false;
-    return held((await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice);
+    return held((await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice, token);
   }
 }
 
