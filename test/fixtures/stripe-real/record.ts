@@ -212,6 +212,10 @@ const receiverBase = await listen(receiver);
 const events = ["identity.verification_session.verified", "identity.verification_session.requires_input", "checkout.session.completed"].join(",");
 const cli: ChildProcess = spawn("stripe", ["listen", "--events", events, "--forward-to", `${receiverBase}/account`, "--forward-connect-to", `${receiverBase}/connect`], { env: cliEnv });
 
+/** Set when `stripe listen` exits at any time: no event can arrive after that, so a wait ends at once. */
+let listenerExit: string | null = null;
+cli.on("exit", (code) => (listenerExit = `stripe listen exited (${code})`));
+
 /** Stops everything this script started. */
 async function cleanUp(): Promise<void> {
   cli.kill();
@@ -243,6 +247,7 @@ async function delivered(objectId: string, type: string): Promise<Delivery> {
   for (;;) {
     const found = deliveries.find((d) => d.objectId === objectId && d.type === type);
     if (found !== undefined) return found;
+    if (listenerExit !== null) throw new Error(`${listenerExit}: no ${type} can arrive`);
     if (Date.now() > until) throw new Error(`no ${type} for the recorded object in ${WAIT_MS / 60_000} minutes`);
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
