@@ -941,6 +941,10 @@ Consents stay in their call records until PRV-3's `ConsentStore`; counters acros
 - Spoken requests to repeat or slow down: the host replays its fixed line, and they never reach
   the engine.
 - Disclosure that an automated assistant answers and that the call is transcribed.
+- A security.txt (RFC 9116) for its own domain: its own contacts and policy, served over HTTPS by
+  its TLS front end, signed if it wants (an OpenPGP cleartext signature), and renewed before it
+  expires. The reference server can serve one from the host's settings; it never serves this
+  project's address.
 - Deciding who may switch these modules on (business verification), so the line cannot be used to
   run a phishing operation.
 - Access and deletion requests: confirming who is asking before calling `exportSubject` or

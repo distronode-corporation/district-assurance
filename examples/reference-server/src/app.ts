@@ -4,7 +4,8 @@
 // serves receipts by capability link with a small receipt page, serves the receipt key set, runs a
 // sample receiver for signed record deliveries, checks the signatures of the carrier webhooks
 // (Twilio, Telnyx), and, with `uploads`, serves the single-use document upload page in English
-// and French (FIL-5). With `ui`, it also serves the demo's browser UI and the routes that run the
+// and French (FIL-5). With `securityTxt`, it serves the host's own `/.well-known/security.txt`
+// (RFC 9116). With `ui`, it also serves the demo's browser UI and the routes that run the
 // scripted demo one step at a time. Not hardened for production; ROADMAP.md, "Reference server",
 // lists what that takes.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -79,6 +80,25 @@ export interface ReferenceServerOptions {
   receiptLinks?: ReceiptLinks;
   /** Document uploads by single-use link: serves `/u/:token`. Off when absent. */
   uploads?: { documents: DocumentStore; scanner: DocumentScanner; ids?: IdGenerator };
+  /** The host's own security.txt. No route when absent: there is no default. */
+  securityTxt?: SecurityTxtSettings;
+  /** Where start-up warnings go. Default `console.warn`. */
+  warn?: (message: string) => void;
+}
+
+/**
+ * The host's security.txt (RFC 9116). A security.txt speaks only for the domain it is served
+ * from, so these are the host's own contacts and policy, never this project's.
+ */
+export interface SecurityTxtSettings {
+  /** One or more ways to reach the host's security team: `mailto:`, `tel:` or `https:` URIs. */
+  contact: readonly string[];
+  /** When the file stops being valid: after the server starts, and at most a year later. */
+  expires: Date;
+  /** The host's disclosure policy, an `https:` URL. */
+  policy?: string;
+  /** Where the host publishes this file, an `https:` URL. */
+  canonical?: string;
 }
 
 /**
@@ -110,7 +130,93 @@ interface Page {
   upload?: true;
   html: string;
 }
-type Answer = [number, Json] | StaticFile | Page;
+/** A plain text answer: the security.txt. */
+type TextAnswer = { text: string };
+type Answer = [number, Json] | StaticFile | Page | TextAnswer;
+
+/** On the security.txt answer: plain text, never sniffed as anything else, never framed. */
+const TEXT_HEADERS = {
+  "content-type": "text/plain; charset=utf-8",
+  "x-content-type-options": "nosniff",
+  "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const WARN_MS = 30 * DAY_MS;
+
+/**
+ * This project's own reporting addresses (SECURITY.md). A host that copies one into its settings
+ * would send reports about its deployment to this project, so they are refused.
+ */
+const PROJECT_ADDRESSES: readonly RegExp[] = [
+  // The mailbox with or without a plus tag, which reaches it too; never a longer domain that starts the same.
+  /(?<![\w.+-])opensource(?:\+[^@\s]*)?@distronode\.com(?![\w-]|\.[\w-])/i,
+  // The repository however its path is spelled: doubled slashes, a .git suffix, any page under it.
+  /github\.com\/+distronode-corporation\/+district-assurance(?:\.git)?(?![\w.-])/i,
+];
+
+/**
+ * A URI of an allowed scheme, on one line of printable ASCII, so it can never add a field of its
+ * own. A web URI must be written `https://` (RFC 9116): the URL parser repairs forms such as
+ * `https:example.org`, but the file carries the value as written, so those are refused.
+ */
+function checkUri(field: string, value: string, schemes: readonly string[]): void {
+  let scheme = "";
+  try {
+    scheme = new URL(value).protocol;
+  } catch {
+    // Not a URI: refused below.
+  }
+  const malformedWeb = scheme === "https:" && !/^https:\/\/[^/]/i.test(value);
+  if (!/^[\x21-\x7e]+$/.test(value) || !schemes.includes(scheme) || malformedWeb) {
+    throw new Error(`securityTxt: ${field} must be a ${schemes.join(" or ")} URI on one line`);
+  }
+  if (PROJECT_ADDRESSES.some((p) => p.test(decodeURIComponentSafe(value)))) {
+    throw new Error(`securityTxt: ${field} is this project's address; a security.txt names the host's own contacts`);
+  }
+}
+
+/** The value with percent escapes decoded where they decode, so an escaped `@` is still seen. */
+function decodeURIComponentSafe(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * The security.txt body, checked once when the server is created. Settings that cannot make a
+ * valid file are refused, so a server never starts with an expired or a far-future file (RFC 9116
+ * advises at most a year); one that expires within 30 days starts with a warning.
+ */
+export function securityTxt(settings: SecurityTxtSettings, now: Date, warn: (message: string) => void): string {
+  // Read once: the contacts, links and expiry checked are the ones written into the file.
+  const contacts = [...settings.contact];
+  const { policy, canonical, expires: expiresAt } = settings;
+  if (contacts.length === 0) throw new Error("securityTxt: at least one contact is required");
+  for (const contact of contacts) checkUri("contact", contact, ["mailto:", "tel:", "https:"]);
+  if (policy !== undefined) checkUri("policy", policy, ["https:"]);
+  if (canonical !== undefined) checkUri("canonical", canonical, ["https:"]);
+  const expires = expiresAt.getTime();
+  const yearAhead = new Date(now);
+  yearAhead.setUTCFullYear(yearAhead.getUTCFullYear() + 1);
+  if (Number.isNaN(expires) || expires <= now.getTime()) throw new Error("securityTxt: expires must be in the future");
+  if (expires > yearAhead.getTime()) throw new Error("securityTxt: expires must be at most a year ahead");
+  // Whole seconds drop the `.000`; any other milliseconds stay, so the file never advertises an
+  // expiry earlier than the one the route enforces.
+  const stamp = expiresAt.toISOString().replace(/\.000Z$/, "Z");
+  if (expires - now.getTime() <= WARN_MS) warn(expiryWarning(expiresAt));
+  const lines = contacts.map((c) => `Contact: ${c}`);
+  lines.push(`Expires: ${stamp}`);
+  if (policy !== undefined) lines.push(`Policy: ${policy}`);
+  if (canonical !== undefined) lines.push(`Canonical: ${canonical}`);
+  return lines.join("\n") + "\n";
+}
+
+function expiryWarning(expires: Date): string {
+  return `security.txt expires at ${expires.toISOString().replace(/\.000Z$/, "Z")}: renew it before then`;
+}
 
 /** On every JSON answer: never sniffed as anything else, never framed, never cached. */
 const JSON_HEADERS = {
@@ -221,6 +327,29 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   const pendingRecords = new Map<string, Promise<void>>();
   const maxBody = options.maxBodyBytes ?? 64 * 1024;
   const files = options.ui === undefined ? new Map<string, StaticFile>() : loadStaticFiles();
+  const security = options.securityTxt;
+  const warn = options.warn ?? console.warn;
+  const startedAt = options.clock.now();
+  // The expiry the route enforces is read with the one the file was built from, from one copy.
+  const securityCopy = security === undefined ? undefined : { ...security, contact: [...security.contact], expires: new Date(security.expires.getTime()) };
+  const securityFile = securityCopy === undefined ? null : { text: securityTxt(securityCopy, startedAt, warn), expires: securityCopy.expires.getTime() };
+  // A server that runs into the last 30 days, or past the expiry, says so once each, on the first
+  // request for the file after it happens: the start-up check alone would never see it.
+  let warnedSoon = securityFile !== null && securityFile.expires - startedAt.getTime() <= WARN_MS;
+  let warnedExpired = false;
+  const securityRequested = (now: number): boolean => {
+    const file = securityFile!;
+    if (now >= file.expires) {
+      if (!warnedExpired) warn(`security.txt expired at ${securityCopy!.expires.toISOString()}: it is no longer served; renew it`);
+      warnedExpired = true;
+      return false;
+    }
+    if (!warnedSoon && file.expires - now <= WARN_MS) {
+      warn(expiryWarning(securityCopy!.expires));
+      warnedSoon = true;
+    }
+    return true;
+  };
 
   async function stripeWebhook(req: IncomingMessage, route: "identity" | "payments" | "connect"): Promise<[number, Json]> {
     const payload = await readBody(req, maxBody);
@@ -433,6 +562,11 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       expect("GET");
       return [200, { keys: options.engine.receiptKeys() }];
     }
+    // The host's own file only, and none once it has expired while the server kept running.
+    if (path === "/.well-known/security.txt" && securityFile !== null && securityRequested(options.clock.now().getTime())) {
+      expect("GET");
+      return { text: securityFile.text };
+    }
     const stripe = /^\/webhooks\/stripe\/(identity|payments|connect)$/.exec(path);
     if (stripe !== null) {
       expect("POST");
@@ -480,6 +614,11 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
         if (Array.isArray(answer)) {
           res.writeHead(answer[0], JSON_HEADERS);
           res.end(JSON.stringify(answer[1]));
+          return;
+        }
+        if ("text" in answer) {
+          res.writeHead(200, TEXT_HEADERS);
+          res.end(answer.text);
           return;
         }
         res.writeHead(200, { ...UI_HEADERS, "content-type": answer.contentType });
