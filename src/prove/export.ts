@@ -10,7 +10,8 @@ import type { AuditEntry, AuditLedger, ReceiptSigner } from "../core/adapters.ts
 import { canonicalJson } from "../core/canonical.ts";
 import type { Clock } from "../core/clock.ts";
 import { EngineError } from "../core/errors.ts";
-import { GENESIS_HASH, verifyChain, type ChainCheck } from "./ledger.ts";
+import { isObject } from "../core/shape.ts";
+import { GENESIS_HASH, verifyChain } from "./ledger.ts";
 
 /** A point on the chain: an entry's `seq` and `hash`, or `{seq: 0, hash: GENESIS_HASH}`. */
 export interface ChainPoint {
@@ -235,20 +236,14 @@ export function verifyLedgerExport(
   if (after !== undefined && (typeof after !== "object" || after === null || after.ledgerId !== trailer.ledgerId || after.cursor !== encodeCursor(trailer.from))) {
     return { ok: false, reason: "continuity" };
   }
-  const entries = parsed as AuditEntry[];
-  const check = chainOf(entries, trailer.from);
-  if (check === null) return { ok: false, reason: "malformed" };
+  // An entry line that is not an object is malformed, not a break in the chain: verifyChain would
+  // report it as a break at the seq it should hold (SRV-7), so it is checked here first.
+  if (!parsed.every(isObject)) return { ok: false, reason: "malformed" };
+  const entries = parsed as unknown[] as AuditEntry[];
+  const check = verifyChain(entries, trailer.from);
   if (!check.ok) return { ok: false, reason: "chain", seq: check.seq };
   // A run cut short does not reach the signed end; a run rebuilt from the same start ends on another hash.
   if (check.head.seq !== trailer.through.seq || check.head.hash !== trailer.through.hash) return { ok: false, reason: "chain" };
   return { ok: true, entries, trailer };
 }
 
-/** `verifyChain` over parsed lines; null when a line is not an entry object and cannot be hashed. */
-function chainOf(entries: AuditEntry[], from: ChainPoint): ChainCheck | null {
-  try {
-    return verifyChain(entries, from);
-  } catch {
-    return null;
-  }
-}
