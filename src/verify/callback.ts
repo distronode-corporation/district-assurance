@@ -178,12 +178,13 @@ async function countDial(rt: EngineRuntime, callId: string, callback: CallbackSt
   const placed = placedKey(rt, callback.subjectKey!);
   const since = new Date(now.getTime() - DAY_MS + 1).toISOString();
   const at = now.toISOString();
-  const take = (s: BadgeSlice): boolean => {
+  let mine: string | undefined;
+  const take = (s: BadgeSlice, token: string): boolean => {
     if (s.callback.status !== "dialing" || today(s.callback.admitting)) return false;
-    s.callback = { ...s.callback, admitting: at };
+    s.callback = { ...s.callback, admitting: at, admittingToken: (mine = token) };
     return true;
   };
-  if (!(await claimOnCall(rt, callId, take, (s) => s.callback.admitting === at))) {
+  if (!(await claimOnCall(rt, callId, take, (s, token) => s.callback.admittingToken === token))) {
     const other = callbackOf((await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice).admitting;
     return today(other) && recordedAt(await counters.get(placed, since), other) !== null ? other : undefined;
   }
@@ -196,7 +197,9 @@ async function countDial(rt: EngineRuntime, callId: string, callback: CallbackSt
     await rt
       .update(callId, (draft) => {
         const callback = draft.slice<BadgeSlice>(BADGE).callback;
-        if (callback.admitting === at) delete callback.admitting;
+        if (callback.admittingToken !== mine) return;
+        delete callback.admitting;
+        delete callback.admittingToken;
       })
       .catch(() => undefined);
     throw error;
@@ -329,13 +332,13 @@ async function forgetCallbackPass(rt: EngineRuntime, callId: string, done: { cla
   const at = new Date(done.at);
   await forgetPass(counters, done.keys, at);
   if (!done.claimed) {
-    const take = (s: BadgeSlice): boolean => {
+    const take = (s: BadgeSlice, token: string): boolean => {
       // Pending only on a passed callback, which stays passed.
       if (!s.callback.forgetPending || s.callback.forgetClaimed === true) return false;
-      s.callback = { ...s.callback, forgetClaimed: true };
+      s.callback = { ...s.callback, forgetClaimed: true, forgetClaimToken: token };
       return true;
     };
-    if (!(await claimOnCall(rt, callId, take, (s) => s.callback.forgetPending && s.callback.forgetClaimed === true))) return;
+    if (!(await claimOnCall(rt, callId, take, (s, token) => s.callback.forgetPending && s.callback.forgetClaimToken === token))) return;
     await removeOwnOnNumbers(counters, done.keys, at);
   }
   await rt.update(callId, (draft) => {

@@ -206,6 +206,8 @@ export interface CallbackState {
    * on calls saved before it.
    */
   forgetClaimed?: true;
+  /** The token of the try that set `forgetClaimed` (absent on a claim saved before it was kept: no try's). */
+  forgetClaimToken?: string;
   /** On the callback call: the number the dial goes to, kept in the write that claims the dial, and the one the carrier check asks about. */
   to?: string;
   /** On the callback call: how often the number on file changed between tries of the dial. Each number gets its own idempotency key. */
@@ -218,6 +220,8 @@ export interface CallbackState {
    * is in the store, and otherwise leaves the dial to the try that claimed it.
    */
   admitting?: string;
+  /** The token of the try that saved `admitting` (absent on a claim saved before it was kept: no try's). */
+  admittingToken?: string;
 }
 
 export interface KeypadResult {
