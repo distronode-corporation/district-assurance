@@ -4,6 +4,8 @@
 // Every runtime function takes the engine's runtime and works in compare-and-set steps: an attempt
 // is counted in one write before it is judged, and a link is reserved in one write before it is
 // sent, so two processes running the same call can never get two attempts or two links for one.
+import { randomBytes } from "node:crypto";
+
 import type { AttemptCounterKey, SubjectRecord } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
@@ -143,7 +145,8 @@ export interface BadgeSlice {
  * call to `submitFactor` or the call's next. `id` is unique on the call (`forgetSeq`; 0 for one
  * saved before ids). `hidden` is the duress PIN's hidden counter (VER-12), when it is on; absent on
  * a pass saved before it was kept here. `claimed` is set on the call before the removals that are
- * not safe to run twice (the number's own failure, the hidden counter's) run, so a replay skips them.
+ * not safe to run twice (the number's own failure, the hidden counter's) run, so a replay skips them;
+ * `claimToken` names the run that claimed it (absent on a claim saved before it was kept: no run's).
  */
 export interface OwedCleanup {
   id: number;
@@ -151,6 +154,7 @@ export interface OwedCleanup {
   at: string;
   hidden?: { key: AttemptCounterKey; duress: boolean };
   claimed?: true;
+  claimToken?: string;
 }
 
 /** The cleanups a call owes, the one saved before they were kept one per pass included (id 0). */
@@ -760,7 +764,7 @@ export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callI
     failed = { error };
   }
   // A duress PIN entry flags its subject, even a stale one: durable and hidden, before the visible reset.
-  if (pinDuress) await flagDuressUnlessCleared(counters, rt.workspaceId, current.subjectKey!, at, clears);
+  if (pinDuress) await flagDuressUnlessCleared(counters, rt.workspaceId, current.subjectKey!, clears);
   // A stale entry's failure stays counted across calls, as for any entry that was not accepted.
   if (stale !== null) throw stale;
   // Only once the result is saved: a write that failed after saving it (the ledger) still owes the
@@ -788,15 +792,16 @@ async function settleForget(rt: EngineRuntime, callId: string, id: number): Prom
   await forgetPass(counters, keys, new Date(at));
   if (owed.claimed !== true) {
     // Not claimed (or claimed by another run first): this run leaves the rest to the run that holds it, or the next.
-    const take = (s: BadgeSlice): boolean => {
+    const take = (s: BadgeSlice, token: string): boolean => {
       const list = owedCleanups(s);
       const mine = list.find((o) => o.id === id);
       if (mine === undefined || mine.claimed === true) return false;
       mine.claimed = true;
+      mine.claimToken = token;
       keepOwed(s, list);
       return true;
     };
-    if (!(await claimOnCall(rt, callId, take, (s) => owedOn(s)?.claimed === true))) return;
+    if (!(await claimOnCall(rt, callId, take, (s, token) => owedOn(s)?.claimToken === token))) return;
     await removeOwnOnNumbers(counters, keys, new Date(at));
     // The hidden counter forgets up to the pass only on a pass that is not under duress; a duress
     // entry takes off its own failure, as a pass does, and keeps the rest (forgetHidden).
@@ -815,14 +820,17 @@ async function settleForget(rt: EngineRuntime, callId: string, id: number): Prom
  * the claim. `take` sets the claim on the slice and says whether it took it (false: not owed, or
  * claimed already); `held` says whether the call holds it. A write that saved and then failed (the
  * ledger, appended after the save) still claimed it, which the call says; one that did not save did not.
+ * `token` is this run's own, for `take` to save with the claim and `held` to compare: a claim another
+ * run saved after this run's write failed unsaved is never this run's.
  */
-export async function claimOnCall(rt: EngineRuntime, callId: string, take: (s: BadgeSlice) => boolean, held: (s: BadgeSlice) => boolean): Promise<boolean> {
+export async function claimOnCall(rt: EngineRuntime, callId: string, take: (s: BadgeSlice, token: string) => boolean, held: (s: BadgeSlice, token: string) => boolean): Promise<boolean> {
+  const token = randomBytes(12).toString("base64url");
   let mine = false;
   try {
-    return await rt.update(callId, (draft) => (mine = take(draft.slice<BadgeSlice>(BADGE))));
+    return await rt.update(callId, (draft) => (mine = take(draft.slice<BadgeSlice>(BADGE), token)));
   } catch {
     if (!mine) return false;
-    return held((await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice);
+    return held((await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice, token);
   }
 }
 
