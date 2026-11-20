@@ -1,0 +1,7 @@
+{
+  "recordedOn": "2026-11-20",
+  "stripeVersionPinned": "2025-03-31.basil",
+  "eventApiVersion": "2026-04-22.dahlia",
+  "cli": "stripe listen (the account's real, signed deliveries, forwarded to the loopback)",
+  "account": "acct_redacted0001"
+}

@@ -2003,6 +2003,26 @@ redirect. An `apiBase` option must be `https:`, or `http:` on a loopback host (`
 `localhost`, `[::1]`) only, with no credentials in it; anything else, and a bad `timeoutMs`, throws
 in the constructor, never quoting the value.
 
+The reference server's `StripeCheckoutLinks` (an example, not part of the package) is a
+`PaymentLinks` adapter for Stripe Checkout in test mode only (a secret test key, `sk_test_`), with
+`capabilities` `{ modes: ["platform", "connect"], minLinkMinutes: 30, maxLinkMinutes: 1440 }`.
+`createLink` sends one `POST /v1/checkout/sessions` in payment mode with the engine's amount,
+currency, description, `expires_at` (the engine's `expiresAt`), the payment id as
+`client_reference_id` and in metadata, and the call id in metadata. In `platform` mode it is made on
+the platform's own account and the request must name no connected account. In `connect` mode it is
+a direct charge on the business's connected account: the `Stripe-Account` header carrying the
+request's `connectedAccountId`, which must be `acct_` and 1 to 255 letters and digits, and nothing
+else (no `on_behalf_of` or `transfer_data`, which make a destination charge with the platform as
+the merchant). `expireLink` and `readLink` send the same header for a connected account. Either
+refusal is a `TypeError` thrown before anything is sent. The engine's methods map to Checkout's
+`payment_method_types` as Stripe answers them: `card` as `card`, `apple_pay` and `google_pay` as
+`card` (Checkout shows the wallets under it; Stripe refuses them as types), `link` as `link`, which
+Checkout takes only beside `card`, so a request offering Link alone is refused before anything is
+sent. Stripe's `checkout.session.completed` for a connect payment comes to the Connect endpoint,
+names the connected account (`account`), and settles the payment there only. These answers were
+recorded once in Stripe test mode and are replayed offline by `test/stripe-real.test.ts`, with the
+Identity run above.
+
 ## 16. Texts
 
 Code builds every text, in the call's locale, one of `SUPPORTED_LOCALES` (exported, a frozen

@@ -32,7 +32,11 @@ export function shortSessionId(id: string): string {
   return `${id.slice(0, 14)}...`;
 }
 
-/** The demo's config without `deposit-connect`: this adapter takes platform payments only. */
+/**
+ * The demo's config without `deposit-connect`, which names a made-up connected account and a
+ * 10-minute link (below Checkout's 30): this demo pays on the platform's account. Connect mode is
+ * proven by the recorded test-mode run in test/fixtures/stripe-real/ instead.
+ */
 export function e2eConfig(): FlowConfig {
   const config = demoConfig();
   delete config.flows["deposit-connect"];

@@ -1,0 +1,78 @@
+{
+  "exchanges": [
+    {
+      "method": "POST",
+      "path": "/v1/checkout/sessions",
+      "headers": {
+        "stripe-version": "2025-03-31.basil",
+        "stripe-account": "acct_redacted0001",
+        "idempotency-key": true
+      },
+      "form": [
+        [
+          "mode",
+          "payment"
+        ],
+        [
+          "line_items[0][quantity]",
+          "1"
+        ],
+        [
+          "line_items[0][price_data][currency]",
+          "cad"
+        ],
+        [
+          "line_items[0][price_data][unit_amount]",
+          "1500"
+        ],
+        [
+          "line_items[0][price_data][product_data][name]",
+          "Recorded deposit (connect, cards and Link, Stripe test mode)"
+        ],
+        [
+          "payment_method_types[0]",
+          "card"
+        ],
+        [
+          "payment_method_types[1]",
+          "link"
+        ],
+        [
+          "expires_at",
+          "1795204521"
+        ],
+        [
+          "client_reference_id",
+          "pay_redacted0002"
+        ],
+        [
+          "metadata[payment_id]",
+          "pay_redacted0002"
+        ],
+        [
+          "metadata[call_id]",
+          "call_redacted0002"
+        ],
+        [
+          "success_url",
+          "http://127.0.0.1:33207/"
+        ]
+      ],
+      "status": 200,
+      "body": "{\n  \"id\": \"cs_test_redacted0003\",\n  \"object\": \"checkout.session\",\n  \"adaptive_pricing\": {\n    \"enabled\": true\n  },\n  \"after_expiration\": null,\n  \"allow_promotion_codes\": null,\n  \"allowed_payment_method_types\": [\n    \"card\",\n    \"link\"\n  ],\n  \"amount_subtotal\": 1500,\n  \"amount_total\": 1500,\n  \"automatic_tax\": {\n    \"address_collection_precision\": null,\n    \"enabled\": false,\n    \"liability\": null,\n    \"provider\": null,\n    \"status\": null\n  },\n  \"billing_address_collection\": null,\n  \"branding_settings\": {\n    \"background_color\": \"#ffffff\",\n    \"border_style\": \"rounded\",\n    \"button_color\": \"#0074d4\",\n    \"display_name\": \"[redacted]\",\n    \"font_family\": \"default\",\n    \"icon\": null,\n    \"logo\": null\n  },\n  \"cancel_url\": null,\n  \"client_reference_id\": \"pay_redacted0002\",\n  \"client_secret\": null,\n  \"collected_information\": null,\n  \"consent\": null,\n  \"consent_collection\": null,\n  \"created\": 1795202422,\n  \"currency\": \"cad\",\n  \"currency_conversion\": null,\n  \"custom_fields\": [],\n  \"custom_text\": {\n    \"after_submit\": null,\n    \"shipping_address\": null,\n    \"submit\": null,\n    \"terms_of_service_acceptance\": null\n  },\n  \"customer\": null,\n  \"customer_account\": null,\n  \"customer_creation\": \"if_required\",\n  \"customer_details\": null,\n  \"customer_email\": null,\n  \"discounts\": [],\n  \"expires_at\": 1795204521,\n  \"integration_identifier\": null,\n  \"invoice\": null,\n  \"invoice_creation\": {\n    \"enabled\": false,\n    \"invoice_data\": {\n      \"account_tax_ids\": null,\n      \"custom_fields\": null,\n      \"description\": null,\n      \"footer\": null,\n      \"issuer\": null,\n      \"metadata\": {},\n      \"rendering_options\": null\n    }\n  },\n  \"livemode\": false,\n  \"locale\": null,\n  \"managed_payments\": {\n    \"enabled\": false\n  },\n  \"marketing_attributions\": null,\n  \"metadata\": {\n    \"call_id\": \"call_redacted0002\",\n    \"payment_id\": \"pay_redacted0002\"\n  },\n  \"mode\": \"payment\",\n  \"origin_context\": null,\n  \"payment_intent\": null,\n  \"payment_link\": null,\n  \"payment_method_collection\": \"if_required\",\n  \"payment_method_configuration_details\": null,\n  \"payment_method_options\": {\n    \"card\": {\n      \"request_three_d_secure\": \"automatic\"\n    }\n  },\n  \"payment_method_types\": [\n    \"card\",\n    \"link\"\n  ],\n  \"payment_status\": \"unpaid\",\n  \"permissions\": null,\n  \"phone_number_collection\": {\n    \"enabled\": false\n  },\n  \"recovered_from\": null,\n  \"saved_payment_method_options\": null,\n  \"setup_intent\": null,\n  \"shipping_address_collection\": null,\n  \"shipping_cost\": null,\n  \"shipping_options\": [],\n  \"status\": \"open\",\n  \"submit_type\": null,\n  \"subscription\": null,\n  \"success_url\": \"http://127.0.0.1:33207/\",\n  \"total_details\": {\n    \"amount_discount\": 0,\n    \"amount_shipping\": 0,\n    \"amount_tax\": 0\n  },\n  \"ui_mode\": \"hosted\",\n  \"url\": \"https://checkout.stripe.com/redacted\",\n  \"wallet_options\": null\n}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/checkout/sessions/cs_test_redacted0003/expire",
+      "headers": {
+        "stripe-version": "2025-03-31.basil",
+        "stripe-account": "acct_redacted0001",
+        "idempotency-key": true
+      },
+      "form": [],
+      "status": 200,
+      "body": "{\n  \"id\": \"cs_test_redacted0003\",\n  \"object\": \"checkout.session\",\n  \"adaptive_pricing\": {\n    \"enabled\": true\n  },\n  \"after_expiration\": null,\n  \"allow_promotion_codes\": null,\n  \"allowed_payment_method_types\": [\n    \"card\",\n    \"link\"\n  ],\n  \"amount_subtotal\": 1500,\n  \"amount_total\": 1500,\n  \"automatic_tax\": {\n    \"address_collection_precision\": null,\n    \"enabled\": false,\n    \"liability\": null,\n    \"provider\": null,\n    \"status\": null\n  },\n  \"billing_address_collection\": null,\n  \"branding_settings\": {\n    \"background_color\": \"#ffffff\",\n    \"border_style\": \"rounded\",\n    \"button_color\": \"#0074d4\",\n    \"display_name\": \"[redacted]\",\n    \"font_family\": \"default\",\n    \"icon\": null,\n    \"logo\": null\n  },\n  \"cancel_url\": null,\n  \"client_reference_id\": \"pay_redacted0002\",\n  \"client_secret\": null,\n  \"collected_information\": null,\n  \"consent\": null,\n  \"consent_collection\": null,\n  \"created\": 1795202422,\n  \"currency\": \"cad\",\n  \"currency_conversion\": null,\n  \"custom_fields\": [],\n  \"custom_text\": {\n    \"after_submit\": null,\n    \"shipping_address\": null,\n    \"submit\": null,\n    \"terms_of_service_acceptance\": null\n  },\n  \"customer\": null,\n  \"customer_account\": null,\n  \"customer_creation\": \"if_required\",\n  \"customer_details\": null,\n  \"customer_email\": null,\n  \"discounts\": [],\n  \"expires_at\": 1795204521,\n  \"integration_identifier\": null,\n  \"invoice\": null,\n  \"invoice_creation\": {\n    \"enabled\": false,\n    \"invoice_data\": {\n      \"account_tax_ids\": null,\n      \"custom_fields\": null,\n      \"description\": null,\n      \"footer\": null,\n      \"issuer\": null,\n      \"metadata\": {},\n      \"rendering_options\": null\n    }\n  },\n  \"livemode\": false,\n  \"locale\": null,\n  \"managed_payments\": {\n    \"enabled\": false\n  },\n  \"marketing_attributions\": null,\n  \"metadata\": {\n    \"call_id\": \"call_redacted0002\",\n    \"payment_id\": \"pay_redacted0002\"\n  },\n  \"mode\": \"payment\",\n  \"origin_context\": null,\n  \"payment_intent\": null,\n  \"payment_link\": null,\n  \"payment_method_collection\": \"if_required\",\n  \"payment_method_configuration_details\": null,\n  \"payment_method_options\": {\n    \"card\": {\n      \"request_three_d_secure\": \"automatic\"\n    }\n  },\n  \"payment_method_types\": [\n    \"card\",\n    \"link\"\n  ],\n  \"payment_status\": \"unpaid\",\n  \"permissions\": null,\n  \"phone_number_collection\": {\n    \"enabled\": false\n  },\n  \"recovered_from\": null,\n  \"saved_payment_method_options\": null,\n  \"setup_intent\": null,\n  \"shipping_address_collection\": null,\n  \"shipping_cost\": null,\n  \"shipping_options\": [],\n  \"status\": \"expired\",\n  \"submit_type\": null,\n  \"subscription\": null,\n  \"success_url\": \"http://127.0.0.1:33207/\",\n  \"total_details\": {\n    \"amount_discount\": 0,\n    \"amount_shipping\": 0,\n    \"amount_tax\": 0\n  },\n  \"ui_mode\": \"hosted\",\n  \"url\": null,\n  \"wallet_options\": null\n}"
+    }
+  ],
+  "cancelStatus": "expired"
+}

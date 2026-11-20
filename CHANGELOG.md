@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Stripe test-mode proofs for VER-5 (#18) and PAY-1 (#25), recorded once through the reference
+  server's own adapters and webhook routes and replayed offline (`test/stripe-real.test.ts`,
+  recorder `test/fixtures/stripe-real/record.ts`, every Stripe id redacted): a Stripe Identity
+  VerificationSession and Stripe's signed `identity.verification_session.verified` event applied to
+  the trial call; a Checkout Session paid in platform mode and one paid as a direct charge on a
+  connected account, each settled by Stripe's signed `checkout.session.completed` on its own
+  endpoint (the Connect one names the account); a connect link cancelled and expired on the
+  connected account; and Stripe's answers on the payment method mapping.
 - Simulator callers for the rest of the built-in steps (#134): `gate.grant` (the fake door, as
   every controller the config's Gate targets name, opens or refuses), `step-up.issue` (a token
   issued and exchanged), and Badge's `text_code`, `spoken_knowledge` and `callback` (the caller
@@ -368,6 +376,13 @@ All notable changes to this project are documented here. The format follows
 - Host-facing: `pinDigest` and `duressDigest` return an Argon2id record with a fresh salt, so two
   calls for the same PIN give different strings that both verify; compare records by checking, never
   by equality.
+- `StripeCheckoutLinks` takes connect mode (`capabilities.modes` is now `["platform", "connect"]`):
+  a direct charge on the connected account by the `Stripe-Account` header only, as Stripe's
+  direct-charges guide has it. A connect request needs a well-formed `acct_` id and a platform
+  request may name none, both checked before anything is sent; `readLink` checks the account too.
+  Link alone is refused before anything is sent, since Checkout takes `link` only beside `card`
+  (Stripe's recorded answer); Apple Pay and Google Pay still go as `card`.
+- `createServe` (`npm run serve`) takes `ids`, for a run against Stripe repeated within a day.
 - Host-facing: a call record is removed through `Engine.removeCall(callId)`, never in the session
   store directly. It is refused while the call has not ended and while its outbox holds ledger
   entries not yet appended (it flushes them first; `flushPending` keeps listing the call), while it
