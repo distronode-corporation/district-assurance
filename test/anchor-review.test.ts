@@ -105,6 +105,12 @@ describe("review #133: verifyAnchor on a malformed export", () => {
     // A value that reads, but as no entry, is a broken chain.
     assert.deepEqual(verifyAnchor(entry, [42, ...entries.slice(1)] as never, { tsa: tsa.chain }), { ok: false, reason: "chain" });
   });
+
+  it("a covered entry whose fields throw when read is malformed, never a throw", async () => {
+    const { entry, entries, tsa } = await anchored();
+    const hostile = { get seq(): number { throw new Error("bad entry"); } };
+    assert.deepEqual(verifyAnchor(entry, [hostile, ...entries.slice(1)] as never, { tsa: tsa.chain }), { ok: false, reason: "malformed" });
+  });
 });
 
 describe("review #133: isAnchorProof reads only its own keys", () => {
