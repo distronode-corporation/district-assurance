@@ -196,6 +196,59 @@ describe("hostile #97: races on the outbox and the pending mark", () => {
     assert.deepEqual(await sessions.pendingCalls("ws_test", 10), []);
   });
 
+  it("A12: a sweep whose clear loses to a write that left an entry pending reports the call as still pending", { timeout: 10_000 }, async () => {
+    const ledger = new SwitchedLedger();
+    const sessions = new HeldUnmarkStore();
+    const t = setup({ adapters: { ledger, sessions } });
+    ledger.down = true;
+    await assert.rejects(t.engine.startCall({ callId: "c1" }), /ledger down/);
+    ledger.down = false;
+    sessions.hold = true;
+    const run = t.engine.flushPending();
+    const early = run.then(
+      () => "settled" as const,
+      () => "settled" as const,
+    );
+    try {
+      // The sweep has appended call.started and holds its clear.
+      assert.equal(await Promise.race([sessions.reached.promise.then(() => "reached" as const), early]), "reached", "the sweep reached its clear");
+      ledger.down = true;
+      await assert.rejects(t.engine.markUntrusted("c1", "document"), /ledger down/);
+    } finally {
+      sessions.release.resolve();
+    }
+    // The clear was stale: session.tainted is still in the outbox, so the call is not flushed.
+    assert.deepEqual(await run, { flushed: [], failed: ["c1"] });
+    assert.deepEqual(await sessions.pendingCalls("ws_test", 10), ["c1"]);
+    ledger.down = false;
+    assert.deepEqual(await t.engine.flushPending(), { flushed: ["c1"], failed: [] });
+    assert.deepEqual((await ledger.list()).map((e) => e.event), ["call.started", "session.tainted"]);
+  });
+
+  it("A13: a sweep whose clear is lost and whose call is then gone reports it flushed (nothing left pending)", async () => {
+    const ledger = new SwitchedLedger();
+    class GoneAfterClear extends MemorySessionStore {
+      gone = false;
+      override async compareAndSet(w: string, c: string, v: number, r: JsonValue, h?: WriteHint): Promise<{ ok: true; version: number } | { ok: false }> {
+        if (h?.ledgerPending === false) {
+          this.gone = true;
+          return { ok: false };
+        }
+        return super.compareAndSet(w, c, v, r, h);
+      }
+      override async get(w: string, c: string) {
+        return this.gone ? null : super.get(w, c);
+      }
+    }
+    const sessions = new GoneAfterClear();
+    const t = setup({ adapters: { ledger, sessions } });
+    ledger.down = true;
+    await assert.rejects(t.engine.startCall({ callId: "c1" }), /ledger down/);
+    ledger.down = false;
+    assert.deepEqual(await t.engine.flushPending(), { flushed: ["c1"], failed: [] });
+    assert.deepEqual((await ledger.list()).map((e) => e.event), ["call.started"]);
+  });
+
   it("A5: two engines on one store and ledger, a write and a background flush at once, append each entry once", async () => {
     const ledger = new SwitchedLedger();
     const sessions = new MemorySessionStore();

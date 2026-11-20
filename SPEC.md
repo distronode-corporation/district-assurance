@@ -250,9 +250,11 @@ one, for example `[pin, callback]` at level 2.
 **Caller ID attestation.** `startCall({attestation})` records, once, the STIR/SHAKEN result the
 host's carrier reported for the call: `A`, `B` or `C` only when the receiving carrier's check of
 the signature passed, `failed` when it failed, and `none` (the default) when there was no signature
-or no result. Any other value is refused (`invalid_input`), and nothing changes it later. A Twilio `StirVerstat` of `TN-Validation-Passed-{A,B,C}-Diverted` or
-`-Passthrough` maps to `none`, because Twilio did not verify the original signer's attestation
-end to end (its `-Failed-` forms map to `failed`). The attestation is
+or no result. Any other value is refused (`invalid_input`), and nothing changes it later. A Twilio `StirVerstat` of `TN-Validation-Passed-{A,B,C}-Diverted` maps to
+`none`, because Twilio checked the diverting provider's signature, not the original signer's.
+`TN-Validation-Passed-{A,B,C}-Passthrough` maps to `none` as policy, though Twilio checked the
+originating provider's signature: only the plain Passed values give a level. The `-Failed-` forms
+of both map to `failed`. The attestation is
 never a factor, never counts toward a factor set and never appears in `methods`. The policy's
 optional `attestationCaps` gives, per value, the highest level a call with it can reach (for
 example `{"C": 2, "none": 2, "failed": 1}`): `finishVerification` takes the lower of the level the
@@ -318,9 +320,14 @@ A **grant** carries the level, the scopes at or below it (narrowed to the verify
 when the step lists them), an expiry, and what judged it: `policyVersion` (the policy's `version`)
 and `configRevision` (the `revision` of the FlowConfig in force when the verification finished,
 newer than the call's own `revision` when the config changed during the call).
-`authorize(callId, scope)` is true only for a scope the policy lists, on a call that has not
-ended, whose minimum is 0 or whose grant includes it, has not expired, and has a level at or
-above the scope's minimum under the config in force now.
+`authorize(callId, scope, amount?)` is true only for a scope the policy lists, on a call that has
+not ended, whose minimum is 0 or whose grant includes it, has not expired, and has a level at or
+above the scope's minimum under the config in force now, raised by the step-up rules that hold now
+(section 4; `amount` is `{amountMinor, currency}`, in a flow by default the current step's). The
+steps' own checks (a payment, an intake, an outside module's step, Gate's door) use the same raised
+minimum, for the request's own amount, so a grant already issued is held to it. The first time a
+rule raises a minimum on a call, it is written to the ledger by name (`policy.step_up`), never with
+the amount, the time or the signal's cause; `authorize` writes then.
 On a
 duress call (section 6) it is also false for every scope whose class is not `none` and for every
 scope in the duress `refuseScopes`.
@@ -356,21 +363,6 @@ feature the account is not approved for, or an answer they cannot read. A Twilio
 **Texted codes** (`text_code`, needs the `messages` and `codes` adapters).
 `sendTextCode(callId)` needs the factor on (and listed by the current `badge.verify` step), a
 keypad or PIN match as above, and a call that is verifying. It sends only when, in order:
-`authorize(callId, scope, amount?)` is true only for a scope the policy lists, on a call that has
-not ended, whose minimum is 0 or whose grant includes it, has not expired, and has a level at or
-above the scope's minimum under the config in force now, raised by the step-up rules that hold now
-(section 4; `amount` is `{amountMinor, currency}`, in a flow by default the current step's). The
-steps' own checks (a payment, an intake, an outside module's step, Gate's door) use the same raised
-minimum, for the request's own amount, so a grant already issued is held to it. The first time a
-rule raises a minimum on a call, it is written to the ledger by name (`policy.step_up`), never with
-the amount, the time or the signal's cause; `authorize` writes then.
-
-Links go only to the subject's number on file, and only after a `keypad_knowledge` or `pin`
-factor passed since verification last started from nothing and since the session was last
-tainted: `markUntrusted` voids the match, so no text, carrier check or payment link goes out on it
-until a fresh verification matches again. A plug-in's pass does not unlock texts.
-
-## 5. Keypad knowledge
 
 1. the number on file starts with `+` and one of the policy's `textCodeCountryCodes` (a country
    calling code such as `1` or `33`, or a longer prefix such as `1204`); without the list, nowhere;
@@ -624,7 +616,7 @@ when there is a number.
   with the pass, on the call, so a write that fails after the pass was saved (its ledger entry)
   still gets it, in the same `submitKeypad` or `submitPin` or before the call's next factor; a pass
   refused before it was saved owes none. The subject's part is safe to run again. The rest (the
-  pass's own failure off the number, and the hidden counter's reset or, after a duress entry, its
+  pass's own failure off the number, and the hidden counter's cleanup or, after a duress entry, its
   own failure) is claimed on the call in one more write before it runs, so it runs at most once: a
   replay never takes off another failure of the same millisecond. A claim that is not saved runs
   none of it, which stays owed; a removal that fails after its claim is not run again, and that
@@ -737,6 +729,17 @@ it), per calling number and per subject.
   counted on the number's counter and, when the call already named a subject, the subject's.
   `beginVerification` on a call running a limited flow counts it on the subject's counter (and on a
   number given only then), once per counter per call: a restart for the same subject counts nothing.
+  This count comes before the subject is written on the call: over the limit, the flow fails and
+  `beginVerification` throws `rate_limited` with the subject never written, so no factor is judged
+  for it in between. A limited flow started on the call after the count found none (`startFlow`,
+  with no subject yet to count) is seen by the subject's write, which then counts the start the same
+  way before it writes; a subject is never written on a limited flow that has not counted it. The count is the reservation: each counter is counted first, then taken on the
+  call in one write (which also checks the call can start verification now), then the subject is
+  written. A count is taken back (`removeFailure` at its time) only once it is known not to have been
+  taken: an overlapping `beginVerification` on the call took that counter first, or the write saved
+  nothing (no compare-and-set ran, or each answered `ok: false`). A write with no answer, a process
+  that stops between the count and the write, or a subject's write that fails after it, leaves it
+  counted: at most one start too many, the safe side.
 - Badge's `lockout.flowStartsPerHour`: `{subject, number}`, defaults `5` and `10`, which are also
   the most a config may allow (1 up to the default); `validateConfig` refuses anything else. A
   start exactly an hour old has left the hour. An engine with a limited flow in its config needs
@@ -746,7 +749,10 @@ it), per calling number and per subject.
   limit refuses it too (that start stays counted). A start the call itself then refuses, because a
   concurrent `startFlow` attached a flow first or a concurrent `startCall` took the id first, is
   taken back off each counter (`removeFailure` at the time it was recorded); one whose write saved
-  and then failed (the ledger down) stays counted. A `callingNumber` that is not a string is
+  and then failed (the ledger down) stays counted. A counter write that fails while the start is
+  counted passes its error on, after the starts already counted are taken back; the failed write's
+  own (kept or not) and one the store refuses to take back stay as the store left them (fail
+  closed). A `callingNumber` that is not a string is
   `invalid_input`, like one that is not E.164.
 - A refused start throws `RateLimitedError` (an `EngineError` with code `rate_limited`) with one
   message, whichever limit was hit, and the `callId` of the call it was refused on, so a host that
@@ -813,7 +819,8 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   flag is set again only while that count is unchanged. A failure to set it leaves the alert owed. A duress entry resets the visible
   counters as a pass does, so it looks like one; every entered factor's failures on the subject are
   also counted in a hidden counter (kind `duress.hidden.<kind>`) that only a pass not under duress
-  resets (a duress entry takes off only its own failure), and that counter's hard lock (not its
+  clears, of the failures up to it (a later one, by another call, stays; a duress entry takes off
+  only its own failure; either takes one read and the same writes), and that counter's hard lock (not its
   waits) refuses like any lock. So a caller who knows the duress PIN gets no more guesses at the
   real PIN than one who does not. `clearDuress(subjectKey, memberId)` is a host-privileged call,
   like `resetPin`: the business's own tools, never a caller's request, once it knows the subject is
@@ -824,8 +831,11 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   subjectKey)` = `HMAC-SHA256(knowledgeKey, "duress.cleared:" + subjectKey)`, which the business can
   match and a reader of the ledger or an export cannot; then the count of clearings goes up, and the
   flag and the hidden counters of every installed factor (on or off) are cleared. A clearing that
-  lands while an earlier entry's alert is being delivered may be undone by that delivery's setting of
-  the flag (the counters store has no compare-and-set): the subject stays flagged, and the business
+  lands while an earlier entry's flag is being written (the entry's own write, or its alert's on
+  delivery) is never undone: the counters store has no compare-and-set, so the writer reads the
+  count of clearings again after the write and takes its write back if it went up (the clearing
+  counts before it clears, so it is either counted by then or clears the write itself). The alert
+  still goes out. A take-back that fails leaves the subject flagged (fail closed), and the business
   clears it again.
 - Every duress entry owes an alert: in the same write, Badge's part of the call record gets
   `duressAlerts` `{alertId, subjectKey, at, clears}` and `duress`, and the record `owesAlerts: true` until
@@ -881,14 +891,13 @@ unknown fields at every level, the policy's shape and then its rules against the
 factors, every module's switch and settings, every adapter an enabled module's settings need,
 every step's module (installed and on) and the step itself, and, walking each flow in order, that
 every step needing a scope comes after a `badge.verify` step whose level reaches that scope's
-minimum and whose `scopes`, if listed, include it, that the engine has the `messages` adapter when
-a step needs a contact-class scope (its security notice, section 16), and that no flow has more
-`step-up.issue` steps than step-up's `maxTokensPerCall` (each completes only on a token of its own, so such a flow could
-never finish; a module's optional `validateFlow` makes such whole-flow checks). Cross-checks against a module's settings or the
 minimum and whose `scopes`, if listed, include it, that a step whose amount is sure to trigger an
 amount rule on that scope (over the threshold, a currency the rule does not list, or no amount, as
-for an `amountRef`) comes after a `badge.verify` step that reaches the rule's level, and that the engine has the `messages` adapter
-when a step needs a contact-class scope (its security notice, section 16). Cross-checks against a module's settings or the
+for an `amountRef`) comes after a `badge.verify` step that reaches the rule's level, that the engine
+has the `messages` adapter when a step needs a contact-class scope (its security notice, section
+16), and that no flow has more `step-up.issue` steps than step-up's `maxTokensPerCall` (each
+completes only on a token of its own, so such a flow could never finish; a module's optional
+`validateFlow` makes such whole-flow checks). Cross-checks against a module's settings or the
 policy are skipped when those did not validate (their own problems are reported). The engine
 refuses a config with any problem (`ConfigError`, code `invalid_input`, with `problems`).
 
@@ -945,7 +954,7 @@ published name to the file.
 ## 8. Flow execution
 
 `startCall` refuses (`invalid_input`, nothing saved) a `callId` that is not 1 to 200 characters the
-ledger can carry (no lone surrogate), a `locale` not in `SUPPORTED_LOCALES` (`en`, `fr`), and a `flow` that is not a
+ledger can carry (no lone surrogate), a `locale` not in `SUPPORTED_LOCALES` (`en`, `fr`, `es`), and a `flow` that is not a
 name; the engine refuses a `workspaceId` with a lone surrogate. These enter the ledger directly, so
 no host value can block a call's ledger. `startCall({flow})` or `startFlow(callId, name)`, on an
 open call that has not run a flow, copies
@@ -1072,7 +1081,8 @@ consentId]`, so a consent is revoked in the ledger once (section 17).
 `flushPending(limit = 100)` is the background flush a host schedules (for example every minute, in
 any process): it asks the store's `pendingCalls` for up to `limit` calls and flushes each in turn,
 returning `{flushed, failed}` (call ids); a call that fails stays pending for the next run, and
-the others go on. A listed call with nothing pending (a write that sent no hint, from an engine
+the others go on. A call whose clear lost to a write that left entries of its own pending (that
+write's append failed) is read again and listed in `failed`, as it is still pending. A listed call with nothing pending (a write that sent no hint, from an engine
 before INT-5, emptied its outbox and left the mark) is unmarked by a write with
 `{ledgerPending: false}`; `flushLedger` itself writes nothing on an empty outbox. Two runs at once
 append nothing twice. It throws `invalid_input` for a limit
@@ -1081,9 +1091,10 @@ that is not a positive integer, and `precondition_failed` when the store has no 
 replayed run of event ids once, as a retried flush sends it.
 
 The ledger is the source of truth; the `onEvent` listener is a notification. It is told of an entry
-after the ledger has it, with the entry's `eventId` and `seq`, at least once and best effort: the
-same event comes again, with the same `eventId`, when a flush replays it (after a lost clear, or
-from another process), and one is missed when the process stops between the append and the call.
+after the ledger has it, with the entry's `eventId` and `seq`, best effort and possibly more than
+once, so not at least once: the same event comes again, with the same `eventId`, when a flush
+replays it (after a lost clear, or from another process), and one is missed when the process stops
+between the append and the call.
 The engine calls the listener inline and never awaits it; a listener with slow work returns a
 promise. A throw or a rejection is passed to `onListenerError(error, event)`, and a failure of
 that hook is ignored: nothing the listener does stops the call, the write or the ledger. Any
@@ -1400,10 +1411,12 @@ node scripts/verify-receipt.mjs <receipt.json | -> <keys.json | https://host/.we
 A key set URL must be `https`, or `http` on `127.0.0.1`, `localhost` or `[::1]`, because a key set
 fetched in the clear could be swapped for one that makes a forged receipt look valid. Redirects are
 refused. A worked example, against the demo server on this machine (`npm run ui`, after the
-`deposit` flow has run to its end in the page, which makes `call_1` with a payment of 15000):
+`deposit` flow has run to its end in the page, which makes `call_1` with a payment of 15000). The
+finished run's view carries the receipt's capability link as `receiptLink` (`/r/<token>`, the
+page opens it); `<token>` below is that token, and `/r/<token>.json` is the signed receipt:
 
 ```sh
-$ curl -s http://127.0.0.1:8787/receipts/call_1 > receipt.json
+$ curl -s http://127.0.0.1:8787/r/<token>.json > receipt.json
 $ node scripts/verify-receipt.mjs receipt.json http://127.0.0.1:8787/.well-known/receipt-keys.json
 valid
 $ curl -s http://127.0.0.1:8787/.well-known/receipt-keys.json > keys.json   # or keep a copy
@@ -1493,9 +1506,6 @@ that is not a whole, non-negative, safe integer.
 
 | Type | Accepted | Stored as |
 |---|---|---|
-| `text` | trimmed, non-empty, well-formed Unicode (no lone surrogate), at most `maxLength` (500), and no card number | string |
-| `number` | `-?\d+(\.\d+)?` | number |
-| `date` | `YYYY-MM-DD` naming a real day | string |
 | `text` | trimmed, non-empty, Unicode text (a lone surrogate is `not_text`), at most `maxLength` (500), no card number, and matching `pattern` whole if set (`no_match`) | string |
 | `number` | `-?\d+(\.\d+)?`, from `min` to `max` if set (`below_min`, `above_max`) | number |
 | `date` | `YYYY-MM-DD` naming a real day, from `min` to `max` if set | string |
@@ -1745,7 +1755,7 @@ always recorded. A request the engine expired (its own deadline, a link too late
 with a slow create, a cancel or the end of the call) that the provider then reports paid becomes
 `paid`, and `payment.settled` carries `late: true`.
 
-**Refunds (platform mode).** `refundPayment({callId, paymentId, amountMinor?, reason, sequence?})` is a host
+**Refunds (platform mode).** `refundPayment({callId, paymentId, amountMinor?, reason, sequence})` is a host
 call made for the business (its back office or staff): no grant reaches it, no flow step runs it,
 and the model is never given it. It refunds a `paid` platform payment in full (the default: all
 that is left) or in part, with `reason` one of `requested_by_customer`, `duplicate`, `fraudulent`.
@@ -1754,24 +1764,22 @@ up to more than was paid (a refund the provider answered `failed` does not count
 `precondition_failed` for a payment not `paid`, a connect payment, a payment refunded in full, a
 payment with a dispute open or lost (the provider refuses those too), and an engine whose payments
 adapter has no `refund`; `module_disabled` on a call that started with Paylink off. A refund is
-reserved in one write (one in flight per payment; asking again while it is resumes it, and another
-amount is refused), with its intent and idempotency key saved before the provider is asked, sent
+reserved in one write (one in flight per payment), with its intent and idempotency key saved before the provider is asked, sent
 with `PaymentLinks.refund({linkId, paymentIntentId?, mode: "platform", amountMinor, currency,
 reason, idempotencyKey})`, and committed in another write with the provider's answer and
 `payment.refunded`. It returns `{refundId, status, amountMinor, refundedMinor}`. Each refund of a
 payment has a sequence number, 1 for its first and one more for each after (a failed one keeps
-its number), and its key is `[workspaceId, callId, paymentId, "refund", sequence]`. A host that
-passes `sequence` makes a retry safe after it lost the engine's answer: the same number again
-resumes that refund with its key while it is in flight, or gives its saved result back once it
-was committed, and never refunds again (another amount for it is `invalid_input`); the next
-number starts a new refund, any other number is `invalid_input`, and a new number while another
-refund is in flight is `precondition_failed`. Without `sequence`, a call is the next refund, or
-resumes the one in flight, so a host that retries without it after a committed refund asks for a
-second one. A refund still
+its number), and its key is `[workspaceId, callId, paymentId, "refund", sequence]`. `sequence`
+is required: a missing one, or anything but an integer of 1 or more, is `invalid_input` before any
+write. A host that retries after a lost answer must reuse that refund's number: the same number again resumes that refund with its key while it is in flight, or gives its saved result
+back once it was committed, and never refunds again (another amount for it is `invalid_input`);
+the next number starts a new refund (sent with a new key and limited to the amount not yet
+refunded, so a retry under the next number refunds again), any other number is `invalid_input`,
+and a new number while another refund is in flight is `precondition_failed`. A refund still
 in flight is resumed with its own key before the dispute check, which is for new refunds: a refund
 the provider made whose answer was lost is learned even if a dispute opened since. An adapter
 answers a refund the provider refused as `failed` and throws only when the answer was lost: a
-refund that threw stays in flight and the next `refundPayment` resumes it with the same key, so
+refund that threw stays in flight and the next `refundPayment` with its number resumes it with the same key, so
 an adapter that throws for a refusal blocks the payment's refunds. An answer that is not one of the
 provider's three (`pending`, `succeeded`, `failed`, with a refund id) is treated the same way, as a
 lost answer (`precondition_failed`): nothing is recorded or ledgered, the refund stays in flight,
@@ -1791,7 +1799,8 @@ intent is kept on it and bound to the call (`payment_intent:<id>`), after the wr
 every later outcome for the link, so a lost binding is made when the event comes again.
 `applyDisputeOutcome` finds the payment by it and records the dispute's status and amount
 (`payment.disputed`). A dispute that names no payment intent is not applied (`{applied: false}`);
-one whose payment intent is not bound yet answers `{applied: false, unbound: true}`, since
+one whose payment intent is not bound yet answers `{applied: false, unbound: true}` (a connected
+account's event never does: it answers `{applied: false}` and is acknowledged), since
 webhooks come in any order and the payment's own event may still be on its way: the host has it
 delivered again (the reference server answers 503 and does not remember the event, so Stripe
 retries it within its own retry window). A connected account's dispute event is ignored
@@ -2013,7 +2022,8 @@ receipt never verifies as an access grant. A host's module can never take a buil
    (signed, not expired, and `reserved`, `delivered` or `unknown`), and the engine then asks each
    one's controller to withdraw it with its optional `revoke({grant, target, callId,
    idempotencyKey})` (key `[workspaceId, callId, grantId, "revoke"]`), once, recording
-   `access.revoked` `{grantId, outcome: "revoked" | "failed"}`. A controller without `revoke` is
+   `access.revoked` `{grantId, outcome: "revoked" | "failed"}`; a taint whose ledger append then
+   fails still asks, and `markUntrusted` throws that failure after. A controller without `revoke` is
    asked nothing and the grant runs to its expiry. A grant already delivered and acted on cannot be
    pulled back: a door that opened stays opened, and `revoke` only stops what has not happened yet
    (an access code not yet redeemed, a credential not yet used). A config changed by another
@@ -2578,11 +2588,8 @@ controls, combining marks: `SEPARATOR_CLASS`). A numeral is any run of Unicode d
 (fullwidth, Arabic-Indic and the rest), read by its values for the checks, and the original span
 is what is removed. English and French number words are read on every call, since callers switch
 between them; Spanish words only on a Spanish call (`Engine.redact` and a `LiveCardNumberDetector`
-given its `locale`), so on an English call "once" and "y" are words. A call is Spanish only once
-the engine takes the `es` locale (#122, which lands with or after this); until then `startCall`
-takes `en` and `fr`, and Spanish is read by a `LiveCardNumberDetector` given `locale: "es"` and by
-text redacted with no call. Text redacted with no call
-reads every language. Any other word or punctuation ends a run. Joining this widely can join things
+given its `locale`), so on an English call "once" and "y" are words. A call started with
+`locale: "es"` is a Spanish call. Text redacted with no call reads every language. Any other word or punctuation ends a run. Joining this widely can join things
 that are not one number (a date beside an amount); over-redaction is the safe side, since the risk
 is a number reaching storage. Spoken numbers are read as people say them:
 
@@ -2647,8 +2654,7 @@ digits read one by one) may break anywhere.
 |---|---|---|---|
 | `card_number` | `cardNumberRedactor` | 13 to 19 digits, Luhn | `[card number removed]` |
 | `sin` | `sinRedactor` | 9 digits, Luhn, groups 3-3-3 | `[SIN removed]` |
-| `health_card` | `healthCardRedactor` | Ontario: 10 digits, Luhn, groups 4-3-3 (a version code after it is kept). British Columbia: 10 digits starting with 9, mod 11 check digit (weights 2, 4, 8, 5, 10, 9, 7, 3 on digits 2 to 9), groups 4-3-3. Quebec: four letters right before the run, as one word or spelled one by one (at most 8
-separators in each gap and before the digits, so only the last 48 characters before a run are read), then 8 digits whose 3rd to 6th give a month (or month plus 50) and a day, groups 4-4; the letters are removed too | `[health card number removed]` |
+| `health_card` | `healthCardRedactor` | Ontario: 10 digits, Luhn, groups 4-3-3 (a version code after it is kept). British Columbia: 10 digits starting with 9, mod 11 check digit (weights 2, 4, 8, 5, 10, 9, 7, 3 on digits 2 to 9), groups 4-3-3. Quebec: four letters right before the run, as one word or spelled one by one (at most 8 separators in each gap and before the digits, so only the last 48 characters before a run are read), then 8 digits whose 3rd to 6th give a month (or month plus 50) and a day, groups 4-4; the letters are removed too | `[health card number removed]` |
 | `bank_account` | `bankAccountRedactor` | a whole run of 3 or more digits with a bank word among the last 4 words before it, counting only words after the previous run. English: bank, branch, transit, institution, account; French: banque, bancaire, succursale, compte, folio; Spanish: banco, bancaria, bancario, sucursal, cuenta, tránsito, institución, with or without accents; each also in the plural; read in the languages `numberLanguagesFor` gives the call: English and French always, Spanish on a Spanish call and on text with no call | `[banking details removed]` |
 
 Bank numbers carry no check digit, so a bank word is what marks them; an account number read
@@ -2706,7 +2712,9 @@ refused with `conflict`, to be confirmed again.
 - `intakeRecords` are the subject's, values included; `pinDigestOnFile` says whether a digest is
   on file, never the digest.
 - `calls` are the calls those records name. `consents` and `receipts` are the ones those call
-  records hold (a call record that is gone is skipped). A consent carries the `subjectKey` Badge
+  records hold (a call record that is gone is skipped), so a consent recorded on a call that filed
+  no record of the subject is not listed (the `ConsentStore` is read by consent id, never by
+  subject); `limits` says so. A consent carries the `subjectKey` Badge
   matched on the call when it was recorded (or null), and only those recorded under this subject
   are listed: a call can match another subject later, and their consents are not this subject's. A
   consent keeps its original answer; `revocations` holds the revocation the `ConsentStore` keeps for

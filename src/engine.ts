@@ -43,7 +43,7 @@ import * as callback from "./verify/callback.ts";
 import type { CallbackOutcome } from "./verify/callback.ts";
 import { FLOW_START, claimNotice, counterKeys, flowStartLimited, isCallingNumber, lockoutOf, recordFlowStarts, unlockCounter } from "./verify/counters.ts";
 import { pinTag, type BadgeSettings, type FactorEntry, type FactorPlugin, type PinOutcome } from "./verify/factors.ts";
-import { clearsSoFar, duressFlagKey, flagDuress } from "./verify/duress-flag.ts";
+import { flagDuressUnlessCleared } from "./verify/duress-flag.ts";
 import { knowledgeHmac, type KnowledgeHmac, type KnowledgeKey } from "./verify/knowledge.ts";
 import * as pin from "./verify/pin.ts";
 import * as textCode from "./verify/text-code.ts";
@@ -75,7 +75,40 @@ const UNCOUNTED: FlowStart = { over: null, counted: null, recorded: null };
  */
 type WriteOutcome = { write: "none" | "saved" | "unknown" };
 
-const counterId = (key: AttemptCounterKey): string => `${key.scope}:${key.key}`;
+const counterId = (key: { scope: string; key: string }): string => `${key.scope}:${key.key}`;
+
+/**
+ * The flow-start counters a call's limited flow has counted, or null when it runs no limited flow.
+ * A flow started before `counted` existed (undefined) was never counted: it stays as it was. [] is a new limited flow.
+ */
+function lateCounted(record: CallRecord): readonly string[] | null {
+  const counted = record.flow?.counted;
+  return counted === undefined ? null : counted;
+}
+
+/**
+ * A flow's attach write found the call's counter keys changed since its start was counted
+ * (verification named a subject meanwhile): the count is given back and the start counted again.
+ */
+class FlowKeysMoved extends EngineError {
+  constructor() {
+    super("conflict", "verification named a subject while the flow start was being counted");
+  }
+}
+
+/**
+ * A late count found over a limit on a counter the flow has admitted since it was read (another
+ * verification on the call counted it first): this count is given back and the rest judged again.
+ */
+class LateKeyAdmitted extends Error {}
+
+/** A verification start's subject write found a limited flow it was not counted on: count, then write again. */
+class LateCountNeeded extends EngineError {
+  constructor() {
+    super("conflict", "a limited flow started on the call while verification was starting");
+  }
+}
+
 
 export interface EngineOptions {
   workspaceId: string;
@@ -96,7 +129,7 @@ export interface EngineOptions {
   ids?: IdGenerator;
   /** Default: card numbers. */
   redactor?: Redactor;
-  /** Told of each event after its ledger entry is appended: at least once, best effort, never awaited (INT-5). */
+  /** Told of each event after its ledger entry is appended: best effort, possibly more than once, never awaited (INT-5). */
   onEvent?: EventListener;
   /**
    * How long one `DuressNotifier.notify` may take, in milliseconds: a whole number from 100 to 30000
@@ -159,6 +192,13 @@ interface QueuedEvent {
   tag?: string | undefined;
 }
 
+/**
+ * An amount a host gave as null: not known, so over every amount rule (`amountOver` counts a
+ * number that is not one and a currency no rule lists as over). Distinct from an amount left out,
+ * which in a flow is the current step's.
+ */
+const UNKNOWN_AMOUNT: StepUpAmount = Object.freeze({ amountMinor: Number.NaN, currency: "" });
+
 /** A member of the business lifting one lock early: the counter a lock notice named, and who did it. */
 export interface UnlockInput {
   workspaceId: string;
@@ -189,9 +229,15 @@ export class Engine {
   readonly #onListenerError: ListenerErrorHandler | undefined;
   /** Badge as installed now: a new build replaces it when a factor is added (`useFactor`, `use`). */
   #badge: badge.BadgeModule;
+  /** The registry's replace for a built-in module, which only this engine holds (`#swapBadge`). */
+  #replaceBuiltIn!: (module: AssuranceModule) => void;
   readonly #rt: EngineRuntime;
-  /** Duress alerts this engine is sending now, by id, with when it started: one send at a time, retried after a while. */
-  readonly #sending = new Map<string, number>();
+  /**
+   * Duress alerts this engine is sending now, by id, with when the send started: one send at a time,
+   * retried after a while. Each claim is its own object, so a send that resumes after another took
+   * its alert over neither sends it nor clears the newer claim.
+   */
+  readonly #sending = new Map<string, { since: number }>();
   /** Per call, the owed alerts of the duress alert send scheduled and not yet started (`#sendDuressAlertsSoon`). */
   readonly #sendScheduled = new Map<string, string>();
   #receiptModules: readonly AssuranceModule[];
@@ -261,7 +307,13 @@ export class Engine {
           : (value as { capabilities?: unknown }).capabilities;
     }
     this.#receiptModules = builtInModules(this.#badge);
-    this.registry = new ModuleRegistry({ adapters: present, capabilities, reserved: BUILT_IN_MODULES, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
+    this.registry = new ModuleRegistry({
+      adapters: present,
+      capabilities,
+      reserved: BUILT_IN_MODULES,
+      modules: [...this.#receiptModules, ...(options.modules ?? [])],
+      grantReplace: (replace) => (this.#replaceBuiltIn = replace),
+    });
     // This engine's own build of Badge, running the judges the outside modules given here supply.
     // A Badge shared by several engines never gains a factor through one of them.
     this.#swapBadge(this.#badge.withOutsideFactors(this.registry.factorPlugins()));
@@ -331,7 +383,7 @@ export class Engine {
 
   /** Puts a new build of Badge in place of the old, in the registry (when Badge is installed) and for the runtime. */
   #swapBadge(next: badge.BadgeModule): void {
-    if (this.registry.get(badge.BADGE) === this.#badge) this.registry.replace(next);
+    if (this.registry.get(badge.BADGE) === this.#badge) this.#replaceBuiltIn(next);
     this.#receiptModules = this.#receiptModules.map((m) => (m === this.#badge ? next : m));
     this.#badge = next;
   }
@@ -424,11 +476,18 @@ export class Engine {
       if ((await this.#sessions.get(this.workspaceId, callId)) !== null) return null;
       start = await this.#countFlowStart(record, flow.name, { steps: flow.steps });
     }
-    const draft = this.#draft(record, events);
-    if (flow !== null) this.#attachFlow(draft, flow.name, { steps: flow.steps }, flow.revision, start);
-    then(draft);
-    this.#advance(draft);
-    record.outbox = await Promise.all(events.map((event, i) => this.#outboxEntry(callId, 1, i, event)));
+    try {
+      const draft = this.#draft(record, events);
+      // Checked again for real: a module can be turned off while the start was being counted.
+      if (flow !== null) this.#attachFlow(draft, flow.name, { steps: flow.steps }, flow.revision, start);
+      then(draft);
+      this.#advance(draft);
+      record.outbox = await Promise.all(events.map((event, i) => this.#outboxEntry(callId, 1, i, event)));
+    } catch (error) {
+      // Nothing was written: the start is given back.
+      await this.#uncount(start);
+      throw error;
+    }
     let created: boolean;
     try {
       created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue, { ledgerPending: record.outbox.length > 0 });
@@ -471,17 +530,25 @@ export class Engine {
     // A grant that may still be acted on when the taint lands is written down with it, and its
     // controller is asked to withdraw it where it can (Gate, SPEC.md section 17).
     let tainted: gate.AccessRecord[] = [];
-    await this.#update(callId, (draft) => {
-      draft.apply({ type: "untrusted_content", source });
-      for (const module of this.registry.list()) {
-        const name = module.manifest.name;
-        const slice = draft.record.modules[name];
-        if (module.onUntrusted !== undefined && slice !== undefined) draft.record.modules[name] = module.onUntrusted(slice);
-      }
-      draft.emit("session.tainted", "code", { source });
-      tainted = gate.noteTaintedGrants(this.#rt, draft);
-    });
+    // A write saved whose ledger flush then failed still asks for the revokes: the taint stands
+    // either way, and the controllers hear of it once. The write's error is thrown after.
+    let failure: { error: unknown } | null = null;
+    try {
+      await this.#update(callId, (draft) => {
+        draft.apply({ type: "untrusted_content", source });
+        for (const module of this.registry.list()) {
+          const name = module.manifest.name;
+          const slice = draft.record.modules[name];
+          if (module.onUntrusted !== undefined && slice !== undefined) draft.record.modules[name] = module.onUntrusted(slice);
+        }
+        draft.emit("session.tainted", "code", { source });
+        tainted = gate.noteTaintedGrants(this.#rt, draft);
+      });
+    } catch (error) {
+      failure = { error };
+    }
     await gate.revokeTainted(this.#rt, callId, tainted);
+    if (failure !== null) throw failure.error;
   }
 
   /** Keypad entry is open: the host pauses transcripts, cuts audio to the model and holds listen-in. */
@@ -530,8 +597,9 @@ export class Engine {
   async authorize(callId: string, scope: string, given?: StepUpAmount): Promise<boolean> {
     // Read once, before the wait: both checks judge the amount the host passed at the call, as a
     // plain copy, so a getter or a change to the object meanwhile cannot answer each differently.
-    // A null from the host is no amount (over every amount rule), never the internal "not asked yet".
-    const amount = typeof given === "object" && given !== null ? { amountMinor: given.amountMinor, currency: given.currency } : (given ?? undefined);
+    // A null from the host is no amount (over every amount rule), never the internal "not asked yet"
+    // and never the step's amount, which only an amount left out stands for.
+    const amount = typeof given === "object" && given !== null ? { amountMinor: given.amountMinor, currency: given.currency } : given === null ? UNKNOWN_AMOUNT : given;
     const record = await this.#read(callId);
     const check = this.#cover(record, scope, amount);
     // A rule in `applied` was walked by #cover, which set `stepUps` on this read copy (`??=`).
@@ -566,28 +634,45 @@ export class Engine {
     const definition = this.#flowDefinition(name);
     const revision = this.#config.revision;
     const numberKey = await this.#numberKey(input.callingNumber);
-    const before = await this.#read(callId);
-    this.#keepNumber(before, numberKey);
-    const start = await this.#countFlowStart(before, name, definition);
-    // The start is taken back when nothing was written (the write's own check refused the flow, every
-    // compare-and-set found the call moved, or a read failed first), or when a write with no answer
-    // is read back without this flow. A write that saved and then failed (the ledger down) keeps it.
-    const outcome: WriteOutcome = { write: "none" };
-    try {
-      await this.#update(
-        callId,
-        (draft) => {
-          this.#keepNumber(draft.record, numberKey);
-          this.#attachFlow(draft, name, definition, revision, start);
-        },
-        outcome,
-      );
-    } catch (error) {
-      if (outcome.write === "none" || (outcome.write === "unknown" && !(await this.#holdsFlow(callId, name, start)))) await this.#uncount(start);
-      throw error;
+    for (let attempt = 1; ; attempt++) {
+      const before = await this.#read(callId);
+      this.#keepNumber(before, numberKey);
+      const start = await this.#countFlowStart(before, name, definition);
+      // The start is taken back when nothing was written (the write's own check refused the flow, every
+      // compare-and-set found the call moved, or a read failed first), or when a write with no answer
+      // is read back without this flow. A write that saved and then failed (the ledger down) keeps it.
+      const outcome: WriteOutcome = { write: "none" };
+      try {
+        await this.#update(
+          callId,
+          (draft) => {
+            this.#keepNumber(draft.record, numberKey);
+            // Counted on the keys the call had when it was read: a subject verification bound since
+            // (and so never counted on this flow, which was not attached yet) is counted again.
+            if (start.counted !== null && this.#flowKeys(draft.record).some((id) => !start.counted!.includes(id))) throw new FlowKeysMoved();
+            this.#attachFlow(draft, name, definition, revision, start);
+          },
+          outcome,
+        );
+      } catch (error) {
+        if (outcome.write === "none" || (outcome.write === "unknown" && !(await this.#holdsFlow(callId, name, start)))) {
+          // A refused take-back is reported beside the start's own error, which comes first.
+          await this.#uncount(start).catch((cleanup: unknown) => {
+            throw new AggregateError([error, cleanup], "the flow did not start, and taking back its count failed");
+          });
+        }
+        // Counted again under the call's keys now, as many times as a write is tried.
+        if (error instanceof FlowKeysMoved && attempt < MAX_WRITE_ATTEMPTS) continue;
+        throw error;
+      }
+      if (start.over !== null) throw new RateLimitedError(callId);
+      return (await this.flowPosition(callId))!;
     }
-    if (start.over !== null) throw new RateLimitedError(callId);
-    return (await this.flowPosition(callId))!;
+  }
+
+  /** The flow-start counter ids the call's Badge part names now (its subject's and its number's). */
+  #flowKeys(record: CallRecord): string[] {
+    return counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice).map(counterId);
   }
 
   /**
@@ -618,10 +703,17 @@ export class Engine {
     }
   }
 
-  /** Takes back the starts a start recorded, once the call refused it: one entry per counter, at the time it was recorded. */
+  /**
+   * Takes back the starts a start recorded, once the call refused it: one entry per counter, at the
+   * time it was recorded. Each is tried on its own, so a refused one never keeps another counter's
+   * slot; the first refusal is thrown after all were tried (the refused start stays, fail closed).
+   */
   async #uncount(start: FlowStart): Promise<void> {
     if (start.recorded === null) return;
-    for (const key of start.recorded.keys) await this.#adapters.counters!.removeFailure(key, start.recorded.at);
+    const { keys, at } = start.recorded;
+    const refused: unknown[] = [];
+    for (const key of keys) await this.#adapters.counters!.removeFailure(key, at).catch((e: unknown) => refused.push(e));
+    if (refused.length > 0) throw refused[0];
   }
 
   /**
@@ -702,28 +794,100 @@ export class Engine {
    * the host's code chose, and the calling number when it is not withheld (counted, never a factor).
    */
   async beginVerification(callId: string, input: badge.BeginVerificationInput): Promise<void> {
-    await badge.beginVerification(this.#rt, callId, input);
+    const resolved = await badge.resolveVerification(this.#rt, input);
     // Once verification names a subject (or brings a number), a flow with an hourly limit is
     // counted on that counter too, once per call; over the limit, the flow fails and the host gets
-    // the same `rate_limited` as a refused start.
-    const record = await this.#read(callId);
-    const flow = record.flow;
-    // A flow started before `counted` existed (undefined) was never counted: it stays as it was. [] is a new limited flow.
-    if (flow === null || flow.counted === null || flow.counted === undefined) return;
-    const keys = counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice).filter((key) => !flow.counted!.includes(counterId(key)));
-    if (keys.length === 0) return;
-    const { over } = await this.#countStarts(keys);
-    await this.#update(callId, (draft) => {
-      const current = draft.record.flow!;
-      if (over === null) {
-        current.counted!.push(...keys.map(counterId));
-        return;
-      }
-      // Fails closed, whatever another process did to the flow meanwhile.
-      current.status = "failed";
-      draft.emit("flow.rate_limited", "code", { flow: current.name, scope: over });
-    });
+    // the same `rate_limited` as a refused start. Counted before the subject is written, so over the
+    // limit no factor can be judged for it in between; a start that fails after the count keeps it,
+    // at most one too many. The count is the reservation: each counter is counted first, then taken
+    // on the call (`counted`). A count is given back only once it is known not to have been taken:
+    // another overlapping verification took that counter first, or the write saved nothing. A crash
+    // in between leaves it counted, at most one too many: the safe side.
+    await this.#admitVerification(callId, resolved);
+    // Inside the subject's write: a limited flow attached since the count (startFlow found no subject
+    // to count) refuses it, and the start is counted again, as for a flow found first, then written.
+    const admit = (draft: CallDraft, slice: badge.BadgeSlice) => {
+      const counted = lateCounted(draft.record);
+      if (counted !== null && this.#lateKeys(slice, resolved, counted).length > 0) throw new LateCountNeeded();
+    };
+    try {
+      await badge.startVerification(this.#rt, callId, resolved, admit);
+    } catch (error) {
+      if (!(error instanceof LateCountNeeded)) throw error;
+      // A flow attaches once per call, and this count takes its keys: a second refusal cannot come
+      // from another attachment, and would reach the host as a conflict.
+      await this.#admitVerification(callId, resolved);
+      await badge.startVerification(this.#rt, callId, resolved, admit);
+    }
+  }
+
+  /** Counts the start on the call's limited flow, if it runs one (`beginVerification`). */
+  async #admitVerification(callId: string, resolved: badge.ResolvedVerification): Promise<void> {
+    // Again from a fresh read while a count finds a key over its limit that the flow admitted
+    // meanwhile: the read leaves that key out, so each pass judges fewer keys, and only new ones.
+    for (;;) {
+      const record = await this.#read(callId);
+      const counted = lateCounted(record);
+      if (counted === null || !(await this.#countLateStarts(callId, record, counted, resolved))) return;
+    }
+  }
+
+  /** The flow-start counters a verification start brings that the call's flow has not counted. */
+  #lateKeys(slice: badge.BadgeSlice, resolved: badge.ResolvedVerification, counted: readonly string[]): AttemptCounterKey[] {
+    return counterKeys(this.workspaceId, FLOW_START, badge.verificationKeys(slice, resolved)).filter((key) => !counted.includes(counterId(key)));
+  }
+
+  /**
+   * Counts a running limited flow's starts on the counters a verification start brings
+   * (`beginVerification`). Only keys the flow has not admitted are judged: one another verification
+   * on the call admitted meanwhile is never counted twice, nor a reason to fail the flow. True when
+   * the count must be made again, from a fresh read (`#admitVerification`).
+   */
+  async #countLateStarts(callId: string, record: CallRecord, counted: readonly string[], resolved: badge.ResolvedVerification): Promise<boolean> {
+    const keys = this.#lateKeys(this.#slice(record.modules, badge.BADGE) as unknown as badge.BadgeSlice, resolved, counted);
+    if (keys.length === 0) return false;
+    const { over, at } = await this.#countStarts(keys);
+    // Takes back these counters' counts (none was made when a counter was already at its limit).
+    const giveBack = (back: readonly AttemptCounterKey[]) => this.#uncount({ over, counted: null, recorded: at === null ? null : { keys: back, at } });
+    const outcome: WriteOutcome = { write: "none" };
+    // The counters another verification on this call took first, as the last write attempt found
+    // them: the attempt that saved, kept when the write fails after saving.
+    let taken: AttemptCounterKey[] = [];
+    try {
+      await this.#update(
+        callId,
+        (draft) => {
+          // The start's own checks, so a start the call refuses fails no flow and keeps no count.
+          badge.assertCanBegin(draft);
+          const current = draft.record.flow!;
+          const now = current.counted!;
+          taken = keys.filter((key) => now.includes(counterId(key)));
+          if (over !== null) {
+            // The limit hit is on a key the flow admitted since the read: a duplicate, not this flow's
+            // start over a limit. Nothing is written, and the keys it has not admitted are judged again.
+            if (taken.some((key) => key.scope === over)) throw new LateKeyAdmitted();
+            // Fails closed, whatever another process did to the flow meanwhile; the count stays.
+            current.status = "failed";
+            draft.emit("flow.rate_limited", "code", { flow: current.name, scope: over });
+            return;
+          }
+          now.push(...keys.filter((key) => !now.includes(counterId(key))).map(counterId));
+        },
+        outcome,
+      );
+    } catch (error) {
+      // Saved nothing: every count is given back. Saved, then failed (a ledger append): only the
+      // ones another verification took first. A write with no answer keeps them.
+      if (outcome.write === "none") await giveBack(keys);
+      if (outcome.write === "saved") await giveBack(taken);
+      if (error instanceof LateKeyAdmitted) return true;
+      throw error;
+    }
+    // Counters another verification on this call took first: this count is the extra one, given
+    // back whether or not a key it has not admitted was over its limit.
+    await giveBack(taken);
     if (over !== null) throw new RateLimitedError(callId);
+    return false;
   }
 
   /** Judges every keypad field at once. The answer is the same for an unknown account and a wrong value. */
@@ -796,12 +960,25 @@ export class Engine {
   async requestCallback(callId: string): Promise<void> {
     const plan = await callback.requestCallback(this.#rt, callId);
     const first = await this.#read(callId);
-    if (first.state.phase !== "ended") {
+    // An ended call that still owes its receipt (the signer failed on an earlier request) gets it
+    // before the callback dials: endCall completes it without ending again.
+    const owesReceipt = trace.wantsReceipt(this.#rt, first) && trace.receiptOf(first) === null;
+    if (first.state.phase !== "ended" || owesReceipt) {
       try {
         await this.endCall(callId);
       } catch (e) {
         // Two requests at once both reach here: the one that ended the call second is not an error.
-        if (!(e instanceof EngineError && e.code === "invalid_transition" && (await this.#read(callId)).state.phase === "ended")) throw e;
+        const won = e instanceof EngineError && e.code === "invalid_transition" ? await this.#read(callId) : null;
+        if (won === null || won.state.phase !== "ended") throw e;
+        // The request that ended it may still be signing its receipt, and may fail to: the receipt
+        // is completed here too (the first one stored is the call's), so the callback never dials first.
+        if (trace.wantsReceipt(this.#rt, won) && trace.receiptOf(won) === null) {
+          await this.endCall(callId).catch(async (again: unknown) => {
+            // The other request stored the receipt in between: endCall found nothing owed and tried
+            // to end the call again. The receipt is there, so the callback goes ahead.
+            if (!(again instanceof EngineError && again.code === "invalid_transition" && trace.receiptOf(await this.#read(callId)) !== null)) throw again;
+          });
+        }
       }
     }
     if (plan === null) return;
@@ -1000,7 +1177,12 @@ export class Engine {
     const failed: string[] = [];
     for (const [name, controller] of Object.entries(this.#adapters.access ?? {})) {
       if (typeof controller.flush !== "function") continue;
-      await controller.flush({ workspaceId: this.workspaceId }).catch(() => failed.push(name));
+      // try, not .catch: a flush that throws before it returns a promise is a failure too.
+      try {
+        await controller.flush({ workspaceId: this.workspaceId });
+      } catch {
+        failed.push(name);
+      }
     }
     return { failed };
   }
@@ -1109,7 +1291,12 @@ export class Engine {
     // What an access controller still owes the ledger for this call is written now, before the
     // receipt's head is taken; one that fails is left to the next sweep (it opens nothing).
     for (const controller of Object.values(this.#adapters.access ?? {})) {
-      if (typeof controller.flush === "function") await controller.flush({ workspaceId: this.workspaceId, callId }).catch(() => undefined);
+      if (typeof controller.flush !== "function") continue;
+      try {
+        await controller.flush({ workspaceId: this.workspaceId, callId });
+      } catch {
+        // Left to the next sweep: a spent code opens nothing meanwhile.
+      }
     }
     // No new payment can start once the call ended, so this closes every link the call will have.
     await paylink.expireOpenPayments(this.#rt, ended);
@@ -1244,7 +1431,7 @@ export class Engine {
       newId: (prefix) => this.#ids.next(prefix),
       authorized: (scope) => this.#authorized(draft.record, scope),
       emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
-      contactChanged: () => trace.noteAction(draft, "contact", badge.matchedSubject(draft.record)),
+      contactChanged: () => trace.noteAction(draft, "contact", () => badge.matchedSubject(draft.record)),
     };
     const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);
     draft.record.modules[name] = structuredClone(next);
@@ -1457,10 +1644,12 @@ export class Engine {
       }
       draft.emit("flow.step_completed", "code", detail);
       // A money, contact or access step is what a receipt text names, and a contact one owes a notice.
-      // Such a step follows a level 2 verification, which a keypad or PIN match always unlocked:
-      // matchedSubject fails closed if that ever did not hold.
+      // Such a step follows a level 2 verification, which a keypad or PIN match always unlocked. Only
+      // a contact step needs the match to stand (its notice goes to the matched subject's number):
+      // matchedSubject fails closed if it does not. A payment texted before a taint still completes
+      // when the provider reports it, without the match, which stays void.
       const action = this.#actionClass(owner!, step.type);
-      if (action !== null) trace.noteAction(draft, action, badge.matchedSubject(record));
+      if (action !== null) trace.noteAction(draft, action, () => badge.matchedSubject(record));
       flow.index++;
       const next = flow.steps[flow.index];
       if (next === undefined) {
@@ -1521,7 +1710,7 @@ export class Engine {
     try {
       // Bounded like a duress notify: a messages adapter that never answers neither stalls the
       // sweep nor keeps this engine from trying again (same idempotency key per notice).
-      await this.#withinNotifyTimeout(trace.sendContactNotice(this.#rt, callId), "the messages adapter did not answer in time");
+      await this.#withinNotifyTimeout(trace.sendContactNotice(this.#rt, callId), "the messages adapter");
       return true;
     } finally {
       this.#delivering.delete(callId);
@@ -1552,15 +1741,16 @@ export class Engine {
    * id once), then clears them from the record if nobody wrote since. A failed append throws and
    * leaves the rest pending; a lost clear leaves them for the next write, which appends nothing twice.
    * The listener is told after each append, so it never hears of an entry the ledger does not have.
+   * Answers whether the clear was saved (true for an empty outbox, which needs none).
    */
-  async #flush(callId: string, version: number, record: CallRecord): Promise<void> {
-    if (record.outbox.length === 0) return;
+  async #flush(callId: string, version: number, record: CallRecord): Promise<boolean> {
+    if (record.outbox.length === 0) return true;
     for (const queued of record.outbox) {
       await this.#append({ eventId: queued.eventId, callId, actor: queued.actor, event: queued.name, at: queued.at, detail: queued.detail });
       // Not awaited: a notice store that stalls holds up neither the rest of the outbox nor the call. It never rejects.
       if (queued.counter !== undefined) void this.#notifyLock(queued.counter, queued.detail);
     }
-    await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue, { ledgerPending: false });
+    return (await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue, { ledgerPending: false })).ok;
   }
 
   /**
@@ -1597,13 +1787,16 @@ export class Engine {
 
   /**
    * The counter a `verification.locked` entry is about, read from the call as the entry is saved,
-   * so the notice names the subject or number of that verification. Badge writes the entry only
-   * for a counter it counted, so the key for its scope is set.
+   * so the notice names the subject or number of that verification (for a callback, the counter
+   * its request reserved). Badge writes the entry only for a counter it counted, so the key is set.
    */
   #lockedCounter(record: CallRecord, detail: { [key: string]: JsonValue }): AttemptCounterKey {
     const s = record.modules[badge.BADGE] as unknown as badge.BadgeSlice;
     const scope = detail.scope as AttemptCounterKey["scope"];
-    return { workspaceId: this.workspaceId, factor: detail.kind as string, scope, key: (scope === "subject" ? s.subjectKey : s.numberKey)! };
+    // A callback's lock is on the counters reserved from the call that asked: a callback call keeps
+    // no calling number of its own, so its number lock is named by the key the request counted.
+    const reserved = detail.kind === callback.CALLBACK ? s.callback.keys.find((k) => k.scope === scope) : undefined;
+    return reserved ?? { workspaceId: this.workspaceId, factor: detail.kind as string, scope, key: (scope === "subject" ? s.subjectKey : s.numberKey)! };
   }
 
   /**
@@ -1658,18 +1851,22 @@ export class Engine {
    * mark when nothing is pending: a write that sent no hint (an engine from before INT-5) can empty
    * the outbox and leave the mark, and `#flush` writes nothing on an empty outbox, so the call would
    * be listed for ever. A host's own flushLedger never writes on an empty outbox.
+   * Answers whether the call has nothing pending: after a lost clear or unmark, the write that won
+   * may have left entries of its own (its append failed), so the call is read again.
    */
-  async #flushStored(callId: string, unmark: boolean): Promise<void> {
+  async #flushStored(callId: string, unmark: boolean): Promise<boolean> {
     const stored = await this.#sessions.get(this.workspaceId, callId);
     if (stored === null) throw new EngineError("unknown_call", "no such call");
     const record = structuredClone(stored.record) as unknown as CallRecord;
     this.#sendDuressAlertsSoon(callId, record);
     if (unmark && record.outbox.length === 0) {
       // A lost write here is fine: the write that won sent its own hint.
-      await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, stored.record, { ledgerPending: false });
-      return;
+      if ((await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, stored.record, { ledgerPending: false })).ok) return true;
+    } else if (await this.#flush(callId, stored.version, record)) {
+      return true;
     }
-    await this.#flush(callId, stored.version, record);
+    const now = await this.#sessions.get(this.workspaceId, callId);
+    return now === null || (now.record as unknown as CallRecord).outbox.length === 0;
   }
 
   /**
@@ -1686,8 +1883,8 @@ export class Engine {
     const report: FlushReport = { flushed: [], failed: [] };
     for (const callId of await this.#sessions.pendingCalls(this.workspaceId, limit)) {
       try {
-        await this.#flushStored(callId, true);
-        report.flushed.push(callId);
+        // A call a concurrent write left with entries pending is reported as still pending.
+        (await this.#flushStored(callId, true) ? report.flushed : report.failed).push(callId);
       } catch {
         report.failed.push(callId);
       }
@@ -1758,39 +1955,45 @@ export class Engine {
     let delivered = 0;
     for (const alert of badge.owedDuressAlerts(await this.#read(callId))) {
       const now = this.#clock.now().getTime();
-      const since = this.#sending.get(alert.alertId);
-      if (notifier === undefined || (since !== undefined && now - since < 30_000)) continue;
-      this.#sending.set(alert.alertId, now);
+      const held = this.#sending.get(alert.alertId);
+      if (notifier === undefined || (held !== undefined && now - held.since < 30_000)) continue;
+      const claim = { since: now };
+      this.#sending.set(alert.alertId, claim);
       try {
+        // Read again once claimed: another send may have delivered and acknowledged it while this
+        // one waited on an earlier alert. A read that fails leaves it owed.
+        if (!badge.owedDuressAlerts(await this.#read(callId)).some((owed) => owed.alertId === alert.alertId)) continue;
         // The flag goes with the alert: set again here, before the notifier, in case the entry's own
         // write of it was lost (a failed store, a crash), unless the business cleared the subject
         // after the entry was judged. An engine that judged an entry has counters (Badge requires
         // them for every entered factor), and one without them fails here, leaving the alert owed.
-        const counters = this.#adapters.counters!;
-        if ((await clearsSoFar(counters, this.workspaceId, alert.subjectKey)) === alert.clears) {
-          await flagDuress(counters, duressFlagKey(this.workspaceId, alert.subjectKey), new Date(alert.at));
-        }
-        await this.#withinNotifyTimeout(notifier.notify({ alertId: alert.alertId, workspaceId: this.workspaceId, subjectKey: alert.subjectKey, callId, at: alert.at }));
+        // Bounded like the notify: a counter read that never settles leaves this alert owed, unsent,
+        // and the loop goes on to the next one.
+        await this.#withinNotifyTimeout(flagDuressUnlessCleared(this.#adapters.counters!, this.workspaceId, alert.subjectKey, alert.clears), "the duress flag check");
+        // Another send took the alert over while this one waited (its claim went stale): it is theirs.
+        if (this.#sending.get(alert.alertId) !== claim) continue;
+        await this.#withinNotifyTimeout(notifier.notify({ alertId: alert.alertId, workspaceId: this.workspaceId, subjectKey: alert.subjectKey, callId, at: alert.at }), "the duress notifier");
         await this.#acknowledgeDuressAlert(callId, alert.alertId);
         delivered++;
       } catch {
         // Still owed: the next write, flushLedger or deliverDuressAlerts sends it again.
       } finally {
-        this.#sending.delete(alert.alertId);
+        if (this.#sending.get(alert.alertId) === claim) this.#sending.delete(alert.alertId);
       }
     }
     return delivered;
   }
 
   /**
-   * The notify's answer, or a rejection once `notifyTimeoutMs` passes first. The race handles the
-   * notify's own late rejection, and a late resolve is no longer awaited, so it acknowledges nothing.
+   * The answer (a notify, or the flag check before it), or a rejection once `notifyTimeoutMs` passes
+   * first. The race handles a late rejection, and a late resolve is no longer awaited, so it
+   * acknowledges nothing.
    */
-  async #withinNotifyTimeout(sent: Promise<void>, what = "the duress notifier did not answer in time"): Promise<void> {
+  async #withinNotifyTimeout(sent: Promise<void>, what: string): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const late = new Promise<never>((_, reject) => {
       // Unref'd: a wait for a notifier never keeps the host's process alive on its own.
-      timer = setTimeout(() => reject(new Error(what)), this.#notifyTimeoutMs).unref();
+      timer = setTimeout(() => reject(new Error(`${what} did not answer in time`)), this.#notifyTimeoutMs).unref();
     });
     try {
       await Promise.race([sent, late]);

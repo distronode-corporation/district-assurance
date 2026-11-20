@@ -127,7 +127,8 @@ export async function sendTextCode(rt: EngineRuntime, callId: string): Promise<{
     // Read after the counters and the HMAC: their time takes nothing from the code's life or the hold.
     const now = rt.clock.now();
     // A refused send never replaces a code still live, so a send that lost a race cannot void the one that won.
-    if (code !== null || !isLive(slice.textCode, now)) {
+    // A call stored before the field was kept has none: no code.
+    if (code !== null || !isLive(slice.textCode ?? null, now)) {
       const expiresAt = new Date(now.getTime() + TEXT_CODE_TTL_SECONDS * 1000).toISOString();
       slice.textCode = { digest, expiresAt, tries: 0 };
     }
@@ -145,11 +146,27 @@ export async function sendTextCode(rt: EngineRuntime, callId: string): Promise<{
 async function finishSend(rt: EngineRuntime, callId: string, code: string | null, refusal: TextCodeRefusal | null, send: { to: string; locale: Locale; sendId: string }): Promise<void> {
   let outcome = refusal;
   if (code !== null) {
-    const body = textCodeText(send.locale, code);
-    await rt
-      .adapter("messages")
-      .sendText({ to: send.to, body, purpose: "one_time_code", idempotencyKey: rt.idempotencyKey(callId, "text_code", send.sendId) })
-      .catch(() => (outcome = "send_failed"));
+    // Claimed in a write on the call before the SMS adapter is asked: only under this send's own
+    // hold, within its time, on a call not ended. The claim marks the send `sending` and renews its
+    // hold for TEXT_SEND_HOLD_SECONDS from now, so endCall refuses until the answer is recorded or
+    // that time passes (a send that crashed holds the call no longer). Too late, or ended: nothing
+    // is texted, and the send is recorded as failed (only while the call is open).
+    const claimed = await rt.update(callId, (draft) => {
+      const now = rt.clock.now();
+      const hold = draft.slice<BadgeSlice>(BADGE).textSends!.find((h) => h.sendId === send.sendId && now.getTime() < Date.parse(h.until));
+      if (hold === undefined || draft.record.state.phase === "ended") return false;
+      hold.sending = true;
+      hold.until = new Date(now.getTime() + TEXT_SEND_HOLD_SECONDS * 1000).toISOString();
+      return true;
+    });
+    if (!claimed) outcome = "send_failed";
+    else {
+      const body = textCodeText(send.locale, code);
+      await rt
+        .adapter("messages")
+        .sendText({ to: send.to, body, purpose: "one_time_code", idempotencyKey: rt.idempotencyKey(callId, "text_code", send.sendId) })
+        .catch(() => (outcome = "send_failed"));
+    }
   }
   await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
@@ -179,7 +196,8 @@ export async function checkTextCode(rt: EngineRuntime, callId: string, code: str
     allowFactor(rt, draft.record, "text_code");
     draft.assertCan({ type: "factor_recorded", factor: { kind: "text_code", passed: false, at: rt.now() } });
     const s = draft.slice<BadgeSlice>(BADGE);
-    const held = s.textCode;
+    // A call stored before the field was kept has none: no code was sent.
+    const held = s.textCode ?? null;
     if (held === null) throw new EngineError("precondition_failed", "no code was sent for this verification");
     if (!isLive(held, now)) return { matched: false, locked: true };
     held.tries++;
