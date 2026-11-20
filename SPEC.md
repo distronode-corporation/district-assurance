@@ -1184,7 +1184,7 @@ always recorded. A request the engine expired (its own deadline, a link too late
 with a slow create, a cancel or the end of the call) that the provider then reports paid becomes
 `paid`, and `payment.settled` carries `late: true`.
 
-**Refunds (platform mode).** `refundPayment({callId, paymentId, amountMinor?, reason, sequence?})` is a host
+**Refunds (platform mode).** `refundPayment({callId, paymentId, amountMinor?, reason, sequence})` is a host
 call made for the business (its back office or staff): no grant reaches it, no flow step runs it,
 and the model is never given it. It refunds a `paid` platform payment in full (the default: all
 that is left) or in part, with `reason` one of `requested_by_customer`, `duplicate`, `fraudulent`.
@@ -1193,24 +1193,22 @@ up to more than was paid (a refund the provider answered `failed` does not count
 `precondition_failed` for a payment not `paid`, a connect payment, a payment refunded in full, a
 payment with a dispute open or lost (the provider refuses those too), and an engine whose payments
 adapter has no `refund`; `module_disabled` on a call that started with Paylink off. A refund is
-reserved in one write (one in flight per payment; asking again while it is resumes it, and another
-amount is refused), with its intent and idempotency key saved before the provider is asked, sent
+reserved in one write (one in flight per payment), with its intent and idempotency key saved before the provider is asked, sent
 with `PaymentLinks.refund({linkId, paymentIntentId?, mode: "platform", amountMinor, currency,
 reason, idempotencyKey})`, and committed in another write with the provider's answer and
 `payment.refunded`. It returns `{refundId, status, amountMinor, refundedMinor}`. Each refund of a
 payment has a sequence number, 1 for its first and one more for each after (a failed one keeps
-its number), and its key is `[workspaceId, callId, paymentId, "refund", sequence]`. A host that
-passes `sequence` makes a retry safe after it lost the engine's answer: the same number again
-resumes that refund with its key while it is in flight, or gives its saved result back once it
-was committed, and never refunds again (another amount for it is `invalid_input`); the next
-number starts a new refund, any other number is `invalid_input`, and a new number while another
-refund is in flight is `precondition_failed`. Without `sequence`, a call is the next refund, or
-resumes the one in flight, so a host that retries without it after a committed refund asks for a
-second one. A refund still
+its number), and its key is `[workspaceId, callId, paymentId, "refund", sequence]`. `sequence`
+is required: a missing one, or anything but an integer of 1 or more, is `invalid_input` before any
+write. A host that retries after a lost answer must reuse that refund's number: the same number again resumes that refund with its key while it is in flight, or gives its saved result
+back once it was committed, and never refunds again (another amount for it is `invalid_input`);
+the next number starts a new refund (sent with a new key and limited to the amount not yet
+refunded, so a retry under the next number refunds again), any other number is `invalid_input`,
+and a new number while another refund is in flight is `precondition_failed`. A refund still
 in flight is resumed with its own key before the dispute check, which is for new refunds: a refund
 the provider made whose answer was lost is learned even if a dispute opened since. An adapter
 answers a refund the provider refused as `failed` and throws only when the answer was lost: a
-refund that threw stays in flight and the next `refundPayment` resumes it with the same key, so
+refund that threw stays in flight and the next `refundPayment` with its number resumes it with the same key, so
 an adapter that throws for a refusal blocks the payment's refunds. An answer that is not one of the
 provider's three (`pending`, `succeeded`, `failed`, with a refund id) is treated the same way, as a
 lost answer (`precondition_failed`): nothing is recorded or ledgered, the refund stays in flight,
@@ -1230,7 +1228,8 @@ intent is kept on it and bound to the call (`payment_intent:<id>`), after the wr
 every later outcome for the link, so a lost binding is made when the event comes again.
 `applyDisputeOutcome` finds the payment by it and records the dispute's status and amount
 (`payment.disputed`). A dispute that names no payment intent is not applied (`{applied: false}`);
-one whose payment intent is not bound yet answers `{applied: false, unbound: true}`, since
+one whose payment intent is not bound yet answers `{applied: false, unbound: true}` (a connected
+account's event never does: it answers `{applied: false}` and is acknowledged), since
 webhooks come in any order and the payment's own event may still be on its way: the host has it
 delivered again (the reference server answers 503 and does not remember the event, so Stripe
 retries it within its own retry window). A connected account's dispute event is ignored
@@ -1398,7 +1397,8 @@ receipt never verifies as an access grant. A host's module can never take a buil
    (signed, not expired, and `reserved`, `delivered` or `unknown`), and the engine then asks each
    one's controller to withdraw it with its optional `revoke({grant, target, callId,
    idempotencyKey})` (key `[workspaceId, callId, grantId, "revoke"]`), once, recording
-   `access.revoked` `{grantId, outcome: "revoked" | "failed"}`. A controller without `revoke` is
+   `access.revoked` `{grantId, outcome: "revoked" | "failed"}`; a taint whose ledger append then
+   fails still asks, and `markUntrusted` throws that failure after. A controller without `revoke` is
    asked nothing and the grant runs to its expiry. A grant already delivered and acted on cannot be
    pulled back: a door that opened stays opened, and `revoke` only stops what has not happened yet
    (an access code not yet redeemed, a credential not yet used). A config changed by another
