@@ -66,6 +66,15 @@ describe("removeCall", () => {
     assert.deepEqual(await sessions.pendingCalls("ws_test", 10), [], "no longer listed");
   });
 
+  it("never starts a call again under a removed call's id, whose ledger event ids are spent", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall({ callId: "call_host_1" });
+    await t.engine.endCall(callId);
+    await t.engine.removeCall(callId);
+    await assert.rejects(t.engine.startCall({ callId: "call_host_1" }));
+    assert.equal(await t.sessions.get("ws_test", "call_host_1"), null);
+  });
+
   it("refuses a call that has not ended", async () => {
     const t = setup();
     const callId = await verifiedCall(t);

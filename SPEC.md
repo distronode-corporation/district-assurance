@@ -1064,7 +1064,8 @@ described where they are written.
 
 **Removing a call record.** A host removes a call record only through `removeCall(callId)`, never
 in its session store directly: the store's optional `remove(workspaceId, callId, expectedVersion)`
-removes only the version the engine checked, with its pending mark. `removeCall` is refused
+removes only the version the engine checked, with its pending mark, and keeps the id so it is never
+created again (`startCall` refuses it): its ledger event ids are spent. `removeCall` is refused
 (`precondition_failed`) for a call that has not ended, for one that still owes a duress alert or a
 contact notice (`sweepAlerts` sends it), for one with a filed record whose confirmed mark it could
 not make (the call keeps the marks it owes in `marksOwed` until the record store has them), and for

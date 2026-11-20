@@ -191,6 +191,8 @@ export function sessionStoreContract(factory: () => SessionStore | Promise<Sessi
         assert.equal(await store.get("w", "c1"), null);
         assert.equal(await store.remove("w", "c1", 1), false, "once");
         assert.notEqual(await store.get("w2", "c1"), null, "workspaces apart");
+        assert.equal(await store.create("w", "c1", { n: 2 }), false, "a removed id is never created again: its ledger event ids are spent");
+        assert.equal(await store.get("w", "c1"), null);
         if (store.pendingCalls !== undefined) assert.deepEqual(await store.pendingCalls("w", 10), [], "the mark goes with it");
       },
     ],

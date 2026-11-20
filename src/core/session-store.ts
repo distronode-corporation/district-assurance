@@ -10,12 +10,14 @@ const tupleKey = (workspaceId: string, id: string): string => JSON.stringify([wo
 export class MemorySessionStore implements SessionStore {
   readonly #sessions = new Map<string, StoredSession>();
   readonly #refs = new Map<string, string>();
+  /** Ids of removed sessions: never created again. */
+  readonly #removed = new Set<string>();
   /** Per workspace, the calls whose latest write said their ledger entries are pending (INT-5). */
   readonly #pending = new Map<string, Set<string>>();
 
   async create(workspaceId: string, callId: string, record: JsonValue, hint?: WriteHint): Promise<boolean> {
     const key = tupleKey(workspaceId, callId);
-    if (this.#sessions.has(key)) return false;
+    if (this.#sessions.has(key) || this.#removed.has(key)) return false;
     this.#sessions.set(key, { version: 1, record: structuredClone(record) });
     this.#mark(workspaceId, callId, hint);
     return true;
@@ -58,6 +60,7 @@ export class MemorySessionStore implements SessionStore {
     const key = tupleKey(workspaceId, callId);
     if (this.#sessions.get(key)?.version !== expectedVersion) return false;
     this.#sessions.delete(key);
+    this.#removed.add(key);
     this.#pending.get(workspaceId)?.delete(callId);
     return true;
   }
