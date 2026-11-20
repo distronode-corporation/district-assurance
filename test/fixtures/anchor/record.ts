@@ -1,4 +1,4 @@
-// Writes the recorded anchor fixtures (PRV-9): what a time-stamp authority and a Rekor v2 log
+// Writes the synthetic anchor fixtures (PRV-9; the real ones are record-real.ts's, in real/): what a time-stamp authority and a Rekor v2 log
 // answer for the head of `fixtureLedger()`. Run once with `node test/fixtures/anchor/record.ts`;
 // the tests replay the files and never touch a network. The authority (an RSA root and a
 // time-stamping certificate) and the log (an Ed25519 key) are throwaways made here, not a secret;
