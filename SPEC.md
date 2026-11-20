@@ -260,9 +260,14 @@ A **grant** carries the level, the scopes at or below it (narrowed to the verify
 when the step lists them), an expiry, and what judged it: `policyVersion` (the policy's `version`)
 and `configRevision` (the `revision` of the FlowConfig in force when the verification finished,
 newer than the call's own `revision` when the config changed during the call).
-`authorize(callId, scope)` is true only for a scope the policy lists, on a call that has not
-ended, whose minimum is 0 or whose grant includes it, has not expired, and has a level at or
-above the scope's minimum under the config in force now.
+`authorize(callId, scope, amount?)` is true only for a scope the policy lists, on a call that has
+not ended, whose minimum is 0 or whose grant includes it, has not expired, and has a level at or
+above the scope's minimum under the config in force now, raised by the step-up rules that hold now
+(section 4; `amount` is `{amountMinor, currency}`, in a flow by default the current step's). The
+steps' own checks (a payment, an intake, an outside module's step, Gate's door) use the same raised
+minimum, for the request's own amount, so a grant already issued is held to it. The first time a
+rule raises a minimum on a call, it is written to the ledger by name (`policy.step_up`), never with
+the amount, the time or the signal's cause; `authorize` writes then.
 On a
 duress call (section 6) it is also false for every scope whose class is not `none` and for every
 scope in the duress `refuseScopes`.
@@ -298,21 +303,6 @@ feature the account is not approved for, or an answer they cannot read. A Twilio
 **Texted codes** (`text_code`, needs the `messages` and `codes` adapters).
 `sendTextCode(callId)` needs the factor on (and listed by the current `badge.verify` step), a
 keypad or PIN match as above, and a call that is verifying. It sends only when, in order:
-`authorize(callId, scope, amount?)` is true only for a scope the policy lists, on a call that has
-not ended, whose minimum is 0 or whose grant includes it, has not expired, and has a level at or
-above the scope's minimum under the config in force now, raised by the step-up rules that hold now
-(section 4; `amount` is `{amountMinor, currency}`, in a flow by default the current step's). The
-steps' own checks (a payment, an intake, an outside module's step, Gate's door) use the same raised
-minimum, for the request's own amount, so a grant already issued is held to it. The first time a
-rule raises a minimum on a call, it is written to the ledger by name (`policy.step_up`), never with
-the amount, the time or the signal's cause; `authorize` writes then.
-
-Links go only to the subject's number on file, and only after a `keypad_knowledge` or `pin`
-factor passed since verification last started from nothing and since the session was last
-tainted: `markUntrusted` voids the match, so no text, carrier check or payment link goes out on it
-until a fresh verification matches again. A plug-in's pass does not unlock texts.
-
-## 5. Keypad knowledge
 
 1. the number on file starts with `+` and one of the policy's `textCodeCountryCodes` (a country
    calling code such as `1` or `33`, or a longer prefix such as `1204`); without the list, nowhere;
@@ -841,14 +831,13 @@ unknown fields at every level, the policy's shape and then its rules against the
 factors, every module's switch and settings, every adapter an enabled module's settings need,
 every step's module (installed and on) and the step itself, and, walking each flow in order, that
 every step needing a scope comes after a `badge.verify` step whose level reaches that scope's
-minimum and whose `scopes`, if listed, include it, that the engine has the `messages` adapter when
-a step needs a contact-class scope (its security notice, section 16), and that no flow has more
-`step-up.issue` steps than step-up's `maxTokensPerCall` (each completes only on a token of its own, so such a flow could
-never finish; a module's optional `validateFlow` makes such whole-flow checks). Cross-checks against a module's settings or the
 minimum and whose `scopes`, if listed, include it, that a step whose amount is sure to trigger an
 amount rule on that scope (over the threshold, a currency the rule does not list, or no amount, as
-for an `amountRef`) comes after a `badge.verify` step that reaches the rule's level, and that the engine has the `messages` adapter
-when a step needs a contact-class scope (its security notice, section 16). Cross-checks against a module's settings or the
+for an `amountRef`) comes after a `badge.verify` step that reaches the rule's level, that the engine
+has the `messages` adapter when a step needs a contact-class scope (its security notice, section
+16), and that no flow has more `step-up.issue` steps than step-up's `maxTokensPerCall` (each
+completes only on a token of its own, so such a flow could never finish; a module's optional
+`validateFlow` makes such whole-flow checks). Cross-checks against a module's settings or the
 policy are skipped when those did not validate (their own problems are reported). The engine
 refuses a config with any problem (`ConfigError`, code `invalid_input`, with `problems`).
 
@@ -890,7 +879,7 @@ too, never from a spoken answer, until then.
 ## 8. Flow execution
 
 `startCall` refuses (`invalid_input`, nothing saved) a `callId` that is not 1 to 200 characters the
-ledger can carry (no lone surrogate), a `locale` not in `SUPPORTED_LOCALES` (`en`, `fr`), and a `flow` that is not a
+ledger can carry (no lone surrogate), a `locale` not in `SUPPORTED_LOCALES` (`en`, `fr`, `es`), and a `flow` that is not a
 name; the engine refuses a `workspaceId` with a lone surrogate. These enter the ledger directly, so
 no host value can block a call's ledger. `startCall({flow})` or `startFlow(callId, name)`, on an
 open call that has not run a flow, copies
@@ -1156,10 +1145,12 @@ node scripts/verify-receipt.mjs <receipt.json | -> <keys.json | https://host/.we
 A key set URL must be `https`, or `http` on `127.0.0.1`, `localhost` or `[::1]`, because a key set
 fetched in the clear could be swapped for one that makes a forged receipt look valid. Redirects are
 refused. A worked example, against the demo server on this machine (`npm run ui`, after the
-`deposit` flow has run to its end in the page, which makes `call_1` with a payment of 15000):
+`deposit` flow has run to its end in the page, which makes `call_1` with a payment of 15000). The
+finished run's view carries the receipt's capability link as `receiptLink` (`/r/<token>`, the
+page opens it); `<token>` below is that token, and `/r/<token>.json` is the signed receipt:
 
 ```sh
-$ curl -s http://127.0.0.1:8787/receipts/call_1 > receipt.json
+$ curl -s http://127.0.0.1:8787/r/<token>.json > receipt.json
 $ node scripts/verify-receipt.mjs receipt.json http://127.0.0.1:8787/.well-known/receipt-keys.json
 valid
 $ curl -s http://127.0.0.1:8787/.well-known/receipt-keys.json > keys.json   # or keep a copy
@@ -1204,9 +1195,6 @@ bounds how many links it issues and how long it keeps them (a durable store with
 
 | Type | Accepted | Stored as |
 |---|---|---|
-| `text` | trimmed, non-empty, well-formed Unicode (no lone surrogate), at most `maxLength` (500), and no card number | string |
-| `number` | `-?\d+(\.\d+)?` | number |
-| `date` | `YYYY-MM-DD` naming a real day | string |
 | `text` | trimmed, non-empty, Unicode text (a lone surrogate is `not_text`), at most `maxLength` (500), no card number, and matching `pattern` whole if set (`no_match`) | string |
 | `number` | `-?\d+(\.\d+)?`, from `min` to `max` if set (`below_min`, `above_max`) | number |
 | `date` | `YYYY-MM-DD` naming a real day, from `min` to `max` if set | string |
@@ -2275,11 +2263,8 @@ controls, combining marks: `SEPARATOR_CLASS`). A numeral is any run of Unicode d
 (fullwidth, Arabic-Indic and the rest), read by its values for the checks, and the original span
 is what is removed. English and French number words are read on every call, since callers switch
 between them; Spanish words only on a Spanish call (`Engine.redact` and a `LiveCardNumberDetector`
-given its `locale`), so on an English call "once" and "y" are words. A call is Spanish only once
-the engine takes the `es` locale (#122, which lands with or after this); until then `startCall`
-takes `en` and `fr`, and Spanish is read by a `LiveCardNumberDetector` given `locale: "es"` and by
-text redacted with no call. Text redacted with no call
-reads every language. Any other word or punctuation ends a run. Joining this widely can join things
+given its `locale`), so on an English call "once" and "y" are words. A call started with
+`locale: "es"` is a Spanish call. Text redacted with no call reads every language. Any other word or punctuation ends a run. Joining this widely can join things
 that are not one number (a date beside an amount); over-redaction is the safe side, since the risk
 is a number reaching storage. Spoken numbers are read as people say them:
 
@@ -2343,8 +2328,7 @@ digits read one by one) may break anywhere.
 |---|---|---|---|
 | `card_number` | `cardNumberRedactor` | 13 to 19 digits, Luhn | `[card number removed]` |
 | `sin` | `sinRedactor` | 9 digits, Luhn, groups 3-3-3 | `[SIN removed]` |
-| `health_card` | `healthCardRedactor` | Ontario: 10 digits, Luhn, groups 4-3-3 (a version code after it is kept). British Columbia: 10 digits starting with 9, mod 11 check digit (weights 2, 4, 8, 5, 10, 9, 7, 3 on digits 2 to 9), groups 4-3-3. Quebec: four letters right before the run, as one word or spelled one by one (at most 8
-separators in each gap and before the digits, so only the last 48 characters before a run are read), then 8 digits whose 3rd to 6th give a month (or month plus 50) and a day, groups 4-4; the letters are removed too | `[health card number removed]` |
+| `health_card` | `healthCardRedactor` | Ontario: 10 digits, Luhn, groups 4-3-3 (a version code after it is kept). British Columbia: 10 digits starting with 9, mod 11 check digit (weights 2, 4, 8, 5, 10, 9, 7, 3 on digits 2 to 9), groups 4-3-3. Quebec: four letters right before the run, as one word or spelled one by one (at most 8 separators in each gap and before the digits, so only the last 48 characters before a run are read), then 8 digits whose 3rd to 6th give a month (or month plus 50) and a day, groups 4-4; the letters are removed too | `[health card number removed]` |
 | `bank_account` | `bankAccountRedactor` | a whole run of 3 or more digits with a bank word among the last 4 words before it, counting only words after the previous run. English: bank, branch, transit, institution, account; French: banque, bancaire, succursale, compte, folio; Spanish: banco, bancaria, bancario, sucursal, cuenta, tránsito, institución, with or without accents; each also in the plural; read in the languages `numberLanguagesFor` gives the call: English and French always, Spanish on a Spanish call and on text with no call | `[banking details removed]` |
 
 Bank numbers carry no check digit, so a bank word is what marks them; an account number read
@@ -2400,7 +2384,9 @@ refused with `conflict`, to be confirmed again.
 - `intakeRecords` are the subject's, values included; `pinDigestOnFile` says whether a digest is
   on file, never the digest.
 - `calls` are the calls those records name. `consents` and `receipts` are the ones those call
-  records hold (a call record that is gone is skipped). A consent carries the `subjectKey` Badge
+  records hold (a call record that is gone is skipped), so a consent recorded on a call that filed
+  no record of the subject is not listed (the `ConsentStore` is read by consent id, never by
+  subject); `limits` says so. A consent carries the `subjectKey` Badge
   matched on the call when it was recorded (or null), and only those recorded under this subject
   are listed: a call can match another subject later, and their consents are not this subject's. A
   consent keeps its original answer; `revocations` holds the revocation the `ConsentStore` keeps for
