@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import fc from "fast-check";
 
 import type { AuditEntry, AuditInput } from "../../src/core/adapters.ts";
-import type { JsonValue } from "../../src/core/canonical.ts";
+import { canonicalJson, type JsonValue } from "../../src/core/canonical.ts";
 import { EngineError } from "../../src/core/errors.ts";
 import { ENGINE_EVENTS, type Actor } from "../../src/core/events.ts";
 import { GENESIS_HASH, MemoryAuditLedger, chainEntry, detailCarriesCardNumber, verifyChain } from "../../src/prove/ledger.ts";
@@ -54,7 +54,20 @@ const writers: fc.Arbitrary<Writers> = fc
   );
 
 /** What a ledger must do with one append, given the event ids it has already stored. */
-type Expected = { kind: "first"; eventId: string } | { kind: "refused" } | { kind: "appended" };
+type Expected = { kind: "first"; eventId: string } | { kind: "refused"; because: "card" | "text" } | { kind: "appended" };
+
+/**
+ * Whether canonical JSON refuses the text of an entry: a lone surrogate in its event id, call id or
+ * detail (RFC 8785, section 3.2.2.2). Such an append throws a TypeError and stores nothing.
+ */
+function textRefused(input: AuditInput): boolean {
+  try {
+    canonicalJson({ eventId: input.eventId ?? null, callId: input.callId, detail: input.detail });
+    return false;
+  } catch {
+    return true;
+  }
+}
 
 async function runWriters(ledger: MemoryAuditLedger, plan: Writers, g: fc.GeneratorValue) {
   const stored = new Set<string>();
@@ -63,7 +76,8 @@ async function runWriters(ledger: MemoryAuditLedger, plan: Writers, g: fc.Genera
     // The model, taken when the append is made: an id seen before returns its first entry.
     let expected: Expected;
     if (input.eventId !== undefined && stored.has(input.eventId)) expected = { kind: "first", eventId: input.eventId };
-    else if (detailCarriesCardNumber(input.detail)) expected = { kind: "refused" };
+    else if (detailCarriesCardNumber(input.detail)) expected = { kind: "refused", because: "card" };
+    else if (textRefused(input)) expected = { kind: "refused", because: "text" };
     else {
       expected = { kind: "appended" };
       if (input.eventId !== undefined) stored.add(input.eventId);
@@ -99,7 +113,10 @@ async function chain(g: fc.GeneratorValue): Promise<AuditEntry[]> {
   for (let n = int(g, 1, 6); n > 0; n--) {
     const input = g(auditInput, n);
     delete input.eventId;
-    if (detailCarriesCardNumber(input.detail)) input.detail = {};
+    if (detailCarriesCardNumber(input.detail) || textRefused(input)) {
+      input.detail = {};
+      input.callId = null;
+    }
     await ledger.append(input);
   }
   return ledger.list();
@@ -131,7 +148,8 @@ describe("property: the ledger's hash chain", () => {
         assert.equal(stored.length, results.filter((r) => r.expected.kind === "appended").length);
         for (const { expected, input, outcome } of results) {
           if (expected.kind === "refused") {
-            assert.ok(outcome instanceof EngineError && outcome.code === "invalid_input", "a detail with a card number is refused");
+            if (expected.because === "card") assert.ok(outcome instanceof EngineError && outcome.code === "invalid_input", "a detail with a card number is refused");
+            else assert.ok(outcome instanceof TypeError && /^canonicalJson: lone surrogate/.test(outcome.message), "a lone surrogate is refused, never stored");
             continue;
           }
           assert.ok(!(outcome instanceof Error), String(outcome));
@@ -157,7 +175,7 @@ describe("property: the ledger's hash chain", () => {
   it("hashes a detail the same whatever the order of its keys", async () => {
     await fuzz(
       fc.property(auditInput(0), fc.gen(), (input, g) => {
-        if (detailCarriesCardNumber(input.detail)) return;
+        if (detailCarriesCardNumber(input.detail) || textRefused(input)) return;
         const shuffled = { ...input, detail: reordered(g, input.detail) as { [key: string]: JsonValue } };
         assert.equal(chainEntry(shuffled, 1, GENESIS_HASH).hash, chainEntry(input, 1, GENESIS_HASH).hash);
       }),

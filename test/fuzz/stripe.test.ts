@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 
 import fc from "fast-check";
 
+import { EngineError } from "../../src/core/errors.ts";
 import { parseStripeEvent, signStripePayload, verifyStripeSignature, type SignatureCheck } from "../../src/webhooks/stripe.ts";
 import { flipByte, fuzz, int, jsonValue, mutate, nastyString, pick, printableString } from "./harness.ts";
 
@@ -32,6 +33,7 @@ const TYPES = [
   "__proto__",
   "constructor",
   "toString",
+  "charge.dispute.created",
 ];
 
 const event: fc.Arbitrary<Record<string, unknown>> = fc.record({
@@ -119,7 +121,7 @@ describe("fuzz: verifyStripeSignature", () => {
     );
   });
 
-  it("refuses garbage headers, secrets and clocks with a reason, and never throws", async () => {
+  it("refuses garbage headers, secrets and clocks with a reason, and never throws on a valid tolerance", async () => {
     await fuzz(
       fc.property(
         fc.record({
@@ -127,10 +129,18 @@ describe("fuzz: verifyStripeSignature", () => {
           header: garbageHeader,
           secrets: fc.array(fc.oneof(fc.constant(""), secret), { maxLength: 3 }),
           now: fc.oneof(fc.constantFrom(NOW.getTime(), 0, -1, 8.64e15), fc.integer({ min: 0, max: 2 ** 40 }).map((s) => s * 1000)).map((ms) => new Date(ms)),
-          toleranceSeconds: fc.constantFrom(undefined, 0, 1, 300, -1, Number.NaN, Infinity),
+          toleranceSeconds: fc.constantFrom(undefined, 0, 1, 300, 86_400, -1, 1.5, 86_401, Number.NaN, Infinity),
         }),
         (input) => {
-          const result = verifyStripeSignature({ payload: input.body, header: input.header, secrets: input.secrets, now: input.now, ...(input.toleranceSeconds === undefined ? {} : { toleranceSeconds: input.toleranceSeconds }) });
+          const check = () => verifyStripeSignature({ payload: input.body, header: input.header, secrets: input.secrets, now: input.now, ...(input.toleranceSeconds === undefined ? {} : { toleranceSeconds: input.toleranceSeconds }) });
+          // A tolerance that is not an integer from 0 to 86,400 is the host's mistake, refused
+          // whatever the request: a NaN one would otherwise turn the window off.
+          const tolerance = input.toleranceSeconds;
+          if (tolerance !== undefined && !(Number.isInteger(tolerance) && tolerance >= 0 && tolerance <= 86_400)) {
+            assert.throws(check, (e: unknown) => e instanceof EngineError && e.code === "invalid_input");
+            return;
+          }
+          const result = check();
           assertShape(result);
           assert.equal(result.ok, false, "no garbage header carries a signature over this body");
         },
@@ -172,6 +182,9 @@ describe("fuzz: parseStripeEvent", () => {
               assert.ok(["paid", "unpaid", "no_payment_required"].includes(parsed.outcome.paymentStatus));
               assert.equal(Object.hasOwn(raw.data.object, "payment_status"), true);
             } else assert.equal(raw.type, `checkout.session.${{ async_succeeded: "async_payment_succeeded", async_failed: "async_payment_failed", expired: "expired" }[parsed.outcome.kind]}`);
+            break;
+          case "dispute":
+            assert.ok((raw.type as string).startsWith("charge.dispute."), raw.type as string);
             break;
           default:
             assert.equal(parsed.type, raw.type);

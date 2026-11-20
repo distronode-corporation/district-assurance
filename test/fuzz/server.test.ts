@@ -33,7 +33,11 @@ async function serve(ui: boolean): Promise<Served> {
     engine: world.engine,
     clock: world.t.clock,
     stripeSecrets: { identity: [DEMO_SECRET], payments: [DEMO_SECRET] },
-    maxBodyBytes: 2048,
+    // Every route that reads a body, under one small limit, so the oversized bodies get a 413.
+    // Every request here comes from one address, so the per-address limit (SRV-2, tested on its
+    // own) is set out of reach: this property is about parsing, not about being rate limited.
+    rateLimit: { requests: 1_000_000, windowMs: 60_000 },
+    bodyLimits: { stripeIdentity: 2048, stripePayments: 2048, stripeConnect: 2048, records: 2048, twilio: 2048, telnyx: 2048, demo: 2048 },
     ...(ui ? { ui: new DemoRuns(world) } : {}),
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -92,10 +96,16 @@ const ROUTES = [
   "/.well-known/receipt-keys.json",
   "/webhooks/stripe/identity",
   "/webhooks/stripe/payments",
+  "/webhooks/stripe/connect",
+  "/webhooks/records",
   "/webhooks/twilio",
   "/webhooks/telnyx",
-  "/receipts/call_1",
-  "/receipts/",
+  "/r/rcl_not_a_token",
+  "/r/rcl_not_a_token.json",
+  "/r/",
+  "/u/upl_not_a_token",
+  "/u/",
+  "/.well-known/security.txt",
   "/demo/flows",
   "/demo/runs",
   "/demo/runs/run_1",
@@ -156,7 +166,9 @@ function request(g: fc.GeneratorValue, served: Served): RequestPlan {
   return { bytes: raw, method, path };
 }
 
-const MEANT = new Set([200, 201, 400, 403, 404, 405, 409, 413, 415, 501]);
+// 503 is a signed webhook event the engine could not apply yet, answered with `retry: true` so
+// Stripe sends it again, or the server's own overload refusal (SRV-2).
+const MEANT = new Set([200, 201, 400, 403, 404, 405, 409, 413, 415, 501, 503]);
 
 describe("fuzz: the reference server's request parsing", () => {
   const servers: Served[] = [];
@@ -178,7 +190,8 @@ describe("fuzz: the reference server's request parsing", () => {
           if (reply.body !== "" && plan.method !== "HEAD") {
             if (reply.headers["content-type"]?.startsWith("application/json")) {
               const answer = JSON.parse(reply.body) as Record<string, unknown>;
-              if (reply.status >= 400) assert.equal(typeof answer.error, "string");
+              if (reply.status === 503 && answer.retry === true) assert.deepEqual(answer, { received: true, applied: false, retry: true });
+              else if (reply.status >= 400) assert.equal(typeof answer.error, "string");
             } else {
               // Node's own parser refuses a request it cannot read with a bare 400, and the UI
               // serves its static files; nothing else answers in anything but JSON.

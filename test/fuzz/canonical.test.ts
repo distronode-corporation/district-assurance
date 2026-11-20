@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import fc from "fast-check";
 
 import { canonicalJson } from "../../src/core/canonical.ts";
-import { fuzz, int, jsonValue, nastyString, pick, setOwn } from "./harness.ts";
+import { fuzz, int, jsonValue, nastyText, pick, setOwn } from "./harness.ts";
 
 /** A copy with every object's keys in an order drawn by `g`. */
 function reorder(g: fc.GeneratorValue, value: unknown): unknown {
@@ -58,6 +58,9 @@ const UNSUPPORTED: ReadonlyArray<() => unknown> = [
   () => new String("s"),
   () => new Uint8Array(2),
   () => /re/,
+  // A lone surrogate, high or low: RFC 8785 says canonical JSON must refuse it (section 3.2.2.2).
+  () => "a\ud800",
+  () => "\udfff",
 ];
 
 /** Whether a draw of `g` falls under `percent` out of 100. */
@@ -83,7 +86,11 @@ function plant(g: fc.GeneratorValue, value: unknown): unknown {
   const copy: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value)) setOwn(copy, key, item);
   const keys = Object.keys(copy);
-  if (keys.length === 0 || chance(g, 30)) setOwn(copy, g(nastyString, 4), bad());
+  if (keys.length === 0 || chance(g, 30)) {
+    // Now and then the key is what JSON cannot carry: a lone surrogate.
+    if (chance(g, 15)) setOwn(copy, `${g(nastyText, 3)}${pick(g, ["\ud800", "\udbff", "\udc00", "\udfff"])}`, g(jsonValue, 1, true));
+    else setOwn(copy, g(nastyText, 4), bad());
+  }
   else {
     const key = pick(g, keys);
     setOwn(copy, key, plant(g, copy[key]));
@@ -94,7 +101,7 @@ function plant(g: fc.GeneratorValue, value: unknown): unknown {
 describe("fuzz: canonicalJson", () => {
   it("writes any JSON value in a form that parses back to it, and is its own canonical form", async () => {
     await fuzz(
-      fc.property(jsonValue(4), (value) => {
+      fc.property(jsonValue(4, true), (value) => {
         const text = canonicalJson(value);
         const parsed: unknown = JSON.parse(text);
         assert.deepEqual(parsed, value);
@@ -105,16 +112,16 @@ describe("fuzz: canonicalJson", () => {
   });
 
   it("gives the same text whatever the order of the keys", async () => {
-    await fuzz(fc.property(jsonValue(4), fc.gen(), (value, g) => assert.equal(canonicalJson(reorder(g, value)), canonicalJson(value))));
+    await fuzz(fc.property(jsonValue(4, true), fc.gen(), (value, g) => assert.equal(canonicalJson(reorder(g, value)), canonicalJson(value))));
   });
 
   it("refuses anything JSON cannot carry, wherever it is, with a TypeError naming the path", async () => {
     await fuzz(
-      fc.property(jsonValue(3), fc.gen(), (json, g) => {
+      fc.property(jsonValue(3, true), fc.gen(), (json, g) => {
         const value = plant(g, json);
         assert.throws(
           () => canonicalJson(value),
-          (e: unknown) => e instanceof TypeError && /^canonicalJson: (non-finite number|unsupported \w+|not a plain object) at \$/.test(e.message),
+          (e: unknown) => e instanceof TypeError && /^canonicalJson: (non-finite number|unsupported \w+|not a plain object|lone surrogate in a string) at \$/.test(e.message),
         );
       }),
     );

@@ -8,18 +8,43 @@ import fc from "fast-check";
 import { demoConfig } from "../../examples/reference-server/src/flows.ts";
 import { ConfigError, assertConfig, validateConfig } from "../../src/core/config.ts";
 import { ModuleRegistry } from "../../src/core/module.ts";
+import type { AdapterName } from "../../src/core/runtime.ts";
 import { builtInModules, defaultConfig } from "../../src/modules.ts";
 import { testConfig } from "../helpers.ts";
 import { fuzz, int, jsonValue, mutate, pick } from "./harness.ts";
 
-const ALL_ADAPTERS = ["ledger", "sessions", "records", "identity", "carrier", "messages", "payments", "signer", "pinVerifier"];
+// Every adapter the engine takes: the Record type fails to compile when one is added and not listed.
+const ADAPTERS: Record<AdapterName, true> = {
+  ledger: true,
+  sessions: true,
+  records: true,
+  identity: true,
+  carrier: true,
+  messages: true,
+  payments: true,
+  signer: true,
+  pinVerifier: true,
+  amounts: true,
+  access: true,
+  accessSigner: true,
+  stepUpSigner: true,
+  codes: true,
+  counters: true,
+  dialer: true,
+  notifier: true,
+  duressNotifier: true,
+  fieldCipher: true,
+  consents: true,
+  anchor: true,
+};
+const ALL_ADAPTERS = Object.keys(ADAPTERS) as AdapterName[];
 
 /** Valid configs to start from: the default, the tests' full one, and the demo's flows. */
 const BASES = [defaultConfig, testConfig, demoConfig];
 
 // Sometimes without a few adapters, so "needs the ... adapter" problems come up too.
 const registry: fc.Arbitrary<ModuleRegistry> = fc
-  .subarray(ALL_ADAPTERS.slice(2))
+  .subarray(ALL_ADAPTERS.filter((name) => name !== "ledger" && name !== "sessions"))
   .map((optional) => new ModuleRegistry({ adapters: ["ledger", "sessions", ...optional], modules: builtInModules() }));
 
 /** Garbage now and then; otherwise a valid config broken in one to four places. */

@@ -94,6 +94,14 @@ export function nastyString(maxLength = 12): fc.Arbitrary<string> {
   return fc.string({ unit: nastyUnit, maxLength });
 }
 
+/**
+ * A string of up to `maxLength` hostile units with each lone surrogate made U+FFFD: text canonical
+ * JSON (RFC 8785) can carry, for values that must be valid.
+ */
+export function nastyText(maxLength = 12): fc.Arbitrary<string> {
+  return nastyString(maxLength).map((s) => s.toWellFormed());
+}
+
 /** A string of up to `maxLength` printable ASCII characters. */
 export function printableString(maxLength: number): fc.Arbitrary<string> {
   return fc.string({ unit: fc.constantFrom(...PRINTABLE), maxLength });
@@ -114,20 +122,24 @@ export const jsonNumber: fc.Arbitrary<number> = fc
   .map((value) => (Object.is(value, -0) ? 0 : value));
 
 /** An object of up to `maxKeys` own properties with hostile keys (`__proto__` among them, as data). */
-export function ownObject<T>(value: fc.Arbitrary<T>, maxKeys = 5): fc.Arbitrary<Record<string, T>> {
-  return fc.array(fc.tuple(nastyString(6), value), { maxLength: maxKeys }).map((entries) => {
+export function ownObject<T>(value: fc.Arbitrary<T>, maxKeys = 5, key: fc.Arbitrary<string> = nastyString(6)): fc.Arbitrary<Record<string, T>> {
+  return fc.array(fc.tuple(key, value), { maxLength: maxKeys }).map((entries) => {
     const object: Record<string, T> = {};
     for (const [key, item] of entries) setOwn(object, key, item);
     return object;
   });
 }
 
-/** Any JSON value, nested up to `depth`. */
-export function jsonValue(depth = 3): fc.Arbitrary<unknown> {
-  const leaf = fc.oneof(fc.constant(null), fc.boolean(), jsonNumber, nastyString(12));
+/**
+ * Any JSON value, nested up to `depth`. Its strings and keys may hold lone surrogates, which
+ * `JSON.stringify` writes but canonical JSON refuses; `wellFormed` leaves them out.
+ */
+export function jsonValue(depth = 3, wellFormed = false): fc.Arbitrary<unknown> {
+  const text = wellFormed ? nastyText : nastyString;
+  const leaf = fc.oneof(fc.constant(null), fc.boolean(), jsonNumber, text(12));
   if (depth <= 0) return leaf;
-  const child = jsonValue(depth - 1);
-  return fc.oneof({ weight: 4, arbitrary: leaf }, { weight: 1, arbitrary: fc.array(child, { maxLength: 4 }) }, { weight: 2, arbitrary: ownObject(child) });
+  const child = jsonValue(depth - 1, wellFormed);
+  return fc.oneof({ weight: 4, arbitrary: leaf }, { weight: 1, arbitrary: fc.array(child, { maxLength: 4 }) }, { weight: 2, arbitrary: ownObject(child, 5, text(6)) });
 }
 
 /** A JSON object (the shape a ledger detail must have). */
