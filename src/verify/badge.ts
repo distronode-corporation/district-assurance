@@ -4,22 +4,26 @@
 // Every runtime function takes the engine's runtime and works in compare-and-set steps: an attempt
 // is counted in one write before it is judged, and a link is reserved in one write before it is
 // sent, so two processes running the same call can never get two attempts or two links for one.
-import type { SubjectRecord } from "../core/adapters.ts";
+import { randomBytes } from "node:crypto";
+
+import type { AttemptCounterKey, SubjectRecord } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
-import { EngineError, NotImplementedError } from "../core/errors.ts";
+import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import { isStepLevel } from "../core/config.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
 import {
   FACTOR_KINDS,
+  capCallLevel,
   evaluateAssurance,
   scopesForLevel,
   textCodeTrusted,
   type AssuranceLevel,
   type CarrierSignalReport,
   type FactorKind,
+  type ScopeClass,
 } from "../core/policy.ts";
-import type { CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
+import type { CallDraft, CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
 import { canApply, type SessionState } from "../core/session.ts";
 import { isIntegerIn, isObject, isStringArray, unknownKeys } from "../core/shape.ts";
 import type { IdentityOutcome } from "../webhooks/stripe.ts";
@@ -27,14 +31,20 @@ import {
   BUILT_IN_FACTORS,
   KNOWLEDGE_FACTORS,
   checkFactorPlugin,
+  snapshotFactorPlugin,
   judgeKeypad,
   judgePin,
+  judgeSpoken,
   type BadgeSettings,
   type FactorEntry,
   type FactorPlugin,
+  type PinOutcome,
   type PinSettings,
 } from "./factors.ts";
+import { counterKeys, currentLock, isCallingNumber, lockoutOf, lockoutSettingsErrors, forgetPass, recordFailures, removeOwnOnNumbers, type Lock } from "./counters.ts";
+import { clearsSoFar, duressClearedData, duressFlagKey, flagDuressUnlessCleared, forgetHidden, hiddenCounterKey, hiddenHardLock, hiddenWindowStart, isUnderDuress, recordClear } from "./duress-flag.ts";
 import { isKeypadEntry } from "./knowledge.ts";
+import type { TextCodeState } from "./text-code.ts";
 
 export const BADGE = "badge";
 
@@ -50,8 +60,36 @@ export interface BadgeVerifyStep extends FlowStep {
 export interface BadgeSlice {
   subjectKey: string | null;
   subject: SubjectRecord | null;
+  /** The keyed hash of the calling number the host gave, for the counters and the send limits across calls; null without one. */
+  numberKey: string | null;
   /** Judged attempts per factor kind on this call. */
   attempts: Record<string, number>;
+  /** Tries at choosing a PIN on this call (`enrolPin`), counted before each is judged. Absent until the first. */
+  pinEnrolments?: number;
+  /**
+   * The PIN digests this call's tries are storing and have not yet recorded as enrolled
+   * (`pin.enrolled`), one entry per try. Never the digits. At most `maxAttemptsPerCall` entries.
+   */
+  pinPending?: Array<{ subjectKey: string; digest: string; enrolmentId: string }>;
+  /**
+   * The last enrolment this call recorded (`pin.enrolled`). While that entry is still waiting in
+   * the call's outbox (the ledger failed after the write), the same PIN again finishes as this
+   * enrolment, with no second entry. Never the digits. Absent until the first.
+   */
+  pinEnrolled?: { subjectKey: string; enrolmentId: string };
+  /**
+   * Set once a duress PIN passed on this call (VER-12), and never cleared: the scopes refused on
+   * top of money, contact and access, as Badge's settings named them then. The only place the
+   * duress state is kept. Absent on every other call.
+   */
+  duress?: { refuseScopes: string[] };
+  /**
+   * Duress alerts owed to the host's notifier (VER-12), one per duress entry, written with the
+   * entry and removed once `notify` resolved. Never the PIN. Absent until the first.
+   */
+  duressAlerts?: Array<DuressAlertRecord>;
+  /** Duress entries on this call so far, numbering their alerts. Absent until the first. */
+  duressEntries?: number;
   /** A keypad or PIN factor matched since verification last started from nothing. */
   knowledgeMatched: boolean;
   carrier: CarrierSignalReport | null;
@@ -61,10 +99,19 @@ export interface BadgeSlice {
    * A reserved or sent link resumes with the same idempotency keys after a failure.
    */
   identityLink: "none" | "reserved" | "sent" | "texted" | "void";
-  /** Goes up on every beginVerification, so a result judged for an earlier one is never applied. */
+  /** Goes up on every beginVerification and every taint, so a result judged before either is never applied. */
   epoch: number;
   /** Identity sessions whose outcome may still count. */
   identitySessions: string[];
+  /** The texted code this call holds: null before any send, and after a taint or a change of subject. */
+  textCode: TextCodeState | null;
+  /**
+   * The texted code sends whose ledger entries are not written yet (VER-2), one hold per send: the
+   * call does not end while any is held, each until its own entry is written or its `until` passes,
+   * so no send's entry follows the receipt. `sending` once the send claimed its dispatch to the SMS
+   * adapter, which renewed `until` from the claim. Absent until the first send.
+   */
+  textSends?: Array<{ sendId: string; until: string; sending?: true }>;
   /** How many verifications finished on this call, and the last one's level and counted methods. */
   finished: number;
   lastLevel: AssuranceLevel;
@@ -77,12 +124,104 @@ export interface BadgeSlice {
    * bumps the epoch. Absent on a call never tainted, and on a call stored before the rule.
    */
   voidedEpoch?: number;
+  /**
+   * The accepted passes whose counters are not yet cleaned up (`forgetPass`), one each, so two
+   * factors passing at once on one call each get theirs. Absent when nothing is owed.
+   */
+  forgetsOwed?: OwedCleanup[];
+  /** The last id an owed cleanup was given on this call. Absent until the first. */
+  forgetSeq?: number;
+  /** The one owed cleanup a call saved before they were kept one per pass: read with `owedCleanups`. */
+  forgetOwed?: Omit<OwedCleanup, "id">;
+  /** The callback this call asked for, or the one it is (callback.ts). Absent on calls saved before: read it with `callbackOf`. */
+  callback: CallbackState;
+  /** Untrusted content seen on this call so far (onUntrusted counts it), so an entry judged across one is known. Absent on calls saved before. */
+  taints?: number;
+}
+
+/**
+ * An accepted pass whose counters are not yet cleaned up (`forgetPass`): saved with the pass, so a
+ * write that fails after the pass was saved (its ledger entry) still gets the cleanup, in the same
+ * call to `submitFactor` or the call's next. `id` is unique on the call (`forgetSeq`; 0 for one
+ * saved before ids). `hidden` is the duress PIN's hidden counter (VER-12), when it is on; absent on
+ * a pass saved before it was kept here. `claimed` is set on the call before the removals that are
+ * not safe to run twice (the number's own failure, the hidden counter's) run, so a replay skips them;
+ * `claimToken` names the run that claimed it (absent on a claim saved before it was kept: no run's).
+ */
+export interface OwedCleanup {
+  id: number;
+  keys: AttemptCounterKey[];
+  at: string;
+  hidden?: { key: AttemptCounterKey; duress: boolean };
+  claimed?: true;
+  claimToken?: string;
+}
+
+/** The cleanups a call owes, the one saved before they were kept one per pass included (id 0). */
+function owedCleanups(s: BadgeSlice): OwedCleanup[] {
+  return [...(s.forgetOwed === undefined ? [] : [{ ...s.forgetOwed, id: 0 }]), ...(s.forgetsOwed ?? [])];
+}
+
+/** Keeps the call's owed cleanups as `list`, in one place, the field saved before ids gone. */
+function keepOwed(s: BadgeSlice, list: OwedCleanup[]): void {
+  delete s.forgetOwed;
+  if (list.length === 0) delete s.forgetsOwed;
+  else s.forgetsOwed = list;
 }
 
 /** Which policy and which FlowConfig revision judged a verification. */
 export interface JudgedBy {
   policyVersion: string;
   configRevision: string;
+}
+
+/** A call's part in a callback (VER-9). One per call. */
+export interface CallbackState {
+  /**
+   * On the call that asks: `none`, `requested` while it is decided, then `placed` or `refused`.
+   * On the callback call: `dialing`, `dialed` once the dialer's reference is kept, then `passed` or
+   * `failed`; `void` if untrusted content entered it or its subject changed before the outcome.
+   */
+  status: "none" | "requested" | "placed" | "refused" | "dialing" | "dialed" | "passed" | "failed" | "void";
+  /** The other call: the callback call, on the call that asked; the call that asked, on the callback call. */
+  callId: string | null;
+  /** The dialer's reference, on the callback call. */
+  ref: string | null;
+  /** The counters a failed callback stays counted under, and a pass forgets. */
+  keys: AttemptCounterKey[];
+  /** The hard lock this callback's failure starts, written to the ledger if it fails. */
+  lock: Lock | null;
+  /** The subject the callback is for, kept from the request, so a restart for another subject cannot take it over. */
+  subjectKey: string | null;
+  subject: SubjectRecord | null;
+  /** On the call that asks: its verification (`BadgeSlice.epoch`) when it asked. */
+  epoch: number | null;
+  /** ISO 8601. When the callback is counted, toward the daily limit and as a failure. A resumed request counts at the same time, and a pass forgets that failure. */
+  at: string | null;
+  /** On a passed callback call: its failure is still to be forgotten. A replayed outcome retries that. */
+  forgetPending: boolean;
+  /**
+   * Set on the call before the pass's own failure comes off the calling number, which runs at most
+   * once (a replay could take off another failure of the same millisecond). Absent until then, and
+   * on calls saved before it.
+   */
+  forgetClaimed?: true;
+  /** The token of the try that set `forgetClaimed` (absent on a claim saved before it was kept: no try's). */
+  forgetClaimToken?: string;
+  /** On the callback call: the number the dial goes to, kept in the write that claims the dial, and the one the carrier check asks about. */
+  to?: string;
+  /** On the callback call: how often the number on file changed between tries of the dial. Each number gets its own idempotency key. */
+  redials?: number;
+  /** On the callback call: ISO 8601, when a dial resumed a day or more after `at` was counted toward the daily limit again. */
+  countedAt?: string;
+  /**
+   * On the callback call: ISO 8601, the claim of the one try that counts a resumed dial toward the
+   * daily limit, at that time. Another try within the day counts nothing: it dials once that count
+   * is in the store, and otherwise leaves the dial to the try that claimed it.
+   */
+  admitting?: string;
+  /** The token of the try that saved `admitting` (absent on a claim saved before it was kept: no try's). */
+  admittingToken?: string;
 }
 
 export interface KeypadResult {
@@ -99,8 +238,15 @@ export interface VerificationResult {
 
 export type OutcomeResult = { applied: false } | { applied: true; callId: string };
 
-const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin"];
-const PIN_KEYS = ["mode", "minDigits", "maxDigits", "maxAttemptsPerCall"];
+/**
+ * Who verification is for, and optionally the number the call came from (E.164, from the carrier,
+ * never from the model). The number is never a factor: it only keys a counter across calls, so a
+ * caller trying one account after another from one line is locked out too.
+ */
+export type BeginVerificationInput = ({ accountNumber: string } | { subjectKey: string }) & { callingNumber?: string };
+
+const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin", "lockout"];
+const PIN_KEYS = ["mode", "minDigits", "maxDigits", "maxAttemptsPerCall", "duress"];
 
 /** The subject whose number links may go to: only once a keypad or PIN factor matched. */
 export function matchedSubject(record: CallRecord): SubjectRecord {
@@ -116,18 +262,29 @@ export function badgeModule(options: { factors?: readonly FactorPlugin[] } = {})
   return new BadgeModule(options.factors ?? []);
 }
 
+/**
+ * Badge never changes once built: a factor added later (`withFactor`) or supplied by an outside
+ * module (`withOutsideFactors`) gives a new Badge, which the engine swaps into its registry. So a
+ * Badge shared by several engines never gains a factor through one of them.
+ */
 export class BadgeModule implements AssuranceModule {
   readonly manifest: AssuranceModule["manifest"];
+  /** The host's plug-ins: Badge provides them, in its manifest. */
   readonly #plugins = new Map<string, FactorPlugin>();
+  /** The judges outside modules supply: those modules provide the factors (and the registry checked them); Badge runs them. */
+  readonly #outside = new Map<string, FactorPlugin>();
 
-  constructor(plugins: readonly FactorPlugin[]) {
+  constructor(plugins: readonly FactorPlugin[], outside: readonly FactorPlugin[] = []) {
     const errors: string[] = [];
-    for (const plugin of plugins) {
+    for (const given of plugins) {
+      // Read once: the copy that passes the checks is the one Badge keeps and runs.
+      const plugin = snapshotFactorPlugin(given);
       const problems = checkFactorPlugin(plugin, [...FACTOR_KINDS, ...this.#plugins.keys()]);
       errors.push(...problems);
       if (problems.length === 0) this.#plugins.set(plugin.kind, plugin);
     }
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+    for (const plugin of outside) this.#outside.set(plugin.kind, plugin);
     this.manifest = {
       name: BADGE,
       version: "1",
@@ -138,28 +295,43 @@ export class BadgeModule implements AssuranceModule {
     };
   }
 
+  /** This Badge with one more plug-in of the host's. Refuses a bad plug-in or a kind Badge already has. */
+  withFactor(plugin: FactorPlugin): BadgeModule {
+    return new BadgeModule([...this.#plugins.values(), plugin], [...this.#outside.values()]);
+  }
+
+  /** This Badge running the judges the installed outside modules supply (all of them, replacing the last set). */
+  withOutsideFactors(outside: readonly FactorPlugin[]): BadgeModule {
+    return new BadgeModule([...this.#plugins.values()], outside);
+  }
+
   plugin(kind: string): FactorPlugin | undefined {
-    return this.#plugins.get(kind);
+    return this.#plugins.get(kind) ?? this.#outside.get(kind);
+  }
+
+  /** Every factor kind Badge judges, on or off: its own, the host's plug-ins and the outside modules' judges. */
+  installedFactors(): string[] {
+    return [...this.manifest.provides.factors, ...this.#outside.keys()];
   }
 
   validateSettings(settings: unknown): string[] {
     if (!isObject(settings)) return ["must be an object with the factors that are on"];
     const errors = unknownKeys(settings, SETTINGS_KEYS).map((k) => `${k} is not a badge setting`);
-    const known = this.manifest.provides.factors;
+    const known = this.installedFactors();
     if (!isStringArray(settings.factors) || settings.factors.length === 0) {
       errors.push("factors must list at least one factor");
     } else {
       if (new Set(settings.factors).size !== settings.factors.length) errors.push("factors has duplicates");
       for (const kind of settings.factors) {
+        // No built-in factor is planned any more (VER-2 and VER-3 are built), so none is refused as unbuilt.
         if (!known.includes(kind)) errors.push(`factor ${kind} is not installed`);
-        const planned = BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS]?.planned;
-        if (planned !== undefined) errors.push(`factor ${kind} is not built yet (${planned})`);
       }
       if (settings.factors.includes("pin")) errors.push(...pinSettingsErrors(settings.pin));
     }
     if (settings.grantTtlSeconds !== undefined && !isIntegerIn(settings.grantTtlSeconds, 1, 3600)) {
       errors.push("grantTtlSeconds must be an integer from 1 to 3600");
     }
+    errors.push(...lockoutSettingsErrors(settings.lockout));
     return errors;
   }
 
@@ -167,9 +339,13 @@ export class BadgeModule implements AssuranceModule {
     const s = settings as BadgeSettings;
     const adapters = new Set<string>(this.manifest.adapters);
     for (const kind of s.factors) {
-      for (const a of BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS]?.adapters ?? this.#plugins.get(kind)!.adapters) adapters.add(a);
+      const builtIn = BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS];
+      for (const a of builtIn?.adapters ?? this.plugin(kind)!.adapters) adapters.add(a);
+      // A factor the caller enters (a plug-in always is) is counted across calls.
+      if (builtIn?.entered !== false) adapters.add("counters");
     }
     if (s.pin?.mode === "verifier" && s.factors.includes("pin")) adapters.add("pinVerifier");
+    if (s.pin?.duress !== undefined && s.factors.includes("pin")) adapters.add("duressNotifier");
     return [...adapters];
   }
 
@@ -191,6 +367,9 @@ export class BadgeModule implements AssuranceModule {
       const level = step.level;
       const reachable = ctx.policy.levels.some((rule) => rule.level >= level && rule.anyOf.some((set) => set.every((k) => factors.includes(k))));
       if (!reachable) errors.push(`level ${level} cannot be reached with [${factors.join(", ")}] under the policy`);
+      if (factors.includes("text_code") && ctx.policy.textCodeCountryCodes === undefined) {
+        errors.push("factor text_code needs the policy's textCodeCountryCodes, or no code is ever texted");
+      }
     }
     return errors;
   }
@@ -219,22 +398,31 @@ export class BadgeModule implements AssuranceModule {
     const initial: BadgeSlice = {
       subjectKey: null,
       subject: null,
+      numberKey: null,
       attempts: {},
       knowledgeMatched: false,
       carrier: null,
       identityLink: "none",
       epoch: 0,
       identitySessions: [],
+      textCode: null,
       finished: 0,
       lastLevel: 0,
       lastMethods: [],
       lastJudgedBy: null,
+      callback: noCallback(),
+      taints: 0,
     };
     return initial as unknown as JsonValue;
   }
 
   enterStep(_step: FlowStep, s: JsonValue): JsonValue {
     return (s as unknown as BadgeSlice).finished;
+  }
+
+  blocksEnd(s: JsonValue, now: Date): string | null {
+    const held = ((s as unknown as BadgeSlice).textSends ?? []).some((send) => now.getTime() < Date.parse(send.until));
+    return held ? "a texted code is still being sent; end the call once it is sent" : null;
   }
 
   stepStatus(step: FlowStep, view: StepView): StepStatus {
@@ -244,11 +432,14 @@ export class BadgeModule implements AssuranceModule {
   }
 
   onUntrusted(s: JsonValue): JsonValue {
-    // A photo ID link sent before the taint no longer counts. One link per call still holds.
-    // The verification open now (or the last one) is void: it never grants a level. The next
-    // beginVerification bumps the epoch, so a new verification counts as usual.
+    // A photo ID link or a texted code sent before the taint no longer counts, nor does a callback
+    // still ringing, nor the keypad or PIN match made before it (it unlocks nothing until a fresh
+    // verification matches). One link per call still holds. The epoch moves on too, so a result or a send
+    // decided before the taint is not applied after it, and the verification open now (or the last
+    // one) is void: it never grants a level. The next beginVerification moves it on again, so a new
+    // verification counts as usual.
     const badge = s as unknown as BadgeSlice;
-    return { ...badge, identitySessions: [], identityLink: voided(badge.identityLink), voidedEpoch: badge.epoch } as unknown as JsonValue;
+    return { ...badge, epoch: badge.epoch + 1, knowledgeMatched: false, identitySessions: [], identityLink: voided(badge.identityLink), textCode: null, callback: voidedCallback(callbackOf(badge)), voidedEpoch: badge.epoch + 1, taints: (badge.taints ?? 0) + 1 } as unknown as JsonValue;
   }
 
   receiptPart(s: JsonValue, state: SessionState): { [key: string]: JsonValue } {
@@ -273,8 +464,23 @@ function voided(link: BadgeSlice["identityLink"]): BadgeSlice["identityLink"] {
   return link === "reserved" || link === "sent" ? "void" : link;
 }
 
+/** The callback state of a call that asked for none. */
+function noCallback(): CallbackState {
+  return { status: "none", callId: null, ref: null, keys: [], lock: null, subjectKey: null, subject: null, epoch: null, at: null, forgetPending: false };
+}
+
+/** A call's callback state. A slice stored before `callback` existed has none: it reads as a call that asked for none. */
+export function callbackOf(s: BadgeSlice): CallbackState {
+  return (s as { callback?: CallbackState }).callback ?? noCallback();
+}
+
+/** A callback whose outcome has not arrived, or whose request is still being decided, can no longer count: it is void. */
+function voidedCallback(callback: CallbackState): CallbackState {
+  return callback.status === "requested" || callback.status === "dialing" || callback.status === "dialed" ? { ...callback, status: "void" } : callback;
+}
+
 /** Refuses to apply a result judged for an earlier verification of this call. */
-function assertSameVerification(s: BadgeSlice, epoch: number): void {
+export function assertSameVerification(s: BadgeSlice, epoch: number): void {
   if (s.epoch !== epoch) throw new EngineError("precondition_failed", "verification restarted while this result was on its way; it does not count");
 }
 
@@ -285,13 +491,50 @@ function pinSettingsErrors(pin: unknown): string[] {
   if (!isIntegerIn(pin.minDigits, 4, 12)) errors.push("pin.minDigits must be 4 to 12");
   else if (!isIntegerIn(pin.maxDigits, pin.minDigits, 12)) errors.push("pin.maxDigits must be from minDigits to 12");
   if (!isIntegerIn(pin.maxAttemptsPerCall, 1, 5)) errors.push("pin.maxAttemptsPerCall must be 1 to 5");
+  if (pin.duress !== undefined) errors.push(...duressSettingsErrors(pin.duress));
   return errors;
+}
+
+function duressSettingsErrors(duress: unknown): string[] {
+  if (!isObject(duress)) return ["pin.duress must be an object with refuseScopes"];
+  const errors = unknownKeys(duress, ["refuseScopes"]).map((k) => `pin.duress.${k} is not a duress setting`);
+  if (!isStringArray(duress.refuseScopes)) errors.push("pin.duress.refuseScopes must list scopes (it may be empty)");
+  else if (new Set(duress.refuseScopes).size !== duress.refuseScopes.length) errors.push("pin.duress.refuseScopes has duplicates");
+  return errors;
+}
+
+/**
+ * Whether a duress call refuses a scope (VER-12): every scope whose class is not `none` (money,
+ * contact, access, or no class at all), and the scopes Badge's settings named. False on any other call.
+ */
+export function duressRefuses(record: CallRecord, scope: string, cls: ScopeClass | null): boolean {
+  const duress = (record.modules[BADGE] as unknown as BadgeSlice | undefined)?.duress;
+  return duress !== undefined && (cls !== "none" || duress.refuseScopes.includes(scope));
+}
+
+/** The duress alerts a call record owes (VER-12). */
+/** An alert a call owes: `clears` is how many clearings the subject had when its entry was judged. */
+export interface DuressAlertRecord {
+  alertId: string;
+  subjectKey: string;
+  at: string;
+  clears: number;
+}
+
+export function owedDuressAlerts(record: CallRecord): DuressAlertRecord[] {
+  return (record.modules[BADGE] as unknown as BadgeSlice | undefined)?.duressAlerts ?? [];
+}
+
+/** Takes one delivered duress alert off a call record. */
+export function acknowledgeDuressAlert(record: CallRecord, alertId: string): void {
+  const s = record.modules[BADGE] as unknown as BadgeSlice;
+  s.duressAlerts = s.duressAlerts!.filter((a) => a.alertId !== alertId);
 }
 
 // ---- runtime -------------------------------------------------------------------------------
 
 /** Refuses a factor that is off, or that the current flow step does not allow. */
-function allowFactor(rt: EngineRuntime, record: CallRecord, kind: string): void {
+export function allowFactor(rt: EngineRuntime, record: CallRecord, kind: string): void {
   const settings = rt.settings<BadgeSettings>(BADGE);
   if (!settings.factors.includes(kind)) throw new EngineError("precondition_failed", `the ${kind} factor is turned off`);
   const step = stepOfType<BadgeVerifyStep>(record, "badge.verify");
@@ -301,30 +544,70 @@ function allowFactor(rt: EngineRuntime, record: CallRecord, kind: string): void 
 function maxAttempts(rt: EngineRuntime, module: BadgeModule, kind: string): number {
   if (kind === "keypad_knowledge") return rt.policy.maxKeypadAttemptsPerCall;
   if (kind === "pin") return rt.settings<BadgeSettings>(BADGE).pin!.maxAttemptsPerCall;
+  // A policy without spoken fields gives no attempts, so a spoken answer is never judged against nothing.
+  if (kind === "spoken_knowledge") return rt.policy.spoken?.maxAttemptsPerCall ?? 0;
   return module.plugin(kind)!.maxAttemptsPerCall;
 }
 
 /**
  * Starts (or restarts) verification. The subject is either the account number the caller keyed
  * (hashed under the knowledge key) or a subject key the host's code chose, for example the owner
- * of the line. Choosing the subject is not a factor: only factors raise the level.
+ * of the line. Choosing the subject is not a factor: only factors raise the level. With a calling
+ * number, failures are also counted against that number across calls; a later restart that
+ * leaves it out keeps it. A start is resolved (`resolveVerification`), then written
+ * (`startVerification`); the engine counts a running limited flow's starts in between.
  */
-export async function beginVerification(rt: EngineRuntime, callId: string, input: { accountNumber: string } | { subjectKey: string }): Promise<void> {
+export interface ResolvedVerification {
+  subjectKey: string | null;
+  numberKey: string | null;
+  subject: SubjectRecord | null;
+  byHost: boolean;
+}
+
+/** Checks a verification start's input and keys its subject and number, without writing. */
+export async function resolveVerification(rt: EngineRuntime, input: BeginVerificationInput): Promise<ResolvedVerification> {
   rt.settings(BADGE);
   // Read once: the key or account number checked is the one used, and the ledger names its source.
   const byHost = "subjectKey" in input;
   const given: unknown = byHost ? input.subjectKey : (input as { accountNumber: string }).accountNumber;
   let subjectKey: string | null;
   if (byHost) {
+    // A string only: a regex test turns an array into its text, which would pass, be found by the
+    // record store as the subject, and then key no counter, so the PIN could be guessed without a lock.
     if (typeof given !== "string" || !/^[0-9a-f]{64}$/.test(given)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
     subjectKey = given;
   } else {
-    subjectKey = typeof given === "string" && isKeypadEntry(given) ? rt.hmac(`subject:${given}`) : null;
+    subjectKey = typeof given === "string" && isKeypadEntry(given) ? await rt.hmac(`subject:${given}`) : null;
   }
+  const number = input.callingNumber;
+  if (number !== undefined && !isCallingNumber(number)) throw new EngineError("invalid_input", "callingNumber must be E.164; leave it out when the number is withheld");
+  const numberKey = number === undefined ? null : await rt.hmac(`number:${number}`);
   const subject = subjectKey === null ? null : await rt.adapter("records").getSubject(rt.workspaceId, subjectKey);
+  return { subjectKey, numberKey, subject, byHost };
+}
+
+/** Refuses a verification start the call cannot take now (also checked by a write made just before it). */
+export function assertCanBegin(draft: CallDraft): BadgeSlice {
+  stepOfType(draft.record, "badge.verify");
+  const s = draft.slice<BadgeSlice>(BADGE);
+  draft.assertCan({ type: "verification_started", reset: true });
+  return s;
+}
+
+/** The counters a started verification keys: its subject, and its number or the one the call kept. */
+export function verificationKeys(slice: BadgeSlice, resolved: ResolvedVerification): { subjectKey: string | null; numberKey: string | null } {
+  return { subjectKey: resolved.subjectKey, numberKey: resolved.numberKey ?? slice.numberKey };
+}
+
+/**
+ * Writes a resolved verification start on the call. `admit` runs inside the write, on the call as it
+ * is then, before anything changes, and throws to refuse it (the engine's late flow count).
+ */
+export async function startVerification(rt: EngineRuntime, callId: string, resolved: ResolvedVerification, admit: (draft: CallDraft, slice: BadgeSlice) => void): Promise<void> {
+  const { subjectKey, numberKey, subject, byHost } = resolved;
   await rt.update(callId, (draft) => {
-    stepOfType(draft.record, "badge.verify");
-    const s = draft.slice<BadgeSlice>(BADGE);
+    const s = assertCanBegin(draft);
+    admit(draft, s);
     const reset = subjectKey !== s.subjectKey;
     draft.apply({ type: "verification_started", reset });
     s.epoch++;
@@ -332,6 +615,8 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
       // Another subject: nothing collected for the previous one can count for this one.
       s.identitySessions = [];
       s.identityLink = voided(s.identityLink);
+      s.callback = voidedCallback(callbackOf(s));
+      s.textCode = null;
     }
     if (draft.record.state.factors.length === 0) {
       s.knowledgeMatched = false;
@@ -339,44 +624,276 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
     }
     s.subjectKey = subjectKey;
     s.subject = subject;
+    if (numberKey !== null) s.numberKey = numberKey;
     draft.emit("verification.started", "code", { subject: byHost ? "host" : "account" });
   });
 }
 
+/** Refuses an attempt the call cannot take now: a factor that is off or off-step, a phase that is not verifying, a restarted verification. */
+function assertAttempt(rt: EngineRuntime, draft: CallDraft, kind: string, epoch: number): BadgeSlice {
+  allowFactor(rt, draft.record, kind);
+  draft.assertCan({ type: "factor_recorded", factor: { kind, passed: false, at: rt.now() } });
+  const s = draft.slice<BadgeSlice>(BADGE);
+  assertSameVerification(s, epoch);
+  return s;
+}
+
+/** Answers `locked` without judging, and says so in the ledger: which counter and the factor, never a value. */
+async function refuseLocked(rt: EngineRuntime, callId: string, kind: string, epoch: number, lock: Lock): Promise<KeypadResult> {
+  await rt.update(callId, (draft) => {
+    assertAttempt(rt, draft, kind, epoch);
+    draft.emit("verification.locked", "code", { kind, scope: lock.scope, hard: lock.hard, until: lock.until });
+  });
+  return { matched: false, locked: true };
+}
+
 /**
- * Judges one entered factor: keypad knowledge, the PIN, or a plug-in. The attempt is counted
- * first; after the factor's limit the line stops judging, even the right answer.
+ * Judges one entered factor: keypad knowledge, the PIN, or a plug-in. The counters across calls
+ * are read first, and a locked subject or number is refused without judging or counting. Then the
+ * attempt is counted on the call and as a failure across calls, both before it is judged; an
+ * accepted pass forgets the subject's failures and its own on the number. After the factor's limit the line stops judging, even the right answer.
+ * A judge that throws records no factor and does not refund the attempt.
  */
 export async function submitFactor(rt: EngineRuntime, module: BadgeModule, callId: string, kind: string, entry: FactorEntry): Promise<KeypadResult> {
   const builtIn = BUILT_IN_FACTORS[kind as keyof typeof BUILT_IN_FACTORS];
   const plugin = module.plugin(kind);
   if (builtIn?.entered !== true && plugin === undefined) throw new EngineError("invalid_input", `${kind} is not a factor the caller enters`);
+  const before = await rt.read(callId);
+  allowFactor(rt, before, kind);
+  const current = before.modules[BADGE] as unknown as BadgeSlice | undefined;
+  if (current === undefined) throw new EngineError("module_disabled", `${BADGE} was off when this call started`);
+  const counters = rt.adapter("counters");
+  // A pass this call saved earlier whose cleanup did not run (its write failed after saving it).
+  for (const owed of owedCleanups(current)) await settleForget(rt, callId, owed.id);
+  const lockout = lockoutOf(rt.settings<BadgeSettings>(BADGE).lockout);
+  const keys = counterKeys(rt.workspaceId, kind, current);
+  const settings = rt.settings<BadgeSettings>(BADGE);
+  // With the duress PIN on, a subject's failures are also counted where a duress entry never
+  // resets them, and the hard lock they reach holds (duress-flag.ts).
+  const duressOn = settings.pin?.duress !== undefined;
+  const hidden = duressOn && current.subjectKey !== null ? hiddenCounterKey(rt.workspaceId, kind, current.subjectKey) : null;
+  // The flag is read for every subject, the duress PIN on or off: a subject flagged while it was on
+  // stays under duress after a config turns it off, until the business clears it.
+  const flag = current.subjectKey !== null ? duressFlagKey(rt.workspaceId, current.subjectKey) : null;
+  const lock =
+    (await currentLock(counters, lockout, keys, rt.clock.now())) ??
+    (hidden === null ? null : hiddenHardLock(lockout, await counters.get(hidden, hiddenWindowStart(lockout, rt.clock.now())), rt.clock.now()));
+  if (lock !== null) return refuseLocked(rt, callId, kind, current.epoch, lock);
   const reserved = await rt.update(callId, (draft) => {
-    allowFactor(rt, draft.record, kind);
-    draft.assertCan({ type: "factor_recorded", factor: { kind, passed: false, at: rt.now() } });
-    const s = draft.slice<BadgeSlice>(BADGE);
+    const s = assertAttempt(rt, draft, kind, current.epoch);
     const max = maxAttempts(rt, module, kind);
-    const used = s.attempts[kind] ?? 0;
+    // Own keys only: an inherited one (`constructor`) must never stand in for a count.
+    const used = Object.hasOwn(s.attempts, kind) ? s.attempts[kind]! : 0;
     if (used >= max) return null;
     s.attempts[kind] = used + 1;
-    return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch };
+    return { subjectKey: s.subjectKey, subject: s.subject, last: used + 1 >= max, epoch: s.epoch, locale: draft.record.locale, taints: s.taints };
   });
   if (reserved === null) return { matched: false, locked: true };
-  const input = { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey, subject: reserved.subject, entry, hmac: (d: string) => rt.hmac(d) };
-  const passed =
-    kind === "keypad_knowledge"
-      ? await judgeKeypad(rt.policy, input)
-      : kind === "pin"
-        ? await judgePin(rt, rt.settings<BadgeSettings>(BADGE).pin as PinSettings, input)
-        : (await plugin!.judge(input)) === true;
-  await rt.update(callId, (draft) => {
-    assertSameVerification(draft.slice<BadgeSlice>(BADGE), reserved.epoch);
-    const factor = { kind, passed, at: rt.now() };
-    draft.apply({ type: "factor_recorded", factor });
-    if (passed && KNOWLEDGE_FACTORS.includes(kind)) draft.slice<BadgeSlice>(BADGE).knowledgeMatched = true;
-    draft.emit("verification.factor", "code", { kind, passed });
-  });
-  return { matched: passed, locked: !passed && reserved.last };
+  const at = rt.clock.now();
+  const recorded = await recordFailures(counters, lockout, keys, at);
+  // Another attempt, on this call or another, locked the subject or number since they were read.
+  // This entry is not judged, so it gives back the call's attempt it reserved, like one refused up front.
+  if (recorded.raced !== null) {
+    await rt.update(callId, (draft) => {
+      const s = draft.slice<BadgeSlice>(BADGE);
+      s.attempts[kind] = Math.max(0, s.attempts[kind]! - 1);
+    });
+    return refuseLocked(rt, callId, kind, reserved.epoch, recorded.raced);
+  }
+  const hiddenAfter = hidden === null ? null : await counters.recordFailure(hidden, at.toISOString(), hiddenWindowStart(lockout, at));
+  const input = { workspaceId: rt.workspaceId, subjectKey: reserved.subjectKey, subject: reserved.subject, entry, hmac: (d: string) => rt.hmac(d), locale: reserved.locale };
+  let outcome: PinOutcome;
+  try {
+    if (kind === "pin") outcome = await judgePin(rt, settings.pin as PinSettings, input);
+    else {
+      const passed =
+        kind === "keypad_knowledge"
+          ? await judgeKeypad(rt.policy, input)
+          : kind === "spoken_knowledge"
+            ? await judgeSpoken(rt.policy.spoken!, input)
+            : (await plugin!.judge(input)) === true;
+      outcome = passed ? "pass" : "fail";
+    }
+  } catch (error) {
+    // A key store, PIN verifier or plug-in that throws is not a wrong answer: no factor is recorded
+    // and the error reaches the host. The attempt stays counted, so an entry crafted to make a judge
+    // throw never gives a free try. The ledger notes the failure, as the success path would, only on
+    // the same verification of a call still open; a note refused or failed never hides the error.
+    await rt
+      .update(callId, (draft) => {
+        assertSameVerification(draft.slice<BadgeSlice>(BADGE), reserved.epoch);
+        draft.assertCan({ type: "factor_recorded", factor: { kind, passed: false, at: rt.now() } });
+        draft.emit("verification.factor_error", "code", { kind });
+      })
+      .catch(() => undefined);
+    throw error;
+  }
+  // Only an entry of the duress PIN itself sets the flag. A pass that is a duress entry because the
+  // flag was set when it was read never writes it again: a clearing that lands while it is judged
+  // stays cleared, and the pass does the same store work as any pass.
+  const pinDuress = outcome === "duress";
+  // The subject's clearings so far, read before the flag, so a clearing that lands after the flag
+  // was read is counted after this entry, and its alert's delivery never sets the flag over it.
+  const clears = outcome !== "fail" && current.subjectKey !== null ? await clearsSoFar(counters, rt.workspaceId, current.subjectKey) : 0;
+  // A subject under duress stays so: every pass on it, on any call, is a duress entry until the
+  // business clears the flag (clearDuress).
+  if (outcome === "pass" && flag !== null && (await isUnderDuress(counters, flag))) outcome = "duress";
+  // A duress entry is a pass everywhere the caller can reach: the factor, the level, the grant, the
+  // events, the receipt and the counters across calls. Only the call record's `duress` and the PIN
+  // entry's keyed tag differ.
+  const passed = outcome !== "fail";
+  const hard = passed ? null : (recorded.hard ?? (hiddenAfter === null ? null : hiddenHardLock(lockout, hiddenAfter, at)));
+  let stale: EngineError | null = null;
+  let failed: { error: unknown } | null = null;
+  // The id the pass's cleanup was saved under, from the write's last run.
+  let owedId = -1;
+  try {
+    stale = await rt.update(callId, (draft) => {
+      owedId = -1;
+      const s = draft.slice<BadgeSlice>(BADGE);
+      const now = rt.now();
+      const factor = { kind, passed, at: now };
+      // A duress entry is recorded against the call, not the verification: it stands, and its alert is
+      // owed, even if verification restarted or the call moved on while it was judged. The engine sends
+      // the alert after this write (and retries it until the notifier answers).
+      if (outcome === "duress") {
+        // With the duress PIN turned off since the flag was set, its list of scopes to refuse is gone:
+        // every scope of the policy is refused (fail closed).
+        s.duress ??= { refuseScopes: settings.pin?.duress === undefined ? Object.keys(rt.policy.scopes) : [...settings.pin.duress.refuseScopes] };
+        // Every entry of the duress PIN alerts. A pass that is duress only by the flag alerts once a
+        // call: the first, so a flagged owner's call always raises one, and a run of passes on one
+        // call does not flood the business.
+        if (pinDuress || s.duressEntries === undefined) {
+          // Unique without the id generator: the call and the number of this alert on it, which the
+          // compare-and-set write makes one per entry across every engine.
+          s.duressEntries = (s.duressEntries ?? 0) + 1;
+          const alert = { alertId: JSON.stringify(["duress", rt.workspaceId, callId, s.duressEntries]), subjectKey: reserved.subjectKey!, at: now, clears };
+          s.duressAlerts = [...(s.duressAlerts ?? []), alert];
+        }
+      }
+      // Untrusted content that entered the call while this entry was judged (any taint, the first or
+      // a later one): a pass from before it neither counts toward a grant nor restores the match. The
+      // attempt stays used, so this is no free guess; a failure is recorded as any failure is.
+      if (passed && s.taints !== reserved.taints) return new EngineError("precondition_failed", "untrusted content entered the call while this entry was judged, so it does not count; verify again");
+      // Otherwise the result is applied only to the verification it was judged for, as for any factor;
+      // a stale one is refused with the same error either way, after the write.
+      if (s.epoch !== reserved.epoch) return new EngineError("precondition_failed", "verification restarted while this result was on its way; it does not count");
+      if (!canApply(draft.record.state, { type: "factor_recorded", factor })) return new EngineError("invalid_transition", `factor_recorded is not allowed while ${draft.record.state.phase}`);
+      draft.apply({ type: "factor_recorded", factor });
+      if (passed && KNOWLEDGE_FACTORS.includes(kind)) s.knowledgeMatched = true;
+      // The cleanup is owed with the pass, in the same write: never for a pass that was not saved.
+      if (passed) {
+        owedId = (s.forgetSeq ?? 0) + 1;
+        s.forgetSeq = owedId;
+        const owed: OwedCleanup = { id: owedId, keys: structuredClone(keys), at: at.toISOString() };
+        if (hidden !== null) owed.hidden = { key: structuredClone(hidden), duress: outcome === "duress" };
+        keepOwed(s, [...owedCleanups(s), owed]);
+      }
+      draft.emit("verification.factor", "code", { kind, passed }, kind === "pin" ? outcome : undefined);
+      if (hard !== null) draft.emit("verification.locked", "code", { kind, scope: hard.scope, hard: true, until: hard.until });
+      return null;
+    });
+  } catch (error) {
+    // The entry could not be saved, or was saved and its ledger append failed: a duress PIN entry
+    // still flags its subject below, and the subject's next pass alerts.
+    failed = { error };
+  }
+  // A duress PIN entry flags its subject, even a stale one: durable and hidden, before the visible reset.
+  if (pinDuress) await flagDuressUnlessCleared(counters, rt.workspaceId, current.subjectKey!, clears);
+  // A stale entry's failure stays counted across calls, as for any entry that was not accepted.
+  if (stale !== null) throw stale;
+  // Only once the result is saved: a write that failed after saving it (the ledger) still owes the
+  // cleanup, a pass refused before saving owes none. The number keeps its failures but this
+  // attempt's own: they may be against other accounts, so a pass on this one must not clear them.
+  if (passed) await settleForget(rt, callId, owedId);
+  if (failed !== null) throw failed.error;
+  return { matched: passed, locked: !passed && (reserved.last || hard !== null) };
+}
+
+/**
+ * Runs the counters cleanup a saved pass owes, if the call still owes the one with `id`, then
+ * takes it off the call; a failure to take it off leaves it owed for the call's next factor. The
+ * subject's part is safe to run again. The rest is not (a removal by time can take another
+ * failure of the same millisecond, a reset a later failure), so it is claimed on the call first
+ * and runs at most once: a claim that is not saved runs none of it, and one that is saved and
+ * then fails leaves those failures until they leave the window (fail closed).
+ */
+async function settleForget(rt: EngineRuntime, callId: string, id: number): Promise<void> {
+  const owedOn = (s: BadgeSlice): OwedCleanup | undefined => owedCleanups(s).find((o) => o.id === id);
+  const owed = owedOn((await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice);
+  if (owed === undefined) return;
+  const counters = rt.adapter("counters");
+  const { keys, hidden, at } = owed;
+  await forgetPass(counters, keys, new Date(at));
+  if (owed.claimed !== true) {
+    // Not claimed (or claimed by another run first): this run leaves the rest to the run that holds it, or the next.
+    const take = (s: BadgeSlice, token: string): boolean => {
+      const list = owedCleanups(s);
+      const mine = list.find((o) => o.id === id);
+      if (mine === undefined || mine.claimed === true) return false;
+      mine.claimed = true;
+      mine.claimToken = token;
+      keepOwed(s, list);
+      return true;
+    };
+    if (!(await claimOnCall(rt, callId, take, (s, token) => owedOn(s)?.claimToken === token))) return;
+    await removeOwnOnNumbers(counters, keys, new Date(at));
+    // The hidden counter forgets up to the pass only on a pass that is not under duress; a duress
+    // entry takes off its own failure, as a pass does, and keeps the rest (forgetHidden).
+    if (hidden !== undefined) await forgetHidden(counters, hidden.key, at, hidden.duress);
+  }
+  await rt
+    .update(callId, (draft) => {
+      const s = draft.slice<BadgeSlice>(BADGE);
+      keepOwed(s, owedCleanups(s).filter((o) => o.id !== id));
+    })
+    .catch(() => undefined);
+}
+
+/**
+ * Claims a step of a cleanup on the call, so it runs at most once: true when this run's write saved
+ * the claim. `take` sets the claim on the slice and says whether it took it (false: not owed, or
+ * claimed already); `held` says whether the call holds it. A write that saved and then failed (the
+ * ledger, appended after the save) still claimed it, which the call says; one that did not save did not.
+ * `token` is this run's own, for `take` to save with the claim and `held` to compare: a claim another
+ * run saved after this run's write failed unsaved is never this run's.
+ */
+export async function claimOnCall(rt: EngineRuntime, callId: string, take: (s: BadgeSlice, token: string) => boolean, held: (s: BadgeSlice, token: string) => boolean): Promise<boolean> {
+  const token = randomBytes(12).toString("base64url");
+  let mine = false;
+  try {
+    return await rt.update(callId, (draft) => (mine = take(draft.slice<BadgeSlice>(BADGE), token)));
+  } catch {
+    if (!mine) return false;
+    return held((await rt.read(callId)).modules[BADGE] as unknown as BadgeSlice, token);
+  }
+}
+
+/** An opaque member id: no "@" and no space, so no email address or name reaches the ledger. */
+const MEMBER_ID = /^[A-Za-z0-9._-]{1,64}$/;
+
+/**
+ * The business lifts a subject's duress flag (VER-12): a host call from its own tools, never on a
+ * caller's request, once it knows the subject is safe. `duress.cleared` goes to the ledger with the
+ * member before the flag and the hidden counters are cleared, so no clearing goes unrecorded. Until
+ * then every pass on the subject is a duress entry.
+ */
+export async function clearDuress(rt: EngineRuntime, module: BadgeModule, subjectKey: string, memberId: string): Promise<void> {
+  rt.settings<BadgeSettings>(BADGE);
+  const errors: string[] = [];
+  if (typeof subjectKey !== "string" || !/^[0-9a-f]{64}$/.test(subjectKey)) errors.push("subjectKey must be 64 lower-case hex characters");
+  if (typeof memberId !== "string" || !MEMBER_ID.test(memberId)) errors.push("memberId must be an opaque id: 1 to 64 of letters, digits, '.', '_', '-'");
+  if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+  const counters = rt.adapter("counters");
+  // The ledger never says who was under duress: the subject as a keyed digest only the business can
+  // match (duressClearedSubject with its knowledge key), as enrolDuressPin writes nothing at all.
+  await rt.adapter("ledger").append({ callId: null, actor: "member", event: "duress.cleared", at: rt.now(), detail: { subject: await rt.hmac(duressClearedData(subjectKey)), memberId } });
+  // Counted before the flag goes, so an alert of an earlier entry, delivered later, never sets it again.
+  await recordClear(counters, rt.workspaceId, subjectKey, rt.clock.now());
+  await counters.reset(duressFlagKey(rt.workspaceId, subjectKey));
+  // Every installed factor's hidden counter, outside modules' included, not only those on now: a
+  // factor turned off while the subject is cleared keeps no hidden lock to hold when it is turned on again.
+  for (const kind of module.installedFactors()) await counters.reset(hiddenCounterKey(rt.workspaceId, kind, subjectKey));
 }
 
 /** Asks the carrier about the number on file, never the calling number. Only after a keypad or PIN match. */
@@ -387,8 +904,11 @@ export async function checkCarrier(rt: EngineRuntime, callId: string): Promise<{
   if (!canApply(before.state, { type: "factor_recorded", factor: { kind: "carrier_identity_match", passed: false, at: rt.now() } })) {
     throw new EngineError("invalid_transition", `the carrier is checked while verifying, not while ${before.state.phase}`);
   }
-  const epoch = (before.modules[BADGE] as unknown as BadgeSlice).epoch;
-  const report = await rt.adapter("carrier").check({ phoneNumber: subject.phoneOnFile });
+  const { epoch, callback } = before.modules[BADGE] as unknown as BadgeSlice;
+  // On a callback call, the line the dial rang, which the business may have changed since the
+  // subject was copied: never another line's evidence beside possession of this one.
+  if (callback.status === "dialing") throw new EngineError("precondition_failed", "the carrier is checked on a callback call once it is dialed");
+  const report = await rt.adapter("carrier").check({ phoneNumber: callback.to ?? subject.phoneOnFile });
   const trusted = textCodeTrusted(rt.policy, report);
   await rt.update(callId, (draft) => {
     allowFactor(rt, draft.record, "carrier_identity_match");
@@ -404,12 +924,6 @@ export async function checkCarrier(rt: EngineRuntime, callId: string): Promise<{
     draft.emit("verification.carrier_checked", "code", { checked: report.checked, textCodeTrusted: trusted, identityMatch: report.identityMatch });
   });
   return { textCodeTrusted: trusted };
-}
-
-/** The texted one-time code. Planned (VER-2): limits per subject and per number come first. */
-export async function sendTextCode(rt: EngineRuntime, callId: string): Promise<never> {
-  matchedSubject(await rt.read(callId));
-  throw new NotImplementedError("Engine.sendTextCode", "VER-2");
 }
 
 /**
@@ -488,33 +1002,38 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
     const policy = rt.policy;
     const judgedBy: JudgedBy = { policyVersion: policy.version, configRevision: rt.revision };
     const result = evaluateAssurance(policy, factors, s.carrier);
-    const scopes = scopesForLevel(policy, result.level).filter((scope) => step?.scopes === undefined || step.scopes.includes(scope));
+    // The call's caller ID attestation can only lower the level the factors reached, never raise it.
+    // A call stored before VER-10 has no attestation, and reads as none; a callback call the engine
+    // dialled is never capped (decision 10).
+    const level = capCallLevel(policy, result.level, draft.record);
+    const scopes = scopesForLevel(policy, level).filter((scope) => step?.scopes === undefined || step.scopes.includes(scope));
     const issuedAt = rt.clock.now();
     const grant =
-      result.level === 0
+      level === 0
         ? null
         : {
             grantId: rt.ids.next("grant"),
-            level: result.level,
+            level,
             scopes,
             ...judgedBy,
             issuedAt: issuedAt.toISOString(),
             expiresAt: new Date(issuedAt.getTime() + ttlMs).toISOString(),
           };
-    draft.apply({ type: "verification_finished", level: result.level, grant });
+    draft.apply({ type: "verification_finished", level, grant });
     s.finished++;
-    s.lastLevel = result.level;
+    s.lastLevel = level;
     s.lastMethods = result.counted;
     s.lastJudgedBy = judgedBy;
     draft.emit("verification.finished", "code", {
-      level: result.level,
+      level,
       methods: result.counted,
       discounted: result.discounted.map((d) => d.kind),
+      capped: level < result.level,
       ...judgedBy,
       ...(voidedByTaint ? { voidedByTaint: true } : {}),
     });
     if (grant !== null) draft.emit("grant.issued", "code", { grantId: grant.grantId, level: grant.level, scopes, expiresAt: grant.expiresAt, ...judgedBy });
-    return { level: result.level, scopes: grant === null ? [] : scopes };
+    return { level, scopes: grant === null ? [] : scopes };
   });
 }
 

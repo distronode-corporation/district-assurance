@@ -75,7 +75,7 @@ const portal = { audience: PORTAL, subjectKey: SUBJECT_KEY, nonce: NONCE };
 const forged = (claims: unknown) => `${Buffer.from(JSON.stringify({ alg: "ES256" })).toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.c2ln`;
 
 describe("step-up: config", () => {
-  const registry = (adapters = ["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "stepUpSigner"]) => new ModuleRegistry({ adapters, modules: builtInModules() });
+  const registry = (adapters = ["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "stepUpSigner", "counters"]) => new ModuleRegistry({ adapters, modules: builtInModules() });
   const stepUp = stepUpModule;
 
   it("needs an https issuer", () => {
@@ -86,7 +86,7 @@ describe("step-up: config", () => {
   });
 
   it("needs the stepUpSigner adapter", () => {
-    assert.deepEqual(validateConfig(stepUpConfig(), registry(["ledger", "records", "carrier", "identity", "messages", "payments", "signer"])), [
+    assert.deepEqual(validateConfig(stepUpConfig(), registry(["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "counters"])), [
       "modules.step-up: needs the stepUpSigner adapter, which the engine does not have",
     ]);
   });

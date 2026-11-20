@@ -11,6 +11,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import {
+  RateLimitedError,
   canonicalJson,
   createEngine,
   signStripePayload,
@@ -57,7 +58,7 @@ export interface DemoWorldOptions {
    * at `call_1` with every run would collide with an earlier run's requests.
    */
   ids?: IdGenerator;
-  /** Default: `demoConfig()`. */
+  /** Default: `demoCallbackConfig()`. */
   config?: FlowConfig;
   /** Hears each door the example relay opens. */
   onDoorOpened?: (target: string) => void;
@@ -130,10 +131,25 @@ export async function waitOutFailureWait(clock: Clock): Promise<void> {
   else await new Promise<void>((resolve) => setTimeout(resolve, FIRST_FAILURE_WAIT_MS + 100));
 }
 
+/**
+ * The demo's FlowConfig plus the callback factor (VER-9): on in Badge, a PIN and a callback reach
+ * level 2, and the `owner-callback` flow asks for it on its first step. Owner commands stay at level 1.
+ */
+export function demoCallbackConfig(): FlowConfig {
+  const config = demoConfig();
+  (config.modules.badge!.settings as { factors: string[] }).factors.push("callback");
+  config.policy.levels[1]!.anyOf.push(["pin", "callback"]);
+  config.flows["owner-callback"] = {
+    summary: "The owner's PIN, then a callback to the number on file, which runs the step again on its own call.",
+    steps: [{ type: "badge.verify", level: 2, factors: ["pin", "callback", "carrier_identity_match"], scopes: ["owner.command"] }],
+  };
+  return config;
+}
+
 export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
   const doorsOpened: string[] = [];
   const links: CreatedLink[] = [];
-  const config = options.config ?? demoConfig();
+  const config = options.config ?? demoCallbackConfig();
   const openedFor = new Set<string>();
   const sentGrants = new Map<string, SignedAccessGrant>();
   let relay: Server | null = null;
@@ -173,7 +189,7 @@ export function createDemoWorld(options: DemoWorldOptions = {}): DemoWorld {
     config,
     clock,
     ids: options.ids ?? t.ids,
-    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments, signer: generateTestSigner(), access: { lobby }, accessSigner },
+    adapters: { ledger: t.ledger, sessions: t.sessions, records: t.records, identity: t.identity, carrier: t.carrier, messages: t.messages, payments, counters: t.counters, dialer: t.dialer, signer: generateTestSigner(), access: { lobby }, accessSigner },
   });
   let n = 0;
   const world: DemoWorld = {
@@ -240,6 +256,8 @@ export interface ScriptRun {
   /** This call's payment link, once requested: runs share the fakes, so never "the latest link". */
   linkId: string;
   receipt: SignedReceipt | null;
+  /** The call the engine placed back to the number on file, in the callback script. */
+  callbackCallId?: string;
   /** This call's access grant, once Gate sent one (entry). */
   grantId?: string;
   /** The engine's deadline for this call's link, once texted (the live demo's payment wait). */
@@ -278,7 +296,7 @@ const ownerCommand: ScriptStep[] = [
   {
     label: "owner-command: PIN on process B",
     async run(w, call) {
-      await w.other.beginVerification(call.callId, { subjectKey: subjectKeyFor(TEST_KNOWLEDGE_KEY, OWNER_ACCOUNT) });
+      await w.other.beginVerification(call.callId, { subjectKey: subjectKeyFor(TEST_KNOWLEDGE_KEY, OWNER_ACCOUNT), callingNumber: "+15555550101" });
       await w.other.openSensitive(call.callId, "keypad");
       const wrong = await w.other.submitPin(call.callId, "1111");
       return { detail: wrong.matched ? "MATCHED a wrong PIN" : "no match (one attempt used)", ok: !wrong.matched };
@@ -332,7 +350,8 @@ const deposit: ScriptStep[] = [
   {
     label: "verify: keypad checks",
     async run(w, call) {
-      await w.engine.beginVerification(call.callId, { accountNumber: "12345678" });
+      const refused = await beginOrEnd(w, call, { accountNumber: "12345678" });
+      if (refused !== null) return refused;
       await w.engine.openSensitive(call.callId, "keypad");
       const keypad = await w.engine.submitKeypad(call.callId, { dob: "19850214" });
       await w.engine.closeSensitive(call.callId);
@@ -421,8 +440,25 @@ const deposit: ScriptStep[] = [
 ];
 
 /** Keypad and carrier to level 2, the scopes the flow's verify step names. */
+/**
+ * Begins verification for a flow with an hourly limit. Over it, the engine fails the flow and
+ * throws `RateLimitedError` with the call still open; the host ends that call, so the step ends it
+ * and fails. Null when verification began.
+ */
+async function beginOrEnd(w: DemoWorld, call: ScriptRun, input: { accountNumber: string }): Promise<StepOutcome | null> {
+  try {
+    await w.engine.beginVerification(call.callId, input);
+    return null;
+  } catch (error) {
+    if (!(error instanceof RateLimitedError)) throw error;
+    call.receipt = await w.engine.endCall(error.callId);
+    return { detail: `refused: rate_limited, call ${error.callId} ended`, ok: false };
+  }
+}
+
 export async function verifyToLevel2(w: DemoWorld, call: ScriptRun, scope: string): Promise<StepOutcome> {
-  await w.engine.beginVerification(call.callId, { accountNumber: "12345678" });
+  const refused = await beginOrEnd(w, call, { accountNumber: "12345678" });
+  if (refused !== null) return refused;
   await w.engine.submitKeypad(call.callId, { dob: "19850214" });
   await w.engine.checkCarrier(call.callId);
   const verified = await w.engine.finishVerification(call.callId);
@@ -539,6 +575,63 @@ const entry: ScriptStep[] = [
 ];
 
 export const SCRIPTS: Readonly<Record<DemoFlow, readonly ScriptStep[]>> = { "owner-command": ownerCommand, deposit, "deposit-connect": depositConnect, entry };
+
+/**
+ * A callback (VER-9), run by `npm run demo` after the four flows. Someone calls from a number that is
+ * not the owner's and keys the owner's PIN; the first call is ended and earns nothing. The engine
+ * calls the number on file back, the owner keys the confirmation and the PIN again, and only the
+ * callback call reaches level 2.
+ */
+export const CALLBACK_SCRIPT: readonly ScriptStep[] = [
+  {
+    label: "callback: PIN from another number",
+    async run(w, call) {
+      call.callId = (await w.engine.startCall({ flow: "owner-callback" })).callId;
+      await w.engine.beginVerification(call.callId, { subjectKey: subjectKeyFor(TEST_KNOWLEDGE_KEY, OWNER_ACCOUNT), callingNumber: "+15555550199" });
+      const pin = await w.engine.submitPin(call.callId, OWNER_PIN);
+      return { detail: pin.matched ? "matched, but caller ID can be spoofed" : "no match", ok: pin.matched };
+    },
+  },
+  {
+    label: "callback: asked, first call ended",
+    async run(w, call) {
+      await w.engine.requestCallback(call.callId);
+      const first = await w.engine.state(call.callId);
+      const position = await w.engine.flowPosition(call.callId);
+      return { detail: `first call ${first.phase}, level ${first.level}, flow ${position!.status}`, ok: first.phase === "ended" && first.level === 0 };
+    },
+  },
+  {
+    label: "callback: number on file answered",
+    async run(w, call) {
+      const dial = w.t.dialer.dialed.at(-1)!;
+      call.callbackCallId = dial.callId;
+      const outcome = await w.other.applyCallbackOutcome({ ref: dial.ref, answered: true, confirmed: true });
+      return { detail: `${dial.callId} rang the number on file, confirmation keyed, applied: ${String(outcome.applied)}`, ok: outcome.applied };
+    },
+  },
+  {
+    label: "callback: PIN again, carrier checked",
+    async run(w, call) {
+      const callbackCallId = call.callbackCallId!;
+      const pin = await w.engine.submitPin(callbackCallId, OWNER_PIN);
+      const carrier = await w.engine.checkCarrier(callbackCallId);
+      const verified = await w.engine.finishVerification(callbackCallId);
+      const first = await w.engine.state(call.callId);
+      return {
+        detail: `callback call level ${verified.level} (callback trusted: ${carrier.textCodeTrusted}), first call level ${first.level}`,
+        ok: pin.matched && verified.level === 2 && first.level === 0,
+      };
+    },
+  },
+  {
+    label: "callback: call ended",
+    async run(w, call) {
+      call.receipt = await w.engine.endCall(call.callbackCallId!);
+      return { detail: "no receipt in this flow, the ledger has both calls", ok: call.receipt === null };
+    },
+  },
+];
 
 export function isDemoFlow(name: unknown): name is DemoFlow {
   return name === "owner-command" || name === "deposit" || name === "deposit-connect" || name === "entry";

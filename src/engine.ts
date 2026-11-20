@@ -10,16 +10,15 @@
 // throws NotImplementedError. SPEC.md describes the flow.
 import { createPublicKey, type JsonWebKey } from "node:crypto";
 
-import type { AccessController, IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
+import type { AccessController, AttemptCounterKey, AuditEntry, IntakeRecord, ReceiptSigner, SessionStore } from "./core/adapters.ts";
 import { canonicalJson, hasLoneSurrogate, type JsonValue } from "./core/canonical.ts";
 import { randomIds, systemClock, type Clock, type IdGenerator } from "./core/clock.ts";
 import { ConfigError, assertConfig, moduleEnabled, type FlowConfig } from "./core/config.ts";
-import { EngineError, NotImplementedError } from "./core/errors.ts";
+import { EngineError, RateLimitedError } from "./core/errors.ts";
 import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
 import type { Actor, EngineEventName, EventListener } from "./core/events.ts";
-import { hmacSha256Hex } from "./core/hash.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
-import type { AssuranceLevel, VerificationPolicy } from "./core/policy.ts";
+import { ATTESTATIONS, capCallLevel, scopeClass, scopesForLevel, type AssuranceLevel, type Attestation, type ScopeClass, type VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, type RedactionFinding, type Redactor } from "./core/redaction.ts";
 import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
 import { MemorySessionStore } from "./core/session-store.ts";
@@ -35,24 +34,88 @@ import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
 import * as refunds from "./pay/refunds.ts";
 import type { ConsentRecord } from "./prove/consent.ts";
 import { detailCarriesCardNumber } from "./prove/ledger.ts";
-import type { ReceiptBody, SignedReceipt } from "./prove/receipt.ts";
+import { receiptKeySet, type ReceiptBody, type SignedReceipt } from "./prove/receipt.ts";
 import * as trace from "./prove/trace.ts";
 import * as badge from "./verify/badge.ts";
-import type { FactorEntry, FactorPlugin } from "./verify/factors.ts";
+import * as callback from "./verify/callback.ts";
+import type { CallbackOutcome } from "./verify/callback.ts";
+import { FLOW_START, claimNotice, counterKeys, flowStartLimited, isCallingNumber, lockoutOf, recordFlowStarts, unlockCounter } from "./verify/counters.ts";
+import { pinTag, type BadgeSettings, type FactorEntry, type FactorPlugin, type PinOutcome } from "./verify/factors.ts";
+import { flagDuressUnlessCleared } from "./verify/duress-flag.ts";
+import { knowledgeHmac, type KnowledgeHmac, type KnowledgeKey } from "./verify/knowledge.ts";
+import * as pin from "./verify/pin.ts";
+import * as textCode from "./verify/text-code.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
 export { SUPPORTED_LOCALES, isSupportedLocale } from "./core/runtime.ts";
 export type { EngineAdapters, Locale } from "./core/runtime.ts";
 export type { KeypadResult, OutcomeResult, VerificationResult } from "./verify/badge.ts";
+export type { DuressEnrolmentResult, PinEnrolmentResult } from "./verify/pin.ts";
 
+
+/** What an `AttemptCounters` store must have, checked when the engine is built. */
+const COUNTER_METHODS = ["get", "recordFailure", "removeFailure", "reset"] as const;
 
 /** Writes per step before the engine gives up with `conflict`. */
 export const MAX_WRITE_ATTEMPTS = 5;
 
+/** The scope classes whose flows are limited per hour (VER-15). */
+const LIMITED_CLASSES: ReadonlyArray<ScopeClass | null> = ["money", "contact", "access"];
+
+/** A flow start's count: the limit it hit, the counters it is on, and the starts it recorded (keys and time), to take back if the call then refuses it. */
+type FlowStart = { over: AttemptCounterKey["scope"] | null; counted: string[] | null; recorded: { keys: readonly AttemptCounterKey[]; at: string } | null };
+
+const UNCOUNTED: FlowStart = { over: null, counted: null, recorded: null };
+
+/**
+ * What one `#update` did to the store: nothing (`none`: no compare-and-set ran, or each one
+ * answered `ok: false`), `saved`, or `unknown` (a compare-and-set rejected, so it may have written).
+ */
+type WriteOutcome = { write: "none" | "saved" | "unknown" };
+
+const counterId = (key: { scope: string; key: string }): string => `${key.scope}:${key.key}`;
+
+/**
+ * The flow-start counters a call's limited flow has counted, or null when it runs no limited flow.
+ * A flow started before `counted` existed (undefined) was never counted: it stays as it was. [] is a new limited flow.
+ */
+function lateCounted(record: CallRecord): readonly string[] | null {
+  const counted = record.flow?.counted;
+  return counted === undefined ? null : counted;
+}
+
+/**
+ * A flow's attach write found the call's counter keys changed since its start was counted
+ * (verification named a subject meanwhile): the count is given back and the start counted again.
+ */
+class FlowKeysMoved extends EngineError {
+  constructor() {
+    super("conflict", "verification named a subject while the flow start was being counted");
+  }
+}
+
+/**
+ * A late count found over a limit on a counter the flow has admitted since it was read (another
+ * verification on the call counted it first): this count is given back and the rest judged again.
+ */
+class LateKeyAdmitted extends Error {}
+
+/** A verification start's subject write found a limited flow it was not counted on: count, then write again. */
+class LateCountNeeded extends EngineError {
+  constructor() {
+    super("conflict", "a limited flow started on the call while verification was starting");
+  }
+}
+
+
 export interface EngineOptions {
   workspaceId: string;
-  /** The per-workspace HMAC key for knowledge factors and PINs. At least 16 bytes. */
-  knowledgeKey: string | Uint8Array;
+  /**
+   * The per-workspace HMAC key for knowledge factors and PINs: at least 16 bytes, or an opaque,
+   * asynchronous HMAC-SHA256 function that calls the host's key management service, so the key
+   * never enters this process.
+   */
+  knowledgeKey: KnowledgeKey;
   adapters: EngineAdapters;
   /** The workspace's FlowConfig. Default: `defaultConfig()`. Checked with `validateConfig`; any problem throws a ConfigError. */
   config?: unknown;
@@ -65,6 +128,12 @@ export interface EngineOptions {
   /** Default: card numbers. */
   redactor?: Redactor;
   onEvent?: EventListener;
+  /**
+   * How long one `DuressNotifier.notify` may take, in milliseconds: a whole number from 100 to 30000
+   * (the 30 s after which an unanswered alert may be sent again). Default 30000. A notify that has not
+   * settled by then counts as failed: its alert stays owed, and a late answer changes nothing.
+   */
+  notifyTimeoutMs?: number;
 }
 
 export interface FlowPosition {
@@ -96,27 +165,66 @@ interface QueuedEvent {
   actor: Actor;
   at: string;
   detail: { [key: string]: JsonValue };
+  /** On `verification.locked`: the counter that locked, for the lock notice. Never in the ledger. */
+  counter?: AttemptCounterKey;
+  /** A PIN outcome to tag the entry with (VER-12). Never saved. */
+  tag?: string | undefined;
 }
+
+/** A member of the business lifting one lock early: the counter a lock notice named, and who did it. */
+export interface UnlockInput {
+  workspaceId: string;
+  /** The factor kind the notice named. */
+  factor: string;
+  scope: AttemptCounterKey["scope"];
+  /** The notice's key: the subject key or the keyed hash of the calling number. */
+  key: string;
+  /** The host's opaque id for the member, written in the ledger. 1 to 64 of letters, digits, `.`, `_`, `-`: no `@` and no space, so no email address or name reaches the ledger (as for `clearDuress`). */
+  memberId: string;
+}
+
+const MEMBER_ID = /^[A-Za-z0-9._-]{1,64}$/;
+const COUNTER_KEY = /^[0-9a-f]{64}$/;
 
 export class Engine {
   readonly workspaceId: string;
   readonly registry: ModuleRegistry;
-  readonly #key: string | Uint8Array;
+  /** HMAC-SHA256 under the knowledge key, the one keyed hash the engine and every factor use. */
+  readonly #hmac: KnowledgeHmac;
   readonly #adapters: EngineAdapters;
   readonly #sessions: SessionStore;
   readonly #clock: Clock;
   readonly #ids: IdGenerator;
   readonly #redactor: Redactor;
   readonly #onEvent: EventListener | undefined;
-  readonly #badge: badge.BadgeModule;
+  readonly #notifyTimeoutMs: number;
+  /** Badge as installed now: a new build replaces it when a factor is added (`useFactor`, `use`). */
+  #badge: badge.BadgeModule;
+  /** The registry's replace for a built-in module, which only this engine holds (`#swapBadge`). */
+  #replaceBuiltIn!: (module: AssuranceModule) => void;
   readonly #rt: EngineRuntime;
-  readonly #receiptModules: readonly AssuranceModule[];
+  /**
+   * Duress alerts this engine is sending now, by id, with when the send started: one send at a time,
+   * retried after a while. Each claim is its own object, so a send that resumes after another took
+   * its alert over neither sends it nor clears the newer claim.
+   */
+  readonly #sending = new Map<string, { since: number }>();
+  /** Per call, the owed alerts of the duress alert send scheduled and not yet started (`#sendDuressAlertsSoon`). */
+  readonly #sendScheduled = new Map<string, string>();
+  #receiptModules: readonly AssuranceModule[];
   #config: FlowConfig;
 
   constructor(options: EngineOptions) {
     const errors: string[] = [];
-    const keyLength = typeof options.knowledgeKey === "string" ? Buffer.byteLength(options.knowledgeKey) : options.knowledgeKey.byteLength;
-    if (keyLength < 16) errors.push("knowledgeKey must be at least 16 bytes");
+    const key: unknown = options.knowledgeKey;
+    // An HMAC function keeps its key in the key store: only bytes can be measured here. Anything that
+    // is not a string, a Uint8Array or a function (a number, an object with a byteLength) is refused
+    // now, not at the first hash.
+    if (typeof key === "string" || key instanceof Uint8Array) {
+      if ((typeof key === "string" ? Buffer.byteLength(key) : key.byteLength) < 16) errors.push("knowledgeKey must be at least 16 bytes");
+    } else if (typeof key !== "function") {
+      errors.push("knowledgeKey must be at least 16 bytes (a string or a Uint8Array), or an HMAC function");
+    }
     if (typeof options.workspaceId !== "string" || options.workspaceId === "" || hasLoneSurrogate(options.workspaceId)) {
       errors.push("workspaceId must be a non-empty string the ledger can carry (no lone surrogate)");
     }
@@ -125,15 +233,32 @@ export class Engine {
     for (const module of options.modules ?? []) {
       if ((BUILT_IN_MODULES as readonly string[]).includes(module.manifest.name)) errors.push(`${module.manifest.name} is the name of a built-in module`);
     }
+    // A store missing a method would fail only later, after a pass or a failure: refused now. A
+    // store written before removeFailure existed would leave a failure on the line after every pass.
+    const counters = options.adapters.counters as unknown as Record<string, unknown> | null | undefined;
+    if (counters !== undefined) {
+      // null, anything that is not an object, or an object whose reads throw, has none of them.
+      const missing = COUNTER_METHODS.filter((name) => {
+        try {
+          return typeof counters?.[name] !== "function";
+        } catch {
+          return true;
+        }
+      });
+      if (missing.length > 0) errors.push(`the counters adapter is missing ${missing.join(", ")}`);
+    }
+    const notifyTimeoutMs = options.notifyTimeoutMs ?? 30_000;
+    if (!Number.isInteger(notifyTimeoutMs) || notifyTimeoutMs < 100 || notifyTimeoutMs > 30_000) errors.push("notifyTimeoutMs must be an integer from 100 to 30000");
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     this.workspaceId = options.workspaceId;
-    this.#key = options.knowledgeKey;
+    this.#hmac = knowledgeHmac(options.knowledgeKey);
     this.#sessions = options.adapters.sessions ?? new MemorySessionStore();
     this.#adapters = { ...options.adapters, sessions: this.#sessions };
     this.#clock = options.clock ?? systemClock;
     this.#ids = options.ids ?? randomIds;
     this.#redactor = options.redactor ?? cardNumberRedactor;
     this.#onEvent = options.onEvent;
+    this.#notifyTimeoutMs = notifyTimeoutMs;
     this.#badge = options.badge ?? badge.badgeModule();
     const present = Object.entries(this.#adapters).filter(([, value]) => value !== undefined).map(([name]) => name);
     // What each adapter declares it can do, so a config it cannot serve is refused when saved.
@@ -150,7 +275,16 @@ export class Engine {
           : (value as { capabilities?: unknown }).capabilities;
     }
     this.#receiptModules = builtInModules(this.#badge);
-    this.registry = new ModuleRegistry({ adapters: present, capabilities, reserved: BUILT_IN_MODULES, modules: [...this.#receiptModules, ...(options.modules ?? [])] });
+    this.registry = new ModuleRegistry({
+      adapters: present,
+      capabilities,
+      reserved: BUILT_IN_MODULES,
+      modules: [...this.#receiptModules, ...(options.modules ?? [])],
+      grantReplace: (replace) => (this.#replaceBuiltIn = replace),
+    });
+    // This engine's own build of Badge, running the judges the outside modules given here supply.
+    // A Badge shared by several engines never gains a factor through one of them.
+    this.#swapBadge(this.#badge.withOutsideFactors(this.registry.factorPlugins()));
     this.#config = this.#prepare(options.config === undefined ? defaultConfig() : options.config);
     this.#rt = this.#runtime();
   }
@@ -171,7 +305,11 @@ export class Engine {
     this.#config = this.#prepare(config);
   }
 
-  /** Installs an outside module. It stays off until a config turns it on. */
+  /**
+   * Installs an outside module. It stays off until a config turns it on. The factors its manifest
+   * provides, with the judges it supplies, are run by Badge and stay off until Badge's settings
+   * in a config turn them on.
+   */
   use(module: AssuranceModule): this {
     // A built-in module's name stays the engine's, even after the module was removed: a host's
     // module can never stand in for Gate's grants or Paylink's payments.
@@ -179,23 +317,43 @@ export class Engine {
       throw new EngineError("invalid_input", `${module.manifest.name} is the name of a built-in module`);
     }
     this.registry.use(module);
+    this.#swapBadge(this.#badge.withOutsideFactors(this.registry.factorPlugins()));
     return this;
   }
 
   /**
-   * Adds a Badge factor plug-in after the engine was built. Planned (MOD-3): today plug-ins are
-   * given at construction, with `badge: badgeModule({ factors })`.
+   * Adds a Badge factor plug-in after the engine was built, as `badge: badgeModule({ factors })`
+   * does at construction. The registry refuses a bad kind, a name for caller ID, or a kind another
+   * module provides. The factor stays off until a config turns it on in Badge's settings; the
+   * config in force is unchanged, and `validateConfig` with this engine's registry knows the kind.
    */
-  useFactor(_plugin: FactorPlugin): never {
-    throw new NotImplementedError("Engine.useFactor", "MOD-3");
+  useFactor(plugin: FactorPlugin): this {
+    if (this.registry.get(badge.BADGE) !== this.#badge) throw new EngineError("precondition_failed", "the badge module is not installed");
+    this.#swapBadge(this.#badge.withFactor(plugin));
+    return this;
   }
 
-  /** Uninstalls a module that the config has turned off. The ledger's module cannot be removed. */
+  /**
+   * Uninstalls a module that the config has turned off. The ledger's module cannot be removed, nor
+   * a module supplying a factor the config in force names (in the policy or Badge's settings).
+   */
   remove(name: string): void {
     if (moduleEnabled(this.#config, this.registry, name) && this.registry.get(name)?.manifest.alwaysOn !== true) {
       throw new EngineError("precondition_failed", `${name} is on in the config; turn it off first`);
     }
+    const named = new Set(this.#config.policy.levels.flatMap((rule) => rule.anyOf.flat()));
+    if (this.isEnabled(badge.BADGE)) for (const kind of this.#rt.settings<BadgeSettings>(badge.BADGE).factors) named.add(kind);
+    const inUse = this.registry.judgesOf(name).filter((plugin) => named.has(plugin.kind));
+    if (inUse.length > 0) throw new EngineError("precondition_failed", `${name} supplies the factor ${inUse[0]!.kind}, which the config uses; take it out first`);
     this.registry.remove(name);
+    this.#swapBadge(this.#badge.withOutsideFactors(this.registry.factorPlugins()));
+  }
+
+  /** Puts a new build of Badge in place of the old, in the registry (when Badge is installed) and for the runtime. */
+  #swapBadge(next: badge.BadgeModule): void {
+    if (this.registry.get(badge.BADGE) === this.#badge) this.#replaceBuiltIn(next);
+    this.#receiptModules = this.#receiptModules.map((m) => (m === this.#badge ? next : m));
+    this.#badge = next;
   }
 
   isEnabled(name: string): boolean {
@@ -204,10 +362,23 @@ export class Engine {
 
   // ---- sessions ----------------------------------------------------------------------------
 
-  /** Opens a call. With `flow`, the call runs that flow from its first step. */
-  async startCall(input: { callId?: string; locale?: Locale; flow?: string } = {}): Promise<SessionState> {
-    // Each read once: a getter read again could change a value after it was checked.
-    const { callId: givenId, locale, flow }: { callId?: unknown; locale?: unknown; flow?: unknown } = input;
+  /**
+   * Opens a call. With `flow`, the call runs that flow from its first step. `callingNumber` (E.164,
+   * from the carrier, left out when withheld) keys the counters across calls and flows, never a factor.
+   * A flow over its hourly limit is refused with `rate_limited`, and the call is still opened, with
+   * that flow failed: the host speaks its fixed line and ends it. `attestation` is the caller ID
+   * attestation the host's carrier reported (default `none`), set once here: it can only cap the
+   * call's level under the policy's `attestationCaps`, never raise it.
+   */
+  async startCall(input: { callId?: string; locale?: Locale; flow?: string; callingNumber?: string; attestation?: Attestation } = {}): Promise<SessionState> {
+    // Each read once: a getter read again (the flow, after an await) could change a value after it was checked or counted.
+    const {
+      callId: givenId,
+      locale,
+      flow,
+      callingNumber,
+      attestation: givenAttestation,
+    }: { callId?: unknown; locale?: unknown; flow?: unknown; callingNumber?: unknown; attestation?: unknown } = input;
     // Everything the host gives here enters the ledger as it is, not through emit's checks: checked
     // now, before anything is saved, so no call's ledger can be blocked by a value it cannot hash.
     if (givenId !== undefined && (typeof givenId !== "string" || givenId === "" || givenId.length > 200 || hasLoneSurrogate(givenId))) {
@@ -215,7 +386,34 @@ export class Engine {
     }
     if (locale !== undefined && !isSupportedLocale(locale)) throw new EngineError("invalid_input", `locale must be one of ${SUPPORTED_LOCALES.join(", ")}`);
     if (flow !== undefined && typeof flow !== "string") throw new EngineError("invalid_input", "flow must name a flow");
+    const attestation = givenAttestation === undefined ? "none" : givenAttestation;
+    if (!(ATTESTATIONS as readonly unknown[]).includes(attestation)) throw new EngineError("invalid_input", "attestation must be A, B, C, failed or none");
     const callId = (givenId as string | undefined) ?? this.#ids.next("call");
+    const numberKey = await this.#numberKey(callingNumber as string | undefined);
+    const flowName = flow as string | undefined;
+    const attached = flowName === undefined ? null : { name: flowName, steps: this.#flowDefinition(flowName).steps, revision: this.#config.revision };
+    const start = await this.#create(callId, (locale as Locale | undefined) ?? "en", this.#config.revision, attached, () => undefined, { numberKey, countStart: true, attestation: attestation as Attestation });
+    if (start === null) throw new EngineError("invalid_input", "a call with that id exists");
+    // With the call's id: the call is open, its flow failed, and the host ends it.
+    if (start.over !== null) throw new RateLimitedError(callId);
+    return this.state(callId);
+  }
+
+  /**
+   * Creates a call at version 1, with its flow attached and `then` applied in the same write, so no
+   * other process can change it in between. Null, and nothing written, when the id exists. With
+   * `countStart`, a flow that needs a money, contact or access scope counts its start first (VER-15);
+   * the answer says whether it was over a limit. A start a racing duplicate beat is taken back.
+   * `attestation` defaults to `none`; `attestationExempt` (a callback the engine dialled) is never capped by it.
+   */
+  async #create(
+    callId: string,
+    locale: Locale,
+    revision: string,
+    flow: { name: string; steps: FlowStep[]; revision: string } | null,
+    then: (draft: CallDraft) => void,
+    options: { numberKey?: string | null; countStart?: boolean; attestation?: Attestation; attestationExempt?: true } = {},
+  ): Promise<FlowStart | null> {
     const modules: Record<string, JsonValue> = {};
     for (const module of this.registry.list()) {
       const name = module.manifest.name;
@@ -224,25 +422,64 @@ export class Engine {
     const record: CallRecord = {
       v: 1,
       state: newSession(callId, this.workspaceId, this.#now()),
-      locale: (locale as Locale | undefined) ?? "en",
-      revision: this.#config.revision,
+      locale,
+      revision,
+      attestation: options.attestation ?? "none",
+      ...(options.attestationExempt === true ? { attestationExempt: true as const } : {}),
       flow: null,
       modules,
       outbox: [],
+      ledgerWrites: 1,
     };
-    // A call started with a flow is created with it attached, so no other process can start a
-    // different flow on the same id in between.
-    const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision } }];
-    if (flow !== undefined) {
-      const draft = this.#draft(record, events);
-      this.#attachFlow(draft, flow as string, this.#flowDefinition(flow as string), this.#config.revision);
-      this.#advance(draft);
+    this.#keepNumber(record, options.numberKey ?? null);
+    const events: QueuedEvent[] = [{ name: "call.started", actor: "system", at: this.#now(), detail: { locale: record.locale, revision: record.revision, attestation: record.attestation! } }];
+    let start: FlowStart = UNCOUNTED;
+    if (flow !== null && options.countStart === true) {
+      // A duplicate id is refused before its start is counted.
+      if ((await this.#sessions.get(this.workspaceId, callId)) !== null) return null;
+      start = await this.#countFlowStart(record, flow.name, { steps: flow.steps });
     }
-    record.outbox = events.map((event, i) => ({ eventId: this.#eventId(callId, 1, i), ...event }));
-    const created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
-    if (!created) throw new EngineError("invalid_input", "a call with that id exists");
+    try {
+      const draft = this.#draft(record, events);
+      // Checked again for real: a module can be turned off while the start was being counted.
+      if (flow !== null) this.#attachFlow(draft, flow.name, { steps: flow.steps }, flow.revision, start);
+      then(draft);
+      this.#advance(draft);
+      record.outbox = await Promise.all(events.map((event, i) => this.#outboxEntry(callId, 1, i, event)));
+    } catch (error) {
+      // Nothing was written: the start is given back.
+      await this.#uncount(start);
+      throw error;
+    }
+    let created: boolean;
+    try {
+      created = await this.#sessions.create(this.workspaceId, callId, record as unknown as JsonValue);
+    } catch (error) {
+      // No answer, so the store may have written: read back, and a start the call does not hold is given back.
+      if (!(await this.#holdsFlow(callId, flow?.name, start))) await this.#uncount(start);
+      throw error;
+    }
+    if (!created) {
+      // Another start took the id first (a duplicate delivery racing this one): this start is not counted.
+      await this.#uncount(start);
+      return null;
+    }
     await this.#flush(callId, 1, record);
-    return this.state(callId);
+    return start;
+  }
+
+  /** The keyed hash of a calling number, or null when the host gave none (withheld). */
+  async #numberKey(callingNumber: string | undefined): Promise<string | null> {
+    if (callingNumber === undefined) return null;
+    if (!isCallingNumber(callingNumber)) throw new EngineError("invalid_input", "callingNumber must be E.164; leave it out when the number is withheld");
+    // The same keyed hash as `numberKeyFor`, through the knowledge key's store (it may be a key store's HMAC, #72).
+    return this.#hmac(`number:${callingNumber}`);
+  }
+
+  /** Keeps the calling number's key in Badge's part of the call, for the counters; a later restart without one keeps it. */
+  #keepNumber(record: CallRecord, numberKey: string | null): void {
+    const slice = record.modules[badge.BADGE] as unknown as badge.BadgeSlice | undefined;
+    if (numberKey !== null && slice !== undefined) slice.numberKey = numberKey;
   }
 
   async state(callId: string): Promise<SessionState> {
@@ -251,6 +488,8 @@ export class Engine {
 
   /** Untrusted text (a business webhook reply, a document) entered the conversation. */
   async markUntrusted(callId: string, source: string): Promise<void> {
+    // The taint always lands: a label that is not Unicode text is repaired, never a reason to refuse.
+    source = untrustedLabel(source);
     // A grant that may still be acted on when the taint lands is written down with it, and its
     // controller is asked to withdraw it where it can (Gate, SPEC.md section 17).
     let tainted: gate.AccessRecord[] = [];
@@ -313,15 +552,127 @@ export class Engine {
 
   // ---- flows -------------------------------------------------------------------------------
 
-  /** Starts a named flow on an open call. A call runs at most one flow; its steps are copied in now. */
-  async startFlow(callId: string, name: string): Promise<FlowPosition> {
+  /**
+   * Starts a named flow on an open call. A call runs at most one flow; its steps are copied in now.
+   * A flow over its hourly limit is refused with `rate_limited` and stays on the call, failed.
+   */
+  async startFlow(callId: string, name: string, input: { callingNumber?: string } = {}): Promise<FlowPosition> {
     const definition = this.#flowDefinition(name);
     const revision = this.#config.revision;
-    await this.#update(callId, (draft) => this.#attachFlow(draft, name, definition, revision));
-    return (await this.flowPosition(callId))!;
+    const numberKey = await this.#numberKey(input.callingNumber);
+    for (let attempt = 1; ; attempt++) {
+      const before = await this.#read(callId);
+      this.#keepNumber(before, numberKey);
+      const start = await this.#countFlowStart(before, name, definition);
+      // The start is taken back when nothing was written (the write's own check refused the flow, every
+      // compare-and-set found the call moved, or a read failed first), or when a write with no answer
+      // is read back without this flow. A write that saved and then failed (the ledger down) keeps it.
+      const outcome: WriteOutcome = { write: "none" };
+      try {
+        await this.#update(
+          callId,
+          (draft) => {
+            this.#keepNumber(draft.record, numberKey);
+            // Counted on the keys the call had when it was read: a subject verification bound since
+            // (and so never counted on this flow, which was not attached yet) is counted again.
+            if (start.counted !== null && this.#flowKeys(draft.record).some((id) => !start.counted!.includes(id))) throw new FlowKeysMoved();
+            this.#attachFlow(draft, name, definition, revision, start);
+          },
+          outcome,
+        );
+      } catch (error) {
+        if (outcome.write === "none" || (outcome.write === "unknown" && !(await this.#holdsFlow(callId, name, start)))) {
+          // A refused take-back is reported beside the start's own error, which comes first.
+          await this.#uncount(start).catch((cleanup: unknown) => {
+            throw new AggregateError([error, cleanup], "the flow did not start, and taking back its count failed");
+          });
+        }
+        // Counted again under the call's keys now, as many times as a write is tried.
+        if (error instanceof FlowKeysMoved && attempt < MAX_WRITE_ATTEMPTS) continue;
+        throw error;
+      }
+      if (start.over !== null) throw new RateLimitedError(callId);
+      return (await this.flowPosition(callId))!;
+    }
   }
 
-  #attachFlow(draft: CallDraft, name: string, definition: FlowConfig["flows"][string], revision: string): void {
+  /** The flow-start counter ids the call's Badge part names now (its subject's and its number's). */
+  #flowKeys(record: CallRecord): string[] {
+    return counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice).map(counterId);
+  }
+
+  /**
+   * Checks that a flow can start on the call, then, when it needs a money, contact or access scope,
+   * counts its start on the number's and the subject's counters, whichever the call has. A start
+   * found over a limit is not counted; one that a concurrent start took over a limit is.
+   */
+  async #countFlowStart(record: CallRecord, name: string, definition: Pick<FlowConfig["flows"][string], "steps">): Promise<FlowStart> {
+    // Checked first on a copy, so a start the call would refuse anyway is never counted.
+    this.#attachFlow(this.#draft(structuredClone(record), []), name, definition, this.#config.revision, UNCOUNTED);
+    if (!this.#limited(definition.steps, this.#config.policy)) return UNCOUNTED;
+    const keys = counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice);
+    const { over, at } = await this.#countStarts(keys);
+    return { over, counted: keys.map(counterId), recorded: at === null ? null : { keys, at } };
+  }
+
+  /**
+   * Whether the stored call holds this start's flow, read back after a write that gave no answer.
+   * A read that fails too answers true: the start stays counted, the safe side.
+   */
+  async #holdsFlow(callId: string, name: string | undefined, start: FlowStart): Promise<boolean> {
+    try {
+      const stored = await this.#sessions.get(this.workspaceId, callId);
+      const flow = (stored?.record as unknown as CallRecord | undefined)?.flow ?? null;
+      return flow !== null && flow.name === name && JSON.stringify(flow.counted) === JSON.stringify(start.counted);
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Takes back the starts a start recorded, once the call refused it: one entry per counter, at the
+   * time it was recorded. Each is tried on its own, so a refused one never keeps another counter's
+   * slot; the first refusal is thrown after all were tried (the refused start stays, fail closed).
+   */
+  async #uncount(start: FlowStart): Promise<void> {
+    if (start.recorded === null) return;
+    const { keys, at } = start.recorded;
+    const refused: unknown[] = [];
+    for (const key of keys) await this.#adapters.counters!.removeFailure(key, at).catch((e: unknown) => refused.push(e));
+    if (refused.length > 0) throw refused[0];
+  }
+
+  /**
+   * Counts one flow start on each counter, unless one is already at its limit. `over`: the scope of
+   * the limit hit, or null; `at`: when the starts were recorded, or null when none was.
+   */
+  async #countStarts(keys: readonly AttemptCounterKey[]): Promise<{ over: AttemptCounterKey["scope"] | null; at: string | null }> {
+    const limits = lockoutOf(this.#rt.settings<BadgeSettings>(badge.BADGE).lockout).flowStartsPerHour;
+    const counters = this.#adapters.counters!;
+    const now = this.#clock.now();
+    const limited = await flowStartLimited(counters, limits, keys, now);
+    if (limited !== null) return { over: limited, at: null };
+    return { over: await recordFlowStarts(counters, limits, keys, now), at: now.toISOString() };
+  }
+
+  /**
+   * Whether a flow's starts are limited: a step needs a money, contact or access scope, or a
+   * verification step can grant one (its listed scopes, or every scope its level reaches).
+   */
+  #limited(steps: readonly FlowStep[], policy: VerificationPolicy): boolean {
+    const declared = this.registry.scopeClasses();
+    return steps.some((step) => {
+      const owner = this.registry.stepOwner(step.type)!;
+      const level = owner.stepLevel?.(step) ?? null;
+      // A copy: the list a module returns may be its own, shared or frozen.
+      const scopes = [...(level === null ? [] : (owner.stepGrants?.(step) ?? scopesForLevel(policy, level as AssuranceLevel)))];
+      const need = owner.manifest.scopes.needs[step.type];
+      if (need !== undefined) scopes.push(need);
+      return scopes.some((scope) => LIMITED_CLASSES.includes(scopeClass(scope, policy.scopeClasses, declared)));
+    });
+  }
+
+  #attachFlow(draft: CallDraft, name: string, definition: Pick<FlowConfig["flows"][string], "steps">, revision: string, start: FlowStart): void {
     {
       const record = draft.record;
       if (record.flow !== null) throw new EngineError("precondition_failed", "this call already ran a flow");
@@ -339,10 +690,16 @@ export class Engine {
         const reason = module.cannotRunStep?.(step, slice) ?? null;
         if (reason !== null) throw new EngineError("precondition_failed", `${step.type} cannot run on this call: ${reason}`);
       }
+      if (start.over !== null) {
+        // Over an hourly limit: the call keeps the flow, failed, so nothing else starts on it.
+        record.flow = { name, revision, steps, index: 0, mark: null, status: "failed", counted: start.counted };
+        draft.emit("flow.rate_limited", "code", { flow: name, scope: start.over });
+        return;
+      }
       const first = steps[0]!;
       const firstOwner = this.registry.stepOwner(first.type)!;
       const mark = firstOwner.enterStep(first, record.modules[firstOwner.manifest.name]!);
-      record.flow = { name, revision, steps, index: 0, mark, status: "running" };
+      record.flow = { name, revision, steps, index: 0, mark, status: "running", counted: start.counted };
       draft.emit("flow.started", "code", { flow: name, revision, steps: steps.length });
     }
   }
@@ -357,9 +714,105 @@ export class Engine {
 
   // ---- Badge (verify) ----------------------------------------------------------------------
 
-  /** Starts (or restarts) verification, with the account number the caller keyed or a subject key the host's code chose. */
-  beginVerification(callId: string, input: { accountNumber: string } | { subjectKey: string }): Promise<void> {
-    return badge.beginVerification(this.#rt, callId, input);
+  /**
+   * Starts (or restarts) verification, with the account number the caller keyed or a subject key
+   * the host's code chose, and the calling number when it is not withheld (counted, never a factor).
+   */
+  async beginVerification(callId: string, input: badge.BeginVerificationInput): Promise<void> {
+    const resolved = await badge.resolveVerification(this.#rt, input);
+    // Once verification names a subject (or brings a number), a flow with an hourly limit is
+    // counted on that counter too, once per call; over the limit, the flow fails and the host gets
+    // the same `rate_limited` as a refused start. Counted before the subject is written, so over the
+    // limit no factor can be judged for it in between; a start that fails after the count keeps it,
+    // at most one too many. The count is the reservation: each counter is counted first, then taken
+    // on the call (`counted`). A count is given back only once it is known not to have been taken:
+    // another overlapping verification took that counter first, or the write saved nothing. A crash
+    // in between leaves it counted, at most one too many: the safe side.
+    await this.#admitVerification(callId, resolved);
+    // Inside the subject's write: a limited flow attached since the count (startFlow found no subject
+    // to count) refuses it, and the start is counted again, as for a flow found first, then written.
+    const admit = (draft: CallDraft, slice: badge.BadgeSlice) => {
+      const counted = lateCounted(draft.record);
+      if (counted !== null && this.#lateKeys(slice, resolved, counted).length > 0) throw new LateCountNeeded();
+    };
+    try {
+      await badge.startVerification(this.#rt, callId, resolved, admit);
+    } catch (error) {
+      if (!(error instanceof LateCountNeeded)) throw error;
+      // A flow attaches once per call, and this count takes its keys: a second refusal cannot come
+      // from another attachment, and would reach the host as a conflict.
+      await this.#admitVerification(callId, resolved);
+      await badge.startVerification(this.#rt, callId, resolved, admit);
+    }
+  }
+
+  /** Counts the start on the call's limited flow, if it runs one (`beginVerification`). */
+  async #admitVerification(callId: string, resolved: badge.ResolvedVerification): Promise<void> {
+    // Again from a fresh read while a count finds a key over its limit that the flow admitted
+    // meanwhile: the read leaves that key out, so each pass judges fewer keys, and only new ones.
+    for (;;) {
+      const record = await this.#read(callId);
+      const counted = lateCounted(record);
+      if (counted === null || !(await this.#countLateStarts(callId, record, counted, resolved))) return;
+    }
+  }
+
+  /** The flow-start counters a verification start brings that the call's flow has not counted. */
+  #lateKeys(slice: badge.BadgeSlice, resolved: badge.ResolvedVerification, counted: readonly string[]): AttemptCounterKey[] {
+    return counterKeys(this.workspaceId, FLOW_START, badge.verificationKeys(slice, resolved)).filter((key) => !counted.includes(counterId(key)));
+  }
+
+  /**
+   * Counts a running limited flow's starts on the counters a verification start brings
+   * (`beginVerification`). Only keys the flow has not admitted are judged: one another verification
+   * on the call admitted meanwhile is never counted twice, nor a reason to fail the flow. True when
+   * the count must be made again, from a fresh read (`#admitVerification`).
+   */
+  async #countLateStarts(callId: string, record: CallRecord, counted: readonly string[], resolved: badge.ResolvedVerification): Promise<boolean> {
+    const keys = this.#lateKeys(this.#slice(record.modules, badge.BADGE) as unknown as badge.BadgeSlice, resolved, counted);
+    if (keys.length === 0) return false;
+    const { over, at } = await this.#countStarts(keys);
+    // Takes back these counters' counts (none was made when a counter was already at its limit).
+    const giveBack = (back: readonly AttemptCounterKey[]) => this.#uncount({ over, counted: null, recorded: at === null ? null : { keys: back, at } });
+    const outcome: WriteOutcome = { write: "none" };
+    // The counters another verification on this call took first, as the last write attempt found
+    // them: the attempt that saved, kept when the write fails after saving.
+    let taken: AttemptCounterKey[] = [];
+    try {
+      await this.#update(
+        callId,
+        (draft) => {
+          // The start's own checks, so a start the call refuses fails no flow and keeps no count.
+          badge.assertCanBegin(draft);
+          const current = draft.record.flow!;
+          const now = current.counted!;
+          taken = keys.filter((key) => now.includes(counterId(key)));
+          if (over !== null) {
+            // The limit hit is on a key the flow admitted since the read: a duplicate, not this flow's
+            // start over a limit. Nothing is written, and the keys it has not admitted are judged again.
+            if (taken.some((key) => key.scope === over)) throw new LateKeyAdmitted();
+            // Fails closed, whatever another process did to the flow meanwhile; the count stays.
+            current.status = "failed";
+            draft.emit("flow.rate_limited", "code", { flow: current.name, scope: over });
+            return;
+          }
+          now.push(...keys.filter((key) => !now.includes(counterId(key))).map(counterId));
+        },
+        outcome,
+      );
+    } catch (error) {
+      // Saved nothing: every count is given back. Saved, then failed (a ledger append): only the
+      // ones another verification took first. A write with no answer keeps them.
+      if (outcome.write === "none") await giveBack(keys);
+      if (outcome.write === "saved") await giveBack(taken);
+      if (error instanceof LateKeyAdmitted) return true;
+      throw error;
+    }
+    // Counters another verification on this call took first: this count is the extra one, given
+    // back whether or not a key it has not admitted was over its limit.
+    await giveBack(taken);
+    if (over !== null) throw new RateLimitedError(callId);
+    return false;
   }
 
   /** Judges every keypad field at once. The answer is the same for an unknown account and a wrong value. */
@@ -392,8 +845,17 @@ export class Engine {
     return { subjectKey: subject.subjectKey, phoneOnFile: subject.phoneOnFile, locale: record.locale };
   }
 
-  sendTextCode(callId: string): Promise<never> {
-    return badge.sendTextCode(this.#rt, callId);
+  /**
+   * Texts a one-time code to the number on file, after a keypad or PIN match. Always `{ sent: true }`:
+   * a send refused by the country allow-list or a limit looks the same, so the host speaks one line.
+   */
+  sendTextCode(callId: string): Promise<{ sent: true }> {
+    return textCode.sendTextCode(this.#rt, callId);
+  }
+
+  /** Judges a texted code and records a `text_code` factor. 5 tries per code, 10 minutes, used once. */
+  checkTextCode(callId: string, code: string): Promise<badge.KeypadResult> {
+    return textCode.checkTextCode(this.#rt, callId, code);
   }
 
   startPhotoId(callId: string): Promise<{ sent: true }> {
@@ -404,8 +866,133 @@ export class Engine {
     return badge.applyIdentityOutcome(this.#rt, outcome);
   }
 
+  /**
+   * Asks for a callback to the number on file (VER-9) and ends this call, which never gains a
+   * level from it. When the request is allowed, the engine creates the callback call for the
+   * subject this call matched, in verification, and has the `dialer` ring the number on file; the
+   * dialer's outcome arrives at `applyCallbackOutcome`. A refused request (no keypad or PIN match,
+   * no number on file, a lock, the daily limit) returns the same, so the caller hears the same.
+   * Calling it again after a failure resumes a placed callback without ringing twice.
+   */
+  async requestCallback(callId: string): Promise<void> {
+    const plan = await callback.requestCallback(this.#rt, callId);
+    const first = await this.#read(callId);
+    // An ended call that still owes its receipt (the signer failed on an earlier request) gets it
+    // before the callback dials: endCall completes it without ending again.
+    const owesReceipt = trace.wantsReceipt(this.#rt, first) && trace.receiptOf(first) === null;
+    if (first.state.phase !== "ended" || owesReceipt) {
+      try {
+        await this.endCall(callId);
+      } catch (e) {
+        // Two requests at once both reach here: the one that ended the call second is not an error.
+        const won = e instanceof EngineError && e.code === "invalid_transition" ? await this.#read(callId) : null;
+        if (won === null || won.state.phase !== "ended") throw e;
+        // The request that ended it may still be signing its receipt, and may fail to: the receipt
+        // is completed here too (the first one stored is the call's), so the callback never dials first.
+        if (trace.wantsReceipt(this.#rt, won) && trace.receiptOf(won) === null) {
+          await this.endCall(callId).catch(async (again: unknown) => {
+            // The other request stored the receipt in between: endCall found nothing owed and tried
+            // to end the call again. The receipt is there, so the callback goes ahead.
+            if (!(again instanceof EngineError && again.code === "invalid_transition" && trace.receiptOf(await this.#read(callId)) !== null)) throw again;
+          });
+        }
+      }
+    }
+    if (plan === null) return;
+    const flow = first.flow === null ? null : { name: first.flow.name, steps: first.flow.steps, revision: first.flow.revision };
+    // Already created when this resumes: then only the dial is retried.
+    await this.#create(plan.callbackCallId, first.locale, first.revision, flow, (draft) => callback.beginCallbackCall(draft, plan, callId), { attestationExempt: true });
+    try {
+      await callback.dialCallback(this.#rt, plan.callbackCallId);
+    } catch {
+      // A dial that failed answers as a refusal does, so the result never says whether the subject
+      // has a number on file. The callback stays dialing, never passed (fail closed); requesting
+      // again resumes it, and the dialer, the host's own adapter, reports its failure to the host.
+    }
+  }
+
+  /** The dialer's outcome for a callback. Unknown, late, repeated or voided outcomes are ignored. */
+  applyCallbackOutcome(outcome: CallbackOutcome): Promise<badge.OutcomeResult> {
+    return callback.applyCallbackOutcome(this.#rt, outcome);
+  }
+
   finishVerification(callId: string): Promise<badge.VerificationResult> {
     return badge.finishVerification(this.#rt, callId);
+  }
+
+  /**
+   * Lets a caller verified to level 2 or above on this call choose a PIN, keyed twice. Outside a
+   * flow, in `keyed_hash` mode, and only when the subject has no PIN on file.
+   */
+  enrolPin(callId: string, input: { pin: string; confirm: string }): Promise<pin.PinEnrolmentResult> {
+    return pin.enrolPin(this.#rt, callId, input);
+  }
+
+  /**
+   * The business lifts a subject's duress flag (VER-12) once it knows the subject is safe: a host
+   * call, never a caller's, written to the ledger with the member (`duress.cleared`).
+   */
+  clearDuress(subjectKey: string, memberId: string): Promise<void> {
+    return badge.clearDuress(this.#rt, this.#badge, subjectKey, memberId);
+  }
+
+  /** The business resets a subject's PIN (and removes any duress PIN). A host call from the business's own tools, never on a caller's request. */
+  resetPin(subjectKey: string): Promise<void> {
+    return pin.resetPin(this.#rt, subjectKey, this.#adapters.counters);
+  }
+
+  /**
+   * Lifts one lock early, for a member of the business who knows the caller is real (INT-7): the
+   * counter a lock notice named, and nothing else. A host call from the business's own tools: it
+   * takes no call, so nothing on a call reaches it. It grants nothing: the caller still verifies
+   * from nothing. The ledger entry `verification.unlocked` names the member, and is written before
+   * the counter is cleared, so no unlock goes unrecorded.
+   */
+  async unlock(input: UnlockInput): Promise<void> {
+    if (typeof input !== "object" || input === null) throw new EngineError("invalid_input", "unlock takes the counter a lock notice named and the member");
+    // Each field read once, and only the plain copy passed on: a getter read again could change a
+    // value after it was checked (the card-number check, the ledger, the digest, the counter cleared).
+    const { workspaceId, factor, scope, key, memberId }: { [K in keyof UnlockInput]: unknown } = input;
+    const errors: string[] = [];
+    if (workspaceId !== this.workspaceId) errors.push("workspaceId is not this engine's workspace");
+    if (typeof factor !== "string" || !this.#badge.installedFactors().includes(factor)) errors.push("factor is not an installed factor kind");
+    if (scope !== "subject" && scope !== "number") errors.push("scope must be subject or number");
+    // Strings only: a regex test turns an array or an object into a string, which would pass here,
+    // be recorded, and then clear no counter.
+    if (typeof key !== "string" || !COUNTER_KEY.test(key)) errors.push("key must be 64 lower-case hex characters");
+    if (typeof memberId !== "string" || !MEMBER_ID.test(memberId)) errors.push("memberId must be an opaque id: 1 to 64 of letters, digits, '.', '_', '-'");
+    if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+    const counter: AttemptCounterKey = { workspaceId: this.workspaceId, factor: factor as string, scope: scope as AttemptCounterKey["scope"], key: key as string };
+    const counters = this.#adapters.counters;
+    if (counters === undefined) throw new EngineError("precondition_failed", "the engine has no counters adapter, so nothing is locked");
+    // Checked before the digest goes in: the digest is the engine's own hex, never card data.
+    if (detailCarriesCardNumber({ memberId: memberId as string })) throw new EngineError("invalid_input", "audit detail must never carry a card number");
+    // The counter by a keyed digest only the business can match (unlockedCounter with its knowledge
+    // key), never the key itself, as duress.cleared names its subject.
+    const detail = { kind: counter.factor, scope: counter.scope, counter: await this.#hmac(JSON.stringify(["verification.unlocked", counter.factor, counter.scope, counter.key])), memberId: memberId as string };
+    // No event id: one from the id generator repeats when a host's generator does (a restart, a
+    // second process), and the ledger would take the repeat for an append already done, leaving this
+    // unlock unrecorded. Each unlock is its own entry, as a PIN reset is.
+    await this.#adapters.ledger.append({ callId: null, actor: "member", event: "verification.unlocked", at: this.#now(), detail });
+    await unlockCounter(counters, counter);
+  }
+
+  /**
+   * The business enrols or replaces a subject's duress PIN (VER-12). A host call from its own tools,
+   * never on a caller's request; `keyed_hash` mode with `pin.duress` on, for a subject with a PIN.
+   */
+  enrolDuressPin(subjectKey: string, duressPin: string): Promise<pin.DuressEnrolmentResult> {
+    return pin.enrolDuressPin(this.#rt, subjectKey, duressPin);
+  }
+
+  /** The business removes a subject's duress PIN (VER-12). A host call. */
+  removeDuressPin(subjectKey: string): Promise<void> {
+    return pin.removeDuressPin(this.#rt, subjectKey);
+  }
+
+  /** What a `pin` factor ledger entry's keyed `tag` says (VER-12), or null. Only this key's holder can read it. */
+  readPinTag(entry: Pick<AuditEntry, "eventId" | "event" | "detail">): Promise<PinOutcome | null> {
+    return pin.readPinTagWith(this.#hmac, entry);
   }
 
   // ---- Dossier (file) ----------------------------------------------------------------------
@@ -562,7 +1149,7 @@ export class Engine {
       const guards = [...this.#receiptModules, ...this.registry.list().filter((m) => !this.#receiptModules.includes(m))];
       for (const module of guards) {
         const slice = draft.record.modules[module.manifest.name];
-        const reason = slice === undefined ? null : (module.blocksEnd?.(slice) ?? null);
+        const reason = slice === undefined ? null : (module.blocksEnd?.(slice, this.#clock.now()) ?? null);
         if (reason !== null) throw new EngineError("precondition_failed", `the call cannot end yet: ${reason}`);
       }
       // Refused while a signed grant may still be acted on at its door; a grant reserved but not yet
@@ -615,11 +1202,14 @@ export class Engine {
     return slice.receipt === null ? null : structuredClone(slice.receipt);
   }
 
-  /** The key set for verifying this engine's receipts (empty without a signer). */
+  /** The key set for verifying this engine's receipts: with a key ring, the retired keys too (empty without a signer). */
   receiptKeys(): JsonWebKey[] {
     const signer = this.#adapters.signer;
-    // The published `kid` is the one every receipt carries (the signer's keyId), whatever its JWK says.
-    return signer === undefined ? [] : [{ ...publicMembers(signer.publicJwk()), kid: signer.keyId } as JsonWebKey];
+    if (signer === undefined) return [];
+    // A single signer: the published `kid` is the one every receipt carries (its keyId), whatever its JWK says.
+    if (typeof (signer as { keySet?: unknown }).keySet !== "function") return [{ ...publicMembers(signer.publicJwk()), kid: signer.keyId } as JsonWebKey];
+    // A key ring's whole history, each key under its own kid: only public members (#47's check), and a retired key's retiredAt.
+    return receiptKeySet(signer).map((jwk) => ({ ...publicMembers(jwk), ...((jwk as { retiredAt?: string }).retiredAt === undefined ? {} : { retiredAt: (jwk as { retiredAt?: string }).retiredAt }) }) as JsonWebKey);
   }
 
   // ---- outside modules ---------------------------------------------------------------------
@@ -682,7 +1272,7 @@ export class Engine {
         return config().revision;
       },
       now: () => this.#now(),
-      hmac: (data) => hmacSha256Hex(this.#key, data),
+      hmac: this.#hmac,
       settings: <T>(name: string): T => {
         if (!this.isEnabled(name)) throw new EngineError("module_disabled", `the ${name} module is turned off`);
         return this.#config.modules[name]?.settings as T;
@@ -708,7 +1298,16 @@ export class Engine {
     } catch {
       throw new ConfigError(["the config must be plain JSON data"]);
     }
-    return assertConfig(copy, this.registry);
+    const checked = assertConfig(copy, this.registry);
+    // The starts of flows that need a money, contact or access scope are counted (VER-15), even
+    // when no factor the caller enters is on to make Badge ask for the counters itself.
+    if (this.#adapters.counters === undefined) {
+      const problems = Object.entries(checked.flows)
+        .filter(([, flow]) => this.#limited(flow.steps, checked.policy))
+        .map(([name]) => `flows.${name}: needs the counters adapter: it needs a money, contact or access scope, so its starts are limited`);
+      if (problems.length > 0) throw new ConfigError(problems);
+    }
+    return checked;
   }
 
   #outsideModule(name: string): void {
@@ -735,10 +1334,18 @@ export class Engine {
   #authorized(record: CallRecord, scope: string): boolean {
     const min: AssuranceLevel | undefined = Object.hasOwn(this.#config.policy.scopes, scope) ? this.#config.policy.scopes[scope] : undefined;
     if (min === undefined || record.state.phase === "ended") return false;
+    // A duress call (VER-12) refuses money, contact and access, and the scopes Badge's settings named, as if ungranted.
+    if (badge.duressRefuses(record, scope, scopeClass(scope, this.#config.policy.scopeClasses, this.registry.scopeClasses()))) return false;
     if (min === 0) return true;
     const grant = record.state.grant;
-    // The grant's level is checked against today's minimum too, so a stricter config applies to grants already issued.
-    return grant !== null && grant.scopes.includes(scope) && grant.level >= min && this.#clock.now().getTime() < Date.parse(grant.expiresAt);
+    // The grant's level is checked against today's minimum and today's attestation cap too, so a
+    // stricter config applies to grants already issued.
+    return (
+      grant !== null &&
+      grant.scopes.includes(scope) &&
+      capCallLevel(this.#config.policy, grant.level, record) >= min &&
+      this.#clock.now().getTime() < Date.parse(grant.expiresAt)
+    );
   }
 
   async #read(callId: string): Promise<CallRecord> {
@@ -747,7 +1354,7 @@ export class Engine {
     return structuredClone(stored.record) as unknown as CallRecord;
   }
 
-  async #update<R>(callId: string, fn: (draft: CallDraft) => R): Promise<R> {
+  async #update<R>(callId: string, fn: (draft: CallDraft) => R, outcome: WriteOutcome = { write: "none" }): Promise<R> {
     for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
       const stored = await this.#sessions.get(this.workspaceId, callId);
       if (stored === null) throw new EngineError("unknown_call", "no such call");
@@ -759,9 +1366,19 @@ export class Engine {
       // The step's ledger entries are saved with the step, then appended: a ledger that fails
       // leaves them in the record, and the next write (or flushLedger) appends them, once each.
       const version = stored.version + 1;
-      events.forEach((event, i) => record.outbox.push({ eventId: this.#eventId(callId, version, i), ...event }));
+      // Entries are numbered by the writes that queue them, not by the store's version, so a write
+      // with none (a duress alert's acknowledgement, VER-12) leaves no gap a ledger reader could see.
+      // A record from before the count continues from its version (its ids are tagged, so they
+      // could not meet the older ones anyway; continuing keeps the numbers going up).
+      if (events.length > 0) record.ledgerWrites = (record.ledgerWrites ?? stored.version) + 1;
+      record.outbox.push(...(await Promise.all(events.map((event, i) => this.#outboxEntry(callId, record.ledgerWrites!, i, event)))));
+      markOwedAlerts(record);
+      outcome.write = "unknown";
       const saved = await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue);
+      outcome.write = saved.ok ? "saved" : "none";
       if (saved.ok) {
+        // Saved, so owed duress alerts go out before the ledger is tried: one down or stalled never holds them.
+        this.#sendDuressAlertsSoon(callId, record);
         await this.#flush(callId, version, record);
         return result;
       }
@@ -779,19 +1396,21 @@ export class Engine {
       assertCan: (event) => {
         if (!canApply(record.state, event)) throw new EngineError("invalid_transition", `${event.type} is not allowed while ${record.state.phase}`);
       },
-      emit: (name, actor, detail) => {
+      emit: (name, actor, detail, tag) => {
         // A copy, checked here, inside the step, so an entry the ledger would refuse is never saved
         // to be appended later, and a caller changing its object afterwards changes nothing.
         const copy = structuredClone(detail);
         if (detailCarriesCardNumber(copy)) throw new EngineError("invalid_input", "audit detail must never carry a card number");
-        // The ledger hashes every entry as canonical JSON: detail it could not hash (a lone surrogate,
-        // a value JSON cannot carry) is refused here, or it would block the call's ledger for good.
+        // The ledger hashes the entry as canonical JSON after the step is saved: a detail it would
+        // refuse (a lone surrogate, a Date) is refused here, or it would block every later write.
         try {
           canonicalJson(copy);
         } catch {
-          throw new EngineError("invalid_input", "audit detail must be canonical JSON");
+          throw new EngineError("invalid_input", "audit detail must be canonical JSON: plain data, no lone surrogate");
         }
-        events.push({ name, actor, at: this.#now(), detail: copy });
+        const event: QueuedEvent = { name, actor, at: this.#now(), detail: copy, tag };
+        if (name === "verification.locked") event.counter = this.#lockedCounter(record, copy);
+        events.push(event);
       },
       step: () => currentStep(record),
     };
@@ -842,20 +1461,192 @@ export class Engine {
       } catch {
         // Ignored by design: the ledger is the record.
       }
+      // Not awaited: a notice store that stalls holds up neither the rest of the outbox nor the call. It never rejects.
+      if (queued.counter !== undefined) void this.#notifyLock(queued.counter, queued.detail);
     }
     await this.#sessions.compareAndSet(this.workspaceId, callId, version, { ...record, outbox: [] } as unknown as JsonValue);
   }
 
-  /** A ledger event id, unique across workspaces sharing one ledger: a JSON tuple, so no two ids collide. */
-  #eventId(callId: string, version: number, index: number): string {
-    return JSON.stringify([this.workspaceId, callId, version, index]);
+  /**
+   * The counter a `verification.locked` entry is about, read from the call as the entry is saved,
+   * so the notice names the subject or number of that verification (for a callback, the counter
+   * its request reserved). Badge writes the entry only for a counter it counted, so the key is set.
+   */
+  #lockedCounter(record: CallRecord, detail: { [key: string]: JsonValue }): AttemptCounterKey {
+    const s = record.modules[badge.BADGE] as unknown as badge.BadgeSlice;
+    const scope = detail.scope as AttemptCounterKey["scope"];
+    // A callback's lock is on the counters reserved from the call that asked: a callback call keeps
+    // no calling number of its own, so its number lock is named by the key the request counted.
+    const reserved = detail.kind === callback.CALLBACK ? s.callback.keys.find((k) => k.scope === scope) : undefined;
+    return reserved ?? { workspaceId: this.workspaceId, factor: detail.kind as string, scope, key: (scope === "subject" ? s.subjectKey : s.numberKey)! };
   }
 
-  /** Appends any ledger entries a call still has pending (after a ledger outage). Every write does this too. */
+  /**
+   * Tells the host's notifier of a lock whose ledger entry was just appended: once per lock and
+   * capped per workspace (`claimNotice`, before the notifier). Best effort, like the listener: neither
+   * it nor the notifier is awaited, and nothing either does, thrown or rejected, stops the call or the ledger.
+   */
+  async #notifyLock(counter: AttemptCounterKey, detail: { [key: string]: JsonValue }): Promise<void> {
+    const notifier = this.#adapters.notifier;
+    if (notifier === undefined) return;
+    try {
+      const until = detail.until as string;
+      const hard = detail.hard as boolean;
+      const claim = await claimNotice(this.#adapters.counters!, counter, until, this.#clock.now(), hard);
+      if (claim === null) return;
+      const notice = { ...counter, hard, until, capped: claim.capped };
+      // An async wrapper turns a notifier that throws at once into a rejection, caught like the rest.
+      void (async () => notifier.lockout(notice))().catch(() => undefined);
+    } catch {
+      // Ignored by design: the ledger is the record.
+    }
+  }
+
+  /**
+   * A queued event as the outbox keeps it, with its event id. A tagged event (a PIN factor, VER-12)
+   * gets its keyed `tag` here, now that its id is known; the outcome itself is never kept.
+   */
+  async #outboxEntry(callId: string, version: number, index: number, queued: QueuedEvent): Promise<CallRecord["outbox"][number]> {
+    const { tag, ...event } = queued;
+    const eventId = this.#eventId(callId, version, index);
+    if (tag !== undefined) event.detail = { ...event.detail, tag: await pinTag(this.#hmac, eventId, tag as PinOutcome) };
+    return { eventId, ...event };
+  }
+
+  /**
+   * A ledger event id, unique across workspaces sharing one ledger: a JSON tuple, so no two ids
+   * collide. `write` counts the call's writes that queued entries (VER-12); the tag "w" gives these
+   * ids a shape of their own, so they never equal the `[workspaceId, callId, version, index]` ids an
+   * older build writes on the same call during a rolling deploy (the ledger would drop one as a replay).
+   */
+  #eventId(callId: string, write: number, index: number): string {
+    return JSON.stringify([this.workspaceId, callId, "w", write, index]);
+  }
+
+  /** Appends any ledger entries a call still has pending (after a ledger outage), and sends any owed duress alert. Every write does this too. */
   async flushLedger(callId: string): Promise<void> {
     const stored = await this.#sessions.get(this.workspaceId, callId);
     if (stored === null) throw new EngineError("unknown_call", "no such call");
-    await this.#flush(callId, stored.version, structuredClone(stored.record) as unknown as CallRecord);
+    const record = structuredClone(stored.record) as unknown as CallRecord;
+    this.#sendDuressAlertsSoon(callId, record);
+    await this.#flush(callId, stored.version, record);
+  }
+
+  /**
+   * Sends a call's owed duress alerts (VER-12) and waits for them: the host's sweep, for calls whose
+   * alert may still be owed (a notifier that was down, a process that stopped). Answers how many the
+   * notifier acknowledged now. An alert another send of this engine has in hand is left to it.
+   */
+  async deliverDuressAlerts(callId: string): Promise<number> {
+    return this.#sendDuressAlerts(callId);
+  }
+
+  /**
+   * Sends the alerts every call of this workspace still owes (VER-12), for a host after a crash or
+   * on a schedule, without knowing the call ids: the session store lists them
+   * (`listCallsOwingAlerts`). `sent`: calls that owe nothing now; `failed`: calls that still owe one.
+   */
+  async sweepAlerts(): Promise<{ sent: string[]; failed: string[] }> {
+    const list = this.#sessions.listCallsOwingAlerts?.bind(this.#sessions);
+    if (list === undefined) throw new EngineError("precondition_failed", "the session store cannot list the calls that owe alerts (listCallsOwingAlerts)");
+    const callIds = await list(this.workspaceId);
+    // Every call's send starts at once, so a notifier that never answers for one does not hold up the rest.
+    const owed = await Promise.all(
+      callIds.map(async (callId) => {
+        try {
+          await this.#sendDuressAlerts(callId);
+          return badge.owedDuressAlerts(await this.#read(callId)).length > 0;
+        } catch {
+          // A call the store cannot read now, or no longer holds, is reported, and the sweep goes on.
+          return true;
+        }
+      }),
+    );
+    return { sent: callIds.filter((_, i) => !owed[i]), failed: callIds.filter((_, i) => owed[i]) };
+  }
+
+  /** Off the caller's response path: after the reply, so neither the notifier's time nor its failure reaches the caller. */
+  #sendDuressAlertsSoon(callId: string, record: CallRecord): void {
+    if (badge.owedDuressAlerts(record).length === 0) return;
+    // A write that owes the same alerts as a send already scheduled and not yet started (a pass's
+    // counters cleanup right after the entry, VER-1) shares that send, which reads the call's owed
+    // alerts again when it runs; a write that owes a new alert schedules its own.
+    const owed = JSON.stringify(badge.owedDuressAlerts(record).map((alert) => alert.alertId));
+    if (this.#sendScheduled.get(callId) === owed) return;
+    this.#sendScheduled.set(callId, owed);
+    setImmediate(() => {
+      if (this.#sendScheduled.get(callId) === owed) this.#sendScheduled.delete(callId);
+      void this.#sendDuressAlerts(callId).catch(() => undefined);
+    });
+  }
+
+  /**
+   * Each alert the stored call owes now (read again, so an alert already acknowledged is not sent
+   * twice), one send at a time per engine (again after 30 seconds without an answer), taken off the
+   * record once acknowledged.
+   */
+  async #sendDuressAlerts(callId: string): Promise<number> {
+    const notifier = this.#adapters.duressNotifier;
+    let delivered = 0;
+    for (const alert of badge.owedDuressAlerts(await this.#read(callId))) {
+      const now = this.#clock.now().getTime();
+      const held = this.#sending.get(alert.alertId);
+      if (notifier === undefined || (held !== undefined && now - held.since < 30_000)) continue;
+      const claim = { since: now };
+      this.#sending.set(alert.alertId, claim);
+      try {
+        // Read again once claimed: another send may have delivered and acknowledged it while this
+        // one waited on an earlier alert. A read that fails leaves it owed.
+        if (!badge.owedDuressAlerts(await this.#read(callId)).some((owed) => owed.alertId === alert.alertId)) continue;
+        // The flag goes with the alert: set again here, before the notifier, in case the entry's own
+        // write of it was lost (a failed store, a crash), unless the business cleared the subject
+        // after the entry was judged. An engine that judged an entry has counters (Badge requires
+        // them for every entered factor), and one without them fails here, leaving the alert owed.
+        // Bounded like the notify: a counter read that never settles leaves this alert owed, unsent,
+        // and the loop goes on to the next one.
+        await this.#withinNotifyTimeout(flagDuressUnlessCleared(this.#adapters.counters!, this.workspaceId, alert.subjectKey, alert.clears), "the duress flag check");
+        // Another send took the alert over while this one waited (its claim went stale): it is theirs.
+        if (this.#sending.get(alert.alertId) !== claim) continue;
+        await this.#withinNotifyTimeout(notifier.notify({ alertId: alert.alertId, workspaceId: this.workspaceId, subjectKey: alert.subjectKey, callId, at: alert.at }), "the duress notifier");
+        await this.#acknowledgeDuressAlert(callId, alert.alertId);
+        delivered++;
+      } catch {
+        // Still owed: the next write, flushLedger or deliverDuressAlerts sends it again.
+      } finally {
+        if (this.#sending.get(alert.alertId) === claim) this.#sending.delete(alert.alertId);
+      }
+    }
+    return delivered;
+  }
+
+  /**
+   * The answer (a notify, or the flag check before it), or a rejection once `notifyTimeoutMs` passes
+   * first. The race handles a late rejection, and a late resolve is no longer awaited, so it
+   * acknowledges nothing.
+   */
+  async #withinNotifyTimeout(sent: Promise<void>, what: string): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<never>((_, reject) => {
+      // Unref'd: a wait for a notifier never keeps the host's process alive on its own.
+      timer = setTimeout(() => reject(new Error(`${what} did not answer in time`)), this.#notifyTimeoutMs).unref();
+    });
+    try {
+      await Promise.race([sent, late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Takes a delivered alert off the call record, in its own compare-and-set write, with no ledger entry. */
+  async #acknowledgeDuressAlert(callId: string, alertId: string): Promise<void> {
+    for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
+      const stored = (await this.#sessions.get(this.workspaceId, callId))!;
+      const record = structuredClone(stored.record) as unknown as CallRecord;
+      badge.acknowledgeDuressAlert(record, alertId);
+      markOwedAlerts(record);
+      if ((await this.#sessions.compareAndSet(this.workspaceId, callId, stored.version, record as unknown as JsonValue)).ok) return;
+    }
+    throw new EngineError("conflict", `the call changed under every one of ${MAX_WRITE_ATTEMPTS} attempts`);
   }
 }
 
@@ -909,4 +1700,25 @@ function publicMembers(jwk: JsonWebKey & { kid?: string }): JsonWebKey {
 
 export function createEngine(options: EngineOptions): Engine {
   return new Engine(options);
+}
+
+/**
+ * markUntrusted's label as Unicode text with any card number removed (the ledger refuses detail
+ * that carries one, and the taint must land); a value that will not turn into a string is labelled
+ * "unlabelled".
+ */
+function untrustedLabel(source: unknown): string {
+  let text: string;
+  try {
+    text = String(source).toWellFormed();
+  } catch {
+    return "unlabelled";
+  }
+  return cardNumberRedactor.redact(text).text;
+}
+
+/** Marks a record that owes an alert, so a session store can list it for a sweep, and unmarks one that does not. */
+function markOwedAlerts(record: CallRecord): void {
+  if (badge.owedDuressAlerts(record).length > 0) record.owesAlerts = true;
+  else delete record.owesAlerts;
 }

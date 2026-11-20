@@ -1,40 +1,17 @@
 // Badge factors are plug-ins. Each factor kind says how it is entered, how many attempts a call
 // gets, and which adapters it needs; Badge's settings turn each one on or off, and a flow step
 // says which of them may count. A host adds its own factor (one the caller enters and code judges)
-// with `badgeModule({ factors: [...] })`.
-import type { SubjectRecord } from "../core/adapters.ts";
-import { hexDigestsEqual } from "../core/hash.ts";
-import { FACTOR_KINDS, FORBIDDEN_FACTOR_KINDS, type VerificationPolicy } from "../core/policy.ts";
-import { isIntegerIn } from "../core/shape.ts";
+// with `badgeModule({ factors: [...] })` or, after the engine is built, `engine.useFactor`. The
+// plug-in types and their checks live in the core (core/module.ts), where the registry uses them.
+import { hexDigestsEqual, hmacSha256Hex } from "../core/hash.ts";
+import type { FactorJudgeInput } from "../core/module.ts";
+import { FACTOR_KINDS, type SpokenPolicy, type VerificationPolicy } from "../core/policy.ts";
 import type { AdapterName, EngineRuntime } from "../core/runtime.ts";
+import type { LockoutSettings } from "./counters.ts";
 import { isKeypadEntry, judgeKeypadWith } from "./knowledge.ts";
+import { normaliseSpokenAnswer } from "./spoken.ts";
 
-/** What the caller entered: one string (a PIN), or one value per field (keypad knowledge). */
-export type FactorEntry = string | Readonly<Record<string, string>>;
-
-export interface FactorJudgeInput {
-  workspaceId: string;
-  /** Null when the account number was not something a keypad can produce. */
-  subjectKey: string | null;
-  /** Null for an unknown subject. Judge it the same way, and give the same answer as a wrong entry. */
-  subject: SubjectRecord | null;
-  /** From a code path, never from the model. Discarded after judging. */
-  entry: FactorEntry;
-  /** HMAC-SHA256 under the workspace's knowledge key, hex. */
-  hmac(data: string): string;
-}
-
-/** A factor the caller enters and code judges. The engine counts each attempt before judging it. */
-export interface FactorPlugin {
-  /** snake_case, 3 to 32 characters. Never a name for caller ID. */
-  kind: string;
-  summary: string;
-  /** Attempts per call, 1 to 5. */
-  maxAttemptsPerCall: number;
-  /** Adapter names the judge needs. */
-  adapters: readonly AdapterName[];
-  judge(input: FactorJudgeInput): Promise<boolean>;
-}
+export { checkFactorPlugin, snapshotFactorPlugin, type FactorEntry, type FactorJudgeInput, type FactorPlugin } from "../core/module.ts";
 
 export type PinMode = "keyed_hash" | "verifier";
 
@@ -47,6 +24,32 @@ export interface PinSettings {
   maxDigits: number;
   /** 1 to 5. */
   maxAttemptsPerCall: number;
+  /**
+   * The duress PIN (VER-12), off unless set. `refuseScopes`: scopes refused on a duress call on top
+   * of every money, contact and access scope (for example `owner.command`); it may be empty.
+   */
+  duress?: { refuseScopes: string[] };
+}
+
+/**
+ * What a PIN entry was: not a match, the PIN, or the duress PIN. Only the call record and the
+ * ledger's keyed `tag` know which pass it was; to the caller a duress entry is a pass.
+ */
+export type PinOutcome = "fail" | "pass" | "duress";
+
+export const PIN_OUTCOMES: readonly PinOutcome[] = ["fail", "pass", "duress"];
+
+/** The stored digest of a subject's duress PIN: `HMAC(key, "duress:" + subjectKey + ":" + pin)`. */
+export function duressDigest(knowledgeKey: string | Uint8Array, subjectKey: string, pin: string): string {
+  return hmacSha256Hex(knowledgeKey, `duress:${subjectKey}:${pin}`);
+}
+
+/**
+ * The `tag` every `pin` factor entry carries: an HMAC under the knowledge key of the entry's event
+ * id and its outcome. The same shape for every outcome, so only the key holder can tell them apart.
+ */
+export function pinTag<R extends string | Promise<string>>(hmac: (data: string) => R, eventId: string, outcome: PinOutcome): R {
+  return hmac(JSON.stringify(["pin.tag", eventId, outcome]));
 }
 
 export interface BadgeSettings {
@@ -56,6 +59,8 @@ export interface BadgeSettings {
   grantTtlSeconds?: number;
   /** Required when `pin` is on. */
   pin?: PinSettings;
+  /** Waits and locks across calls for the factors the caller enters (counters.ts). Default: the floors. */
+  lockout?: LockoutSettings;
 }
 
 /** How each built-in factor reaches the engine. Planned factors cannot be turned on yet. */
@@ -64,44 +69,78 @@ export const BUILT_IN_FACTORS: Readonly<Record<(typeof FACTOR_KINDS)[number], { 
   pin: { entered: true, adapters: [] },
   carrier_identity_match: { entered: false, adapters: ["carrier"] },
   photo_id: { entered: false, adapters: ["identity", "messages"] },
-  text_code: { entered: false, adapters: ["messages"], planned: "VER-2" },
-  spoken_knowledge: { entered: true, adapters: [], planned: "VER-3" },
+  text_code: { entered: false, adapters: ["messages", "codes"] },
+  // Built in, not a plug-in: a plug-in is entered by the caller and counts as knowledge. Failed
+  // callbacks and the daily limit are counted across calls.
+  callback: { entered: false, adapters: ["dialer", "counters"] },
+  spoken_knowledge: { entered: true, adapters: [] },
 };
 
-/** Factors whose match lets the engine text the number on file (a link only goes out after one). */
+/**
+ * Factors whose match lets the engine text or call back the number on file (a link or a callback
+ * only goes out after one). A spoken answer does not: speech-to-text hears it, and a postal code is
+ * known to more people.
+ */
 export const KNOWLEDGE_FACTORS: readonly string[] = ["keypad_knowledge", "pin"];
 
-const PLUGIN_KIND = /^[a-z][a-z0-9_]{2,31}$/;
-
-/** Every problem with a factor plug-in. */
-export function checkFactorPlugin(plugin: FactorPlugin, taken: readonly string[]): string[] {
-  const errors: string[] = [];
-  if (!PLUGIN_KIND.test(plugin.kind)) errors.push(`factor kind ${JSON.stringify(plugin.kind)} must be snake_case, 3 to 32 characters`);
-  if (FORBIDDEN_FACTOR_KINDS.includes(plugin.kind)) errors.push(`factor kind ${plugin.kind} would make caller ID a factor, which it never is`);
-  if (taken.includes(plugin.kind)) errors.push(`factor kind ${plugin.kind} already exists`);
-  if (!isIntegerIn(plugin.maxAttemptsPerCall, 1, 5)) errors.push(`factor ${plugin.kind}: maxAttemptsPerCall must be 1 to 5`);
-  return errors;
-}
-
-/** The PIN factor's judge: a keyed hash on file, or the host's verifier. Unknown subjects do the same work. */
-export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: FactorJudgeInput): Promise<boolean> {
+/**
+ * The PIN factor's judge: a keyed hash on file, or the host's verifier. Unknown subjects do the same
+ * work. Every entry is compared with the PIN and the duress PIN digests alike, whether or not a
+ * duress PIN is on file or turned on, so the work and the time never say which it was.
+ */
+export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: FactorJudgeInput): Promise<PinOutcome> {
   const pin = typeof input.entry === "string" ? input.entry : "";
   const wellFormed = isKeypadEntry(pin) && pin.length >= settings.minDigits && pin.length <= settings.maxDigits;
+  let match: boolean;
+  let duress: boolean;
+  let brokenSubject = false;
   if (settings.mode === "verifier") {
     // The verifier is asked every time, with a stand-in for a malformed entry or a non-keypad
     // account, so the answer's timing never says which it was. The stand-in's answer is ignored.
-    const usable = input.subjectKey !== null && wellFormed;
-    const subjectKey = input.subjectKey ?? input.hmac("subject:");
-    const { matched } = await rt.adapter("pinVerifier").verify({ workspaceId: input.workspaceId, subjectKey, pin: wellFormed ? pin : "0".repeat(settings.minDigits) });
-    return matched && usable && input.subject !== null;
+    const subjectKey = input.subjectKey ?? (await input.hmac("subject:"));
+    const answer = await rt.adapter("pinVerifier").verify({ workspaceId: input.workspaceId, subjectKey, pin: wellFormed ? pin : "0".repeat(settings.minDigits) });
+    duress = answer.duress === true;
+    match = answer.matched;
+  } else {
+    // Both digests on file are read from the store now, not from the call's copy of the subject, so
+    // a reset (which removes both) since verification began counts. An unknown subject is looked up
+    // the same way.
+    const onFile = await rt.adapter("records").getSubject(input.workspaceId, input.subjectKey ?? (await input.hmac("subject:")));
+    const entry = wellFormed ? pin : "";
+    match = hexDigestsEqual(await input.hmac(`pin:${input.subjectKey ?? ""}:${entry}`), onFile?.pinDigest ?? "");
+    duress = hexDigestsEqual(await input.hmac(`duress:${input.subjectKey ?? ""}:${entry}`), onFile?.duressDigest ?? "");
+    // The two digests are keyed apart, so they are equal only on a subject imported wrongly.
+    brokenSubject = hexDigestsEqual(onFile?.pinDigest ?? "", onFile?.duressDigest ?? "") && onFile?.pinDigest !== undefined;
   }
-  const digest = input.hmac(`pin:${input.subjectKey ?? ""}:${wellFormed ? pin : ""}`);
-  const match = hexDigestsEqual(digest, input.subject?.pinDigest ?? "");
-  return match && wellFormed && input.subject !== null;
+  // A subject on file implies a keypad-shaped account or a host's subject key, never the stand-in.
+  if (!wellFormed || input.subject === null) return "fail";
+  // An entry that is both the PIN and the duress PIN, in either mode, and a subject imported with
+  // the two digests equal, are refused like a wrong PIN, with no alarm: neither a login nor an alarm.
+  if ((match && duress) || brokenSubject) return "fail";
+  if (duress && settings.duress !== undefined) return "duress";
+  return match ? "pass" : "fail";
 }
 
 /** The keypad knowledge factor's judge: every configured field at once, one answer. */
 export async function judgeKeypad(policy: VerificationPolicy, input: FactorJudgeInput): Promise<boolean> {
   const entries = typeof input.entry === "string" ? {} : input.entry;
   return judgeKeypadWith(input.hmac, input.subject, policy.keypadFields, entries);
+}
+
+/**
+ * The spoken knowledge factor's judge: every spoken field at once, one answer. Each transcript is
+ * normalised exactly (spoken.ts) and compared like a keypad field, as the keyed digest of
+ * `field:<name>:<value>` in constant time; an unusable answer does the same work and fails.
+ */
+export async function judgeSpoken(spoken: SpokenPolicy, input: FactorJudgeInput): Promise<boolean> {
+  const entries = typeof input.entry === "string" ? {} : input.entry;
+  const fields = Object.entries(spoken.fields);
+  let ok = input.subject !== null && fields.length > 0;
+  for (const [field, format] of fields) {
+    const answer = normaliseSpokenAnswer({ field: format, transcript: entries[field] ?? "", locale: input.locale });
+    const value = answer.status === "normalised" ? answer.value : "";
+    const match = hexDigestsEqual(await input.hmac(`field:${field}:${value}`), input.subject?.knowledge[field] ?? "");
+    ok = ok && match && answer.status === "normalised";
+  }
+  return ok;
 }

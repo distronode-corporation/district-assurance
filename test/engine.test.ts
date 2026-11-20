@@ -1,10 +1,10 @@
 import { strict as assert } from "node:assert";
+import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
 
 import type { PaymentLinks } from "../src/core/adapters.ts";
 import type { JsonValue } from "../src/core/canonical.ts";
 import { ConfigError } from "../src/core/config.ts";
-import { NotImplementedError } from "../src/core/errors.ts";
 import type { EngineEvent } from "../src/core/events.ts";
 import { defaultVerificationPolicy } from "../src/core/policy.ts";
 import { createEngine } from "../src/engine.ts";
@@ -13,9 +13,9 @@ import { formatAmount } from "../src/pay/paylink.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import { verifyReceipt } from "../src/prove/receipt.ts";
-import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
+import { FakeCarrierSignals, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryAttemptCounters, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine } from "../src/testing/index.ts";
-import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
+import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig, verifiedCall, waitOut } from "./helpers.ts";
 
 describe("Engine construction", () => {
   it("refuses a short key, an empty workspace, a missing ledger and a bad config", () => {
@@ -37,6 +37,90 @@ describe("Engine construction", () => {
     assert.equal(engine.isEnabled("trace"), true, "the ledger is always on");
     assert.equal(engine.isEnabled("badge"), false);
     assert.deepEqual(engine.receiptKeys(), []);
+  });
+
+  it("takes the knowledge key as an asynchronous HMAC function (a KMS), and uses it for its own hashing too", async () => {
+    // A stand-in for a key management service: every answer comes back on a later turn of the
+    // event loop, as a network call's would, and the engine gets the function, never the key.
+    const asked: string[] = [];
+    const kms = async (data: string): Promise<string> => {
+      asked.push(data.split(":")[0]!);
+      await new Promise((resolve) => setImmediate(resolve));
+      return createHmac("sha256", TEST_KNOWLEDGE_KEY).update(data).digest("hex");
+    };
+    const t = setup({ knowledgeKey: kms });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: true, locked: false });
+    assert.deepEqual(await t.engine.submitPin(callId, PIN), { matched: true, locked: false });
+    // The duress digest (VER-12) and the PIN entry's keyed tag go through it too.
+    assert.deepEqual(asked.slice(0, 4), ["subject", "field", "pin", "duress"], "the subject key, the keypad field and the PIN all went through the function");
+    assert.equal(asked.length, 5);
+    assert.ok(asked[4]!.startsWith('["pin.tag",'), "the PIN entry's tag");
+    assert.equal((await t.engine.finishVerification(callId)).level, 1);
+    assert.equal(JSON.stringify(await t.ledger.list()).includes(DOB), false);
+
+    // A wrong PIN through the KMS is a wrong answer, judged the same way.
+    const other = await t.engine.startCall();
+    await t.engine.beginVerification(other.callId, { accountNumber: ACCOUNT });
+    assert.deepEqual(await t.engine.submitPin(other.callId, "9999"), { matched: false, locked: false });
+  });
+
+  it("fails closed when the KMS rejects: no factor, the attempt counted, and nothing it was asked in the ledger or the events", async () => {
+    let down = false;
+    const asked: string[] = [];
+    const kms = async (data: string): Promise<string> => {
+      await new Promise((resolve) => setImmediate(resolve));
+      if (down && !data.startsWith("subject:")) {
+        asked.push(data);
+        throw new Error("kms unavailable");
+      }
+      return createHmac("sha256", TEST_KNOWLEDGE_KEY).update(data).digest("hex");
+    };
+    const seen: unknown[] = [];
+    const t = setup({ knowledgeKey: kms, onEvent: (event) => void seen.push(event) });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    down = true;
+    await assert.rejects(t.engine.submitKeypad(callId, { dob: DOB }), /kms unavailable/);
+    await assert.rejects(t.engine.submitPin(callId, PIN), /kms unavailable/);
+    assert.equal(asked.length, 2, "the KMS was asked for the keypad field and the PIN");
+    const entries = await t.ledger.list();
+    const events = entries.map((e) => e.event);
+    assert.deepEqual(events.slice(-2), ["verification.factor_error", "verification.factor_error"]);
+    assert.equal(events.includes("verification.factor"), false, "a failure is never a factor");
+    assert.equal((await t.engine.state(callId)).factors.length, 0);
+    const written = JSON.stringify([entries, seen]);
+    for (const secret of [DOB, PIN, ...asked, ...asked.map((d) => createHmac("sha256", TEST_KNOWLEDGE_KEY).update(d).digest("hex"))]) {
+      assert.equal(written.includes(secret), false, "no entry, digest or question of the KMS is written");
+    }
+    // The failed attempts are not refunded: the PIN has 2 of its 3 left once the KMS is back.
+    down = false;
+    // Each failure starts a wait across calls (VER-1): waited out before each try.
+    waitOut(t);
+    assert.deepEqual(await t.engine.submitPin(callId, "9999"), { matched: false, locked: false });
+    waitOut(t);
+    assert.deepEqual(await t.engine.submitPin(callId, PIN), { matched: true, locked: false });
+
+    // An outage that uses up every keypad attempt locks the call, even after the KMS recovers.
+    const second = await t.engine.startCall();
+    await t.engine.beginVerification(second.callId, { accountNumber: ACCOUNT });
+    down = true;
+    for (let i = 0; i < 2; i++) {
+      waitOut(t);
+      await assert.rejects(t.engine.submitKeypad(second.callId, { dob: DOB }), /kms unavailable/);
+    }
+    down = false;
+    waitOut(t);
+    assert.deepEqual(await t.engine.submitKeypad(second.callId, { dob: DOB }), { matched: false, locked: true });
+  });
+
+  it("refuses an HMAC function whose answer is not 64 lower-case hex characters, without quoting it", async () => {
+    for (const answer of ["AB".repeat(32), "ab".repeat(31), 42 as unknown as string]) {
+      const t = setup({ knowledgeKey: async () => answer });
+      const { callId } = await t.engine.startCall();
+      await assert.rejects(t.engine.beginVerification(callId, { accountNumber: ACCOUNT }), (e: unknown) => rejects("invalid_input", /knowledge HMAC function/)(e) && !(e as Error).message.includes(String(answer)));
+    }
   });
 
   it("checks a null config instead of using the default, and refuses one that is not plain data", () => {
@@ -85,6 +169,7 @@ describe("Engine construction", () => {
         payments: new FakePaymentLinks(),
         records: new MemoryRecordStore(),
         ledger: new MemoryAuditLedger(),
+        counters: new MemoryAttemptCounters(),
         signer: generateTestSigner(),
       },
     });
@@ -118,7 +203,7 @@ describe("Engine sessions", () => {
       events.map((e) => e.name),
       ["call.started", "session.tainted"],
     );
-    assert.deepEqual(events[0]!.detail, { locale: "en", revision: "default" });
+    assert.deepEqual(events[0]!.detail, { locale: "en", revision: "default", attestation: "none" });
     assert.deepEqual(events[1]!.detail, { source: "business_endpoint" });
     const entries = await t.ledger.list();
     assert.deepEqual(entries.map((e) => e.event), ["call.started", "session.tainted"]);
@@ -191,7 +276,9 @@ describe("Engine verify", () => {
     await assert.rejects(t.engine.submitKeypad(callId, { dob: DOB }), rejects("invalid_transition"));
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     assert.deepEqual(await t.engine.submitKeypad(callId, { dob: "1" }), { matched: false, locked: false });
+    waitOut(t);
     assert.deepEqual(await t.engine.submitKeypad(callId, { dob: "2" }), { matched: false, locked: true });
+    waitOut(t);
     // Even the right answer is not judged now.
     assert.deepEqual(await t.engine.submitKeypad(callId, { dob: DOB }), { matched: false, locked: true });
     assert.equal((await t.engine.state(callId)).factors.length, 2);
@@ -307,13 +394,29 @@ describe("Engine verify", () => {
     assert.deepEqual(await t.engine.applyIdentityOutcome({ sessionId: texted, status: "verified" }), { applied: false }, "single use");
   });
 
-  it("has a planned texted code, refused before a match", async () => {
-    const t = setup();
+  it("texts no code before a keypad match, nor after a wrong entry or for an unknown account", async () => {
+    const t = setup({ config: testConfig((c) => {
+      c.modules.badge = { settings: { factors: ["keypad_knowledge", "text_code"] } };
+      c.policy.textCodeCountryCodes = ["1"];
+    }) });
     const { callId } = await t.engine.startCall();
+    await assert.rejects(t.engine.sendTextCode(callId), rejects("precondition_failed"), "before verification");
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
-    await assert.rejects(t.engine.sendTextCode(callId), rejects("precondition_failed"));
-    await t.engine.submitKeypad(callId, { dob: DOB });
-    await assert.rejects(t.engine.sendTextCode(callId), (e: unknown) => e instanceof NotImplementedError && e.issue === "VER-2");
+    await assert.rejects(t.engine.sendTextCode(callId), rejects("precondition_failed"), "before any entry");
+    await t.engine.submitKeypad(callId, { dob: "19000101" });
+    await assert.rejects(t.engine.sendTextCode(callId), rejects("precondition_failed"), "after a wrong entry");
+    const other = await t.engine.startCall();
+    await t.engine.beginVerification(other.callId, { accountNumber: "99999999" });
+    await t.engine.submitKeypad(other.callId, { dob: DOB });
+    await assert.rejects(t.engine.sendTextCode(other.callId), rejects("precondition_failed"), "unknown account");
+    assert.equal(t.messages.sent.length, 0);
+    // Past the wait VER-1 puts after the wrong entry.
+    waitOut(t);
+    assert.equal((await t.engine.submitKeypad(callId, { dob: DOB })).matched, true);
+    assert.deepEqual(await t.engine.sendTextCode(callId), { sent: true });
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(t.messages.sent.length, 1);
+    assert.deepEqual({ to: t.messages.sent[0]!.to, purpose: t.messages.sent[0]!.purpose }, { to: PHONE_ON_FILE, purpose: "one_time_code" });
   });
 
   it("refuses factors that are turned off, and entries for factors the caller does not enter", async () => {
@@ -374,6 +477,22 @@ describe("Engine authorize", () => {
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     assert.equal((await t.engine.state(callId)).factors.length, 0);
     await assert.rejects(t.engine.startPhotoId(callId), rejects("precondition_failed"), "the match before the taint no longer counts");
+  });
+
+  it("sends nothing out on a match made before the taint, until a fresh verification matches", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.markUntrusted(callId, "crm_note");
+    await assert.rejects(t.engine.startPhotoId(callId), rejects("precondition_failed"), "no identity link on the old match");
+    await assert.rejects(t.engine.checkCarrier(callId), rejects("precondition_failed"), "no carrier check on the old match");
+    assert.equal(t.messages.sent.length, 0);
+    await t.engine.finishVerification(callId);
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.startPhotoId(callId);
+    assert.equal(t.messages.sent.length, 1, "a fresh match unlocks the link again");
   });
 
   it("ignores a photo ID outcome for a link sent before the taint", async () => {
@@ -533,12 +652,14 @@ describe("Engine ledger detail", () => {
   it("refuses detail the ledger could not hash before it is saved, so the call's ledger never blocks (CodeRabbit on 699637f)", async () => {
     const t = setup();
     const { callId } = await t.engine.startCall();
-    await assert.rejects(t.engine.markUntrusted(callId, "x\ud800"), rejects("invalid_input", /canonical JSON/));
-    assert.equal((await t.engine.state(callId)).tainted, false, "nothing was saved");
+    // The taint always lands (#75, PRV-2): its label is repaired, never a reason to refuse.
+    await t.engine.markUntrusted(callId, "x\ud800");
+    assert.equal((await t.engine.state(callId)).tainted, true);
     // The call's ledger still takes entries.
     await t.engine.markUntrusted(callId, "crm_note");
-    const events = (await t.ledger.list()).map((e) => e.event);
-    assert.deepEqual(events, ["call.started", "session.tainted"]);
+    const entries = await t.ledger.list();
+    assert.deepEqual(entries.map((e) => e.event), ["call.started", "session.tainted", "session.tainted"]);
+    assert.deepEqual(entries[1]!.detail, { source: "x\uFFFD" });
   });
 });
 
@@ -1025,7 +1146,7 @@ describe("Engine prove", () => {
     assert.equal(verifyReceipt(receipt, t.engine.receiptKeys()), true);
     assert.equal(receipt.body.v, 1, "the fields are optional, so the format stays at version 1");
     const entries = await t.ledger.list();
-    assert.deepEqual(entries.find((e) => e.event === "call.started")!.detail, { locale: "en", revision: "default" });
+    assert.deepEqual(entries.find((e) => e.event === "call.started")!.detail, { locale: "en", revision: "default", attestation: "none" });
     assert.deepEqual(
       entries.filter((e) => e.event === "verification.finished").map((e) => [e.detail.policyVersion, e.detail.configRevision]),
       [["default-1", "default"], ["custom-2", "2026-11-18.2"]],

@@ -4,6 +4,7 @@
 // from them here, and a scope is allowed only when the level reaches the scope's minimum. Caller
 // ID is not a factor kind at all, so no policy can count it, and no factor plug-in may take a name
 // that means it (FORBIDDEN_FACTOR_KINDS).
+import { isIntegerIn, isObject, isStringArray, unknownKeys } from "./shape.ts";
 
 export type AssuranceLevel = 0 | 1 | 2 | 3;
 
@@ -20,6 +21,11 @@ export const FACTOR_KINDS = [
   "pin",
   /** A government photo ID plus a selfie, checked by an identity provider through a texted link. */
   "photo_id",
+  /**
+   * The business calls back the number on file and the person who answers keys a confirmation. It
+   * proves possession of that line, like a texted code, and is recorded on the callback call only.
+   */
+  "callback",
 ] as const;
 
 export type BuiltInFactorKind = (typeof FACTOR_KINDS)[number];
@@ -41,7 +47,14 @@ export interface FactorResult {
 export interface CarrierSignalReport {
   /** False when the carrier could not answer (no coverage, no approval, an error). */
   checked: boolean;
-  /** Hours since the last SIM change, or null when none is known. */
+  /**
+   * True only when the carrier was asked about SIM changes and answered. A carrier that cannot
+   * report them (Telnyx Number Lookup, for example) answers false, and a texted code never counts
+   * on its report: there `lastSimSwapHoursAgo` is null because nothing was asked, not because none
+   * is known.
+   */
+  simSwapChecked: boolean;
+  /** Hours since the last SIM change, or null when none is known (or, without `simSwapChecked`, not asked). */
   lastSimSwapHoursAgo: number | null;
   /** Hours since the number was last ported, or null when none is known. */
   lastPortHoursAgo: number | null;
@@ -68,12 +81,46 @@ export interface VerificationPolicy {
   /** When the carrier could not answer, whether a texted code still counts. Default policy: no. */
   trustTextCodeWithoutCarrierCheck: boolean;
   /**
+   * Where a texted code may go: E.164 country calling codes, digits only (`"1"`, `"33"`), or a
+   * longer prefix that narrows one (`"1204"`, one area code), matched against the number on file.
+   * Absent, no code is texted anywhere, and a `badge.verify` step that uses `text_code` is refused.
+   */
+  textCodeCountryCodes?: string[];
+  /**
    * The class of each scope whose name does not imply one (SCOPE_PREFIX_CLASSES), for example
    * `{ "owner.command": "none" }`. A scope with no class is refused, so a new money scope cannot
    * slip under the floor by its name. A class here can make a scope stricter, never looser.
    */
   scopeClasses?: Record<string, ScopeClass>;
+  /** The spoken fields judged together as one spoken_knowledge factor. Without them, spoken answers are never judged. */
+  spoken?: SpokenPolicy;
+  /**
+   * The highest level a call can reach, per caller ID attestation, for example
+   * `{ "C": 2, "none": 2, "failed": 1 }`. A cap only lowers a level. Default: no caps, so the
+   * attestation is recorded and changes nothing.
+   */
+  attestationCaps?: Partial<Record<Attestation, AssuranceLevel>>;
 }
+
+/** The formats a spoken answer is normalised to (src/verify/spoken.ts). */
+export const SPOKEN_FORMATS = ["ca_postal_code", "us_zip_code", "reference"] as const;
+export type SpokenFormat = (typeof SPOKEN_FORMATS)[number];
+
+export interface SpokenPolicy {
+  /** Field name to its format, for example `{ "postal_code": "ca_postal_code" }`. Never a keypad field too. */
+  fields: Record<string, SpokenFormat>;
+  /** Spoken attempts allowed per call before the line stops judging, 1 to 5. */
+  maxAttemptsPerCall: number;
+}
+
+/**
+ * The caller ID attestation a call started with (STIR/SHAKEN), as the host's carrier reported it:
+ * `A`, `B` or `C` only when the receiving carrier's check of the signature passed, `failed` when it
+ * failed, `none` when there was no signature or no result. It speaks to the calling number only,
+ * never to who is speaking, so it is never a factor: it can only cap a level (`attestationCaps`).
+ */
+export const ATTESTATIONS = ["A", "B", "C", "failed", "none"] as const;
+export type Attestation = (typeof ATTESTATIONS)[number];
 
 /**
  * What a scope does, which sets its floor. Money movement, contact changes and access are never
@@ -100,7 +147,52 @@ export const SCOPE_PREFIX_CLASSES: ReadonlyArray<readonly [prefix: string, cls: 
 ];
 
 /** Factors that are not something the caller knows. Level 2 and above need one of them. */
-export const NON_KNOWLEDGE_FACTORS: readonly string[] = ["text_code", "carrier_identity_match", "photo_id"];
+export const NON_KNOWLEDGE_FACTORS: readonly string[] = ["text_code", "carrier_identity_match", "photo_id", "callback"];
+
+/**
+ * Factors that prove possession of the number on file, and share its weaknesses (a SIM swap, a
+ * port-out, call forwarding, someone else answering). Never a set on their own, and discounted by
+ * the carrier rule (`textCodeTrusted`).
+ */
+export const NUMBER_POSSESSION_FACTORS: readonly string[] = ["text_code", "callback"];
+
+/** A destination prefix in `textCodeCountryCodes`: digits that start with an assigned country code. */
+const COUNTRY_CODE = /^[1-9][0-9]{0,5}$/;
+
+/**
+ * The country calling codes ITU-T has assigned to countries and geographic areas (ITU-T
+ * Recommendation E.164, "List of ITU-T Recommendation E.164 assigned country codes", the complement
+ * ITU publishes with its Operational Bulletin). Spare and withdrawn codes are left out, and so are
+ * the codes for global services (800, 808, 870, 878, 881, 882, 883, 888, 979, and the trial code
+ * 991), which no number on file for a person's country carries: a texted code is never sent to
+ * one. 379, reserved for Vatican City with no numbers issued under it, is left out too. The list
+ * is prefix-free, as E.164 requires.
+ *
+ * Checked 2026-11-19 against Google libphonenumber's country-code map, which tracks ITU-T E.164
+ * assignments; re-check when ITU assigns or withdraws a code.
+ */
+export const E164_COUNTRY_CODES: readonly string[] = [
+  "1", "7", "20", "27", "30", "31", "32", "33", "34", "36", "39", "40", "41", "43", "44", "45",
+  "46", "47", "48", "49", "51", "52", "53", "54", "55", "56", "57", "58", "60", "61", "62", "63",
+  "64", "65", "66", "81", "82", "84", "86", "90", "91", "92", "93", "94", "95", "98", "211", "212",
+  "213", "216", "218", "220", "221", "222", "223", "224", "225", "226", "227", "228", "229", "230",
+  "231", "232", "233", "234", "235", "236", "237", "238", "239", "240", "241", "242", "243", "244",
+  "245", "246", "247", "248", "249", "250", "251", "252", "253", "254", "255", "256", "257", "258",
+  "260", "261", "262", "263", "264", "265", "266", "267", "268", "269", "290", "291", "297", "298",
+  "299", "350", "351", "352", "353", "354", "355", "356", "357", "358", "359", "370", "371", "372",
+  "373", "374", "375", "376", "377", "378", "380", "381", "382", "383", "385", "386", "387",
+  "389", "420", "421", "423", "500", "501", "502", "503", "504", "505", "506", "507", "508", "509",
+  "590", "591", "592", "593", "594", "595", "596", "597", "598", "599", "670", "672", "673", "674",
+  "675", "676", "677", "678", "679", "680", "681", "682", "683", "685", "686", "687", "688", "689",
+  "690", "691", "692", "850", "852", "853", "855", "856", "880", "886", "960", "961", "962", "963",
+  "964", "965", "966", "967", "968", "970", "971", "972", "973", "974", "975", "976", "977", "992",
+  "993", "994", "995", "996", "998",
+];
+
+/** Whether a destination prefix starts with an assigned country code: "44" and "4420" do, "4" and "42" do not. */
+export function isAssignedCountryPrefix(prefix: string): boolean {
+  return COUNTRY_CODE.test(prefix) && E164_COUNTRY_CODES.some((code) => prefix.startsWith(code));
+}
 
 /** The policy's limit on keypad attempts per call, like the PIN's. */
 export const MAX_KEYPAD_ATTEMPTS = 5;
@@ -163,7 +255,7 @@ export function validatePolicy(
     if (seen.has(r.level)) errors.push(`level ${r.level} is defined twice`);
     seen.add(r.level);
     if (sets.length === 0) errors.push(`level ${r.level} has no factor sets`);
-    for (const set of sets) errors.push(...checkFactorSet(r.level, set, knownFactors));
+    for (const set of sets) errors.push(...checkFactorSet(r.level, set, knownFactors, p.spoken !== undefined));
   }
   const classes = p.scopeClasses;
   const classesOk = classes === undefined || (typeof classes === "object" && classes !== null && !Array.isArray(classes));
@@ -199,12 +291,50 @@ export function validatePolicy(
   if (!Number.isInteger(attempts) || (attempts as number) < 1 || (attempts as number) > MAX_KEYPAD_ATTEMPTS) {
     errors.push(`maxKeypadAttemptsPerCall must be an integer from 1 to ${MAX_KEYPAD_ATTEMPTS}`);
   }
+  if (p.spoken !== undefined) errors.push(...spokenErrors(p.spoken, Array.isArray(p.keypadFields) ? p.keypadFields : []));
   if (typeof p.simSwapWindowHours !== "number" || !(p.simSwapWindowHours > 0)) errors.push("simSwapWindowHours must be a positive number");
   if (typeof p.trustTextCodeWithoutCarrierCheck !== "boolean") errors.push("trustTextCodeWithoutCarrierCheck must be true or false");
+  const countries = p.textCodeCountryCodes;
+  if (countries !== undefined) {
+    if (!isStringArray(countries) || countries.length === 0 || !countries.every((c) => isAssignedCountryPrefix(c))) {
+      errors.push("textCodeCountryCodes must list assigned E.164 country calling codes (or longer prefixes of one), 1 to 6 digits without the +");
+    } else if (new Set(countries).size !== countries.length) {
+      errors.push("textCodeCountryCodes has duplicates");
+    }
+  }
+  errors.push(...attestationCapErrors(p.attestationCaps));
   return errors;
 }
 
-function checkFactorSet(level: number, set: string[], knownFactors: readonly string[]): string[] {
+function attestationCapErrors(caps: unknown): string[] {
+  if (caps === undefined) return [];
+  if (typeof caps !== "object" || caps === null || Array.isArray(caps)) return ["attestationCaps must map A, B, C, failed or none to a level from 0 to 3"];
+  const errors: string[] = [];
+  for (const [attestation, cap] of Object.entries(caps)) {
+    if (!(ATTESTATIONS as readonly string[]).includes(attestation)) errors.push(`attestationCaps.${attestation} is not an attestation (A, B, C, failed or none)`);
+    if (!([0, 1, 2, 3] as unknown[]).includes(cap)) errors.push(`attestationCaps.${attestation} must be a level from 0 to 3`);
+  }
+  return errors;
+}
+
+/** The spoken fields, each with a known format and none a keypad field too, and the attempt limit. */
+function spokenErrors(spoken: unknown, keypadFields: readonly unknown[]): string[] {
+  if (!isObject(spoken)) return ["spoken must be { fields, maxAttemptsPerCall }"];
+  const errors = unknownKeys(spoken, ["fields", "maxAttemptsPerCall"]).map((k) => `spoken.${k} is not a spoken setting`);
+  const formats = SPOKEN_FORMATS.join(", ");
+  if (!isObject(spoken.fields) || Object.keys(spoken.fields).length === 0) {
+    errors.push(`spoken.fields must map at least one field name to a format (${formats})`);
+  } else {
+    for (const [field, format] of Object.entries(spoken.fields)) {
+      if (!(SPOKEN_FORMATS as readonly unknown[]).includes(format)) errors.push(`spoken.fields.${field} must be one of ${formats}`);
+      if (keypadFields.includes(field)) errors.push(`spoken.fields.${field} is also a keypad field`);
+    }
+  }
+  if (!isIntegerIn(spoken.maxAttemptsPerCall, 1, 5)) errors.push("spoken.maxAttemptsPerCall must be an integer from 1 to 5");
+  return errors;
+}
+
+function checkFactorSet(level: number, set: string[], knownFactors: readonly string[], hasSpoken: boolean): string[] {
   const errors: string[] = [];
   const label = `level ${level} set [${set.join(", ")}]`;
   if (set.length === 0) return [`level ${level} has an empty factor set`];
@@ -216,7 +346,12 @@ function checkFactorSet(level: number, set: string[], knownFactors: readonly str
   if (level >= 2 && !set.some((kind) => NON_KNOWLEDGE_FACTORS.includes(kind))) {
     errors.push(`${label}: level 2 and above need a factor that is not something the caller knows (${NON_KNOWLEDGE_FACTORS.join(", ")})`);
   }
-  if (set.length === 1 && set[0] === "text_code") errors.push(`${label}: a texted code is never a factor on its own`);
+  if (set.every((kind) => NUMBER_POSSESSION_FACTORS.includes(kind))) {
+    errors.push(`${label}: possession of the number on file (${NUMBER_POSSESSION_FACTORS.join(", ")}) is never a factor on its own`);
+  }
+  // A spoken answer counts on its own only at level 1: above it, the rules before this one need a
+  // second factor, and one that is not something the caller knows.
+  if (set.includes("spoken_knowledge") && !hasSpoken) errors.push(`${label}: spoken_knowledge needs the policy's spoken fields`);
   if (level === 3 && !set.includes("photo_id")) errors.push(`${label}: level 3 needs photo_id`);
   return errors;
 }
@@ -247,9 +382,16 @@ export function scopeFloor(scope: string): AssuranceLevel {
   return cls === null ? 0 : CLASS_FLOORS[cls];
 }
 
-/** Whether a texted code can be trusted, given what the carrier said about the number on file. */
+/**
+ * Whether possession of the number on file (a texted code, a callback) can be trusted, given what
+ * the carrier said about that number: not after a SIM change or a port inside the window, and not
+ * without an answer unless the policy says so. An answer that did not cover SIM changes never
+ * trusts one, whatever the policy says about having no answer at all; checked with `!== true`, so
+ * an adapter that leaves the field out fails closed.
+ */
 export function textCodeTrusted(policy: VerificationPolicy, report: CarrierSignalReport | null): boolean {
   if (report === null || !report.checked) return policy.trustTextCodeWithoutCarrierCheck;
+  if (report.simSwapChecked !== true) return false;
   const recent = (hours: number | null) => hours !== null && hours <= policy.simSwapWindowHours;
   return !recent(report.lastSimSwapHoursAgo) && !recent(report.lastPortHoursAgo);
 }
@@ -270,15 +412,35 @@ export function evaluateAssurance(
 ): AssuranceResult {
   const passed = new Set(factors.filter((f) => f.passed).map((f) => f.kind));
   const discounted: AssuranceResult["discounted"] = [];
-  if (passed.has("text_code") && !textCodeTrusted(policy, carrier)) {
-    passed.delete("text_code");
-    discounted.push({ kind: "text_code", reason: "carrier_signal" });
+  const trusted = textCodeTrusted(policy, carrier);
+  for (const kind of NUMBER_POSSESSION_FACTORS) {
+    if (passed.has(kind) && !trusted) {
+      passed.delete(kind);
+      discounted.push({ kind, reason: "carrier_signal" });
+    }
   }
   let level: AssuranceLevel = 0;
   for (const rule of policy.levels) {
     if (rule.level > level && rule.anyOf.some((set) => set.every((kind) => passed.has(kind)))) level = rule.level;
   }
   return { level, counted: [...passed].sort(), discounted };
+}
+
+/**
+ * A level under the policy's cap for the call's attestation: the lower of the two. A cap never
+ * raises a level, and with no cap for the attestation the level is unchanged.
+ */
+export function capLevel(policy: VerificationPolicy, level: AssuranceLevel, attestation: Attestation): AssuranceLevel {
+  const cap = policy.attestationCaps?.[attestation];
+  return cap !== undefined && cap < level ? cap : level;
+}
+
+/**
+ * A call's level under its attestation's cap. A call stored before VER-10 has no attestation and
+ * reads as none; a callback leg the engine dialled (`attestationExempt`) is never capped.
+ */
+export function capCallLevel(policy: VerificationPolicy, level: AssuranceLevel, call: { attestation?: Attestation; attestationExempt?: true }): AssuranceLevel {
+  return call.attestationExempt === true ? level : capLevel(policy, level, call.attestation ?? "none");
 }
 
 /** The scopes a level unlocks, sorted. Scopes at level 0 need no verification and are included. */

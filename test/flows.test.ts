@@ -8,7 +8,7 @@ import { ConfigError, validateConfig, type FlowConfig } from "../src/core/config
 import type { AssuranceModule } from "../src/core/module.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { TEST_KNOWLEDGE_KEY } from "../src/testing/index.ts";
-import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
+import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig, verifiedCall, waitOut } from "./helpers.ts";
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const pay = { type: "paylink.request", amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" } as const;
@@ -102,7 +102,11 @@ describe("flows", () => {
     t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
     const { callId } = await t.engine.startCall({ flow: "owner-command" });
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
-    for (let i = 0; i < 3; i++) await t.engine.submitPin(callId, "0000");
+    for (let i = 0; i < 3; i++) {
+      await t.engine.submitPin(callId, "0000");
+      waitOut(t);
+    }
+    assert.equal((await t.engine.state(callId)).factors.length, 3, "every attempt of the call was used");
     assert.equal((await t.engine.finishVerification(callId)).level, 0);
     assert.equal((await t.engine.flowPosition(callId))!.status, "failed");
     const ended = rejects("precondition_failed", /flow owner-command has failed/);
@@ -430,6 +434,56 @@ describe("module switches", () => {
     await assert.rejects(off.engine.setIntakeField(call.callId, "a", "b"), rejects("module_disabled"));
     await assert.rejects(off.engine.confirmIntake(call.callId, { confirmedBy: "voice" }), rejects("module_disabled"));
     await assert.rejects(off.engine.abandonIntake(call.callId), rejects("module_disabled"));
+  });
+});
+
+describe("lone surrogates and other values the ledger cannot hash (PRV-2 review)", () => {
+  it("never saves a ledger entry it cannot append, so the call is never wedged", async () => {
+    const t = setup({ config: flowConfig(), modules: [loyaltyModule()] });
+    t.engine.configure(
+      flowConfig((c) => {
+        c.modules.loyalty = {};
+        c.flows.loyalty = { steps: [{ type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }, { type: "loyalty.lookup" }] };
+      }),
+    );
+    // Its step needs status.read (ADR-25, #47): the call verifies first, so only the detail is refused.
+    const { callId } = await t.engine.startCall({ flow: "loyalty" });
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    // An outside module's detail that canonical JSON refuses is refused in the step, not saved.
+    for (const bad of [{ note: "\uD800" }, { at: new Date(0) }] as unknown as { [key: string]: JsonValue }[]) {
+      await assert.rejects(t.engine.updateModule(callId, "loyalty", (slice, call) => (call.emit("noted", bad), slice)), rejects("invalid_input", /canonical JSON/));
+    }
+    // The taint always lands, whatever its label holds: a lone surrogate is replaced, not refused.
+    await t.engine.markUntrusted(callId, "crm note \uD800");
+    assert.equal((await t.engine.state(callId)).tainted, true);
+    // The call still ends (its flow has no receipt step since the ADR-25 adaptation).
+    await t.engine.endCall(callId);
+    const entries = await t.ledger.list();
+    assert.equal(entries.at(-1)!.event, "call.ended");
+    assert.deepEqual(entries.find((e) => e.event === "session.tainted")!.detail, { source: "crm note \uFFFD" });
+    assert.equal(entries.some((e) => e.event === "module.event"), false);
+  });
+
+  it("taints a call whose label carries a card number, with the number removed from the label", async () => {
+    const t = setup({ config: flowConfig() });
+    const { callId } = await t.engine.startCall();
+    await t.engine.markUntrusted(callId, "crm note 4111111111111111");
+    assert.equal((await t.engine.state(callId)).tainted, true);
+    const tainted = (await t.ledger.list()).find((e) => e.event === "session.tainted")!;
+    assert.deepEqual(tainted.detail, { source: "crm note [card number removed]" });
+    assert.equal(JSON.stringify(await t.engine.state(callId)).includes("4111111111111111"), false, "nor kept on the call");
+  });
+
+  it("refuses a config holding a lone surrogate anywhere, at save time", () => {
+    const problems = validateConfig(
+      flowConfig((c) => ((c.modules.trace!.settings as { wordings: { text: { en: string } }[] }).wordings[0]!.text.en = "May we text you? \uDC00")),
+      setup().engine.registry,
+    );
+    assert.deepEqual(problems, ["modules.trace.settings.wordings[0].text.en: holds a lone surrogate, which is not Unicode text"]);
+    const keyed = validateConfig(flowConfig((c) => (c.flows["x\uD800"] = c.flows["owner-command"]!)), setup().engine.registry);
+    assert.equal(keyed[0], "flows.x\uFFFD: holds a lone surrogate, which is not Unicode text", "a key is reported too, its path repaired");
   });
 });
 

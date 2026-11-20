@@ -72,6 +72,7 @@ How the page is kept small and safe:
 | `public/` | the page: `index.html`, `style.css`, `app.js`, and `receipt-check.js` (no DOM, tested in Node) |
 | `src/e2e.ts` | `npm run demo:e2e`: the UI, the door relay and a real Stripe Checkout in test mode; `owner-command` and `visit` |
 | `src/stripe-adapters.ts` | `StripeCheckoutLinks`, a minimal PAY-1 Checkout adapter (test-mode keys only, platform mode, built-in fetch), and `StripeIdentityProvider`, the Stripe Identity adapter (VER-5) |
+| `src/carrier-adapters.ts` | Twilio Lookup and Telnyx Number Lookup carrier signal adapters (VER-4) |
 
 ## Trying it with your own Stripe test account
 
@@ -103,12 +104,107 @@ Stripe Identity with your own test account" in the repository's README.md.
 
 Use test-mode keys only. Never commit a secret; the server reads them from the environment.
 
+## Caller ID attestation
+
+The host passes the call's STIR/SHAKEN result to `startCall({ attestation })` when the call
+starts. The engine never reads a carrier's value itself; the host maps it as below. A value this
+table does not list, a missing value and a value the host cannot read all map to `none`.
+
+| Carrier value | `attestation` |
+|---|---|
+| Twilio `StirVerstat`: `TN-Validation-Passed-A`, `-B`, `-C` | `A`, `B`, `C` |
+| Twilio `StirVerstat`: `TN-Validation-Failed-A`, `-B`, `-C`, `TN-Validation-Failed`, `NULL` | `failed` |
+| Twilio `StirVerstat`: `TN-Validation-Failed-A-Diverted`, `-B-Diverted`, `-C-Diverted` | `failed` |
+| Twilio `StirVerstat`: `TN-Validation-Failed-A-Passthrough`, `-B-Passthrough`, `-C-Passthrough` | `failed` |
+| Twilio `StirVerstat`: `TN-Validation-Passed-A-Diverted`, `-B-Diverted`, `-C-Diverted` | `none` |
+| Twilio `StirVerstat`: `TN-Validation-Passed-A-Passthrough`, `-B-Passthrough`, `-C-Passthrough` | `none` |
+| Twilio `StirVerstat`: `No-TN-Validation`, or no `StirVerstat` | `none` |
+| Telnyx SIP `verstat=TN-Validation-Passed` | `A` |
+| Telnyx SIP `verstat=TN-Validation-Passed-B` | `B` |
+| Telnyx SIP `verstat=TN-Validation-Passed-C` | `C` |
+| Telnyx SIP `verstat=TN-Validation-Failed` | `failed` |
+| Telnyx SIP `verstat=No-TN-Validation`, or no `verstat` | `none` |
+| Telnyx TeXML `ShakenStirAttestation` `A`, `B`, `C` with `ShakenStirValidated` true | `A`, `B`, `C` |
+| Telnyx TeXML `ShakenStirAttestation` with `ShakenStirValidated` false | `failed` |
+| Telnyx TeXML without `ShakenStirAttestation` | `none` |
+
+`A`, `B` or `C` means the receiving carrier's check of the signature passed; never pass a level
+from a signature that was not checked, or whose check failed. A Twilio Passed value with
+`-Diverted` is `none`: Twilio checked the diverting provider's signature on the forwarded call,
+not the original signer's. A Passed value with `-Passthrough` is `none` as policy, though Twilio checked
+the originating provider's signature: only the plain Passed values give a level. A level reported without its check
+result, such as `shaken_stir_attestation` in the Voice API's `call.initiated` screening result,
+is not listed here, so it maps to `none`; and a TeXML `ShakenStirAttestation` is never read
+without `ShakenStirValidated`. The Telnyx rows follow Telnyx's SIP header parameters page
+(`TN-Validation-Passed` is A, `-B` and `-C` are B and C) and its TeXML callback fields. Twilio documents `StirVerstat` for
+the United States and France. Coverage for Canadian numbers is checked per carrier before it is
+documented here.
+
+In Canada and the United States, `C` or no attestation is common for genuine callers: calls from
+abroad, and calls whose signature was lost on an older, non-IP part of the network. An attestation
+speaks to the calling number only, never to who is speaking. That is why it is never a factor, and
+why the policy has no `attestationCaps` by default (DECISIONS.md, ADR-26): a business that wants
+them sets them, for example `{ "C": 2, "none": 2, "failed": 1 }`.
+
 ## Carrier signals
 
-Planned (VER-4), Twilio and Telnyx. What each offers, to be confirmed per country when the adapters
-are built. `CarrierSignals` is vendor-neutral, so another carrier can be added as its own adapter.
+`src/carrier-adapters.ts` (VER-4) has two `CarrierSignals` adapters. They call the vendors' REST
+APIs with `fetch`, and their tests replay fixture responses from a local fake server, never the
+network. `CarrierSignals` is vendor-neutral, so another carrier (Sinch, for example) can be added
+as its own adapter.
 
-| Carrier | SIM swap | Porting | Identity match | One-time codes |
-|---|---|---|---|---|
-| Twilio (Lookup, Verify) | yes, with carrier approval | yes | yes, with carrier approval | SMS, voice, WhatsApp |
-| Telnyx (Number Lookup, Verify) | not found | porting status and date, carrier | caller identity (name, address) | SMS, voice, flash call, WhatsApp |
+| Signal | Twilio Lookup v2 (`TwilioLookupSignals`) | Telnyx Number Lookup (`TelnyxNumberLookupSignals`) |
+|---|---|---|
+| SIM swap (`simSwapChecked`, `lastSimSwapHoursAgo`) | yes, the `sim_swap` field (`simSwapChecked: true`); needs Twilio's approval and the carrier's, per country | no: `simSwapChecked: false`, hours null, so a texted code never counts on this report alone |
+| Porting (`lastPortHoursAgo`) | not used: always null | yes, `portability.ported_status` and `ported_date`; no approval |
+| Identity match (`identityMatch`) | yes, the `identity_match` field, when the host gives the identity on file; needs Twilio's approval, per country | no: always `unavailable` |
+| Carrier | not used | yes, name and line type, from `lookup()`, outside the report |
+| Countries this account may use | `TWILIO_LOOKUP_COUNTRIES`, `US` by default | `TELNYX_LOOKUP_COUNTRIES`, `US` by default; list a country only once your account may look it up |
+
+How the answers are read:
+
+- **SIM swap:** hours since `last_sim_swap_date` (an ISO 8601 time only; anything else is no
+  date), but when `swapped_in_period` is true never older than `swapped_period`, and 0 without a
+  date that fits it; else, when it is false, the length of `swapped_period` (an ISO 8601 duration,
+  refused when too long to be a number) as a lower bound.
+  `swapped_period` is the window Twilio looked at, not the age of a change, so it is never read as
+  one when the change fell inside it. Anything else is no answer.
+- **Identity match:** `match` when `summary_score` is at least `identityMinScore` (1 to 100, 80
+  by default; anything else throws when the adapter is built), else `no_match`; a
+  `summary_score` outside 0 to 100 is no answer. The identity
+  comes from the host's `identityFor(phoneNumber)`; without it only SIM Swap is asked. Twilio
+  takes the identity in the query string.
+- **Porting:** `N` is none known; `Y` gives the hours from the last moment the port date ends
+  anywhere (Telnyx gives a day, with no time or zone, so noon UTC the next day), or 0 without a
+  date; anything else is no answer.
+- Hours are rounded down and never negative.
+
+Every failure answers `checked: false` with nothing known, and never throws into the call: a
+number that is not E.164, an answer for a country outside the allow-list, a timeout (`timeoutMs`,
+3000 by default, over the whole exchange, the host's `identityFor` included), a network or HTTP error, a field error (a feature the
+account is not approved for, or a country it does not cover), or an answer that cannot be read. A
+Twilio report is `checked` only when every field asked for answered. The optional `onUnavailable`
+listener hears why (`vendor`, `reason`, the HTTP `status` and the vendor's error `code`), never
+the number, the identity or a credential; it may be async, and its errors, thrown or rejected, are
+ignored without holding back the report.
+
+A `baseUrl` override must be `https:`; plain `http:` is accepted only on a loopback host (a local
+fake server), so credentials never cross a network in clear text (on loopback they stay on the
+host, unencrypted). Any other origin throws when the adapter
+is built, before a credential is used, and so does a `timeoutMs` that is not a whole number from 1
+to 60000. A number on file that is not a string is not E.164.
+
+Telnyx alone reports no SIM change, so its `checked: true` report says `simSwapChecked: false`, and
+the policy never counts a texted code on it, whatever `trustTextCodeWithoutCarrierCheck` says. Its
+port signal stays in the report. A host that turns texted codes on (VER-2) takes SIM swap from
+Twilio.
+
+Credentials come from the environment only:
+
+```sh
+TWILIO_API_KEY=SK... TWILIO_API_SECRET=...       # or TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN
+TELNYX_API_KEY=KEY...
+```
+
+`twilioLookupFromEnv()` and `telnyxLookupFromEnv()` return the adapter, or null when its
+credentials are not set. The reference server itself still runs on the fake carrier.

@@ -12,12 +12,14 @@
 //    signed-webhook relay adapter posts it to an example door relay on the loopback, which checks
 //    it with Gate's public key and opens the (pretend) door. The same grant again, and a changed
 //    copy, are refused.
+// 5. A callback: the owner's PIN from a number that is not the owner's, then a callback to the
+//    number on file; only the callback call gains a level.
 import type { JsonWebKey } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 import { verifyChain, verifyReceipt, type SignedReceipt } from "../../../src/index.ts";
 import { createReferenceServer } from "./app.ts";
-import { DEMO_CONNECT_SECRET, DEMO_SECRET, SCRIPTS, createDemoWorld, type DemoFlow, type ScriptRun } from "./script.ts";
+import { CALLBACK_SCRIPT, DEMO_CONNECT_SECRET, DEMO_SECRET, SCRIPTS, createDemoWorld, type ScriptRun, type ScriptStep } from "./script.ts";
 
 const log = (step: string, detail = "") => console.log(`  ${step.padEnd(36)} ${detail}`);
 
@@ -41,9 +43,9 @@ export async function runDemo(print = true): Promise<DemoResult> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   world.base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   let allOk = true;
-  const play = async (flow: DemoFlow): Promise<ScriptRun> => {
+  const play = async (steps: readonly ScriptStep[]): Promise<ScriptRun> => {
     const call: ScriptRun = { callId: "", linkId: "", receipt: null };
-    for (const step of SCRIPTS[flow]) {
+    for (const step of steps) {
       const outcome = await step.run(world, call);
       allOk &&= outcome.ok;
       say(step.label, outcome.detail);
@@ -53,8 +55,8 @@ export async function runDemo(print = true): Promise<DemoResult> {
 
   try {
     say("District Assurance demo (fake adapters, no network)");
-    const owner = await play("owner-command");
-    const { callId } = await play("deposit");
+    const owner = await play(SCRIPTS["owner-command"]);
+    const { callId } = await play(SCRIPTS.deposit);
     const receipt = (await (await fetch(`${world.base}/receipts/${callId}`)).json()) as SignedReceipt;
     const { keys } = (await (await fetch(`${world.base}/.well-known/receipt-keys.json`)).json()) as { keys: JsonWebKey[] };
     const valid = verifyReceipt(receipt, keys);
@@ -63,8 +65,9 @@ export async function runDemo(print = true): Promise<DemoResult> {
     const tamperedFails = !verifyReceipt(tampered, keys);
     say("prove: receipt signature", valid ? "valid" : "INVALID");
     say("prove: receipt with one change", tamperedFails ? "rejected" : "ACCEPTED");
-    const connect = await play("deposit-connect");
-    await play("entry");
+    const connect = await play(SCRIPTS["deposit-connect"]);
+    await play(SCRIPTS.entry);
+    await play(CALLBACK_SCRIPT);
     const chain = verifyChain(await world.t.ledger.list());
     say("prove: audit ledger (all calls)", chain.ok ? `${chain.head.seq} entries, hash chain intact` : "BROKEN");
     if (!allOk || !valid || !tamperedFails || !chain.ok) throw new Error("the demo's checks failed");

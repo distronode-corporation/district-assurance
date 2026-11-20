@@ -69,7 +69,7 @@ describe("L1 review: Gate", () => {
   });
 
   it("refuses a flow with more gate.grant steps than maxGrantsPerCall, since it could never complete (T2)", () => {
-    const registry = new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "pinVerifier", "access", "accessSigner"], modules: builtInModules() });
+    const registry = new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "pinVerifier", "access", "accessSigner", "counters"], modules: builtInModules() });
     const flow = (max: number | undefined, grants: number) =>
       gateConfig((c) => {
         c.modules.gate = { settings: { targets: structuredClone(targets), ...(max === undefined ? {} : { maxGrantsPerCall: max }) } };

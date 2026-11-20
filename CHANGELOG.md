@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The callback factor (VER-9): a built-in `callback` kind; `requestCallback` ends the call and, after a keypad or PIN match, has a new `CallbackDialer` adapter ring the number on file on a new callback call, where `applyCallbackOutcome` records it only for a keyed confirmation; possession like `text_code` in the policy; one per call, 3 per subject a day, failures counted in `AttemptCounters`; `verification.callback_started` and `verification.callback_finished` events; a scripted callback in the demo.
+- Lockout alerts (INT-7): a `Notifier` adapter (`FakeNotifier`) told of each lock's counter, factor kind and end after its ledger entry, once per lock and at most 20 an hour per workspace for hard locks and 20 for waits, best effort; `engine.unlock({ workspaceId, factor, scope, key, memberId })` clears one counter and writes `verification.unlocked`.
+- Limits across flows (VER-15): failure counters are pinned to subject or number and factor kind,
+  never flow or call; flows that need a money, contact or access scope are limited per hour (10
+  per calling number, 5 per subject, Badge's `lockout.flowStartsPerHour`, defaults as ceilings),
+  refused with one `rate_limited` answer (`RateLimitedError`, with the call's id) and a `flow.rate_limited` event; `startCall` and
+  `startFlow` take `callingNumber`.
+- Lockouts across calls (VER-1): an `AttemptCounters` adapter (`MemoryAttemptCounters`,
+  `attemptCountersContract`) counts failures of every entered factor per subject and per calling
+  number (`beginVerification({ callingNumber })`, kept as a keyed hash), before judging; a wait of
+  5, 15, 60, 300 and 900 seconds and a hard lock after 10 failures in 24 hours, in Badge's
+  `lockout` setting as defaults and floors; a `verification.locked` event. Badge needs `counters`
+  when a factor the caller enters is on. A pass takes its own failure off the calling number with
+  `AttemptCounters.removeFailure`, one atomic step. `recordSubjectFailure` is gone.
 - Amounts from code, read back first (PAY-2): an `AmountSource` adapter (`amounts`, reference
   `PriceListAmounts`) resolves a `paylink.request` step's `amountRef`; `readBackPayment` builds the
   amount read-back in the call's locale (`AMOUNT_READBACK_TEXT`) and `confirmPaymentAmount` records
@@ -46,8 +60,7 @@ All notable changes to this project are documented here. The format follows
   code for an access grant to the number on file instead of working a door; codes kept only as
   keyed hashes (`AccessCodeStore`, `MemoryAccessCodeStore`), redeemed once within the grant's
   lifetime for the signed grant, revocable; texts counted against VER-2's per-subject limit in its
-  `CodeStore` (`CodeStore`, `CodeSendKey` and `MemoryCodeStore` are a stand-in copy of VER-2's
-  shape until it lands); `Engine.numberOnFile`.
+  `CodeStore`; `Engine.numberOnFile`.
 - Paylink's two modes (PAY-7), `connect` and `platform`, per flow step; `linkLifeMinutes` (5 to 60,
   default 15) with the engine expiring links itself (`expirePaymentLinks`, `PaymentLinks.expireLink`);
   an allow-list of instant payment methods (card, Apple Pay, Google Pay, Link). Outcomes from
@@ -70,6 +83,10 @@ All notable changes to this project are documented here. The format follows
   only, live and restricted keys refused). The payment is read back from Stripe; Gate's grant goes
   to the example door relay; the call ends with a receipt the page verifies.
 
+- Texted one-time codes (VER-2): `Engine.sendTextCode` and `Engine.checkTextCode`, the `text_code`
+  factor in Badge's settings, a `CodeStore` adapter (`MemoryCodeStore`, `codeStoreContract`) for
+  send limits per subject and per calling number, and `textCodeCountryCodes` in the policy; a
+  refused send answers like a sent one.
 - The modular core. A module registry and module interface (what a module provides, the scopes it
   grants or needs, the adapters it requires, its settings validator); Badge, Dossier, Paylink and
   Trace as modules, switched on and off per workspace config; outside modules with `engine.use`.
@@ -91,9 +108,42 @@ All notable changes to this project are documented here. The format follows
   document VerificationSession with a matching selfie by `fetch` and a restricted key, and
   `npm run serve` with `STRIPE_IDENTITY_KEY` runs a trial call whose check comes back through the
   identity webhook.
+- Key store contracts (INT-4): the knowledge key can be an opaque, asynchronous HMAC function (a
+  key management service) that the engine and every factor hash through, `signReceipt` refuses a
+  signature that is not 64-byte P1363, and `derToP1363` converts a key store's DER signature. A
+  factor judge that throws or rejects (a key store outage) records no factor and writes
+  `verification.factor_error`; the attempt stays counted.
+- Spoken answers (VER-3): `normaliseSpokenAnswer` reads Canadian postal codes, US ZIP codes and short references spoken in English or French, exactly or `unusable`, and the `spoken_knowledge` factor compares them like keypad fields under the policy's new `spoken` fields.
+- PIN enrolment and reset (VER-6): `enrolPin` lets a caller verified to level 2 on the call choose a PIN, keyed twice, weak PINs refused, stored through the new `RecordStore.putPinDigest`; `resetPin` is the business's host call; `pin.enrolled` and `pin.reset` events.
+- Receipt key sets and rotation (PRV-1): `receiptKeyRing` holds several signers with one active and
+  publishes retired public keys, `engine.receiptKeys()` and the reference server's key set route
+  serve the whole history, so a receipt signed before a rotation still verifies. A retired key is
+  published with `retired: true` and its `retiredAt`; `checkReceipt`, the stand-alone verifier and
+  the demo page call such a receipt "valid, signed with a retired key (retired <time>)", and a
+  receipt the retired key signed at or after its retirement invalid.
+- A stand-alone receipt verifier (PRV-2): `scripts/verify-receipt.mjs`, with no dependencies, checks
+  a receipt against a key set file or URL and prints valid or invalid; SPEC.md has a worked example.
+- Duress PIN (VER-12), off by default (`pin.duress`): the business enrols it with `enrolDuressPin`, stored through the new `RecordStore.putDuressDigest`; a duress entry passes like the PIN to the caller while `authorize` refuses money, contact, access and `refuseScopes`, and the new `DuressNotifier` adapter is told of every duress entry from an alert owed in the call record until it answers (`deliverDuressAlerts` and `sweepAlerts` are the host's sweeps); a duress entry flags its subject until `clearDuress` (a host-privileged call; a `duress.cleared` ledger entry with an opaque member id and a keyed digest of the subject, never the subject key), the flag holds when the duress PIN is turned off and is set again on the alert's delivery unless the subject was cleared since, a flagged subject's passes alert once a call, and its failures stay counted in a hidden counter, which a PIN reset clears; every PIN ledger entry carries a keyed `tag` that `readPinTag` reads, and ledger event ids are numbered by the call's writes that queue entries (not the store version), so an alert's acknowledgement leaves no gap; `sweepAlerts` reports a call it cannot read as failed and goes on; a duress PIN entry whose own write fails still flags its subject; `clearDuress` clears the hidden counters of every installed factor.
+- Carrier signal adapters for the reference server (VER-4): Twilio Lookup (SIM Swap, Identity
+  Match) and Telnyx Number Lookup (porting status and date, the carrier), credentials from the
+  environment, failing closed with `checked: false`; tested against a local fake server.
+- An adversarial suite in English and Canadian French (VER-7): scripted dialogues run through a
+  scripted host, checking no grant without factors, no text before a match, identical answers for
+  unknown and wrong, and no grant after a taint.
+- Badge factor plug-ins after the engine is built (MOD-3): `engine.useFactor(plugin)`, and outside
+  modules that supply `factorPlugins` for the factors their manifest provides. The registry checks
+  them for clashes and caller-ID names; they stay off until a config turns them on.
+- Caller ID attestation (VER-10): `startCall({ attestation })` records the call's STIR/SHAKEN
+  result (`A`, `B`, `C`, `failed`, default `none`) in `call.started` and the receipt (an optional
+  field, format version 1), and the policy's optional `attestationCaps` can only lower a level. A
+  callback call, which the engine dialled, is never capped.
 
 ### Changed
 
+- Breaking: `CarrierSignalReport` has a required `simSwapChecked`, true only when the carrier was
+  asked about SIM changes and answered, and `textCodeTrusted` never trusts a texted code on a
+  report without it, whatever the policy says (VER-4). The Telnyx adapter answers false; every
+  `CarrierSignals` adapter has to set it.
 - `PaymentLinks.createLink` takes a `PaymentLinkRequest` (mode, connected account, payment methods,
   expiry); `requestPayment` also returns `expiresAt`; receipts' payments carry `mode`.
 - `confirmIntake` refuses a `confirmedBy` other than `voice` or `keypad` (`invalid_input`) before
@@ -109,7 +159,13 @@ All notable changes to this project are documented here. The format follows
   amount too. A host that calls it directly calls `readBackPayment`, speaks the text, and calls
   `confirmPaymentAmount` on the caller's yes first (PAY-2). The demo's deposit, connect-mode and
   live e2e flows read their amounts back first.
-
+- `canonicalJson` refuses a string or property name holding a lone surrogate (RFC 8785, section
+  3.2.2.2), as do the stand-alone verifier and the demo page; an intake text value holding one is
+  refused as `not_text`. A step whose ledger detail canonical JSON refuses (a lone surrogate, a
+  `Date`) is refused before it is saved, `markUntrusted` repairs a lone surrogate in its label, and
+  `validateConfig` refuses a config holding one.
+- A taint now voids the keypad or PIN match made before it: `startPhotoId`, `checkCarrier` and a
+  payment link refuse until a fresh verification matches (found by the adversarial suite).
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 
@@ -119,6 +175,9 @@ All notable changes to this project are documented here. The format follows
 - The policy, forms, consent wordings, grant lifetime and payment limit moved into FlowConfig;
   `startIntake` takes a form id and `recordConsent` a purpose.
 - `state`, `authorize`, `setIntakeField` and `receipt` are asynchronous (the session store).
+- A factor plug-in's `hmac(data)` is asynchronous (a `Promise` of the hex digest), so the knowledge
+  key can live in a key management service. `subjectKeyFor`, `knowledgeDigest`, `pinDigest` and
+  `judgeKeypadFactors` return a `Promise` when given an HMAC function; `judgeKeypadWith` always does.
 - `returning_pin` is now `pin`; `returningCallerPin` is `enrolPin` (VER-6).
 - Once a call's flow has ended, no step work runs on that call. A consent answered "no" fails its
   step unless the step says `require: "answer"`. Outside modules' steps are held to their scopes

@@ -3,15 +3,22 @@
 import { generateKeyPairSync } from "node:crypto";
 
 import type {
+  AttemptCounterKey,
+  AttemptCounters,
+  CallbackDialer,
   CarrierSignals,
   CodeSendKey,
   CodeStore,
+  DuressAlert,
+  DuressNotifier,
   IdentityProvider,
   IntakeRecord,
+  LockNotice,
   MessagePurpose,
   MessageSender,
   PaymentLinkCapabilities,
   PaymentLinkRequest,
+  Notifier,
   PaymentLinks,
   PaymentMode,
   PaymentRefundRequest,
@@ -22,9 +29,11 @@ import type {
 } from "../core/adapters.ts";
 import type { Clock, IdGenerator } from "../core/clock.ts";
 import type { CarrierSignalReport } from "../core/policy.ts";
+import type { Locale } from "../core/runtime.ts";
 import type { AccessController, SignedAccessGrant, UnlockResult } from "../gate/access.ts";
 import { keyPairSigner } from "../prove/receipt.ts";
-import { knowledgeDigest, pinDigest, subjectKeyFor } from "../verify/knowledge.ts";
+import { duressDigest } from "../verify/factors.ts";
+import { knowledgeDigest, pinDigest, subjectKeyFor, type KnowledgeKeyBytes } from "../verify/knowledge.ts";
 
 /** A clock that only moves when told to. */
 export class FixedClock implements Clock {
@@ -70,14 +79,14 @@ export class FakeIdentityProvider implements IdentityProvider {
   }
 }
 
-/** Answers every check with the same report, unless one is set per number. */
+/** Answers every check with the same report, unless one is set per number: by default a carrier that answered about SIM changes and saw none. */
 export class FakeCarrierSignals implements CarrierSignals {
   readonly checked: string[] = [];
   readonly #byNumber = new Map<string, CarrierSignalReport>();
   #fallback: CarrierSignalReport;
 
   constructor(fallback: Partial<CarrierSignalReport> = {}) {
-    this.#fallback = { checked: true, lastSimSwapHoursAgo: null, lastPortHoursAgo: null, identityMatch: "unavailable", ...fallback };
+    this.#fallback = { checked: true, simSwapChecked: true, lastSimSwapHoursAgo: null, lastPortHoursAgo: null, identityMatch: "unavailable", ...fallback };
   }
 
   set(phoneNumber: string, report: Partial<CarrierSignalReport>): void {
@@ -87,6 +96,24 @@ export class FakeCarrierSignals implements CarrierSignals {
   async check(input: { phoneNumber: string }): Promise<CarrierSignalReport> {
     this.checked.push(input.phoneNumber);
     return structuredClone(this.#byNumber.get(input.phoneNumber) ?? this.#fallback);
+  }
+}
+
+/**
+ * Rings nothing: records each callback and hands out one reference per idempotency key, like a
+ * dialer that honours idempotency keys. The test reports the outcome with `applyCallbackOutcome`.
+ */
+export class FakeCallbackDialer implements CallbackDialer {
+  readonly dialed: Array<{ callId: string; to: string; locale: Locale; ref: string }> = [];
+  readonly #byKey = new Map<string, string>();
+
+  async dial(input: { callId: string; to: string; locale: Locale; idempotencyKey: string }): Promise<{ ref: string }> {
+    const existing = this.#byKey.get(input.idempotencyKey);
+    if (existing !== undefined) return { ref: existing };
+    const ref = `cb_fake_${this.dialed.length + 1}`;
+    this.#byKey.set(input.idempotencyKey, ref);
+    this.dialed.push({ callId: input.callId, to: input.to, locale: input.locale, ref });
+    return { ref };
   }
 }
 
@@ -209,6 +236,32 @@ export class MemoryRecordStore implements RecordStore {
     const record = this.#records.get(`${workspaceId}/${recordId}`);
     return record === undefined ? null : structuredClone(record);
   }
+
+  async putPinDigest(workspaceId: string, subjectKey: string, digest: string | null, enrolmentId?: string): Promise<boolean> {
+    // No await: one atomic step.
+    const subject = this.#subjects.get(`${workspaceId}/${subjectKey}`);
+    if (subject === undefined) return false;
+    if (digest === null) {
+      delete subject.pinDigest;
+      delete subject.pinEnrolmentId;
+      delete subject.duressDigest;
+    } else if (subject.pinDigest !== undefined) return false;
+    else {
+      subject.pinDigest = digest;
+      if (enrolmentId !== undefined) subject.pinEnrolmentId = enrolmentId;
+    }
+    return true;
+  }
+
+  async putDuressDigest(workspaceId: string, subjectKey: string, digest: string | null, ifPinDigest?: string): Promise<boolean> {
+    // No await: one atomic step.
+    const subject = this.#subjects.get(`${workspaceId}/${subjectKey}`);
+    if (subject === undefined) return false;
+    if (digest === null) delete subject.duressDigest;
+    else if (subject.pinDigest !== ifPinDigest) return false;
+    else subject.duressDigest = digest;
+    return true;
+  }
 }
 
 /**
@@ -218,14 +271,30 @@ export class MemoryRecordStore implements RecordStore {
 export class FakePinVerifier implements PinVerifier {
   readonly asked: string[] = [];
   readonly #pins = new Map<string, string>();
+  readonly #duress = new Map<string, string>();
 
   set(workspaceId: string, subjectKey: string, pin: string): void {
     this.#pins.set(`${workspaceId}/${subjectKey}`, pin);
   }
 
-  async verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean }> {
+  /** The subject's duress PIN (VER-12). */
+  setDuress(workspaceId: string, subjectKey: string, pin: string): void {
+    this.#duress.set(`${workspaceId}/${subjectKey}`, pin);
+  }
+
+  async verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean; duress?: boolean }> {
     this.asked.push(input.subjectKey);
-    return { matched: this.#pins.get(`${input.workspaceId}/${input.subjectKey}`) === input.pin };
+    const key = `${input.workspaceId}/${input.subjectKey}`;
+    return { matched: this.#pins.get(key) === input.pin, duress: this.#duress.get(key) === input.pin };
+  }
+}
+
+/** Keeps what it is told of duress PIN entries (VER-12). */
+export class FakeDuressNotifier implements DuressNotifier {
+  readonly told: DuressAlert[] = [];
+
+  async notify(input: DuressAlert): Promise<void> {
+    this.told.push({ ...input });
   }
 }
 
@@ -249,16 +318,76 @@ export class MemoryCodeStore implements CodeStore {
   }
 }
 
+/**
+ * The reference `AttemptCounters`: failure times per key, in memory. Share one between engines
+ * to share lockouts, as a host shares one database table between processes.
+ */
+export class MemoryAttemptCounters implements AttemptCounters {
+  readonly #failures = new Map<string, number[]>();
+
+  async get(key: AttemptCounterKey, since: string): Promise<string[]> {
+    return this.#since(this.#failures.get(counterId(key)) ?? [], since);
+  }
+
+  async recordFailure(key: AttemptCounterKey, at: string, since: string): Promise<string[]> {
+    // No await between the read and the write: in one process, this is one atomic step.
+    const id = counterId(key);
+    const kept = (this.#failures.get(id) ?? []).filter((t) => t >= Date.parse(since));
+    kept.push(Date.parse(at));
+    this.#failures.set(id, kept);
+    return this.#since(kept, since);
+  }
+
+  async removeFailure(key: AttemptCounterKey, at: string): Promise<void> {
+    // No await: one atomic step, like recordFailure.
+    const times = this.#failures.get(counterId(key)) ?? [];
+    const i = times.lastIndexOf(Date.parse(at));
+    if (i !== -1) times.splice(i, 1);
+  }
+
+  async reset(key: AttemptCounterKey): Promise<void> {
+    this.#failures.delete(counterId(key));
+  }
+
+  #since(times: readonly number[], since: string): string[] {
+    const from = Date.parse(since);
+    return times.filter((t) => t >= from).map((t) => new Date(t).toISOString());
+  }
+}
+
+/**
+ * Keeps the lock notices it is told of, as a host's email or dashboard would show them. `fail`
+ * makes it throw at once (`"throws"`), reject (`"rejects"`) or never answer (`"hangs"`).
+ */
+export class FakeNotifier implements Notifier {
+  readonly notices: LockNotice[] = [];
+  fail: "throws" | "rejects" | "hangs" | null = null;
+
+  lockout(notice: LockNotice): Promise<void> {
+    this.notices.push(structuredClone(notice));
+    if (this.fail === "throws") throw new Error("notifier down");
+    if (this.fail === "rejects") return Promise.reject(new Error("notifier down"));
+    if (this.fail === "hangs") return new Promise(() => undefined);
+    return Promise.resolve();
+  }
+}
+
+/** A JSON tuple, so no two keys share an id whatever their parts contain. */
+function counterId(key: AttemptCounterKey): string {
+  return JSON.stringify([key.workspaceId, key.factor, key.scope, key.key]);
+}
+
 /** A subject record built from plain values, hashed the way the engine compares them. */
 export function testSubject(
-  knowledgeKey: string | Uint8Array,
-  input: { accountNumber: string; phoneOnFile: string; knowledge: Record<string, string>; pin?: string },
+  knowledgeKey: KnowledgeKeyBytes,
+  input: { accountNumber: string; phoneOnFile: string; knowledge: Record<string, string>; pin?: string; duressPin?: string },
 ): SubjectRecord {
   const knowledge: Record<string, string> = {};
   for (const [field, value] of Object.entries(input.knowledge)) knowledge[field] = knowledgeDigest(knowledgeKey, field, value);
   const subjectKey = subjectKeyFor(knowledgeKey, input.accountNumber);
   const subject: SubjectRecord = { subjectKey, phoneOnFile: input.phoneOnFile, knowledge };
   if (input.pin !== undefined) subject.pinDigest = pinDigest(knowledgeKey, subjectKey, input.pin);
+  if (input.duressPin !== undefined) subject.duressDigest = duressDigest(knowledgeKey, subjectKey, input.duressPin);
   return subject;
 }
 

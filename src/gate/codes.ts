@@ -31,6 +31,7 @@ import type { Engine } from "../engine.ts";
 import { signDocument } from "../prove/receipt.ts";
 import { accessGrantDigest, type AccessController, type AccessGrantBody, type SignedAccessGrant, type UnlockResult } from "./access.ts";
 import type { AccessResult } from "./gate.ts";
+import { TEXT_CODE_LIMITS } from "../verify/text-code.ts";
 
 /** Digits in a code: a guess at the door is one in 100 million per live code. */
 export const ACCESS_CODE_DIGITS = 8;
@@ -159,10 +160,9 @@ export const ACCESS_CODE_TEXT: Record<Locale, (code: string, minutes: number) =>
 
 /**
  * The send limits an access code counts against, per subject: VER-2's subject limits for texted
- * codes (`TEXT_CODE_LIMITS.subject` in #79), so the two kinds of code share one budget in one
- * `CodeStore`. A stand-in copy until VER-2 lands, when this becomes that constant.
+ * codes, so the two kinds of code share one budget in one `CodeStore`.
  */
-export const ACCESS_CODE_SEND_LIMITS = { max: 5, windowSeconds: 86_400, minIntervalSeconds: 60 } as const;
+export const ACCESS_CODE_SEND_LIMITS = TEXT_CODE_LIMITS.subject;
 
 export interface AccessCodeOptions {
   /** The HMAC key for codes, at least 16 bytes. Its own key, not the knowledge key. */

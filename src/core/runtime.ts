@@ -4,10 +4,16 @@
 import type {
   AccessController,
   AmountSource,
+  AttemptCounterKey,
+  AttemptCounters,
   AuditLedger,
+  CallbackDialer,
   CarrierSignals,
+  CodeStore,
+  DuressNotifier,
   IdentityProvider,
   MessageSender,
+  Notifier,
   PaymentLinks,
   PinVerifier,
   ReceiptSigner,
@@ -18,7 +24,7 @@ import type { JsonValue } from "./canonical.ts";
 import type { Clock, IdGenerator } from "./clock.ts";
 import type { Actor, EngineEventName } from "./events.ts";
 import type { FlowStep } from "./module.ts";
-import type { VerificationPolicy } from "./policy.ts";
+import type { Attestation, VerificationPolicy } from "./policy.ts";
 import type { SessionEvent, SessionState } from "./session.ts";
 
 /**
@@ -58,6 +64,16 @@ export interface EngineAdapters {
   accessSigner?: ReceiptSigner;
   /** Signs web sign-in step-up tokens. Its own key (its own `kid`), not the receipt or access key. */
   stepUpSigner?: ReceiptSigner;
+  /** Send limits for texted codes, shared by every engine of the workspace. */
+  codes?: CodeStore;
+  /** Failures across calls, shared by every engine of the workspace. Badge needs it when a factor the caller enters is on; a PIN reset clears the subject's PIN counters. */
+  counters?: AttemptCounters;
+  /** Places callbacks to the number on file. Badge needs it when the `callback` factor is on. */
+  dialer?: CallbackDialer;
+  /** Told of each lock, so the business knows someone is locked out (INT-7). Optional, best effort. */
+  notifier?: Notifier;
+  /** Told of a duress PIN entry (VER-12). Needed while Badge's `pin.duress` is set. */
+  duressNotifier?: DuressNotifier;
 }
 
 export type AdapterName = keyof EngineAdapters;
@@ -72,6 +88,11 @@ export interface FlowCursor {
   index: number;
   mark: JsonValue;
   status: FlowStatus;
+  /**
+   * The flow-start counters (`scope:key`) this flow was counted on, so a restart is not counted
+   * twice; null for a flow whose starts are not limited (no money, contact or access scope).
+   */
+  counted: string[] | null;
 }
 
 /** One call, as the SessionStore holds it. JSON only. */
@@ -81,11 +102,36 @@ export interface CallRecord {
   locale: Locale;
   /** The config revision the call started under. */
   revision: string;
+  /**
+   * The caller ID attestation the call started with, set once by `startCall`. Never a factor.
+   * Absent on a call stored before VER-10, which reads as `none`.
+   */
+  attestation?: Attestation;
+  /** A callback call the engine dialled (VER-9): never capped by its attestation (decision 10). */
+  attestationExempt?: true;
   flow: FlowCursor | null;
   /** Each module's own part, by module name. */
   modules: Record<string, JsonValue>;
   /** Ledger entries saved with a change and not yet known to be appended. */
-  outbox: Array<{ eventId: string; name: EngineEventName; actor: Actor; at: string; detail: { [key: string]: JsonValue } }>;
+  outbox: Array<{
+    eventId: string;
+    name: EngineEventName;
+    actor: Actor;
+    at: string;
+    detail: { [key: string]: JsonValue };
+    /** On a `verification.locked` entry, the counter that locked, for the lock notice (INT-7). Never in the ledger. */
+    counter?: AttemptCounterKey;
+  }>;
+  /**
+   * The writes so far that queued ledger entries, numbering their event ids. Absent on a record
+   * saved before it was kept, which continues from its version.
+   */
+  ledgerWrites?: number;
+  /**
+   * Present, and true, while the call owes an alert to a host adapter (a duress alert, VER-12), so a
+   * session store can index the calls a sweep must visit (`SessionStore.listCallsOwingAlerts`).
+   */
+  owesAlerts?: true;
 }
 
 /** A call being changed inside one compare-and-set attempt. Everything here is synchronous and pure. */
@@ -95,8 +141,11 @@ export interface CallDraft {
   slice<T>(module: string): T;
   apply(event: SessionEvent): void;
   assertCan(event: SessionEvent): void;
-  /** Queues a ledger entry, written once the change is saved. */
-  emit(name: EngineEventName, actor: Actor, detail: { [key: string]: JsonValue }): void;
+  /**
+   * Queues a ledger entry, written once the change is saved. With `tag` (a PIN outcome, VER-12) the
+   * entry gets a `tag` field, an HMAC of its event id and that outcome; the outcome is never saved.
+   */
+  emit(name: EngineEventName, actor: Actor, detail: { [key: string]: JsonValue }, tag?: string): void;
   /** The flow step the call is on, or null when no flow is running. */
   step(): FlowStep | null;
 }
@@ -109,8 +158,8 @@ export interface EngineRuntime {
   /** The revision of the config in force now (a call keeps the one it started under in `CallRecord.revision`). */
   readonly revision: string;
   now(): string;
-  /** HMAC-SHA256 under the workspace's knowledge key, hex. The key itself never leaves the engine. */
-  hmac(data: string): string;
+  /** HMAC-SHA256 under the workspace's knowledge key, hex. The engine never holds a key kept in a key store. */
+  hmac(data: string): Promise<string>;
   /** The module's validated settings. Throws `module_disabled` when it is off. */
   settings<T>(module: string): T;
   adapter<K extends AdapterName>(name: K): NonNullable<EngineAdapters[K]>;

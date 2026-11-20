@@ -42,6 +42,10 @@ describe("canonicalJson", () => {
     assert.throws(() => canonicalJson(Number.POSITIVE_INFINITY), /non-finite/);
     assert.throws(() => canonicalJson({ d: new Date(0) }), /not a plain object at \$\.d/);
     assert.throws(() => canonicalJson(new Map()), /not a plain object/);
+    // RFC 8785, section 3.2.2.2: a lone surrogate, in a value or a key, is refused; a pair is kept.
+    assert.throws(() => canonicalJson({ a: ["x\ud800"] }), /lone surrogate in a string at \$\.a\[0\]/);
+    assert.throws(() => canonicalJson({ "\udc00": 1 }), /lone surrogate in a string at \$\.\udc00/);
+    assert.equal(canonicalJson({ "😀": "😀" }), '{"😀":"😀"}');
     // eslint-disable-next-line no-sparse-arrays
     assert.throws(() => canonicalJson([1, , 2]), /unsupported undefined at \$\[1\]/);
   });

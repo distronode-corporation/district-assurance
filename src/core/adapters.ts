@@ -6,6 +6,7 @@ import type { JsonWebKey } from "node:crypto";
 import type { JsonValue } from "./canonical.ts";
 import type { Actor, EngineEventName } from "./events.ts";
 import type { AssuranceLevel, CarrierSignalReport } from "./policy.ts";
+import type { Locale } from "./runtime.ts";
 
 /** Photo ID plus selfie by a link the caller opens on their phone (for example Stripe Identity). */
 export interface IdentityProvider {
@@ -20,6 +21,27 @@ export interface IdentityProvider {
 /** Carrier facts about a phone number (for example SIM swap, porting, identity match). */
 export interface CarrierSignals {
   check(input: { phoneNumber: string }): Promise<CarrierSignalReport>;
+}
+
+/**
+ * Places a callback (VER-9): the host's telephony dials the number on file as a new outbound call
+ * and, when it is answered, plays a fixed prompt asking the person to key a confirmation. Keys only:
+ * speech never confirms, so voicemail or an answering machine never passes. The host reports the
+ * result with `Engine.applyCallbackOutcome({ ref, answered, confirmed })`. A retried dial with the
+ * same idempotency key must not ring the line twice.
+ */
+export interface CallbackDialer {
+  dial(input: {
+    /** The callback call the engine created; the host runs the rest of the callback on it. */
+    callId: string;
+    /** E.164. Always the number on file, resolved by the engine. */
+    to: string;
+    locale: Locale;
+    idempotencyKey: string;
+  }): Promise<{
+    /** The dialer's reference for the outbound call; its outcome names it. */
+    ref: string;
+  }>;
 }
 
 export type MessagePurpose = "identity_link" | "payment_link" | "one_time_code" | "reference";
@@ -89,10 +111,10 @@ export interface CodeSendKey {
 
 /**
  * The send limits for texted codes, across calls: every engine of a workspace shares one, as they
- * share the SessionStore. It holds only when codes were sent, per subject and per calling number,
- * never a code. `MemoryCodeStore` in `district-assurance/testing` is the reference. A stand-in
- * copy of VER-2's interface (#79) for one-time access codes, until VER-2 lands with its contract
- * suite.
+ * share the SessionStore. The codes themselves live in the call record; this holds only when codes
+ * were sent, per subject and per calling number. `codeStoreContract` in
+ * `district-assurance/testing` is the suite a durable one must pass; `MemoryCodeStore` is the
+ * reference.
  */
 export interface CodeStore {
   /**
@@ -156,12 +178,23 @@ export interface PaymentRefundRequest {
 export interface SubjectRecord {
   /** HMAC of the account number under the workspace's knowledge key. */
   subjectKey: string;
-  /** E.164. Where texted links and codes go. Never the calling number unless they are the same. */
+  /**
+   * E.164. Where texted links and codes go, and the line a callback dials. Never the calling number
+   * unless they are the same. A value that is not E.164 (an empty string) means no number on file,
+   * and a callback is refused.
+   */
   phoneOnFile: string;
   /** Field name to the HMAC of its value (`knowledgeDigest`). */
   knowledge: Record<string, string>;
   /** The HMAC of the subject's PIN (`pinDigest`), for the PIN factor in `keyed_hash` mode. */
   pinDigest?: string;
+  /** The HMAC of the subject's duress PIN (`duressDigest`), set only by the business (VER-12). */
+  duressDigest?: string;
+  /**
+   * Which enrolment stored `pinDigest` (VER-6): written with it by `putPinDigest`, so a call
+   * finishing an enrolment whose last write failed can tell its own from another's. Opaque.
+   */
+  pinEnrolmentId?: string;
 }
 
 /** What the engine asks an `AmountSource` for: the reference a step or the host's code named, and whose call it is. */
@@ -195,7 +228,97 @@ export interface AmountSource {
  * subject exists, and should take the same time either way.
  */
 export interface PinVerifier {
-  verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean }>;
+  /**
+   * `duress: true` when the entry is the subject's duress PIN (VER-12): the call then looks like a
+   * pass to the caller, and `matched` is ignored. It counts only while Badge's `pin.duress` is set.
+   */
+  verify(input: { workspaceId: string; subjectKey: string; pin: string }): Promise<{ matched: boolean; duress?: boolean }>;
+}
+
+/** One duress alert (VER-12): `alertId` is the same on every retry of it, for a host to drop repeats. */
+export interface DuressAlert {
+  alertId: string;
+  workspaceId: string;
+  subjectKey: string;
+  callId: string;
+  /** When the duress PIN was entered, ISO 8601. */
+  at: string;
+}
+
+/**
+ * Told when a caller enters a duress PIN (VER-12), for every duress entry. The alert is owed in the
+ * call record, in the same write that recorded the entry, and sent after that write, off the
+ * caller's response path; it stays owed until `notify` resolves, and is retried on the call's next
+ * write, on `flushLedger` and on `deliverDuressAlerts` (the host's sweep). So it is delivered at
+ * least once: drop repeats by `alertId`. Never given the PIN. The host alerts whoever the business
+ * named, away from the call. `notify` must not block: hand the alert to a queue and return.
+ */
+export interface DuressNotifier {
+  notify(input: DuressAlert): Promise<void>;
+}
+
+/**
+ * Which failures a counter holds: one factor kind, in one workspace, for one subject (its subject
+ * key) or one calling number (`numberKeyFor`, a keyed hash: the store never sees the number).
+ * Never a flow or a call: failures in one flow count in every other (VER-15).
+ */
+export interface AttemptCounterKey {
+  workspaceId: string;
+  /** The factor kind, for example `pin`, or `flow.start` for the starts of flows that need a money, contact or access scope (VER-15). The engine also keeps its lock notices under `notice:` kinds, which no factor kind can be (INT-7). */
+  factor: string;
+  scope: "subject" | "number";
+  /** The subject key, or the keyed hash of the calling number. 64 lower-case hex characters. */
+  key: string;
+}
+
+/**
+ * Failed attempts across calls, for lockouts that outlive a call (VER-1), and the starts of flows
+ * that need a money, contact or access scope, for their hourly limit (VER-15). Every engine of a
+ * workspace, in every process, must share one store. Times are ISO 8601. `attemptCountersContract`
+ * in `district-assurance/testing` is the suite a durable store must pass; `MemoryAttemptCounters`
+ * is the reference.
+ */
+export interface AttemptCounters {
+  /** The failures recorded for the key at or after `since`, in the order they were recorded. */
+  get(key: AttemptCounterKey, since: string): Promise<string[]>;
+  /**
+   * Records one failure at `at`, and returns the failures at or after `since` in the order they
+   * were recorded, this one last, in one atomic step: of two concurrent failures, the second sees
+   * the first. The store may forget failures before `since`.
+   */
+  recordFailure(key: AttemptCounterKey, at: string, since: string): Promise<string[]>;
+  /**
+   * Forgets one failure recorded at `at` and keeps every other, in one atomic step, so a failure
+   * another attempt records meanwhile is never lost; nothing when there is none. After a pass, it
+   * takes the passing attempt's own failure off the calling number.
+   */
+  removeFailure(key: AttemptCounterKey, at: string): Promise<void>;
+  /** Forgets every failure for the key: after a pass, or when the business lifts a lock. */
+  reset(key: AttemptCounterKey): Promise<void>;
+}
+
+/**
+ * A lock, as the business is told of it: the counter that locked (what `Engine.unlock` takes to
+ * lift it), the factor kind and when it ends. The key is the subject key or the keyed hash of the
+ * calling number: never an account number, a phone number or anything the caller keyed.
+ */
+export interface LockNotice extends AttemptCounterKey {
+  /** True for the lock after too many failures in the window; false for a wait after a failure. */
+  hard: boolean;
+  /** ISO 8601. */
+  until: string;
+  /** True on the workspace's last notice for the hour: locks after it are in the ledger only. */
+  capped: boolean;
+}
+
+/**
+ * Tells the business that someone is locked out (INT-7), for example by email or a dashboard.
+ * Told after the `verification.locked` entry is written, once per lock and at most 20 times an
+ * hour per workspace, best effort: a notifier that fails or hangs never
+ * blocks the call or the ledger, and the ledger stays the record.
+ */
+export interface Notifier {
+  lockout(notice: LockNotice): Promise<void>;
 }
 
 /** A stored call session and its version. The version goes up by one on every write. */
@@ -223,6 +346,12 @@ export interface SessionStore {
   /** Points a provider reference (an identity session, a payment link) at a call. The first binding wins. */
   bindRef(workspaceId: string, ref: string, callId: string): Promise<boolean>;
   resolveRef(workspaceId: string, ref: string): Promise<string | null>;
+  /**
+   * The ids of the workspace's calls whose stored record has `owesAlerts: true`, for
+   * `Engine.sweepAlerts` after a crash (VER-12). Optional: without it the host sweeps by call id
+   * (`deliverDuressAlerts`). A durable store indexes that one field.
+   */
+  listCallsOwingAlerts?(workspaceId: string): Promise<string[]>;
 }
 
 export interface IntakeRecord {
@@ -244,6 +373,24 @@ export interface RecordStore {
   /** Idempotent by `recordId`: the engine retries a write whose outcome it could not see, with the same record. */
   putIntakeRecord(record: IntakeRecord): Promise<void>;
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
+  /**
+   * Stores a subject's PIN digest (`pinDigest`) with the id of the enrolment that chose it
+   * (`pinEnrolmentId`), or removes both with null (a reset by the business), and the duress PIN
+   * (`duressDigest`, VER-12) in the same atomic step, so no duress PIN enrolled against a newer PIN
+   * is ever removed by an older reset. Never given the PIN
+   * itself. A digest is stored only if the subject has none, as one atomic step (of two enrolments at
+   * once, one wins and the other replaces nothing); the answer says whether it was stored. Null always
+   * removes and answers true. A subject the store does not have is left alone, and the answer is false.
+   */
+  putPinDigest(workspaceId: string, subjectKey: string, digest: string | null, enrolmentId?: string): Promise<boolean>;
+  /**
+   * Stores a subject's duress PIN digest (`duressDigest`), replacing any (the business changes it),
+   * only if the subject's PIN digest is still `ifPinDigest`, in one atomic step, so a PIN reset and
+   * a new PIN in between can never leave the duress PIN equal to the PIN; the answer says whether it
+   * stored. Null removes it (whatever `ifPinDigest`) and answers true. Never given the PIN itself. A
+   * subject the store does not have is left alone, and the answer is false.
+   */
+  putDuressDigest(workspaceId: string, subjectKey: string, digest: string | null, ifPinDigest?: string): Promise<boolean>;
 }
 
 export interface AuditInput {

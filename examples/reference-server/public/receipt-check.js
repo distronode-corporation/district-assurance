@@ -3,7 +3,17 @@
 // suite against receipts the engine signed (test/reference-ui.test.ts).
 //
 // canonicalJson mirrors src/core/canonical.ts (RFC 8785 for the values the engine produces): keys
-// sorted by UTF-16 code units, no whitespace, strings and numbers as JSON.stringify writes them.
+// sorted by UTF-16 code units, no whitespace, strings and numbers as JSON.stringify writes them,
+// and a string or key holding a lone surrogate refused (RFC 8785, section 3.2.2.2).
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function jsonString(value) {
+  if (!value.isWellFormed()) throw new TypeError("canonicalJson: lone surrogate");
+  return JSON.stringify(value);
+}
 
 /**
  * @param {unknown} value
@@ -15,7 +25,7 @@ export function canonicalJson(value) {
     case "boolean":
       return value ? "true" : "false";
     case "string":
-      return JSON.stringify(value);
+      return jsonString(value);
     case "number":
       if (!Number.isFinite(value)) throw new TypeError("canonicalJson: non-finite number");
       return JSON.stringify(value);
@@ -23,7 +33,7 @@ export function canonicalJson(value) {
       if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
       return `{${Object.keys(value)
         .sort()
-        .map((key) => `${JSON.stringify(key)}:${canonicalJson(/** @type {Record<string, unknown>} */ (value)[key])}`)
+        .map((key) => `${jsonString(key)}:${canonicalJson(/** @type {Record<string, unknown>} */ (value)[key])}`)
         .join(",")}}`;
     default:
       throw new TypeError(`canonicalJson: unsupported ${typeof value}`);
@@ -56,15 +66,39 @@ export async function sha256Hex(text) {
  *
  * @param {{ body: unknown, alg: string, kid: string, signature: string }} receipt
  * @param {ReadonlyArray<{ kid?: string, kty?: string, crv?: string, x?: string, y?: string }>} keys
- * @returns {Promise<{ ok: boolean, reason: "valid" | "wrong_alg" | "unknown_kid" | "bad_key" | "malformed_signature" | "signature_mismatch" }>}
+ * A key with `retiredAt` verifies only a receipt issued before it was retired: such a receipt is
+ * `valid_retired_key`, with the time, and one issued at or after it is `retired_key_after`.
+ *
+ * @returns {Promise<{ ok: boolean, reason: "valid" | "valid_retired_key" | "wrong_alg" | "unknown_kid" | "bad_key" | "retired_key_after" | "malformed_signature" | "malformed_body" | "signature_mismatch", retiredAt?: string }>}
  */
 export async function checkReceipt(receipt, keys) {
-  if (receipt.alg !== "ES256") return { ok: false, reason: "wrong_alg" };
-  const jwk = keys.find((k) => k.kid === receipt.kid);
+  // Read once, and the body serialized once: the issue time checked against a retirement is read
+  // from the bytes whose signature is verified, so neither a body swapped while the key is
+  // imported nor an issuedAt getter that changes can pass a later receipt as an earlier one.
+  const { alg, kid, body, signature: sig } = receipt;
+  /** @type {string | null} */
+  let text = null;
+  try {
+    text = canonicalJson(body);
+  } catch {
+    // Judged below, after the signature and the key, as a malformed body.
+  }
+  const snapshot = text === null ? body : JSON.parse(text);
+  if (alg !== "ES256") return { ok: false, reason: "wrong_alg" };
+  const jwk = keys.find((k) => k.kid === kid);
   if (jwk === undefined) return { ok: false, reason: "unknown_kid" };
+  /** @type {string | null} */
+  let retiredAt = null;
+  if (/** @type {{ retiredAt?: unknown }} */ (jwk).retiredAt !== undefined) {
+    const at = /** @type {{ retiredAt?: unknown }} */ (jwk).retiredAt;
+    if (!isUtcTime(at)) return { ok: false, reason: "bad_key" };
+    const issuedAt = /** @type {{ issuedAt?: unknown } | null | undefined} */ (snapshot)?.issuedAt;
+    if (!isUtcTime(issuedAt) || Date.parse(issuedAt) >= Date.parse(at)) return { ok: false, reason: "retired_key_after" };
+    retiredAt = at;
+  }
   let signature;
   try {
-    signature = base64urlToBytes(receipt.signature);
+    signature = base64urlToBytes(sig);
   } catch {
     return { ok: false, reason: "malformed_signature" };
   }
@@ -75,9 +109,24 @@ export async function checkReceipt(receipt, keys) {
   } catch {
     return { ok: false, reason: "bad_key" };
   }
-  const payload = new TextEncoder().encode(canonicalJson(receipt.body));
+  // The engine signs only what canonicalJson accepts, so no key signed a body it refused.
+  if (text === null) return { ok: false, reason: "malformed_body" };
+  const payload = new TextEncoder().encode(text);
   const ok = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, signature, payload);
-  return ok ? { ok: true, reason: "valid" } : { ok: false, reason: "signature_mismatch" };
+  if (!ok) return { ok: false, reason: "signature_mismatch" };
+  return retiredAt === null ? { ok: true, reason: "valid" } : { ok: true, reason: "valid_retired_key", retiredAt };
+}
+
+/**
+ * An ISO 8601 UTC time as the engine writes it.
+ *
+ * @param {unknown} value
+ * @returns {value is string}
+ */
+function isUtcTime(value) {
+  if (typeof value !== "string") return false;
+  const ms = Date.parse(value);
+  return !Number.isNaN(ms) && new Date(ms).toISOString() === value;
 }
 
 /**
@@ -88,7 +137,13 @@ export async function checkReceipt(receipt, keys) {
  */
 export async function entryHashMatches(entry) {
   const { hash, ...rest } = entry;
-  return (await sha256Hex(canonicalJson(rest))) === hash;
+  let text;
+  try {
+    text = canonicalJson(rest);
+  } catch {
+    return false;
+  }
+  return (await sha256Hex(text)) === hash;
 }
 
 /**

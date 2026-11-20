@@ -27,7 +27,7 @@ function withFlow(step: Record<string, unknown>, settings: Record<string, unknow
   });
 }
 
-const registry = () => new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer"], modules: builtInModules() });
+const registry = () => new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "counters"], modules: builtInModules() });
 
 /** Problems of a config's paylink parts, without their paths. */
 function problems(config: FlowConfig): string[] {
@@ -468,7 +468,7 @@ describe("paylink: the engine's own deadline", () => {
     }
     // A step whose own mode is invalid is reported for that, not checked against the adapter.
     assert.deepEqual(
-      validateConfig(withFlow({ ...pay, mode: "cash" }), new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer"], capabilities: { payments: { ...platformOnly, refund: true } }, modules: builtInModules() })),
+      validateConfig(withFlow({ ...pay, mode: "cash" }), new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "counters"], capabilities: { payments: { ...platformOnly, refund: true } }, modules: builtInModules() })),
       ["flows.deposit.steps[1] (paylink.request): mode must be connect or platform"],
     );
   });
@@ -753,7 +753,7 @@ describe("paylink: the engine's own deadline", () => {
     const off = setup({ adapters: { payments: bare as never }, config: testConfig((c) => delete (c.modules as Record<string, unknown>).paylink) });
     assert.throws(() => off.engine.configure(testConfig()), refused);
     // A registry that only knows adapter names cannot tell, and does not refuse.
-    assert.deepEqual(validateConfig(testConfig(), new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "pinVerifier"], modules: builtInModules() })), []);
+    assert.deepEqual(validateConfig(testConfig(), new ModuleRegistry({ adapters: ["ledger", "records", "carrier", "identity", "messages", "payments", "signer", "pinVerifier", "counters"], modules: builtInModules() })), []);
   });
 
   it("refuses on a call that started with paylink off", async () => {

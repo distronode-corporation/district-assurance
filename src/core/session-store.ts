@@ -47,4 +47,13 @@ export class MemorySessionStore implements SessionStore {
   async resolveRef(workspaceId: string, ref: string): Promise<string | null> {
     return this.#refs.get(tupleKey(workspaceId, ref)) ?? null;
   }
+
+  async listCallsOwingAlerts(workspaceId: string): Promise<string[]> {
+    const out: string[] = [];
+    for (const [key, stored] of this.#sessions) {
+      const [workspace, callId] = JSON.parse(key) as [string, string];
+      if (workspace === workspaceId && (stored.record as { owesAlerts?: unknown } | null)?.owesAlerts === true) out.push(callId);
+    }
+    return out;
+  }
 }

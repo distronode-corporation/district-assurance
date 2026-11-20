@@ -4,8 +4,8 @@
 // produces: object keys sorted by UTF-16 code units, no whitespace, strings and numbers
 // serialised as ECMAScript's JSON.stringify does. Anything JSON cannot carry faithfully is
 // refused instead of being dropped or coerced: undefined, functions, symbols, bigints,
-// non-finite numbers, strings with a lone UTF-16 surrogate, and objects that are not plain (a
-// Date, a Map, a class instance).
+// non-finite numbers, objects that are not plain (a Date, a Map, a class instance), and
+// strings or keys holding a lone surrogate (RFC 8785, section 3.2.2.2: not valid Unicode).
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -69,6 +69,6 @@ function serialiseObject(value: object, path: string): string {
   const record = value as Record<string, unknown>;
   // Default sort compares UTF-16 code units, which is what RFC 8785 asks for.
   const keys = Object.keys(record).sort();
-  const parts = keys.map((key) => `${jsonString(key, path)}:${serialise(record[key], `${path}.${key}`)}`);
+  const parts = keys.map((key) => `${jsonString(key, `${path}.${key}`)}:${serialise(record[key], `${path}.${key}`)}`);
   return `{${parts.join(",")}}`;
 }

@@ -28,7 +28,7 @@ export type FieldValue = string | number | boolean;
 
 export type NormaliseResult =
   | { ok: true; value: FieldValue }
-  | { ok: false; reason: "empty" | "too_long" | "not_a_number" | "not_a_date" | "not_yes_or_no" | "card_number" };
+  | { ok: false; reason: "empty" | "too_long" | "not_a_number" | "not_a_date" | "not_yes_or_no" | "card_number" | "not_text" };
 
 const FIELD_KEY = /^[a-z][a-z0-9_]{0,63}$/;
 const YES = new Set(["yes", "y", "oui"]);
@@ -53,6 +53,8 @@ export function normaliseFieldValue(field: IntakeField, raw: string): NormaliseR
   if (value === "") return { ok: false, reason: "empty" };
   switch (field.type) {
     case "text":
+      // A lone surrogate is not Unicode text, and canonical JSON (the record digest) refuses it.
+      if (!value.isWellFormed()) return { ok: false, reason: "not_text" };
       if (findCardNumbers(value).length > 0) return { ok: false, reason: "card_number" };
       if (value.length > (field.maxLength ?? 500)) return { ok: false, reason: "too_long" };
       return { ok: true, value };

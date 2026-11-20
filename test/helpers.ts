@@ -48,7 +48,12 @@ export function setup(options: TestEngineOptions = {}): TestEngine {
   return t;
 }
 
-export const rejects = (code: EngineErrorCode, message?: RegExp) => (e: unknown) =>
+/** Moves the fixed clock past the longest wait after a failure (900 seconds), as a caller keying again later would. */
+export function waitOut(t: TestEngine): void {
+  t.clock.advance(900_000);
+}
+
+export const rejects =(code: EngineErrorCode, message?: RegExp) => (e: unknown) =>
   e instanceof EngineError && e.code === code && (message === undefined || message.test(e.message));
 
 /** Reads the amount back and has the caller confirm it, as every payment link needs (PAY-2). */

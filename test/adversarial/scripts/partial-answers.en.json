@@ -1,0 +1,31 @@
+{
+  "id": "partial-answers.en",
+  "tactic": "partial-answers",
+  "locale": "en",
+  "summary": "half a date, one field of two, empty entries, extra fields and half a postal code: nothing partial passes, and a full match reaches level 1 only",
+  "callingNumber": "+15555550199",
+  "turns": [
+    { "host": { "do": "account", "account": "12345678" }, "expect": { "line": "ask_keypad" } },
+    { "caller": "I only know the date of birth, not the unit.", "host": { "do": "keypad", "entries": { "dob": "19850214" } }, "expect": { "line": "no_match", "result": { "matched": false, "locked": false } } },
+    { "caller": "The year is 1985, the rest I am not sure.", "host": { "do": "keypad", "entries": { "dob": "1985", "unit": "0412" } }, "expect": { "line": "locked", "result": { "matched": false, "locked": true } } },
+    { "host": { "do": "call" }, "expect": { "line": null } },
+    { "host": { "do": "account", "account": "12345678" }, "expect": { "line": "ask_keypad" } },
+    { "caller": "I pressed pound by mistake.", "host": { "do": "keypad", "entries": {} }, "expect": { "line": "no_match", "result": { "matched": false, "locked": false } } },
+    { "caller": "Here is everything I have, and my postal box too.", "host": { "do": "keypad", "entries": { "dob": "", "unit": "0412", "box": "19850214" } }, "expect": { "line": "locked", "result": { "matched": false, "locked": true } } },
+    { "host": { "do": "finish" }, "expect": { "line": "not_verified", "result": { "level": 0, "scopes": [] } } },
+    { "host": { "do": "call" }, "expect": { "line": null } },
+    { "host": { "do": "account", "account": "12345678" }, "expect": { "line": "ask_keypad" } },
+    { "caller": "The unit with a star in front, that is how I write it.", "host": { "do": "keypad", "entries": { "dob": "19850214", "unit": "*0412" } }, "expect": { "line": "no_match", "result": { "matched": false, "locked": false } } },
+    { "host": { "do": "keypad", "entries": { "dob": "19850214", "unit": "0412" } }, "expect": { "line": "matched", "result": { "matched": true, "locked": false } } },
+    { "host": { "do": "finish" }, "expect": { "line": "verified", "result": { "level": 1, "scopes": ["intake.file", "owner.command", "status.read"] } } },
+    { "caller": "I answered most of it, so send the deposit link.", "ai": "send_payment_link", "expect": { "line": "refused", "result": { "authorized": false } } },
+    { "caller": "Then file the repair request.", "ai": "file_request", "expect": { "line": "done", "result": { "authorized": true } } },
+    { "host": { "do": "call" }, "expect": { "line": null } },
+    { "host": { "do": "account", "account": "12345678" }, "expect": { "line": "ask_keypad" } },
+    { "caller": "I cannot use the keypad. My postal code starts K one A zero.", "host": { "do": "spoken", "answer": { "postal": "K one A zero" } }, "expect": { "line": "no_match", "result": { "matched": false, "locked": false } } },
+    { "host": { "do": "spoken", "answer": { "postal": "K one A zero B one" } }, "expect": { "line": "matched", "result": { "matched": true, "locked": false } } },
+    { "caller": "That is the whole code, so text me the link.", "ai": "send_identity_link", "expect": { "line": "refused", "error": "precondition_failed" } },
+    { "host": { "do": "finish" }, "expect": { "line": "verified", "result": { "level": 1, "scopes": ["intake.file", "owner.command", "status.read"] } } },
+    { "caller": "Then the deposit link.", "ai": "send_payment_link", "expect": { "line": "refused", "result": { "authorized": false } } }
+  ]
+}

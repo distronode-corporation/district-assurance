@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import type { JsonValue } from "../src/core/canonical.ts";
 import { ConfigError, assertConfig, moduleEnabled, validateConfig, type FlowConfig } from "../src/core/config.ts";
 import { EngineError } from "../src/core/errors.ts";
-import { ModuleRegistry, checkManifest, type AssuranceModule, type ModuleManifest } from "../src/core/module.ts";
+import { ModuleRegistry, checkFactorPlugin, checkFactorPlugins, checkManifest, type AssuranceModule, type FactorPlugin, type ModuleManifest } from "../src/core/module.ts";
 import { isBilingual } from "../src/core/shape.ts";
 import { builtInModules, defaultConfig } from "../src/modules.ts";
 import { badgeModule } from "../src/verify/badge.ts";
@@ -18,7 +18,7 @@ function hole(): unknown[] {
   return list;
 }
 
-const ALL_ADAPTERS = ["ledger", "sessions", "records", "identity", "carrier", "messages", "payments", "signer", "pinVerifier"];
+const ALL_ADAPTERS = ["ledger", "sessions", "records", "identity", "carrier", "messages", "payments", "signer", "pinVerifier", "counters", "codes"];
 
 function registry(adapters: readonly string[] = ALL_ADAPTERS, extra: AssuranceModule[] = []): ModuleRegistry {
   return new ModuleRegistry({ adapters, modules: [...builtInModules(), ...extra] });
@@ -147,6 +147,7 @@ describe("validateConfig: modules", () => {
     );
     assert.deepEqual(problems, [
       "modules.badge: needs the records adapter, which the engine does not have",
+      "modules.badge: needs the counters adapter, which the engine does not have",
       "modules.badge: needs the carrier adapter, which the engine does not have",
       "modules.badge: needs the identity adapter, which the engine does not have",
       "modules.badge: needs the messages adapter, which the engine does not have",
@@ -166,8 +167,6 @@ describe("validateConfig: modules", () => {
     assert.deepEqual(at({ factors: ["pin", "pin", "caller_id", "text_code", "spoken_knowledge"], grantTtlSeconds: 0 }), [
       "modules.badge.settings: factors has duplicates",
       "modules.badge.settings: factor caller_id is not installed",
-      "modules.badge.settings: factor text_code is not built yet (VER-2)",
-      "modules.badge.settings: factor spoken_knowledge is not built yet (VER-3)",
       "modules.badge.settings: pin settings are required when the pin factor is on",
       "modules.badge.settings: grantTtlSeconds must be an integer from 1 to 3600",
     ]);
@@ -184,6 +183,44 @@ describe("validateConfig: modules", () => {
     assert.deepEqual(at({ factors: ["keypad_knowledge"], grantTtlSeconds: 3600 }), []);
     assert.deepEqual(at({ factors: ["keypad_knowledge", 3] }), ["modules.badge.settings: factors must list at least one factor"]);
     assert.deepEqual(at({ factors: hole() }), ["modules.badge.settings: factors must list at least one factor"], "a hole is not a factor");
+  });
+
+  it("checks badge lockout settings, whose defaults are floors (VER-1)", () => {
+    const at = (lockout: unknown) => validateConfig(config((c) => (c.modules.badge.settings.lockout = lockout)), registry());
+    assert.deepEqual(at({}), []);
+    assert.deepEqual(at({ backoffSeconds: [10, 30, 120, 600, 1800, 3600, 3600], lockAfterFailures: 3, windowHours: 168 }), [], "stricter is fine");
+    assert.deepEqual(at({ backoffSeconds: [5, 15, 60, 300, 900, 900, 900, 900, 900, 900], lockAfterFailures: 1, windowHours: 24 }), [], "the floors themselves");
+    assert.deepEqual(at("strict"), ["modules.badge.settings: lockout must be an object"]);
+    assert.deepEqual(at({ backoffSeconds: [5, 15, 60, 300], lockAfterFailures: 11, windowHours: 23, after: 1 }), [
+      "modules.badge.settings: lockout.after is not a lockout setting",
+      "modules.badge.settings: lockout.backoffSeconds must list 5 to 10 whole seconds, each at most 86400",
+      "modules.badge.settings: lockout.lockAfterFailures must be 1 to 10",
+      "modules.badge.settings: lockout.windowHours must be 24 to 168",
+    ]);
+    const tooLong = "modules.badge.settings: lockout.backoffSeconds must list 5 to 10 whole seconds, each at most 86400";
+    assert.deepEqual(at({ backoffSeconds: Array(11).fill(900) }), [tooLong]);
+    assert.deepEqual(at({ backoffSeconds: [5, 15, 60, 300, 86_401] }), [tooLong]);
+    assert.deepEqual(at({ backoffSeconds: [5, 15, 60, 300, 1.5] }), [tooLong]);
+    assert.deepEqual(at({ backoffSeconds: "5,15" }), [tooLong]);
+    assert.deepEqual(at({ backoffSeconds: [5, 15, 60, 300, ...hole()] }), [tooLong]);
+    const below = "modules.badge.settings: lockout.backoffSeconds must not go below 5, 15, 60, 300, 900 (900 after that)";
+    assert.deepEqual(at({ backoffSeconds: [4, 15, 60, 300, 900] }), [below]);
+    assert.deepEqual(at({ backoffSeconds: [5, 15, 60, 300, 899] }), [below]);
+    assert.deepEqual(at({ backoffSeconds: [5, 15, 60, 300, 900, 899] }), [below], "900 after the fifth");
+    assert.deepEqual(at({ lockAfterFailures: 0 }), ["modules.badge.settings: lockout.lockAfterFailures must be 1 to 10"]);
+    assert.deepEqual(at({ windowHours: 169 }), ["modules.badge.settings: lockout.windowHours must be 24 to 168"]);
+  });
+
+  it("needs the counters adapter whenever a factor the caller enters is on", () => {
+    const needs = (factors: string[]) =>
+      validateConfig(
+        config((c) => (c.modules.badge.settings.factors = factors)),
+        registry(ALL_ADAPTERS.filter((a) => a !== "counters")),
+      ).filter((p) => p.includes("counters"));
+    const missing = ["modules.badge: needs the counters adapter, which the engine does not have"];
+    assert.deepEqual(needs(["keypad_knowledge"]), missing);
+    assert.deepEqual(needs(["pin"]), missing);
+    assert.deepEqual(needs(["carrier_identity_match", "photo_id"]), [], "factors the caller does not enter are not counted");
   });
 
   it("checks dossier settings", () => {
@@ -316,7 +353,19 @@ describe("validateConfig: flows", () => {
     assert.deepEqual(step({ level: 2, factors: ["pin", "pin", "text_code"] }), [
       "flows.f.steps[0] (badge.verify): factors has duplicates",
       "flows.f.steps[0] (badge.verify): factor text_code is turned off in the badge settings",
+      "flows.f.steps[0] (badge.verify): factor text_code needs the policy's textCodeCountryCodes, or no code is ever texted",
     ]);
+    const withCodes = (countries: string[] | undefined) =>
+      validateConfig(
+        config((c) => {
+          c.modules.badge.settings.factors.push("text_code");
+          if (countries !== undefined) c.policy.textCodeCountryCodes = countries;
+          c.flows = { f: { steps: [{ type: "badge.verify", level: 2, factors: ["keypad_knowledge", "text_code"] }] } };
+        }),
+        registry(),
+      );
+    assert.deepEqual(withCodes(["1", "33"]), []);
+    assert.deepEqual(withCodes(undefined), ["flows.f.steps[0] (badge.verify): factor text_code needs the policy's textCodeCountryCodes, or no code is ever texted"]);
     assert.deepEqual(step({ level: 3, factors: ["keypad_knowledge", "carrier_identity_match"] }), [
       "flows.f.steps[0] (badge.verify): level 3 cannot be reached with [keypad_knowledge, carrier_identity_match] under the policy",
     ]);
@@ -534,6 +583,48 @@ describe("module registry", () => {
             "factor kind voice_x already exists",
           ].join("; "),
     );
+  });
+
+  it("checks the factors a manifest provides, and the judges a module supplies for them (MOD-3)", () => {
+    const installed = builtInModules();
+    const judge = async () => true;
+    const manifest = (factors: string[]) => ({ ...outside("x1").manifest, provides: { factors, steps: [], outcomes: [] }, scopes: { grants: [], needs: {} } });
+    assert.deepEqual(checkManifest(manifest(["caller_id", "ab", "pin"]), installed), [
+      "module x1: factor kind caller_id would make caller ID a factor, which it never is",
+      'module x1: factor kind "ab" must be snake_case, 3 to 32 characters',
+      "module x1: factor pin is already provided by badge",
+    ]);
+    const supplying = (factors: string[], factorPlugins: FactorPlugin[]): AssuranceModule => ({ ...outside("x1"), manifest: manifest(factors), factorPlugins });
+    const plugin = (kind: string, patch: Partial<FactorPlugin> = {}): FactorPlugin => ({ kind, summary: "x", maxAttemptsPerCall: 1, adapters: [], judge, ...patch });
+    assert.deepEqual(checkFactorPlugins(outside("x1")), [], "a module without factors needs no judges");
+    assert.deepEqual(checkFactorPlugins({ ...outside("x1"), manifest: manifest(["desk_code"]) }), ["module x1: factor desk_code has no judge"], "a missing list judges nothing");
+    assert.deepEqual(checkFactorPlugins(installed.find((m) => m.manifest.name === "badge")!), [], "Badge judges its own factors");
+    assert.deepEqual(checkFactorPlugins(supplying(["desk_code"], [plugin("desk_code")])), []);
+    assert.deepEqual(
+      checkFactorPlugins(supplying(["desk_code", "token_code"], [plugin("desk_code"), plugin("desk_code", { maxAttemptsPerCall: 6 }), plugin("other_code", { judge: "yes" as unknown as FactorPlugin["judge"] })])),
+      [
+        "module x1: judges desk_code twice",
+        "module x1: factor desk_code: maxAttemptsPerCall must be 1 to 5",
+        "module x1: judges other_code, a factor its manifest does not provide",
+        "module x1: factor other_code: judge must be a function",
+        "module x1: factor token_code has no judge",
+      ],
+    );
+    assert.throws(() => registry().use(supplying(["desk_code"], [])), /module x1: factor desk_code has no judge/);
+    assert.deepEqual(checkFactorPlugin(plugin("desk_code", { judge: undefined as unknown as FactorPlugin["judge"] }), []), ["factor desk_code: judge must be a function"]);
+  });
+
+  it("lists the judges outside modules supply, and replaces a module in its place (MOD-3)", () => {
+    const reg = registry(ALL_ADAPTERS, [{ ...outside("x1"), manifest: { ...outside("x1").manifest, provides: { factors: ["desk_code"], steps: ["x1.lookup"], outcomes: [] } }, factorPlugins: [{ kind: "desk_code", summary: "x", maxAttemptsPerCall: 1, adapters: [], judge: async () => true }] }]);
+    assert.deepEqual(reg.factorPlugins().map((p) => p.kind), ["desk_code"]);
+    const plugin = { kind: "desk_code", summary: "x", maxAttemptsPerCall: 1, adapters: [], judge: async () => true };
+    assert.throws(() => reg.replace(badgeModule({ factors: [plugin] })), /factor desk_code is already provided by x1/);
+    const next = badgeModule({ factors: [{ ...plugin, kind: "lobby_code" }] });
+    reg.replace(next);
+    assert.equal(reg.get("badge"), next);
+    assert.deepEqual(reg.list().map((m) => m.manifest.name), ["badge", "dossier", "paylink", "trace", "gate", "step-up", "x1"]);
+    assert.ok(reg.factorKinds().includes("lobby_code"));
+    assert.throws(() => reg.replace(outside("loyalty")), (e: unknown) => e instanceof EngineError && e.code === "invalid_input" && /no module named loyalty/.test(e.message));
   });
 
   it("has small shape helpers", () => {

@@ -1,14 +1,17 @@
 // The reference server, over a real socket on 127.0.0.1, and the scripted demo.
 import { strict as assert } from "node:assert";
+import type { JsonWebKey } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 
 import { SEEN_EVENT_MAX, SEEN_EVENT_TTL_MS, SeenEvents, createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { runDemo } from "../examples/reference-server/src/demo.ts";
 import { createDoorRelay } from "../examples/reference-server/src/door-relay.ts";
-import { canonicalJson, signDocument, signStripePayload, type Engine } from "../src/index.ts";
+import { canonicalJson, receiptKeyRing, signDocument, signStripePayload, verifyReceipt, type Engine } from "../src/index.ts";
 import { FixedClock, createTestEngine, generateTestSigner, type TestEngine } from "../src/testing/index.ts";
 
+/** When k1 stopped signing: after the test clock's receipts (2026-01-01), so they predate it. */
+const RETIRED_AT = "2026-06-01T00:00:00.000Z";
 const SECRET = "whsec_test_not_a_secret";
 
 describe("reference server", () => {
@@ -191,6 +194,24 @@ describe("reference server", () => {
     const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/receipts/c1`);
     assert.deepEqual([res.status, await res.json()], [500, { error: "internal" }]);
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it("serves the key set history, so a receipt signed before a rotation still verifies (PRV-1)", async () => {
+    const k1 = generateTestSigner("k1");
+    const earlier = createTestEngine({ adapters: { signer: k1 } });
+    const old = (await earlier.engine.endCall((await earlier.engine.startCall()).callId))!;
+    const later = createTestEngine({ adapters: { signer: receiptKeyRing({ signers: [generateTestSigner("k2")], active: "k2", retired: [{ ...k1.publicJwk(), retiredAt: RETIRED_AT }] }) } });
+    const server = createReferenceServer({ engine: later.engine, stripeSecrets: { identity: [], payments: [] }, clock: later.clock });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { keys } = (await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/.well-known/receipt-keys.json`)).json()) as { keys: JsonWebKey[] };
+      assert.deepEqual(keys.map((k) => k.kid), ["k2", "k1"]);
+      assert.equal(keys.some((k) => "d" in k), false);
+      assert.equal(verifyReceipt(old, keys), true);
+    } finally {
+      // A request or an assertion that fails still closes the server, so the test process can exit.
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 
