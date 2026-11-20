@@ -903,8 +903,9 @@ too, never from a spoken answer, until then.
 
 **JSON Schema.** `schema/flow-config.v1.json` (JSON Schema 2020-12, published with the package as
 `district-assurance/schema/flow-config.v1.json`) describes the shape of version 1 for editors and
-tools: the fields of each object, their types, ranges and patterns, the built-in modules' settings
-(checked only while the module is on) and the built-in steps. An outside module's settings and
+tools: the fields of each object, their types, ranges and patterns, the settings of the six built-in
+modules, Badge, Dossier, Paylink, Trace, Gate and step-up (checked only while the module is on),
+and their steps. An outside module's settings and
 steps are open. The schema is never stricter than `validateConfig`: every config `validateConfig`
 accepts with the built-in modules passes the schema. It cannot see the rules that need the registry, the
 adapters or another part of the document (installed modules and factors, floors, planned factors

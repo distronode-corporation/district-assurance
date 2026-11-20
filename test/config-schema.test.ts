@@ -11,16 +11,19 @@ import { isDeepStrictEqual } from "node:util";
 import { demoConfig } from "../examples/reference-server/src/flows.ts";
 import { validateConfig, type FlowConfig, type FlowDefinition, type ModuleConfig } from "../src/core/config.ts";
 import { ModuleRegistry, type AssuranceModule } from "../src/core/module.ts";
-import { SCOPE_CLASSES, type LevelRule, type VerificationPolicy } from "../src/core/policy.ts";
+import { ATTESTATIONS, SCOPE_CLASSES, SPOKEN_FORMATS, type LevelRule, type StepUpRule, type VerificationPolicy } from "../src/core/policy.ts";
 import type { DossierCollectStep, DossierSettings } from "../src/file/dossier.ts";
+import type { GateGrantStep, GateSettings, GateTarget } from "../src/gate/gate.ts";
+import type { StepUpIssueStep, StepUpSettings, StepUpSite } from "../src/gate/step-up.ts";
 import type { FieldType, IntakeField, IntakeForm } from "../src/file/intake.ts";
 import { builtInModules, defaultConfig } from "../src/modules.ts";
-import { PAYMENT_MODES, type PaylinkRequestStep, type PaylinkSettings } from "../src/pay/paylink.ts";
-import type { AmountSource } from "../src/pay/payment.ts";
+import type { PaylinkRequestStep, PaylinkSettings } from "../src/pay/paylink.ts";
+import { INSTANT_PAYMENT_METHODS, PAYMENT_MODES, type AmountSourceKind } from "../src/pay/payment.ts";
 import type { ConsentWording } from "../src/prove/consent.ts";
-import type { TraceConsentStep, TraceSettings } from "../src/prove/trace.ts";
+import type { TraceConsentStep, TraceReceiptStep, TraceSettings } from "../src/prove/trace.ts";
 import type { BadgeVerifyStep } from "../src/verify/badge.ts";
-import type { BadgeSettings, PinMode, PinSettings } from "../src/verify/factors.ts";
+import type { LockoutSettings } from "../src/verify/counters.ts";
+import type { AccessibilitySettings, BadgeSettings, PinMode, PinSettings } from "../src/verify/factors.ts";
 import { testConfig } from "./helpers.ts";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -152,25 +155,35 @@ const membersOf =
 /** Each object in the schema and the keys of the type it describes. A change to a type fails typecheck here first. */
 const OBJECTS: ReadonlyArray<readonly [pointer: string, keys: readonly string[]]> = [
   ["#", keysOf<FlowConfig>()(["version", "revision", "policy", "modules", "flows"])],
-  ["#/$defs/policy", keysOf<VerificationPolicy>()(["version", "levels", "scopes", "scopeClasses", "keypadFields", "maxKeypadAttemptsPerCall", "simSwapWindowHours", "trustTextCodeWithoutCarrierCheck"])],
+  ["#/$defs/policy", keysOf<VerificationPolicy>()(["version", "levels", "scopes", "scopeClasses", "keypadFields", "maxKeypadAttemptsPerCall", "simSwapWindowHours", "trustTextCodeWithoutCarrierCheck", "textCodeCountryCodes", "spoken", "attestationCaps", "timeZone", "stepUp"])],
+  ["#/$defs/stepUpRule", keysOf<StepUpRule>()(["name", "scope", "level", "amountOverMinor", "localTime", "signal"])],
   ["#/$defs/levelRule", keysOf<LevelRule>()(["level", "anyOf"])],
   ["#/$defs/moduleConfig", keysOf<ModuleConfig>()(["enabled", "settings"])],
   ["#/$defs/traceModule", keysOf<ModuleConfig>()(["enabled", "settings"])],
-  ["#/$defs/badgeSettings", keysOf<BadgeSettings>()(["factors", "grantTtlSeconds", "pin"])],
-  ["#/$defs/pinSettings", keysOf<PinSettings>()(["mode", "minDigits", "maxDigits", "maxAttemptsPerCall"])],
+  ["#/$defs/badgeSettings", keysOf<BadgeSettings>()(["factors", "grantTtlSeconds", "pin", "lockout", "accessibility"])],
+  ["#/$defs/accessibilitySettings", keysOf<AccessibilitySettings>()(["spokenKeypadFields", "keypadIdleSeconds", "maxKeypadIdleSeconds"])],
+  ["#/$defs/lockoutSettings", keysOf<LockoutSettings>()(["backoffSeconds", "lockAfterFailures", "windowHours", "flowStartsPerHour"])],
+  ["#/$defs/pinSettings", keysOf<PinSettings>()(["mode", "minDigits", "maxDigits", "maxAttemptsPerCall", "duress"])],
   ["#/$defs/dossierSettings", keysOf<DossierSettings>()(["forms"])],
   ["#/$defs/form", keysOf<IntakeForm>()(["formId", "version", "fields"])],
-  ["#/$defs/field", keysOf<IntakeField>()(["key", "label", "type", "required", "sensitive", "maxLength"])],
-  ["#/$defs/bilingual", keysOf<IntakeField["label"]>()(["en", "fr"])],
-  ["#/$defs/paylinkSettings", keysOf<PaylinkSettings>()(["maxAmountMinor"])],
-  ["#/$defs/traceSettings", keysOf<TraceSettings>()(["receipts", "wordings"])],
+  ["#/$defs/field", keysOf<IntakeField>()(["key", "label", "type", "required", "sensitive", "maxLength", "showIf", "min", "max", "pattern"])],
+  ["#/$defs/bilingual", keysOf<IntakeField["label"]>()(["en", "fr", "es"])],
+  ["#/$defs/paylinkSettings", keysOf<PaylinkSettings>()(["maxAmountMinor", "mode", "connectedAccountId", "linkLifeMinutes", "paymentMethods"])],
+  ["#/$defs/traceSettings", keysOf<TraceSettings>()(["receipts", "wordings", "businessName"])],
   ["#/$defs/wording", keysOf<ConsentWording>()(["purpose", "version", "text"])],
   ["#/$defs/flow", keysOf<FlowDefinition>()(["summary", "steps"])],
   ["#/$defs/badgeVerifyStep", keysOf<BadgeVerifyStep>()(["type", "level", "factors", "scopes"])],
   ["#/$defs/dossierCollectStep", keysOf<DossierCollectStep>()(["type", "form"])],
-  ["#/$defs/paylinkRequestStep", keysOf<PaylinkRequestStep>()(["type", "amountMinor", "currency", "description", "amountSource", "mode"])],
+  ["#/$defs/paylinkRequestStep", keysOf<PaylinkRequestStep>()(["type", "amountMinor", "currency", "amountRef", "description", "amountSource", "mode", "linkLifeMinutes", "paymentMethods"])],
   ["#/$defs/traceConsentStep", keysOf<TraceConsentStep>()(["type", "purpose", "require"])],
-  ["#/$defs/traceReceiptStep", ["type"]],
+  ["#/$defs/traceReceiptStep", keysOf<TraceReceiptStep>()(["type", "textLink"])],
+  ["#/$defs/traceReceiptStep/properties/textLink", keysOf<NonNullable<TraceReceiptStep["textLink"]>>()(["consent"])],
+  ["#/$defs/gateSettings", keysOf<GateSettings>()(["targets", "maxGrantsPerCall"])],
+  ["#/$defs/gateTarget", keysOf<GateTarget>()(["id", "controller", "ref"])],
+  ["#/$defs/gateGrantStep", keysOf<GateGrantStep>()(["type", "target", "lifetimeSeconds"])],
+  ["#/$defs/stepUpSettings", keysOf<StepUpSettings>()(["issuer", "sites", "maxTokensPerCall"])],
+  ["#/$defs/stepUpSite", keysOf<StepUpSite>()(["id", "audience"])],
+  ["#/$defs/stepUpIssueStep", keysOf<StepUpIssueStep>()(["type", "site", "lifetimeSeconds"])],
 ];
 
 /** Each closed list in the schema and the union or constant it comes from. */
@@ -181,14 +194,22 @@ const ENUMS: ReadonlyArray<readonly [pointer: string, members: readonly Json[]]>
   ["#/$defs/pinSettings/properties/mode", membersOf<PinMode>()(["keyed_hash", "verifier"])],
   ["#/$defs/field/properties/type", membersOf<FieldType>()(["text", "number", "date", "yes_no"])],
   ["#/$defs/badgeVerifyStep/properties/level", membersOf<BadgeVerifyStep["level"]>()([1, 2, 3])],
-  ["#/$defs/paylinkRequestStep/properties/amountSource", membersOf<AmountSource>()(["intake_record", "business_endpoint", "price_list"])],
+  ["#/$defs/paylinkRequestStep/properties/amountSource", membersOf<AmountSourceKind>()(["intake_record", "business_endpoint", "price_list"])],
   ["#/$defs/paylinkRequestStep/properties/mode", [...PAYMENT_MODES]],
+  ["#/$defs/paylinkSettings/properties/mode", [...PAYMENT_MODES]],
+  ["#/$defs/paymentMethods/items", [...INSTANT_PAYMENT_METHODS]],
+  ["#/$defs/policy/properties/attestationCaps/propertyNames", [...ATTESTATIONS]],
+  ["#/$defs/policy/properties/spoken/properties/fields/additionalProperties", [...SPOKEN_FORMATS]],
   ["#/$defs/traceConsentStep/properties/require", membersOf<NonNullable<TraceConsentStep["require"]>>()(["yes", "answer"])],
 ];
 
 // ---- the corpus ----------------------------------------------------------------------------
 
-const ALL_ADAPTERS = ["ledger", "sessions", "records", "identity", "carrier", "messages", "payments", "signer", "pinVerifier"];
+// Every adapter an engine can have (EngineAdapters), so a config's modules never fail for want of one.
+const ALL_ADAPTERS = [
+  "ledger", "sessions", "records", "identity", "carrier", "messages", "payments", "signer", "pinVerifier", "amounts",
+  "access", "accessSigner", "stepUpSigner", "codes", "counters", "dialer", "notifier", "duressNotifier", "fieldCipher", "consents", "anchor",
+];
 
 /** An outside module whose settings and steps take anything: the schema cannot know them. */
 const crm: AssuranceModule = {
@@ -213,6 +234,24 @@ function registry(adapters: readonly string[] = ALL_ADAPTERS): ModuleRegistry {
 }
 
 const json = (value: unknown) => JSON.parse(JSON.stringify(value)) as { [key: string]: any };
+
+/**
+ * Gate and step-up on, each with a flow that verifies to the scope its step needs (the settings and
+ * levels test/gate.test.ts and test/gate-step-up-hostile.test.ts use), and a receipt that texts its
+ * link (PRV-10).
+ */
+function gateAndStepUpConfig(): { [key: string]: any } {
+  const c = json(testConfig());
+  c.policy.scopes["entry.open"] = 2;
+  c.policy.scopes["entry.sign_in"] = 2;
+  c.modules.trace.settings.businessName = "Maple Property Management";
+  c.modules.gate = { settings: { targets: [{ id: "front-door", controller: "lobby", ref: "door-1" }, { id: "garage", controller: "lobby", ref: "door 2" }], maxGrantsPerCall: 5 } };
+  c.modules["step-up"] = { settings: { issuer: "https://verify.example.test", sites: [{ id: "portal", audience: "https://portal.example.test" }], maxTokensPerCall: 1 } };
+  const verify = (scope: string) => ({ type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: [scope] });
+  c.flows.entry = { steps: [verify("entry.open"), { type: "gate.grant", target: "front-door", lifetimeSeconds: 900 }, { type: "trace.receipt", textLink: { consent: c.modules.trace.settings.wordings[0].purpose } }] };
+  c.flows.web = { steps: [verify("entry.sign_in"), { type: "step-up.issue", site: "portal", lifetimeSeconds: 300 }] };
+  return c;
+}
 
 /** Configs validateConfig accepts, each with the adapters its engine has. */
 const GOOD: ReadonlyArray<readonly [name: string, config: { [key: string]: any }, adapters?: readonly string[]]> = [
@@ -250,6 +289,13 @@ const GOOD: ReadonlyArray<readonly [name: string, config: { [key: string]: any }
     c.modules.trace.settings.receipts = false;
     return c;
   })(), ALL_ADAPTERS.filter((a) => a !== "signer")],
+  ["Gate and step-up on, and a receipt that texts its link", gateAndStepUpConfig()],
+  ["Gate and step-up listed but switched off, whose settings are not checked", (() => {
+    const c = json(defaultConfig());
+    c.modules.gate = { enabled: false, settings: "anything" };
+    c.modules["step-up"] = { enabled: false };
+    return c;
+  })()],
   ["fields that are not sensitive, a description padded with spaces, a policy with an extra field", (() => {
     const c = json(demoConfig());
     c.modules.dossier.settings.forms[0].fields[0].sensitive = false;
@@ -295,7 +341,7 @@ const BAD: ReadonlyArray<readonly [name: string, kind: "shape" | "rule", patch: 
   ["a field key in camel case", "shape", (c) => (c.modules.dossier.settings.forms[0].fields[0].key = "isUrgent")],
   ["a field with a blank French label", "shape", (c) => (c.modules.dossier.settings.forms[0].fields[0].label.fr = "  ")],
   ["a field type that does not exist", "shape", (c) => (c.modules.dossier.settings.forms[0].fields[0].type = "photo")],
-  ["a sensitive field (FIL-2)", "shape", (c) => (c.modules.dossier.settings.forms[0].fields[0].sensitive = true)],
+  ["an empty field pattern", "shape", (c) => (c.modules.dossier.settings.forms[0].fields[0].pattern = "")],
   ["a payment limit above 1,000,000", "shape", (c) => (c.modules.paylink.settings.maxAmountMinor = 1_000_001)],
   ["receipts as a string", "shape", (c) => (c.modules.trace.settings.receipts = "yes")],
   ["a wording purpose with a hyphen", "shape", (c) => (c.modules.trace.settings.wordings[0].purpose = "repair-texts")],
@@ -316,20 +362,47 @@ const BAD: ReadonlyArray<readonly [name: string, kind: "shape" | "rule", patch: 
   ["an amount from the model", "shape", (c) => (c.flows.deposit.steps[2].amountSource = "model")],
   ["a consent that requires maybe", "shape", (c) => (c.flows.deposit.steps[3].require = "maybe")],
   ["a receipt step with a field", "shape", (c) => (c.flows.deposit.steps[4].sign = true)],
-  ["a module that is not installed", "rule", (c) => (c.modules.gate = {})],
-  ["a step whose module is not installed", "rule", (c) => (c.flows.deposit.steps[0].type = "gate.grant")],
+  ["a module that is not installed", "rule", (c) => (c.modules.crm2 = {})],
+  ["Gate on without settings", "shape", (c) => (c.modules.gate = {})],
+  ["Gate with no targets", "shape", (c) => (c.modules.gate = { settings: { targets: [] } })],
+  ["a Gate target id in capitals", "shape", (c) => (c.modules.gate = { settings: { targets: [{ id: "Front", controller: "lobby", ref: "d" }] } })],
+  ["a Gate target without a controller", "shape", (c) => (c.modules.gate = { settings: { targets: [{ id: "front", controller: "", ref: "d" }] } })],
+  ["a Gate setting that does not exist", "shape", (c) => (c.modules.gate = { settings: { targets: [{ id: "front", controller: "lobby", ref: "d" }], doors: 1 } })],
+  ["step-up on without sites", "shape", (c) => (c.modules["step-up"] = { settings: { issuer: "https://verify.example.test", sites: [] } })],
+  ["a step-up issuer with a query", "shape", (c) => (c.modules["step-up"] = { settings: { issuer: "https://verify.example.test/?a=1", sites: [{ id: "portal", audience: "p" }] } })],
+  ["a step-up audience with a space", "shape", (c) => (c.modules["step-up"] = { settings: { issuer: "https://verify.example.test", sites: [{ id: "portal", audience: "a b" }] } })],
+  ["a gate.grant step without a target", "shape", (c) => c.flows.deposit.steps.splice(1, 0, { type: "gate.grant" })],
+  ["a gate.grant step with a field", "shape", (c) => c.flows.deposit.steps.splice(1, 0, { type: "gate.grant", target: "front", door: 1 })],
+  ["a step-up.issue step without a site", "shape", (c) => c.flows.deposit.steps.splice(1, 0, { type: "step-up.issue" })],
+  ["a receipt link without a consent", "shape", (c) => (c.flows.deposit.steps[4].textLink = {})],
+  ["a receipt link with a field", "shape", (c) => (c.flows.deposit.steps[4].textLink = { consent: "repair_texts", to: "x" })],
+  ["a step-up issuer that is not https", "rule", (c) => (c.modules["step-up"] = { settings: { issuer: "http://verify.example.test", sites: [{ id: "portal", audience: "p" }] } })],
+  ["two Gate targets with one id", "rule", (c) => (c.modules.gate = { settings: { targets: [{ id: "front", controller: "lobby", ref: "d" }, { id: "front", controller: "lobby", ref: "e" }] } })],
+  ["a gate.grant step for a target that does not exist", "rule", (c) => {
+    const g = gateAndStepUpConfig();
+    Object.assign(c, g);
+    c.flows.entry.steps[1].target = "attic";
+  }],
+  ["a receipt link for a consent that does not exist", "rule", (c) => (c.flows.deposit.steps[4].textLink = { consent: "marketing" })],
+  ["a step whose module is not installed", "rule", (c) => (c.flows.deposit.steps[0].type = "crm2.lookup")],
   ["a step whose module is off", "rule", (c) => (c.modules.paylink.enabled = false)],
   ["an unknown factor in the policy", "rule", (c) => c.policy.levels[0].anyOf.push(["voice_print"])],
   ["a money scope below level 2", "rule", (c) => (c.policy.scopes["payment.request"] = 1)],
   ["a scope with no class", "rule", (c) => (c.policy.scopes["owner.reboot"] = 1)],
-  ["a planned factor turned on (VER-2)", "rule", (c) => c.modules.badge.settings.factors.push("text_code")],
+  ["a texted code in a step without the policy's textCodeCountryCodes", "rule", (c) => {
+    c.modules.badge.settings.factors.push("text_code");
+    c.flows.deposit.steps[0].factors.push("text_code");
+  }],
   ["a PIN with more minimum than maximum digits", "rule", (c) => (c.modules.badge.settings.pin.minDigits = 10)],
   ["two forms with one id", "rule", (c) => c.modules.dossier.settings.forms.push(c.modules.dossier.settings.forms[0])],
   ["a step for a form that does not exist", "rule", (c) => (c.flows.deposit.steps[1].form = "plumbing")],
   ["a step for a wording that does not exist", "rule", (c) => (c.flows.deposit.steps[3].purpose = "marketing")],
   ["a factor turned off in the badge settings", "rule", (c) => (c.flows.deposit.steps[0].factors = ["keypad_knowledge", "voice_print"])],
   ["an amount above the workspace's limit", "rule", (c) => (c.flows.deposit.steps[2].amountMinor = 60_000)],
-  ["a payment mode (PAY-7)", "rule", (c) => (c.flows.deposit.steps[2].mode = "connect")],
+  ["connect mode with no connected account", "rule", (c) => {
+    c.modules.paylink.settings.mode = "connect";
+    delete c.modules.paylink.settings.connectedAccountId;
+  }],
   ["a payment before verification", "rule", (c) => c.flows.deposit.steps.shift()],
 ];
 
@@ -439,7 +512,7 @@ describe("the FlowConfig schema against validateConfig", () => {
 
   it("is never stricter than validateConfig, over thousands of near-miss configs", () => {
     const random = lcg(20261118);
-    const bases = [json(demoConfig()), json(testConfig()), GOOD[5]![1]] as Json[];
+    const bases = [json(demoConfig()), json(testConfig()), GOOD[5]![1], gateAndStepUpConfig()] as Json[];
     let accepted = 0;
     let refusedByBoth = 0;
     for (let i = 0; i < 4000; i++) {
@@ -475,6 +548,23 @@ const formId = (c: { [key: string]: any }, id: string) => {
 const purpose = (c: { [key: string]: any }, p: string) => {
   c.modules.trace.settings.wordings[0].purpose = p;
   c.flows.deposit.steps[3].purpose = p;
+};
+/** The Gate and step-up config, with one change: the edges below start from it. */
+const gate = (c: { [key: string]: any }, change: (s: { [key: string]: any }) => void) => {
+  Object.assign(c, gateAndStepUpConfig());
+  change(c.modules.gate.settings);
+};
+const gateStep = (c: { [key: string]: any }, seconds: number) => {
+  Object.assign(c, gateAndStepUpConfig());
+  c.flows.entry.steps[1].lifetimeSeconds = seconds;
+};
+const stepUp = (c: { [key: string]: any }, change: (s: { [key: string]: any }) => void) => {
+  Object.assign(c, gateAndStepUpConfig());
+  change(c.modules["step-up"].settings);
+};
+const stepUpStep = (c: { [key: string]: any }, seconds: number) => {
+  Object.assign(c, gateAndStepUpConfig());
+  c.flows.web.steps[1].lifetimeSeconds = seconds;
 };
 const EDGES: ReadonlyArray<readonly [name: string, accepted: boolean, patch: Patch]> = [
   ["a revision of 64 characters", true, (c) => (c.revision = "r".repeat(64))],
@@ -514,6 +604,35 @@ const EDGES: ReadonlyArray<readonly [name: string, accepted: boolean, patch: Pat
   ["an empty form version", true, (c) => (c.modules.dossier.settings.forms[0].version = "")],
   ["an empty wording version", false, (c) => (c.modules.trace.settings.wordings[0].version = "")],
   ["a flow summary that is not a string", false, (c) => (c.flows.deposit.summary = 1)],
+  ["a Gate target id of 64 characters", true, (c) => {
+    gate(c, (s) => (s.targets[0].id = `f${"-".repeat(63)}`));
+    c.flows.entry.steps[1].target = c.modules.gate.settings.targets[0].id;
+  }],
+  ["a Gate target id of 65 characters", false, (c) => {
+    gate(c, (s) => (s.targets[0].id = `f${"-".repeat(64)}`));
+    c.flows.entry.steps[1].target = c.modules.gate.settings.targets[0].id;
+  }],
+  ["a Gate target ref of 200 characters", true, (c) => gate(c, (s) => (s.targets[0].ref = "r".repeat(200)))],
+  ["a Gate target ref of 201 characters", false, (c) => gate(c, (s) => (s.targets[0].ref = "r".repeat(201)))],
+  ["a Gate target ref of spaces", false, (c) => gate(c, (s) => (s.targets[0].ref = " \t "))],
+  ["a Gate target ref with spaces around", true, (c) => gate(c, (s) => (s.targets[0].ref = " d 1 "))],
+  ["five access grants a call", true, (c) => gate(c, (s) => (s.maxGrantsPerCall = 5))],
+  ["six access grants a call", false, (c) => gate(c, (s) => (s.maxGrantsPerCall = 6))],
+  ["no access grant a call", false, (c) => gate(c, (s) => (s.maxGrantsPerCall = 0))],
+  ["an access grant of 10 seconds", true, (c) => gateStep(c, 10)],
+  ["an access grant of 9 seconds", false, (c) => gateStep(c, 9)],
+  ["an access grant of 900 seconds", true, (c) => gateStep(c, 900)],
+  ["an access grant of 901 seconds", false, (c) => gateStep(c, 901)],
+  ["a step-up audience of 200 characters", true, (c) => stepUp(c, (s) => (s.sites[0].audience = "a".repeat(200)))],
+  ["a step-up audience of 201 characters", false, (c) => stepUp(c, (s) => (s.sites[0].audience = "a".repeat(201)))],
+  ["a step-up issuer with a fragment", false, (c) => stepUp(c, (s) => (s.issuer = "https://verify.example.test/#x"))],
+  ["a step-up issuer with a path", true, (c) => stepUp(c, (s) => (s.issuer = "https://verify.example.test/tenant-1"))],
+  ["five step-up tokens a call", true, (c) => stepUp(c, (s) => (s.maxTokensPerCall = 5))],
+  ["six step-up tokens a call", false, (c) => stepUp(c, (s) => (s.maxTokensPerCall = 6))],
+  ["a step-up token of 120 seconds", true, (c) => stepUpStep(c, 120)],
+  ["a step-up token of 119 seconds", false, (c) => stepUpStep(c, 119)],
+  ["a step-up token of 300 seconds", true, (c) => stepUpStep(c, 300)],
+  ["a step-up token of 301 seconds", false, (c) => stepUpStep(c, 301)],
 ];
 
 describe("the FlowConfig schema at the edges of each pattern and range", () => {
