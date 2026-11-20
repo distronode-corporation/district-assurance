@@ -1266,6 +1266,28 @@ Tells the business that someone is locked out, best effort; the ledger stays the
 | notifier-2 | I | A notice carries an account number, a phone number or what the caller keyed. | A notice names the counter and its keyed hash, never a value. | covered | `verify-lockout-alerts.test.ts`: "tell the business once per lock, however many attempts and engines it refuses, with the counter and never a value"; `verify-lockout-alerts.test.ts`: "name the calling number by its keyed hash, and tell a wait after a failure as well as a hard lock" |
 | notifier-3 | D | An attacker runs up waits so a hard lock's notice is lost in the noise. | Hard locks' notices are kept apart from waits'. | covered | `verify-lockout-alerts.test.ts`: "keep the hard locks' notices apart from the waits', so waits an attacker runs up never hide a hard lock (review)" |
 
+### Supply chain and releases
+
+A compromised dependency, action or build, or a release nobody meant to make. **Controls:** the
+package has no runtime dependency. Every workflow action is pinned by full commit SHA, every workflow's
+top-level token is read-only or empty with each job granted only the scopes it uses, and no
+package-manager cache is restored. npm audit and
+osv-scanner check the lockfile on every pull request, weekly, and on each release tag
+(`supply-chain.yml`). Nothing publishes on its own: `"private": true` makes `npm publish` refuse
+until a release is decided (ADR-12), a tag push is only ever a dry run, publishing needs a person
+to start the workflow by hand on a tag with `publish` ticked, and the publish job waits for the
+`npm-publish` environment's reviewers. It runs only in this repository, on a tagged commit that
+is on main, after CI and the supply-chain checks pass on the tag. The tarball must be
+byte-identical across two builds and a third on a fresh runner, holds only `dist/` and the listed
+documents, and passes an unpack-and-import smoke test before it is published (`release.yml`).
+There is no npm token: trusted publishing uses the publish job's short-lived OIDC token, the only
+job granted `id-token: write`, and npm provenance ties the tarball to the commit and workflow
+that built it. Today one maintainer can approve a publish, so the environment does not prevent
+self-review; once there is a second maintainer, a second reviewer is required (the environment's
+"prevent self-review" on). The runners' egress is audited, not blocked (harden-runner); before the
+second publish it switches to block, allowing only the endpoints the first real publish run's
+audit log shows.
+
 ## Left to the host
 
 - Routing keypad tones to a buffer outside the model, never logging them or the string its

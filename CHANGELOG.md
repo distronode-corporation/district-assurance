@@ -243,6 +243,12 @@ All notable changes to this project are documented here. The format follows
   link's cap), request timeouts (408 and 503), a per-address rate limit (429), and structured
   request logs by route pattern with no headers, bodies or link tokens (`logJsonLines`, on in
   `npm run serve`).
+- A release workflow (SRV-5): a version tag on main runs CI and the supply-chain checks, a
+  reproducible pack, a file list check and an exports smoke test as a dry run. Only a manual run
+  on the tag with `publish` ticked, upstream and after an environment approval, publishes with npm
+  provenance by trusted publishing. The package stays private (ADR-12).
+  A local `npm pack` or `npm publish` builds first (`prepack`), so it never ships the documents
+  without dist/; the workflow packs with install scripts off after its own clean build.
 
 ### Changed
 

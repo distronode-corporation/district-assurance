@@ -2771,3 +2771,18 @@ page refusal is its HTML page):
   (`createServe`) uses it unless given its own `log`; `main.ts` registers `guardLogStream`, an
   `error` listener on standard output that stops the log on the first error (an EPIPE when its
   reader went away), instead of the process ending on an unhandled `error` event.
+
+## 17. The published package
+
+The package has three entry points and no others: `district-assurance`, `district-assurance/testing`
+and `district-assurance/package.json`; any other path is refused by Node. The tarball holds the
+compiled `dist/` (JavaScript and declarations) and the documents `files` names. It is not on npm:
+`package.json` is `"private": true` until a release is decided (ADR-12). A release is a version tag
+`vX.Y.Z` matching `package.json`, run by `.github/workflows/release.yml`: the CI workflow and the
+supply-chain checks on the tag, two builds that must pack to the same bytes, a check of the file
+list, and a smoke test that unpacks the tarball into an empty project, imports each entry point
+and type-checks a strict consumer. The tagged commit must be on main. A tag push is always a dry
+run. Only a manual run on the tag with `publish` ticked, in this repository and after the
+`npm-publish` environment's reviewers approve, publishes that tarball with npm provenance. A
+version with a pre-release part goes to the `next` dist-tag. In a fork, or a manual run without
+`publish`, the same run is a dry run.

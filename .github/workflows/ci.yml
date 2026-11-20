@@ -7,6 +7,8 @@ on:
   # The merge queue runs the same required checks on the queued commit.
   merge_group:
     types: [checks_requested]
+  # release.yml runs this on the tag, as the gate before a publish.
+  workflow_call:
 
 permissions:
   contents: read

@@ -1,0 +1,377 @@
+name: Release
+
+# Checks a version tag and, only when a person asks for it, publishes it to npm with provenance.
+# Nothing here runs on its own: a person pushes a tag `vX.Y.Z` that matches package.json, or
+# starts the workflow by hand on such a tag. Every run, in this repository or a fork, does all
+# of this:
+#   ci            the CI workflow (ci.yml) on the tagged commit: lint, typecheck, 100% coverage,
+#                 build and demo, on every system and Node version it covers.
+#   supply-chain  npm audit and osv-scanner on the tagged lockfile (supply-chain.yml).
+#   pack          requires the tagged commit to be on main, builds and packs twice and requires
+#                 the same bytes (a reproducible pack), checks the file list, and unpacks the
+#                 tarball into an empty project to import and type-check its three entry points
+#                 (the exports smoke test).
+# Then exactly one of:
+#   publish       this repository only, on a manual run on a tag with `publish` ticked, and only
+#                 after the `npm-publish` environment's reviewers approve. It rebuilds, requires
+#                 the pack job's SHA-256, and publishes that tarball.
+#   dry-run       everything else (a tag push, a fork, or a manual run without `publish`): the
+#                 same rebuild and comparison, and `npm publish --dry-run` once the package is
+#                 not private.
+#
+# A tag push never publishes. Publishing takes three separate acts by people: a manual run with
+# `publish` ticked, an approval in the `npm-publish` environment, and a merged pull request that
+# removes `"private": true`. The tagged commit must also be on main.
+#
+# The `npm-publish` environment does not exist yet. GitHub creates an environment named by a job
+# the first time that job runs, WITHOUT protection rules, so create it with required reviewers
+# and a `v*` tag rule before the first manual publish run. Until then the publish job refuses:
+# its first step reads the environment back and stops unless it has a required reviewer and a
+# deployment rule, so an environment created without protection never lets a publish through.
+#
+# The package is private until a release is decided (DECISIONS.md, ADR-12), so the publish
+# job fails while package.json has `"private": true`. That line goes only in the pull request
+# that decides the first release.
+#
+# No secret and no npm token. npm's trusted publishing exchanges the job's OIDC token for a
+# one-time publish credential and signs the provenance statement. It is set up on npmjs.com,
+# outside this file: the package's trusted publisher is this repository, the workflow file
+# `release.yml` and the environment `npm-publish`. The environment, with required reviewers
+# and a tag rule of `v*`, is set up in the repository's settings.
+#
+# First release: npm sets a trusted publisher only on a package that already exists, so this
+# workflow cannot publish the first version (with no token and no trusted publisher it has no
+# credential, and the publish step fails closed). The package's first publication, who makes it
+# and how, is part of the release decision (ADR-12); once it exists, the trusted publisher above
+# is set up, and every later version is published by a manual run of this workflow.
+on:
+  push:
+    tags: ['v[0-9]*.[0-9]*.[0-9]*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish to npm (this repository only; otherwise a dry run). Run it on a tag.
+        type: boolean
+        default: false
+
+# Read-only at the top level; each job names the scopes it needs.
+permissions:
+  contents: read
+
+# One release per tag at a time, never cancelled half way.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository]
+
+  supply-chain:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/supply-chain.yml # zizmor: ignore[self-repository]
+
+  pack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.ref.outputs.version }}
+      filename: ${{ steps.pack.outputs.filename }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The whole history, for the check that the tagged commit is on main.
+          fetch-depth: 0
+      # No package-manager cache anywhere in this file: a restored cache is one more input to
+      # what gets published.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      # A manual run on a branch stops here, and so does a tag that does not name the version.
+      - name: The ref is the tag of package.json's version
+        id: ref
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::A release runs on a tag, not on the $REF_TYPE '$REF_NAME'."
+            exit 1
+          fi
+          version="$(node -p 'require("./package.json").version')"
+          if [ "$REF_NAME" != "v$version" ]; then
+            echo "::error::The tag '$REF_NAME' does not match package.json's version $version (expected v$version)."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Only a commit already on main is released: a tag on a side branch stops here.
+      - name: The tagged commit is on main
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::The tagged commit $GITHUB_SHA is not on main."
+            exit 1
+          fi
+      # Development dependencies only (the package has no runtime dependency), with no install
+      # scripts: nothing runs before the build but the compiler.
+      - run: npm ci --ignore-scripts
+      # Two clean builds, two packs, one set of bytes. npm fixes every file's time and mode in
+      # the tarball, so the bytes depend only on the files; a difference means the build is not
+      # deterministic and nothing is published. The publish job repeats this on a fresh runner
+      # and must reach the same SHA-256.
+      - name: Reproducible pack
+        id: pack
+        env:
+          VERSION: ${{ steps.ref.outputs.version }}
+        run: |
+          set -euo pipefail
+          file="district-assurance-$VERSION.tgz"
+          for n in 1 2; do
+            npm run build
+            mkdir -p "$RUNNER_TEMP/pack-$n"
+            npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/pack-$n"
+          done
+          first="$(sha256sum "$RUNNER_TEMP/pack-1/$file" | cut -d' ' -f1)"
+          second="$(sha256sum "$RUNNER_TEMP/pack-2/$file" | cut -d' ' -f1)"
+          if [ "$first" != "$second" ]; then
+            echo "::error::Two builds of the same commit packed differently ($first, $second)."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/release"
+          cp "$RUNNER_TEMP/pack-1/$file" "$RUNNER_TEMP/release/$file"
+          echo "filename=$file" >> "$GITHUB_OUTPUT"
+          echo "sha256=$first" >> "$GITHUB_OUTPUT"
+          echo "$file SHA-256 $first" >> "$GITHUB_STEP_SUMMARY"
+      # Only the compiled entry points and the documents `files` names: no source, test,
+      # example or configuration file, and every entry point present.
+      - name: Tarball contents
+        env:
+          FILE: ${{ steps.pack.outputs.filename }}
+        run: |
+          set -euo pipefail
+          tar -tzf "$RUNNER_TEMP/release/$FILE" | sort > "$RUNNER_TEMP/contents.txt"
+          cat "$RUNNER_TEMP/contents.txt"
+          allowed='^package/(dist/.+\.(js|d\.ts)|package\.json|README\.md|SECURITY-MODEL\.md|SECURITY\.md|SPEC\.md|CHANGELOG\.md|LICENSE|NOTICE)$'
+          if grep -vE "$allowed" "$RUNNER_TEMP/contents.txt"; then
+            echo "::error::The tarball holds files outside the published set (above)."
+            exit 1
+          fi
+          for required in package/dist/index.js package/dist/index.d.ts package/dist/testing/index.js \
+            package/dist/testing/index.d.ts package/package.json package/LICENSE package/NOTICE; do
+            grep -qxF "$required" "$RUNNER_TEMP/contents.txt" || { echo "::error::$required is missing."; exit 1; }
+          done
+      # The tarball unpacked into an empty project's node_modules, as an install lays it out
+      # (the package has no dependency, so there is nothing else to install and no registry
+      # call). The two entry points and
+      # package.json import, a path inside dist/ is refused, the testing entry builds an engine,
+      # and a strict TypeScript consumer type-checks against the published declarations, the
+      # library's own included (skipLibCheck is off).
+      - name: Exports smoke test
+        env:
+          FILE: ${{ steps.pack.outputs.filename }}
+          VERSION: ${{ steps.ref.outputs.version }}
+        run: |
+          set -euo pipefail
+          smoke="$RUNNER_TEMP/smoke"
+          mkdir -p "$smoke"
+          cd "$smoke"
+          printf '{ "name": "smoke", "private": true, "type": "module" }\n' > package.json
+          mkdir -p node_modules/district-assurance
+          tar -xzf "$RUNNER_TEMP/release/$FILE" -C node_modules/district-assurance --strip-components=1
+          cat > smoke.mjs <<'EOF'
+          import assert from "node:assert/strict";
+          import * as root from "district-assurance";
+          import * as testing from "district-assurance/testing";
+          import pkg from "district-assurance/package.json" with { type: "json" };
+
+          assert.equal(pkg.version, process.argv[2]);
+          for (const name of ["createEngine", "validateConfig", "verifyReceipt", "verifyStripeSignature", "findCardNumbers"]) {
+            assert.equal(typeof root[name], "function", `district-assurance exports ${name}`);
+          }
+          for (const name of ["createTestEngine", "sessionStoreContract"]) {
+            assert.equal(typeof testing[name], "function", `district-assurance/testing exports ${name}`);
+          }
+          // Only the three entry points are public: a path inside dist/ is refused.
+          await assert.rejects(import("district-assurance/dist/index.js"), { code: "ERR_PACKAGE_PATH_NOT_EXPORTED" });
+          // The testing entry builds a working engine from the published files alone.
+          const { engine } = testing.createTestEngine();
+          assert.equal(typeof engine.startCall, "function");
+          console.log(`district-assurance ${pkg.version}: ${Object.keys(root).length} root exports, ${Object.keys(testing).length} testing exports`);
+          EOF
+          node smoke.mjs "$VERSION"
+          cat > smoke-types.ts <<'EOF'
+          import { createEngine, type Engine } from "district-assurance";
+          import { createTestEngine, sessionStoreContract } from "district-assurance/testing";
+
+          const engine: Engine = createTestEngine().engine;
+          export const checks = [createEngine, sessionStoreContract, engine] as const;
+          EOF
+          "$GITHUB_WORKSPACE/node_modules/.bin/tsc" --noEmit --strict --exactOptionalPropertyTypes \
+            --target es2024 --lib es2024 --module nodenext --moduleResolution nodenext \
+            --typeRoots "$GITHUB_WORKSPACE/node_modules/@types" --types node smoke-types.ts
+      # The exact tarball, for anyone to compare with the registry's copy.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.pack.outputs.filename }}
+          path: ${{ runner.temp }}/release/${{ steps.pack.outputs.filename }}
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: [ci, supply-chain, pack]
+    # Upstream only, so a fork never tries, and only a manual run on a tag with the box ticked:
+    # a tag push is a dry run.
+    if: >-
+      github.repository == 'distronode-corporation/district-assurance' &&
+      github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Waits for the environment's required reviewers: the last person in the loop. One maintainer
+    # today, so self-review is allowed; a second reviewer is required once there is one
+    # (SECURITY-MODEL.md, "Supply chain and releases").
+    environment: npm-publish
+    permissions:
+      contents: read
+      # Trusted publishing and the provenance statement. Only this job holds it, and its steps
+      # run only the pinned actions above and the repository's own build, install scripts off.
+      id-token: write
+      # Reads the npm-publish environment's protection rules back (the first step).
+      actions: read
+    steps:
+      # Audit, not block, until the first real publish: its audit log gives the endpoint list, and
+      # the policy switches to block with that list before the second publish (SECURITY-MODEL.md).
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      # The approval this job waited for is only as good as the environment's rules, and an
+      # environment GitHub created on first use has none. Fails closed: no reviewer, no deployment
+      # rule, or no answer from the API, and nothing is published.
+      - name: The npm-publish environment requires a reviewer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/environments/npm-publish" > "$RUNNER_TEMP/environment.json"
+          node -e '
+            const env = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+            const reviewers = (env.protection_rules ?? []).filter((rule) => rule.type === "required_reviewers").flatMap((rule) => rule.reviewers ?? []);
+            const deploymentRule = env.deployment_branch_policy?.custom_branch_policies === true;
+            if (reviewers.length === 0 || !deploymentRule) {
+              console.log("::error::The npm-publish environment needs required reviewers and a v* tag rule before anything is published.");
+              process.exit(1);
+            }
+            console.log(`npm-publish: ${reviewers.length} required reviewer(s), custom deployment rules`);
+          ' "$RUNNER_TEMP/environment.json"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      # The bytes published are rebuilt here, on a fresh runner, and must be the bytes the pack
+      # job checked and smoke-tested. No artifact passes between the jobs.
+      - name: Rebuild and compare with the pack job
+        env:
+          FILE: ${{ needs.pack.outputs.filename }}
+          EXPECTED_SHA256: ${{ needs.pack.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          npm run build
+          mkdir -p "$RUNNER_TEMP/release"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/release"
+          actual="$(sha256sum "$RUNNER_TEMP/release/$FILE" | cut -d' ' -f1)"
+          if [ "$actual" != "$EXPECTED_SHA256" ]; then
+            echo "::error::The rebuilt tarball ($actual) differs from the one the pack job checked ($EXPECTED_SHA256)."
+            exit 1
+          fi
+      - name: The package is not private
+        run: |
+          set -euo pipefail
+          if [ "$(node -p 'require("./package.json").private === true')" = "true" ]; then
+            echo "::error::package.json has \"private\": true (ADR-12). Remove it in the pull request that decides the first release."
+            exit 1
+          fi
+      # Trusted publishing needs npm 11.5.1 or later.
+      - name: npm is new enough for trusted publishing
+        run: |
+          set -euo pipefail
+          npm --version
+          node -e 'const [a, b, c] = process.argv[1].split(".").map(Number); process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1)' "$(npm --version)" \
+            || { echo "::error::npm $(npm --version) is older than 11.5.1."; exit 1; }
+      # A version with a pre-release part goes to the `next` dist-tag, never to `latest`.
+      - name: npm publish
+        env:
+          FILE: ${{ needs.pack.outputs.filename }}
+          VERSION: ${{ needs.pack.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag=latest
+          case "$VERSION" in *-*) tag=next ;; esac
+          npm publish "$RUNNER_TEMP/release/$FILE" --provenance --access public --tag "$tag" --ignore-scripts
+
+  dry-run:
+    needs: [ci, supply-chain, pack]
+    if: >-
+      ${{ !(github.repository == 'distronode-corporation/district-assurance' &&
+        github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && inputs.publish) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      # The same rebuild and comparison as the publish job.
+      - name: Rebuild and compare with the pack job
+        env:
+          FILE: ${{ needs.pack.outputs.filename }}
+          EXPECTED_SHA256: ${{ needs.pack.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          npm run build
+          mkdir -p "$RUNNER_TEMP/release"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/release"
+          actual="$(sha256sum "$RUNNER_TEMP/release/$FILE" | cut -d' ' -f1)"
+          if [ "$actual" != "$EXPECTED_SHA256" ]; then
+            echo "::error::The rebuilt tarball ($actual) differs from the one the pack job checked ($EXPECTED_SHA256)."
+            exit 1
+          fi
+      # While the package is private (ADR-12) a real run would stop at the publish job's
+      # private check, so the dry run ends at the comparison above and says so.
+      - name: npm publish --dry-run
+        env:
+          FILE: ${{ needs.pack.outputs.filename }}
+          VERSION: ${{ needs.pack.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$(node -p 'require("./package.json").private === true')" = "true" ]; then
+            echo "package.json is private (ADR-12): a real run would stop here. Nothing was published." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          tag=latest
+          case "$VERSION" in *-*) tag=next ;; esac
+          npm publish "$RUNNER_TEMP/release/$FILE" --dry-run --access public --tag "$tag" --ignore-scripts
+          echo "Dry run: $FILE was not published." >> "$GITHUB_STEP_SUMMARY"
