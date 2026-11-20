@@ -642,9 +642,10 @@ the model has a path to it; the host keeps it off every tool the model can call 
 It refunds only a paid platform payment, never more in total than was paid, one refund in flight
 per payment, each with its own idempotency key, saved with the refund's intent before the provider
 is asked and made of the payment and the refund's sequence number; a refund whose answer was lost
-resumes with the same key, so the provider refunds once, and a host that names the sequence number
-gets a committed refund's saved result back when it lost the engine's answer, never a second
-refund (tested). A refund is refused while a dispute is open or
+resumes with the same key, so the provider refunds once. The sequence number is required: a host
+that lost the engine's answer must ask again with the same number to get the committed refund's
+saved result back, never a second refund (tested); a new number is a new refund, limited to the
+amount not yet refunded. A refund is refused while a dispute is open or
 after it was lost (tested). Dispute events come only through the signed payments webhook, are found
 by the payment intent bound when the payment was paid, and a connected account's is ignored and
 written down (tested). Refunds and disputes are ledger entries with amounts and statuses, never
@@ -834,9 +835,11 @@ Consents stay in their call records until PRV-3's `ConsentStore`; counters acros
   dropped, not overwritten.
 - Authorizing the member behind `clearDuress` and `resetPin`: the engine takes the member id as
   given, so only the host's staff tools, after their own sign-in, may call them.
-- Repeating a `clearDuress` that raced an alert's delivery: the counters store has no
-  compare-and-set, so a clearing that lands while an earlier entry's alert is delivered may be
-  undone, leaving the subject flagged (fail closed) until the business clears it again (tested).
+- Repeating a `clearDuress` only when a flag write's take-back fails: the counters store has no
+  compare-and-set, so a flag written for an earlier entry (its own write, or its alert's) reads the
+  count of clearings again afterwards and takes itself back over a clearing that landed meanwhile
+  (tested); if that removal fails, the subject stays flagged (fail closed) until the business
+  clears it again.
 - Accepting that the hidden counter shows in the hard lock: because a duress entry never clears
   earlier wrong guesses, a caller who counts guesses can see the hard lock come sooner after a
   duress entry than after a real pass; waits and answers are unchanged (a kept trade-off).

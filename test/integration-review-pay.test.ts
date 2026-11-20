@@ -249,7 +249,7 @@ describe("L1 review: disputes", () => {
     assert.equal((await t.engine.applyDisputeOutcome(dispute({ status: "warning_closed" }))).applied, true);
     // The older warning_needs_response event arrives after: no time on either, so by its stage.
     assert.deepEqual(await t.engine.applyDisputeOutcome(dispute()), { applied: false });
-    assert.equal((await t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "requested_by_customer" })).status, "succeeded");
+    assert.equal((await t.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", reason: "requested_by_customer" })).status, "succeeded");
   });
 
   it("orders dispute events by the provider's time when both carry one, and by stage on a tie (T13)", async () => {
