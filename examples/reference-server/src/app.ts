@@ -572,7 +572,9 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
   const STRIPE_LIMITS = { identity: "stripeIdentity", payments: "stripePayments", connect: "stripeConnect" } as const;
 
   async function stripeWebhook(req: IncomingMessage, route: "identity" | "payments" | "connect"): Promise<[number, Json]> {
-    const payload = await readBody(req, limits[STRIPE_LIMITS[route]]);
+    // The bytes as received: checked before anything decodes or parses them, so a body under a bad
+    // signature is never read, and two invalid UTF-8 bodies that decode alike never share one.
+    const payload = await readBytes(req, limits[STRIPE_LIMITS[route]]);
     const header = req.headers["stripe-signature"];
     const check = verifyStripeSignature({
       payload,
@@ -581,7 +583,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       now: options.clock.now(),
     });
     if (!check.ok) return [400, { error: "signature", reason: check.reason }];
-    const event = parseStripeEvent(payload);
+    const event = parseStripeEvent(payload.toString("utf8"));
     if (event === null) return [400, { error: "malformed_event" }];
     // Only an event this endpoint handles is applied and remembered: one that reached the wrong
     // endpoint (an unfiltered listener) is acknowledged and left for its own endpoint.
@@ -634,7 +636,8 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
    * succeeds, so a failed handler answers 500 and the retry is applied, not skipped.
    */
   async function recordWebhook(req: IncomingMessage): Promise<[number, Json]> {
-    const payload = await readBody(req, limits.records);
+    // The bytes as received, verified before they are decoded or parsed (as `stripeWebhook` does).
+    const payload = await readBytes(req, limits.records);
     const header = req.headers[DELIVERY_SIGNATURE_HEADER];
     const check = verifyStripeSignature({
       payload,
@@ -643,7 +646,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       now: options.clock.now(),
     });
     if (!check.ok) return [400, { error: "signature", reason: check.reason }];
-    const delivery = parseRecordDelivery(payload);
+    const delivery = parseRecordDelivery(payload.toString("utf8"));
     if (delivery === null) return [400, { error: "malformed_delivery" }];
     const key = delivery.idempotencyKey;
     if (receivedRecords.has(key)) {

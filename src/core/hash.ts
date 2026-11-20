@@ -5,7 +5,7 @@ export function sha256Hex(data: string | Uint8Array): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
-export function hmacSha256Hex(key: string | Uint8Array, data: string): string {
+export function hmacSha256Hex(key: string | Uint8Array, data: string | Uint8Array): string {
   return createHmac("sha256", key).update(data).digest("hex");
 }
 

@@ -1080,9 +1080,11 @@ and never opened outside SQLite, since closing any descriptor on a file drops ev
 process holds on it, another connection's too. It refuses an existing database file, or a `-wal`,
 `-shm` or `-journal` file beside it, that is readable or writable by group or others (SQLite keeps
 an existing file's mode), a symbolic link at the path or beside it (SQLite would use the files
-beside the link's target, not the ones checked), and anything that is not a regular file. On
-Windows it refuses every database file, since the mode sets no ACL there; `:memory:` opens on
-every platform. A file that is not a database, or a store whose schema fails, closes the
+beside the link's target, not the ones checked), and anything that is not a regular file. The
+file-backed stores are POSIX only: on Windows `openSqliteStores` refuses every database file, since
+the mode sets no ACL there, so a Windows host uses another store, its own `RecordStore` and
+`AuditLedger`. `:memory:` opens on every platform and keeps nothing across a restart: it is for
+tests only. A file that is not a database, or a store whose schema fails, closes the
 connection before the error is thrown. A write transaction that SQLite already rolled back (a full
 disk, a trigger's `RAISE(ROLLBACK)`), or whose ROLLBACK fails too, rejects with the error that
 caused it, and the connection stays usable. `SqliteRecordStore` also takes the PIN and
@@ -1724,7 +1726,11 @@ recordIds})` returns `{amountMinor, currency}` or null. `source` is the step's `
 `verifyStripeSignature` follows Stripe's published scheme: the `Stripe-Signature` header has
 `t=<unix seconds>` and one or more `v1=<hex>`; each `v1` is `HMAC-SHA256(secret, t + "." + raw
 body)`. The check passes if any `v1` matches any configured secret and `t` is within 300 seconds
-of now, either way. A host may set `toleranceSeconds`, an integer from 0 to 86,400; any other
+of now, either way. The raw body is the bytes received: `payload` may be a `Uint8Array` (a string
+is taken as its UTF-8), and a receiver checks those bytes before it decodes or parses them, since
+a decoder with replacement reads two different invalid UTF-8 bodies the same. The reference
+server's `/webhooks/stripe/*` and `/webhooks/records` routes do: a body under a bad signature is
+refused without being decoded or parsed. A host may set `toleranceSeconds`, an integer from 0 to 86,400; any other
 tolerance, or a `now` that is not a valid `Date`, throws `invalid_input` before anything is
 checked, since a NaN or an Infinity would let a replay of any age pass. `parseStripeEvent` maps
 `identity.verification_session.{verified,requires_input,canceled}` and
@@ -2369,7 +2375,8 @@ record and destination, the same however often the record is delivered. Headers:
 `content-type: application/json`, `idempotency-key`, and `district-signature:
 t=<unix seconds>,v1=<HMAC-SHA256(secret, t + "." + body)>`, the scheme of section 15, so
 `verifyStripeSignature` checks it; each attempt is signed with its own time. A receiver checks the
-signature, then reads the key from the signed body and applies it once.
+signature over the bytes received, then decodes them, reads the key from the signed body and
+applies it once.
 
 Retries: a 2xx delivers; no answer (the adapter rejects), 408, 429 or 5xx waits
 `min(maxDelayMs, baseDelayMs * 2^(attempt - 1))` and tries again, up to `maxAttempts`; any other

@@ -124,8 +124,15 @@ createReferenceServer({
 ## Persistent stores (SQLite)
 
 `openSqliteStores(path)` keeps the ledger, the subjects and the confirmed records in one SQLite
-file, so a restarted server keeps them. The file holds subjects and records, so it is kept
-owner-only:
+file, so a restarted server keeps them.
+
+**The file-backed stores are POSIX only. On Windows, `openSqliteStores` refuses a database file**:
+mode 0600 sets no ACL there, so the file would be as readable as its folder, and there is no
+option to allow it. A Windows host uses another store: its own `RecordStore` and `AuditLedger`
+(checked with `recordStoreContract` and `auditLedgerContract`). `openSqliteStores(":memory:")`
+opens on every platform but keeps nothing across a restart: it is for tests only.
+
+The file holds subjects and records, so it is kept owner-only:
 
 - A new file is created exclusively, with mode 0600, before SQLite opens it. An existing file, or a `-wal`,
   `-shm` or `-journal` file beside it, that group or others can read or write is refused (chmod 600
@@ -135,9 +142,6 @@ owner-only:
 - An existing file is checked by path, never opened outside SQLite, since closing a descriptor on
   it would drop the locks another SQLite connection in the process holds on it.
 - A `file:` URI is refused, since its file would not get the mode.
-- **Windows: a database file is refused.** Mode 0600 sets no ACL there, so the file would be as
-  readable as its folder. There is no option to allow it; `openSqliteStores(":memory:")` works on
-  every platform, and keeps nothing across a restart.
 
 ## Trying it with your own Stripe test account
 

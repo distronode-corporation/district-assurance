@@ -391,6 +391,11 @@ All notable changes to this project are documented here. The format follows
   - Carrier webhooks: `verifyTwilioSignature` and `verifyTelnyxSignature` take the raw body as a
     `Uint8Array` too, and the reference server passes the bytes received, so two invalid UTF-8
     bodies never verify under one signature; a Telnyx public key that is not a string is skipped.
+  - Stripe and record-delivery webhooks: `verifyStripeSignature` takes the raw body as a
+    `Uint8Array` too, and the reference server's `/webhooks/stripe/*` and `/webhooks/records`
+    routes verify the bytes received before decoding or parsing them, so a body under a bad
+    signature is refused (400 `signature`, as before) without being read, and two invalid UTF-8
+    bodies never verify under one signature.
   - Monthly reports (PRV-8): payment totals are summed exactly, and a total past
     `Number.MAX_SAFE_INTEGER` refuses the report (`precondition_failed`), as `signReportJson` and
     `signReportCsv` refuse a report holding one; a `payment.link_sent` without a payment id counts

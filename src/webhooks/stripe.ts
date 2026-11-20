@@ -12,8 +12,12 @@ export type SignatureCheck =
   | { ok: false; reason: "missing_header" | "malformed_header" | "no_secret" | "timestamp_out_of_tolerance" | "no_matching_signature" };
 
 export interface StripeSignatureInput {
-  /** The raw request body, exactly as received. A re-serialised body never verifies. */
-  payload: string;
+  /**
+   * The raw request body, exactly as received. A re-serialised body never verifies. Give the bytes,
+   * and decode them only once this check passes: a decoded copy reads two different invalid UTF-8
+   * bodies the same, and both would verify under one signature. A string is taken as its UTF-8.
+   */
+  payload: string | Uint8Array;
   header: string | null | undefined;
   /** The endpoint's signing secrets; more than one while a secret is rolled. */
   secrets: readonly string[];
@@ -57,7 +61,7 @@ export function verifyStripeSignature(input: StripeSignatureInput): SignatureChe
   if (Math.abs(Math.floor(nowMs / 1000) - timestamp) > (tolerance as number)) {
     return { ok: false, reason: "timestamp_out_of_tolerance" };
   }
-  const signed = `${timestamp}.${payload}`;
+  const signed = Buffer.concat([Buffer.from(`${timestamp}.`), Buffer.from(payload)]);
   for (const secret of secrets) {
     const expected = hmacSha256Hex(secret, signed);
     if (signatures.some((sig) => hexDigestsEqual(expected, sig))) return { ok: true, timestamp };
