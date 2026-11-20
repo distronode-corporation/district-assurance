@@ -98,6 +98,9 @@ All notable changes to this project are documented here. The format follows
   factor in Badge's settings, a `CodeStore` adapter (`MemoryCodeStore`, `codeStoreContract`) for
   send limits per subject and per calling number, and `textCodeCountryCodes` in the policy; a
   refused send answers like a sent one.
+- Monthly report per business (PRV-8): `monthlyReport` counts one workspace's month from the
+  ledger, in the host's time zone, as JSON and CSV signed with the receipt key under domain
+  separation (`signReportJson`, `signReportCsv`, `verifyReport`). Counts and totals only.
 - The modular core. A module registry and module interface (what a module provides, the scopes it
   grants or needs, the adapters it requires, its settings validator); Badge, Dossier, Paylink and
   Trace as modules, switched on and off per workspace config; outside modules with `engine.use`.
