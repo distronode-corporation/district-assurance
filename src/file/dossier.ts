@@ -380,7 +380,11 @@ export async function confirmIntake(
     if (!(error instanceof CipherFailed)) throw error;
     // Another process may have sealed and filed the same record meanwhile: then that record stands.
     const released = await releaseFailedFiling(rt, callId, reserved.record, reserved.form, error.reason);
-    if (released.kind === "filed") return released.record;
+    // Returned only once marked, as the process that filed it would: its mark may have failed.
+    if (released.kind === "filed") {
+      await settleOwedMarks(rt, callId);
+      return released.record;
+    }
     if (released.kind === "writing") {
       throw new EngineError("conflict", "another process is writing this record; confirm again for its outcome");
     }

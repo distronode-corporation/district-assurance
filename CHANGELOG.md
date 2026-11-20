@@ -288,6 +288,10 @@ All notable changes to this project are documented here. The format follows
 - Public timestamp anchors for the ledger (PRV-9): `anchorLedger()` appends a `ledger.anchored`
   entry with a proof from an `Anchor` adapter, `verifyAnchor` checks it offline, and the reference
   server has an RFC 3161 time-stamp authority adapter and a Rekor v2 one; no new dependency.
+- Anchors proven against real services (PRV-9): one anchor of a throwaway ledger, made through
+  `anchorLedger()` with DigiCert's public time-stamp authority and Sigstore's Rekor v2 log
+  (log2025-1), recorded in `test/fixtures/anchor/real/` by `test/fixtures/anchor/record-real.ts`
+  and verified offline in `test/prove-anchor-real.test.ts`, including after the certificates expire.
 - A flow simulator (MOD-4): `district-assurance simulate <config.json> --flow <name> --script <name
   or file>` (`npm run simulate --` here) runs a flow on the fakes with a scripted caller (`pass`,
   `wrong-pin`, `lockout`, `consent-no`, `payment-paid`, `payment-expired`, or a JSON file) and
@@ -349,6 +353,8 @@ All notable changes to this project are documented here. The format follows
   tested over a shared JSON corpus in `test/corpus/`; compose health card numbers before SINs. Bank
   words are English, French and Spanish, read in the languages the call reads number words in:
   English and French on every call, Spanish on a Spanish call and on text with no call.
+- README badges for the OpenSSF Scorecard, the licence and CI on main, and a section in
+  CONTRIBUTING.md on reporting bugs and asking for features through GitHub issues.
 
 ### Changed
 
@@ -364,8 +370,9 @@ All notable changes to this project are documented here. The format follows
 - Host-facing: a call record is removed through `Engine.removeCall(callId)`, never in the session
   store directly. It is refused while the call has not ended and while its outbox holds ledger
   entries not yet appended (it flushes them first; `flushPending` keeps listing the call), while it
-  still owes a duress alert or a contact notice, and while a filed record's confirmed mark is owed
-  (it makes the mark first), so a
+  still owes a duress alert, a contact notice or its receipt, while a payment link is still open
+  or a refund is not yet final, and while a filed record's confirmed mark is owed (it makes the
+  mark first), so a
   pending entry such as `consent.recorded` is never lost with its record. `SessionStore` has an
   optional `remove(workspaceId, callId, expectedVersion)` (in `MemorySessionStore` and
   `sessionStoreContract`).

@@ -152,6 +152,50 @@ describe("removeCall", () => {
     await assert.rejects(t.engine.applyRefundOutcome({ ...update, status: "failed" }), rejects("unknown_call"));
   });
 
+  it("keeps an ended call whose payment link is still open, and removes it once endCall closes the link (CodeRabbit #143)", async () => {
+    // With receipts off too, where no owed receipt would hold the record.
+    for (const receipts of [true, false]) {
+      const t = setup(receipts ? {} : { config: testConfig((c) => (c.modules.trace!.settings = { receipts: false })) });
+      const callId = await verifiedCall(t);
+      const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
+      await confirmAmount(t.engine, callId, request);
+      await t.engine.requestPayment(callId, request);
+      const expire = t.payments.expireLink.bind(t.payments);
+      t.payments.expireLink = async () => {
+        throw new Error("provider down");
+      };
+      await assert.rejects(t.engine.endCall(callId), /provider down/);
+      const stored = (await t.sessions.get("ws_test", callId))!.record as unknown as { state: { phase: string } };
+      assert.equal(stored.state.phase, "ended", "ended, with its link still open");
+      await assert.rejects(t.engine.removeCall(callId), rejects("precondition_failed", /payment link/), `receipts=${receipts}`);
+      assert.notEqual(await t.sessions.get("ws_test", callId), null, "the record stays");
+      t.payments.expireLink = expire;
+      await t.engine.endCall(callId);
+      assert.deepEqual(await t.engine.removeCall(callId), { removed: true });
+    }
+  });
+
+  it("removes an ended call whose payment link was paid, and one whose link expired (CodeRabbit #143)", async () => {
+    const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
+    const paidSetup = setup();
+    const paid = await verifiedCall(paidSetup);
+    await confirmAmount(paidSetup.engine, paid, request);
+    await paidSetup.engine.requestPayment(paid, request);
+    await paidSetup.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid", paymentIntentId: "pi_1" });
+    await paidSetup.engine.endCall(paid);
+    assert.deepEqual(await paidSetup.engine.removeCall(paid), { removed: true });
+
+    const expiredSetup = setup();
+    const expired = await verifiedCall(expiredSetup);
+    await confirmAmount(expiredSetup.engine, expired, request);
+    await expiredSetup.engine.requestPayment(expired, request);
+    expiredSetup.clock.advance(61 * 60_000);
+    await expiredSetup.engine.expirePaymentLinks(expired);
+    await expiredSetup.engine.endCall(expired);
+    assert.equal(expiredSetup.payments.expired.length, 1, "expired once, at its deadline");
+    assert.deepEqual(await expiredSetup.engine.removeCall(expired), { removed: true });
+  });
+
   it("removes an ended call whose payment has no refund, and one that started with Paylink off", async () => {
     const t = setup();
     const paid = await verifiedCall(t);

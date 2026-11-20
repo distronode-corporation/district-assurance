@@ -121,7 +121,7 @@ createReferenceServer({
 | `src/stripe-adapters.ts` | `StripeCheckoutLinks`, a minimal PAY-1 Checkout adapter (test-mode keys only, platform mode, built-in fetch), and `StripeIdentityProvider`, the Stripe Identity adapter (VER-5) |
 | `src/carrier-adapters.ts` | Twilio Lookup and Telnyx Number Lookup carrier signal adapters (VER-4) |
 | `src/sqlite-stores.ts` | `openSqliteStores(path)`: optional persistent ledger and record store on `node:sqlite` (SRV-4); see below |
-| `src/anchor-adapters.ts` | `TimestampAuthorityAnchor` (an RFC 3161 time-stamp authority) and `RekorAnchor` (a Rekor v2 log plus an authority), `Anchor` adapters for `anchorLedger` (PRV-9) |
+| `src/anchor-adapters.ts` | `TimestampAuthorityAnchor` (an RFC 3161 time-stamp authority) and `RekorAnchor` (a Rekor v2 log plus an authority), `Anchor` adapters for `anchorLedger` (PRV-9); proven once against DigiCert's TSA and Sigstore's Rekor v2 (SPEC.md, Anchors) |
 
 ## Persistent stores (SQLite)
 

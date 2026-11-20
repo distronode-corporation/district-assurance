@@ -1,5 +1,9 @@
 # district-assurance
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/distronode-corporation/district-assurance/badge)](https://scorecard.dev/viewer/?uri=github.com/distronode-corporation/district-assurance)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/distronode-corporation/district-assurance/blob/main/LICENSE)
+[![CI](https://github.com/distronode-corporation/district-assurance/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/distronode-corporation/district-assurance/actions/workflows/ci.yml?query=branch%3Amain)
+
 The engine behind District Assurance: TypeScript code that lets an automated phone line be trusted
 with sensitive work. It checks who is calling, files what the caller confirms, takes payment
 without ever touching a card number, and proves each step afterwards with a hash-chained audit

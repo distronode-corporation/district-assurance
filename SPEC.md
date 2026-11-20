@@ -1111,7 +1111,8 @@ created again (`startCall` refuses it): its ledger event ids are spent. `removeC
 contact notice (`sweepAlerts` sends it), for one that still owes its receipt (a signing that failed
 after the call ended; `endCall` signs it), for one with a refund of its payment not yet final (in
 flight, with the provider's answer still on its way, which `refundPayment` resumes, or `pending` at
-the provider, which its update settles), for one with a filed record whose confirmed mark it could
+the provider, which its update settles), for one with a payment link still open (one `endCall`
+could not close at the provider, which `endCall` closes when called again), for one with a filed record whose confirmed mark it could
 not make (the call keeps the marks it owes in `marksOwed` until the record store has them), and for
 one whose outbox still holds entries after it tried to flush them (the ledger refused them): the record is kept, and `flushPending` keeps
 listing it, until they are appended, so no pending entry (a `consent.recorded` written while the
@@ -1282,6 +1283,22 @@ that fixes in time that the ledger was still there, unchanged, and each grows th
   nothing to the public log. Both read at most `maxReplyBytes` of a reply (default
   `MAX_REPLY_BYTES`, 256 KiB), cancel the rest and refuse it, and refuse an error answer without
   reading its body.
+- Proven against real services, once, and replayed offline. `test/fixtures/anchor/record-real.ts`
+  anchored a throwaway ledger (two test calls, no real data) through `anchorLedger()` and
+  `RekorAnchor`, with DigiCert's public RFC 3161 time-stamp authority
+  (`http://timestamp.digicert.com`) and Sigstore's public-good Rekor v2 log
+  (`https://log2025-1.rekor.sigstore.dev`, origin `log2025-1.rekor.sigstore.dev`, its Ed25519 key
+  from Sigstore's TUF-distributed `trusted_root.json`). The answers are kept in
+  `test/fixtures/anchor/real/`, and `test/prove-anchor-real.test.ts` checks them with no network:
+  the token's signature, its SigningCertificate and SigningCertificateV2 (DigiCert signs both),
+  the chain to DigiCert Trusted Root G4 and the message imprint; the entry's signature, its
+  inclusion proof and the log's signed checkpoint (the witnesses' cosignatures are left aside).
+  Certificates are checked at the token's time, never the clock's, so the recorded anchor keeps
+  verifying after DigiCert's certificates expire (the test runs it with the clock at 2040). The
+  recorded TimeStampResp carries three certificates, including a cross-signed copy of the root;
+  as for any token, `verifyAnchor` ignores them and uses the chain the host supplies. The synthetic
+  fixtures (`record.ts`, a throwaway authority and log) stay for the failure paths a real service
+  will not produce on demand.
 
 ### Export
 

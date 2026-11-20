@@ -1859,8 +1859,9 @@ export class Engine {
    * not yet appended: it flushes them first, and a ledger that still refuses them keeps the record
    * (and `flushPending` keeps listing it), so no pending entry, a `consent.recorded` among them, is
    * lost with the record. Refused too while the call owes a notification, a confirmed mark or its
-   * receipt (a signing that failed after the call ended: endCall completes it), and while a refund
-   * of its payment is not yet final (in flight, or pending at the provider). A succeeded refund that
+   * receipt (a signing that failed after the call ended: endCall completes it), while a payment
+   * link is still open (one endCall could not close), and while a refund of its payment is not yet
+   * final (in flight, or pending at the provider). A succeeded refund that
    * later fails is recorded only while the record is kept: the host's retention decides. Removes only the version it checked: a write that lands first is read
    * again, up to three times (`conflict` after that). A host removes call records only through
    * this, never in its store directly. Needs a session store with `remove`.
@@ -1896,6 +1897,11 @@ export class Engine {
       // (its update, applyRefundOutcome, settles it). Removing the record would lose either.
       if (((record.modules[paylink.PAYLINK] as unknown as paylink.PaylinkSlice | undefined)?.payments ?? []).some((p) => (p.refunds ?? []).some((r) => r.status === "requested" || r.status === "pending"))) {
         throw new EngineError("precondition_failed", "a refund of the call's payment is not yet final; it is kept until the provider's answer is recorded, then remove the record");
+      }
+      // A link endCall could not close (the provider failed) is still payable: its outcome, and the
+      // close that endCall or cancelPaymentLink retries, need the record.
+      if (paylink.openPayments(record).length > 0) {
+        throw new EngineError("precondition_failed", "a payment link of the call is still open; endCall closes it, then remove the record");
       }
       // A receipt whose signing failed after the call ended is completed by endCall, which needs the record.
       if (trace.wantsReceipt(this.#rt, record) && trace.receiptOf(record) === null) {
