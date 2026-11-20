@@ -5,7 +5,7 @@
 import { EngineError } from "../core/errors.ts";
 import { hexDigestsEqual, hmacSha256Hex } from "../core/hash.ts";
 import type { PaymentOutcome } from "../pay/payment.ts";
-import { DISPUTE_STATUSES, type DisputeOutcome, type DisputeStatus } from "../pay/refunds.ts";
+import { DISPUTE_STATUSES, PROVIDER_REFUND_STATUSES, type DisputeOutcome, type DisputeStatus, type ProviderRefundStatus, type RefundOutcome } from "../pay/refunds.ts";
 
 export type SignatureCheck =
   | { ok: true; timestamp: number }
@@ -83,10 +83,17 @@ export type ParsedStripeEvent =
   | { eventId: string; livemode: boolean; kind: "identity"; outcome: IdentityOutcome }
   | { eventId: string; livemode: boolean; kind: "payment"; outcome: PaymentOutcome & { paymentIntentId?: string } }
   | { eventId: string; livemode: boolean; kind: "dispute"; outcome: DisputeOutcome }
+  | { eventId: string; livemode: boolean; kind: "refund"; outcome: RefundOutcome }
   | { eventId: string; livemode: boolean; kind: "ignored"; type: string };
 
 /** Stripe's dispute events. Each carries the dispute as it was when the event was made; the engine keeps the latest. */
 const DISPUTE_TYPES = new Set(["charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed", "charge.dispute.funds_withdrawn", "charge.dispute.funds_reinstated"]);
+
+/**
+ * Stripe's refund update events. Each carries the Refund as it is now; `refund.created` is left out,
+ * since the engine records a refund's first answer from the provider itself.
+ */
+const REFUND_TYPES = new Set(["refund.updated", "refund.failed", "charge.refund.updated"]);
 
 // A Map, not an object literal: an event type like `constructor` or `__proto__` must find nothing
 // (SRV-7's fuzzing found an object lookup turning them into identity outcomes).
@@ -133,6 +140,10 @@ export function parseStripeEvent(body: string): ParsedStripeEvent | null {
     const dispute = disputeOutcome(object);
     return dispute === null ? null : { ...base, kind: "dispute", outcome: { ...dispute, ...account, ...at } };
   }
+  if (REFUND_TYPES.has(event.type)) {
+    const refund = refundOutcome(object);
+    return refund === null ? null : { ...base, kind: "refund", outcome: { ...refund, ...account } };
+  }
   // A Checkout Session names its payment intent; a platform payment's disputes are found by it.
   const intent = typeof object.payment_intent === "string" ? { paymentIntentId: object.payment_intent } : {};
   switch (event.type) {
@@ -163,4 +174,17 @@ function disputeOutcome(object: Record<string, unknown>): Omit<DisputeOutcome, "
   if (!(DISPUTE_STATUSES as readonly unknown[]).includes(status) || !Number.isSafeInteger(amount) || (amount as number) < 0) return null;
   if (typeof currency !== "string" || !/^[a-z]{3}$/.test(currency)) return null;
   return { disputeId: object.id as string, chargeId: charge, paymentIntentId: intent, status: status as DisputeStatus, amountMinor: amount as number, currency };
+}
+
+/**
+ * A Refund object: its id, the payment intent it names (null when it names none), its status,
+ * amount and currency. Never its failure reason or the card's details. Null when a field is not
+ * what Stripe sends.
+ */
+function refundOutcome(object: Record<string, unknown>): Omit<RefundOutcome, "account"> | null {
+  const { payment_intent: intent, status, amount, currency } = object;
+  if (intent !== undefined && intent !== null && typeof intent !== "string") return null;
+  if (!(PROVIDER_REFUND_STATUSES as readonly unknown[]).includes(status) || !Number.isSafeInteger(amount) || (amount as number) < 0) return null;
+  if (typeof currency !== "string" || !/^[a-z]{3}$/.test(currency)) return null;
+  return { providerRef: object.id as string, paymentIntentId: intent ?? null, status: status as ProviderRefundStatus, amountMinor: amount as number, currency };
 }

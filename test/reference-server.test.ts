@@ -137,6 +137,29 @@ describe("reference server", () => {
     }
   });
 
+  it("has Stripe deliver again a refund update whose payment is not bound yet, and applies the rest on the platform's endpoint only", async () => {
+    const both = createTestEngine();
+    const server = createReferenceServer({ engine: both.engine, stripeSecrets: { identity: [SECRET], payments: [SECRET], connect: [SECRET] }, clock: both.clock });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const send = async (path: string, body: string) => {
+      const res = await fetch(`${url}${path}`, { method: "POST", headers: signed(body), body });
+      return [res.status, await res.json()] as const;
+    };
+    try {
+      const object = { id: "re_1", object: "refund", charge: "ch_1", payment_intent: "pi_unbound", status: "failed", amount: 15000, currency: "cad" };
+      const update = event("evt_30", "refund.failed", object);
+      assert.deepEqual(await send("/webhooks/stripe/payments", update), [503, { received: true, applied: false, retry: true }]);
+      assert.deepEqual(await send("/webhooks/stripe/payments", update), [503, { received: true, applied: false, retry: true }], "never remembered as processed");
+      const placed = event("evt_31", "refund.updated", { ...object, payment_intent: null });
+      assert.deepEqual(await send("/webhooks/stripe/payments", placed), [200, { received: true, applied: false }], "one that can never be placed is acknowledged");
+      assert.deepEqual(await send("/webhooks/stripe/payments", placed), [200, { received: true, duplicate: true }]);
+      assert.deepEqual(await send("/webhooks/stripe/connect", update), [200, { received: true, applied: false, handled: false }], "a connect payment's refunds are the business's");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("applies an event only on its own endpoint, never remembering one that went to the wrong one", async () => {
     const both = createTestEngine();
     const server = createReferenceServer({ engine: both.engine, stripeSecrets: { identity: [SECRET], payments: [SECRET], connect: [SECRET] }, clock: both.clock });

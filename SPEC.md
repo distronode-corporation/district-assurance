@@ -1022,6 +1022,7 @@ answer on file, a phone number, a link or card data.
 | `payment.outcome_ignored` | `paymentId`, `reason` (`account`): an outcome from another account |
 | `payment.settled` | `paymentId`, `status`, and `late: true` for a payment made after the engine closed its link |
 | `payment.refunded` | `paymentId`, `refundId`, `providerRef`, `amountMinor`, `currency`, `reason`, `status` (`pending`, `succeeded` or `failed`) |
+| `payment.refund_updated` | `paymentId`, `refundId`, `providerRef`, `amountMinor`, `currency`, `status` (`succeeded` or `failed`): a pending refund's later outcome at the provider |
 | `payment.disputed` | `paymentId`, `disputeId`, `status`, `amountMinor`, `currency` |
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
 | `consent.revoked` | `consentId`, `purpose`, `wordingVersion`, `via` (`call`, `text` or `web`) |
@@ -1773,10 +1774,23 @@ throws for a refusal blocks the payment's refunds. An answer that is not one of 
 (`precondition_failed`): nothing is recorded or ledgered, the refund stays in flight, and while an
 adapter keeps answering that way every later refund of the payment is blocked, since one is in
 flight at a time. A refund the provider made is learned once the adapter answers properly. A
-`pending` refund counts as pending, toward the total, until a provider update for it arrives, and
-the engine has no path for those updates yet: the payments webhook does not apply Stripe's
-`charge.refund.updated` or `refund.updated` (#117). So a pending refund that later fails at the
-provider still counts, and the business refunds the rest by hand at the provider.
+`pending` refund counts as pending, toward the total, until a provider update for it arrives.
+
+**Refund updates (platform mode).** `applyRefundOutcome({providerRef, paymentIntentId, status,
+amountMinor, currency, account?})` applies a verified refund update (Stripe's `refund.updated`,
+`refund.failed` and `charge.refund.updated`; `parseStripeEvent` gives them as `kind: "refund"`, and
+the reference server applies them on its payments endpoint only). It finds the payment by its bound
+payment intent and the refund by the provider's refund id the engine recorded (`providerRef`). Only
+a `pending` refund moves: to `succeeded`, or to `failed` (Stripe's `failed` or `canceled`), written
+as `payment.refund_updated`; a failed one stops counting toward the refunded total, so the business
+can refund that amount again with the next sequence number. A refund already `succeeded` or `failed`
+is final, and an update that changes nothing (`pending`, `requires_action`, a repeat) writes nothing.
+It answers `{applied: true, callId, status}`, `{applied: false}` for an update with no payment
+intent, a refund the engine did not make (made by hand at the provider), or one whose amount or
+currency differs from what the engine asked, and `{applied: false, unbound: true}` while the payment
+intent is not bound or the engine's own answer for a refund of that payment is still on its way, so
+the host has the event delivered again. A connected account's event is ignored and written down
+(`payment.outcome_ignored`). Works after the call ended; the receipt is never changed.
 
 A platform payment paid late (after the engine closed its link) keeps its payment intent too, so
 its disputes and refunds land like any other's.
@@ -1861,9 +1875,11 @@ session's `payment_intent` when it is a string) and
 `charge.dispute.{created,updated,closed,funds_withdrawn,funds_reinstated}` (the dispute id,
 `charge`, `payment_intent` or null, `status`, `amount` and `currency`, and the event's `created` as
 `occurredAt`; never its evidence; a `created` that is present but not Unix seconds, or past what a
-JavaScript `Date` holds, makes the body malformed); other types are reported as ignored, and a body
+JavaScript `Date` holds, makes the body malformed), and `refund.updated`, `refund.failed` and
+`charge.refund.updated` (the refund id as `providerRef`, `payment_intent` or null, `status`, `amount`
+and `currency`; never its failure reason; `refund.created` is ignored); other types are reported as ignored, and a body
 that is not a well-formed event is `null`, including one whose `account` is present but not a string
-(never read as "no account"). The reference server applies dispute events from the platform's
+(never read as "no account"). The reference server applies dispute and refund events from the platform's
 payments endpoint only. `applyPaymentOutcome` answers `{applied: false, unbound: true}` for a link
 no call holds yet (its reference may still be being bound when the provider's event arrives); the
 reference server answers 503 for it and does not remember the event, as for an unbound dispute, so

@@ -953,10 +953,10 @@ block, allowing only the endpoints the first real publish run's audit log shows.
 - **Who carries refunds and disputes in platform mode.** The engine now refunds platform payments
   and records their disputes (above), but who bears a lost dispute, and on what terms between the
   platform and the business, is a legal and payment provider question that is not decided.
-  Refund status changes after the provider's first answer (`charge.refund.updated`,
-  `refund.updated`) are not followed yet: a `pending` refund counts as pending until a provider
-  update arrives, and the engine has no path for one, so a pending refund that later fails still
-  counts against the payment until the business refunds the rest by hand at the provider (#117).
+  A `pending` refund counts against the payment until the provider's signed refund update
+  (`refund.updated`, `refund.failed`, `charge.refund.updated`) brings it to its final status
+  (`applyRefundOutcome`): one that failed is released and can be refunded again. A provider that
+  never sends the update leaves it pending.
 
 ## STRIDE tables
 

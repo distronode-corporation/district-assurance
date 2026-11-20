@@ -44,7 +44,7 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-28, says why.
 | M3 Gate and payment modes | The Gate module with signed access grants, the signed-webhook relay, Seam, Kisi and Verkada, one-time access codes, web sign-in step-up; Paylink's `connect` and `platform` modes, link life and instant methods | done |
 | M4 Badge | Texted codes, spoken answers, carrier and Stripe Identity adapters, the adversarial suite, and the later Badge work (callback, caller ID attestation, the accessible path, duress PIN, risk-based step-up, synthetic voice, limits across flows, lockout alerts) | done |
 | M5 Dossier | Read-backs, encrypted fields, delivery, conditional fields, documents by text, Spanish | done |
-| M6 Paylink | Amounts from code, cancel and expiry, the live detector, refunds; the Stripe Checkout adapter in platform mode. Open: the Checkout adapter's connect mode, pending refunds; saved cards and keypad capture gated | PAY-1, PAY-4, PAY-6, [#132](https://github.com/distronode-corporation/district-assurance/issues/132) |
+| M6 Paylink | Amounts from code, cancel and expiry, the live detector, refunds; the Stripe Checkout adapter in platform mode. Open: the Checkout adapter's connect mode; saved cards and keypad capture gated | PAY-1, PAY-4, PAY-6 |
 | M7 Trace | Key rotation, the stand-alone verifier, consent revocation, ledger export, more redactors, subject requests, monthly reports, a public timestamp anchor, receipt links by text | done |
 | M8 Reference server hardening | Carrier signatures, limits and logs, receipt links, persistent stores, the release workflow, signed releases, fuzz tests, the threat tables, security.txt, benchmarks. Open: the release dry run in a fork and the first release | SRV-5 |
 | M9 Host integration and module authors | Transcript forwarding, event delivery, the module author kit, the FlowConfig JSON Schema, factors added after construction, the flow simulator. Open: simulator callers for the remaining steps | [#134](https://github.com/distronode-corporation/district-assurance/issues/134) |
@@ -55,13 +55,10 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-28, says why.
    mode.
 2. **SRV-5:** the release workflow's dry run on a tag in a fork, and the checks on the first real
    release.
-3. **[#132](https://github.com/distronode-corporation/district-assurance/issues/132):** reconcile a
-   pending refund with the provider's final status (no refund update webhook or status poll yet;
-   SPEC.md section 14 says what happens today).
-4. **[#134](https://github.com/distronode-corporation/district-assurance/issues/134):** scripted
+3. **[#134](https://github.com/distronode-corporation/district-assurance/issues/134):** scripted
    simulator callers for `gate.grant`, `step-up.issue`, callbacks, texted codes and spoken
    answers; a flow with one of those steps stops there with exit code 3 today.
-5. **Gated, not scheduled:** PAY-4 (saved-card charges) and PAY-6 (keypad card capture); PAY-6
+4. **Gated, not scheduled:** PAY-4 (saved-card charges) and PAY-6 (keypad card capture); PAY-6
    starts only after an assessor's scoping and a buyer who needs it.
 
 Dependencies: PAY-6 needs PAY-1.
@@ -177,12 +174,8 @@ mode before it goes live.
 | Cancel and expire open links (PAY-3) | `src/pay/paylink.ts`, `src/engine.ts` | `cancelPaymentLink`, `expirePaymentLinks`, a link expired when the call ends (`test/engine.test.ts`, `test/pay-close-hostile.test.ts`) |
 | Live card-number detector (PAY-5) | `src/core/live-detector.ts`, `src/core/redaction.ts` | partial and spoken numbers over the shared corpus in `test/corpus/` (`test/redaction.test.ts`, `test/redaction-hostile.test.ts`) |
 | Refunds and disputes in platform mode (PAY-8) | `src/pay/refunds.ts` | `test/pay-refunds.test.ts`, `test/pay-refunds-hostile.test.ts` |
+| A pending refund's later outcome (PAY-9, #132) | `src/pay/refunds.ts`, `src/webhooks/stripe.ts` | `test/pay-refund-updates.test.ts` |
 | Stripe Checkout in platform mode (part of PAY-1) | `examples/reference-server/src/stripe-adapters.ts` | `StripeCheckoutLinks` against a local fake (`test/stripe-adapters.test.ts`), and `npm run demo:e2e` with a real Checkout Session in test mode |
-
-Open on GitHub and not written out here:
-[#132](https://github.com/distronode-corporation/district-assurance/issues/132), reconcile a
-pending refund with the provider's final status. Until then a refund the provider leaves pending
-still counts against the payment (SPEC.md section 14).
 
 **Proven by:** Unit tests at 100%; the Checkout adapter against a local fake, and in Stripe test
 mode in platform mode (`npm run demo:e2e`). Proving connect mode in test mode is PAY-1, below.

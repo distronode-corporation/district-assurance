@@ -40,6 +40,7 @@ const TYPES = [
   "constructor",
   "toString",
   "charge.dispute.created",
+  "refund.updated",
 ];
 
 const event: fc.Arbitrary<Record<string, unknown>> = fc.record({
@@ -47,7 +48,11 @@ const event: fc.Arbitrary<Record<string, unknown>> = fc.record({
   type: fc.constantFrom(...TYPES),
   livemode: fc.constantFrom<unknown>(true, false, "true", 1, null),
   data: fc.record({
-    object: fc.record({ id: printableString(8).map((s) => `cs_${s}`), payment_status: fc.constantFrom<unknown>("paid", "unpaid", "no_payment_required", "PAID", "", null, 1) }),
+    object: fc.record({ id: printableString(8).map((s) => `cs_${s}`), payment_status: fc.constantFrom<unknown>("paid", "unpaid", "no_payment_required", "PAID", "", null, 1),
+      status: fc.constantFrom<unknown>("failed", "succeeded", "maybe", null),
+      amount: fc.constantFrom<unknown>(15000, -1, 1.5),
+      currency: fc.constantFrom<unknown>("cad", "CAD"),
+    }),
   }),
 });
 
@@ -191,6 +196,10 @@ describe("fuzz: parseStripeEvent", () => {
             break;
           case "dispute":
             assert.ok((raw.type as string).startsWith("charge.dispute."), raw.type as string);
+            break;
+          case "refund":
+            assert.ok(["refund.updated", "refund.failed", "charge.refund.updated"].includes(raw.type as string), raw.type as string);
+            assert.equal(parsed.outcome.providerRef, linkId);
             break;
           default:
             assert.equal(parsed.type, raw.type);

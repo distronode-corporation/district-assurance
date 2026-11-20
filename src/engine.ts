@@ -984,6 +984,15 @@ export class Engine {
     return refunds.applyDisputeOutcome(this.#rt, outcome);
   }
 
+  /**
+   * A verified refund update (`refund.updated`, `refund.failed`, `charge.refund.updated`): a
+   * pending refund's later outcome, recorded against the refund the engine made. One that failed
+   * stops counting toward the refunded total. Works after the call ended; the receipt is never changed.
+   */
+  applyRefundOutcome(outcome: refunds.RefundOutcome): Promise<refunds.RefundApplied> {
+    return refunds.applyRefundOutcome(this.#rt, outcome);
+  }
+
   // ---- Gate (entry) ------------------------------------------------------------------------
 
   /** Issues an access grant and sends it to its door controller, once (SPEC.md, section 17). */
