@@ -1089,7 +1089,8 @@ removes only the version the engine checked, with its pending mark, and keeps th
 created again (`startCall` refuses it): its ledger event ids are spent. `removeCall` is refused
 (`precondition_failed`) for a call that has not ended, for one that still owes a duress alert or a
 contact notice (`sweepAlerts` sends it), for one that still owes its receipt (a signing that failed
-after the call ended; `endCall` signs it), for one with a filed record whose confirmed mark it could
+after the call ended; `endCall` signs it), for one with a refund of its payment in flight (the
+provider's answer is still on its way; `refundPayment` resumes it), for one with a filed record whose confirmed mark it could
 not make (the call keeps the marks it owes in `marksOwed` until the record store has them), and for
 one whose outbox still holds entries after it tried to flush them (the ledger refused them): the record is kept, and `flushPending` keeps
 listing it, until they are appended, so no pending entry (a `consent.recorded` written while the

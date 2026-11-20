@@ -9,7 +9,7 @@ import type { AuditInput } from "../src/core/adapters.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { MemoryAuditLedger } from "../src/prove/ledger.ts";
 import { generateTestSigner, sessionStoreContract, type TestEngine } from "../src/testing/index.ts";
-import { rejects, setup, verifiedCall } from "./helpers.ts";
+import { confirmAmount, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
 
 class SwitchedLedger extends MemoryAuditLedger {
   down = false;
@@ -112,6 +112,40 @@ describe("removeCall", () => {
     await t.engine.endCall(callId);
     assert.notEqual(await t.engine.receipt(callId), null);
     assert.deepEqual(await t.engine.removeCall(callId), { removed: true });
+  });
+
+  it("keeps an ended call with a refund in flight, and removes it once the refund's answer is recorded (CodeRabbit #139)", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
+    await confirmAmount(t.engine, callId, request);
+    await t.engine.requestPayment(callId, request);
+    await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid", paymentIntentId: "pi_1" });
+    await t.engine.endCall(callId);
+    const refund = t.payments.refund.bind(t.payments);
+    t.payments.refund = async () => {
+      throw new Error("the answer was lost");
+    };
+    await assert.rejects(t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "duplicate", sequence: 1 }), /the answer was lost/);
+    await assert.rejects(t.engine.removeCall(callId), rejects("precondition_failed", /refund/));
+    assert.notEqual(await t.sessions.get("ws_test", callId), null, "the record stays");
+    t.payments.refund = refund;
+    await t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "duplicate", sequence: 1 });
+    assert.deepEqual(await t.engine.removeCall(callId), { removed: true });
+  });
+
+  it("removes an ended call whose payment has no refund, and one that started with Paylink off", async () => {
+    const t = setup();
+    const paid = await verifiedCall(t);
+    const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
+    await confirmAmount(t.engine, paid, request);
+    await t.engine.requestPayment(paid, request);
+    await t.engine.endCall(paid);
+    assert.deepEqual(await t.engine.removeCall(paid), { removed: true });
+    const off = setup({ config: testConfig((c) => (c.modules.paylink = { enabled: false })) });
+    const callId = await verifiedCall(off);
+    await off.engine.endCall(callId);
+    assert.deepEqual(await off.engine.removeCall(callId), { removed: true });
   });
 
   it("needs a session store that can remove", async () => {
