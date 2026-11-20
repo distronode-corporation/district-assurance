@@ -66,6 +66,82 @@ describe("requestCallback: two requests reach the end of the asking call togethe
     assert.notEqual(await t.engine.receipt(callId), null);
   });
 
+  it("does not dial when the second's own signing fails too, and both report it", async () => {
+    const t = setup({ config: callbackConfig(), adapters: { signer: { ...generateTestSigner(), sign: () => Promise.reject(new Error("kms down")) } } });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT, callingNumber: "+15555550199" });
+    assert.equal((await t.engine.submitPin(callId, PIN)).matched, true);
+    const endCall = t.engine.endCall.bind(t.engine);
+    let arrived = 0;
+    let firstHere!: () => void;
+    let bothHere!: () => void;
+    const first = new Promise<void>((resolve) => (firstHere = resolve));
+    const together = new Promise<void>((resolve) => (bothHere = resolve));
+    t.engine.endCall = async (id) => {
+      ++arrived;
+      if (arrived === 1) firstHere();
+      if (arrived === 2) bothHere();
+      if (arrived <= 2) await together;
+      return endCall(id);
+    };
+    const a = t.engine.requestCallback(callId);
+    await first;
+    const results = await Promise.allSettled([a, t.engine.requestCallback(callId)]);
+    assert.deepEqual(
+      results.map((r) => (r.status === "rejected" ? (r.reason as Error).message : "ok")),
+      ["kms down", "kms down"],
+    );
+    assert.equal(arrived, 3, "the second tried the receipt itself");
+    assert.equal(t.dialer.dialed.length, 0, "no callback rings for a call with no receipt");
+    assert.equal(await t.engine.receipt(callId), null);
+  });
+
+  it("goes ahead when the first stores the receipt between the second's read and its endCall", async () => {
+    const real = generateTestSigner();
+    let releaseSign!: () => void;
+    const signGate = new Promise<void>((r) => (releaseSign = r));
+    const t = setup({
+      config: callbackConfig(),
+      adapters: {
+        signer: {
+          ...real,
+          sign: async (bytes) => {
+            await signGate;
+            return real.sign(bytes);
+          },
+        },
+      },
+    });
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT, callingNumber: "+15555550199" });
+    assert.equal((await t.engine.submitPin(callId, PIN)).matched, true);
+    const endCall = t.engine.endCall.bind(t.engine);
+    let arrived = 0;
+    let firstHere!: () => void;
+    let bothHere!: () => void;
+    const first = new Promise<void>((resolve) => (firstHere = resolve));
+    const together = new Promise<void>((resolve) => (bothHere = resolve));
+    t.engine.endCall = async (id) => {
+      ++arrived;
+      if (arrived === 1) firstHere();
+      if (arrived === 2) bothHere();
+      if (arrived <= 2) await together;
+      if (arrived === 3) {
+        // The second request read the receipt as owed; the first now finishes signing and stores it.
+        releaseSign();
+        while ((await t.engine.receipt(callId)) === null) await new Promise((r) => setImmediate(r));
+      }
+      return endCall(id);
+    };
+    const a = t.engine.requestCallback(callId);
+    await first;
+    const results = await Promise.all([a, t.engine.requestCallback(callId)]);
+    assert.deepEqual(results, [undefined, undefined], "neither fails with invalid_transition");
+    assert.equal(arrived, 3);
+    assert.equal(t.dialer.dialed.length, 1, "the line rings once");
+    assert.notEqual(await t.engine.receipt(callId), null);
+  });
+
   it("both resolve, the call ends once, and the line rings once", async () => {
     const t = setup({
       config: testConfig((c) => {

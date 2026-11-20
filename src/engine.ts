@@ -889,7 +889,13 @@ export class Engine {
         if (won === null || won.state.phase !== "ended") throw e;
         // The request that ended it may still be signing its receipt, and may fail to: the receipt
         // is completed here too (the first one stored is the call's), so the callback never dials first.
-        if (trace.wantsReceipt(this.#rt, won) && trace.receiptOf(won) === null) await this.endCall(callId);
+        if (trace.wantsReceipt(this.#rt, won) && trace.receiptOf(won) === null) {
+          await this.endCall(callId).catch(async (again: unknown) => {
+            // The other request stored the receipt in between: endCall found nothing owed and tried
+            // to end the call again. The receipt is there, so the callback goes ahead.
+            if (!(again instanceof EngineError && again.code === "invalid_transition" && trace.receiptOf(await this.#read(callId)) !== null)) throw again;
+          });
+        }
       }
     }
     if (plan === null) return;
