@@ -554,9 +554,18 @@ function maxAttempts(rt: EngineRuntime, module: BadgeModule, kind: string): numb
  * (hashed under the knowledge key) or a subject key the host's code chose, for example the owner
  * of the line. Choosing the subject is not a factor: only factors raise the level. With a calling
  * number, failures are also counted against that number across calls; a later restart that
- * leaves it out keeps it.
+ * leaves it out keeps it. A start is resolved (`resolveVerification`), then written
+ * (`startVerification`); the engine counts a running limited flow's starts in between.
  */
-export async function beginVerification(rt: EngineRuntime, callId: string, input: BeginVerificationInput): Promise<void> {
+export interface ResolvedVerification {
+  subjectKey: string | null;
+  numberKey: string | null;
+  subject: SubjectRecord | null;
+  byHost: boolean;
+}
+
+/** Checks a verification start's input and keys its subject and number, without writing. */
+export async function resolveVerification(rt: EngineRuntime, input: BeginVerificationInput): Promise<ResolvedVerification> {
   rt.settings(BADGE);
   // Read once: the key or account number checked is the one used, and the ledger names its source.
   const byHost = "subjectKey" in input;
@@ -574,9 +583,27 @@ export async function beginVerification(rt: EngineRuntime, callId: string, input
   if (number !== undefined && !isCallingNumber(number)) throw new EngineError("invalid_input", "callingNumber must be E.164; leave it out when the number is withheld");
   const numberKey = number === undefined ? null : await rt.hmac(`number:${number}`);
   const subject = subjectKey === null ? null : await rt.adapter("records").getSubject(rt.workspaceId, subjectKey);
+  return { subjectKey, numberKey, subject, byHost };
+}
+
+/** Refuses a verification start the call cannot take now (also checked by a write made just before it). */
+export function assertCanBegin(draft: CallDraft): BadgeSlice {
+  stepOfType(draft.record, "badge.verify");
+  const s = draft.slice<BadgeSlice>(BADGE);
+  draft.assertCan({ type: "verification_started", reset: true });
+  return s;
+}
+
+/** The counters a started verification keys: its subject, and its number or the one the call kept. */
+export function verificationKeys(slice: BadgeSlice, resolved: ResolvedVerification): { subjectKey: string | null; numberKey: string | null } {
+  return { subjectKey: resolved.subjectKey, numberKey: resolved.numberKey ?? slice.numberKey };
+}
+
+/** Writes a resolved verification start on the call. */
+export async function startVerification(rt: EngineRuntime, callId: string, resolved: ResolvedVerification): Promise<void> {
+  const { subjectKey, numberKey, subject, byHost } = resolved;
   await rt.update(callId, (draft) => {
-    stepOfType(draft.record, "badge.verify");
-    const s = draft.slice<BadgeSlice>(BADGE);
+    const s = assertCanBegin(draft);
     const reset = subjectKey !== s.subjectKey;
     draft.apply({ type: "verification_started", reset });
     s.epoch++;

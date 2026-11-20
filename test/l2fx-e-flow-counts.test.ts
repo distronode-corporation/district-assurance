@@ -9,8 +9,9 @@ import type { FlowConfig } from "../src/core/config.ts";
 import type { AssuranceModule } from "../src/core/module.ts";
 import type { MemorySessionStore } from "../src/core/session-store.ts";
 import { FLOW_START, numberKeyFor } from "../src/verify/counters.ts";
+import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, type TestEngine } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, rejects, setup, testConfig } from "./helpers.ts";
+import { ACCOUNT, rejects, setup, testConfig } from "./helpers.ts";
 
 const LONG_AGO = "2000-01-01T00:00:00.000Z";
 const CALLING = "+15555550142";
@@ -187,20 +188,15 @@ describe("l2fx-e U2: startCall gives its count back when the attach fails before
 });
 
 describe("l2fx-e U3: a late flow counter is charged as it is reserved, and given back only when not taken", () => {
-  const subjectStarts = async (t: TestEngine, callId: string) => {
-    const slice = ((await t.sessions.get("ws_test", callId))!.record as { modules: { badge: { subjectKey: string } } }).modules.badge;
-    return (await t.counters.get({ workspaceId: "ws_test", factor: FLOW_START, scope: "subject", key: slice.subjectKey }, LONG_AGO)).length;
-  };
-  // A first step that passes at level 1, so verification can start again on the flow's second step.
+  // The account's subject: counted before a start writes it on the call (U3b).
+  const subjectStarts = async (t: TestEngine, _callId?: string) =>
+    (await t.counters.get({ workspaceId: "ws_test", factor: FLOW_START, scope: "subject", key: subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT) }, LONG_AGO)).length;
+  // A limited flow whose first step verifies at level 1.
   const stepUp = (patch: (c: FlowConfig) => void = () => undefined) =>
     cfg((c) => {
       c.flows = { pay: { steps: [{ type: "badge.verify", level: 1, factors: ["keypad_knowledge"], scopes: ["status.read"] }, verify2] } };
       patch(c);
     });
-  const passFirst = async (t: TestEngine, callId: string) => {
-    await t.engine.submitKeypad(callId, { dob: DOB });
-    await t.engine.finishVerification(callId);
-  };
 
   it("charges the subject once when two beginVerification calls overlap", async () => {
     const t = setup({ config: stepUp() });
@@ -221,11 +217,11 @@ describe("l2fx-e U3: a late flow counter is charged as it is reserved, and given
     };
     const a = t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     await atCharge;
-    // The caller finishes this verification and starts another while the first charge is still out.
-    await passFirst(t, callId);
+    // The caller starts again while the first charge is still out (nothing is written for it yet).
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     release();
-    await a;
+    // The first start finds verification already under way: refused, and its count given back.
+    await assert.rejects(a, rejects("invalid_transition"));
     assert.equal(await subjectStarts(t, callId), 1);
   });
 
@@ -237,7 +233,6 @@ describe("l2fx-e U3: a late flow counter is charged as it is reserved, and given
     await assert.rejects(t.engine.beginVerification(callId, { accountNumber: ACCOUNT }), /counters down/);
     assert.equal(await subjectStarts(t, callId), 0);
     t.counters.recordFailure = record;
-    await passFirst(t, callId);
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     assert.equal(await subjectStarts(t, callId), 1);
   });
@@ -252,7 +247,6 @@ describe("l2fx-e U3: a late flow counter is charged as it is reserved, and given
     };
     await assert.rejects(t.engine.beginVerification(callId, { accountNumber: ACCOUNT }), /lost reply/);
     t.counters.recordFailure = record;
-    await passFirst(t, callId);
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     assert.equal(await subjectStarts(t, callId), 2);
   });
@@ -267,7 +261,6 @@ describe("l2fx-e U3: a late flow counter is charged as it is reserved, and given
     await assert.rejects(t.engine.beginVerification(callId, { accountNumber: ACCOUNT }), /counters down/);
     t.counters.recordFailure = record;
     await t.engine.beginVerification(other, { accountNumber: ACCOUNT });
-    await passFirst(t, callId);
     await assert.rejects(t.engine.beginVerification(callId, { accountNumber: ACCOUNT }), rejects("rate_limited"));
     assert.equal((await t.engine.flowPosition(callId))!.status, "failed");
   });
@@ -291,12 +284,12 @@ describe("l2fx-e U3: a late flow counter is charged as it is reserved, and given
     };
     const a = t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     await atCharge;
-    await passFirst(t, callId);
     // This one brings a number too: it charges and takes both while the first charge is still out.
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT, callingNumber: CALLING });
     assert.equal(await subjectStarts(t, callId), 1);
     release();
-    await a;
+    // The first start finds verification already under way: refused, and its count given back.
+    await assert.rejects(a, rejects("invalid_transition"));
     assert.equal(await starts(t), 1);
     assert.equal(await subjectStarts(t, callId), 1, "the first verification's charge, taken second, is given back");
   });
@@ -354,8 +347,6 @@ describe("l2fx-e U3: a late flow counter is charged as it is reserved, and given
     for (let i = 0; i < 50; i++) await Promise.resolve();
     t.counters.recordFailure = record;
     const next = restarted(t, config);
-    await next.engine.submitKeypad(callId, { dob: DOB });
-    await next.engine.finishVerification(callId);
     await next.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     assert.ok((await subjectStarts(t, callId)) >= 1, "the subject's start is counted: a crash never leaves it free");
   });
@@ -374,8 +365,6 @@ describe("l2fx-e U3: a late flow counter is charged as it is reserved, and given
     await new Promise((resolve) => setImmediate(resolve));
     t.counters.recordFailure = record;
     const next = restarted(t, config);
-    await next.engine.submitKeypad(callId, { dob: DOB });
-    await next.engine.finishVerification(callId);
     await next.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     assert.ok((await subjectStarts(t, callId)) <= 2);
     assert.ok((await subjectStarts(t, callId)) >= 1);

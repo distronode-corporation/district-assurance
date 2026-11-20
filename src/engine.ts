@@ -651,49 +651,58 @@ export class Engine {
    * the host's code chose, and the calling number when it is not withheld (counted, never a factor).
    */
   async beginVerification(callId: string, input: badge.BeginVerificationInput): Promise<void> {
-    await badge.beginVerification(this.#rt, callId, input);
+    const resolved = await badge.resolveVerification(this.#rt, input);
     // Once verification names a subject (or brings a number), a flow with an hourly limit is
     // counted on that counter too, once per call; over the limit, the flow fails and the host gets
-    // the same `rate_limited` as a refused start. The charge is the reservation: each counter is
-    // charged first, then taken on the call (`counted`). A charge is given back only once it is known
-    // not to have been taken: another overlapping verification took that counter first, or the
-    // write saved nothing. A crash in between leaves it charged, at most one too many: the safe side.
+    // the same `rate_limited` as a refused start. Counted before the subject is written, so over the
+    // limit no factor can be judged for it in between; a start that fails after the count keeps it,
+    // at most one too many. The count is the reservation: each counter is counted first, then taken
+    // on the call (`counted`). A count is given back only once it is known not to have been taken:
+    // another overlapping verification took that counter first, or the write saved nothing. A crash
+    // in between leaves it counted, at most one too many: the safe side.
     const record = await this.#read(callId);
     const flow = record.flow;
     // A flow started before `counted` existed (undefined) was never counted: it stays as it was. [] is a new limited flow.
-    if (flow === null || flow.counted === null || flow.counted === undefined) return;
-    const counted = flow.counted;
-    const keys = counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice).filter((key) => !counted.includes(counterId(key)));
+    if (flow !== null && flow.counted !== null && flow.counted !== undefined) await this.#countLateStarts(callId, record, flow.counted, resolved);
+    await badge.startVerification(this.#rt, callId, resolved);
+  }
+
+  /** Counts a running limited flow's starts on the counters a verification start brings (`beginVerification`). */
+  async #countLateStarts(callId: string, record: CallRecord, counted: readonly string[], resolved: badge.ResolvedVerification): Promise<void> {
+    const slice = this.#slice(record.modules, badge.BADGE) as unknown as badge.BadgeSlice;
+    const keys = counterKeys(this.workspaceId, FLOW_START, badge.verificationKeys(slice, resolved)).filter((key) => !counted.includes(counterId(key)));
     if (keys.length === 0) return;
     const { over, at } = await this.#countStarts(keys);
-    // Takes back these counters' charges (none was made when a counter was already at its limit).
+    // Takes back these counters' counts (none was made when a counter was already at its limit).
     const giveBack = (back: readonly AttemptCounterKey[]) => this.#uncount({ over, counted: null, recorded: at === null ? null : { keys: back, at } });
     const outcome: WriteOutcome = { write: "none" };
-    let taken: AttemptCounterKey[];
+    // The counters another verification on this call took first, as the last write attempt found them.
+    let taken: AttemptCounterKey[] = [];
     try {
-      taken = await this.#update(
+      await this.#update(
         callId,
         (draft) => {
+          // The start's own checks, so a start the call refuses fails no flow and keeps no count.
+          badge.assertCanBegin(draft);
           const current = draft.record.flow!;
           const now = current.counted!;
           if (over !== null) {
-            // Fails closed, whatever another process did to the flow meanwhile; the charge stays.
+            // Fails closed, whatever another process did to the flow meanwhile; the count stays.
             current.status = "failed";
             draft.emit("flow.rate_limited", "code", { flow: current.name, scope: over });
-            return [];
+            return;
           }
-          const first = keys.filter((key) => now.includes(counterId(key)));
+          taken = keys.filter((key) => now.includes(counterId(key)));
           now.push(...keys.filter((key) => !now.includes(counterId(key))).map(counterId));
-          return first;
         },
         outcome,
       );
     } catch (error) {
-      // Saved nothing: every charge is given back. A write with no answer keeps them.
+      // Saved nothing: every count is given back. A write with no answer keeps them.
       if (outcome.write === "none") await giveBack(keys);
       throw error;
     }
-    // Counters another verification on this call took first: this charge is the extra one.
+    // Counters another verification on this call took first: this count is the extra one.
     await giveBack(taken);
     if (over !== null) throw new RateLimitedError(callId);
   }
