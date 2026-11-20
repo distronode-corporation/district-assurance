@@ -179,6 +179,13 @@ interface QueuedEvent {
   tag?: string | undefined;
 }
 
+/**
+ * An amount a host gave as null: not known, so over every amount rule (`amountOver` counts a
+ * number that is not one and a currency no rule lists as over). Distinct from an amount left out,
+ * which in a flow is the current step's.
+ */
+const UNKNOWN_AMOUNT: StepUpAmount = Object.freeze({ amountMinor: Number.NaN, currency: "" });
+
 /** A member of the business lifting one lock early: the counter a lock notice named, and who did it. */
 export interface UnlockInput {
   workspaceId: string;
@@ -575,8 +582,9 @@ export class Engine {
   async authorize(callId: string, scope: string, given?: StepUpAmount): Promise<boolean> {
     // Read once, before the wait: both checks judge the amount the host passed at the call, as a
     // plain copy, so a getter or a change to the object meanwhile cannot answer each differently.
-    // A null from the host is no amount (over every amount rule), never the internal "not asked yet".
-    const amount = typeof given === "object" && given !== null ? { amountMinor: given.amountMinor, currency: given.currency } : (given ?? undefined);
+    // A null from the host is no amount (over every amount rule), never the internal "not asked yet"
+    // and never the step's amount, which only an amount left out stands for.
+    const amount = typeof given === "object" && given !== null ? { amountMinor: given.amountMinor, currency: given.currency } : given === null ? UNKNOWN_AMOUNT : given;
     const record = await this.#read(callId);
     const check = this.#cover(record, scope, amount);
     // A rule in `applied` was walked by #cover, which set `stepUps` on this read copy (`??=`).
@@ -1373,7 +1381,7 @@ export class Engine {
       newId: (prefix) => this.#ids.next(prefix),
       authorized: (scope) => this.#authorized(draft.record, scope),
       emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
-      contactChanged: () => trace.noteAction(draft, "contact", badge.matchedSubject(draft.record)),
+      contactChanged: () => trace.noteAction(draft, "contact", () => badge.matchedSubject(draft.record)),
     };
     const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);
     draft.record.modules[name] = structuredClone(next);
@@ -1584,10 +1592,12 @@ export class Engine {
       }
       draft.emit("flow.step_completed", "code", detail);
       // A money, contact or access step is what a receipt text names, and a contact one owes a notice.
-      // Such a step follows a level 2 verification, which a keypad or PIN match always unlocked:
-      // matchedSubject fails closed if that ever did not hold.
+      // Such a step follows a level 2 verification, which a keypad or PIN match always unlocked. Only
+      // a contact step needs the match to stand (its notice goes to the matched subject's number):
+      // matchedSubject fails closed if it does not. A payment texted before a taint still completes
+      // when the provider reports it, without the match, which stays void.
       const action = this.#actionClass(owner!, step.type);
-      if (action !== null) trace.noteAction(draft, action, badge.matchedSubject(record));
+      if (action !== null) trace.noteAction(draft, action, () => badge.matchedSubject(record));
       flow.index++;
       const next = flow.steps[flow.index];
       if (next === undefined) {
