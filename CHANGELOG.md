@@ -210,6 +210,11 @@ All notable changes to this project are documented here. The format follows
   is never stored again; each erasure gets its own entry, closed by `subject.erasure_completed`,
   and a retry after a partial delete finishes the same one.
 - Carrier webhook signatures (SRV-1): `verifyTwilioSignature` and `verifyTelnyxSignature`, tested against Twilio's published examples and RFC 8032's Ed25519 vector; the reference server's `/webhooks/twilio` and `/webhooks/telnyx` routes check them instead of answering 501.
+- Optional SQLite stores for the reference server (SRV-4): `SqliteRecordStore` and an append-only
+  `SqliteAuditLedger` on `node:sqlite`, with no new dependency, that pass the PRV-5 contract suites
+  and keep their data across a restart. `SqliteAuditLedger.list(fromSeq?, limit?)` reads one page
+  of at most `limit` rows and refuses a `limit` that is not an integer of 1 or more, as the
+  hardened ledger contract (#73) asks.
 
 ### Changed
 

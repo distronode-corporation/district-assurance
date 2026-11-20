@@ -702,6 +702,12 @@ appended by event id, once each; a ledger that fails leaves them pending, and th
 A durable ledger must pass `auditLedgerContract`: append-only, one valid chain under concurrent
 appends, each `eventId` once, copies in and out, and card data refused (tested on
 `MemoryAuditLedger`).
+The reference server's optional SQLite ledger (SRV-4) adds triggers that refuse any UPDATE or
+DELETE of an entry, and any INSERT (such as INSERT OR REPLACE) over a stored `seq` or `eventId`,
+from any connection, and takes the database's write lock for each append, so
+two processes on one file keep one chain (tested). The triggers stop mistakes, not an attacker: any
+connection can drop them, and anyone who can write the file can rewrite it; the hash chain and
+signed receipts are what detect that.
 
 ### Reading someone else's receipt
 
@@ -753,7 +759,15 @@ record goes only to a destination in the host's configuration, over `https:` (or
 loopback host) and never to a URL with credentials in it; its `delivery.attempted` ledger entries
 carry the record id, the destination's id, the attempt, the outcome and the status, never a field
 value, the URL or the secret (tested). A texted code
-is kept only as an HMAC bound to its call, and a calling number only as an HMAC.
+is kept only as an HMAC bound to its call, and a calling number only as an HMAC. Upload link
+tokens are 256 random bits and only their SHA-256 is stored, so a copy of the `DocumentStore`
+yields no working link (tested).
+The reference server's optional SQLite stores (SRV-4) keep subjects (HMACs and the number on
+file), confirmed intake values and the ledger in one file, unencrypted, created readable and
+writable by its owner only, with SQLite's WAL and shared-memory files created alike (tested); a
+file that already exists readable or writable by others is refused, and so is a `file:` URI, which
+would open a file other than the one given that mode (tested). Protecting that file, its backups and the disk under it is
+left to the host.
 
 ### Theft of the keys
 
@@ -772,16 +786,6 @@ time is invalid (tested), but `issuedAt` is written by whoever holds the key, so
 does not limit what a thief can sign with it. A key set saved to a file does not see that removal: verifying against a
 saved copy keeps accepting the leaked key, so a holder who needs current trust verifies against
 the key set URL or refreshes the copy.
-
-## Open questions
-
-- **Seam in the door path.** The adapter is built (GAT-5), but putting a paid third party between
-  the engine and a door in production still waits on its pricing and its handling of Canadian data
-  being checked, and on one unlock proven by hand in Seam's sandbox.
-fields are refused by `validateConfig` until field encryption exists (FIL-2). PINs on file are
-HMACs bound to their subject, or stay in the host's own PIN store (`verifier` mode). Upload link
-tokens are 256 random bits and only their SHA-256 is stored, so a copy of the `DocumentStore`
-yields no working link (tested).
 
 ### Other identity and banking numbers in transcripts
 
@@ -820,6 +824,12 @@ receipt, guesses the values and hashes them. Treat the ledger and receipts as pe
 information for retention and access control. The export lists these as kept, with that reason.
 Records filed on a call with no matched subject cannot be found by subject; the export says so.
 Consents stay in their call records until PRV-3's `ConsentStore`; counters across calls are VER-1's.
+
+## Open questions
+
+- **Seam in the door path.** The adapter is built (GAT-5), but putting a paid third party between
+  the engine and a door in production still waits on its pricing and its handling of Canadian data
+  being checked, and on one unlock proven by hand in Seam's sandbox.
 - **Who carries refunds and disputes in platform mode.** The engine now refunds platform payments
   and records their disputes (above), but who bears a lost dispute, and on what terms between the
   platform and the business, is a legal and payment provider question that is not decided.
@@ -867,7 +877,9 @@ Consents stay in their call records until PRV-3's `ConsentStore`; counters acros
   guarantees: they must pass `sessionStoreContract`, `recordStoreContract` and
   `auditLedgerContract` from `district-assurance/testing`, as the memory adapters do (tested); one
   durable `AttemptCounters` store shared by every process of a workspace
-  (`attemptCountersContract`), and a durable `CodeStore` shared by every engine of a workspace that passes `codeStoreContract`.
+  (`attemptCountersContract`), and a durable `CodeStore` shared by every engine of a workspace that passes `codeStoreContract`. The reference server's
+  `SqliteRecordStore` and `SqliteAuditLedger` (SRV-4) are an example that passes the record and
+  ledger suites, not a production store.
 - Passing the calling number from the carrier to `beginVerification`, never one the caller or the
   model gives, so the per-number limits apply. Caller ID can be spoofed, so the number's counter is
   a brake on one line, not a control; the subject's counter is what bounds guessing, and a withheld

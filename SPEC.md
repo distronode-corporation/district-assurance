@@ -1016,6 +1016,27 @@ is refused with nothing stored, and concurrent appends stay one valid chain.
 factory, since the engine only reads them) and intake records are copied in and out, workspaces
 never share a key, keys that differ only in a lone surrogate stay apart, and `putIntakeRecord` is idempotent by `recordId`, also concurrently.
 `MemoryAuditLedger` and `MemoryRecordStore` pass both.
+The reference server has optional SQLite stores on `node:sqlite` (SRV-4,
+`examples/reference-server/src/sqlite-stores.ts`; no dependency). `SqliteAuditLedger` keeps each
+entry as `chainEntry` built it, as JSON, in a table whose `seq` is the primary key and whose
+`eventId` is unique; triggers refuse UPDATE, DELETE, and an INSERT whose `seq` or `eventId` is
+already stored (so INSERT OR REPLACE cannot swap an entry). Each append runs in a `BEGIN IMMEDIATE`
+transaction (a repeated `eventId` returns the first entry; a refused entry rolls back with nothing
+stored), so connections in several processes keep one chain. `SqliteRecordStore` keys subjects and
+intake records by (workspace, id) as two columns; every key, the ledger's `eventId` too, is bound as
+its JSON string, since `node:sqlite` binds text as UTF-8 and would turn a lone surrogate into
+U+FFFD, so two ids that differ only there stay apart; `putIntakeRecord` keeps the first filing of a
+`recordId`, and `putSubject` adds or replaces a subject. `openSqliteStores(path)` opens both on one
+file in WAL mode, created with mode 0600, with a 5-second busy timeout; it takes a filesystem path
+or `:memory:`, and refuses a `file:` URI, whose file would not get that mode. It also refuses an
+existing database file, or a `-wal` or `-shm` file beside it, that is readable or writable by group
+or others (SQLite keeps an existing file's mode). `SqliteRecordStore` also takes the PIN and
+duress PIN writes, each read and written in one `BEGIN IMMEDIATE` transaction so two connections
+never both pass the check, and the subject request writes: a deleted record id is kept (the id
+alone) so a later `putIntakeRecord` of it stores nothing, and erasures are counted per subject in
+one statement, with `putIntakeRecord(record, erasuresSeen)` checking the count and inserting in one
+statement too. Both pass `auditLedgerContract`, `recordStoreContract` and
+`recordStoreErasureContract` (PRV-5) and keep what they hold across a restart.
 
 ## 11. Canonical JSON
 
