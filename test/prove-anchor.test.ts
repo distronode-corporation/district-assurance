@@ -1,6 +1,8 @@
 // Public timestamp anchors for the ledger (PRV-9): the anchor payload, the DER reader, the engine's
 // `anchorLedger`, offline checks with `verifyAnchor`, and the reference server's two adapters
-// replaying recorded answers (test/fixtures/anchor, written by record.ts). No network.
+// replaying recorded answers (test/fixtures/anchor, written by record.ts from a throwaway authority
+// and log, for the failure paths). The answers of DigiCert's TSA and Sigstore's Rekor v2 are
+// replayed in prove-anchor-real.test.ts. No network.
 import { strict as assert } from "node:assert";
 import { X509Certificate, createPublicKey, generateKeyPairSync, sign } from "node:crypto";
 import { readFileSync } from "node:fs";

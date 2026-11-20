@@ -1,0 +1,8 @@
+{
+  "tsa": "http://timestamp.digicert.com",
+  "rekor": "https://log2025-1.rekor.sigstore.dev",
+  "origin": "log2025-1.rekor.sigstore.dev",
+  "nonce": "5f3a0c9d17e2b48a",
+  "recordedAt": "2026-11-20T14:59:01.183Z",
+  "anchoredSeq": 7
+}

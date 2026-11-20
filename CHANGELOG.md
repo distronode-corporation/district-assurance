@@ -274,6 +274,10 @@ All notable changes to this project are documented here. The format follows
 - Public timestamp anchors for the ledger (PRV-9): `anchorLedger()` appends a `ledger.anchored`
   entry with a proof from an `Anchor` adapter, `verifyAnchor` checks it offline, and the reference
   server has an RFC 3161 time-stamp authority adapter and a Rekor v2 one; no new dependency.
+- Anchors proven against real services (PRV-9): one anchor of a throwaway ledger, made through
+  `anchorLedger()` with DigiCert's public time-stamp authority and Sigstore's Rekor v2 log
+  (log2025-1), recorded in `test/fixtures/anchor/real/` by `test/fixtures/anchor/record-real.ts`
+  and verified offline in `test/prove-anchor-real.test.ts`, including after the certificates expire.
 - A flow simulator (MOD-4): `district-assurance simulate <config.json> --flow <name> --script <name
   or file>` (`npm run simulate --` here) runs a flow on the fakes with a scripted caller (`pass`,
   `wrong-pin`, `lockout`, `consent-no`, `payment-paid`, `payment-expired`, or a JSON file) and

@@ -237,7 +237,7 @@ Some buyers will need it; it must never route tones through this engine.
 | Ledger export (PRV-4) | `src/prove/export.ts` | signed NDJSON runs that resume by cursor, tamper detected (`test/prove.test.ts`, `test/ledger-export-hostile.test.ts`) |
 | More redactors (PRV-6) | `src/core/redaction.ts` | SIN, health card and bank account numbers over the shared corpus (`test/redaction.test.ts`, `test/redaction-more-hostile.test.ts`) |
 | Subject requests (PRV-7) | `src/prove/subject.ts` | a signed export and an erasure that keeps the ledger whole (ADR-28) (`test/prove-subject.test.ts`, `test/subject-requests-hostile.test.ts`) |
-| Monthly reports (PRV-8), a public timestamp anchor (PRV-9), receipt links by text (PRV-10) | `src/prove/report.ts`, `src/prove/anchor.ts`, `src/prove/trace.ts` | `test/prove-report.test.ts`, `test/prove-anchor.test.ts`, `test/prove-receipt-text.test.ts` |
+| Monthly reports (PRV-8), a public timestamp anchor (PRV-9), receipt links by text (PRV-10) | `src/prove/report.ts`, `src/prove/anchor.ts`, `src/prove/trace.ts` | `test/prove-report.test.ts`, `test/prove-anchor.test.ts` and `test/prove-anchor-real.test.ts` (DigiCert's TSA and Sigstore's Rekor v2, recorded), `test/prove-receipt-text.test.ts` |
 
 ### M8. Reference server hardening
 
