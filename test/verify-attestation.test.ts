@@ -73,7 +73,10 @@ describe("Caller ID attestation", () => {
       assert.deepEqual(await finished(t), { level: cap, methods: ["keypad_knowledge", "photo_id"], discounted: [], capped: cap < 3, policyVersion: "default-1", configRevision: "default" });
       const receipt = (await t.engine.endCall(callId))!;
       assert.equal(receipt.body.attestation, attestation);
-      assert.deepEqual(receipt.body.verification, { level: cap, methods: cap === 0 ? [] : ["keypad_knowledge", "photo_id"], policyVersion: "default-1", configRevision: "default" });
+      // Decision 11: a receipt held below its methods' level lists only the methods that support the
+      // level shown, as under a synthetic voice band; the ledger entry above keeps them all.
+      const shown = cap === 0 ? [] : cap === 3 ? ["keypad_knowledge", "photo_id"] : ["keypad_knowledge"];
+      assert.deepEqual(receipt.body.verification, { level: cap, methods: shown, policyVersion: "default-1", configRevision: "default" });
     }
   });
 

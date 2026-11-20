@@ -19,6 +19,7 @@ export const ENGINE_EVENTS = [
   "verification.callback_finished",
   "verification.unlocked",
   "verification.finished",
+  "verification.synthetic_voice",
   "identity.link_sent",
   "verification.code_sent",
   "verification.code_refused",

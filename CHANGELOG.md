@@ -243,6 +243,37 @@ All notable changes to this project are documented here. The format follows
   link's cap), request timeouts (408 and 503), a per-address rate limit (429), and structured
   request logs by route pattern with no headers, bodies or link tokens (`logJsonLines`, on in
   `npm run serve`).
+- A release workflow (SRV-5): a version tag on main runs CI and the supply-chain checks, a
+  reproducible pack, a file list check and an exports smoke test as a dry run. Only a manual run
+  on the tag with `publish` ticked, upstream and after an environment approval, publishes with npm
+  provenance by trusted publishing. The package stays private (ADR-12).
+  A local `npm pack` or `npm publish` builds first (`prepack`), so it never ships the documents
+  without dist/; the workflow packs with install scripts off after its own clean build.
+- Signed releases (SRV-6): each release has a CycloneDX SBOM of the published package with a
+  Sigstore-signed attestation, attached to the tag's GitHub release; README.md shows how to check a
+  release with `npm audit signatures` and `gh attestation verify`.
+- Performance benchmarks (SRV-10): `npm run bench` measures the owner-command flow, a level 2
+  verification, ledger appends, receipt signing and verifying, and `validateConfig` on a large
+  config, on the memory adapters with `node:perf_hooks` only, and writes JSON with the machine and
+  commit. CI runs it on a small budget; each release compares with the previous release on the
+  same runner and reports a case over 20% slower in the run summary, never failing. BENCHMARKS.md.
+- Property and fuzz tests (SRV-7, `test/property`, `test/fuzz`) for the ledger, the keypad collector,
+  `validateConfig`, `canonicalJson`, the Stripe checks, the carrier stubs and the reference server,
+  on `fast-check` (a development dependency only), in CI and nightly (`fuzz.yml`); they found, and
+  this fixes, `parseStripeEvent` reading event types like `constructor` from `Object.prototype` and
+  `verifyChain` throwing on a stored entry changed to hold `1e999` instead of reporting the break.
+- Ledger export (PRV-4): `exportLedger` yields the ledger as NDJSON from a `fromSeq` or a cursor,
+  closed by an ES256-signed trailer with the run's start, end and the head; `verifyLedgerExport`
+  checks a run and that it continues the previous one.
+- `moduleContract(module)` in `district-assurance/testing`, the suite an outside module should pass
+  (MOD-1), an example outside module (`examples/modules/callback.ts`) and a guide to writing one
+  in ARCHITECTURE.md.
+- A JSON Schema (2020-12) for FlowConfig version 1, `schema/flow-config.v1.json`, published with the
+  package; tested against the TypeScript types and never stricter than `validateConfig` (MOD-2).
+- A synthetic voice signal (VER-14): `reportSyntheticVoice(callId, {score, vendor})` and per-vendor
+  thresholds in Badge's `syntheticVoice` setting stop spoken answers counting or hold the call to
+  level 1, at once and for grants already issued; the ledger records the vendor and band, never the
+  score, and the receipt neither.
 
 ### Changed
 
@@ -320,6 +351,9 @@ All notable changes to this project are documented here. The format follows
 - `sensitive_closed` (`closeSensitive`) is refused while a payment is open (`invalid_transition`):
   the payment hold ends only when the payment settles or fails, or the call ends, so a host cannot
   resume forwarding while the caller may be reading out card details.
+- `AuditLedger.list(fromSeq?, limit?)` takes a page size, and a ledger adapter must honour it
+  (breaking for adapter authors): `MemoryAuditLedger` does, and `exportLedger` reads each run as
+  one page instead of the rest of the ledger.
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 
@@ -354,6 +388,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Integration of the release and tooling landing (L5):
+  - `validateConfig` refuses a policy list with a hole (a sparse `levels[].anyOf`, factor set or
+    `keypadFields`) as a sentence; one used to throw a TypeError, found by the config fuzz suite.
+  - `verifyLedgerExport` answers `malformed` for an entry line that is not an object again, now
+    that `verifyChain` reports such an entry as a break instead of throwing.
+  - The FlowConfig schema describes Gate's and step-up's settings and steps, and a receipt step's
+    `textLink`; the release tarball allows and requires the schema.
+  - `verifyTelnyxSignature` refuses (`malformed_header`) a signature header whose unused trailing
+    base64 bits are set: the decoder dropped them, so one valid signature had 16 spellings.
 - Integration review of the server and proof landing (L4):
   - Anchors (PRV-9): `checkTimestamp` and `verifyAnchor` require the token's signed
     SigningCertificate or SigningCertificateV2 to name the authority's signing certificate

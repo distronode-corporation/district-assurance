@@ -1,0 +1,531 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:district-assurance:flow-config:v1",
+  "title": "District Assurance FlowConfig, version 1",
+  "description": "The shape of a workspace's FlowConfig (SPEC.md, section 7), for editors and tools. validateConfig stays the authority: it also checks the rules this schema cannot see (installed modules and factors, adapters, scope floors, planned work, forms and wordings a step names, the order of steps). Every config validateConfig accepts with the built-in modules passes this schema; a config that passes it can still be refused.",
+  "type": "object",
+  "required": ["version", "revision", "policy", "modules", "flows"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "revision": {
+      "description": "The host's own label for this revision, written to the ledger with every call.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,64}$"
+    },
+    "policy": { "$ref": "#/$defs/policy" },
+    "modules": {
+      "description": "Module name to its switch and settings. An installed module not listed is off; trace is always on.",
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/moduleName" },
+      "properties": {
+        "badge": { "$ref": "#/$defs/badgeModule" },
+        "dossier": { "$ref": "#/$defs/dossierModule" },
+        "paylink": { "$ref": "#/$defs/paylinkModule" },
+        "trace": { "$ref": "#/$defs/traceModule" },
+        "gate": { "$ref": "#/$defs/gateModule" },
+        "step-up": { "$ref": "#/$defs/stepUpModule" }
+      },
+      "additionalProperties": { "$ref": "#/$defs/moduleConfig" }
+    },
+    "flows": {
+      "description": "Flow name to its steps.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+      "additionalProperties": { "$ref": "#/$defs/flow" }
+    }
+  },
+  "$defs": {
+    "nonBlank": { "type": "string", "pattern": "\\S" },
+    "bilingual": {
+      "type": "object",
+      "required": ["en", "fr"],
+      "properties": {
+        "en": { "$ref": "#/$defs/nonBlank" },
+        "fr": { "$ref": "#/$defs/nonBlank" },
+        "es": { "description": "Optional; when given, not blank.", "$ref": "#/$defs/nonBlank" }
+      }
+    },
+    "policy": {
+      "description": "Levels, scopes and their floors (SPEC.md, section 4).",
+      "type": "object",
+      "required": ["version", "levels", "scopes", "keypadFields", "maxKeypadAttemptsPerCall", "simSwapWindowHours", "trustTextCodeWithoutCarrierCheck"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "levels": { "type": "array", "items": { "$ref": "#/$defs/levelRule" } },
+        "scopes": {
+          "description": "Scope name to its minimum level.",
+          "type": "object",
+          "additionalProperties": { "enum": [0, 1, 2, 3] }
+        },
+        "scopeClasses": {
+          "description": "The class of a scope whose name does not imply one. A class can make a scope stricter, never looser.",
+          "type": "object",
+          "additionalProperties": { "enum": ["money", "contact", "access", "none"] }
+        },
+        "keypadFields": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "maxKeypadAttemptsPerCall": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "simSwapWindowHours": { "type": "number", "exclusiveMinimum": 0 },
+        "trustTextCodeWithoutCarrierCheck": { "type": "boolean" },
+        "textCodeCountryCodes": {
+          "description": "E.164 country calling codes (or longer prefixes of one) a texted code may go to, 1 to 6 digits without the +. validateConfig also refuses codes that are not assigned and the global-service codes.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[0-9]{1,6}$" }
+        },
+        "spoken": {
+          "description": "The spoken fields judged together as one spoken_knowledge factor. No field is a keypad field too.",
+          "type": "object",
+          "required": ["fields", "maxAttemptsPerCall"],
+          "additionalProperties": false,
+          "properties": {
+            "fields": {
+              "description": "Field name to its format, at least one.",
+              "type": "object",
+              "additionalProperties": { "enum": ["ca_postal_code", "us_zip_code", "reference"] }
+            },
+            "maxAttemptsPerCall": { "type": "integer", "minimum": 1, "maximum": 5 }
+          }
+        },
+        "attestationCaps": {
+          "description": "Per caller ID attestation, the highest level a call can reach. A cap only lowers a level.",
+          "type": "object",
+          "propertyNames": { "enum": ["A", "B", "C", "failed", "none"] },
+          "additionalProperties": { "enum": [0, 1, 2, 3] }
+        },
+        "timeZone": { "description": "The business's IANA time zone, for step-up rules on the time of day (VER-13).", "type": "string" },
+        "stepUp": { "description": "Rules that raise one scope's minimum for one request (VER-13). Names are unique.", "type": "array", "items": { "$ref": "#/$defs/stepUpRule" } }
+      }
+    },
+    "stepUpRule": {
+      "description": "Raises scope to level when its one condition holds: amountOverMinor (money scopes), localTime (needs timeZone) or signal. The level must be above the scope's minimum.",
+      "type": "object",
+      "required": ["name", "scope", "level"],
+      "oneOf": [{ "required": ["amountOverMinor"] }, { "required": ["localTime"] }, { "required": ["signal"] }],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "scope": { "type": "string" },
+        "level": { "enum": [1, 2, 3] },
+        "amountOverMinor": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z]{3}$" },
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "localTime": {
+          "type": "object",
+          "required": ["from", "to"],
+          "additionalProperties": false,
+          "properties": {
+            "from": { "type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" },
+            "to": { "type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }
+          }
+        },
+        "signal": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" }
+      }
+    },
+    "levelRule": {
+      "description": "A level is reached when every factor in one of its sets has passed.",
+      "type": "object",
+      "required": ["level", "anyOf"],
+      "properties": {
+        "level": { "enum": [1, 2, 3] },
+        "anyOf": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/factorSet" }
+        }
+      }
+    },
+    "factorSet": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+    "moduleName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,31}$",
+      "not": { "enum": ["core", "engine", "flow", "module"] }
+    },
+    "moduleConfig": {
+      "description": "An outside module: its settings are checked by its own validator.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "settings": true
+      }
+    },
+    "switchedOff": {
+      "description": "A module switched off: its settings are not checked.",
+      "required": ["enabled"],
+      "properties": { "enabled": { "const": false } }
+    },
+    "badgeModule": {
+      "$ref": "#/$defs/moduleConfig",
+      "if": { "$ref": "#/$defs/switchedOff" },
+      "else": {
+        "required": ["settings"],
+        "properties": { "settings": { "$ref": "#/$defs/badgeSettings" } }
+      }
+    },
+    "badgeSettings": {
+      "type": "object",
+      "required": ["factors"],
+      "additionalProperties": false,
+      "properties": {
+        "factors": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "grantTtlSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "pin": true,
+        "lockout": { "$ref": "#/$defs/lockoutSettings" },
+        "accessibility": { "$ref": "#/$defs/accessibilitySettings" },
+        "syntheticVoice": {
+          "description": "Speech vendor name to its two thresholds (VER-14). levelOneAbove is not below spokenKnowledgeAbove.",
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z][a-z0-9_-]{0,31}$" },
+          "additionalProperties": {
+            "type": "object",
+            "required": ["spokenKnowledgeAbove", "levelOneAbove"],
+            "additionalProperties": false,
+            "properties": {
+              "spokenKnowledgeAbove": { "type": "number", "minimum": 0, "maximum": 1 },
+              "levelOneAbove": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        }
+      },
+      "if": { "properties": { "factors": { "contains": { "const": "pin" } } } },
+      "then": {
+        "required": ["pin"],
+        "properties": { "pin": { "$ref": "#/$defs/pinSettings" } }
+      }
+    },
+    "pinSettings": {
+      "description": "Required when the pin factor is on (SPEC.md, section 6). maxDigits is at least minDigits.",
+      "type": "object",
+      "required": ["mode", "minDigits", "maxDigits", "maxAttemptsPerCall"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "enum": ["keyed_hash", "verifier"] },
+        "minDigits": { "type": "integer", "minimum": 4, "maximum": 12 },
+        "maxDigits": { "type": "integer", "minimum": 4, "maximum": 12 },
+        "maxAttemptsPerCall": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "duress": {
+          "description": "The duress PIN (VER-12), off when absent: the scopes a duress call refuses besides money, contact and access.",
+          "type": "object",
+          "required": ["refuseScopes"],
+          "additionalProperties": false,
+          "properties": {
+            "refuseScopes": { "type": "array", "uniqueItems": true, "items": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "accessibilitySettings": {
+      "description": "VER-11: keypad fields said instead of keyed (never the PIN; needs spoken_knowledge on), and keypad timeouts in seconds.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "spokenKeypadFields": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "not": { "const": "pin" } } },
+        "keypadIdleSeconds": {
+          "description": "5 to 60; null or absent is the default, 10.",
+          "if": { "const": null },
+          "else": { "type": "integer", "minimum": 5, "maximum": 60 }
+        },
+        "maxKeypadIdleSeconds": { "type": "integer", "minimum": 5, "maximum": 300 }
+      }
+    },
+    "lockoutSettings": {
+      "description": "Waits and locks across calls (VER-1). Each can only be stricter than the default: backoffSeconds never below 5, 15, 60, 300, 900.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backoffSeconds": { "type": "array", "minItems": 5, "items": { "type": "integer", "minimum": 1, "maximum": 86400 } },
+        "lockAfterFailures": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "windowHours": { "type": "integer", "minimum": 24, "maximum": 168 },
+        "flowStartsPerHour": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "subject": { "type": "integer", "minimum": 1, "maximum": 5 },
+            "number": { "type": "integer", "minimum": 1, "maximum": 10 }
+          }
+        }
+      }
+    },
+    "dossierModule": {
+      "$ref": "#/$defs/moduleConfig",
+      "if": { "$ref": "#/$defs/switchedOff" },
+      "else": {
+        "required": ["settings"],
+        "properties": { "settings": { "$ref": "#/$defs/dossierSettings" } }
+      }
+    },
+    "dossierSettings": {
+      "description": "Form ids are unique.",
+      "type": "object",
+      "required": ["forms"],
+      "additionalProperties": false,
+      "properties": {
+        "forms": { "type": "array", "items": { "$ref": "#/$defs/form" } }
+      }
+    },
+    "form": {
+      "description": "Field keys are unique within a form.",
+      "type": "object",
+      "required": ["formId", "version", "fields"],
+      "properties": {
+        "formId": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+        "version": { "type": "string" },
+        "fields": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/field" } }
+      }
+    },
+    "field": {
+      "type": "object",
+      "required": ["key", "label", "type"],
+      "properties": {
+        "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "label": { "$ref": "#/$defs/bilingual" },
+        "type": { "enum": ["text", "number", "date", "yes_no"] },
+        "required": { "description": "Whether the caller must give a value." },
+        "maxLength": { "description": "Text fields only; default 500." },
+        "sensitive": { "description": "Encrypted with the host's fieldCipher before it is stored (FIL-2)." },
+        "showIf": {
+          "description": "Asked only while another field's value equals `equals`; validateConfig checks the field and the value.",
+          "type": "object",
+          "required": ["field", "equals"],
+          "properties": { "field": { "type": "string" }, "equals": true }
+        },
+        "min": { "description": "The smallest value allowed: a number for a number field, a YYYY-MM-DD date for a date field." },
+        "max": { "description": "The largest value allowed, as min." },
+        "pattern": { "description": "Text fields only: a pattern the whole value must match, which validateConfig checks can be matched quickly.", "type": "string", "minLength": 1 }
+      }
+    },
+    "paylinkModule": {
+      "$ref": "#/$defs/moduleConfig",
+      "if": { "$ref": "#/$defs/switchedOff" },
+      "else": {
+        "properties": { "settings": { "$ref": "#/$defs/paylinkSettings" } }
+      }
+    },
+    "paylinkSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxAmountMinor": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "mode": { "description": "The mode for a step that names none; default platform.", "enum": ["connect", "platform"] },
+        "connectedAccountId": { "description": "The business's account at the provider, which connect mode needs; it needs an explicit mode.", "type": "string", "pattern": "^[A-Za-z0-9_-]{1,255}$" },
+        "linkLifeMinutes": { "$ref": "#/$defs/linkLifeMinutes" },
+        "paymentMethods": { "$ref": "#/$defs/paymentMethods" }
+      }
+    },
+    "linkLifeMinutes": { "description": "How long a texted link lives, 5 to 60 minutes; default 15.", "type": "integer", "minimum": 5, "maximum": 60 },
+    "paymentMethods": {
+      "description": "Instant payment methods only, at least one, no duplicates.",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["card", "apple_pay", "google_pay", "link"] }
+    },
+    "traceModule": {
+      "description": "Trace holds the audit ledger and is always on.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "const": true },
+        "settings": { "$ref": "#/$defs/traceSettings" }
+      }
+    },
+    "traceSettings": {
+      "description": "Wording purposes are unique.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "receipts": { "type": "boolean" },
+        "wordings": { "type": "array", "items": { "$ref": "#/$defs/wording" } },
+        "businessName": { "description": "The name a texted receipt link names, 1 to 64 characters on one line.", "type": "string", "minLength": 1 }
+      }
+    },
+    "wording": {
+      "type": "object",
+      "required": ["purpose", "version", "text"],
+      "properties": {
+        "purpose": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "version": { "type": "string", "minLength": 1 },
+        "text": { "$ref": "#/$defs/bilingual" }
+      }
+    },
+    "flow": {
+      "type": "object",
+      "required": ["steps"],
+      "additionalProperties": false,
+      "properties": {
+        "summary": { "type": "string" },
+        "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/step" } }
+      }
+    },
+    "step": {
+      "description": "A step's type is <module>.<snake_case name>. The built-in steps are described here; an outside module's step is checked by its own validator.",
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,31}\\.[a-z][a-z0-9_]{0,31}$" }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "badge.verify" } } }, "then": { "$ref": "#/$defs/badgeVerifyStep" } },
+        { "if": { "properties": { "type": { "const": "dossier.collect" } } }, "then": { "$ref": "#/$defs/dossierCollectStep" } },
+        { "if": { "properties": { "type": { "const": "paylink.request" } } }, "then": { "$ref": "#/$defs/paylinkRequestStep" } },
+        { "if": { "properties": { "type": { "const": "trace.consent" } } }, "then": { "$ref": "#/$defs/traceConsentStep" } },
+        { "if": { "properties": { "type": { "const": "trace.receipt" } } }, "then": { "$ref": "#/$defs/traceReceiptStep" } },
+        { "if": { "properties": { "type": { "const": "gate.grant" } } }, "then": { "$ref": "#/$defs/gateGrantStep" } },
+        { "if": { "properties": { "type": { "const": "step-up.issue" } } }, "then": { "$ref": "#/$defs/stepUpIssueStep" } }
+      ]
+    },
+    "badgeVerifyStep": {
+      "description": "Verify to level with these factors, each on in Badge's settings. scopes narrows the grant.",
+      "required": ["level", "factors"],
+      "additionalProperties": false,
+      "properties": {
+        "type": true,
+        "level": { "enum": [1, 2, 3] },
+        "factors": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "scopes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
+    "dossierCollectStep": {
+      "description": "Collect a form named in Dossier's settings.",
+      "required": ["form"],
+      "additionalProperties": false,
+      "properties": {
+        "type": true,
+        "form": { "type": "string" }
+      }
+    },
+    "paylinkRequestStep": {
+      "description": "Text a payment link for this amount (SPEC.md, section 14), read back and confirmed first: a fixed amountMinor and currency, or an amountRef the amounts adapter resolves, never both. At most Paylink's maxAmountMinor.",
+      "required": ["description", "amountSource"],
+      "if": { "required": ["amountRef"] },
+      "then": { "allOf": [{ "not": { "required": ["amountMinor"] } }, { "not": { "required": ["currency"] } }] },
+      "else": { "required": ["amountMinor", "currency"] },
+      "additionalProperties": false,
+      "properties": {
+        "type": true,
+        "amountMinor": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "currency": { "type": "string", "pattern": "^[a-z]{3}$" },
+        "amountRef": { "description": "A reference the amounts adapter resolves (PAY-2).", "type": "string", "pattern": "^[A-Za-z0-9.:_-]{1,64}$" },
+        "description": {
+          "description": "1 to 200 characters once trimmed.",
+          "type": "string",
+          "pattern": "^\\s*\\S(?:[\\s\\S]{0,198}\\S)?\\s*$"
+        },
+        "amountSource": { "enum": ["intake_record", "business_endpoint", "price_list"] },
+        "mode": {
+          "description": "Whose account takes the money; default the paylink settings' mode.",
+          "enum": ["connect", "platform"]
+        },
+        "linkLifeMinutes": { "$ref": "#/$defs/linkLifeMinutes" },
+        "paymentMethods": { "$ref": "#/$defs/paymentMethods" }
+      }
+    },
+    "traceConsentStep": {
+      "description": "Ask for consent with a wording named in Trace's settings.",
+      "required": ["purpose"],
+      "additionalProperties": false,
+      "properties": {
+        "type": true,
+        "purpose": { "type": "string" },
+        "require": { "enum": ["yes", "answer"] }
+      }
+    },
+    "traceReceiptStep": {
+      "description": "Sign the call's receipt. Needs the signer adapter. textLink texts a link to it after a money, contact or access step, when the caller said yes to that consent purpose (PRV-10).",
+      "additionalProperties": false,
+      "properties": {
+        "type": true,
+        "textLink": {
+          "type": "object",
+          "required": ["consent"],
+          "additionalProperties": false,
+          "properties": { "consent": { "type": "string" } }
+        }
+      }
+    },
+    "gateModule": {
+      "$ref": "#/$defs/moduleConfig",
+      "if": { "$ref": "#/$defs/switchedOff" },
+      "else": {
+        "required": ["settings"],
+        "properties": { "settings": { "$ref": "#/$defs/gateSettings" } }
+      }
+    },
+    "gateSettings": {
+      "description": "The doors Gate may open (SPEC.md, section 17). Target ids are unique.",
+      "type": "object",
+      "required": ["targets"],
+      "additionalProperties": false,
+      "properties": {
+        "targets": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/gateTarget" } },
+        "maxGrantsPerCall": { "type": "integer", "minimum": 1, "maximum": 5 }
+      }
+    },
+    "gateTarget": {
+      "type": "object",
+      "required": ["id", "controller", "ref"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+        "controller": { "type": "string", "minLength": 1 },
+        "ref": { "description": "1 to 200 characters, not all spaces.", "type": "string", "pattern": "^(?=[\\s\\S]*\\S)[\\s\\S]{1,200}$" }
+      }
+    },
+    "gateGrantStep": {
+      "description": "Issue an access grant for a target in Gate's settings. Needs entry.open.",
+      "required": ["target"],
+      "additionalProperties": false,
+      "properties": {
+        "type": true,
+        "target": { "type": "string" },
+        "lifetimeSeconds": { "type": "integer", "minimum": 10, "maximum": 900 }
+      }
+    },
+    "stepUpModule": {
+      "$ref": "#/$defs/moduleConfig",
+      "if": { "$ref": "#/$defs/switchedOff" },
+      "else": {
+        "required": ["settings"],
+        "properties": { "settings": { "$ref": "#/$defs/stepUpSettings" } }
+      }
+    },
+    "stepUpSettings": {
+      "description": "The sites that may ask for a web sign-in step-up (SPEC.md, section 18). Site ids are unique.",
+      "type": "object",
+      "required": ["issuer", "sites"],
+      "additionalProperties": false,
+      "properties": {
+        "issuer": {
+          "description": "An https URL without a query, a fragment or credentials; validateConfig parses it.",
+          "type": "string",
+          "pattern": "^[^\\s?#]+$"
+        },
+        "sites": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/stepUpSite" } },
+        "maxTokensPerCall": { "type": "integer", "minimum": 1, "maximum": 5 }
+      }
+    },
+    "stepUpSite": {
+      "type": "object",
+      "required": ["id", "audience"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+        "audience": { "description": "1 to 200 characters, no spaces: the tokens' aud.", "type": "string", "pattern": "^\\S{1,200}$" }
+      }
+    },
+    "stepUpIssueStep": {
+      "description": "Issue a step-up token for a site in step-up's settings. Needs entry.sign_in.",
+      "required": ["site"],
+      "additionalProperties": false,
+      "properties": {
+        "type": true,
+        "site": { "type": "string" },
+        "lifetimeSeconds": { "type": "integer", "minimum": 120, "maximum": 300 }
+      }
+    }
+  }
+}

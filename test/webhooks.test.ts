@@ -299,4 +299,19 @@ describe("verifyTelnyxSignature", () => {
     assert.deepEqual(telnyx({ publicKeys: [Buffer.alloc(32, 7).toString("base64")] }), { ok: false, reason: "no_matching_signature" });
     assert.deepEqual(telnyx({ signatureHeader: Buffer.alloc(64).toString("base64") }), { ok: false, reason: "no_matching_signature" });
   });
+
+  it("takes one spelling of a signature: a header whose unused trailing bits are set is refused", () => {
+    // 64 bytes in base64 leave 4 unused bits in the last character before "==". Node's decoder
+    // ignores them, so 16 headers once decoded to one signature; only the one with them zero passes.
+    const last = TELNYX_SIGNATURE.at(-3)!;
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const value = alphabet.indexOf(last);
+    assert.equal(value & 0b1111, 0, "the published vector is the canonical spelling");
+    for (let bits = 1; bits < 16; bits++) {
+      const header = `${TELNYX_SIGNATURE.slice(0, -3)}${alphabet[value | bits]}==`;
+      assert.deepEqual(Buffer.from(header, "base64"), Buffer.from(TELNYX_SIGNATURE, "base64"), "the same signature bytes");
+      assert.deepEqual(telnyx({ signatureHeader: header }), { ok: false, reason: "malformed_header" }, header);
+    }
+    assert.deepEqual(telnyx(), { ok: true, timestamp: t });
+  });
 });

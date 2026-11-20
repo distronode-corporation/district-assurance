@@ -145,7 +145,12 @@ export function verifyTelnyxSignature(input: TelnyxSignatureInput): SignatureChe
   if (signature === null || signature === undefined || signature === "" || stamp === null || stamp === undefined || stamp === "") {
     return { ok: false, reason: "missing_header" };
   }
-  if (!ED25519_SIGNATURE.test(signature) || !/^\d{1,12}$/.test(stamp)) return { ok: false, reason: "malformed_header" };
+  // Strict base64: the last character before "==" carries 4 unused bits, which the decoder drops,
+  // so a header is refused unless re-encoding its bytes gives it back. Each signature then has
+  // exactly one spelling, and no copy of a valid header with other unused bits passes as new.
+  if (!ED25519_SIGNATURE.test(signature) || Buffer.from(signature, "base64").toString("base64") !== signature || !/^\d{1,12}$/.test(stamp)) {
+    return { ok: false, reason: "malformed_header" };
+  }
   const timestamp = Number(stamp);
   const tolerance = input.toleranceSeconds ?? 300;
   // A NaN or infinite tolerance would compare false against every skew and turn the window off.

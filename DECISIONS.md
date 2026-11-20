@@ -33,7 +33,7 @@ Badge's `matchedSubject` (a link goes to the number Badge matched); the other bo
 **Decided.** `node:crypto` provides SHA-256, HMAC, constant-time comparison and ES256. No `jose`,
 no Stripe SDK, no schema library. Development tools only, pinned exactly: `typescript`,
 `@types/node`, `oxlint`, `c8` (with the same `test-exclude` overrides as our other public
-repositories).
+repositories), and `fast-check` for the property and fuzz suites (SRV-7), which `files` never ships.
 **Why.** Every dependency of a security library is part of its security. The receipt format
 (canonical JSON plus a raw P1363 signature) is simple enough that a JWS library buys nothing; the
 Stripe calls the reference server will make are a few `fetch` requests. **Revisit** if JWS

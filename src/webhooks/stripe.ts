@@ -88,11 +88,13 @@ export type ParsedStripeEvent =
 /** Stripe's dispute events. Each carries the dispute as it was when the event was made; the engine keeps the latest. */
 const DISPUTE_TYPES = new Set(["charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed", "charge.dispute.funds_withdrawn", "charge.dispute.funds_reinstated"]);
 
-const IDENTITY_TYPES: Record<string, IdentityOutcome["status"]> = {
-  "identity.verification_session.verified": "verified",
-  "identity.verification_session.requires_input": "requires_input",
-  "identity.verification_session.canceled": "canceled",
-};
+// A Map, not an object literal: an event type like `constructor` or `__proto__` must find nothing
+// (SRV-7's fuzzing found an object lookup turning them into identity outcomes).
+const IDENTITY_TYPES = new Map<string, IdentityOutcome["status"]>([
+  ["identity.verification_session.verified", "verified"],
+  ["identity.verification_session.requires_input", "requires_input"],
+  ["identity.verification_session.canceled", "canceled"],
+]);
 
 const PAYMENT_STATUSES = new Set(["paid", "unpaid", "no_payment_required"]);
 
@@ -117,7 +119,7 @@ export function parseStripeEvent(body: string): ParsedStripeEvent | null {
   if (event.account !== undefined && typeof event.account !== "string") return null;
   const account = typeof event.account === "string" ? { account: event.account } : {};
   const linkId = object.id;
-  const identity = IDENTITY_TYPES[event.type];
+  const identity = IDENTITY_TYPES.get(event.type);
   if (identity !== undefined) return { ...base, kind: "identity", outcome: { sessionId: linkId, status: identity } };
   if (DISPUTE_TYPES.has(event.type)) {
     // The event's own time goes with the dispute, so a snapshot that arrives late never replaces a

@@ -2,9 +2,21 @@ import { strict as assert } from "node:assert";
 import { generateKeyPairSync, sign, verify, type JsonWebKey } from "node:crypto";
 import { describe, it } from "node:test";
 
-import type { AuditInput, ConsentRecord, ReceiptSigner } from "../src/core/adapters.ts";
+import type { AuditEntry, AuditInput, AuditLedger, ConsentRecord, ReceiptSigner } from "../src/core/adapters.ts";
+import { canonicalJson } from "../src/core/canonical.ts";
 import { EngineError } from "../src/core/errors.ts";
 import { wordingDigest } from "../src/prove/consent.ts";
+import {
+  EXPORT_WALK_PAGE,
+  decodeCursor,
+  encodeCursor,
+  exportLedger,
+  ledgerExportPayload,
+  verifyLedgerExport,
+  type ChainPoint,
+  type LedgerExportInput,
+  type LedgerExportTrailer,
+} from "../src/prove/export.ts";
 import { GENESIS_HASH, MemoryAuditLedger, chainEntry, detailCarriesCardNumber, hashEntry, verifyChain } from "../src/prove/ledger.ts";
 import {
   checkReceipt,
@@ -19,7 +31,7 @@ import {
   type ReceiptBody,
   type ReceiptKeyRingOptions,
 } from "../src/prove/receipt.ts";
-import { MemoryConsentStore, generateTestSigner } from "../src/testing/fakes.ts";
+import { FixedClock, MemoryConsentStore, generateTestSigner } from "../src/testing/fakes.ts";
 import { createTestEngine } from "../src/testing/index.ts";
 
 /** When k1 stopped signing: after the test clock's receipts (2026-01-01), so they predate it. */
@@ -57,6 +69,15 @@ describe("audit ledger", () => {
     const relinked = structuredClone(entries);
     relinked[2]!.prevHash = GENESIS_HASH;
     assert.deepEqual(verifyChain(relinked), { ok: false, seq: 3, reason: "prev_hash" });
+  });
+
+  it("reports a stored entry changed into what canonical JSON refuses as a break, without throwing", async () => {
+    // Found by SRV-7's fuzzing (test/property/ledger.test.ts): one changed byte turned a number in
+    // stored JSON into 1e999, which parses as Infinity.
+    const ledger = new MemoryAuditLedger();
+    await ledger.append({ callId: "c1", actor: "code", event: "call.started", at: "2026-01-01T00:00:00.000Z", detail: { n: 1 } });
+    const line = JSON.stringify((await ledger.list())[0]).replace('"n":1', '"n":1e999');
+    assert.deepEqual(verifyChain([JSON.parse(line)]), { ok: false, seq: 1, reason: "hash" });
   });
 
   it("stores copies, so a caller cannot rewrite history", async () => {
@@ -360,5 +381,362 @@ describe("memory consent store", () => {
     assert.equal((await store.getConsent("a", "b/c"))?.consent.purpose, "second");
     await store.revokeConsent("a", { consentId: "b/c", via: "text", at: "2026-01-02T00:00:00.000Z" });
     assert.equal((await store.getConsent("a/b", "c"))?.revoked, null);
+  });
+});
+
+/** A ledger that hands out what `edit` makes of the real entries and head, as a tampered or broken store would. */
+class EditedLedger implements AuditLedger {
+  readonly inner: MemoryAuditLedger;
+  readonly edit: { list?: (entries: AuditEntry[]) => AuditEntry[]; head?: (head: ChainPoint) => ChainPoint };
+
+  constructor(inner: MemoryAuditLedger, edit: EditedLedger["edit"]) {
+    this.inner = inner;
+    this.edit = edit;
+  }
+
+  append(i: AuditInput): Promise<AuditEntry> {
+    return this.inner.append(i);
+  }
+
+  async head(): Promise<ChainPoint> {
+    const head = await this.inner.head();
+    return this.edit.head === undefined ? head : this.edit.head(head);
+  }
+
+  async list(fromSeq?: number, limit?: number): Promise<AuditEntry[]> {
+    const entries = await this.inner.list(fromSeq, limit);
+    return this.edit.list === undefined ? entries : this.edit.list(entries);
+  }
+}
+
+async function ledgerOf(n: number, offset = 0): Promise<MemoryAuditLedger> {
+  const ledger = new MemoryAuditLedger();
+  for (let i = 1; i <= n; i++) await ledger.append(input("module.event", { i: i + offset }));
+  return ledger;
+}
+
+async function collect(lines: AsyncIterable<string>): Promise<string> {
+  let out = "";
+  for await (const line of lines) out += line;
+  return out;
+}
+
+describe("ledger pages", () => {
+  it("lists at most `limit` entries from `fromSeq`, in order", async () => {
+    const ledger = await ledgerOf(5);
+    const seqs = async (from?: number, limit?: number) => (await ledger.list(from, limit)).map((e) => e.seq);
+    assert.deepEqual(await seqs(), [1, 2, 3, 4, 5]);
+    assert.deepEqual(await seqs(1, 1), [1], "one");
+    assert.deepEqual(await seqs(1, 5), [1, 2, 3, 4, 5], "exactly all");
+    assert.deepEqual(await seqs(2, 2), [2, 3], "after plus limit");
+    assert.deepEqual(await seqs(4, 10), [4, 5], "a limit larger than the rest");
+    assert.deepEqual(await seqs(6, 3), [], "past the head");
+    for (const limit of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await assert.rejects(ledger.list(1, limit), /limit must be an integer of 1 or more/, String(limit));
+    }
+  });
+});
+
+describe("ledger export", () => {
+  const clock = new FixedClock("2026-11-18T12:00:00.000Z");
+  const signer = generateTestSigner("k1");
+  const keys = [signer.publicJwk()];
+  const run = (ledger: AuditLedger, more: Partial<LedgerExportInput>) => collect(exportLedger({ ledger, signer, clock, ledgerId: "ws_1", ...more }));
+  const malformed = { ok: false, reason: "malformed" };
+
+  it("yields one canonical entry per line and a signed trailer with the head", async () => {
+    const ledger = await ledgerOf(3);
+    const text = await run(ledger, { fromSeq: 1 });
+    const lines = text.split("\n");
+    assert.equal(lines.length, 5, "three entries, a trailer and the final newline");
+    assert.equal(lines.at(-1), "");
+    const entries = await ledger.list();
+    assert.deepEqual(lines.slice(0, 3), entries.map((e) => canonicalJson(e)));
+    const head = await ledger.head();
+    const signed = JSON.parse(lines[3]!) as LedgerExportTrailer;
+    assert.deepEqual(signed.trailer, {
+      v: 1,
+      type: "ledger_export",
+      ledgerId: "ws_1",
+      from: { seq: 0, hash: GENESIS_HASH },
+      through: head,
+      count: 3,
+      head,
+      exportedAt: "2026-11-18T12:00:00.000Z",
+      cursor: `3.${head.hash}`,
+    });
+    assert.equal(signed.alg, "ES256");
+    assert.equal(signed.kid, "k1");
+    assert.equal(new TextDecoder().decode(ledgerExportPayload(signed.trailer)).startsWith("district-assurance ledger export v1\n{"), true);
+    assert.deepEqual(verifyLedgerExport(text, keys), { ok: true, entries, trailer: signed.trailer });
+  });
+
+  it("starts at any seq, anchored on the entry before it", async () => {
+    const ledger = await ledgerOf(3);
+    const [first, second, third] = await ledger.list();
+    const check = verifyLedgerExport(await run(ledger, { fromSeq: 2 }), keys);
+    assert.ok(check.ok);
+    assert.deepEqual(check.trailer.from, { seq: 1, hash: first!.hash });
+    assert.deepEqual(check.entries, [second, third]);
+    const empty = verifyLedgerExport(await run(ledger, { fromSeq: 4 }), keys);
+    assert.ok(empty.ok);
+    assert.deepEqual([empty.entries, empty.trailer.count, empty.trailer.through], [[], 0, { seq: 3, hash: third!.hash }]);
+    const none = verifyLedgerExport(await run(new MemoryAuditLedger(), { fromSeq: 1 }), keys);
+    assert.ok(none.ok);
+    assert.equal(none.trailer.cursor, `0.${GENESIS_HASH}`);
+  });
+
+  it("resumes by cursor, page by page, into one checked chain", async () => {
+    const ledger = await ledgerOf(5);
+    const first = verifyLedgerExport(await run(ledger, { fromSeq: 1, limit: 2 }), keys);
+    assert.ok(first.ok);
+    assert.deepEqual([first.trailer.through.seq, first.trailer.head.seq, first.entries.length], [2, 5, 2]);
+    const second = verifyLedgerExport(await run(ledger, { cursor: first.trailer.cursor, limit: 2 }), keys, first.trailer);
+    assert.ok(second.ok);
+    assert.deepEqual(second.entries.map((e) => e.seq), [3, 4]);
+    // An entry appended between pages is picked up by the next one.
+    await ledger.append(input("call.ended"));
+    const third = verifyLedgerExport(await run(ledger, { cursor: second.trailer.cursor }), keys, second.trailer);
+    assert.ok(third.ok);
+    assert.deepEqual(third.entries.map((e) => e.seq), [5, 6]);
+    assert.deepEqual(third.trailer.through, await ledger.head());
+    assert.deepEqual([...first.entries, ...second.entries, ...third.entries], await ledger.list());
+    const caughtUp = verifyLedgerExport(await run(ledger, { cursor: third.trailer.cursor }), keys, third.trailer);
+    assert.ok(caughtUp.ok);
+    assert.deepEqual(caughtUp.entries, []);
+    const fromGenesis = verifyLedgerExport(await run(ledger, { cursor: `0.${GENESIS_HASH}` }), keys);
+    assert.ok(fromGenesis.ok);
+    assert.equal(fromGenesis.entries.length, 6);
+  });
+
+  it("refuses a run that does not continue the previous one", async () => {
+    const ledger = await ledgerOf(4);
+    const first = verifyLedgerExport(await run(ledger, { fromSeq: 1, limit: 2 }), keys);
+    assert.ok(first.ok);
+    const skipped = await run(ledger, { fromSeq: 4 });
+    assert.deepEqual(verifyLedgerExport(skipped, keys, first.trailer), { ok: false, reason: "continuity" });
+    const otherLedger = await run(ledger, { cursor: first.trailer.cursor, ledgerId: "ws_2" });
+    assert.deepEqual(verifyLedgerExport(otherLedger, keys, first.trailer), { ok: false, reason: "continuity" });
+    assert.equal(verifyLedgerExport(otherLedger, keys).ok, true, "on its own it is a valid run of ws_2");
+  });
+
+  it("detects a changed, removed or replaced entry, and a changed trailer", async () => {
+    const text = await run(await ledgerOf(3), { fromSeq: 1 });
+    const lines = text.split("\n");
+    assert.deepEqual(verifyLedgerExport(text.replace('"i":2', '"i":7'), keys), { ok: false, reason: "chain", seq: 2 });
+    assert.deepEqual(verifyLedgerExport([lines[0], lines[2], lines[3], ""].join("\n"), keys), { ok: false, reason: "chain", seq: 3 });
+    assert.deepEqual(verifyLedgerExport([lines[0], lines[1], lines[3], ""].join("\n"), keys), { ok: false, reason: "chain" }, "cut short");
+    const page = (await run(await ledgerOf(3), { fromSeq: 1, limit: 2 })).split("\n");
+    assert.deepEqual(verifyLedgerExport([page[0], page[1], lines[2], page[2], ""].join("\n"), keys), { ok: false, reason: "chain" }, "one added");
+    // A whole other chain of the same length from the same start ends on another hash.
+    const other = (await (await ledgerOf(3, 10)).list()).map((e) => canonicalJson(e));
+    assert.deepEqual(verifyLedgerExport([...other, lines[3], ""].join("\n"), keys), { ok: false, reason: "chain" });
+    const signed = JSON.parse(lines[3]!) as LedgerExportTrailer;
+    const moved = { ...signed, trailer: { ...signed.trailer, exportedAt: "2026-11-18T12:00:01.000Z" } };
+    assert.deepEqual(verifyLedgerExport([lines[0], lines[1], lines[2], JSON.stringify(moved), ""].join("\n"), keys), { ok: false, reason: "signature" });
+  });
+
+  it("refuses a bad signature, key or algorithm", async () => {
+    const text = await run(await ledgerOf(1), { fromSeq: 1 });
+    const [entry, trailerLine] = text.split("\n");
+    const signed = JSON.parse(trailerLine!) as LedgerExportTrailer;
+    const withTrailer = (t: unknown) => `${entry}\n${JSON.stringify(t)}\n`;
+    const bad = { ok: false, reason: "signature" };
+    assert.deepEqual(verifyLedgerExport(text, [generateTestSigner("k1").publicJwk()]), bad);
+    assert.deepEqual(verifyLedgerExport(text, []), bad);
+    assert.deepEqual(verifyLedgerExport(withTrailer({ ...signed, alg: "HS256" }), keys), bad);
+    assert.deepEqual(verifyLedgerExport(withTrailer({ ...signed, signature: signed.signature.slice(4) }), keys), bad);
+    assert.deepEqual(verifyLedgerExport(text, [{ kid: "k1", kty: "EC", crv: "P-256", x: "bad", y: "bad" }]), bad);
+    // A signature over the bare canonical body, as a receipt is signed, never passes as a trailer signature.
+    const bare = Buffer.from(await signer.sign(new TextEncoder().encode(canonicalJson(signed.trailer)))).toString("base64url");
+    assert.deepEqual(verifyLedgerExport(withTrailer({ ...signed, signature: bare }), keys), bad);
+  });
+
+  it("refuses malformed input without throwing", async () => {
+    const text = await run(await ledgerOf(2), { fromSeq: 1 });
+    const [e1, e2, trailerLine] = text.split("\n");
+    const signed = JSON.parse(trailerLine!) as LedgerExportTrailer;
+    for (const bad of ["", text.slice(0, -1), "\n", `${e1}\n{oops\n${trailerLine}\n`, `${e1}\n${e2}\n`, "null\n", "7\n", '{"trailer":null}\n']) {
+      assert.deepEqual(verifyLedgerExport(bad, keys), malformed);
+    }
+    const bodies: unknown[] = [
+      { ...signed.trailer, v: 2 },
+      { ...signed.trailer, from: null },
+      { ...signed.trailer, from: { seq: -1, hash: GENESIS_HASH } },
+      { ...signed.trailer, through: { seq: 2, hash: "XY" } },
+      { ...signed.trailer, count: 3 },
+      { ...signed.trailer, head: { seq: 1, hash: GENESIS_HASH } },
+      { ...signed.trailer, from: { seq: 3, hash: GENESIS_HASH } },
+      { ...signed.trailer, cursor: `1.${GENESIS_HASH}` },
+    ];
+    for (const trailer of bodies) assert.deepEqual(verifyLedgerExport(`${e1}\n${e2}\n${JSON.stringify({ ...signed, trailer })}\n`, keys), malformed);
+    // Signed, but an entry line is not an entry.
+    assert.deepEqual(verifyLedgerExport(`${e1}\nnull\n${trailerLine}\n`, keys), malformed);
+    // Whatever an auditor's tool hands it, it answers and never throws.
+    for (const value of [null, undefined, 42, Buffer.from(text)]) assert.deepEqual(verifyLedgerExport(value as unknown as string, keys), malformed);
+    for (const keySet of [null, undefined, {}, "keys", [null, 7]]) {
+      assert.deepEqual(verifyLedgerExport(text, keySet as unknown as typeof keys), { ok: false, reason: "signature" });
+    }
+    for (const after of [null, 7, "trailer", {}]) {
+      assert.deepEqual(verifyLedgerExport(text, keys, after as unknown as LedgerExportTrailer["trailer"]), { ok: false, reason: "continuity" });
+    }
+  });
+
+  it("refuses a signer that does not answer a 64-byte P1363 signature, before yielding", async () => {
+    const der: ReceiptSigner = { ...signer, sign: async () => new Uint8Array(70) };
+    const lines: string[] = [];
+    await assert.rejects(
+      (async () => {
+        for await (const line of exportLedger({ ledger: await ledgerOf(2), signer: der, clock, ledgerId: "ws_1", fromSeq: 1 })) lines.push(line);
+      })(),
+      (e: unknown) => e instanceof EngineError && e.code === "invalid_input" && /64-byte P1363/.test(e.message),
+    );
+    assert.deepEqual(lines, [], "no entry is handed out under a trailer that could never verify");
+  });
+
+  it("refuses bad arguments", async () => {
+    const ledger = await ledgerOf(2);
+    const refused = (e: unknown) => e instanceof EngineError && e.code === "invalid_input";
+    await assert.rejects(run(ledger, {}), refused);
+    await assert.rejects(run(ledger, { fromSeq: 1, cursor: `0.${GENESIS_HASH}` }), refused);
+    for (const fromSeq of [0, 1.5, Number.NaN, 4]) await assert.rejects(run(ledger, { fromSeq }), refused);
+    for (const limit of [0, -1, 2.5]) await assert.rejects(run(ledger, { fromSeq: 1, limit }), refused);
+    await assert.rejects(run(ledger, { fromSeq: 1, ledgerId: "" }), refused);
+    for (const cursor of ["", "3", `01.${GENESIS_HASH}`, `1.${"AB".repeat(32)}`, `3.${GENESIS_HASH}`]) {
+      await assert.rejects(run(ledger, { cursor }), refused);
+    }
+    assert.equal(decodeCursor("x"), null);
+    assert.deepEqual(decodeCursor(encodeCursor({ seq: 2, hash: GENESIS_HASH })), { seq: 2, hash: GENESIS_HASH });
+  });
+
+  it("refuses to sign a ledger that was tampered with", async () => {
+    const ledger = await ledgerOf(3);
+    const [first] = await ledger.list();
+    const head = await ledger.head();
+    const refused = (seq?: number) => (e: unknown) =>
+      e instanceof EngineError && e.code === "precondition_failed" && (seq === undefined || e.message.endsWith(`seq ${seq}`));
+    // The cursor's entry is not what the ledger holds now.
+    await assert.rejects(run(ledger, { cursor: `1.${"ab".repeat(32)}` }), refused());
+    const rewritten = new EditedLedger(ledger, { list: (es) => es.map((e) => (e.seq === 2 ? { ...e, detail: { i: 9 } } : e)) });
+    await assert.rejects(run(rewritten, { fromSeq: 1 }), refused(2));
+    await assert.rejects(run(rewritten, { cursor: encodeCursor(first!) }), refused(2));
+    const dropped = new EditedLedger(ledger, { list: (es) => es.filter((e) => e.seq !== 2) });
+    await assert.rejects(run(dropped, { fromSeq: 1 }), refused(3), "an entry is missing");
+    await assert.rejects(run(dropped, { fromSeq: 3 }), refused(2), "the entry before fromSeq is missing");
+    await assert.rejects(run(dropped, { cursor: encodeCursor({ seq: 2, hash: (await ledger.list(2))[0]!.hash }) }), refused());
+    await assert.rejects(run(new EditedLedger(ledger, { list: () => [] }), { cursor: encodeCursor(head) }), refused());
+    const wrongHead = new EditedLedger(ledger, { head: (h) => ({ ...h, hash: "ab".repeat(32) }) });
+    await assert.rejects(run(wrongHead, { fromSeq: 1 }), refused());
+    await assert.rejects(run(wrongHead, { fromSeq: 1, limit: 1 }), refused(), "even on a page short of the head");
+  });
+
+  it("refuses to sign a page whose first entry was swapped for another chain's (the page never reaches the head)", async () => {
+    const ledger = await ledgerOf(3);
+    const [foreign] = await (await ledgerOf(1, 10)).list();
+    // A valid first entry of another chain: the page 1..1 verifies from genesis on its own.
+    const swapped = new EditedLedger(ledger, { list: (es) => es.map((e) => (e.seq === 1 ? foreign! : e)) });
+    const refused = (e: unknown) => e instanceof EngineError && e.code === "precondition_failed";
+    await assert.rejects(run(swapped, { fromSeq: 1, limit: 1 }), refused);
+    await assert.rejects(run(swapped, { fromSeq: 1, limit: 2 }), refused);
+    // The same pages of the untouched ledger are signed.
+    assert.equal(verifyLedgerExport(await run(ledger, { fromSeq: 1, limit: 1 }), keys).ok, true);
+  });
+
+  it("reads one page of exactly the run's entries, then walks to the head in bounded pages, and cuts an adapter that hands back more", async () => {
+    const inner = await ledgerOf(50);
+    const asked: Array<[number | undefined, number | undefined]> = [];
+    const paged: AuditLedger = {
+      append: (i) => inner.append(i),
+      head: () => inner.head(),
+      list: async (fromSeq, limit) => {
+        asked.push([fromSeq, limit]);
+        return inner.list(fromSeq);
+      },
+    };
+    const check = verifyLedgerExport(await run(paged, { fromSeq: 11, limit: 5 }), keys);
+    assert.equal(check.ok && check.entries.map((e) => e.seq).join(","), "11,12,13,14,15");
+    assert.ok(asked.some(([from, limit]) => from === 11 && limit === 5), "the run's page, no more");
+    assert.deepEqual(asked.at(-1), [16, 35], "then the rest of the chain to the head");
+    assert.equal(asked.every(([, limit]) => limit !== undefined && limit <= EXPORT_WALK_PAGE), true, "in bounded pages, never the whole ledger at once");
+  });
+
+  it("walks on past a read that hands back fewer entries than asked, as a ledger may", async () => {
+    const inner = await ledgerOf(201);
+    // At most 100 per read: "at most limit" is all AuditLedger.list promises.
+    const capped: AuditLedger = { append: (i) => inner.append(i), head: () => inner.head(), list: async (f, l) => inner.list(f, Math.min(l ?? 100, 100)) };
+    const check = verifyLedgerExport(await run(capped, { fromSeq: 1, limit: 1 }), keys);
+    assert.equal(check.ok && check.entries.length, 1);
+  });
+
+  it("cuts entries before the asked seq that an adapter hands back, and still reads the run", async () => {
+    const inner = await ledgerOf(10);
+    // A page read (more than one entry asked) starts two entries early, 4 at most: only entries from
+    // the asked seq count. Single-entry reads (the head and start checks) are exact.
+    const early: AuditLedger = {
+      append: (i) => inner.append(i),
+      head: () => inner.head(),
+      list: async (f, l) => (l === 1 ? inner.list(f, l) : (await inner.list(Math.max(1, (f ?? 1) - 2))).slice(0, 4)),
+    };
+    const check = verifyLedgerExport(await run(early, { fromSeq: 3, limit: 5 }), keys);
+    assert.equal(check.ok && check.entries.map((e) => e.seq).join(","), "3,4,5,6,7");
+  });
+
+  it("reads a run past a read that hands back fewer entries than asked, as a ledger may", async () => {
+    const inner = await ledgerOf(201);
+    const capped: AuditLedger = { append: (i) => inner.append(i), head: () => inner.head(), list: async (f, l) => inner.list(f, Math.min(l ?? 100, 100)) };
+    for (const limit of [201, 150, undefined]) {
+      const check = verifyLedgerExport(await run(capped, { fromSeq: 1, ...(limit === undefined ? {} : { limit }) }), keys);
+      assert.equal(check.ok && check.entries.length, limit ?? 201, String(limit));
+    }
+  });
+
+  it("reads a long run in pages of at most EXPORT_WALK_PAGE entries, never one unbounded page", async () => {
+    const inner = await ledgerOf(EXPORT_WALK_PAGE + 5);
+    const asked: Array<[number | undefined, number | undefined]> = [];
+    const paged: AuditLedger = { append: (i) => inner.append(i), head: () => inner.head(), list: async (f, l) => (asked.push([f, l]), inner.list(f, l)) };
+    const check = verifyLedgerExport(await run(paged, { fromSeq: 1 }), keys);
+    assert.equal(check.ok && check.entries.length, EXPORT_WALK_PAGE + 5);
+    assert.equal(asked.every(([, limit]) => limit !== undefined && limit <= EXPORT_WALK_PAGE), true, JSON.stringify(asked.slice(-3)));
+  });
+
+  it("walks to the head in pages of at most EXPORT_WALK_PAGE entries", async () => {
+    const inner = await ledgerOf(EXPORT_WALK_PAGE + 5);
+    const asked: Array<[number | undefined, number | undefined]> = [];
+    const paged: AuditLedger = { append: (i) => inner.append(i), head: () => inner.head(), list: async (f, l) => (asked.push([f, l]), inner.list(f, l)) };
+    assert.equal(verifyLedgerExport(await run(paged, { fromSeq: 1, limit: 2 }), keys).ok, true);
+    assert.deepEqual(asked.slice(-2), [[3, EXPORT_WALK_PAGE], [EXPORT_WALK_PAGE + 3, 3]]);
+  });
+
+  it("refuses a page whose walk to the head is cut short or ends on another head", async () => {
+    const ledger = await ledgerOf(3);
+    const stored = await ledger.list();
+    const refused = (e: unknown) => e instanceof EngineError && e.code === "precondition_failed" && /does not reach the head/.test(e.message);
+    // The walk is the third read: the head check, the run's page, then the walk.
+    const onWalk = (edit: (es: AuditEntry[]) => AuditEntry[]) => {
+      let calls = 0;
+      return new EditedLedger(ledger, { list: (es) => (++calls >= 3 ? edit(es) : es) });
+    };
+    await assert.rejects(run(onWalk((es) => es.filter((e) => e.seq !== 3)), { fromSeq: 1, limit: 1 }), refused, "a walk that stops before the head");
+    // Seq 3 rewritten and chained on seq 2: the walk verifies, and ends on a hash that is not the head.
+    const rewritten = chainEntry({ ...input("module.event", { i: 99 }) }, 3, stored[1]!.hash);
+    await assert.rejects(run(onWalk((es) => es.map((e) => (e.seq === 3 ? rewritten : e))), { fromSeq: 1, limit: 1 }), refused, "a walk that ends on another head");
+  });
+
+  it("refuses a run read short of, or past a rewrite of, its end", async () => {
+    const ledger = await ledgerOf(3);
+    const refused = (e: unknown) => e instanceof EngineError && e.code === "precondition_failed" && e.message.endsWith("expected end");
+    // The head check reads list(3); every read after it is the run's (a short read is asked again
+    // for the rest) or the walk's. Edit all of them, so a dropped entry stays dropped.
+    const onRunRead = (edit: (es: AuditEntry[]) => AuditEntry[]) => {
+      let calls = 0;
+      return new EditedLedger(ledger, { list: (es) => (++calls >= 2 ? edit(es) : es) });
+    };
+    await assert.rejects(run(onRunRead((es) => es.filter((e) => e.seq !== 3)), { fromSeq: 1 }), refused, "a verified prefix short of the head");
+    await assert.rejects(run(onRunRead((es) => es.filter((e) => e.seq !== 2)), { fromSeq: 1, limit: 2 }), refused, "a limited run short of its end");
+    const other = await (await ledgerOf(3, 10)).list();
+    await assert.rejects(run(onRunRead(() => other), { fromSeq: 1 }), refused, "a rewrite that ends on another hash at the head's seq");
+    // Valid limited and empty runs still pass.
+    assert.equal(verifyLedgerExport(await run(onRunRead((es) => es), { fromSeq: 1, limit: 2 }), keys).ok, true);
+    assert.equal(verifyLedgerExport(await run(ledger, { fromSeq: 4 }), keys).ok, true);
   });
 });

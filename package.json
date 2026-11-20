@@ -29,10 +29,12 @@
       "types": "./dist/testing/index.d.ts",
       "default": "./dist/testing/index.js"
     },
+    "./schema/flow-config.v1.json": "./schema/flow-config.v1.json",
     "./package.json": "./package.json"
   },
   "files": [
     "dist/",
+    "schema/",
     "README.md",
     "SECURITY-MODEL.md",
     "SECURITY.md",
@@ -41,6 +43,9 @@
     "LICENSE",
     "NOTICE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=24.2"
   },
@@ -49,10 +54,12 @@
   },
   "scripts": {
     "build": "node scripts/clean.mjs && tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "oxlint --deny-warnings",
     "test": "node --test --throw-deprecation --test-reporter=spec \"test/**/*.test.ts\"",
     "test:coverage": "c8 node --test --throw-deprecation --test-reporter=spec \"test/**/*.test.ts\"",
+    "bench": "node bench/main.ts",
     "demo": "node examples/reference-server/src/demo.ts",
     "serve": "node examples/reference-server/src/main.ts",
     "ui": "node examples/reference-server/src/ui.ts",
@@ -62,6 +69,7 @@
   "devDependencies": {
     "@types/node": "24.19.2",
     "c8": "12.0.0",
+    "fast-check": "4.10.2",
     "oxlint": "1.91.0",
     "typescript": "7.0.2"
   },

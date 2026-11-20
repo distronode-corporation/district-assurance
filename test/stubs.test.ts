@@ -5,12 +5,10 @@ import { describe, it } from "node:test";
 
 import { NotImplementedError } from "../src/core/errors.ts";
 import { chargeSavedCard, startKeypadCardCapture } from "../src/pay/later.ts";
-import { exportLedger } from "../src/prove/later.ts";
 
 const STUBS: Array<[string, () => unknown]> = [
   ["PAY-4", () => chargeSavedCard({ callId: "c", paymentId: "p" })],
   ["PAY-6", () => startKeypadCardCapture({ callId: "c", paymentId: "p" })],
-  ["PRV-4", () => exportLedger({ fromSeq: 1 })],
 ];
 
 /** Planned work a validator refuses by id (so a config can never reach it mid-call). */

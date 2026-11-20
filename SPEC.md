@@ -5,8 +5,9 @@ marked *planned* names its ROADMAP.md issue.
 
 ## 1. Session state machine
 
-A session has a **phase** and, orthogonal to it, a **sensitive** flag, a **tainted** flag, the
-recorded **factors**, the current **level** and an optional **grant**.
+A session has a **phase** and, orthogonal to it, a **sensitive** flag, a **tainted** flag, a
+**synthetic voice** band (`clear`, `spoken_off` or `level_1`, section 4), the recorded
+**factors**, the current **level** and an optional **grant**.
 
 ```
             verification_started                 intake_started
@@ -36,6 +37,7 @@ recorded **factors**, the current **level** and an optional **grant**.
 | `payment_requested {paymentId}` | open | phase `paying`, sensitive `payment`, payment id appended |
 | `payment_settled {paymentId}` | paying | phase `open`, sensitive cleared |
 | `untrusted_content {source}` | any but ended | tainted (sticky), level 0, grant dropped; a verification open when it lands is void (below) |
+| `synthetic_voice_scored {band, ceiling, scopes}` | any but ended | band raised to `band` if higher (never lowered); level held to `ceiling`; a grant above `ceiling` lowered to it with only the `scopes` it reaches, or dropped at 0 |
 | `call_ended {at}` | any but ended | phase `ended`, grant dropped, sensitive cleared |
 
 A taint during an open verification fails that verification (Sean, 2026-11-19). `finishVerification`
@@ -136,6 +138,21 @@ refused if it provides any factor; only Badge, whose own code judges its factors
 new build under the same name, checked against the others the same way, in its place. `remove`
 refuses Trace. `Engine.remove` also refuses a module the config has on, and a module supplying a
 factor the config in force names (in the policy or Badge's `factors`).
+
+`moduleContract(module, {settings?, steps?, policy?, installed?})` in `district-assurance/testing`
+is the suite an outside module should pass (MOD-1), given sample settings and a sample of each step
+it provides. It checks that the manifest passes `checkManifest` against `installed` (default: the
+built-in modules) and is JSON; that the sample settings and steps validate and `requiredAdapters`
+includes the manifest's adapters; that `validateSettings`, `validateStep`, `stepLevel` and
+`stepGrants` never throw on garbage (every JSON type, `__proto__` and method-named keys, a long
+string, lone UTF-16 surrogates, deep nesting, a sparse array, a missing value, at every path of the samples) and answer
+with the right types (`stepLevel` a level from 0 to 3, or null); that `initCall` and `enterStep` return canonical JSON, the same each time;
+that `stepStatus` answers the same for the same view, in any order; that `validateFlow` and
+`checkAdapters`, when a module has them, answer sentences for the sample settings and steps; and
+that none of these, nor `cannotRunStep` (asked for an English call), `blocksEnd` (given a fixed `now`, as the engine passes
+its clock's time), `onUntrusted` or `receiptPart`, changes a (frozen) input. Every built-in module
+passes it, Gate and step-up included. `examples/modules/callback.ts` is an example outside module
+that passes it.
 
 | Built-in | Steps | Needs | Adapters |
 |---|---|---|---|
@@ -253,8 +270,31 @@ the callback factor already proves possession of that line.
 Badge's settings turn factors on (`factors`, at least one), set the grant lifetime
 (`grantTtlSeconds`, default 900, at most 3600), the lockouts across calls and the hourly limits
 on flow starts (`lockout`, section 6)
-and, when `pin` is on, the PIN settings (section 6).
+and, when `pin` is on, the PIN settings (section 6), and optionally the synthetic voice thresholds
+below (`syntheticVoice`).
 A factor that is off is refused at every entry point. A planned factor cannot be turned on.
+
+**Synthetic voice** (VER-14). `syntheticVoice` maps a vendor name (1 to 32 of `a-z`, `0-9`, `-`,
+`_`, starting with a letter) to `{spokenKnowledgeAbove, levelOneAbove}`, numbers from 0 to 1 with
+`levelOneAbove` not below `spokenKnowledgeAbove`; vendors' scores are not comparable, so each has
+its own. `reportSyntheticVoice(callId, {score, vendor})` takes a score from 0 to 1 at any point in
+a call that has not ended, in a flow or not; an input that is not an object, a vendor that is not
+a string naming a vendor with thresholds, or a score that is not a number from 0 to 1, is refused (`invalid_input`). A call
+stored before VER-14 has no band, and reads as `clear`. Its band is `level_1` above `levelOneAbove`,
+`spoken_off` above `spokenKnowledgeAbove`, else `clear`. The call keeps its highest band, so a
+later, lower score lifts nothing, and a taint or a new verification does not reset it. Under
+`spoken_off` or `level_1`, `spoken_knowledge` does not count toward a level; under `level_1`, a
+verification finishes at level 1 at most. A band applies at once: in the score's own write, the
+level and the grant are lowered to what the last verification's counted methods reach under the
+band (re-judged under the policy only when a method stops counting), and a grant lowered to 0 is
+dropped. A score never raises a level, never counts as a factor, and without a score there is no
+cap. The score is not stored: the call record keeps the band, the ledger the vendor and the band.
+The receipt keeps neither, and a call a band holds below what its counted methods reach shows on
+its receipt the level it holds with only the methods that support it (those in a policy set at
+that level or below that the call passed in full), so it reads exactly like a call that honestly
+reached that level; `verification.finished` in the ledger keeps every counted method. A caller ID
+attestation cap (VER-10) trims the receipt's methods the same way (decision 11). The band and the
+cap are each a ceiling on the level the factors reached, so their order does not change the level.
 
 **Step-up rules** (`stepUp`, VER-13) raise one scope's minimum for one request. A rule is `{name,
 scope, level}` plus exactly one condition:
@@ -896,6 +936,21 @@ engine takes no spoken "sí" and no voice confirmation on a Spanish call, and a 
 Spanish caller's consent (`recordConsent`, whose `answer` the host maps) must take it on the keypad
 too, never from a spoken answer, until then.
 
+**JSON Schema.** `schema/flow-config.v1.json` (JSON Schema 2020-12, published with the package as
+`district-assurance/schema/flow-config.v1.json`) describes the shape of version 1 for editors and
+tools: the fields of each object, their types, ranges and patterns, the settings of the six built-in
+modules, Badge, Dossier, Paylink, Trace, Gate and step-up (checked only while the module is on),
+and their steps. An outside module's settings and
+steps are open. The schema is never stricter than `validateConfig`: every config `validateConfig`
+accepts with the built-in modules passes the schema. It cannot see the rules that need the registry, the
+adapters or another part of the document (installed modules and factors, floors, planned factors
+and modes, the form or wording a step names, unique ids, step order), so a config that passes it
+can still be refused; `validateConfig` stays the authority. `test/config-schema.test.ts` checks it
+against the TypeScript types (at type-check time) and against `validateConfig` (a corpus of good
+and bad configs, both sides of the edge of every pattern and range the schema copies from a
+validator, and a seeded sweep of near-miss configs), and that the package's exports resolve the
+published name to the file.
+
 ## 8. Flow execution
 
 `startCall` refuses (`invalid_input`, nothing saved) a `callId` that is not 1 to 200 characters the
@@ -965,7 +1020,8 @@ answer on file, a phone number, a link or card data.
 | `identity.link_sent` | none |
 | `verification.code_sent` | none |
 | `verification.code_refused` | `reason`: `country`, `subject_limit`, `number_limit` or `send_failed` |
-| `verification.finished` | `level` (after any attestation cap), `methods`, `discounted`, `capped` (true when a cap lowered the level), `policyVersion`, `configRevision`; `voidedByTaint: true` when a taint landed in that verification |
+| `verification.finished` | `level` (after any attestation cap), `methods`, `discounted`, `capped` (true when an attestation cap or a synthetic voice band lowered the level), `policyVersion`, `configRevision`; `voidedByTaint: true` when a taint landed in that verification |
+| `verification.synthetic_voice` | `vendor`, `band` (never the score) |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt`, `policyVersion`, `configRevision` |
 | `pin.enrolled` | none (never the digits, the digest or their length) |
 | `pin.reset` | `subjectKey`; actor `member`, `callId` null |
@@ -1049,7 +1105,11 @@ library's own thenable), and a `then` that throws when read is a listener failur
 
 Entry: `{seq, prevHash, eventId?, callId, actor, event, at, detail, hash}`. `seq` starts at 1; the first
 `prevHash` is 64 zeros; `hash` is SHA-256 over the canonical JSON of every other field.
-`verifyChain(entries, from?)` reports the first entry whose `seq`, `prevHash` or `hash` is wrong.
+`verifyChain(entries, from?)` reports the first entry whose `seq`, `prevHash` or `hash` is wrong;
+an entry that is not an object (storage can hand back anything) is reported at the seq it holds,
+as `seq`, never thrown on.
+An entry that canonical JSON cannot hash (a stored number changed to `1e999` reads as Infinity) is
+reported as a wrong `hash`, never thrown.
 `chainEntry` refuses a detail in which any string (other than a 64-character hex digest) contains
 a card number. An `AuditLedger` lists `list(fromSeq?, limit?)`: the entries with `seq` at or after
 `fromSeq`, in order, at most `limit` (an integer of 1 or more) when it is given, read as one page,
@@ -1176,6 +1236,61 @@ that fixes in time that the ledger was still there, unchanged, and each grows th
   `MAX_REPLY_BYTES`, 256 KiB), cancel the rest and refuse it, and refuse an error answer without
   reading its body.
 
+### Export
+
+`exportLedger({ledger, signer, clock, ledgerId, fromSeq | cursor, limit?})` is an async generator of
+newline-delimited JSON lines, each ending in `\n`: one line per entry, in canonical JSON and in
+order, then one signed trailer line.
+
+```json
+{
+  "trailer": {
+    "v": 1, "type": "ledger_export", "ledgerId": "ws_123",
+    "from":    { "seq": 0,  "hash": "<64 zeros, or the hash of the entry before the first line>" },
+    "through": { "seq": 17, "hash": "<hash of the last line's entry; equal to from when empty>" },
+    "count": 17,
+    "head":    { "seq": 17, "hash": "<the ledger head when the export was taken>" },
+    "exportedAt": "...",
+    "cursor": "17.<through.hash>"
+  },
+  "alg": "ES256",
+  "kid": "...",
+  "signature": "<base64url of the 64-byte r||s signature over the payload>"
+}
+```
+
+The payload is the bytes of `district-assurance ledger export v1\n` followed by
+`canonicalJson(trailer)`, so a trailer signature and a receipt signature can never stand in for each
+other. The signer is a `ReceiptSigner`, and the receipt key set verifies trailers by `kid`. The
+trailer is signed before the first line is yielded, and a signature that is not 64 bytes (P1363),
+or that does not verify against the signer's own `publicJwk()`, is refused with `invalid_input`, so
+a failing signer never leaves a consumer with entries and no valid trailer. Each input is read once.
+
+A run starts at `fromSeq` (1 or more, at most the head plus one) or right after `cursor`
+(`<seq>.<hash>` of a previous trailer's `through`), never both, and stops at the head read when the
+export starts, or after `limit` entries; it asks the ledger for that one page (`list(from + 1,
+count)`), in reads of at most `EXPORT_WALK_PAGE` entries, and again for the rest when a read hands
+back fewer entries than asked. A run that stops short of the head is signed only once the chain is walked from its end
+to the head, in reads of at most `EXPORT_WALK_PAGE` (1,000) entries, and verifies there; so an
+export reads the ledger from the run to the head, and a run that reaches the head reads only
+itself. A walk that fails is refused with `precondition_failed`, before anything is yielded. The run is complete when `through` equals `head`; otherwise
+the next run takes `cursor`. Refused with `invalid_input`: neither or both of `fromSeq` and
+`cursor`, a `fromSeq` or `limit` that is not an integer of 1 or more, a `fromSeq` past the head plus
+one (on an empty ledger, more than 1), an empty `ledgerId`, a cursor that is malformed or past the head. Refused with `precondition_failed`,
+before anything is yielded: a head the ledger does not hold, a cursor whose entry the ledger no
+longer holds with that hash, a missing entry before `fromSeq`, and a run that fails `verifyChain`
+from its start. `ledgerId` is the host's name for the ledger, for example the workspace id.
+
+`verifyLedgerExport(ndjson, keys, after?)` checks a whole run and never throws, whatever its
+arguments are (a text that is not a string is `malformed`, a key set that is not a list of keys
+fails `signature`, an `after` that is not a trailer fails `continuity`). It returns
+`{ok: true, entries, trailer}`, or `{ok: false, reason}` with `reason`: `malformed` (a line that is
+not JSON, no final newline, a trailer that is missing or inconsistent, an entry line that is not an
+object), `signature` (unknown `kid`, wrong `alg`, a signature that does not verify), `continuity`
+(given the previous run's trailer as `after`: a different `ledgerId`, or a start other than its
+cursor) or `chain` (`verifyChain` from `from` fails, with its `seq`, or the run does not end on
+`through`).
+
 ## 11. Canonical JSON
 
 Object keys sorted by UTF-16 code units, no whitespace, strings and numbers as ECMAScript
@@ -1216,7 +1331,8 @@ or not the flow finished), or, for a call that ran no flow, when Trace's `receip
 false. `endCall` returns it, or null. `verification` comes from Badge, `records` from Dossier,
 `payments` from Paylink and `consents` from Trace (`answer` is `yes`, `no`, or `not_recorded` for
 a consent still being stored when the call ended, section 21); a module that is off contributes an
-empty part. `verification.policyVersion` and `verification.configRevision` name the policy and the
+empty part. A receipt never carries a synthetic voice band, vendor or score, since a receipt can
+reach the caller (SRV-3). `verification.policyVersion` and `verification.configRevision` name the policy and the
 FlowConfig revision that judged the call's last finished verification (whatever level it reached);
 both are absent when no verification finished on the call. They are optional, so the format stays
 at `v: 1`, and a reader that does not know them still checks the signature over the whole body.
@@ -2658,8 +2774,8 @@ points (in any encoding), which some platforms let verify a forged signature. Th
 configured key and the timestamp is within 300 seconds of now (configurable, an integer from 0 to
 86,400, else `invalid_input`), either way; an invalid `now` is out of tolerance. It
 returns the same `SignatureCheck` as Stripe's: `no_secret`, `missing_header` (either header),
-`malformed_header` (a signature that is not 64 bytes of base64, a timestamp that is not 1 to 12
-digits), `timestamp_out_of_tolerance`, `no_matching_signature`.
+`malformed_header` (a signature that is not 64 bytes of base64 in its one canonical spelling, with
+the unused bits of its last character zero, or a timestamp that is not 1 to 12 digits), `timestamp_out_of_tolerance`, `no_matching_signature`.
 
 The reference server answers `POST /webhooks/twilio` and `/webhooks/telnyx` with 400
 `{error: "signature", reason}` when the check fails, 200 `{received: true}` when it passes, and
@@ -2779,3 +2895,19 @@ page refusal is its HTML page):
   (`createServe`) uses it unless given its own `log`; `main.ts` registers `guardLogStream`, an
   `error` listener on standard output that stops the log on the first error (an EPIPE when its
   reader went away), instead of the process ending on an unhandled `error` event.
+
+## 17. The published package
+
+The package has four entry points and no others: `district-assurance`, `district-assurance/testing`,
+`district-assurance/package.json` and `district-assurance/schema/flow-config.v1.json` (the FlowConfig
+JSON Schema, section 7); any other path is refused by Node. The tarball holds the compiled `dist/`
+(JavaScript and declarations), the schema and the documents `files` names. It is not on npm:
+`package.json` is `"private": true` until a release is decided (ADR-12). A release is a version tag
+`vX.Y.Z` matching `package.json`, run by `.github/workflows/release.yml`: the CI workflow and the
+supply-chain checks on the tag, two builds that must pack to the same bytes, a check of the file
+list, and a smoke test that unpacks the tarball into an empty project, imports each entry point
+and type-checks a strict consumer. The tagged commit must be on main. A tag push is always a dry
+run. Only a manual run on the tag with `publish` ticked, in this repository and after the
+`npm-publish` environment's reviewers approve, publishes that tarball with npm provenance. A
+version with a pre-release part goes to the `next` dist-tag. In a fork, or a manual run without
+`publish`, the same run is a dry run.

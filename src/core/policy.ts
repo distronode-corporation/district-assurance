@@ -296,7 +296,8 @@ export function validatePolicy(
   const seen = new Set<unknown>();
   for (const [index, rule] of (Array.isArray(p.levels) ? p.levels : []).entries()) {
     const r = (typeof rule === "object" && rule !== null ? rule : {}) as Record<string, unknown>;
-    const sets = Array.isArray(r.anyOf) && r.anyOf.every((set) => Array.isArray(set) && set.every((k) => typeof k === "string")) ? (r.anyOf as string[][]) : null;
+    // Dense lists only: `every` skips a hole, which would then be read as a factor set.
+    const sets = isDenseArray(r.anyOf) && r.anyOf.every(isStringArray) ? (r.anyOf as string[][]) : null;
     if (typeof r.level !== "number" || sets === null) {
       errors.push(`levels[${index}] must be { level, anyOf: [[factor, ...], ...] }`);
       continue;
@@ -331,7 +332,7 @@ export function validatePolicy(
       if (typeof level === "number" && level < floor) errors.push(`scope ${scope} is ${cls}, and below its floor of level ${floor}`);
     }
   }
-  if (!Array.isArray(p.keypadFields) || !p.keypadFields.every((f) => typeof f === "string")) {
+  if (!isStringArray(p.keypadFields)) {
     errors.push("keypadFields must be a list of field names");
   } else {
     if (p.keypadFields.length === 0) errors.push("keypadFields is empty");

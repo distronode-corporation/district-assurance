@@ -7,6 +7,8 @@ on:
   # The merge queue runs the same required checks on the queued commit.
   merge_group:
     types: [checks_requested]
+  # release.yml runs this on the tag, as the gate before a publish.
+  workflow_call:
 
 permissions:
   contents: read
@@ -72,7 +74,15 @@ jobs:
       # 100% lines, statements, functions and branches in every file under src/, each file on
       # its own (c8, .c8rc.json). A file no test loads counts, at 0%. The reference server under
       # examples/ is tested by the same run but not held to the bar.
+      # The same run holds the property and fuzz suites (test/property, test/fuzz, SRV-7). On the
+      # fixed seed each property runs the same examples and minimum cases every time, then batches
+      # of more cases in a fixed order for 200 ms; how many batches fit depends on the runner, so
+      # a failure found only on a faster one is replayed with the seed and path it printed.
+      # fuzz.yml runs them for much longer on a new seed each night.
       - run: npm run test:coverage
+        env:
+          DA_FUZZ_MS: "200"
+          DA_FUZZ_SEED: "14311149"
       - run: npm run build
       # The scripted call, end to end, on fake adapters and a loopback server.
       - run: npm run demo
@@ -82,3 +92,11 @@ jobs:
       - name: Audit pack
         if: matrix.os == 'ubuntu-24.04' && matrix.node == 24
         run: node scripts/audit-pack.mjs
+      # The benchmarks on a small budget, so the scripts cannot rot (BENCHMARKS.md). Numbers from
+      # a run this short mean little; the release workflow compares releases on full runs.
+      - name: Benchmarks, short
+        shell: bash
+        run: |
+          npm run bench -- --budget-ms 25 --out "$RUNNER_TEMP/bench.json"
+          # A run that skipped its main() would exit 0 too: the results file must be there.
+          test -s "$RUNNER_TEMP/bench.json"

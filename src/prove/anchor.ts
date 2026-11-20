@@ -526,11 +526,15 @@ export function verifyAnchor(anchored: AuditEntry, entries: readonly AuditEntry[
   if (anchored.event !== "ledger.anchored" || !Number.isSafeInteger(seq) || (seq as number) < 1 || !isAnchorProof(proof)) {
     return { ok: false, reason: "malformed" };
   }
+  const covered: unknown[] = entries.slice(0, seq as number);
+  // An export holding nothing (null or a hole) where an entry should be is malformed. verifyChain
+  // reports any other value that is not an entry as a break in the chain (SRV-7), but it reads an
+  // object's fields, and one whose field throws when read is malformed too, never a throw.
+  if (covered.some((e) => e === null || e === undefined)) return { ok: false, reason: "malformed" };
   let chain: ReturnType<typeof verifyChain>;
   try {
-    chain = verifyChain(entries.slice(0, seq as number));
+    chain = verifyChain(covered as AuditEntry[]);
   } catch {
-    // An export holding null, or anything else that is not an entry, where an entry should be.
     return { ok: false, reason: "malformed" };
   }
   if (!chain.ok || chain.head.seq !== seq) return { ok: false, reason: "chain" };
