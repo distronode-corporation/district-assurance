@@ -1089,14 +1089,19 @@ removes only the version the engine checked, with its pending mark, and keeps th
 created again (`startCall` refuses it): its ledger event ids are spent. `removeCall` is refused
 (`precondition_failed`) for a call that has not ended, for one that still owes a duress alert or a
 contact notice (`sweepAlerts` sends it), for one that still owes its receipt (a signing that failed
-after the call ended; `endCall` signs it), for one with a refund of its payment in flight (the
-provider's answer is still on its way; `refundPayment` resumes it), for one with a filed record whose confirmed mark it could
+after the call ended; `endCall` signs it), for one with a refund of its payment not yet final (in
+flight, with the provider's answer still on its way, which `refundPayment` resumes, or `pending` at
+the provider, which its update settles), for one with a filed record whose confirmed mark it could
 not make (the call keeps the marks it owes in `marksOwed` until the record store has them), and for
 one whose outbox still holds entries after it tried to flush them (the ledger refused them): the record is kept, and `flushPending` keeps
 listing it, until they are appended, so no pending entry (a `consent.recorded` written while the
 ledger was down) is ever lost with its record. A write that lands before the removal is read
 again, up to three times (`conflict` after that); an unknown call is `unknown_call`, and a store
-without `remove` is `precondition_failed`. It answers `{removed: true}`.
+without `remove` is `precondition_failed`. It answers `{removed: true}`. A `succeeded` refund can
+still fail later at the provider, with no bound on when, so it does not hold the record: its late
+failure is recorded only while the host keeps the call record, and once the record is removed the
+update is refused (`unknown_call`). A host that wants late failures recorded keeps call records
+with refunds for as long as its provider can report one.
 
 `flushPending(limit = 100)` is the background flush a host schedules (for example every minute, in
 any process): it asks the store's `pendingCalls` for up to `limit` calls and flushes each in turn,

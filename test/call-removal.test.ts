@@ -127,11 +127,29 @@ describe("removeCall", () => {
       throw new Error("the answer was lost");
     };
     await assert.rejects(t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "duplicate", sequence: 1 }), /the answer was lost/);
-    await assert.rejects(t.engine.removeCall(callId), rejects("precondition_failed", /refund/));
+    await assert.rejects(t.engine.removeCall(callId), rejects("precondition_failed", /not yet final/));
     assert.notEqual(await t.sessions.get("ws_test", callId), null, "the record stays");
     t.payments.refund = refund;
     await t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "duplicate", sequence: 1 });
     assert.deepEqual(await t.engine.removeCall(callId), { removed: true });
+  });
+
+  it("keeps an ended call with a pending refund until the provider's update settles it (CodeRabbit #139)", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
+    await confirmAmount(t.engine, callId, request);
+    await t.engine.requestPayment(callId, request);
+    await t.engine.applyPaymentOutcome({ kind: "completed", linkId: "cs_fake_1", paymentStatus: "paid", paymentIntentId: "pi_1" });
+    await t.engine.endCall(callId);
+    t.payments.refundStatus = "pending";
+    await t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "duplicate", sequence: 1 });
+    await assert.rejects(t.engine.removeCall(callId), rejects("precondition_failed", /not yet final/));
+    const update = { providerRef: "re_fake_1", paymentIntentId: "pi_1", status: "succeeded" as const, amountMinor: 15000, currency: "cad" };
+    assert.deepEqual(await t.engine.applyRefundOutcome(update), { applied: true, callId, status: "succeeded" });
+    assert.deepEqual(await t.engine.removeCall(callId), { removed: true });
+    // A succeeded refund does not hold the record: a late failure after the removal is refused (SPEC).
+    await assert.rejects(t.engine.applyRefundOutcome({ ...update, status: "failed" }), rejects("unknown_call"));
   });
 
   it("removes an ended call whose payment has no refund, and one that started with Paylink off", async () => {
