@@ -22,23 +22,23 @@ name: Release
 #   github-release  after publish: a GitHub release on the tag with the tarball, the SBOM and
 #                 the attestation's Sigstore bundle attached.
 #   dry-run       everything else (a tag push, a fork, or a manual run without `publish`): the
-#                 same rebuild, comparison and SBOM check, and `npm publish --dry-run` once the
-#                 package is not private. Nothing is signed: only the publish job may ask for an
-#                 OIDC token.
+#                 same rebuild, comparison and SBOM check, and `npm publish --dry-run` (skipped
+#                 for a package.json with `"private": true`). Nothing is signed: only the
+#                 publish job may ask for an OIDC token.
 # And beside them, needed by nothing:
 #   bench         the benchmarks of the previous release and of this one, one after the other on
 #                 the same runner, and a case more than 20% slower reported in the run summary
 #                 (BENCHMARKS.md). It never fails or holds up a release.
 #
-# A tag push never publishes. Publishing takes three separate acts by people: a manual run with
-# `publish` ticked, an approval in the `npm-publish` environment, and a merged pull request that
-# removes `"private": true`. The tagged commit must also be on main.
+# A tag push never publishes. Publishing takes two separate acts by people: a manual run with
+# `publish` ticked and an approval in the `npm-publish` environment, on a tag of a version whose
+# package.json is not private. The tagged commit must also be on main.
 #
-# The `npm-publish` environment does not exist yet. GitHub creates an environment named by a job
-# the first time that job runs, WITHOUT protection rules, so create it with required reviewers
-# and a `v*` tag rule before the first manual publish run. Until then the publish job refuses:
-# its first step reads the environment back and stops unless it has a required reviewer and a
-# deployment rule, so an environment created without protection never lets a publish through.
+# The `npm-publish` environment has required reviewers and a `v*` tag rule. GitHub creates an
+# environment named by a job the first time that job runs, WITHOUT protection rules, so the
+# publish job does not take the environment's existence on trust: its first step reads it back
+# and stops unless it has a required reviewer and a deployment rule, so an environment that lost
+# or never had its protection never lets a publish through.
 #
 # What each signature covers. npm provenance (the publish step) ties the tarball to this
 # commit and this workflow, and npm's registry signs it; `npm audit signatures` checks both.
@@ -46,9 +46,9 @@ name: Release
 # is the tarball's SHA-256 and its predicate the SBOM, and `gh attestation verify` checks it.
 # README.md ("Checking a release") gives both commands.
 #
-# The package is private until a release is decided (DECISIONS.md, ADR-12), so the publish
-# job fails while package.json has `"private": true`. That line goes only in the pull request
-# that decides the first release.
+# The package was private until the first release was decided (DECISIONS.md, ADR-12), and the
+# release pull request for 0.1.0 removed `"private": true`. The publish job still fails on a
+# package.json that has it, so a manifest marked private is never published.
 #
 # No secret and no npm token. npm's trusted publishing exchanges the job's OIDC token for a
 # one-time publish credential and signs the provenance statement. It is set up on npmjs.com,
@@ -56,11 +56,11 @@ name: Release
 # `release.yml` and the environment `npm-publish`. The environment, with required reviewers
 # and a tag rule of `v*`, is set up in the repository's settings.
 #
-# First release: npm sets a trusted publisher only on a package that already exists, so this
-# workflow cannot publish the first version (with no token and no trusted publisher it has no
-# credential, and the publish step fails closed). The package's first publication, who makes it
-# and how, is part of the release decision (ADR-12); once it exists, the trusted publisher above
-# is set up, and every later version is published by a manual run of this workflow.
+# First publication: npm sets a trusted publisher only on a package that already exists, so this
+# workflow cannot create the package (with no token and no trusted publisher it has no
+# credential, and the publish step fails closed). The package's owner reserves the name by hand
+# with a placeholder version that is not a release, the trusted publisher above is then set up,
+# and every release, from 0.1.0 on, is published by a manual run of this workflow.
 on:
   push:
     tags: ['v[0-9]*.[0-9]*.[0-9]*']
@@ -298,9 +298,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # registry-url as npm's trusted publishing guide has it. No cache, as everywhere here.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+          registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - run: npm ci --ignore-scripts
       # The bytes published are rebuilt here, on a fresh runner, and must be the bytes the pack
@@ -569,8 +571,8 @@ jobs:
             echo "::error::district-assurance $VERSION is already published with other bytes ($published, not $integrity)."
             exit 1
           fi
-      # While the package is private (ADR-12) a real run would stop at the publish job's
-      # private check, so the dry run ends at the comparison above and says so.
+      # A package.json marked private (ADR-12) would stop a real run at the publish job's
+      # private check, so for one the dry run ends at the comparison above and says so.
       - name: npm publish --dry-run
         if: steps.registry.outputs.publish == 'true'
         env:

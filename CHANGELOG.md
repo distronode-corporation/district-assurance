@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-20
+
+The first published release.
+
 ### Added
 
 - M0 skeleton. The engine (`createEngine`) with the call session state machine, the assurance policy
@@ -338,6 +342,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The package is published: `package.json` no longer has `"private": true` (ADR-12), and 0.1.0 is
+  the first version `release.yml` publishes to npm, with provenance. The publish job's
+  `setup-node` names the npm registry (`registry-url`), as npm's trusted publishing guide has it.
 - Breaking, reference server: the `maxBodyBytes` option of `createReferenceServer` is replaced by
   `bodyLimits`, one limit per route that reads a body (SRV-2).
 - Breaking: `CarrierSignalReport` has a required `simSwapChecked`, true only when the carrier was

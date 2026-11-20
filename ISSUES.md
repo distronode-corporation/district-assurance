@@ -105,12 +105,12 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 ```markdown
 ## Why
 
-The release workflow is built (`.github/workflows/release.yml`, with `supply-chain.yml`), and nothing is published yet, by decision: `package.json` keeps `"private": true`.
+The release workflow is built (`.github/workflows/release.yml`, with `supply-chain.yml`), and the first release is decided: 0.1.0 (ADR-12). Its release pull request removes `"private": true`, and from 0.1.0 on every version is published by `release.yml` from its tag. The fork dry run is replaced by the dry run the tag push runs in this repository before the manual publish.
 
 ## Acceptance criteria
 
-- [ ] The workflow's dry run on a tag in a fork, recorded in the pull request (also asked for by signed releases, SRV-6).
-- [ ] `private: true` is removed only in the pull request that decides the first release, and that release is checked against the reviewed source.
+- [ ] The tag push's dry run for v0.1.0 passes in this repository before the publish run (also asked for by signed releases, SRV-6).
+- [ ] `private: true` is removed only in the pull request that decides the first release, and that release is checked against the reviewed source: npm provenance, the SBOM attestation and the registry tarball's bytes.
 
 ## Files
 
@@ -119,7 +119,7 @@ The release workflow is built (`.github/workflows/release.yml`, with `supply-cha
 
 ## Tests
 
-- A dry run on a tag in a fork
+- The tag push's dry run for v0.1.0
 
 ## Done when
 

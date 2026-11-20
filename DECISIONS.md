@@ -123,6 +123,13 @@ with its own release workflow (provenance, reproducible packs), modelled on our 
 packages.
 **Amended (SRV-5):** the release workflow is built (`.github/workflows/release.yml`); the package
 stays private until the pull request that decides the first release removes `"private": true`.
+**Amended (first release, Sean, 2026-11):** the first release is 0.1.0. Its release pull request
+removes `"private": true`, and from 0.1.0 on every version is published by `release.yml` from its
+tag through npm trusted publishing, with provenance. The name is reserved on npm by the
+package's owner with a hand-published placeholder version below 0.1.0, since npm sets a trusted
+publisher only on a package that exists; the placeholder is not a release. The fork dry run
+SRV-5 asked for is replaced by the dry run a tag push runs in this repository before anything is
+published.
 
 ## ADR-13. A small core plus modules, switched by config
 

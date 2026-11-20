@@ -4,9 +4,11 @@
 
 | Version | Supported |
 |---|---|
-| 0.0.x (pre-alpha, unreleased) | Best effort |
+| 0.1.x (pre-alpha) | Best effort |
+| Earlier | No |
 
-Nothing is released yet. Reports against `main` are welcome.
+From 0.1.0 on, releases are published to npm as `district-assurance` with npm provenance. Fixes
+land in the latest 0.1.x release; reports against `main` are welcome too.
 
 ## Scope
 

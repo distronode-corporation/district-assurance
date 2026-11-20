@@ -925,10 +925,11 @@ A compromised dependency, action or build, or a release nobody meant to make. **
 package has no runtime dependency. Every workflow action is pinned by full commit SHA, every
 workflow's top-level token is read-only or empty with each job granted only the scopes it uses,
 and no package-manager cache is restored. npm audit and osv-scanner check the lockfile on every
-pull request, weekly, and on each release tag (`supply-chain.yml`). Nothing has been published:
-`"private": true` makes `npm publish` refuse until a release is decided (ADR-12), and the release
-workflow (`release.yml`) has not yet had its dry run on a tag in a fork. In that workflow a tag
-push is only ever a dry run, publishing needs a person to start the workflow by hand on a tag
+pull request, weekly, and on each release tag (`supply-chain.yml`). From 0.1.0 on, every version
+on npm is published by the release workflow (`release.yml`) from its tag, with npm provenance
+(ADR-12); the hand-published placeholder version that reserved the name holds no code, and
+the publish job refuses a package.json marked `"private": true`. In that workflow a tag push is
+only ever a dry run, publishing needs a person to start the workflow by hand on a tag
 with `publish` ticked, and the publish job waits for the `npm-publish` environment's reviewers;
 its first step stops unless that environment has a required reviewer and a deployment rule, so
 an environment created without protection never lets a publish through. It runs only in this
@@ -1147,7 +1148,7 @@ What is published, and how.
 
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
-| release-1 | T | A published package differs from the reviewed source, or cannot be traced to it. | A release workflow (`release.yml`) with a reproducible pack, an exports smoke test and npm provenance. Nothing is published (`"private": true`), and the workflow has not had its dry run on a tag in a fork. | open | SRV-5 |
+| release-1 | T | A published package differs from the reviewed source, or cannot be traced to it. | A release workflow (`release.yml`) with a reproducible pack, an exports smoke test, npm provenance and a signed SBOM attestation, which publishes every version from 0.1.0 on. Open until the first publish (0.1.0) is checked against the reviewed source. | open | SRV-5 |
 | release-2 | E | A host imports a runtime function of a module that was meant to stay internal. | The root entry point keeps the modules' runtime functions out. | covered | `entry-points.test.ts`: "keeps the runtime functions of the modules out of the root" |
 
 ### SessionStore

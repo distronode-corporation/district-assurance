@@ -8,9 +8,10 @@ check before an owner's command to full verification with a payment during the c
 caller let in through a door. A small reference server and a scripted demo let you try it end to
 end on your own machine.
 
-> **Status: pre-alpha.** The API will change without notice, nothing is published to npm, and
-> nothing here is certified: no PCI DSS attestation, no SOC 2 report, no regulated identity
-> proofing. Do not put it in front of real callers.
+> **Status: pre-alpha.** Published to npm as `district-assurance` from 0.1.0 on. The API will
+> change, and before 1.0 a minor version may break it. Nothing here is certified: no PCI DSS
+> attestation, no SOC 2 report, no regulated identity proofing. Do not put it in front of real
+> callers.
 
 ## A core and six modules
 
@@ -268,9 +269,10 @@ No regulated identity proofing: it checks a caller against the organisation's ow
 
 ## Checking a release
 
-Nothing is published yet (the package is private until a release is decided). From the first
-release on, every version is built and published by `.github/workflows/release.yml` from its tag,
-and you can check two things before you trust it.
+From 0.1.0 on, every version on npm is built and published by `.github/workflows/release.yml`
+from its tag, with npm provenance, and you can check two things before you trust it. (The
+placeholder version below 0.1.0 that reserved the name on npm is not a release and holds no
+code.)
 
 Where it came from: npm provenance, signed through Sigstore and logged in its public transparency
 log, ties the tarball to the commit and the workflow run that built it, and the registry signs the
