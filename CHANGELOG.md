@@ -234,6 +234,10 @@ All notable changes to this project are documented here. The format follows
   <name or file>` (`npm run simulate --` here) runs a flow on the fakes with a scripted caller
   (`pass`, `wrong-pin`, `lockout`, `consent-no`, `payment-paid`, `payment-expired`, or a JSON file)
   and prints each step, decision, event and the receipt; a bad config or an outside module is refused.
+- STRIDE tables in SECURITY-MODEL.md, one per module and adapter, each row naming its control and
+  the test that proves it or its open issue, checked by `test/security-model.test.ts`; and an
+  audit pack (`node scripts/audit-pack.mjs`, built in CI) with the test, coverage and contract
+  suite reports, an SBOM and the documents (SRV-8).
 
 ### Changed
 
