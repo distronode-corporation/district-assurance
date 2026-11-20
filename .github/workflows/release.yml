@@ -23,6 +23,10 @@ name: Release
 #                 same rebuild, comparison and SBOM check, and `npm publish --dry-run` once the
 #                 package is not private. Nothing is signed: only the publish job may ask for an
 #                 OIDC token.
+# And beside them, needed by nothing:
+#   bench         the benchmarks of the previous release and of this one, one after the other on
+#                 the same runner, and a case more than 20% slower reported in the run summary
+#                 (BENCHMARKS.md). It never fails or holds up a release.
 #
 # A tag push never publishes. Publishing takes three separate acts by people: a manual run with
 # `publish` ticked, an approval in the `npm-publish` environment, and a merged pull request that
@@ -517,3 +521,71 @@ jobs:
           case "$VERSION" in *-*) tag=next ;; esac
           npm publish "$RUNNER_TEMP/release/$FILE" --dry-run --access public --tag "$tag" --ignore-scripts
           echo "Dry run: $FILE was not published." >> "$GITHUB_STEP_SUMMARY"
+
+  # The engine's costs against the previous release's (SRV-10). Both releases are measured here,
+  # one after the other on this one runner, so the two runs share a runner type, a machine and a
+  # Node version. A case more than 20% slower is reported in the run summary and as a warning.
+  # Shared runners are noisy, so one run never fails a release: no job needs this one, and it
+  # continues on error. The benchmarks import only the sources and Node, so there is no install.
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      BENCH_RUNNER: ubuntu-24.04
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      # The whole history and its tags, to find and check out the previous release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      # The version tag just below this one (a pre-release sorts before its release), or none.
+      - name: The previous release
+        id: previous
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          previous=""
+          found=false
+          for tag in $(git -c versionsort.suffix=- tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname); do
+            if [ "$found" = true ]; then previous="$tag"; break; fi
+            if [ "$tag" = "$REF_NAME" ]; then found=true; fi
+          done
+          echo "Previous release: ${previous:-none}"
+          echo "tag=$previous" >> "$GITHUB_OUTPUT"
+      # The previous release's own benchmark code on its own sources. A release from before
+      # benchmarks has none, and the comparison says so.
+      - name: Benchmarks, previous release
+        if: steps.previous.outputs.tag != ''
+        env:
+          TAG: ${{ steps.previous.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/previous" "$TAG"
+          if [ -f "$RUNNER_TEMP/previous/bench/main.ts" ]; then
+            cd "$RUNNER_TEMP/previous"
+            node bench/main.ts --out "$RUNNER_TEMP/bench-previous.json"
+          else
+            echo "$TAG has no benchmarks."
+          fi
+      - name: Benchmarks, this release
+        run: node bench/main.ts --out "$RUNNER_TEMP/bench-current.json"
+      - name: Compare with the previous release
+        run: node bench/compare.ts "$RUNNER_TEMP/bench-previous.json" "$RUNNER_TEMP/bench-current.json"
+      # Both result files (CPU, system, Node version and commit inside), kept with the run.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-results
+          path: ${{ runner.temp }}/bench-*.json
+          if-no-files-found: warn
+          retention-days: 90

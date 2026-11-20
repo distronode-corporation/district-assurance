@@ -252,6 +252,11 @@ All notable changes to this project are documented here. The format follows
 - Signed releases (SRV-6): each release has a CycloneDX SBOM of the published package with a
   Sigstore-signed attestation, attached to the tag's GitHub release; README.md shows how to check a
   release with `npm audit signatures` and `gh attestation verify`.
+- Performance benchmarks (SRV-10): `npm run bench` measures the owner-command flow, a level 2
+  verification, ledger appends, receipt signing and verifying, and `validateConfig` on a large
+  config, on the memory adapters with `node:perf_hooks` only, and writes JSON with the machine and
+  commit. CI runs it on a small budget; each release compares with the previous release on the
+  same runner and reports a case over 20% slower in the run summary, never failing. BENCHMARKS.md.
 
 ### Changed
 
