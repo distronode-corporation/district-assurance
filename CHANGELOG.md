@@ -265,6 +265,9 @@ All notable changes to this project are documented here. The format follows
 - Ledger export (PRV-4): `exportLedger` yields the ledger as NDJSON from a `fromSeq` or a cursor,
   closed by an ES256-signed trailer with the run's start, end and the head; `verifyLedgerExport`
   checks a run and that it continues the previous one.
+- `moduleContract(module)` in `district-assurance/testing`, the suite an outside module should pass
+  (MOD-1), an example outside module (`examples/modules/callback.ts`) and a guide to writing one
+  in ARCHITECTURE.md.
 
 ### Changed
 

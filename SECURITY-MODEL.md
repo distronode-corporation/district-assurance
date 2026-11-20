@@ -1391,7 +1391,10 @@ block, allowing only the endpoints the first real publish run's audit log shows.
 - Outside modules: their code runs inside the engine's writes and is part of the host's security
   model. So do factor judges, the host's plug-ins and those an outside module supplies: the
   engine counts and limits their attempts, but whether a judge answers the same way for an unknown
-  subject and a wrong entry is the judge's.
+  subject and a wrong entry is the judge's. `moduleContract` checks the shape of an outside module
+  (validators that never throw on a malformed config, a pure `stepStatus`, JSON call state); it
+  cannot check what the module's code does with the scopes it is given, or what it writes to the
+  ledger.
 - The person path: a caller who fails or cannot use a keypad reaches someone who can help.
 - Relay and TTY callers: a flow they use offers a factor set they can complete at the step's
   level (a spoken answer alone reaches level 1 at most, and the carrier check and texted links
