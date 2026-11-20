@@ -1,5 +1,5 @@
 {
-  "about": "Card numbers in transcripts, for any implementation of District Assurance redaction and live detection (SPEC.md, section 17). Every card number here is a public test number. `runs`: the digits of each run a text holds, in order. `redact`: the text after card-number redaction; the marker is \"[card number removed]\". `live`: chunks fed one at a time to a live detector with the default threshold of 8 digits unless `minDigits` is set; after each chunk, whether it signals an interrupt and how many digits the run still open at the end holds.",
+  "about": "Card numbers in transcripts, for any implementation of District Assurance redaction and live detection (SPEC.md, section 24). Every card number here is a public test number. `runs`: the digits of each run a text holds, in order. `redact`: the text after card-number redaction; the marker is \"[card number removed]\". `live`: chunks fed one at a time to a live detector with the default threshold of 8 digits unless `minDigits` is set; after each chunk, whether it signals an interrupt and how many digits the run still open at the end holds.",
   "version": 1,
   "runs": [
     { "name": "numerals with separators", "text": "4242 4242-4242.4242", "runs": ["4242424242424242"] },

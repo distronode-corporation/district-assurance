@@ -111,7 +111,7 @@ form parameters, Telnyx uses Ed25519), and each will be built against the carrie
 vectors (SRV-1). Until then a carrier route can never be trusted by accident.
 **Amended (modular core):** the carriers are Twilio and Telnyx. Sinch is out of scope for now; its
 stub and route are removed, and `CarrierSignals` stays vendor-neutral so it can be added later.
-**Amended (SRV-1):** both carrier checks are built and tested (SPEC.md, section 17); the stubs
+**Amended (SRV-1):** both carrier checks are built and tested (SPEC.md, section 27); the stubs
 and the 501 answers are gone.
 
 ## ADR-12. The package is private until a release is decided
@@ -389,7 +389,7 @@ key is needed to recompute each sensitive value's HMAC; a host that rotates it k
 for checking.
 **Revisit** if a third party without the knowledge key must check a record against its receipt:
 that needs a per-record salt published with the record instead.
-## ADR-21. Subject erasure deletes values and keeps digests (PRV-7)
+## ADR-28. Subject erasure deletes values and keeps digests (PRV-7)
 
 **Decided.** `eraseSubject` deletes a subject's intake records, the copy of their values a call
 record keeps, and their PIN digest, through the stores, and appends `subject.erased`. It never

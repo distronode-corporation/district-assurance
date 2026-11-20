@@ -86,7 +86,7 @@ All notable changes to this project are documented here. The format follows
   built and when a config is saved. Connect-mode payments are bound per connected account.
 - The reference server's Connect webhook route; the demo takes a deposit in each mode and opens a
   door through the relay.
-- ADR-21 to ADR-25.
+- ADR-21 to ADR-28.
 - Grants, `verification.finished`, `grant.issued` and receipts name the `policyVersion` and
   `configRevision` that judged the caller (VER-8); optional on receipts, which stay at `v: 1`.
 - `npm run demo:e2e`: the demo UI with a real Stripe Checkout Session in test mode, through a
@@ -208,7 +208,7 @@ All notable changes to this project are documented here. The format follows
   `deletePinDigest`, `markSubjectErased` and `subjectErasures` (with `recordStoreErasureContract` in
   `district-assurance/testing`), and `putIntakeRecord` an optional `erasuresSeen`, `Engine.exportSubject` returns a signed export (its own domain, never a
   receipt; `verifySubjectExport`), and `Engine.eraseSubject` deletes the records and the PIN digest
-  and appends `subject.erased`, leaving the ledger and receipts whole (ADR-21). A consent carries
+  and appends `subject.erased`, leaving the ledger and receipts whole (ADR-28). A consent carries
   the matched `subjectKey` and an export lists only that subject's consents; a deleted record id
   is never stored again; each erasure gets its own entry, closed by `subject.erasure_completed`,
   and a retry after a partial delete finishes the same one.

@@ -519,7 +519,7 @@ the duress PIN is off unless it is set.
   entry is hashed the same way and compared in constant time; an unknown subject, a subject without
   a digest and a malformed entry do the same work and give the same answer. The digest is read from
   the `RecordStore` on every attempt, and the call record's copy of the subject never holds it, so
-  a digest erased (section 17) or changed since verification began counts at once.
+  a digest erased (section 26) or changed since verification began counts at once.
 - `verifier` mode: the host's `PinVerifier.verify({workspaceId, subjectKey, pin})` decides; the
   PIN is passed once and kept nowhere. It is asked for every attempt: for a malformed entry or an
   account a keypad cannot produce, with a stand-in (`minDigits` zeros, an HMAC subject key) whose
@@ -1048,8 +1048,8 @@ answer on file, a phone number, a link or card data.
 | `contact.notice_owed` | none: saved in the same write as the contact change that owes it |
 | `contact.notice_sent` | none |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
-| `subject.erased` | `recordIds`, `pinDigest` (whether one is deleted): the erasure's plan; `callId` null, actor `member` (section 17) |
-| `subject.erasure_completed` | `erasureSeq` (the `subject.erased` entry it completes); `callId` null, actor `member` (section 17) |
+| `subject.erased` | `recordIds`, `pinDigest` (whether one is deleted): the erasure's plan; `callId` null, actor `member` (section 26) |
+| `subject.erasure_completed` | `erasureSeq` (the `subject.erased` entry it completes); `callId` null, actor `member` (section 26) |
 | `ledger.anchored` | `seq` (the head it covers), `proof` (section 10); no call: `callId` is null |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
@@ -1067,7 +1067,7 @@ a further write if nobody wrote since. A failed append leaves them pending, and 
 `flushLedger(callId)` appends them. A ledger appends an `eventId` once (a second append returns the
 first entry), so nothing is lost or doubled. `consent.revoked` is the one entry written outside a call's write, since a consent
 can be revoked after its call: its `eventId` is `[workspaceId, callId, "consent.revoked",
-consentId]`, so a consent is revoked in the ledger once (section 17).
+consentId]`, so a consent is revoked in the ledger once (section 21).
 
 `flushPending(limit = 100)` is the background flush a host schedules (for example every minute, in
 any process): it asks the store's `pendingCalls` for up to `limit` calls and flushes each in turn,
@@ -2515,7 +2515,7 @@ de vérification d'identité, à usage unique : URL". Payment link: "Your secure
 AMOUNT: URL" / "Votre lien de paiement sécurisé pour AMOUNT : URL", with the amount formatted in
 the currency's own decimals.
 
-## 17. Document uploads
+## 23. Document uploads
 
 A caller adds a photo or a PDF to a record they confirmed through a single-use link
 (`src/file/upload.ts`). The functions take a context: the workspace id, a `DocumentStore` and the
@@ -2567,7 +2567,7 @@ answer, not "link not usable", and a retry while the first upload still runs get
 `Retry-After` (the timeout in whole seconds) and is never scanned a second time. Creating the link, texting
 it to the number on file and writing ledger entries for it are not wired into the engine yet.
 
-## 17. Card numbers in transcripts
+## 24. Card numbers in transcripts
 
 **Runs of digits.** `digitRuns(text)` reads a text into runs of digits. A run is numerals and spoken
 numbers in English, French or Spanish with only separators between them (Spanish hundreds,
@@ -2617,7 +2617,7 @@ separator-only chunks never grow what it keeps; it never returns it, and forgets
 **Corpus.** `test/corpus/card-numbers.json` holds the cases for runs, redaction and live detection
 as plain JSON, so an implementation in another language can be tested against the same cases.
 
-## 17. Redaction
+## 25. Redaction
 
 Each detector is its own `Redactor`; a host composes the ones it wants with `composeRedactors`,
 card numbers first, then health card numbers, SINs and bank numbers (a 10-digit health card number
@@ -2657,7 +2657,7 @@ yet. Number words ("forty two", "quarante-deux") and "double" forms are planned 
 corpus is shared JSON in `test/corpus/`, one file per kind: each case gives a text, its language
 and the exact substrings a redactor must find, in order.
 
-## 17. Subject requests: access and deletion
+## 26. Subject requests: access and deletion
 
 Two `Engine` methods the business calls from its own code, for one person's access or deletion
 request. They take no call id and are no flow step, so nothing on a call reaches them. Both take
@@ -2744,7 +2744,7 @@ or removes a ledger entry or a receipt, so `verifyChain` and every receipt still
 listener is not told (the entry names no call). Attempt counts live per call in the call record;
 counters per subject across calls are VER-1's, and the erase resets them once they exist.
 
-## 17. Carrier webhooks
+## 27. Carrier webhooks
 
 `verifyTwilioSignature` follows Twilio's published scheme: the `X-Twilio-Signature` header is
 `base64(HMAC-SHA1(auth token, URL + parameters))`, where URL is the full URL Twilio requested,
@@ -2778,7 +2778,7 @@ both would verify under one signature. Twilio's form parameters are decoded from
 configured public origin followed by the request target. A carrier with no key configured refuses
 everything.
 
-## 17. The flow simulator
+## 28. The flow simulator
 
 `district-assurance simulate <config.json> --flow <name> --script <name or file>` (the package's
 `bin`; `npm run simulate -- ...` in this repository) runs one flow of a FlowConfig with a scripted
@@ -2835,7 +2835,7 @@ text, so every line, on standard output and standard error, writes C0 and C1 con
 and bidi controls and marks as `\u` escapes (`terminalSafe`): a file can never move the cursor,
 set the terminal's title or make one result read as another.
 
-## 17. Reference server limits and logs
+## 29. Reference server limits and logs
 
 `examples/reference-server/src/app.ts`, not part of the package. Every limit below, the timeout and
 each body limit is a whole number from 1 (the timeout at most 2,147,483,647 ms, what `setTimeout`
@@ -2888,7 +2888,7 @@ page refusal is its HTML page):
   `error` listener on standard output that stops the log on the first error (an EPIPE when its
   reader went away), instead of the process ending on an unhandled `error` event.
 
-## 17. The published package
+## 30. The published package
 
 The package has four entry points and no others: `district-assurance`, `district-assurance/testing`,
 `district-assurance/package.json` and `district-assurance/schema/flow-config.v1.json` (the FlowConfig
