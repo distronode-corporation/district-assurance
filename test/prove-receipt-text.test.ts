@@ -4,6 +4,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import type { MessagePurpose } from "../src/core/adapters.ts";
+import type { CallRecord } from "../src/core/runtime.ts";
 import type { JsonValue } from "../src/core/canonical.ts";
 import { validateConfig, type FlowConfig } from "../src/core/config.ts";
 import type { AssuranceModule } from "../src/core/module.ts";
@@ -182,6 +183,21 @@ describe("receipt link text", () => {
     await t.engine.endCall(callId);
     assert.deepEqual(await t.engine.textReceiptLink(callId, LINK), { texted: false });
     assert.equal(texts(t, "receipt_link").length, 0);
+  });
+
+  it("lets a payment texted before a taint complete when the provider reports it paid, without restoring the match", async () => {
+    const t = engine();
+    const callId = await verified(t, "deposit");
+    await confirmAmount(t.engine, callId);
+    await t.engine.requestPayment(callId);
+    await t.engine.markUntrusted(callId, "crm_note");
+    const linkId = t.payments.created.at(-1)!.linkId;
+    const applied = await t.engine.applyPaymentOutcome({ kind: "completed", linkId, paymentStatus: "paid" });
+    assert.deepEqual(applied, { applied: true, callId, status: "paid" }, "the settlement is saved");
+    const record = (await t.sessions.get("ws_test", callId))!.record as unknown as CallRecord;
+    assert.equal(record.flow!.index, 2, "the flow moved past the payment step");
+    assert.equal((record.modules.badge as unknown as { knowledgeMatched: boolean }).knowledgeMatched, false, "the match stays void");
+    assert.equal((await events(t, "flow.step_completed")).filter((e) => e.detail.type === "paylink.request").length, 1);
   });
 
   it("is not sent when the caller's latest answer withdrew an earlier yes", async () => {

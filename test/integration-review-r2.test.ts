@@ -196,6 +196,33 @@ describe("L1 review round 2: access codes", () => {
     assert.deepEqual(await w.codes.redeem({ ...keypad("keypad-1"), code }), { ok: false });
   });
 
+  it("still asks for the revoke when the taint's ledger flush fails, and throws that failure after (round 2, second pass)", async () => {
+    const w = codesWorld();
+    const callId = await w.call();
+    assert.equal((await w.codes.issue(w.engine, callId, { target: "side-door", lifetimeSeconds: 600 })).status, "delivered");
+    const code = w.lastCode();
+    w.ledger.failures = 1;
+    await assert.rejects(w.engine.markUntrusted(callId, "webhook_reply"), /ledger down/);
+    assert.equal(await w.engine.authorize(callId, "entry.open"), false, "the taint was saved");
+    assert.deepEqual(await w.codes.redeem({ ...keypad("keypad-1"), code }), { ok: false }, "and the code was taken back");
+    assert.deepEqual((await w.events("access.revoked")).map((e) => e.detail.outcome), ["revoked"]);
+    assert.equal((await w.events("access.tainted")).length, 1, "the taint's own entries were appended with the next write");
+  });
+
+  it("counts a flush that throws before it returns a promise as a failure, at the end and on the sweep (round 2, second pass)", async () => {
+    const w = codesWorld();
+    const flush = w.codes.controller.flush!;
+    w.codes.controller.flush = () => {
+      throw new Error("not async");
+    };
+    const callId = await w.call();
+    await w.engine.endCall(callId);
+    assert.equal((await w.engine.state(callId)).phase, "ended");
+    assert.deepEqual(await w.engine.sweepAccess(), { failed: ["keypad"] });
+    w.codes.controller.flush = flush;
+    assert.deepEqual(await w.engine.sweepAccess(), { failed: [] });
+  });
+
   it("never texts a code to a call tainted while the code was being stored", async () => {
     const limits = new MemoryCodeStore();
     const w = codesWorld({ limits });
@@ -369,6 +396,17 @@ describe("L1 review round 2: refunds and disputes", () => {
     for (const sequence of [0, 1.5, "1"]) await assert.rejects(refund({ sequence }), rejects("invalid_input", /sequence/), String(sequence));
   });
 
+  it("refuses a refund with no sequence, or an invalid one, before any write (sequence is required)", async () => {
+    const { t, callId } = await paidCall();
+    const before = (await t.sessions.get("ws_test", callId))!.version;
+    for (const sequence of [undefined, null, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "1", 2 ** 53]) {
+      const input = { callId, paymentId: "pay_1", reason: "requested_by_customer", ...(sequence === undefined ? {} : { sequence }) };
+      await assert.rejects(t.engine.refundPayment(input as never), rejects("invalid_input", /sequence must be an integer of 1 or more/), String(sequence));
+    }
+    assert.equal((await t.sessions.get("ws_test", callId))!.version, before, "no write");
+    assert.equal(t.payments.refunds.length, 0, "the provider was never asked");
+  });
+
   it("resumes a numbered refund whose provider answer was lost with the same key, and refunds once", async () => {
     const { t, callId } = await paidCall();
     const keys: string[] = [];
@@ -397,7 +435,14 @@ describe("L1 review round 2: refunds and disputes", () => {
     assert.deepEqual(await t.engine.applyDisputeOutcome(dispute({ occurredAt: at(30) })), { applied: false }, "nothing changed, no entry");
     assert.deepEqual(await t.engine.applyDisputeOutcome(dispute({ status: "warning_needs_response", occurredAt: at(20) })), { applied: false }, "older than t30");
     assert.equal((await t.ledger.list()).filter((e) => e.event === "payment.disputed").length, 1);
-    assert.equal((await t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "requested_by_customer" })).status, "succeeded");
+    assert.equal((await t.engine.refundPayment({ sequence: 1, callId, paymentId: "pay_1", reason: "requested_by_customer" })).status, "succeeded");
+  });
+
+  it("acknowledges a connected account's dispute for a payment intent no call holds, never asking for it again (round 2, second pass)", async () => {
+    const { t } = await paidCall();
+    const dispute: DisputeOutcome = { disputeId: "dp_9", chargeId: "ch_9", paymentIntentId: "pi_unknown", status: "needs_response", amountMinor: 100, currency: "cad" };
+    assert.deepEqual(await t.engine.applyDisputeOutcome({ ...dispute, account: "acct_x" }), { applied: false });
+    assert.deepEqual(await t.engine.applyDisputeOutcome(dispute), { applied: false, unbound: true }, "the platform's own still waits");
   });
 
   it("refuses a dispute event whose created time is past what a Date can hold, without throwing", () => {

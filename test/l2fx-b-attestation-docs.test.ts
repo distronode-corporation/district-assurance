@@ -51,8 +51,18 @@ describe("docs: Twilio StirVerstat Diverted and Passthrough values", () => {
     assert.equal(rows.get("No-TN-Validation"), "none");
   });
 
-  it("SPEC section 4 names the Passed Diverted and Passthrough values as none, and why", () => {
+  // Twilio checks a Diverted value with the diverting provider's certificate and a Passthrough
+  // value with the originating provider's: each gets its own reason, never a shared one.
+  it("SPEC section 4 names the Passed Diverted and Passthrough values as none, each with its own reason", () => {
     const section = spec.slice(spec.indexOf("**Caller ID attestation.**"));
-    assert.match(section, /`TN-Validation-Passed-\{A,B,C\}-Diverted` or\s+`-Passthrough` maps to `none`, because Twilio did not verify the original signer's attestation\s+end to end/);
+    assert.match(section, /`TN-Validation-Passed-\{A,B,C\}-Diverted` maps to\s+`none`, because Twilio checked the diverting provider's signature,\s+not the original signer's/);
+    assert.match(section, /`TN-Validation-Passed-\{A,B,C\}-Passthrough`\s+maps\s+to\s+`none`\s+as\s+policy,\s+though\s+Twilio\s+checked\s+the\s+originating\s+provider's\s+signature:\s+only\s+the\s+plain\s+Passed\s+values\s+give\s+a\s+level/);
+    assert.doesNotMatch(section, /did not verify the original signer's attestation/);
+  });
+
+  it("the README gives Diverted and Passthrough each its own reason", () => {
+    assert.match(readme, /`-Diverted` is `none`: Twilio checked the\s+diverting provider's signature/);
+    assert.match(readme, /`-Passthrough` is `none` as policy, though Twilio checked\s+the originating provider's signature/);
+    assert.doesNotMatch(readme, /Twilio checked a diverting provider's signature, or one passed through/);
   });
 });

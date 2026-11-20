@@ -264,7 +264,7 @@ The release workflow is built, and nothing is published yet, by decision: `packa
 | Piece | Where | Proof |
 |---|---|---|
 | Transcript and audio forwarding (INT-2) | `src/core/forwarding.ts` | the transcript, audio to speech-to-text, audio to the model and listen-in, all held while `sensitive` is set and after the call (`test/session.test.ts`, `test/forwarding-hostile.test.ts`); the host must still ask it and obey |
-| Event delivery (INT-5) | `src/engine.ts` | the listener told at least once after each append, never awaited, its errors to `onListenerError` (`test/engine.test.ts`, `test/event-delivery-hostile.test.ts`) |
+| Event delivery (INT-5) | `src/engine.ts` | the listener told best effort, possibly more than once, after each append, never awaited, its errors to `onListenerError` (`test/engine.test.ts`, `test/event-delivery-hostile.test.ts`) |
 | Module author kit (MOD-1) | `src/testing/contracts.ts`, `examples/modules/callback.ts` | `moduleContract` and an example outside module (`test/module-contract.test.ts`, `test/module-contract-hostile.test.ts`) |
 | JSON Schema for FlowConfig (MOD-2) | `schema/flow-config.v1.json` | every config `validateConfig` accepts passes the schema (`test/config-schema.test.ts`) |
 | Factors added after construction (MOD-3) | `src/engine.ts`, `src/verify/badge.ts` | `engine.useFactor` and modules that provide factors (`test/factor-plugins-hostile.test.ts`, `test/pin.test.ts`) |

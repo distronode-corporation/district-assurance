@@ -3,8 +3,8 @@
 import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { PassThrough } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, it, type TestContext } from "node:test";
 
@@ -149,25 +149,23 @@ describe("guardLogStream", () => {
 const MAIN = fileURLToPath(new URL("../examples/reference-server/src/main.ts", import.meta.url));
 
 /**
- * Starts `npm run serve`'s program (node on main.ts) on a free port and waits for its first line.
+ * Starts `npm run serve`'s program (node on main.ts) with PORT=0 and reads the port it bound from
+ * its first line, so no other test can take the port between choosing it and listening on it.
  * `nodeArgs` go before the entry. Rejects with its standard error if it exits first.
  */
 async function startServe(ctx: TestContext, nodeArgs: string[] = []) {
-  const free = createServer();
-  await new Promise<void>((resolve) => free.listen(0, "127.0.0.1", resolve));
-  const port = (free.address() as AddressInfo).port;
-  await new Promise<void>((resolve) => free.close(() => resolve()));
-  const child = spawn(process.execPath, [...nodeArgs, MAIN], { env: { ...process.env, PORT: String(port) }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, [...nodeArgs, MAIN], { env: { ...process.env, PORT: "0" }, stdio: ["ignore", "pipe", "pipe"] });
   ctx.after(() => {
     child.kill();
   });
   let stderr = "";
   child.stderr.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
-  await new Promise<void>((resolve, reject) => {
-    child.stdout.once("data", () => resolve());
+  const banner = await new Promise<string>((resolve, reject) => {
+    firstLine(child.stdout).then(resolve, reject);
     child.once("exit", () => reject(new Error(`exited early: ${stderr}`)));
   });
-  return { child, port, stderr: () => stderr };
+  const port = Number(/^reference server on http:\/\/127\.0\.0\.1:(\d+) /.exec(banner)?.[1]);
+  return { child, port, banner, stderr: () => stderr };
 }
 
 // Node.js 24.2 sets import.meta.main to false for a .ts entry. Node 24.19 does not, so this load
@@ -182,6 +180,38 @@ registerHooks({
   },
 });
 `)}`;
+
+/** The stream's first line, without its newline: chunks are buffered until one arrives. */
+function firstLine(stream: NodeJS.ReadableStream): Promise<string> {
+  return new Promise((resolve) => {
+    let text = "";
+    const onData = (c: Buffer): void => {
+      text += c.toString("utf8");
+      const end = text.indexOf("\n");
+      if (end === -1) return;
+      stream.off("data", onData);
+      resolve(text.slice(0, end));
+    };
+    stream.on("data", onData);
+  });
+}
+
+describe("npm run serve's banner", () => {
+  it("is read through its newline, even when standard output splits it across chunks", async () => {
+    const stream = new PassThrough();
+    const line = firstLine(stream);
+    stream.write("reference server on http://127.0.0.1:");
+    await new Promise((resolve) => setImmediate(resolve));
+    stream.write("4321 (pre-alpha)\nnext");
+    assert.equal(await line, "reference server on http://127.0.0.1:4321 (pre-alpha)");
+  });
+  it("names the port the server bound, so PORT=0 gives a port that answers", { timeout: 30_000 }, async (ctx) => {
+    const { child, port, banner, stderr } = await startServe(ctx);
+    assert.ok(Number.isInteger(port) && port > 0, banner);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/healthz`)).status, 200);
+    assert.equal(child.exitCode, null, stderr());
+  });
+});
 
 describe("npm run serve's entry check", () => {
   it("starts the server where import.meta.main is false for a .ts entry, as on Node.js 24.2", { timeout: 30_000 }, async (ctx) => {

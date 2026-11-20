@@ -12,9 +12,9 @@
 // A refund is reserved in one write (one in flight per payment, the total never above what was
 // paid), its intent and idempotency key saved before the provider is asked, sent, and committed in
 // another write. Each refund of a payment has a sequence number (1 for its first refund, 2 for the
-// next) and its key is made of the payment and that number. A failed send leaves it reserved, and
-// asking again resumes it with the same key; a host that names the sequence number gets the saved
-// result back when its earlier answer was lost after the commit, so a payment is never refunded twice.
+// next), which the host must name, and its key is made of the payment and that number. A failed send
+// leaves it reserved, and asking again with its number resumes it with the same key, or gives the
+// saved result back when the host lost the answer after the commit: a payment is never refunded twice.
 import type { PaymentRefundRequest } from "../core/adapters.ts";
 import { EngineError } from "../core/errors.ts";
 import type { CallDraft, EngineRuntime } from "../core/runtime.ts";
@@ -111,12 +111,12 @@ export interface RefundInput {
   amountMinor?: number;
   reason: RefundReason;
   /**
-   * Which refund of this payment this is: 1 for its first, 2 for the next. Asking again with the
-   * same number (an answer the host lost) resumes that refund with its key, or gives its saved
-   * result back, and never refunds again; a different amount is refused. The next number starts a
-   * new refund, and any other is refused. Left out: the next refund, or the one still in flight.
+   * Required: which refund of this payment this is, 1 for its first, 2 for the next. Asking again
+   * with the same number (an answer the host lost) resumes that refund with its key, or gives its
+   * saved result back, and never refunds again; a different amount is refused. The next number
+   * starts a new refund (refused while another is in flight), and any other is refused.
    */
-  sequence?: number;
+  sequence: number;
 }
 
 export interface RefundResult {
@@ -158,9 +158,10 @@ function findPayment(draft: CallDraft, paymentId: string): Payment | undefined {
 /**
  * Refunds a paid platform payment, in full or in part, never more in total than was paid. Refused
  * while a dispute is open (the provider refuses too), for a payment not paid, and for a connect
- * payment (the business refunds those on its own account). One refund is in flight per payment:
- * asking again while it is resumes it with the same idempotency key, and a different amount is
- * refused. Works after the call ended; the receipt is never changed.
+ * payment (the business refunds those on its own account). `sequence` is required, checked before
+ * any write. One refund is in flight per payment: asking again with its number resumes it with the
+ * same idempotency key (a different amount is refused), and a new number waits for it. Works after
+ * the call ended; the receipt is never changed.
  */
 export async function refundPayment(rt: EngineRuntime, input: RefundInput): Promise<RefundResult> {
   // Read once: the amount and reason checked here are the ones refunded and recorded, so a getter
@@ -170,7 +171,8 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
   if (asked !== undefined && (!Number.isSafeInteger(asked) || asked <= 0)) {
     throw new EngineError("invalid_input", "amountMinor must be a positive integer");
   }
-  if (sequence !== undefined && (!Number.isSafeInteger(sequence) || sequence < 1)) throw new EngineError("invalid_input", "sequence must be a positive integer");
+  // Required, so a host that retries cannot refund twice: checked before any write.
+  if (!Number.isSafeInteger(sequence) || sequence < 1) throw new EngineError("invalid_input", "sequence must be an integer of 1 or more: the refund's number for this payment");
   const payments = rt.adapter("payments");
   // Optional for the adapter (no flow step needs it): a refund without it is refused here.
   if (payments.refund === undefined) throw new EngineError("precondition_failed", "the payments adapter cannot refund");
@@ -182,23 +184,16 @@ export async function refundPayment(rt: EngineRuntime, input: RefundInput): Prom
     const refunds = (payment.refunds ??= []);
     // A refund the host names by its number, made already: the same one, never a second. Its saved
     // result is given back once committed (the host lost the first answer), and resumed while in flight.
-    if (sequence !== undefined && sequence <= refunds.length) {
+    if (sequence <= refunds.length) {
       const known = refunds[sequence - 1]!;
       if (asked !== undefined && asked !== known.amountMinor) throw new EngineError("invalid_input", "that refund was made for another amount");
       return { refund: known, payment, sequence };
     }
-    if (sequence !== undefined && sequence !== refunds.length + 1) throw new EngineError("invalid_input", `the next refund of this payment is number ${refunds.length + 1}`);
-    // A refund already sent (its answer lost) is resumed with its own key whatever happened since:
-    // the provider may have made it, and only the same key learns that. The dispute guard is for
-    // new refunds.
-    const open = refunds.find((r) => r.status === "requested");
-    if (open !== undefined) {
-      if (sequence !== undefined) throw new EngineError("precondition_failed", `refund number ${refunds.indexOf(open) + 1} of this payment is still being sent; resume it first`);
-      if (asked !== undefined && asked !== open.amountMinor) {
-        throw new EngineError("invalid_input", "a refund of this payment is still being sent; resume it with the same amount");
-      }
-      return { refund: open, payment, sequence: refunds.indexOf(open) + 1 };
-    }
+    if (sequence !== refunds.length + 1) throw new EngineError("invalid_input", `the next refund of this payment is number ${refunds.length + 1}`);
+    // A new refund waits for the one in flight: it may have been made, and only its own number
+    // (with its key) learns that. The dispute guard is for new refunds.
+    const open = refunds.findIndex((r) => r.status === "requested");
+    if (open !== -1) throw new EngineError("precondition_failed", `refund number ${open + 1} of this payment is still being sent; resume it first`);
     if ((payment.disputes ?? []).some(blocksRefund)) throw new EngineError("precondition_failed", "the payment is disputed: it cannot be refunded while its dispute is open or after it was lost");
     const left = payment.amountMinor - refunded(refunds);
     if (left === 0) throw new EngineError("precondition_failed", "the payment is refunded in full");
@@ -279,7 +274,8 @@ export async function applyDisputeOutcome(rt: EngineRuntime, outcome: DisputeOut
   const callId = await rt.resolveRef(paymentIntentRef(paymentIntentId));
   // Not bound yet: the payment's own outcome may still be on its way (webhooks come in any order).
   // `unbound` tells the host to have the event delivered again rather than drop it.
-  if (callId === null) return { applied: false, unbound: true };
+  // A connected account's event is never the platform's to wait for: acknowledged, not retried.
+  if (callId === null) return account === undefined ? { applied: false, unbound: true } : { applied: false };
   return rt.update(callId, (draft) => {
     const slice = draft.slice<PaylinkSlice>(PAYLINK);
     const payment = slice.payments.find((p) => p.paymentIntentId === paymentIntentId)!;

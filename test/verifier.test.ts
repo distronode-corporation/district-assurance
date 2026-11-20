@@ -19,16 +19,29 @@ import { FixedClock, createTestEngine, generateTestSigner } from "../src/testing
 const RETIRED_AT = "2026-06-01T00:00:00.000Z";
 const SCRIPT = fileURLToPath(new URL("../scripts/verify-receipt.mjs", import.meta.url));
 
-function run(args: string[], stdin = ""): Promise<{ code: number | null; stdout: string; stderr: string }> {
+/** Past the verifier's own 10 s bound on fetching a key set, so only a verifier that stalls reaches it. */
+const RUN_DEADLINE_MS = 20_000;
+
+function run(args: string[], stdin = "", deadlineMs = RUN_DEADLINE_MS): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [SCRIPT, ...args]);
     // A child that cannot start rejects this run, rather than throwing out of the test.
     child.on("error", reject);
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    // A stalled verifier is killed, so it never outlives the test, and the run rejects with its case.
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, deadlineMs);
     child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
     child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.on("close", (code, signal) => {
+      clearTimeout(deadline);
+      if (timedOut) reject(new Error(`the verifier did not exit within ${deadlineMs} ms and was killed (${signal}): ${JSON.stringify(args)}`));
+      else resolve({ code, stdout, stderr });
+    });
     child.stdin.end(stdin);
   });
 }
@@ -164,6 +177,19 @@ describe("stand-alone receipt verifier (PRV-2)", () => {
         assert.match(result.stderr, message);
       }),
     );
+  });
+
+  it("kills a verifier that stalls, and names the case it was running", async () => {
+    // A key set URL that accepts the connection and never answers: the verifier waits on it.
+    const stalled = createServer(() => undefined);
+    await new Promise<void>((resolve) => stalled.listen(0, "127.0.0.1", resolve));
+    try {
+      const args = [file("receipt.json", receipt), `http://127.0.0.1:${(stalled.address() as AddressInfo).port}/keys.json`];
+      await assert.rejects(run(args, "", 300), (e: unknown) => e instanceof Error && e.message === `the verifier did not exit within 300 ms and was killed (SIGKILL): ${JSON.stringify(args)}`);
+    } finally {
+      stalled.closeAllConnections();
+      await new Promise((resolve) => stalled.close(resolve));
+    }
   });
 
   it("stops reading standard input past 1 MiB, without waiting for it to end", { timeout: 30_000 }, async (t) => {

@@ -350,7 +350,7 @@ describe("#124 slot 1: clearDuress", () => {
   // Sean, 2026-11-19: accepted and documented. AttemptCounters has no compare-and-set, so a clearing
   // that lands between a delivery's read of the clearings and its write of the flag is undone: the
   // subject stays flagged (fail closed), and clearing again works.
-  it("Z12 a clearing that lands during an alert's delivery may be undone: the subject stays flagged, and a second clearing holds", async () => {
+  it("Z12 a clearing that lands during an alert's delivery holds (U7): the delivery takes its flag back", async () => {
     class Holding extends MemoryAttemptCounters {
       hold: { gate: Promise<void>; reached: () => void } | null = null;
       override async get(key: AttemptCounterKey, since: string): Promise<string[]> {
@@ -383,11 +383,6 @@ describe("#124 slot 1: clearDuress", () => {
     const owner = await call(t);
     await t.engine.submitPin(owner, PIN);
     await t.engine.finishVerification(owner);
-    assert.equal(await t.engine.authorize(owner, "owner.command"), false, "fail closed: still flagged");
-    await t.engine.clearDuress(OWNER, "member-7");
-    const again = await call(t);
-    await t.engine.submitPin(again, PIN);
-    await t.engine.finishVerification(again);
-    assert.equal(await t.engine.authorize(again, "owner.command"), true, "the second clearing holds");
+    assert.equal(await t.engine.authorize(owner, "owner.command"), true, "the first clearing holds");
   });
 });
