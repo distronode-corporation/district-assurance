@@ -111,6 +111,8 @@ form parameters, Telnyx uses Ed25519), and each will be built against the carrie
 vectors (SRV-1). Until then a carrier route can never be trusted by accident.
 **Amended (modular core):** the carriers are Twilio and Telnyx. Sinch is out of scope for now; its
 stub and route are removed, and `CarrierSignals` stays vendor-neutral so it can be added later.
+**Amended (SRV-1):** both carrier checks are built and tested (SPEC.md, section 17); the stubs
+and the 501 answers are gone.
 
 ## ADR-12. The package is private until a release is decided
 

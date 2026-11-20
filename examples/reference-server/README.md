@@ -62,14 +62,52 @@ How the page is kept small and safe:
   A real receiver must store them durably, and mark a key received in the same transaction that
   applies the record.
 
+## security.txt
+
+`createReferenceServer({ ..., securityTxt })` serves `GET /.well-known/security.txt` (RFC 9116)
+as `text/plain; charset=utf-8`, built from the host's own settings:
+
+```ts
+createReferenceServer({
+  engine,
+  clock,
+  stripeSecrets,
+  securityTxt: {
+    contact: ["mailto:security@example.test", "https://example.test/report"], // one or more
+    expires: new Date("2027-06-30T00:00:00Z"), // exactly one
+    policy: "https://example.test/disclosure", // optional
+    canonical: "https://example.test/.well-known/security.txt", // optional
+  },
+  warn: (message) => log.warn(message), // optional, default console.warn
+});
+```
+
+- Without `securityTxt` there is no such route (`404`). There is no default: a security.txt speaks
+  only for the domain it is served from, so it is never this project's address, and settings that
+  name this project's own reporting address (its email or its GitHub repository) are refused at
+  start. Reports about this code go through [SECURITY.md](../../SECURITY.md).
+- A contact is a `mailto:`, `tel:` or `https:` URI; `policy` and `canonical` are `https:` URLs.
+  Each must be one line of printable ASCII, so a value cannot add a field of its own. A `tel:`
+  contact is a global number (RFC 3966): `+`, then digits and the separators `-`, `.`, `(` and
+  `)`, with at least one digit, so a local number, a parameter, an escape or `tel:` alone is refused.
+- The settings are checked when the server is created, on its clock. An `expires` that is not in
+  the future, or more than a year ahead (the RFC's advice), is refused with an error, so the server
+  does not start. One within 30 days starts with a warning through `warn`. A server that runs into
+  the last 30 days warns once, on the first request for the file after that, and one still running
+  when `expires` passes stops serving the file and warns once more. A `warn` that throws, or
+  answers a promise that rejects, loses that warning and is not told it again; the route answers
+  as it would have.
+- RFC 9116 requires HTTPS. This server speaks plain HTTP, so the host's TLS front end serves the
+  file to the world. Signing it (an OpenPGP cleartext signature, which the RFC recommends) is the
+  host's too: this server serves the file unsigned, and a host that signs it serves its signed
+  copy from the front end instead.
+
 ## Files
 
 | File | |
 |---|---|
-| `src/app.ts` | `createReferenceServer({ engine, stripeSecrets, clock })`: the routes |
+| `src/app.ts` | `createReferenceServer({ engine, stripeSecrets, clock, receiptLinks })`: the routes, `ReceiptLinks`, the receipt page and the security.txt checks |
 | `src/script.ts` | the scripted calls, one step at a time, and the demo's records, engines and door relay |
-| `src/app.ts` | `createReferenceServer({ engine, stripeSecrets, clock, receiptLinks })`: the routes, `ReceiptLinks` and the receipt page |
-| `src/script.ts` | the scripted calls, one step at a time, and the demo's records and engines |
 | `src/demo.ts` | `npm run demo`: every step in a row; `runDemo(false)` is also run by the test suite |
 | `src/demo-runs.ts` | the UI's runs: one step per request, and the run's state, ledger and chain check |
 | `src/static.ts` | the UI's file allow-list and its headers |
@@ -81,6 +119,47 @@ How the page is kept small and safe:
 | `src/e2e.ts` | `npm run demo:e2e`: the UI, the door relay and a real Stripe Checkout in test mode; `owner-command` and `visit` |
 | `src/stripe-adapters.ts` | `StripeCheckoutLinks`, a minimal PAY-1 Checkout adapter (test-mode keys only, platform mode, built-in fetch), and `StripeIdentityProvider`, the Stripe Identity adapter (VER-5) |
 | `src/carrier-adapters.ts` | Twilio Lookup and Telnyx Number Lookup carrier signal adapters (VER-4) |
+| `src/sqlite-stores.ts` | `openSqliteStores(path)`: optional persistent ledger and record store on `node:sqlite` (SRV-4); see below |
+
+## Persistent stores (SQLite)
+
+`openSqliteStores(path)` keeps the ledger, the subjects and the confirmed records in one SQLite
+file, so a restarted server keeps them.
+
+**The file-backed stores are POSIX only. On Windows, `openSqliteStores` refuses a database file**:
+mode 0600 sets no ACL there, so the file would be as readable as its folder, and there is no
+option to allow it. A Windows host uses another store: its own `RecordStore` and `AuditLedger`
+(checked with `recordStoreContract` and `auditLedgerContract`). `openSqliteStores(":memory:")`
+opens on every platform but keeps nothing across a restart: it is for tests only.
+
+The file holds subjects and records, so it is kept owner-only:
+
+- A new file is created exclusively, with mode 0600, in a private folder beside it and hard-linked
+  into place before SQLite opens it, so a new database file needs a filesystem with hard links
+  (one without them, such as exFAT, is refused). An existing file, or a `-wal`,
+  `-shm` or `-journal` file beside it, that group or others can read or write is refused (chmod 600
+  first).
+- A symbolic link, at the path or beside it, is refused: SQLite would use the files beside the
+  link's target, not the ones checked. Give the target's own path.
+- A database file with a second hard link is refused: SQLite names the WAL after the name it
+  opens, so two names would keep two WALs for one database. The only second link allowed is the
+  brief one while another opener creates the file (its private name, which it removes next).
+- The checks read files by name before SQLite opens them, so the host must keep other accounts
+  from changing the names in between, and this is enforced: **the database's directory must be
+  owned by the server's user and not writable by group or others (chmod 700), and no directory
+  above it may be writable by others unless it has the sticky bit** (as `/tmp` has). Otherwise the
+  open is refused before any file is created.
+- An existing file is checked by path, never opened outside SQLite, since closing a descriptor on
+  it would drop the locks another SQLite connection in the process holds on it.
+- A `file:` URI is refused, since its file would not get the mode.
+
+The journal mode depends on the SQLite that Node bundles. SQLite's
+[WAL-reset bug](https://sqlite.org/wal.html#walresetbug) (every version from 3.7.0 through
+3.51.2) can corrupt a WAL-mode database when two connections in separate threads or processes
+write or checkpoint at the same instant. So the file is in WAL mode only on a build with the fix
+(3.51.3 or later, except the withdrawn 3.52.0, or the 3.44.6 and 3.50.7 backports); an older one,
+such as the SQLite 3.50.0 in Node 24.2, uses a rollback journal (`journal_mode = DELETE`), and
+moves a file left in WAL mode back to one. Readers then wait for a writer, which is slower but safe.
 
 ## Trying it with your own Stripe test account
 

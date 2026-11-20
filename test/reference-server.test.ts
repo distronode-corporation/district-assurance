@@ -1,11 +1,29 @@
 // The reference server, over a real socket on 127.0.0.1, and the scripted demo.
 import { strict as assert } from "node:assert";
-import type { JsonWebKey } from "node:crypto";
-import type { AddressInfo } from "node:net";
-import { after, before, describe, it } from "node:test";
+import { createHmac, createPublicKey, generateKeyPairSync, sign, type JsonWebKey } from "node:crypto";
+import { request } from "node:http";
+import { connect, type AddressInfo } from "node:net";
+import { after, before, describe, it, type TestContext } from "node:test";
 
-import { ReceiptLinks, SEEN_EVENT_MAX, SEEN_EVENT_TTL_MS, SeenEvents, createReferenceServer } from "../examples/reference-server/src/app.ts";
+import {
+  DEFAULT_BODY_LIMITS,
+  ReceiptLinks,
+  SEEN_EVENT_MAX,
+  SEEN_EVENT_TTL_MS,
+  SeenEvents,
+  createReferenceServer,
+  logJsonLines,
+  rateLimitKey,
+  securityTxt,
+  type BodyLimits,
+  type ReferenceServerOptions,
+  type RequestLog,
+  type SecurityTxtSettings,
+} from "../examples/reference-server/src/app.ts";
+import { DemoRuns } from "../examples/reference-server/src/demo-runs.ts";
 import { runDemo } from "../examples/reference-server/src/demo.ts";
+import { createServe } from "../examples/reference-server/src/main.ts";
+import { createDemoWorld } from "../examples/reference-server/src/script.ts";
 import { createDoorRelay } from "../examples/reference-server/src/door-relay.ts";
 import {
   MemoryDocumentStore,
@@ -30,16 +48,29 @@ import { FixedClock, createTestEngine, generateTestSigner, type TestEngine } fro
 /** When k1 stopped signing: after the test clock's receipts (2026-01-01), so they predate it. */
 const RETIRED_AT = "2026-06-01T00:00:00.000Z";
 const SECRET = "whsec_test_not_a_secret";
+const TWILIO_TOKEN = "twilio_token_not_a_secret";
+const TWILIO_ORIGIN = "https://voice.example.test";
+const TELNYX_PRIVATE = generateKeyPairSync("ed25519").privateKey;
+const TELNYX_KEY = Buffer.from(createPublicKey(TELNYX_PRIVATE).export({ format: "jwk" }).x!, "base64url").toString("base64");
 
 describe("reference server", () => {
   let t: TestEngine;
   let base = "";
   let close: () => Promise<void>;
   const links = new ReceiptLinks();
+  const logs: RequestLog[] = [];
 
   before(async () => {
     t = createTestEngine();
-    const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [SECRET], payments: [] }, clock: t.clock, maxBodyBytes: 1024, receiptLinks: links });
+    const server = createReferenceServer({
+      engine: t.engine,
+      stripeSecrets: { identity: [SECRET], payments: [] },
+      carriers: { twilio: { authTokens: [TWILIO_TOKEN], publicOrigin: TWILIO_ORIGIN }, telnyx: { publicKeys: [TELNYX_KEY] } },
+      clock: t.clock,
+      bodyLimits: { stripeIdentity: 1024 },
+      receiptLinks: links,
+      log: (entry) => logs.push(entry),
+    });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     close = () => new Promise((resolve) => server.close(() => resolve()));
@@ -185,14 +216,87 @@ describe("reference server", () => {
     }
   });
 
-  it("refuses a body over the limit", async () => {
-    const res = await post("/webhooks/stripe/identity", "x".repeat(5000));
+  it("refuses a body over its route's limit, declared or streamed", async () => {
+    let res = await post("/webhooks/stripe/identity", "x".repeat(5000));
     assert.deepEqual([res.status, await res.json()], [413, { error: "body_too_large" }]);
+    // No Content-Length: the body arrives in chunks and is cut off once it passes the limit.
+    const streamed = await raw(base, "POST", "/webhooks/stripe/identity", { "transfer-encoding": "chunked" }, ["x".repeat(800), "x".repeat(800)]);
+    assert.deepEqual([streamed.status, JSON.parse(streamed.body)], [413, { error: "body_too_large" }]);
+    // The payments route keeps its own default of 64 KiB, so the same body reaches the signature check.
+    res = await post("/webhooks/stripe/payments", "x".repeat(5000));
+    assert.deepEqual([res.status, await res.json()], [400, { error: "signature", reason: "no_secret" }]);
+    res = await post("/webhooks/stripe/payments", "x".repeat(DEFAULT_BODY_LIMITS.stripePayments + 1));
+    assert.equal(res.status, 413);
   });
 
-  it("answers 501 on the carrier webhooks that are not built", async () => {
-    const res = await post("/webhooks/twilio", "");
-    assert.deepEqual([res.status, await res.json()], [501, { error: "not_implemented", issue: "SRV-1", carrier: "twilio" }]);
+  it("logs one entry per request, by route pattern, without paths, tokens, headers or bodies", async () => {
+    logs.length = 0;
+    const { callId } = await t.engine.startCall();
+    await t.engine.endCall(callId);
+    const token = links.issue(callId);
+    assert.equal((await fetch(`${base}/r/${token}.json?token=tok_not_a_secret`)).status, 200);
+    assert.equal((await fetch(`${base}/r/${token}`)).status, 200);
+    const body = event("evt_log", "identity.verification_session.verified", { id: "vs_secret_session" });
+    await post("/webhooks/stripe/identity", body, { ...signed(body), authorization: "Bearer not_a_secret_token" });
+    await post("/webhooks/stripe/identity", body, { "stripe-signature": "t=1,v1=00" });
+    await post("/webhooks/telnyx", "{}");
+    await fetch(`${base}/nope/${callId}`);
+    const time = t.clock.now().toISOString();
+    assert.deepEqual(
+      logs.map(({ ms, ...entry }) => {
+        assert.ok(Number.isInteger(ms) && ms >= 0);
+        return entry;
+      }),
+      [
+        { time, address: "127.0.0.1", method: "GET", route: "/r/:token.json", status: 200 },
+        { time, address: "127.0.0.1", method: "GET", route: "/r/:token", status: 200 },
+        { time, address: "127.0.0.1", method: "POST", route: "/webhooks/stripe/identity", status: 200 },
+        { time, address: "127.0.0.1", method: "POST", route: "/webhooks/stripe/identity", status: 400, error: "signature" },
+        { time, address: "127.0.0.1", method: "POST", route: "/webhooks/telnyx", status: 400, error: "signature" },
+        { time, address: "127.0.0.1", method: "GET", route: "unmatched", status: 404, error: "not_found" },
+      ],
+    );
+    const text = JSON.stringify(logs);
+    for (const leak of [callId, token, "tok_not_a_secret", "not_a_secret_token", "evt_log", "vs_secret_session", "v1=", SECRET]) assert.equal(text.includes(leak), false, leak);
+  });
+
+  it("writes log entries as JSON lines with logJsonLines", (ctx) => {
+    const write = ctx.mock.method(process.stdout, "write", () => true);
+    const entry: RequestLog = { time: "2026-01-01T00:00:00.000Z", address: "127.0.0.1", method: "GET", route: "/healthz", status: 200, ms: 0 };
+    logJsonLines(entry);
+    write.mock.restore();
+    assert.deepEqual(
+      write.mock.calls.map((c) => c.arguments[0]),
+      [`${JSON.stringify(entry)}\n`],
+    );
+  });
+
+  it("checks Twilio signatures against the public URL, query included", async () => {
+    const body = "CallSid=CA1234567890ABCDE&Digits=1234";
+    const url = `${TWILIO_ORIGIN}/webhooks/twilio?foo=1`;
+    const signature = createHmac("sha1", TWILIO_TOKEN).update(`${url}CallSidCA1234567890ABCDEDigits1234`).digest("base64");
+    const form = { "content-type": "application/x-www-form-urlencoded" };
+    let res = await post("/webhooks/twilio?foo=1", body, { ...form, "x-twilio-signature": signature });
+    assert.deepEqual([res.status, await res.json()], [200, { received: true }]);
+    res = await post("/webhooks/twilio?foo=2", body, { ...form, "x-twilio-signature": signature });
+    assert.deepEqual([res.status, await res.json()], [400, { error: "signature", reason: "no_matching_signature" }]);
+    res = await post("/webhooks/twilio?foo=1", body, form);
+    assert.deepEqual([res.status, await res.json()], [400, { error: "signature", reason: "missing_header" }]);
+    assert.equal((await fetch(`${base}/webhooks/twilio`)).status, 405);
+  });
+
+  it("checks Telnyx signatures and their timestamp", async () => {
+    const body = '{"data":{"event_type":"call.initiated"}}';
+    const stamp = `${Math.floor(t.clock.now().getTime() / 1000)}`;
+    const signature = sign(null, Buffer.from(`${stamp}|${body}`), TELNYX_PRIVATE).toString("base64");
+    let res = await post("/webhooks/telnyx", body, { "telnyx-signature-ed25519": signature, "telnyx-timestamp": stamp });
+    assert.deepEqual([res.status, await res.json()], [200, { received: true }]);
+    res = await post("/webhooks/telnyx", `${body} `, { "telnyx-signature-ed25519": signature, "telnyx-timestamp": stamp });
+    assert.deepEqual([res.status, await res.json()], [400, { error: "signature", reason: "no_matching_signature" }]);
+    res = await post("/webhooks/telnyx", body, { "telnyx-signature-ed25519": signature, "telnyx-timestamp": `${Number(stamp) - 301}` });
+    assert.deepEqual([res.status, await res.json()], [400, { error: "signature", reason: "timestamp_out_of_tolerance" }]);
+    res = await post("/webhooks/telnyx", body);
+    assert.deepEqual([res.status, await res.json()], [400, { error: "signature", reason: "missing_header" }]);
   });
 
   it("serves a receipt only by its link token: the page, the JSON, and one 404 for everything else", async () => {
@@ -279,8 +383,13 @@ describe("reference server", () => {
     const brokenLinks = new ReceiptLinks();
     const server = createReferenceServer({ engine: broken, stripeSecrets: { identity: [], payments: [] }, clock: t.clock, receiptLinks: brokenLinks });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/r/${brokenLinks.issue("c1")}`);
+    const other = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const res = await fetch(`${other}/r/${brokenLinks.issue("c1")}`);
     assert.deepEqual([res.status, await res.json()], [500, { error: "internal" }]);
+    for (const carrier of ["twilio", "telnyx"]) {
+      const refused = await fetch(`${other}/webhooks/${carrier}`, { method: "POST", body: "" });
+      assert.deepEqual([refused.status, await refused.json()], [400, { error: "signature", reason: "no_secret" }], `${carrier} without keys refuses everything`);
+    }
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
@@ -302,6 +411,354 @@ describe("reference server", () => {
     }
   });
 });
+
+describe("reference server limits", () => {
+  /** A server on `host`, closed when the test ends, passed or failed. */
+  async function serve(ctx: TestContext, options: Partial<ReferenceServerOptions>, host = "127.0.0.1"): Promise<{ base: string; port: number }> {
+    const t = createTestEngine();
+    const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [], payments: [] }, clock: t.clock, ...options });
+    await new Promise<void>((resolve) => server.listen(0, host, resolve));
+    ctx.after(
+      () =>
+        new Promise<void>((resolve) => {
+          server.closeAllConnections();
+          server.close(() => resolve());
+        }),
+    );
+    const port = (server.address() as AddressInfo).port;
+    return { base: `http://127.0.0.1:${port}`, port };
+  }
+
+  it("gives every route that reads a body its own limit", async (ctx) => {
+    const own: Array<[string, keyof BodyLimits, number]> = [
+      ["/webhooks/stripe/identity", "stripeIdentity", 11],
+      ["/webhooks/stripe/payments", "stripePayments", 12],
+      ["/webhooks/stripe/connect", "stripeConnect", 13],
+      ["/webhooks/records", "records", 14],
+      ["/webhooks/twilio", "twilio", 15],
+      ["/webhooks/telnyx", "telnyx", 16],
+    ];
+    const s = await serve(ctx, { bodyLimits: Object.fromEntries(own.map(([, name, max]) => [name, max])) });
+    for (const [path, name, max] of own) {
+      const at = await fetch(`${s.base}${path}`, { method: "POST", body: "x".repeat(max) });
+      assert.deepEqual([at.status, ((await at.json()) as { error: string }).error], [400, "signature"], `${name}: a body at its limit is read`);
+      const over = await fetch(`${s.base}${path}`, { method: "POST", body: "x".repeat(max + 1) });
+      assert.deepEqual([over.status, await over.json()], [413, { error: "body_too_large" }], `${name}: one byte over is refused`);
+    }
+  });
+
+  it("labels the security.txt, receipt link, upload and record routes by pattern", async (ctx) => {
+    const logs: RequestLog[] = [];
+    const clock = new FixedClock();
+    const scanner = { scan: async () => ({ clean: true }) };
+    const s = await serve(ctx, {
+      clock,
+      securityTxt: { contact: ["mailto:security@example.org"], expires: new Date(clock.now().getTime() + 90 * 24 * 60 * 60 * 1000) },
+      warn: () => {},
+      receiptLinks: new ReceiptLinks(),
+      uploads: { documents: new MemoryDocumentStore(), scanner },
+      log: (e) => logs.push(e),
+    });
+    assert.equal((await fetch(`${s.base}/.well-known/security.txt`)).status, 200);
+    assert.equal((await fetch(`${s.base}/r/tok_secret_link`)).status, 404);
+    assert.equal((await fetch(`${s.base}/r/tok_secret_link.json`)).status, 404);
+    assert.equal((await fetch(`${s.base}/u/upl_secret_link`)).status, 410);
+    assert.equal((await fetch(`${s.base}/u/upl_secret_link`, { method: "PUT" })).status, 405);
+    assert.equal((await fetch(`${s.base}/webhooks/records`, { method: "POST", body: "{}" })).status, 400);
+    assert.equal((await fetch(`${s.base}/webhooks/stripe/connect`, { method: "POST", body: "{}" })).status, 400);
+    assert.equal((await fetch(`${s.base}/webhooks/twilio`, { method: "POST", body: "a=1" })).status, 400);
+    assert.deepEqual(
+      logs.map((e) => [e.method, e.route, e.status]),
+      [
+        ["GET", "/.well-known/security.txt", 200],
+        ["GET", "/r/:token", 404],
+        ["GET", "/r/:token.json", 404],
+        ["GET", "/u/:token", 410],
+        ["PUT", "/u/:token", 405],
+        ["POST", "/webhooks/records", 400],
+        ["POST", "/webhooks/stripe/connect", 400],
+        ["POST", "/webhooks/twilio", 400],
+      ],
+    );
+    assert.equal(JSON.stringify(logs).includes("secret_link"), false, "no token in the log");
+  });
+
+  it("logs each request of npm run serve as a JSON line by default, or to the sink it is given", async (ctx) => {
+    const entries: RequestLog[] = [];
+    const given = createServe({ env: {}, log: (e) => entries.push(e) }).server;
+    const fallback = createServe({ env: {} }).server;
+    const write = ctx.mock.method(process.stdout, "write", () => true);
+    try {
+      for (const server of [given, fallback]) {
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/healthz`);
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    } finally {
+      write.mock.restore();
+    }
+    assert.deepEqual(entries.map((e) => [e.route, e.status]), [["/healthz", 200]]);
+    // The test runner writes its own reports to standard output too: only the log's lines are read.
+    const lines = write.mock.calls
+      .map((c) => c.arguments[0])
+      .filter((chunk): chunk is string => typeof chunk === "string" && chunk.startsWith('{"time":'))
+      .map((line) => JSON.parse(line) as RequestLog);
+    assert.deepEqual(lines.map((e) => [e.route, e.status]), [["/healthz", 200]]);
+  });
+
+  it("limits each address to a number of requests per window, on the rate limit's clock", async (ctx) => {
+    const clock = new FixedClock();
+    const logs: RequestLog[] = [];
+    const s = await serve(ctx, { clock, rateLimit: { requests: 2, windowMs: 60_000, clock }, log: (e) => logs.push(e) });
+    assert.equal((await fetch(`${s.base}/healthz`)).status, 200);
+    assert.equal((await fetch(`${s.base}/nope`)).status, 404, "every request counts, matched or not");
+    let res = await fetch(`${s.base}/healthz`, { headers: { "x-forwarded-for": "192.0.2.1" } });
+    assert.deepEqual([res.status, res.headers.get("retry-after"), await res.json()], [429, "60", { error: "rate_limited" }], "X-Forwarded-For is not trusted");
+    clock.advance(45_500);
+    res = await fetch(`${s.base}/healthz`);
+    assert.deepEqual([res.status, res.headers.get("retry-after")], [429, "15"]);
+    clock.advance(14_500);
+    assert.equal((await fetch(`${s.base}/healthz`)).status, 200, "a new window");
+    assert.deepEqual(
+      logs.map((e) => [e.route, e.status, e.error]),
+      [
+        ["/healthz", 200, undefined],
+        ["unmatched", 404, "not_found"],
+        ["unmatched", 429, "rate_limited"],
+        ["unmatched", 429, "rate_limited"],
+        ["/healthz", 200, undefined],
+      ],
+    );
+  });
+
+  it("counts windows on the rate limit's own clock, so a server on the demo's fixed clock is never locked out", async (ctx) => {
+    // npm run ui and npm run demo give the server the demo's FixedClock, which never moves.
+    const serverClock = new FixedClock();
+    const rateClock = new FixedClock();
+    const s = await serve(ctx, { clock: serverClock, rateLimit: { requests: 1, windowMs: 60_000, clock: rateClock } });
+    assert.equal((await fetch(`${s.base}/healthz`)).status, 200);
+    assert.equal((await fetch(`${s.base}/healthz`)).status, 429);
+    serverClock.advance(60_000);
+    assert.equal((await fetch(`${s.base}/healthz`)).status, 429, "the server's clock does not end a window");
+    rateClock.advance(60_000);
+    assert.equal((await fetch(`${s.base}/healthz`)).status, 200, "the rate limit's clock does");
+    const d = await serve(ctx, { clock: serverClock, rateLimit: { requests: 1, windowMs: 60_000 } });
+    assert.equal((await fetch(`${d.base}/healthz`)).status, 200);
+    serverClock.advance(120_000);
+    assert.equal((await fetch(`${d.base}/healthz`)).status, 429, "by default the system clock counts the window, not the server's");
+  });
+
+  it("refuses a limit that would switch itself off, or refuse everything, when the server is created", () => {
+    const t = createTestEngine();
+    const base = { engine: t.engine, stripeSecrets: { identity: [], payments: [] }, clock: t.clock };
+    const bad: Array<[string, Partial<ReferenceServerOptions>]> = [
+      ["windowMs 0 is a new window every request", { rateLimit: { requests: 2, windowMs: 0 } }],
+      ["windowMs NaN never ends a window", { rateLimit: { requests: 2, windowMs: Number.NaN } }],
+      ["requests NaN is never over", { rateLimit: { requests: Number.NaN, windowMs: 60_000 } }],
+      ["requests 0 refuses everything", { rateLimit: { requests: 0, windowMs: 60_000 } }],
+      ["requests 1.5", { rateLimit: { requests: 1.5, windowMs: 60_000 } }],
+      ["addresses 0", { rateLimit: { requests: 1, windowMs: 60_000, addresses: 0 } }],
+      ["timeoutMs 0 turns node:http's receive deadline off", { timeoutMs: 0 }],
+      ["timeoutMs past what setTimeout can wait", { timeoutMs: 2 ** 31 }],
+      ["a NaN body limit is never passed", { bodyLimits: { stripePayments: Number.NaN } }],
+      ["a negative body limit", { bodyLimits: { demo: -1 } }],
+      ["a zero records limit", { bodyLimits: { records: 0 } }],
+      ["a fractional Telnyx limit", { bodyLimits: { telnyx: 0.5 } }],
+    ];
+    for (const [label, options] of bad) {
+      assert.throws(() => createReferenceServer({ ...base, ...options }), /must be a whole number from 1/, label);
+    }
+    assert.ok(createReferenceServer({ ...base, timeoutMs: 2 ** 31 - 1, rateLimit: { requests: 1, windowMs: 1, addresses: 1 }, bodyLimits: { demo: 1 } }));
+  });
+
+  it("counts an IPv6 address by its /64 and an IPv4-mapped one as its IPv4 address, and logs what it counts", async (ctx) => {
+    // On every address, IPv4 loopback reaches the socket as ::ffff:127.0.0.1.
+    const clock = new FixedClock();
+    const logs: RequestLog[] = [];
+    const s = await serve(ctx, { clock, rateLimit: { requests: 1, windowMs: 60_000, clock }, log: (e) => logs.push(e) }, "::");
+    assert.equal((await fetch(`http://127.0.0.1:${s.port}/healthz`)).status, 200);
+    assert.equal((await fetch(`http://[::1]:${s.port}/healthz`)).status, 200, "IPv6 loopback is another /64");
+    assert.deepEqual(
+      logs.map((e) => e.address),
+      ["127.0.0.1", "0:0:0:0::/64"],
+    );
+    // One subscriber usually holds a whole /64, so counting each address would let it rotate freely.
+    for (const [a, b] of [
+      ["2001:db8:1:2::1", "2001:db8:1:2:ffff:ffff:ffff:fffe"],
+      ["2001:0DB8:0001:0002:0:0:0:9", "2001:db8:1:2::a%eth0"],
+      ["::1", "::"],
+      ["64:ff9b::192.0.2.1", "64:ff9b::198.51.100.7"],
+    ]) {
+      assert.equal(rateLimitKey(a!), rateLimitKey(b!), `${a} and ${b} share a /64`);
+    }
+    assert.equal(rateLimitKey("2001:db8:1:2::1"), "2001:db8:1:2::/64");
+    assert.notEqual(rateLimitKey("2001:db8:1:2::1"), rateLimitKey("2001:db8:1:3::1"), "the next /64 is another caller");
+    assert.equal(rateLimitKey("::ffff:192.0.2.1"), "192.0.2.1");
+    assert.equal(rateLimitKey("::FFFF:192.0.2.1"), "192.0.2.1");
+    assert.equal(rateLimitKey("192.0.2.1"), "192.0.2.1");
+    assert.equal(rateLimitKey("unknown"), "unknown");
+  });
+
+  it("tracks a bounded number of addresses, forgetting ended windows first, then the oldest", async (ctx) => {
+    const clock = new FixedClock();
+    // Listening on every address, so the same server sees IPv4 and IPv6 loopback as two callers.
+    const s = await serve(ctx, { clock, rateLimit: { requests: 1, windowMs: 60_000, addresses: 1, clock } }, "::");
+    const v4 = `http://127.0.0.1:${s.port}/healthz`;
+    const v6 = `http://[::1]:${s.port}/healthz`;
+    assert.equal((await fetch(v4)).status, 200);
+    assert.equal((await fetch(v4)).status, 429);
+    assert.equal((await fetch(v6)).status, 200, "the IPv4 window is dropped, though not ended, to make room");
+    assert.equal((await fetch(v4)).status, 200, "and so IPv4 starts again");
+    clock.advance(60_000);
+    assert.equal((await fetch(v6)).status, 200, "the ended IPv4 window makes room");
+    assert.equal((await fetch(v6)).status, 429);
+  });
+
+  it("answers 503 when a request takes longer than its deadline", async (ctx) => {
+    const logs: RequestLog[] = [];
+    const links = new ReceiptLinks();
+    const token = links.issue("call_slow");
+    const engine = { receipt: () => new Promise(() => undefined) } as unknown as Engine;
+    const s = await serve(ctx, { engine, receiptLinks: links, timeoutMs: 100, log: (e) => logs.push(e) });
+    const res = await fetch(`${s.base}/r/${token}.json`);
+    assert.deepEqual([res.status, await res.json()], [503, { error: "timeout" }]);
+    assert.deepEqual(logs.map((e) => [e.route, e.status, e.error]), [["/r/:token.json", 503, "timeout"]]);
+  });
+
+  it("disconnects a client that sends its headers too slowly with a 408, in JSON, and logs it", async (ctx) => {
+    const logs: RequestLog[] = [];
+    const s = await serve(ctx, { timeoutMs: 100, log: (e) => logs.push(e) });
+    // The headers never end, so no handler runs: node:http times the request out.
+    const answer = await rawSocket(s.port, "POST /webhooks/stripe/identity HTTP/1.1\r\nhost: 127.0.0.1\r\n");
+    assert.match(answer, /^HTTP\/1\.1 408 Request Timeout\r\n/);
+    assert.match(answer, /\r\ncontent-type: application\/json; charset=utf-8\r\n/);
+    assert.match(answer, /\r\nconnection: close\r\n/);
+    assert.equal(answer.slice(answer.indexOf("\r\n\r\n") + 4), JSON.stringify({ error: "request_timeout" }));
+    assert.deepEqual(
+      logs.map((e) => [e.address, e.method, e.route, e.status, e.error]),
+      [["127.0.0.1", "unknown", "unmatched", 408, "request_timeout"]],
+    );
+  });
+
+  it("answers and logs once when a body arrives too slowly", async (ctx) => {
+    const logs: RequestLog[] = [];
+    const s = await serve(ctx, { timeoutMs: 100, log: (e) => logs.push(e) });
+    // The headers end but the body never does: whichever deadline comes first answers, once.
+    const answer = await rawSocket(s.port, "POST /webhooks/stripe/identity HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 10\r\n\r\nab");
+    const status = Number(/^HTTP\/1\.1 (\d{3}) /.exec(answer)![1]);
+    assert.ok(status === 408 || status === 503, answer);
+    assert.equal(answer.match(/HTTP\/1\.1 /g)!.length, 1, "one answer");
+    // node:http checks its deadline every 100 ms here, so give a late check time to run.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.deepEqual(
+      logs.map((e) => [e.method, e.route, e.status]),
+      [["POST", "/webhooks/stripe/identity", status]],
+    );
+  });
+
+  it("refuses requests node:http cannot read in JSON, and logs them", async (ctx) => {
+    const logs: RequestLog[] = [];
+    const s = await serve(ctx, { log: (e) => logs.push(e) });
+    const bodyOf = (answer: string) => JSON.parse(answer.slice(answer.indexOf("\r\n\r\n") + 4)) as unknown;
+    let answer = await rawSocket(s.port, "NOT HTTP AT ALL\r\n\r\n");
+    assert.match(answer, /^HTTP\/1\.1 400 Bad Request\r\n/);
+    assert.deepEqual(bodyOf(answer), { error: "bad_request" });
+    answer = await rawSocket(s.port, `GET /healthz HTTP/1.1\r\nhost: 127.0.0.1\r\nx-big: ${"x".repeat(20_000)}\r\n\r\n`);
+    assert.match(answer, /^HTTP\/1\.1 431 /);
+    assert.deepEqual(bodyOf(answer), { error: "headers_too_large" });
+    answer = await rawSocket(s.port, `POST /webhooks/stripe/identity HTTP/1.1\r\nhost: 127.0.0.1\r\ntransfer-encoding: chunked\r\n\r\n1;${"x".repeat(20_000)}\r\n`);
+    assert.match(answer, /^HTTP\/1\.1 413 /);
+    assert.deepEqual(bodyOf(answer), { error: "body_too_large" });
+    assert.deepEqual(
+      logs.map((e) => [e.method, e.route, e.status, e.error]),
+      [
+        ["unknown", "unmatched", 400, "bad_request"],
+        ["unknown", "unmatched", 431, "headers_too_large"],
+        ["POST", "/webhooks/stripe/identity", 413, "body_too_large"],
+      ],
+    );
+  });
+
+  it("closes a reset connection without answering or logging", () => {
+    const logs: RequestLog[] = [];
+    const t = createTestEngine();
+    const server = createReferenceServer({ engine: t.engine, stripeSecrets: { identity: [], payments: [] }, clock: t.clock, log: (e) => logs.push(e) });
+    const written: string[] = [];
+    let destroyed = false;
+    const socket = { writable: true, remoteAddress: "127.0.0.1", write: (s: string) => written.push(s), destroy: () => (destroyed = true) };
+    server.emit("clientError", Object.assign(new Error("reset"), { code: "ECONNRESET" }), socket);
+    assert.deepEqual([written, logs, destroyed], [[], [], true]);
+  });
+
+  it("keeps serving when the log sink throws", async (ctx) => {
+    let calls = 0;
+    const s = await serve(ctx, {
+      timeoutMs: 100,
+      log: () => {
+        calls += 1;
+        throw new Error("sink down");
+      },
+    });
+    assert.deepEqual(await (await fetch(`${s.base}/healthz`)).json(), { ok: true });
+    assert.match(await rawSocket(s.port, "GET /healthz HTTP/1.1\r\n"), /^HTTP\/1\.1 408 /);
+    assert.deepEqual(await (await fetch(`${s.base}/healthz`)).json(), { ok: true });
+    assert.equal(calls, 3);
+  });
+
+  it("gives the demo's runs a small body limit of their own, and labels the demo routes", async (ctx) => {
+    const world = createDemoWorld();
+    const logs: RequestLog[] = [];
+    const s = await serve(ctx, { engine: world.engine, clock: world.t.clock, ui: new DemoRuns(world), log: (e) => logs.push(e) });
+    const start = (body: string) => fetch(`${s.base}/demo/runs`, { method: "POST", headers: { "content-type": "application/json" }, body });
+    let res = await start(JSON.stringify({ flow: "deposit", pad: "x".repeat(DEFAULT_BODY_LIMITS.demo) }));
+    assert.deepEqual([res.status, await res.json()], [413, { error: "body_too_large" }]);
+    res = await start(JSON.stringify({ flow: "deposit" }));
+    assert.equal(res.status, 201);
+    const { runId } = (await res.json()) as { runId: string };
+    await fetch(`${s.base}/demo/runs/${runId}`);
+    await fetch(`${s.base}/demo/runs/${runId}/next`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    await fetch(`${s.base}/demo/flows`);
+    await fetch(`${s.base}/`);
+    assert.deepEqual(
+      logs.map((e) => [e.route, e.status]),
+      [
+        ["/demo/runs", 413],
+        ["/demo/runs", 201],
+        ["/demo/runs/:runId", 200],
+        ["/demo/runs/:runId/next", 200],
+        ["/demo/flows", 200],
+        ["/", 200],
+      ],
+    );
+    assert.equal(JSON.stringify(logs).includes(runId), false, "no run id in the log");
+  });
+});
+
+/** Writes `text` on a new connection and resolves with everything the server sent before closing. */
+function rawSocket(port: number, text: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1", () => socket.write(text));
+    let answer = "";
+    socket.on("data", (chunk: Buffer) => (answer += chunk.toString("utf8")));
+    socket.on("close", () => resolve(answer));
+    socket.on("error", reject);
+  });
+}
+
+/** A raw HTTP/1.1 request whose body is written chunk by chunk, with the headers exactly as given. */
+function raw(base: string, method: string, path: string, headers: Record<string, string>, chunks: string[]): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request(`${base}${path}`, { method, headers }, (res) => {
+      const parts: Buffer[] = [];
+      res.on("data", (c: Buffer) => parts.push(c));
+      res.on("end", () => resolve({ status: res.statusCode!, body: Buffer.concat(parts).toString("utf8") }));
+    });
+    req.on("error", reject);
+    for (const chunk of chunks) req.write(chunk);
+    req.end();
+  });
+}
 
 describe("example door relay", () => {
   it("refuses an oversized body without keeping it, and a body that is not JSON", async () => {
@@ -518,13 +975,21 @@ describe("reference server: document uploads", () => {
     assert.match(html, /Accepted: PDF, up to 2 KB\./);
   });
 
-  it("takes one upload per link, then answers that the link is used", async () => {
+  it("takes one upload per link: a repeat gets the same answer, and the page then says the link is used", async () => {
     const token = await link();
     let res = await send(token, JPEG);
     assert.equal(res.status, 201);
-    assert.match(await res.text(), /Your document was received/);
-    assert.deepEqual([...documents.documents().at(-1)!.bytes], [...JPEG]);
-    res = await send(token, JPEG);
+    const received = await res.text();
+    assert.match(received, /Your document was received/);
+    const stored = documents.documents();
+    assert.deepEqual([...stored.at(-1)!.bytes], [...JPEG]);
+    assert.ok(received.includes(`Reference: ${stored.at(-1)!.document.documentId}`));
+    // A retry (the first answer lost) learns the outcome it missed; nothing is stored twice.
+    res = await send(token, JPEG, "image/jpeg", "?lang=fr");
+    assert.equal(res.status, 201);
+    assert.ok((await res.text()).includes(`Référence : ${stored.at(-1)!.document.documentId}`));
+    assert.equal(documents.documents().length, stored.length);
+    res = await fetch(`${base}/u/${token}`);
     assert.equal(res.status, 410);
     assert.match(await res.text(), /expired or was already used/);
     res = await fetch(`${base}/u/${token}?lang=fr`);
@@ -573,13 +1038,19 @@ describe("reference server: document uploads", () => {
   it("refuses what the scanner does not pass, and spends the link", async () => {
     const token = await link();
     scanner.clean = false;
-    const res = await send(token, JPEG);
+    let res = await send(token, JPEG);
     scanner.clean = true;
     assert.equal(res.status, 422);
     const html = await res.text();
     assert.match(html, /could not be accepted/);
     assert.doesNotMatch(html, /<form/);
-    assert.equal((await send(token, JPEG)).status, 410);
+    // Spent: a repeat gets the same refusal, without a second scan, and the page no form.
+    const stored = documents.documents().length;
+    res = await send(token, JPEG);
+    assert.equal(res.status, 422);
+    assert.doesNotMatch(await res.text(), /<form/);
+    assert.equal(documents.documents().length, stored);
+    assert.equal((await fetch(`${base}/u/${token}`)).status, 410);
   });
 
   it("answers a page, not a 500, when the scanner throws, and the link is spent", async () => {
@@ -594,7 +1065,8 @@ describe("reference server: document uploads", () => {
     const html = await res.text();
     assert.match(html, /n'a pas pu être vérifié/);
     assert.doesNotMatch(html, /internals|<form/);
-    assert.equal((await send(token, JPEG)).status, 410);
+    assert.equal((await send(token, JPEG)).status, 503, "a repeat gets the same answer, and no second scan");
+    assert.equal((await fetch(`${base}/u/${token}`)).status, 410);
   });
 
   it("is off without the uploads option", async () => {
@@ -603,6 +1075,154 @@ describe("reference server: document uploads", () => {
     const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/u/${await link()}`);
     assert.deepEqual([res.status, await res.json()], [404, { error: "not_found" }]);
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+});
+
+describe("reference server security.txt", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  // The fixed clock starts at 2026-01-01T00:00:00Z; every date here is relative to it.
+  const settings = (clock: FixedClock, days: number, extra: Partial<SecurityTxtSettings> = {}): SecurityTxtSettings => ({
+    contact: ["mailto:security@example.test", "https://example.test/report"],
+    expires: new Date(clock.now().getTime() + days * DAY),
+    ...extra,
+  });
+  /** A server, closed when the test ends, passed or failed: registered as soon as it listens. */
+  const start = async (ctx: TestContext, options: Partial<ReferenceServerOptions> & { clock: FixedClock }) => {
+    const server = createReferenceServer({ engine: createTestEngine().engine, stripeSecrets: { identity: [], payments: [] }, warn: () => {}, ...options });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    ctx.after(
+      () =>
+        new Promise<void>((resolve) => {
+          server.closeAllConnections();
+          server.close(() => resolve());
+        }),
+    );
+    return { get: (init?: RequestInit) => fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/.well-known/security.txt`, init) };
+  };
+
+  it("serves the host's file as plain text, with every field it was given", async (ctx) => {
+    const clock = new FixedClock();
+    const s = await start(ctx, { clock, securityTxt: settings(clock, 200, { policy: "https://example.test/disclosure", canonical: "https://example.test/.well-known/security.txt" }) });
+    const res = await s.get();
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("content-type"), "text/plain; charset=utf-8");
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(
+      await res.text(),
+      [
+        "Contact: mailto:security@example.test",
+        "Contact: https://example.test/report",
+        "Expires: 2026-07-20T00:00:00Z",
+        "Policy: https://example.test/disclosure",
+        "Canonical: https://example.test/.well-known/security.txt",
+        "",
+      ].join("\n"),
+    );
+    assert.equal((await s.get({ method: "POST" })).status, 405);
+  });
+
+  it("serves only Contact and Expires when nothing else is set", async (ctx) => {
+    const clock = new FixedClock();
+    const s = await start(ctx, { clock, securityTxt: { contact: ["tel:+1-555-0100"], expires: new Date("2026-06-01T12:30:00.000Z") } });
+    assert.equal(await (await s.get()).text(), "Contact: tel:+1-555-0100\nExpires: 2026-06-01T12:30:00Z\n");
+  });
+
+  it("keeps nonzero milliseconds in Expires, so the file never claims an earlier expiry than the route enforces", async (ctx) => {
+    const clock = new FixedClock();
+    clock.advance(100);
+    const s = await start(ctx, { clock, securityTxt: { contact: ["tel:+1-555-0100"], expires: new Date("2026-01-01T00:00:00.900Z") } });
+    assert.equal(await (await s.get()).text(), "Contact: tel:+1-555-0100\nExpires: 2026-01-01T00:00:00.900Z\n");
+  });
+
+  it("has no route without settings, and never a default address", async (ctx) => {
+    const s = await start(ctx, { clock: new FixedClock() });
+    const res = await s.get();
+    assert.deepEqual([res.status, await res.json()], [404, { error: "not_found" }]);
+  });
+
+  it("stops serving the file once it expires while the server runs", async (ctx) => {
+    const clock = new FixedClock();
+    const s = await start(ctx, { clock, securityTxt: settings(clock, 100) });
+    clock.advance(100 * DAY - 1);
+    assert.equal((await s.get()).status, 200);
+    clock.advance(1);
+    assert.equal((await s.get()).status, 404);
+  });
+
+  it("refuses at start an Expires in the past, now, or more than a year ahead", () => {
+    const clock = new FixedClock();
+    const make = (securityTxt: SecurityTxtSettings) => () => createReferenceServer({ engine: createTestEngine().engine, stripeSecrets: { identity: [], payments: [] }, clock, securityTxt, warn: () => {} });
+    assert.throws(make(settings(clock, -1)), /expires must be in the future/);
+    assert.throws(make(settings(clock, 0)), /expires must be in the future/);
+    assert.throws(make({ contact: ["mailto:a@example.test"], expires: new Date("not a date") }), /expires must be in the future/);
+    assert.throws(make({ contact: ["mailto:a@example.test"], expires: new Date("2027-01-01T00:00:00.001Z") }), /at most a year ahead/);
+    assert.doesNotThrow(make({ contact: ["mailto:a@example.test"], expires: new Date("2027-01-01T00:00:00.000Z") }), "exactly a year ahead is allowed");
+  });
+
+  it("refuses at start a missing contact and values that are not one-line URIs of an allowed scheme", () => {
+    const clock = new FixedClock();
+    const make = (extra: Partial<SecurityTxtSettings>) => () => securityTxt(settings(clock, 200, extra), clock.now(), () => {});
+    assert.throws(make({ contact: [] }), /at least one contact/);
+    assert.throws(make({ contact: ["security@example.test"] }), /contact must be a mailto: or tel: or https: URI/);
+    assert.throws(make({ contact: ["http://example.test/report"] }), /contact must be/);
+    assert.throws(make({ contact: ["https://example.test/\nPolicy: https://evil.test/"] }), /contact must be/, "a line break would add a field");
+    assert.throws(make({ contact: ["mailto:a b@example.test"] }), /contact must be/);
+    assert.throws(make({ contact: ["https:example.test/report"] }), /contact must be/, "the URL parser would repair this form");
+    assert.throws(make({ contact: ["https:/example.test/report"] }), /contact must be/);
+    assert.throws(make({ policy: "https:example.test/disclosure" }), /policy must be/);
+    assert.throws(make({ canonical: "https:///example.test/.well-known/security.txt" }), /canonical must be/);
+    assert.doesNotThrow(make({ contact: ["mailto:a@example.test", "tel:+1-555-0100", "https://example.test/report"] }));
+    assert.throws(make({ policy: "mailto:a@example.test" }), /policy must be a https: URI/);
+    assert.throws(make({ canonical: "http://example.test/.well-known/security.txt" }), /canonical must be a https: URI/);
+  });
+
+  it("warns at start when the file expires within 30 days, and not before", () => {
+    const clock = new FixedClock();
+    const warnings: string[] = [];
+    const warn = (m: string) => warnings.push(m);
+    securityTxt(settings(clock, 31), clock.now(), warn);
+    assert.deepEqual(warnings, []);
+    securityTxt(settings(clock, 30), clock.now(), warn);
+    assert.deepEqual(warnings, ["security.txt expires at 2026-01-31T00:00:00Z: renew it before then"]);
+    createReferenceServer({ engine: createTestEngine().engine, stripeSecrets: { identity: [], payments: [] }, clock, securityTxt: settings(clock, 1), warn });
+    assert.equal(warnings.length, 2, "the server warns through its warn option");
+  });
+
+  it("refuses this project's own reporting address, however it is written", () => {
+    const clock = new FixedClock();
+    const make = (extra: Partial<SecurityTxtSettings>) => () => securityTxt(settings(clock, 200, extra), clock.now(), () => {});
+    for (const contact of [
+      "mailto:opensource@distronode.com",
+      "mailto:OpenSource@Distronode.com?subject=report",
+      "mailto:opensource%40distronode.com",
+      "https://github.com/distronode-corporation/district-assurance/security/advisories/new",
+    ]) {
+      assert.throws(make({ contact: [contact] }), /contact is this project's address/, contact);
+    }
+    assert.throws(make({ policy: "https://github.com/distronode-corporation/district-assurance/blob/main/SECURITY.md" }), /policy is this project's address/);
+    assert.doesNotThrow(make({ contact: ["https://github.com/distronode-corporation/district-assurance-host/security"] }), "a host's own repository is fine");
+    assert.doesNotThrow(make({ contact: ["mailto:a%ZZ@example.test"] }), "a value that does not decode is checked as written");
+  });
+
+  it("warns once when a running server reaches the last 30 days, and once when the file expires", async (ctx) => {
+    const clock = new FixedClock();
+    const warnings: string[] = [];
+    const s = await start(ctx, { clock, securityTxt: settings(clock, 60), warn: (m) => warnings.push(m) });
+    assert.equal((await s.get()).status, 200);
+    assert.deepEqual(warnings, [], "60 days out: no warning");
+    clock.advance(30 * DAY);
+    for (let i = 0; i < 2; i++) assert.equal((await s.get()).status, 200);
+    assert.deepEqual(warnings, ["security.txt expires at 2026-03-02T00:00:00Z: renew it before then"]);
+    clock.advance(30 * DAY);
+    for (let i = 0; i < 2; i++) assert.equal((await s.get()).status, 404);
+    assert.deepEqual(warnings.slice(1), ["security.txt expired at 2026-03-02T00:00:00.000Z: it is no longer served; renew it"]);
+  });
+
+  it("warns through console.warn by default", (t) => {
+    const clock = new FixedClock();
+    const spy = t.mock.method(console, "warn", () => {});
+    createReferenceServer({ engine: createTestEngine().engine, stripeSecrets: { identity: [], payments: [] }, clock, securityTxt: settings(clock, 7) });
+    assert.deepEqual(spy.mock.calls.map((c) => c.arguments), [["security.txt expires at 2026-01-08T00:00:00Z: renew it before then"]]);
   });
 });
 

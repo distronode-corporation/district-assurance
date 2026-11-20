@@ -4,6 +4,7 @@
 import type {
   AccessController,
   AmountSource,
+  Anchor,
   AttemptCounterKey,
   AttemptCounters,
   AuditLedger,
@@ -105,6 +106,8 @@ export interface EngineAdapters {
   fieldCipher?: FieldCipher;
   /** Where consents are kept so they can be revoked after the call. Without it, `revokeConsent` is refused. */
   consents?: ConsentStore;
+  /** A time-stamp authority, or a public log plus one, for `anchorLedger` (PRV-9). */
+  anchor?: Anchor;
 }
 
 export type AdapterName = keyof EngineAdapters;

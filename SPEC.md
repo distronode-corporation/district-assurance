@@ -29,7 +29,7 @@ recorded **factors**, the current **level** and an optional **grant**.
 | `factor_recorded {factor}` | verifying | factor appended |
 | `verification_finished {level, grant}` | verifying | phase `open`, level and grant set, sensitive cleared |
 | `sensitive_opened {reason: keypad}` | verifying | sensitive `keypad` |
-| `sensitive_closed` | verifying, paying | sensitive cleared |
+| `sensitive_closed` | verifying (never paying: the payment hold ends only when the payment settles or the call ends) | sensitive cleared |
 | `intake_started` | open | phase `filing` |
 | `intake_confirmed {recordId}` | filing | phase `open`, record id appended |
 | `intake_abandoned` | filing | phase `open` |
@@ -53,6 +53,17 @@ the only caller in the package.
 speech-to-text and the model, and holds staff listen-in. The engine tracks the flag; the host
 enforces it.
 
+`forwardingFor(state)` is the single place a host asks what it may forward. It returns
+`{transcript, speechToText, model, listenIn, heldFor}`: the four are all false while `sensitive`
+is set (`heldFor` is the reason, `keypad` or `payment`) and once the phase is `ended` (`heldFor`
+is `ended`), and all true otherwise (`heldFor` null). With no state (null or undefined, when the
+host could not read it) or a state the engine never writes (an unknown phase, a missing or unknown
+`sensitive`, `paying` without the `payment` hold as a call stored before the hold could no longer be
+lifted may hold, or fields that are not the state's own), all four are false and `heldFor` is
+`unknown`. Each field is read once. Taint does not change forwarding. The
+function is pure; the host asks again after each engine call and forwards nothing when it cannot
+read the state.
+
 ## 2. The call record and the SessionStore
 
 A call is one JSON record: `{v: 1, state, locale, revision, attestation, flow, modules}`, where
@@ -73,13 +84,22 @@ that call (`module_disabled`).
 
 The record lives in a `SessionStore`:
 
-- `create(workspaceId, callId, record)` stores it at version 1, or answers false if the id exists.
+- `create(workspaceId, callId, record, hint?)` stores it at version 1, or answers false if the id exists.
 - `get` returns `{version, record}` or null.
-- `compareAndSet(workspaceId, callId, expectedVersion, record)` writes only if the stored version is
+- `compareAndSet(workspaceId, callId, expectedVersion, record, hint?)` writes only if the stored version is
   `expectedVersion`, and the new version is `expectedVersion + 1`; otherwise `{ok: false}`.
 - `bindRef(workspaceId, ref, callId)` points a provider reference (`identity:<session id>`,
   `payment:<link id>`, `payment_intent:<payment intent id>`, `callback:<dialer ref>`) at a call, first
   binding wins; `resolveRef` reads it.
+- Optional: `pendingCalls(workspaceId, limit)` lists up to `limit` calls whose latest write had the
+  hint `{ledgerPending: true}` (its outbox is not empty, section 9). The engine sends the hint with
+  every write; a store that lists keeps the mark in the same write as the record, and a write
+  without a hint leaves the mark as it was. A store lists the calls listed least recently first:
+  the in-memory store rotates the list (listed calls go to the back), so a call that keeps failing
+  cannot starve the others, and a durable store that always listed the same first `limit` would
+  let up to `limit` failing calls hold back every other one. The contract checks that repeated small
+  reads reach every pending call: three reads of one, and two reads of two, each reach all three of
+  three pending calls.
 
 Every engine step reads the record, applies one pure change, and writes it with compare-and-set.
 On `{ok: false}` the step starts again from a fresh read, up to 5 attempts (`MAX_WRITE_ATTEMPTS`),
@@ -983,6 +1003,7 @@ answer on file, a phone number, a link or card data.
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
 | `subject.erased` | `recordIds`, `pinDigest` (whether one is deleted): the erasure's plan; `callId` null, actor `member` (section 17) |
 | `subject.erasure_completed` | `erasureSeq` (the `subject.erased` entry it completes); `callId` null, actor `member` (section 17) |
+| `ledger.anchored` | `seq` (the head it covers), `proof` (section 10); no call: `callId` is null |
 
 The ledger is always on: every engine needs a `ledger` adapter, and Trace cannot be turned off.
 A step's entries are saved in the call record's `outbox` by the same compare-and-set write, each
@@ -997,10 +1018,32 @@ ledger never drops one as a replay; an entry the ledger would refuse (card data,
 surrogate) is refused before it is saved, so it can never block a call's ledger; the outbox is cleared by
 a further write if nobody wrote since. A failed append leaves them pending, and the next write or
 `flushLedger(callId)` appends them. A ledger appends an `eventId` once (a second append returns the
-first entry), so nothing is lost or doubled. The listener is told after each append, at least once
-and best effort. `consent.revoked` is the one entry written outside a call's write, since a consent
+first entry), so nothing is lost or doubled. `consent.revoked` is the one entry written outside a call's write, since a consent
 can be revoked after its call: its `eventId` is `[workspaceId, callId, "consent.revoked",
 consentId]`, so a consent is revoked in the ledger once (section 17).
+
+`flushPending(limit = 100)` is the background flush a host schedules (for example every minute, in
+any process): it asks the store's `pendingCalls` for up to `limit` calls and flushes each in turn,
+returning `{flushed, failed}` (call ids); a call that fails stays pending for the next run, and
+the others go on. A call whose clear lost to a write that left entries of its own pending (that
+write's append failed) is read again and listed in `failed`, as it is still pending. A listed call with nothing pending (a write that sent no hint, from an engine
+before INT-5, emptied its outbox and left the mark) is unmarked by a write with
+`{ledgerPending: false}`; `flushLedger` itself writes nothing on an empty outbox. Two runs at once
+append nothing twice. It throws `invalid_input` for a limit
+that is not a positive integer, and `precondition_failed` when the store has no `pendingCalls`.
+`auditLedgerContract(factory)` in `district-assurance/testing` checks that a ledger appends a
+replayed run of event ids once, as a retried flush sends it.
+
+The ledger is the source of truth; the `onEvent` listener is a notification. It is told of an entry
+after the ledger has it, with the entry's `eventId` and `seq`, best effort and possibly more than
+once, so not at least once: the same event comes again, with the same `eventId`, when a flush
+replays it (after a lost clear, or from another process), and one is missed when the process stops
+between the append and the call.
+The engine calls the listener inline and never awaits it; a listener with slow work returns a
+promise. A throw or a rejection is passed to `onListenerError(error, event)`, and a failure of
+that hook is ignored: nothing the listener does stops the call, the write or the ledger. Any
+returned value whose `then` is a function counts as a promise (one from another realm, or a
+library's own thenable), and a `then` that throws when read is a listener failure too.
 
 ## 10. Audit ledger
 
@@ -1025,6 +1068,113 @@ is refused with nothing stored, and concurrent appends stay one valid chain.
 factory, since the engine only reads them) and intake records are copied in and out, workspaces
 never share a key, keys that differ only in a lone surrogate stay apart, and `putIntakeRecord` is idempotent by `recordId`, also concurrently.
 `MemoryAuditLedger` and `MemoryRecordStore` pass both.
+
+The reference server has optional SQLite stores on `node:sqlite` (SRV-4,
+`examples/reference-server/src/sqlite-stores.ts`; no dependency). `SqliteAuditLedger` keeps each
+entry as `chainEntry` built it, as JSON, in a table whose `seq` is the primary key and whose
+`eventId` is unique; triggers refuse UPDATE, DELETE, and an INSERT whose `seq` or `eventId` is
+already stored (so INSERT OR REPLACE cannot swap an entry). Each append runs in a `BEGIN IMMEDIATE`
+transaction (a repeated `eventId` returns the first entry; a refused entry rolls back with nothing
+stored), so connections in several processes keep one chain. `SqliteRecordStore` keys subjects and
+intake records by (workspace, id) as two columns; every key, the ledger's `eventId` too, is bound as
+its JSON string, since `node:sqlite` binds text as UTF-8 and would turn a lone surrogate into
+U+FFFD, so two ids that differ only there stay apart; `putIntakeRecord` keeps the first filing of a
+`recordId`, and `putSubject` adds or replaces a subject. Entries, subjects and records are stored
+as JSON with one change, since JSON writes -0 as 0: -0 is stored as the string NUL `-0`, and every
+string that starts with NUL gets one more NUL in front, so -0 reads back as -0 and no stored string
+reads back as anything else; the entry's hash is over canonical JSON, the same either way.
+`openSqliteStores(path)` opens both on one file with a 5-second busy timeout, in WAL mode only on
+a SQLite build with the fix for the WAL-reset bug (3.51.3 or later except the withdrawn 3.52.0, or
+the 3.44.6 and 3.50.7 backports; https://sqlite.org/wal.html#walresetbug), and with a rollback
+journal (`journal_mode = DELETE`) on an older one, such as Node 24.2's SQLite 3.50.0; it takes
+a filesystem path or `:memory:`, and refuses a `file:` URI, whose file would not get the mode
+below. Since the checks below read files by name before SQLite opens them, the database's
+directory must be owned by the current user and not writable by group or others, and no directory
+above it writable by others unless it has the sticky bit; anything else is refused before a file
+is created. A new file is created exclusively with mode 0600 before SQLite opens it, in a private
+directory in the directory the path resolves to, and hard-linked into place (one another process
+creates in between is checked as an existing one). An existing file is checked by path (`lstat`)
+and never opened outside SQLite, since closing any descriptor on a file drops every POSIX lock the
+process holds on it, another connection's too. It refuses an existing database file, or a `-wal`,
+`-shm` or `-journal` file beside it, that is readable or writable by group or others (SQLite keeps
+an existing file's mode), a symbolic link at the path or beside it (SQLite would use the files
+beside the link's target, not the ones checked), a database file with a second hard link (SQLite
+names the WAL after the name it opens, so two names would keep two WALs; the brief second link
+of another opener's create, its private name, is allowed), and anything that is not a regular file. The
+file-backed stores are POSIX only: on Windows `openSqliteStores` refuses every database file, since
+the mode sets no ACL there, so a Windows host uses another store, its own `RecordStore` and
+`AuditLedger`. `:memory:` opens on every platform and keeps nothing across a restart: it is for
+tests only. A file that is not a database, or a store whose schema fails, closes the
+connection before the error is thrown. A write transaction that SQLite already rolled back (a full
+disk, a trigger's `RAISE(ROLLBACK)`), or whose ROLLBACK fails too, rejects with the error that
+caused it, and the connection stays usable. `SqliteRecordStore` also takes the PIN and
+duress PIN writes, each read and written in one `BEGIN IMMEDIATE` transaction so two connections
+never both pass the check, and the subject request writes: a deleted record id is kept (the id
+alone) so a later `putIntakeRecord` of it stores nothing, and erasures are counted per subject in
+one statement, with `putIntakeRecord(record, erasuresSeen)` checking the count and inserting in one
+statement too. Both pass `auditLedgerContract`, `recordStoreContract` and
+`recordStoreErasureContract` (PRV-5) and keep what they hold across a restart.
+
+**Anchors (PRV-9).** A chain shows that no entry changed after later ones were written, but whoever
+holds the ledger could rebuild all of it. `engine.anchorLedger()` takes the ledger's head
+`{seq, hash}`, hands its **anchor payload** to the `anchor` adapter, and appends a
+`ledger.anchored` entry `{seq, proof}` (event id `["ledger.anchored", seq]`, so engines anchoring
+the same head append one entry). It refuses without the adapter or on an empty ledger
+(`precondition_failed`), and refuses a malformed proof (`invalid_input`). The host schedules it
+(daily, for example); the engine never calls out on its own. After the append the listener is
+told, best effort, with `callId` null, and is handed a copy: what it does to the event never
+reaches the entry `anchorLedger` returns. Anchoring when nothing new was appended still appends an
+entry, on purpose: the previous `ledger.anchored` entry is the new head, so each run is a heartbeat
+that fixes in time that the ledger was still there, unchanged, and each grows the ledger by one.
+
+- Anchor payload: the UTF-8 bytes of `"district-assurance/ledger-anchor/v1\n" +
+  canonicalJson({seq, hash})`. It is not JSON, so a signature over it never verifies as a receipt.
+- `proof` is `{kind: "rfc3161", token}` or `{kind: "rekor", token, entry}`, every value base64,
+  with exactly those own keys (`isAnchorProof`): a field inherited from a prototype does not count.
+  `token` is an RFC 3161 TimeStampToken (DER) whose imprint is SHA-256 of the payload. `entry` is
+  the Rekor v2 TransparencyLogEntry JSON for a `hashedrekord` v0.0.2 of the payload, signed by the
+  host's P-256 key. Rekor v2 gives an inclusion proof and a signed checkpoint but no time, so the
+  time is always the token's.
+- `verifyAnchor(entry, entries, {tsa, rekor?})` checks offline and never throws. `entries` run from
+  seq 1 to at least the covered seq; `tsa` is the authority's certificate chain as the host has it,
+  signing certificate first (certificates in the token are ignored); `rekor` is the log's public
+  key (Ed25519 or ECDSA) and origin. In order: the entry's shape, and an `entries` that is not a
+  list, one holding null or anything else that is not an entry within the covered seqs, or a trust
+  without a `tsa` list (`malformed`); the chain up to
+  `seq` (`chain`); the token: one signer, signed content type TSTInfo, signed message digest of the
+  TSTInfo, a signed SigningCertificate (RFC 2634, a SHA-1 hash) or SigningCertificateV2 (RFC 5035,
+  SHA-256 unless it names another hash) attribute, signature by the first certificate with RSA or
+  ECDSA over SHA-256, 384 or 512 (`token`, also for an attribute this reader cannot read or a hash it
+  does not know); the first ESSCertID of each such attribute names the first certificate, by its
+  hash over the certificate's DER and, when it has an IssuerSerial, by its issuer and serial byte for
+  byte (`certificate` when it names another); the chain: the first certificate has the time-stamping extended key usage, each is issued and
+  signed by the next, every one after the first is a CA (basicConstraints cA true, keyCertSign when
+  it has a keyUsage extension) whose pathLenConstraint, if any, allows the CAs below it, all are valid at the token's time, the last is trusted as given
+  (`certificate`); the imprint against the head recomputed from `entries` (`imprint`: the chain was
+  changed or rebuilt after the anchor); for Rekor, the body's digest and signature, a checkpoint
+  signed by the log under its origin whose size and root lines are canonical (a decimal with no
+  leading zero, 32 bytes of base64), and the RFC 9162 inclusion proof of the entry's top-level
+  `logIndex` into the tree of that checkpoint's size and root (`log`). The inclusion proof's own
+  `logIndex`, `treeSize` and `rootHash` are optional copies and, when present, must agree with the
+  top-level index and the checkpoint (`log` otherwise); as proto3 JSON writes it, a missing index is
+  0 and a missing list of hashes is empty. A log index above `Number.MAX_SAFE_INTEGER` is refused
+  (`log`), so `logIndex` is always exact. It returns `{seq, hash, time, logIndex}`.
+- `timestampTokenFields(token)` reads what a token says about the request it answers: `{imprintHash,
+  nonce}` (the nonce as the INTEGER's contents, null when the token has none), or null when the
+  token does not read. It checks nothing; a host that has just asked compares these with its
+  request. An archived token has no request, so `verifyAnchor` does not read them.
+- The DER reader (`readDer`) takes one-byte tags and definite lengths up to four bytes.
+- The reference server has `TimestampAuthorityAnchor` (RFC 3161 over HTTP) and `RekorAnchor`
+  (`POST /api/v2/log/entries`, plus the authority for the time); each checks what it got before
+  the engine writes it. `timestampRequest(payload, nonce)` builds the TimeStampReq: version 1, a
+  SHA-256 imprint of the payload, the nonce and `certReq` true. `TimestampAuthorityAnchor` sends a
+  fresh random nonce with each request (its `nonce` option makes them, for a test that replays a
+  recorded answer) and, beyond `checkTimestamp`, refuses a token whose imprint is not SHA-256 or
+  that does not carry that nonce, so an earlier token for the same payload is not taken as the
+  answer. `RekorAnchor` asks the authority first and Rekor after, so a refused time-stamp writes
+  nothing to the public log. Both read at most `maxReplyBytes` of a reply (default
+  `MAX_REPLY_BYTES`, 256 KiB), cancel the rest and refuse it, and refuse an error answer without
+  reading its body.
 
 ## 11. Canonical JSON
 
@@ -1190,6 +1340,51 @@ page has no script, style or form, every value is escaped, and it is sent with `
 `Referrer-Policy: no-referrer` and `noindex`. There is no route by call id. `ReceiptLinks` keeps
 every link it issues, in memory, for the life of the process, with no limit and no expiry: the host
 bounds how many links it issues and how long it keeps them (a durable store with expiry in its place).
+
+### Monthly reports
+
+`monthlyReport({ledger, workspaceId, month, timeZone?})` reads the whole ledger and reports one
+workspace's calendar month. `month` is `YYYY-MM` read in `timeZone` (an IANA name, `UTC` by
+default); an entry belongs to the month its `at` falls in, in that zone. An entry belongs to the
+workspace named first in its `eventId` tuple; an entry with no `eventId`, or one that does not
+name a workspace, is counted only in `unattributed` (for its month), never anywhere else. An entry
+whose `at` is not a UTC time as the engine writes it (`toISOString`), or names a date that does
+not exist, has no month: it is counted in `malformed.count` (across the whole ledger, whatever
+workspace it names) with the first one's `seq` in `malformed.firstSeq` (null when none), never
+anywhere else and never for a workspace, so one bad entry in a shared ledger never stops any
+workspace's report. So is an entry of the workspace in the month whose detail does not read as the
+engine writes it (a consent answer other than `yes` or `no`, a link without a non-empty string
+`paymentId` or whose amount is not a whole number with a lower-case currency, a level that is not
+a whole number): it is never tallied, so it can never put a non-number in the report and stop it
+being signed, and a settlement without a payment id never matches a link. A bad `workspaceId`,
+`month` or `timeZone` is refused with `invalid_input`. Payment totals are summed exactly: a total
+that would pass `Number.MAX_SAFE_INTEGER` refuses the report (`precondition_failed`), never rounds
+it.
+
+| Field | From |
+|---|---|
+| `calls.started`, `calls.ended` | `call.started`, `call.ended` |
+| `verifications.byLevel` | `verification.finished` by `level` (`0` to `3` always listed; 0 is a verification that reached no level) |
+| `verifications.failedFactors` | `verification.factor` with `passed: false` |
+| `payments.sent` | `payment.link_sent`: `count` and `totals` in minor units by currency |
+| `payments.paid`, `.failed`, `.expired` | `payment.settled` by `status`, with the amount of the call's `payment.link_sent` for that payment, which may be in an earlier month |
+| `payments.unmatched` | a settlement whose link the ledger does not show, or whose status is not paid, failed or expired |
+| `consents` | `consent.recorded`, `{yes, no}` by `purpose` |
+| `lockouts` | `verification.locked` (VER-1), once written |
+| `access.issued`, `.refused`, `.revoked` | `access.issued`, `access.refused` (GAT-1, as Gate writes them), and `access.revoked` once Gate has a revocation |
+
+The report also names `workspaceId`, `month`, `timeZone` and `ledger` (the seq and hash of the
+last entry read). It holds counts and totals only. `reportCsv(report)` writes it as RFC 4180
+`metric,value` rows with CRLF line ends (`payments.paid.total.cad,15000`); a field with a comma, a
+quote or a line break is quoted, and one starting with `=`, `+`, `-`, `@`, a tab or a carriage
+return gets a leading `'`. `signReportJson(signer, report)` and `signReportCsv(signer, report)`
+sign with the receipt signer, over `"district-assurance signed document v1\n" + document + "\n" +
+content`, where `document` is `monthly_report.json` (content: `canonicalJson(report)`) or
+`monthly_report.csv` (content: the CSV). A receipt's signed bytes are canonical JSON and start
+with `{`, so neither verifies as the other. `verifyReport(signed, keys)` returns false for an
+unknown document type or key, a wrong algorithm, a malformed signature or any change. Both sign
+functions refuse (`precondition_failed`) a report, built here or handed in, with a payment total
+that is not a whole, non-negative, safe integer.
 
 ## 13. Intake values
 
@@ -1549,7 +1744,11 @@ recordIds})` returns `{amountMinor, currency}` or null. `source` is the step's `
 `verifyStripeSignature` follows Stripe's published scheme: the `Stripe-Signature` header has
 `t=<unix seconds>` and one or more `v1=<hex>`; each `v1` is `HMAC-SHA256(secret, t + "." + raw
 body)`. The check passes if any `v1` matches any configured secret and `t` is within 300 seconds
-of now, either way. A host may set `toleranceSeconds`, an integer from 0 to 86,400; any other
+of now, either way. The raw body is the bytes received: `payload` may be a `Uint8Array` (a string
+is taken as its UTF-8), and a receiver checks those bytes before it decodes or parses them, since
+a decoder with replacement reads two different invalid UTF-8 bodies the same. The reference
+server's `/webhooks/stripe/*` and `/webhooks/records` routes do: a body under a bad signature is
+refused without being decoded or parsed. A host may set `toleranceSeconds`, an integer from 0 to 86,400; any other
 tolerance, or a `now` that is not a valid `Date`, throws `invalid_input` before anything is
 checked, since a NaN or an Infinity would let a replay of any age pass. `parseStripeEvent` maps
 `identity.verification_session.{verified,requires_input,canceled}` and
@@ -2195,7 +2394,8 @@ record and destination, the same however often the record is delivered. Headers:
 `content-type: application/json`, `idempotency-key`, and `district-signature:
 t=<unix seconds>,v1=<HMAC-SHA256(secret, t + "." + body)>`, the scheme of section 15, so
 `verifyStripeSignature` checks it; each attempt is signed with its own time. A receiver checks the
-signature, then reads the key from the signed body and applies it once.
+signature over the bytes received, then decodes them, reads the key from the signed body and
+applies it once.
 
 Retries: a 2xx delivers; no answer (the adapter rejects), 408, 429 or 5xx waits
 `min(maxDelayMs, baseDelayMs * 2^(attempt - 1))` and tries again, up to `maxAttempts`; any other
@@ -2249,9 +2449,18 @@ accept an upload.
 `MemoryDocumentStore` is the reference store. The reference server, given `uploads`, serves
 `GET /u/:token` (the upload page, in the link's language or `?lang=en|fr`, with a switch to the
 other) and `POST /u/:token` (a `multipart/form-data` body with a part named `file`, read up to the
-link's `maxBytes` plus 16 KiB). Answers: 201 received, 400 no file, 410 link not usable, 413 too
-large, 415 type, 422 scan refused, 503 scan failed, each as a page in the same language. Creating the link, texting
+link's `maxBytes` plus 16 KiB). Answers: 201 received (the page gives the document's id as a
+reference), 400 no file, 410 link not usable, 413 too large, 415 type, 422 scan refused, 503 scan
+failed, each as a page in the same language. An upload can outlast the request deadline after it
+spent its link, so the server keeps the outcome of each upload that spent one (stored, scan
+refused, scan failed) by the token's hash until the link would have expired, at most
+`uploads.keptMax` (default 10,000) at once. One is never dropped before it expires: when the
+store is still full after expired ones go, a new upload gets 503 with `Retry-After` (whole
+seconds until the first kept outcome expires) before it claims its link, and is not scanned. A retry with the same link gets that same
+answer, not "link not usable", and a retry while the first upload still runs gets 503 with
+`Retry-After` (the timeout in whole seconds) and is never scanned a second time. Creating the link, texting
 it to the number on file and writing ledger entries for it are not wired into the engine yet.
+
 ## 17. Card numbers in transcripts
 
 **Runs of digits.** `digitRuns(text)` reads a text into runs of digits. A run is numerals and spoken
@@ -2298,6 +2507,7 @@ separator-only chunks never grow what it keeps; it never returns it, and forgets
 
 **Corpus.** `test/corpus/card-numbers.json` holds the cases for runs, redaction and live detection
 as plain JSON, so an implementation in another language can be tested against the same cases.
+
 ## 17. Redaction
 
 Each detector is its own `Redactor`; a host composes the ones it wants with `composeRedactors`,
@@ -2336,6 +2546,7 @@ with no bank word before it is not found. Health card numbers of other provinces
 yet. Number words ("forty two", "quarante-deux") and "double" forms are planned (PAY-5). The test
 corpus is shared JSON in `test/corpus/`, one file per kind: each case gives a text, its language
 and the exact substrings a redactor must find, in order.
+
 ## 17. Subject requests: access and deletion
 
 Two `Engine` methods the business calls from its own code, for one person's access or deletion
@@ -2347,8 +2558,9 @@ in a given case is the business's to decide.
 
 The `RecordStore` lists a subject's intake records (`listIntakeRecords(workspaceId, subjectKey)`),
 deletes records by id (`deleteIntakeRecords(workspaceId, recordIds)`) and removes a subject's PIN
-digest, keeping the rest of the subject record (`deletePinDigest(workspaceId, subjectKey)`); the
-deletes are idempotent. A record filed under no subject is never listed. The store remembers each
+digest, with its duress digest and the `pinEnrolmentId` that names that PIN (as a reset does),
+keeping the rest of the subject record (`deletePinDigest(workspaceId, subjectKey)`); the
+deletes are idempotent. `recordStoreContract` checks that all three go and the rest stays. A record filed under no subject is never listed. The store remembers each
 deleted record id (the id alone) and a later `putIntakeRecord` of it stores nothing, so a
 confirmation whose write was still in flight when the subject was erased cannot bring the values
 back. It also counts each subject's erasures (`markSubjectErased`, `subjectErasures`; the subject key
@@ -2423,3 +2635,147 @@ and both carry it out. It never changes
 or removes a ledger entry or a receipt, so `verifyChain` and every receipt still verify. The
 listener is not told (the entry names no call). Attempt counts live per call in the call record;
 counters per subject across calls are VER-1's, and the erase resets them once they exist.
+
+## 17. Carrier webhooks
+
+`verifyTwilioSignature` follows Twilio's published scheme: the `X-Twilio-Signature` header is
+`base64(HMAC-SHA1(auth token, URL + parameters))`, where URL is the full URL Twilio requested,
+query included, and parameters are the form parameters of the raw body, sorted by name (then by
+value for a repeated name, in code-unit order; a name and value sent twice count once) and written
+as name then value with no separator.
+When the URL has a `bodySHA256` query parameter, the URL alone is signed and the hex SHA-256 of
+the raw body must equal it (`body_hash_mismatch` otherwise). The URL is tried as given and with the
+scheme's default port (443 or 80) added or removed; a URL with another port is also tried with
+that port removed (Twilio drops it for HTTPS voice callbacks), and no port but the default is ever
+added. The check
+passes if any configured auth token matches. Refusals: `no_secret`, `missing_header`,
+`no_matching_signature`, `body_hash_mismatch`. The scheme has no timestamp.
+
+`verifyTelnyxSignature` follows Telnyx's published scheme: the `telnyx-signature-ed25519` header is
+the base64 Ed25519 signature of `telnyx-timestamp + "|" + raw body`. Public keys are the base64 of
+32 raw bytes; any other value is skipped, and so is a key on one of Ed25519's eight small-order
+points (in any encoding), which some platforms let verify a forged signature. The check passes if the signature verifies under any
+configured key and the timestamp is within 300 seconds of now (configurable, an integer from 0 to
+86,400, else `invalid_input`), either way; an invalid `now` is out of tolerance. It
+returns the same `SignatureCheck` as Stripe's: `no_secret`, `missing_header` (either header),
+`malformed_header` (a signature that is not 64 bytes of base64, a timestamp that is not 1 to 12
+digits), `timestamp_out_of_tolerance`, `no_matching_signature`.
+
+The reference server answers `POST /webhooks/twilio` and `/webhooks/telnyx` with 400
+`{error: "signature", reason}` when the check fails, 200 `{received: true}` when it passes, and
+does nothing else with the body: the engine takes no carrier event yet. The body is read and
+checked as the raw bytes received, never decoded first (both functions take a `string` or a
+`Uint8Array`): a decoder with replacement reads two different invalid UTF-8 bodies the same, and
+both would verify under one signature. Twilio's form parameters are decoded from those bytes. Twilio's URL is the
+configured public origin followed by the request target. A carrier with no key configured refuses
+everything.
+
+## 17. The flow simulator
+
+`district-assurance simulate <config.json> --flow <name> --script <name or file>` (the package's
+`bin`; `npm run simulate -- ...` in this repository) runs one flow of a FlowConfig with a scripted
+caller and prints what happens, so a business sees a flow before a real caller meets it. The source
+is `src/cli/simulate.ts`.
+
+- The engine is `createTestEngine`'s: the fixed clock, sequential ids, the in-memory adapters and a
+  throwaway signing key. No network, no key, no environment.
+- The config is refused, with every problem and exit code 1, when it turns on a module that is not
+  built in (`badge`, `dossier`, `paylink`, `trace`, `gate`, `step-up`: an outside module's code is not
+  there to run)
+  or when `validateConfig` finds a problem; an outside module listed with `enabled: false` is left
+  out. A flow the config does not have, or a script that is neither built in nor a valid file, is
+  refused the same way. Bad arguments print the usage and exit 2. A flow that ran exits 0, whether
+  it completed or failed. A step the simulator has no scripted caller for (a type another module
+  adds, a Gate or a step-up step: only `badge.verify`, `dossier.collect`, `paylink.request` and
+  `trace.consent` have one) prints `step <type> is not simulated`, and a `badge.verify` step that lists
+  a factor other than `keypad_knowledge`, `pin`, `carrier_identity_match` or `photo_id` prints
+  `step badge.verify factor <kind> is not simulated`; either way the call ends there and the run
+  exits 3, never guessing or skipping part of the step.
+- The caller is made up: one subject on file with a 555 number, an answer for every keypad field
+  and a PIN of `minDigits` digits. It acts on whatever step the flow is on: at `badge.verify` it
+  keys the account number, then each factor the step lists (keypad answers, the PIN, the carrier
+  check, the photo ID link), then waits for the result; at `dossier.collect` it answers every field
+  of the step's form with a sample value (a text answer cut to the field's `maxLength`) and
+  confirms; at `paylink.request` it asks to pay and the provider reports the script's outcomes; at
+  `trace.consent` it answers. A refusal by the engine is printed and the caller goes on. After the
+  last step the call ends, abandoning a flow still running, and `flow: <status>` gives the status
+  once the call has ended.
+- A script is `{summary, wrongKeypad, wrongPins, carrier, photoId, consent, payment}`: wrong
+  keypad answers and wrong PINs before the right ones (0 to 5; after each wrong entry the caller
+  waits out the wait Badge's `lockout` setting gives for the failures so far, and stops once locked out),
+  the carrier's `identityMatch`, the photo ID outcome, the consent answer, and the payment outcome
+  (`paid`; `paid_later`, completed unpaid then the asynchronous success; `failed`; `expired`). A
+  script file is a JSON object with any of these fields, checked field by field; the rest come
+  from `pass`. Built in:
+
+| Script | |
+|---|---|
+| `pass` | every answer right, the carrier matches, the photo ID is verified, consent yes, paid |
+| `wrong-pin` | one wrong PIN and one wrong keypad answer, then the right ones |
+| `lockout` | wrong PINs and keypad answers until the line stops judging them |
+| `consent-no` | as `pass`, consent no |
+| `payment-paid` | as `pass`, paid later: completed unpaid, then the asynchronous success |
+| `payment-expired` | as `pass`, the link expires |
+
+Output, one line each: the headings `simulate:`, `script:`, `call:`, `step <n>/<count>: <type>
+<fields>`, `flow: <status>` and `receipt:`; `  caller:` what the caller does, then `  decision:` the
+engine's answer or `  refused:` its refusal; `    event <name> (<actor>) <detail>` for every ledger
+entry, as it is appended. Then the signed receipt as JSON, checked against the engine's key set, or
+`receipt: none`. Nothing the caller keys is printed: events carry no values (section 9) and
+decisions say right or wrong, never the digits. A config and a script file are someone else's
+text, so every line, on standard output and standard error, writes C0 and C1 control characters
+and bidi controls and marks as `\u` escapes (`terminalSafe`): a file can never move the cursor,
+set the terminal's title or make one result read as another.
+
+## 17. Reference server limits and logs
+
+`examples/reference-server/src/app.ts`, not part of the package. Every limit below, the timeout and
+each body limit is a whole number from 1 (the timeout at most 2,147,483,647 ms, what `setTimeout`
+can wait); anything else throws when the server is created, since 0 or NaN would switch a limit
+off. Each request is handled in this order, and every refusal is JSON `{"error": code}` (an upload
+page refusal is its HTML page):
+
+- **Rate limit**, first, before any other work: each caller, from the socket's address (an IPv6
+  address counts by its /64, an IPv4-mapped one such as `::ffff:192.0.2.1` as its IPv4 address),
+  gets `rateLimit.requests` requests per fixed window of `rateLimit.windowMs` (default 300 a
+  minute), counted on `rateLimit.clock`, the system clock by default and never the server's
+  `clock`, which the demo fixes. Every request counts, whatever its route or answer. Over the limit:
+  `429 rate_limited` with `Retry-After` in whole seconds to the window's end. `X-Forwarded-For` is
+  never read. At most `rateLimit.addresses` addresses are tracked (default 10,000); to make room,
+  ended windows are dropped first, then the oldest.
+- **Body limits** per route: `stripeIdentity`, `stripePayments`, `stripeConnect`, `records`,
+  `twilio` and `telnyx` 64 KiB each, `demo` 1 KiB (`bodyLimits` overrides each). An upload
+  (`POST /u/:token`) is limited by its own link's size cap plus 16 KiB of multipart overhead. A
+  declared `Content-Length` over the limit is refused before a byte is read; a streamed body is cut
+  off once it passes the limit. Either way: `413 body_too_large` (the upload page's "too large" for
+  an upload). The other routes never read a body.
+- **Timeouts**, `timeoutMs` (default 10 seconds): a request whose headers and body are not all
+  received in time gets `408 request_timeout` and the connection is closed; a request not answered
+  within `timeoutMs` of its headers gets `503 timeout`.
+- **Requests node:http cannot read** are refused by the server's `clientError` handler, also in
+  JSON and with `Connection: close`: too slow `408 request_timeout`, headers too large
+  `431 headers_too_large`, chunk extensions too large `413 body_too_large`, anything else
+  malformed `400 bad_request`. A reset connection, or one whose answer is already written, gets
+  nothing more and is closed. A malformed request sent right behind a body drained after its
+  answer is the next request, and is answered and logged as one. When earlier pipelined requests
+  on the connection are still being answered, the refusal waits until each of their answers is
+  sent or its socket closes, so it is never read as theirs, and it is sent once.
+- **Abandoned requests**: a request whose connection closes before its answer is sent (the client
+  reset it or left) is abandoned: neither its handler nor the deadline answers or logs it later.
+- **Logs**: with `log`, one entry per answered request, after the answer is written, including the
+  refusals above: `{time, address, method, route, status, error?, ms}`. `time` is from the
+  server's clock; `address` is the caller the rate limit counts (an IPv6 /64, never the whole
+  address); `method` is `unknown` when the request was refused before its headers were read;
+  `route` is the matched pattern (`/r/:token`, `/r/:token.json`, `/u/:token`,
+  `/webhooks/stripe/connect`, `/.well-known/security.txt`, `/demo/runs/:runId/next`) or
+  `unmatched`, never the path as sent, so no call id, run id or link token reaches a log; `error`
+  is a JSON answer's error code. An entry holds no header, query string or body. A `log` that
+  throws, or answers a promise that rejects, loses that entry; the server and the answer are
+  unaffected. `jsonLinesLog(stream)` writes each entry as one line of JSON on `stream` and never
+  holds more than the stream's own buffer: while `write` answers false, each new entry is dropped
+  and counted, and on `drain` one line says how many were
+  (`{"warning":"log_entries_dropped","dropped":n}`); a request never waits on the log. Its `stop()`
+  writes nothing more. `logJsonLines` is that log on standard output, and `npm run serve`
+  (`createServe`) uses it unless given its own `log`; `main.ts` registers `guardLogStream`, an
+  `error` listener on standard output that stops the log on the first error (an EPIPE when its
+  reader went away), instead of the process ending on an unhandled `error` event.

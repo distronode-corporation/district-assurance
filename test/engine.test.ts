@@ -1,12 +1,13 @@
 import { strict as assert } from "node:assert";
 import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
+import { runInNewContext } from "node:vm";
 
-import type { IntakeRecord, PaymentLinks } from "../src/core/adapters.ts";
+import type { AuditInput, IntakeRecord, PaymentLinks, SessionStore, WriteHint } from "../src/core/adapters.ts";
 import { canonicalJson, type JsonValue } from "../src/core/canonical.ts";
 import { ConfigError } from "../src/core/config.ts";
 import { hmacSha256Hex } from "../src/core/hash.ts";
-import type { EngineEvent } from "../src/core/events.ts";
+import type { DeliveredEvent, EngineEvent } from "../src/core/events.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { defaultVerificationPolicy } from "../src/core/policy.ts";
 import { INTERRUPT_LINES, bankAccountRedactor, cardNumberRedactor, composeRedactors, healthCardRedactor, sinRedactor } from "../src/core/redaction.ts";
@@ -18,7 +19,7 @@ import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import { verifyReceipt } from "../src/prove/receipt.ts";
 import { isStopRequest } from "../src/prove/consent.ts";
 import { FakeCarrierSignals, FakeFieldCipher, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryAttemptCounters, MemoryConsentStore, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
-import { TEST_KNOWLEDGE_KEY, createTestEngine } from "../src/testing/index.ts";
+import { TEST_KNOWLEDGE_KEY, auditLedgerContract, createTestEngine, sessionStoreContract } from "../src/testing/index.ts";
 import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, form, heard, rejects, setup, testConfig, verifiedCall, waitOut } from "./helpers.ts";
 
 /** The digest of the read-back the caller heard, or any digest once no draft is open (a filed or released intake asks for none). */
@@ -967,6 +968,8 @@ describe("Engine pay", () => {
     const state = await t.engine.state(callId);
     assert.equal(state.phase, "paying");
     assert.equal(state.sensitive, "payment");
+    await assert.rejects(t.engine.closeSensitive(callId), rejects("invalid_transition"), "the payment hold cannot be lifted by the host");
+    assert.equal((await t.engine.state(callId)).sensitive, "payment");
     const text = t.messages.sent.at(-1)!;
     assert.equal(text.to, PHONE_ON_FILE);
     assert.equal(text.purpose, "payment_link");
@@ -1829,5 +1832,303 @@ describe("Engine consent revocation", () => {
     assert.deepEqual([revoked.via, revoked.at], ["call", "2026-01-01T00:00:00.000Z"]);
     const entry = (await ledger.list()).find((e) => e.event === "consent.revoked")!;
     assert.deepEqual([entry.actor, entry.at, entry.detail.via], ["caller", revoked.at, "call"]);
+  });
+});
+
+// INT-5: event delivery. The ledger is the record; the listener is told after each append, at
+// least once and best effort; a background flush catches up calls whose entries are pending.
+
+/** A ledger that is down while `down` is set. */
+class SwitchedLedger extends MemoryAuditLedger {
+  down = false;
+  override async append(input: AuditInput) {
+    if (this.down) throw new Error("ledger down");
+    return super.append(input);
+  }
+}
+
+/** Refuses appends for the calls in `blocked` and takes the rest. */
+class BlockingLedger extends MemoryAuditLedger {
+  readonly blocked = new Set<string>();
+  override async append(input: AuditInput) {
+    if (input.callId !== null && this.blocked.has(input.callId)) throw new Error("ledger blocked");
+    return super.append(input);
+  }
+}
+
+/** Forgets event ids, so a replay appends twice: the ledger the contract case must catch. */
+class ForgetfulLedger extends MemoryAuditLedger {
+  override async append(input: AuditInput) {
+    const copy = { ...input };
+    delete copy.eventId;
+    return super.append(copy);
+  }
+}
+
+/** Loses the next clear of a ledger outbox, as if another process wrote first. */
+class LosingClearStore extends MemorySessionStore {
+  loseClears = 0;
+  override async compareAndSet(w: string, c: string, v: number, r: JsonValue, h?: WriteHint): Promise<{ ok: true; version: number } | { ok: false }> {
+    if (this.loseClears > 0 && (r as { outbox: unknown[] }).outbox.length === 0) {
+      this.loseClears--;
+      return { ok: false };
+    }
+    return super.compareAndSet(w, c, v, r, h);
+  }
+}
+
+/** A store without the optional `pendingCalls`. */
+function storeWithoutPendingCalls(): SessionStore {
+  const inner = new MemorySessionStore();
+  return {
+    create: inner.create.bind(inner),
+    get: inner.get.bind(inner),
+    compareAndSet: inner.compareAndSet.bind(inner),
+    bindRef: inner.bindRef.bind(inner),
+    resolveRef: inner.resolveRef.bind(inner),
+  };
+}
+
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+describe("Engine event delivery (INT-5)", () => {
+  it("tells the listener after each append, with the entry's event id and seq", async () => {
+    const events: DeliveredEvent[] = [];
+    const t = setup({ onEvent: (e) => events.push(e) });
+    const { callId } = await t.engine.startCall();
+    await t.engine.markUntrusted(callId, "document");
+    const entries = await t.ledger.list();
+    assert.deepEqual(
+      events.map((e) => [e.name, e.eventId, e.seq]),
+      entries.map((e) => [e.event, e.eventId, e.seq]),
+    );
+    // Ids count the writes that queued entries (#124), not store versions: the second such write is 2.
+    assert.equal(events[1]!.eventId, JSON.stringify(["ws_test", callId, "w", 2, 0]));
+  });
+
+  it("reports a listener's throw and rejection to onListenerError, and the call and the ledger go on", async () => {
+    const reported: Array<[string, string]> = [];
+    let n = 0;
+    const t = setup({
+      onEvent: async (e) => {
+        if (n++ === 0) throw new Error(`async ${e.name}`);
+      },
+      onListenerError: (error, event) => reported.push([(error as Error).message, event.name]),
+    });
+    const { callId } = await t.engine.startCall();
+    const sync = setup({
+      onEvent: () => {
+        throw new Error("sync");
+      },
+      onListenerError: (error, event) => reported.push([(error as Error).message, event.name]),
+    });
+    await sync.engine.startCall();
+    await t.engine.markUntrusted(callId, "document");
+    await tick();
+    assert.deepEqual(reported.sort(), [
+      ["async call.started", "call.started"],
+      ["sync", "call.started"],
+    ]);
+    assert.equal((await t.engine.state(callId)).tainted, true);
+    assert.deepEqual((await t.ledger.list()).map((e) => e.event), ["call.started", "session.tainted"]);
+  });
+
+  it("ignores an onListenerError hook that fails itself", async () => {
+    let calls = 0;
+    const failingHook = () => {
+      calls++;
+      throw new Error("hook bug");
+    };
+    const sync = setup({
+      onEvent: () => {
+        throw new Error("listener bug");
+      },
+      onListenerError: failingHook,
+    });
+    const async = setup({ onEvent: () => Promise.reject(new Error("listener bug")), onListenerError: failingHook });
+    await sync.engine.startCall();
+    await async.engine.startCall();
+    await tick();
+    assert.equal(calls, 2);
+    assert.equal((await sync.ledger.list()).length, 1);
+    assert.equal((await async.ledger.list()).length, 1);
+  });
+
+  it("ignores an async onListenerError hook that rejects, with no unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let calls = 0;
+      const t = setup({
+        onEvent: () => {
+          throw new Error("listener bug");
+        },
+        onListenerError: async () => {
+          calls++;
+          throw new Error("hook bug");
+        },
+      });
+      await t.engine.startCall();
+      await tick();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(calls, 1);
+      assert.deepEqual(unhandled, []);
+      assert.equal((await t.ledger.list()).length, 1);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("treats a promise from another realm like a native one, from the listener and from the hook", async () => {
+    // A promise made in another realm (node:vm here; a worker or a bundled library elsewhere) is
+    // not an instance of this realm's Promise, but it rejects just the same.
+    const foreign = (message: string): unknown => runInNewContext(`Promise.reject(new Error(${JSON.stringify(message)}))`);
+    const probe = foreign("probe") as PromiseLike<unknown>;
+    assert.equal(probe instanceof Promise, false);
+    probe.then(undefined, () => undefined);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const errors: string[] = [];
+      const t = setup({ onEvent: () => foreign("listener rejection") as void, onListenerError: (e) => void errors.push((e as Error).message) });
+      await t.engine.startCall();
+      const h = setup({
+        onEvent: () => {
+          throw new Error("listener bug");
+        },
+        onListenerError: () => foreign("hook rejection") as void,
+      });
+      await h.engine.startCall();
+      // A then that throws when read is a listener failure too, never the engine's.
+      const throwingThen = new Proxy({}, { get: (_target, key) => (key === "then" ? assert.fail("then read") : undefined) });
+      const g = setup({ onEvent: () => throwingThen as unknown as void, onListenerError: (e) => void errors.push((e as Error).message) });
+      await g.engine.startCall();
+      await tick();
+      await tick();
+      assert.deepEqual(errors, ["listener rejection", "then read"]);
+      assert.deepEqual(unhandled, [], "the hook's rejection was caught and ignored");
+      assert.equal((await h.ledger.list()).length, 1);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("never waits for the listener's promise", async () => {
+    const t = setup({ onEvent: () => new Promise(() => undefined) });
+    const { callId } = await t.engine.startCall();
+    await t.engine.markUntrusted(callId, "document");
+    assert.equal((await t.ledger.list()).length, 2);
+  });
+
+  it("tells the listener again, with the same event id and seq, of an entry a lost clear left pending", async () => {
+    const sessions = new LosingClearStore();
+    const events: DeliveredEvent[] = [];
+    const t = setup({ adapters: { sessions }, onEvent: (e) => events.push(e) });
+    sessions.loseClears = 1;
+    const { callId } = await t.engine.startCall();
+    await t.engine.flushLedger(callId);
+    const id = JSON.stringify(["ws_test", callId, "w", 1, 0]);
+    assert.deepEqual(
+      events.map((e) => [e.name, e.eventId, e.seq]),
+      [
+        ["call.started", id, 1],
+        ["call.started", id, 1],
+      ],
+    );
+    assert.equal((await t.ledger.list()).length, 1, "the ledger has it once");
+  });
+
+  it("flushes in the background the calls whose ledger entries are pending, and only those", async () => {
+    const ledger = new SwitchedLedger();
+    const t = setup({ adapters: { ledger } });
+    const { callId: steady } = await t.engine.startCall();
+    const { callId } = await t.engine.startCall();
+    ledger.down = true;
+    await assert.rejects(t.engine.markUntrusted(callId, "document"), /ledger down/);
+    await assert.rejects(t.engine.startCall({ callId: "c_new" }), /ledger down/);
+    assert.deepEqual(await t.engine.flushPending(), { flushed: [], failed: [callId, "c_new"] }, "a failed run leaves them pending");
+    ledger.down = false;
+    assert.deepEqual(await t.engine.flushPending(1), { flushed: [callId], failed: [] });
+    assert.deepEqual(await t.engine.flushPending(), { flushed: ["c_new"], failed: [] });
+    assert.deepEqual(await t.engine.flushPending(), { flushed: [], failed: [] });
+    const entries = await ledger.list();
+    assert.deepEqual(
+      entries.map((e) => [e.callId, e.event]),
+      [
+        [steady, "call.started"],
+        [callId, "call.started"],
+        [callId, "session.tainted"],
+        ["c_new", "call.started"],
+      ],
+    );
+    assert.equal(verifyChain(entries).ok, true);
+  });
+
+  it("unmarks a call whose outbox a write without a hint emptied, so it is not listed for ever", async () => {
+    const t = setup();
+    const { callId } = await t.engine.startCall();
+    const stored = (await t.sessions.get("ws_test", callId))!;
+    const record = stored.record as unknown as { outbox: unknown[] };
+    // An engine from before INT-5 (a rolling deploy) writes pending entries with the hint, then
+    // clears them with a write that sends none, so the store keeps the call marked.
+    assert.equal(record.outbox.length, 0);
+    await t.sessions.compareAndSet("ws_test", callId, stored.version, { ...record, outbox: [{ eventId: "x" }] } as never, { ledgerPending: true });
+    await t.sessions.compareAndSet("ws_test", callId, stored.version + 1, { ...record, outbox: [] } as never);
+    assert.deepEqual(await t.sessions.pendingCalls!("ws_test", 10), [callId], "marked, with nothing pending");
+    assert.deepEqual(await t.engine.flushPending(), { flushed: [callId], failed: [] });
+    assert.deepEqual(await t.sessions.pendingCalls!("ws_test", 10), [], "unmarked");
+    assert.deepEqual(await t.engine.flushPending(), { flushed: [], failed: [] });
+    const entries = await t.ledger.list();
+    assert.deepEqual(entries.map((e) => e.event), ["call.started"], "nothing appended for it");
+    // flushLedger itself, which a host may call at any time, writes nothing on an empty outbox.
+    const { version } = (await t.sessions.get("ws_test", callId))!;
+    await t.engine.flushLedger(callId);
+    assert.equal((await t.sessions.get("ws_test", callId))!.version, version);
+  });
+
+  it("rotates the pending calls, so one that keeps failing does not starve the rest", async () => {
+    const ledger = new BlockingLedger();
+    const t = setup({ adapters: { ledger } });
+    ledger.blocked.add("c_a");
+    ledger.blocked.add("c_b");
+    await assert.rejects(t.engine.startCall({ callId: "c_a" }), /ledger blocked/);
+    await assert.rejects(t.engine.startCall({ callId: "c_b" }), /ledger blocked/);
+    ledger.blocked.delete("c_b");
+    assert.deepEqual(await t.engine.flushPending(1), { flushed: [], failed: ["c_a"] });
+    assert.deepEqual(await t.engine.flushPending(1), { flushed: ["c_b"], failed: [] });
+    assert.deepEqual(await t.engine.flushPending(1), { flushed: [], failed: ["c_a"] }, "the failed call stays pending");
+    assert.deepEqual((await ledger.list()).map((e) => e.callId), ["c_b"]);
+  });
+
+  it("appends nothing twice when two background flushes run at once", async () => {
+    const ledger = new SwitchedLedger();
+    const t = setup({ adapters: { ledger } });
+    ledger.down = true;
+    for (const id of ["c1", "c2", "c3"]) await assert.rejects(t.engine.startCall({ callId: id }), /ledger down/);
+    ledger.down = false;
+    await Promise.all([t.engine.flushPending(), t.engine.flushPending()]);
+    assert.deepEqual((await ledger.list()).map((e) => e.callId), ["c1", "c2", "c3"]);
+    assert.deepEqual(await t.engine.flushPending(), { flushed: [], failed: [] });
+  });
+
+  it("refuses a bad limit, and a session store that cannot list pending calls", async () => {
+    const t = setup();
+    for (const limit of [0, -1, 1.5, Number.NaN]) await assert.rejects(t.engine.flushPending(limit), rejects("invalid_input"));
+    const bare = setup({ adapters: { sessions: storeWithoutPendingCalls() } });
+    await assert.rejects(bare.engine.flushPending(), rejects("precondition_failed", /pendingCalls/));
+  });
+});
+
+describe("contract suites (INT-5 cases)", () => {
+  for (const c of auditLedgerContract(() => new MemoryAuditLedger())) it(`MemoryAuditLedger: ${c.name}`, c.run);
+  for (const c of sessionStoreContract(storeWithoutPendingCalls)) it(`a store without pendingCalls: ${c.name}`, c.run);
+
+  it("catches a ledger that appends a replayed event id twice", async () => {
+    const failed: string[] = [];
+    for (const c of auditLedgerContract(() => new ForgetfulLedger())) await c.run().catch(() => failed.push(c.name));
+    // #73's full suite has more eventId cases; the replay case is among those it fails.
+    assert.ok(failed.includes("appends a replayed run of eventIds once, as a retried flush does: only the new ones append"));
   });
 });

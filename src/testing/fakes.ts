@@ -1,11 +1,13 @@
 // In-memory and fake adapters, for tests and the demo. They never call a network. Hosts use them
 // to test their own wiring; production hosts plug in real adapters behind the same interfaces.
-import { generateKeyPairSync } from "node:crypto";
+import { X509Certificate, createHash, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 
 import type {
   AttemptCounterKey,
   AttemptCounters,
   CallbackDialer,
+  Anchor,
+  AnchorProof,
   CarrierSignals,
   CodeSendKey,
   CodeStore,
@@ -306,6 +308,7 @@ export class MemoryRecordStore implements RecordStore {
     const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
     // The duress PIN is a PIN too: left alone, it would still pass for the subject (VER-12).
     delete subject?.pinDigest;
+    delete subject?.pinEnrolmentId;
     delete subject?.duressDigest;
   }
 }
@@ -500,4 +503,75 @@ export function testSubject(
 export function generateTestSigner(keyId = "test-key-1"): ReceiptSigner {
   const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   return keyPairSigner(keyId, privateKey.export({ format: "pem", type: "pkcs8" }).toString());
+}
+
+// ---- a time-stamp authority (PRV-9) -------------------------------------------------------------
+
+/** A DER element: one-byte tag, definite length. */
+function der(tag: number, ...parts: Uint8Array[]): Buffer {
+  const body = Buffer.concat(parts);
+  const size: number[] = [];
+  for (let n = body.length; n > 0; n = Math.floor(n / 256)) size.unshift(n % 256);
+  const length = body.length < 0x80 ? [body.length] : [0x80 | size.length, ...size];
+  return Buffer.concat([Buffer.from([tag, ...length]), body]);
+}
+
+const derSequence = (...parts: Uint8Array[]): Buffer => der(0x30, ...parts);
+const derOid = (hex: string): Buffer => der(0x06, Buffer.from(hex, "hex"));
+const derText = (tag: number, text: string): Buffer => der(tag, Buffer.from(text, "latin1"));
+const ONE = der(0x02, Buffer.from([1]));
+const SHA256_ALGORITHM = derSequence(derOid("608648016503040201"), der(0x05));
+const ECDSA_SHA256 = derSequence(derOid("2a8648ce3d040302"));
+const TST_INFO_OID = derOid("2a864886f70d0109100104");
+
+/**
+ * A time-stamp authority in memory: a throwaway P-256 key, a self-signed certificate for
+ * time-stamping, and an RFC 3161 token over SHA-256 of each anchor payload at the clock's time,
+ * naming that certificate in a SigningCertificateV2 (its SHA-256 hash, the DEFAULT, and IssuerSerial).
+ * `chain` is what a host passes to `verifyAnchor`. It never sees more than the payload.
+ */
+export class FakeTimestampAuthority implements Anchor {
+  readonly anchored: Array<{ seq: number; hash: string }> = [];
+  readonly chain: X509Certificate[];
+  readonly #clock: Clock;
+  readonly #key: KeyObject;
+  readonly #name: Buffer;
+  /** The SigningCertificateV2 attribute every token signs. */
+  readonly #signingCertificate: Buffer;
+
+  constructor(clock: Clock) {
+    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+    this.#clock = clock;
+    this.#key = privateKey;
+    this.#name = derSequence(der(0x31, derSequence(derOid("550403"), derText(0x0c, "Fake time-stamp authority, not a secret"))));
+    const timeStamping = der(0x04, derSequence(derOid("2b06010505070308")));
+    const extensions = der(0xa3, derSequence(derSequence(derOid("551d25"), der(0x01, Buffer.from([0xff])), timeStamping)));
+    const validity = derSequence(derText(0x17, "200101000000Z"), derText(0x17, "491231235959Z"));
+    const spki = publicKey.export({ type: "spki", format: "der" });
+    const tbs = derSequence(der(0xa0, der(0x02, Buffer.from([2]))), ONE, ECDSA_SHA256, this.#name, validity, this.#name, spki, extensions);
+    this.chain = [new X509Certificate(derSequence(tbs, ECDSA_SHA256, der(0x03, Buffer.from([0]), sign("sha256", tbs, privateKey))))];
+    // ESSCertIDv2 { certHash, issuerSerial { issuer: one directoryName [4], serial 1 } }.
+    const issuerSerial = derSequence(derSequence(der(0xa4, this.#name)), ONE);
+    const essCertId = derSequence(der(0x04, createHash("sha256").update(this.chain[0]!.raw).digest()), issuerSerial);
+    this.#signingCertificate = derSequence(derOid("2a864886f70d010910022f"), der(0x31, derSequence(derSequence(essCertId))));
+  }
+
+  async anchor(input: { seq: number; hash: string; payload: Uint8Array }): Promise<AnchorProof> {
+    this.anchored.push({ seq: input.seq, hash: input.hash });
+    // GeneralizedTime keeps a fraction of a second when there is one, without trailing zeros (X.690 11.7).
+    const time = this.#clock.now().toISOString().replace(/[-:T]/g, "").replace(/\.?0*Z$/, "Z");
+    const imprint = derSequence(SHA256_ALGORITHM, der(0x04, createHash("sha256").update(input.payload).digest()));
+    const serial = der(0x02, Buffer.from([this.anchored.length % 128]));
+    const tstInfo = derSequence(ONE, derOid("2a0304"), imprint, serial, derText(0x18, time));
+    const attributes = [
+      derSequence(derOid("2a864886f70d010903"), der(0x31, TST_INFO_OID)),
+      derSequence(derOid("2a864886f70d010904"), der(0x31, der(0x04, createHash("sha256").update(tstInfo).digest()))),
+      this.#signingCertificate,
+    ];
+    const signature = sign("sha256", der(0x31, ...attributes), this.#key);
+    const signerInfo = derSequence(ONE, derSequence(this.#name, ONE), SHA256_ALGORITHM, der(0xa0, ...attributes), ECDSA_SHA256, der(0x04, signature));
+    const content = derSequence(TST_INFO_OID, der(0xa0, der(0x04, tstInfo)));
+    const signedData = derSequence(der(0x02, Buffer.from([3])), der(0x31, SHA256_ALGORITHM), content, der(0x31, signerInfo));
+    return { kind: "rfc3161", token: derSequence(derOid("2a864886f70d010702"), der(0xa0, signedData)).toString("base64") };
+  }
 }

@@ -55,6 +55,7 @@ describe("the AuditLedger contract", () => {
       "appends an eventId once: a second append returns the first entry",
       "returns a copy for a replayed eventId too, so a caller cannot change what is stored",
       "stores one entry for concurrent appends of one eventId",
+      "appends a replayed run of eventIds once, as a retried flush does: only the new ones append",
     ]);
   });
 
@@ -223,7 +224,12 @@ describe("the contracts catch a store that collapses keys differing only in a lo
         return super.resolveRef(utf8Key(w), utf8Key(ref));
       }
     }
-    assert.deepEqual(await failing(sessionStoreContract(() => new Collapsing())), ["keeps keys that differ only in a lone UTF-16 surrogate apart: workspaces, calls and references"]);
+    assert.deepEqual(await failing(sessionStoreContract(() => new Collapsing())), [
+      "keeps keys that differ only in a lone UTF-16 surrogate apart: workspaces, calls and references",
+      // #97's pending-mark cases: the collapsing overrides do not pass its write hints on.
+      "keeps a call's pending ledger mark with its writes, per workspace, if it lists pending calls",
+      "lists the pending calls listed least recently first, so the same few never hold back the rest",
+    ]);
   });
 
   it("AuditLedger", async () => {

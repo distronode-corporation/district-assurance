@@ -98,6 +98,9 @@ All notable changes to this project are documented here. The format follows
   factor in Badge's settings, a `CodeStore` adapter (`MemoryCodeStore`, `codeStoreContract`) for
   send limits per subject and per calling number, and `textCodeCountryCodes` in the policy; a
   refused send answers like a sent one.
+- Monthly report per business (PRV-8): `monthlyReport` counts one workspace's month from the
+  ledger, in the host's time zone, as JSON and CSV signed with the receipt key under domain
+  separation (`signReportJson`, `signReportCsv`, `verifyReport`). Counts and totals only.
 - The modular core. A module registry and module interface (what a module provides, the scopes it
   grants or needs, the adapters it requires, its settings validator); Badge, Dossier, Paylink and
   Trace as modules, switched on and off per workspace config; outside modules with `engine.use`.
@@ -209,9 +212,42 @@ All notable changes to this project are documented here. The format follows
   the matched `subjectKey` and an export lists only that subject's consents; a deleted record id
   is never stored again; each erasure gets its own entry, closed by `subject.erasure_completed`,
   and a retry after a partial delete finishes the same one.
+- Carrier webhook signatures (SRV-1): `verifyTwilioSignature` and `verifyTelnyxSignature`, tested against Twilio's published examples and RFC 8032's Ed25519 vector; the reference server's `/webhooks/twilio` and `/webhooks/telnyx` routes check them instead of answering 501.
+- Optional SQLite stores for the reference server (SRV-4): `SqliteRecordStore` and an append-only
+  `SqliteAuditLedger` on `node:sqlite`, with no new dependency, that pass the PRV-5 contract suites
+  and keep their data across a restart. `SqliteAuditLedger.list(fromSeq?, limit?)` reads one page
+  of at most `limit` rows and refuses a `limit` that is not an integer of 1 or more, as the
+  hardened ledger contract (#73) asks.
+- `forwardingFor(state)` (INT-2): the single place a host asks whether it may forward the
+  transcript, audio to speech-to-text, audio to the model and listen-in; all held while `sensitive`
+  is set and after the call ends.
+- Event delivery semantics (INT-5): the listener may be async, is never awaited, gets each entry's
+  `eventId` and `seq`, and its failures go to `onListenerError`; `engine.flushPending()` is a
+  background flush over the calls a session store lists with the optional `pendingCalls` (from
+  `ledgerPending` write hints); an `auditLedgerContract` case for replayed event ids.
+- SRV-9: the reference server serves the host's own `/.well-known/security.txt` (RFC 9116) from its
+  `securityTxt` settings, refusing at start an `Expires` in the past or over a year ahead, or this
+  project's own reporting address, and warning within 30 days (also once when a running server
+  gets there, and once at expiry); SECURITY.md adds the scope and a thanks list.
+- Public timestamp anchors for the ledger (PRV-9): `anchorLedger()` appends a `ledger.anchored` entry with a proof from an `Anchor` adapter, `verifyAnchor` checks it offline, and the reference server has an RFC 3161 time-stamp authority adapter and a Rekor v2 one; no new dependency.
+- A flow simulator (MOD-4, #53): `district-assurance simulate <config.json> --flow <name> --script
+  <name or file>` (`npm run simulate --` here) runs a flow on the fakes with a scripted caller
+  (`pass`, `wrong-pin`, `lockout`, `consent-no`, `payment-paid`, `payment-expired`, or a JSON file)
+  and prints each step, decision, event and the receipt; a bad config or an outside module is refused.
+- STRIDE tables in SECURITY-MODEL.md, one per module and adapter, each row naming its control and
+  the test that proves it or its open issue, checked by `test/security-model.test.ts`; and an
+  audit pack (`node scripts/audit-pack.mjs`, built in CI) with the test, coverage and contract
+  suite reports, an SBOM and the documents (SRV-8).
+- Reference server limits and logging (SRV-2): a body limit per route (`bodyLimits`: the three
+  Stripe endpoints, the record receiver, Twilio, Telnyx and the demo runs; an upload keeps its
+  link's cap), request timeouts (408 and 503), a per-address rate limit (429), and structured
+  request logs by route pattern with no headers, bodies or link tokens (`logJsonLines`, on in
+  `npm run serve`).
 
 ### Changed
 
+- Breaking, reference server: the `maxBodyBytes` option of `createReferenceServer` is replaced by
+  `bodyLimits`, one limit per route that reads a body (SRV-2).
 - Breaking: `CarrierSignalReport` has a required `simSwapChecked`, true only when the carrier was
   asked about SIM changes and answered, and `textCodeTrusted` never trusts a texted code on a
   report without it, whatever the policy says (VER-4). The Telnyx adapter answers false; every
@@ -281,6 +317,9 @@ All notable changes to this project are documented here. The format follows
 - `abandonIntake` releases a reserved filing: it deletes the record by id first
   (`RecordStore.deleteIntakeRecords`), so a later write of that id stores nothing, then drops the
   draft. A reserved filing resumes only while `intake.file` is still granted (VER-13 with FIL-1).
+- `sensitive_closed` (`closeSensitive`) is refused while a payment is open (`invalid_transition`):
+  the payment hold ends only when the payment settles or fails, or the call ends, so a host cannot
+  resume forwarding while the caller may be reading out card details.
 - Carriers are Twilio and Telnyx: the Sinch webhook signature stub and its reference server route
   are removed. `CarrierSignals` stays vendor-neutral.
 
@@ -315,6 +354,62 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Integration review of the server and proof landing (L4):
+  - Anchors (PRV-9): `checkTimestamp` and `verifyAnchor` require the token's signed
+    SigningCertificate or SigningCertificateV2 to name the authority's signing certificate
+    (`certificate` otherwise; a token with neither, or one that does not read, is `token`).
+    `checkRekorEntry` takes the index from the entry's top-level `logIndex` and the tree size and
+    root from the signed checkpoint; the inclusion proof's own copies may be left out, as proto3
+    JSON leaves out defaults, and must agree when present. `isAnchorProof` counts only a proof's
+    own keys, and `verifyAnchor` answers `malformed`, never throws, for an export holding null
+    where an entry should be. New: `timestampTokenFields(token)`, the imprint hash and nonce a
+    token carries. Offline verification otherwise checks what it did.
+  - Breaking, reference server: `timestampRequest(payload, nonce)` takes the nonce.
+    `TimestampAuthorityAnchor` sends a fresh nonce with each request (a `nonce` option for tests)
+    and refuses a token that does not echo it or whose imprint is not SHA-256; both anchor
+    adapters read at most `maxReplyBytes` of a reply (`MAX_REPLY_BYTES`, 256 KiB) and never read
+    an error answer's body; `RekorAnchor` asks the authority before Rekor, so a refused
+    time-stamp writes nothing to the public log.
+  - SQLite stores (SRV-4): an existing file is checked by path (`lstat`), never opened outside
+    SQLite, which would drop another connection's locks; a new file is created exclusively with
+    mode 0600; a `-journal` file is checked as `-wal` and `-shm` are; a symbolic link (at the path
+    or beside it) and anything that is not a regular file are refused; a database file on Windows
+    is refused, since the mode sets no ACL there (`:memory:` still opens); -0 is kept through an
+    escaped encoding; a failed open or schema closes the connection; a transaction SQLite already
+    rolled back, or whose ROLLBACK fails, rejects with the error that caused it.
+  - `RecordStore.deletePinDigest` also removes `pinEnrolmentId`, as a reset does, in the memory
+    and SQLite stores, and `recordStoreContract` checks it.
+  - Reference server: `jsonLinesLog(stream)` (behind `logJsonLines`) drops entries while the
+    stream is backpressured and writes one `log_entries_dropped` line on drain, and `stop()` ends
+    it; `npm run serve` registers `guardLogStream`, so an error on standard output stops logging
+    instead of ending the process. On Node.js 24.2, where `import.meta.main` is false for a `.ts`
+    entry, `npm run serve`, `npm run demo` and `npm run demo:e2e` exited without running; their
+    entry check (`isProgram`) now compares the resolved `argv[1]` with the module's own path. An upload that spent its link keeps its outcome until the link
+    expires, so a retry gets the same answer (a received page names the document), and a retry
+    while the first upload still runs gets 503 with `Retry-After`. Kept outcomes are never evicted
+    before they expire: when `uploads.keptMax` (default 10,000) are held, a new upload gets 503
+    with `Retry-After` before it claims its link, and is not scanned. A request whose connection
+    closes before its answer is neither answered nor logged later. A client error behind
+    pipelined requests waits for their answers. A `tel:` security.txt contact must be `+` and
+    digits (with `-`, `.`, `(`, `)`), and a `warn` that throws no longer breaks the route.
+  - Carrier webhooks: `verifyTwilioSignature` and `verifyTelnyxSignature` take the raw body as a
+    `Uint8Array` too, and the reference server passes the bytes received, so two invalid UTF-8
+    bodies never verify under one signature; a Telnyx public key that is not a string is skipped.
+  - Stripe and record-delivery webhooks: `verifyStripeSignature` takes the raw body as a
+    `Uint8Array` too, and the reference server's `/webhooks/stripe/*` and `/webhooks/records`
+    routes verify the bytes received before decoding or parsing them, so a body under a bad
+    signature is refused (400 `signature`, as before) without being read, and two invalid UTF-8
+    bodies never verify under one signature.
+  - Monthly reports (PRV-8): payment totals are summed exactly, and a total past
+    `Number.MAX_SAFE_INTEGER` refuses the report (`precondition_failed`), as `signReportJson` and
+    `signReportCsv` refuse a report holding one; a `payment.link_sent` without a payment id counts
+    as malformed.
+  - Simulator (MOD-4): after each wrong entry the caller waits out the backoff Badge's `lockout`
+    setting gives, and a `badge.verify` step with a factor it has no caller for exits 3.
+  - The listener's copy of a `ledger.anchored` event is made inside the listener guard: a detail
+    that cannot be copied skips the listener and is reported to `onListenerError`.
+  - Audit pack (SRV-8): a supplied SBOM goes in `sbom/supplied/`, so it never overwrites a
+    manifest, and the coverage data goes in a new temporary folder that never overlaps `--out`.
 - Integration review of the Gate and payments landing (L1):
   - `accessKeys()` and `receiptKeys()` publish each key under its signer's `keyId`, as
     `stepUpKeys()` does, so a signer whose JWK has no `kid` no longer makes its grants and

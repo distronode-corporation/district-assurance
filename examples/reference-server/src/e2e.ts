@@ -22,6 +22,7 @@ import type { Server } from "node:http";
 import { EngineError, randomIds, systemClock, type FlowConfig, type SignedReceipt } from "../../../src/index.ts";
 import { createReferenceServer } from "./app.ts";
 import { DemoRuns } from "./demo-runs.ts";
+import { isProgram } from "./main.ts";
 import { demoConfig } from "./flows.ts";
 import { SCRIPTS, createDemoWorld, pass, verifyToLevel2, type DemoWorld, type ScriptStep, type Scripts, type StepOutcome } from "./script.ts";
 import { StripeApiError, StripeCheckoutLinks, assertTestModeSecretKey, type CheckoutSessionStatus } from "./stripe-adapters.ts";
@@ -286,7 +287,8 @@ export async function startE2eDemo(apiKey: string, port: number, options: Omit<E
   };
 }
 
-if (import.meta.main) {
+// Not `import.meta.main`, which Node.js 24.2 sets false for a .ts entry (see `isProgram`).
+if (isProgram(process.argv[1], import.meta.url)) {
   // Read once, then dropped from the environment so nothing started later inherits it.
   const key = process.env.STRIPE_TEST_SECRET_KEY;
   delete process.env.STRIPE_TEST_SECRET_KEY;

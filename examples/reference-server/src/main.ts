@@ -16,13 +16,16 @@
 // on file is a 555 number nothing is texted to; open the link, complete Stripe's test check, and
 // the signed `identity.verification_session.*` event that `stripe listen` forwards is applied to
 // the call. The engine's events for the trial (which hold no values) are printed too, so the
-// applied outcome shows as a `verification.factor` line. Everything else runs on fake adapters until its Stripe adapter is built (PAY-1).
+// applied outcome shows as a `verification.factor` line. Each answered request is logged as one
+// JSON line (route pattern, status, time; never a path, header or body). Everything else runs on fake adapters until its Stripe adapter is built (PAY-1).
+import { realpathSync } from "node:fs";
 import type { Server } from "node:http";
+import { fileURLToPath } from "node:url";
 
 import { systemClock, type Clock, type MessagePurpose, type MessageSender } from "../../../src/index.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine, type TestEngineOptions } from "../../../src/testing/index.ts";
 
-import { createReferenceServer } from "./app.ts";
+import { createReferenceServer, logJsonLines, type JsonLinesLog, type RequestLog } from "./app.ts";
 import { StripeIdentityProvider, type StripeAdapterOptions } from "./stripe-adapters.ts";
 
 const TRIAL_ACCOUNT = "12345678";
@@ -52,6 +55,8 @@ export interface ServeOptions {
   stripe?: StripeAdapterOptions;
   /** For tests: the clock for the engine and the webhook signature window. Default the system clock. */
   clock?: Clock;
+  /** Where each answered request's log entry goes. Default one JSON line each on standard output. */
+  log?: (entry: RequestLog) => void;
 }
 
 export interface Serve {
@@ -59,6 +64,15 @@ export interface Serve {
   t: TestEngine;
   /** With STRIPE_IDENTITY_KEY only: starts the trial call and creates its Stripe Identity check. */
   startTrialCall: (() => Promise<{ callId: string; sessionId: string }>) | null;
+}
+
+/**
+ * Takes the error events of the stream a log writes to, and stops the log on the first. An EPIPE
+ * on standard output (its reader went away) arrives as an `error` event, which with no listener
+ * would end the process. Registered once, before the server starts.
+ */
+export function guardLogStream(stream: { on(event: "error", listener: (error: Error) => void): unknown }, log: Pick<JsonLinesLog, "stop">): void {
+  stream.on("error", () => log.stop());
 }
 
 export function createServe(options: ServeOptions): Serve {
@@ -94,6 +108,7 @@ export function createServe(options: ServeOptions): Serve {
     engine: t.engine,
     clock,
     stripeSecrets: { identity: secret("STRIPE_IDENTITY_WEBHOOK_SECRET"), payments: secret("STRIPE_PAYMENTS_WEBHOOK_SECRET"), connect: secret("STRIPE_CONNECT_WEBHOOK_SECRET") },
+    log: options.log ?? logJsonLines,
   });
   const startTrialCall = async () => {
     t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: TRIAL_ACCOUNT, phoneOnFile: TRIAL_PHONE, knowledge: { dob: TRIAL_DOB } }));
@@ -108,7 +123,23 @@ export function createServe(options: ServeOptions): Serve {
   return { server, t, startTrialCall: key === "" ? null : startTrialCall };
 }
 
-if (import.meta.main) {
+/**
+ * Whether the module at `moduleUrl` is the program node was started with (`entry`, its argv[1]).
+ * Not `import.meta.main`: on Node.js 24.2 (the oldest the package allows) it is false for a `.ts`
+ * entry, so `npm run serve` exited at once without listening. Both paths are resolved through
+ * symlinks; importing this module from anywhere else does not start the server.
+ */
+export function isProgram(entry: string | undefined, moduleUrl: string): boolean {
+  if (entry === undefined) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
+if (isProgram(process.argv[1], import.meta.url)) {
+  guardLogStream(process.stdout, logJsonLines);
   const port = Number(process.env.PORT ?? 8787);
   const { server, startTrialCall } = createServe({ env: process.env });
   server.listen(port, "127.0.0.1", () => {

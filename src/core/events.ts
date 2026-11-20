@@ -68,6 +68,7 @@ export const ENGINE_EVENTS = [
   "module.event",
   "subject.erased",
   "subject.erasure_completed",
+  "ledger.anchored",
 ] as const;
 
 export type EngineEventName = (typeof ENGINE_EVENTS)[number];
@@ -76,11 +77,31 @@ export type Actor = "caller" | "ai" | "code" | "member" | "system";
 
 export interface EngineEvent {
   name: EngineEventName;
-  callId: string;
+  /** Null for an engine-wide event (`ledger.anchored`). */
+  callId: string | null;
   actor: Actor;
   /** ISO 8601. */
   at: string;
   detail: { [key: string]: JsonValue };
 }
 
-export type EventListener = (event: EngineEvent) => void;
+/** An event as the listener sees it: after its ledger entry was appended, with that entry's id and seq. */
+export interface DeliveredEvent extends EngineEvent {
+  /** The ledger entry's event id. The same event can be delivered more than once; this id says so. */
+  eventId: string;
+  /** The ledger entry's seq. */
+  seq: number;
+}
+
+/**
+ * Told of each event after its ledger entry is appended (INT-5). The ledger is the record; the
+ * listener is a notification, best effort and possibly repeated: the same event can come again (after
+ * a ledger outage, or from another process's flush), and one is missed if the process stops right
+ * after the append. The engine calls it inline and never awaits it, so a listener with slow work
+ * returns a promise instead of blocking. A throw or a rejection goes to `onListenerError` and never
+ * stops the call or the ledger. The return type is `void` so any function fits, an async one too.
+ */
+export type EventListener = (event: DeliveredEvent) => void;
+
+/** Told when the listener throws or its promise rejects. A failure of this hook is ignored. */
+export type ListenerErrorHandler = (error: unknown, event: DeliveredEvent) => void;

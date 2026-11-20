@@ -1,44 +1,6 @@
 # Issues
 
-Every open issue of [ROADMAP.md](ROADMAP.md), 41 of them, ready to paste into GitHub: the heading is the title, the fenced block is the body. They are in milestone order, owner-command first; open them in that order. ROADMAP.md has the waves and the dependencies, and `test/stubs.test.ts` fails if an id here is missing there.
-
-### VER-1: Durable failure counters and lockout per subject and per calling number (hard gate before owner-command goes live)
-
-**Labels:** `badge`, `m2`  
-**Milestone:** M2 Owner command  
-**Depends on:** none
-
-```markdown
-## Why
-
-Attempt limits are per call today, for keypad knowledge, the PIN and plug-in factors alike; a caller can call again, and a 4-digit PIN with 3 attempts per call falls within about 3,300 calls. **Hard gate:** no host runs the owner-command flow, or any PIN factor, on a live line before this is merged.
-
-## Acceptance criteria
-
-- [ ] An `AttemptCounters` adapter interface in `src/core/adapters.ts`: `get`, `recordFailure`, `reset`, keyed by workspace, factor kind and either subject key or a hash of the calling number.
-- [ ] `submitFactor` (and so `submitKeypad` and `submitPin`) consults the counters before counting the attempt, and refuses to judge while locked (the same `locked: true` answer).
-- [ ] Backoff after failures (5, 15, 60, 300, 900 seconds) and a hard lock after 10 failures in 24 hours, in Badge's settings with these as defaults and floors, checked by `validateConfig`.
-- [ ] A `verification.locked` event with the scope of the lock (`subject` or `number`) and the factor kind, never the values.
-- [ ] Badge requires the adapter when any entered factor is on; `recordSubjectFailure` in `src/verify/later.ts` is replaced by the real implementation.
-
-## Files
-
-- src/core/adapters.ts
-- src/verify/counters.ts (new)
-- src/verify/badge.ts
-- src/verify/later.ts
-- src/testing/fakes.ts
-- src/testing/contracts.ts
-
-## Tests
-
-- test/verify-counters.test.ts: backoff and lock with the fixed clock, and a contract suite for the adapter
-- test/pin.test.ts: a PIN lock carries across two calls and two engines; unknown subjects are counted by number
-
-## Done when
-
-All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
-```
+Every open issue of [ROADMAP.md](ROADMAP.md), 36 of them, ready to paste into GitHub: the heading is the title, the fenced block is the body. They are in milestone order, owner-command first; open them in that order. ROADMAP.md has the waves and the dependencies, and `test/stubs.test.ts` fails if an id here is missing there.
 
 ### VER-8: Policy version and config revision in grants and receipts
 
@@ -127,36 +89,6 @@ Production keys live in a KMS, not in process memory.
 ## Tests
 
 - test/prove.test.ts: DER to P1363 conversion against node:crypto output
-
-## Done when
-
-All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
-```
-
-### PRV-5: Adapter contract suites in district-assurance/testing
-
-**Labels:** `trace`, `m2`  
-**Milestone:** M2 Owner command  
-**Depends on:** none
-
-```markdown
-## Why
-
-A host's durable stores must keep the same guarantees as the memory ones.
-
-## Acceptance criteria
-
-- [ ] `auditLedgerContract(factory)` and `recordStoreContract(factory)` exported from `district-assurance/testing`, in the style of `sessionStoreContract`: ordering, copies, append-only, chain validity, concurrency of appends.
-- [ ] The memory adapters pass them in CI.
-
-## Files
-
-- src/testing/contracts.ts
-- src/testing/index.ts
-
-## Tests
-
-- test/contracts.test.ts
 
 ## Done when
 
@@ -1083,34 +1015,6 @@ All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, S
 All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
 ```
 
-### SRV-4: Optional persistent stores for the reference server
-
-**Labels:** `reference-server`, `m8`  
-**Milestone:** M8 Reference server hardening  
-**Depends on:** PRV-5
-
-```markdown
-## Why
-
-The server forgets everything on restart.
-
-## Acceptance criteria
-
-- [ ] SQLite-backed `RecordStore` and `AuditLedger` on `node:sqlite` (no new dependency), passing the PRV-5 contract suites.
-
-## Files
-
-- examples/reference-server/src/sqlite-stores.ts (new)
-
-## Tests
-
-- The PRV-5 contract suites
-
-## Done when
-
-All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
-```
-
 ### SRV-5: Release workflow
 
 **Labels:** `reference-server`, `m8`  
@@ -1136,66 +1040,6 @@ Nothing is published yet, by decision.
 ## Tests
 
 - A dry run on a tag in a fork
-
-## Done when
-
-All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
-```
-
-### INT-2: Transcript and audio forwarding helper
-
-**Labels:** `integration`, `m9`  
-**Milestone:** M9 Host integration and module authors  
-**Depends on:** none
-
-```markdown
-## Why
-
-Hosts must pause transcripts and cut audio while `sensitive` is set.
-
-## Acceptance criteria
-
-- [ ] `forwardingFor(state)` returns what the host may forward (transcript, audio to speech-to-text, audio to the model, listen-in) for the current session; documented as the single place a host asks.
-
-## Files
-
-- src/core/forwarding.ts (new)
-- ARCHITECTURE.md
-
-## Tests
-
-- test/session.test.ts
-
-## Done when
-
-All boxes are ticked, `npm run test:coverage` keeps every `src/` file at 100%, SPEC.md and SECURITY-MODEL.md match the change, and CHANGELOG.md has a line under Unreleased.
-```
-
-### INT-5: Event delivery semantics
-
-**Labels:** `integration`, `m9`  
-**Milestone:** M9 Host integration and module authors  
-**Depends on:** none
-
-```markdown
-## Why
-
-Ledger entries are saved with each step (an outbox in the call record) and appended idempotently by event id; a failed append is retried by the next write or `flushLedger`. The listener is still synchronous and told at least once, best effort.
-
-## Acceptance criteria
-
-- [ ] An async listener with defined semantics: the ledger is the source of truth; listener failures are reported (an `onListenerError` hook) and never block the call or the ledger.
-- [ ] A background flush a host can schedule for calls whose outbox is not empty, and an `auditLedgerContract` case (PRV-5) for idempotent appends.
-
-## Files
-
-- src/engine.ts
-- src/core/events.ts
-- src/core/adapters.ts
-
-## Tests
-
-- test/engine.test.ts
 
 ## Done when
 

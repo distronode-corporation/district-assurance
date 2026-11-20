@@ -14,6 +14,7 @@ const spec = readFileSync(new URL("../SPEC.md", import.meta.url), "utf8");
 function twilioRows(): Map<string, string> {
   const ticked = (cell: string) => [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1]!);
   const mapped = new Map<string, string>();
+  // A Windows checkout may hold the README with CRLF endings: a "\r" left on a line would stop the `$` match.
   for (const line of readme.split(/\r?\n/)) {
     const row = /^\| Twilio `StirVerstat`: (.*) \| (.*) \|$/.exec(line);
     if (row === null) continue;
