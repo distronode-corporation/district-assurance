@@ -334,6 +334,12 @@ export interface StoredSession {
   record: JsonValue;
 }
 
+/** What the engine says about a record it writes, so a store can index it without reading the record. */
+export interface WriteHint {
+  /** The record holds ledger entries not yet known to be appended (its outbox is not empty). */
+  ledgerPending: boolean;
+}
+
 /**
  * Where call sessions live, so several processes (a voice agent and a web backend, several
  * replicas) can run one call. Every write is a compare-and-set on the session's version: the
@@ -343,13 +349,27 @@ export interface StoredSession {
  */
 export interface SessionStore {
   /** Stores a new session at version 1. False, and nothing written, when the id exists. */
-  create(workspaceId: string, callId: string, record: JsonValue): Promise<boolean>;
+  create(workspaceId: string, callId: string, record: JsonValue, hint?: WriteHint): Promise<boolean>;
   get(workspaceId: string, callId: string): Promise<StoredSession | null>;
   /**
    * Writes the record only if the stored version is `expectedVersion`, and returns the new
    * version (`expectedVersion + 1`). `{ ok: false }` when the version moved or the session is gone.
    */
-  compareAndSet(workspaceId: string, callId: string, expectedVersion: number, record: JsonValue): Promise<{ ok: true; version: number } | { ok: false }>;
+  compareAndSet(
+    workspaceId: string,
+    callId: string,
+    expectedVersion: number,
+    record: JsonValue,
+    hint?: WriteHint,
+  ): Promise<{ ok: true; version: number } | { ok: false }>;
+  /**
+   * Optional (INT-5). Up to `limit` ids of the workspace's calls whose latest write said
+   * `ledgerPending`, for a background flush (`Engine.flushPending`). A store that has it keeps the
+   * mark with the record, in the same write; a write without a hint leaves the mark as it was.
+   * List the calls listed least recently first (`MemorySessionStore` rotates them): a store that
+   * always lists the same first `limit` lets calls that keep failing hold back every other one.
+   */
+  pendingCalls?(workspaceId: string, limit: number): Promise<string[]>;
   /** Points a provider reference (an identity session, a payment link) at a call. The first binding wins. */
   bindRef(workspaceId: string, ref: string, callId: string): Promise<boolean>;
   resolveRef(workspaceId: string, ref: string): Promise<string | null>;

@@ -218,6 +218,10 @@ All notable changes to this project are documented here. The format follows
 - `forwardingFor(state)` (INT-2): the single place a host asks whether it may forward the
   transcript, audio to speech-to-text, audio to the model and listen-in; all held while `sensitive`
   is set and after the call ends.
+- Event delivery semantics (INT-5): the listener may be async, is never awaited, gets each entry's
+  `eventId` and `seq`, and its failures go to `onListenerError`; `engine.flushPending()` is a
+  background flush over the calls a session store lists with the optional `pendingCalls` (from
+  `ledgerPending` write hints); an `auditLedgerContract` case for replayed event ids.
 
 ### Changed
 

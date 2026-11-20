@@ -147,9 +147,53 @@ export function sessionStoreContract(factory: () => SessionStore | Promise<Sessi
         assert.equal(await store.resolveRef("w2", "payment:cs_1"), null);
       },
     ],
+    [
+      "keeps a call's pending ledger mark with its writes, per workspace, if it lists pending calls",
+      async (store) => {
+        // `pendingCalls` is optional (INT-5); a store without it has nothing more to keep here.
+        if (store.pendingCalls === undefined) return;
+        const pending = async (w: string) => (await store.pendingCalls!(w, 10)).sort();
+        await store.create("w", "c1", { n: 1 }, { ledgerPending: true });
+        await store.create("w", "c2", { n: 1 }, { ledgerPending: false });
+        await store.create("w", "c3", { n: 1 }, { ledgerPending: true });
+        await store.create("w2", "c4", { n: 1 }, { ledgerPending: true });
+        assert.deepEqual(await pending("w"), ["c1", "c3"]);
+        assert.equal((await store.pendingCalls("w", 1)).length, 1, "at most `limit` ids");
+        assert.deepEqual(await pending("w3"), []);
+        await store.compareAndSet("w", "c1", 1, { n: 2 }, { ledgerPending: false });
+        await store.compareAndSet("w", "c2", 1, { n: 2 }, { ledgerPending: true });
+        assert.deepEqual(await store.compareAndSet("w", "c3", 9, { n: 2 }, { ledgerPending: false }), { ok: false });
+        assert.equal(await store.create("w", "c3", { n: 9 }, { ledgerPending: false }), false);
+        await store.compareAndSet("w", "c3", 1, { n: 2 });
+        assert.deepEqual(await pending("w"), ["c2", "c3"], "a lost write, a refused create and a write without a hint change no mark");
+        assert.deepEqual(await pending("w2"), ["c4"]);
+      },
+    ],
+    [
+      "lists the pending calls listed least recently first, so the same few never hold back the rest",
+      async (store) => {
+        if (store.pendingCalls === undefined) return;
+        for (const id of ["c1", "c2", "c3"]) await store.create("w", id, { n: 1 }, { ledgerPending: true });
+        // Calls that stay pending (their flush keeps failing) must not be the only ones listed.
+        const seen = new Set<string>();
+        for (let run = 0; run < 3; run++) for (const id of await store.pendingCalls("w", 1)) seen.add(id);
+        assert.deepEqual([...seen].sort(), ["c1", "c2", "c3"], "three runs of one reach all three calls");
+        const twos = [await store.pendingCalls("w", 2), await store.pendingCalls("w", 2)].flat();
+        assert.deepEqual([...new Set(twos)].sort(), ["c1", "c2", "c3"], "two runs of two reach all three calls");
+      },
+    ],
   ];
   return cases.map(([name, body]) => ({ name, run: async () => body(await factory()) }));
 }
+
+const replayEntry = (n: number): AuditInput => ({
+  eventId: JSON.stringify(["w", "c1", 2, n]),
+  callId: "c1",
+  actor: "code",
+  event: "module.event",
+  at: `2026-01-01T00:00:0${n}.000Z`,
+  detail: { n },
+});
 
 const T0 = "2026-01-01T00:00:00.000Z";
 const at = (seconds: number): string => new Date(Date.parse(T0) + seconds * 1000).toISOString();
@@ -423,6 +467,23 @@ export function auditLedgerContract(factory: () => AuditLedger | Promise<AuditLe
         const appended = await Promise.all(Array.from({ length: 5 }, (_, i) => ledger.append(contractEntry(i + 1, { eventId: "same" }))));
         for (const entry of appended) assert.deepEqual(entry, appended[0]);
         assert.equal((await ledger.list()).length, 1);
+      },
+    ],
+    [
+      "appends a replayed run of eventIds once, as a retried flush does: only the new ones append",
+      async (ledger) => {
+        const first: AuditEntry[] = [];
+        for (const n of [0, 1]) first.push(await ledger.append(replayEntry(n)));
+        const replayed: AuditEntry[] = [];
+        for (const n of [0, 1, 2, 3]) replayed.push(await ledger.append(replayEntry(n)));
+        assert.deepEqual(replayed.slice(0, 2), first, "a replayed id returns its first entry");
+        assert.deepEqual(
+          replayed.map((e) => e.seq),
+          [1, 2, 3, 4],
+        );
+        const stored = await ledger.list();
+        assert.deepEqual(stored, replayed);
+        assert.deepEqual(verifyChain(stored), { ok: true, head: await ledger.head() });
       },
     ],
   ];

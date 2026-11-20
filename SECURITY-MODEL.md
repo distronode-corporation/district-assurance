@@ -699,6 +699,11 @@ invalid (tested).
 A step's ledger entries are saved with the step itself (an outbox in the call record) and
 appended by event id, once each; a ledger that fails leaves them pending, and the next write or
 `flushLedger` appends them, so no saved step is ever missing from the ledger for good (tested).
+A call nobody writes again is caught up by `flushPending`, a background flush the host schedules,
+over the calls its session store lists as pending (tested). The ledger is the record, never the
+`onEvent` listener: the listener hears of an entry only after the ledger has it, may hear of it
+twice (same `eventId`) or not at all, and its failures go to `onListenerError` without stopping
+the call or the ledger (tested). A listener gets the same detail as the ledger, never a value.
 A durable ledger must pass `auditLedgerContract`: append-only, one valid chain under concurrent
 appends, each `eventId` once, copies in and out, and card data refused (tested on
 `MemoryAuditLedger`).
@@ -882,7 +887,8 @@ Consents stay in their call records until PRV-3's `ConsentStore`; counters acros
   durable `AttemptCounters` store shared by every process of a workspace
   (`attemptCountersContract`), and a durable `CodeStore` shared by every engine of a workspace that passes `codeStoreContract`. The reference server's
   `SqliteRecordStore` and `SqliteAuditLedger` (SRV-4) are an example that passes the record and
-  ledger suites, not a production store.
+  ledger suites, not a production store. Scheduling `flushPending` on a session store with
+  `pendingCalls`.
 - Passing the calling number from the carrier to `beginVerification`, never one the caller or the
   model gives, so the per-number limits apply. Caller ID can be spoofed, so the number's counter is
   a brake on one line, not a control; the subject's counter is what bounds guessing, and a withheld

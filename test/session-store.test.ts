@@ -2,7 +2,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import type { AuditInput, SessionStore } from "../src/core/adapters.ts";
+import type { AuditInput, SessionStore, WriteHint } from "../src/core/adapters.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import type { JsonValue } from "../src/core/canonical.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
@@ -18,14 +18,14 @@ describe("MemorySessionStore passes the SessionStore contract", () => {
 describe("the contract suite", () => {
   it("catches a store that ignores the version", async () => {
     class Careless extends MemorySessionStore {
-      override async compareAndSet(w: string, c: string, _v: number, r: JsonValue) {
+      override async compareAndSet(w: string, c: string, _v: number, r: JsonValue, h?: WriteHint) {
         const stored = await this.get(w, c);
-        return super.compareAndSet(w, c, stored?.version ?? 0, r);
+        return super.compareAndSet(w, c, stored?.version ?? 0, r, h);
       }
     }
     const failures = [];
     for (const c of sessionStoreContract(async () => new Careless())) await c.run().catch((e: unknown) => failures.push(e));
-    assert.equal(failures.length, 1, "the expected-version case fails");
+    assert.equal(failures.length, 2, "the expected-version case fails, and so does the pending-mark case, whose lost write is not lost");
   });
 });
 
