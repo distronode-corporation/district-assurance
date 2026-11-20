@@ -268,6 +268,8 @@ All notable changes to this project are documented here. The format follows
 - `moduleContract(module)` in `district-assurance/testing`, the suite an outside module should pass
   (MOD-1), an example outside module (`examples/modules/callback.ts`) and a guide to writing one
   in ARCHITECTURE.md.
+- A JSON Schema (2020-12) for FlowConfig version 1, `schema/flow-config.v1.json`, published with the
+  package; tested against the TypeScript types and never stricter than `validateConfig` (MOD-2).
 
 ### Changed
 

@@ -433,6 +433,8 @@ judge with `engine.use`) is off until a config turns it on in Badge's settings; 
 changes the config in force (tested). The registry refuses a factor whose kind another module
 provides or is a name for caller ID, from a plug-in and from any module's manifest alike (tested).
 A module cannot be removed while the config in force names a factor it supplies (tested).
+The JSON Schema for FlowConfig is a convenience for editors, not a control: a config that passes it
+can still be refused, and only `validateConfig` decides (SPEC.md, section 7).
 
 ### Races across processes
 

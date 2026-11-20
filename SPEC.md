@@ -901,6 +901,20 @@ engine takes no spoken "sí" and no voice confirmation on a Spanish call, and a 
 Spanish caller's consent (`recordConsent`, whose `answer` the host maps) must take it on the keypad
 too, never from a spoken answer, until then.
 
+**JSON Schema.** `schema/flow-config.v1.json` (JSON Schema 2020-12, published with the package as
+`district-assurance/schema/flow-config.v1.json`) describes the shape of version 1 for editors and
+tools: the fields of each object, their types, ranges and patterns, the built-in modules' settings
+(checked only while the module is on) and the built-in steps. An outside module's settings and
+steps are open. The schema is never stricter than `validateConfig`: every config `validateConfig`
+accepts with the built-in modules passes the schema. It cannot see the rules that need the registry, the
+adapters or another part of the document (installed modules and factors, floors, planned factors
+and modes, the form or wording a step names, unique ids, step order), so a config that passes it
+can still be refused; `validateConfig` stays the authority. `test/config-schema.test.ts` checks it
+against the TypeScript types (at type-check time) and against `validateConfig` (a corpus of good
+and bad configs, both sides of the edge of every pattern and range the schema copies from a
+validator, and a seeded sweep of near-miss configs), and that the package's exports resolve the
+published name to the file.
+
 ## 8. Flow execution
 
 `startCall` refuses (`invalid_input`, nothing saved) a `callId` that is not 1 to 200 characters the
