@@ -3,7 +3,7 @@
 // `npm publish` builds first (prepack); the release workflow builds explicitly, packs with
 // install scripts off, and checks the tarball's entry points.
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { describe, it } from "node:test";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -41,5 +41,38 @@ describe("the package", () => {
 
   it("reads the release workflow the same with CRLF line endings, as a Windows checkout may hold it", () => {
     assert.deepEqual(packs(lf(raw.replace(/\r?\n/g, "\r\n"))), packs(release));
+  });
+});
+
+describe("the release workflow's tarball allow-list", () => {
+  const allowed = new RegExp(/allowed='([^']+)'/.exec(release)![1]!);
+  const required = [...release.matchAll(/package\/[\w./-]+/g)].map((m) => m[0]);
+
+  it("admits every path `files` ships, so a new published file cannot fail the release pack", () => {
+    const shipped = ["package/package.json"];
+    for (const entry of pkg.files) {
+      if (entry === "dist/") shipped.push("package/dist/index.js", "package/dist/testing/index.d.ts");
+      else if (entry.endsWith("/")) {
+        for (const name of readdirSync(new URL(`../${entry}`, import.meta.url), { recursive: true }) as string[]) shipped.push(`package/${entry}${name}`);
+      } else shipped.push(`package/${entry}`);
+    }
+    for (const path of shipped) assert.match(path, allowed, path);
+  });
+
+  it("still refuses what must never ship", () => {
+    for (const path of ["package/src/index.ts", "package/test/pack.test.ts", "package/schema/x.ts", "package/schema/../src/a.json", "package/.env", "package/examples/a.json"]) {
+      assert.doesNotMatch(path, allowed, path);
+    }
+  });
+
+  it("requires every export target in the tarball", () => {
+    const exportsMap = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { exports: Record<string, unknown> }).exports;
+    const targets = new Set<string>();
+    const walk = (v: unknown): void => {
+      if (typeof v === "string") targets.add(`package/${v.replace(/^\.\//, "")}`);
+      else if (v !== null && typeof v === "object") for (const x of Object.values(v)) walk(x);
+    };
+    walk(exportsMap);
+    for (const target of targets) assert.ok(required.includes(target), `release.yml requires ${target}`);
   });
 });

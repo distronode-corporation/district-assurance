@@ -169,8 +169,8 @@ jobs:
           echo "filename=$file" >> "$GITHUB_OUTPUT"
           echo "sha256=$first" >> "$GITHUB_OUTPUT"
           echo "$file SHA-256 $first" >> "$GITHUB_STEP_SUMMARY"
-      # Only the compiled entry points and the documents `files` names: no source, test,
-      # example or configuration file, and every entry point present.
+      # Only the compiled entry points, the FlowConfig schema and the documents `files` names: no
+      # source, test, example or configuration file, and every entry point present.
       - name: Tarball contents
         env:
           FILE: ${{ steps.pack.outputs.filename }}
@@ -178,13 +178,14 @@ jobs:
           set -euo pipefail
           tar -tzf "$RUNNER_TEMP/release/$FILE" | sort > "$RUNNER_TEMP/contents.txt"
           cat "$RUNNER_TEMP/contents.txt"
-          allowed='^package/(dist/.+\.(js|d\.ts)|package\.json|README\.md|SECURITY-MODEL\.md|SECURITY\.md|SPEC\.md|CHANGELOG\.md|LICENSE|NOTICE)$'
+          allowed='^package/(dist/.+\.(js|d\.ts)|schema/[a-z0-9.-]+\.json|package\.json|README\.md|SECURITY-MODEL\.md|SECURITY\.md|SPEC\.md|CHANGELOG\.md|LICENSE|NOTICE)$'
           if grep -vE "$allowed" "$RUNNER_TEMP/contents.txt"; then
             echo "::error::The tarball holds files outside the published set (above)."
             exit 1
           fi
           for required in package/dist/index.js package/dist/index.d.ts package/dist/testing/index.js \
-            package/dist/testing/index.d.ts package/package.json package/LICENSE package/NOTICE; do
+            package/dist/testing/index.d.ts package/schema/flow-config.v1.json package/package.json package/LICENSE \
+            package/NOTICE; do
             grep -qxF "$required" "$RUNNER_TEMP/contents.txt" || { echo "::error::$required is missing."; exit 1; }
           done
       # The tarball unpacked into an empty project's node_modules, as an install lays it out
