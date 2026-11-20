@@ -2150,7 +2150,9 @@ and throws `precondition_failed`; one after the end is refused (`invalid_transit
 not have for this workspace (`invalid_input`), a consent answered "no", and a consent that is not
 recorded on its call, still being stored or settled as not recorded (`precondition_failed`). So
 that `consent.revoked` never precedes `consent.recorded`, it appends the call's pending ledger
-entries first; when the host has removed the call record, the store alone decides. Otherwise it
+entries first. When the host has removed the call record, the revocation is still stored (a yes
+in the store never outlives the caller's no), but `consent.revoked` is appended only when this
+workspace's ledger holds the consent's `consent.recorded` entry (read page by page). Otherwise it
 stores the revocation, appends `consent.revoked` (actor `member` for `web`, else
 `caller`) at the revocation's time, tells the listener, and returns the revocation. A second
 revocation, or a retry after the ledger failed, returns the first one and completes its entry

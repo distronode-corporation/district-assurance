@@ -7,6 +7,7 @@ import { REDACTION_MARKERS, cardNumberRedactor, composeRedactors, healthCardReda
 import { deliverRecord } from "../src/file/delivery.ts";
 import { validateForm, type IntakeForm } from "../src/file/intake.ts";
 import { verifySubjectExport } from "../src/prove/subject.ts";
+import { LEDGER_PAGE } from "../src/prove/trace.ts";
 import { FakeFieldCipher, MemoryConsentStore, MemoryRecordStore } from "../src/testing/fakes.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../src/testing/index.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
@@ -59,6 +60,18 @@ describe("L3 review round 3: redaction", () => {
     assert.deepEqual(inBetween.findings.at(-1), { kind: "health_card", start: 0, end: 16 }, "a finding over the piece left between them covers the card");
   });
 
+  it("maps a finding that starts exactly where an inserted marker starts, inside an earlier one, to what that marker replaced", () => {
+    const text = "4111111111111111 tail";
+    // "[SIN removed]" now stands where "card" was, right after the "[" left of the card marker; "[SIN" starts at it.
+    const result = composeRedactors(cardNumberRedactor, wordRedactor("card", "sin"), wordRedactor("\\[SIN", "health_card"), wordRedactor("tail", "bank_account")).redact(text);
+    assert.deepEqual(result.findings.slice(2), [
+      { kind: "health_card", start: 0, end: 16 },
+      { kind: "bank_account", start: 17, end: 21 },
+    ]);
+    // A finding that starts at a marker in the plain case maps to its start, as before.
+    assert.deepEqual(composeRedactors(cardNumberRedactor, wordRedactor("\\[card", "sin")).redact(text).findings[1], { kind: "sin", start: 0, end: 16 });
+  });
+
   it("translates the offsets of many findings over many earlier markers without rescanning them (linear, not quadratic)", () => {
     const composed = composeRedactors(cardNumberRedactor, sinRedactor);
     const time = (n: number) => {
@@ -71,10 +84,12 @@ describe("L3 review round 3: redaction", () => {
       return took;
     };
     time(500);
-    const small = Math.max(time(2_000), 1);
-    const large = time(32_000);
-    // Sixteen times the input: a quadratic translation took about 128 times as long, a linear one takes about 12.
-    assert.ok(large / small < 40, `32,000 pairs took ${Math.round(large)} ms, 2,000 took ${Math.round(small)} ms`);
+    // The fastest of three runs each, so one pause of the process does not decide the ratio.
+    const fastest = (n: number) => Math.min(time(n), time(n), time(n));
+    const small = Math.max(fastest(2_000), 1);
+    const large = fastest(32_000);
+    // Sixteen times the input: a quadratic translation took about 56 times as long, a linear one takes about 12.
+    assert.ok(large / small < 36, `32,000 pairs took ${Math.round(large)} ms, 2,000 took ${Math.round(small)} ms`);
   });
 });
 
@@ -168,11 +183,30 @@ describe("L3 review round 3: confirmIntake under a step-up rule raised mid-filin
     await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack }), rejects("scope_denied", /intake_flagged/));
     assert.equal((await t.ledger.list()).some((e) => e.event === "intake.confirmed"), false);
     assert.deepEqual((await t.engine.state(callId)).recordIds, []);
-    assert.notEqual(await t.records.getIntakeRecord("ws_test", "rec_1"), null, "the write landed before the refusal");
-    // Refused again on a retry, before anything is written, and the claim of the refused write is gone.
+    assert.equal(await t.records.getIntakeRecord("ws_test", "rec_1"), null, "the row the write stored is deleted at once, so no reader takes it for a confirmed record");
+    const stored = (await t.sessions.get("ws_test", callId))!.record as unknown as { modules: { dossier: { intake: { writers?: Record<string, string>; abandoning?: boolean } } } };
+    assert.deepEqual([stored.modules.dossier.intake.writers, stored.modules.dossier.intake.abandoning], [{}, true], "the refused write's claim is gone and the filing is being abandoned");
     await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack }), rejects("scope_denied"));
-    const stored = (await t.sessions.get("ws_test", callId))!.record as unknown as { modules: { dossier: { intake: { writers?: Record<string, string> } } } };
-    assert.deepEqual(stored.modules.dossier.intake.writers, {});
+    await t.engine.abandonIntake(callId);
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "intake.abandoned").length, 1);
+  });
+
+  it("leaves a row whose delete failed after a refused write to abandonIntake, which deletes it", async () => {
+    const t = setup({ config: stepUpConfig(), adapters: { fieldCipher: new FakeFieldCipher() } });
+    const callId = await level1Draft(t, "repair", "issue", "leak");
+    const put = t.records.putIntakeRecord.bind(t.records);
+    t.records.putIntakeRecord = async (record, seen) => (await t.engine.raiseSignal(callId, "intake_flagged"), put(record, seen));
+    const del = t.records.deleteIntakeRecords.bind(t.records);
+    let fail = true;
+    t.records.deleteIntakeRecords = async (ws, ids) => {
+      if (fail) {
+        fail = false;
+        throw new Error("delete down");
+      }
+      return del(ws, ids);
+    };
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) }), rejects("scope_denied", /intake_flagged/));
+    assert.notEqual(await t.records.getIntakeRecord("ws_test", "rec_1"), null);
     await t.engine.abandonIntake(callId);
     assert.equal(await t.records.getIntakeRecord("ws_test", "rec_1"), null);
   });
@@ -220,6 +254,36 @@ describe("L3 review round 3: abandonIntake", () => {
     assert.equal(await heard(t, callId), fresh, "the new draft is still there");
     assert.equal((await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: fresh })).values.issue, "burst pipe");
     assert.equal((await t.ledger.list()).filter((e) => e.event === "intake.abandoned").length, 1, "one abandonment recorded");
+  });
+});
+
+describe("L3 review round 3: abandonIntake against a filing committed before its claim", () => {
+  it("leaves the filed record and a draft opened since alone", async () => {
+    const records = new HeldStore();
+    records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB }, pin: PIN }));
+    const t = setup({ adapters: { records } });
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak");
+    const readBack = await heard(t, callId);
+    records.failNext = 1;
+    await assert.rejects(t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack }), /store down/);
+    const read = t.sessions.get.bind(t.sessions);
+    let race = true;
+    t.sessions.get = async (ws, id) => {
+      const got = await read(ws, id);
+      if (race) {
+        race = false;
+        await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack });
+        await t.engine.startIntake(callId, "repair");
+        await t.engine.setIntakeField(callId, "issue", "burst pipe");
+      }
+      return got;
+    };
+    await t.engine.abandonIntake(callId);
+    assert.deepEqual((await t.engine.state(callId)).recordIds, ["rec_1"]);
+    assert.notEqual(await records.getIntakeRecord("ws_test", "rec_1"), null);
+    assert.equal((await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) })).values.issue, "burst pipe", "the new draft stays");
   });
 });
 
@@ -278,7 +342,7 @@ describe("L3 review round 3: subject export", () => {
 });
 
 describe("L3 review round 3: revokeConsent once the call is gone", () => {
-  it("refuses a yes the store holds when the ledger never recorded it, and accepts one it did", async () => {
+  it("keeps the withdrawal of a yes the ledger never recorded in the store, and appends no consent.revoked for it", async () => {
     const consents = new MemoryConsentStore();
     const t = setup({ adapters: { consents } });
     const { callId } = await t.engine.startCall();
@@ -287,12 +351,33 @@ describe("L3 review round 3: revokeConsent once the call is gone", () => {
     const stray = { ...yes, consentId: "cns_stray" };
     await consents.putConsent("ws_test", stray);
     const later = createTestEngine({ config: testConfig(), adapters: { consents, ledger: t.ledger } });
-    await assert.rejects(later.engine.revokeConsent({ consentId: stray.consentId, via: "web" }), rejects("precondition_failed", /ledger holds no record/));
+    const withdrawn = await later.engine.revokeConsent({ consentId: stray.consentId, via: "web" });
+    assert.deepEqual((await consents.getConsent("ws_test", stray.consentId))!.revoked, withdrawn);
+    assert.deepEqual(await later.engine.revokeConsent({ consentId: stray.consentId, via: "text" }), withdrawn, "the first withdrawal stands");
     // Another workspace's consent.recorded for the same ids, on a shared ledger, proves nothing here.
     const other = createTestEngine({ workspaceId: "ws_other", config: testConfig(), adapters: { consents, ledger: t.ledger } });
     await consents.putConsent("ws_other", yes);
-    await assert.rejects(other.engine.revokeConsent({ consentId: yes.consentId, via: "web" }), rejects("precondition_failed", /ledger holds no record/));
+    await other.engine.revokeConsent({ consentId: yes.consentId, via: "web" });
     assert.equal((await t.ledger.list()).filter((e) => e.event === "consent.revoked").length, 0);
     assert.equal((await later.engine.revokeConsent({ consentId: yes.consentId, via: "web" })).via, "web");
+    assert.deepEqual((await t.ledger.list()).filter((e) => e.event === "consent.revoked").map((e) => e.detail.consentId), [yes.consentId]);
+  });
+
+  it("finds the consent.recorded entry past the first page of a long ledger, reading page by page", async () => {
+    const consents = new MemoryConsentStore();
+    const t = setup({ adapters: { consents } });
+    for (let i = 0; i < LEDGER_PAGE + 3; i++) await t.ledger.append({ callId: null, actor: "system", event: "signal.raised", at: "2026-01-01T00:00:00.000Z", detail: { signal: `filler_${i}` } });
+    const { callId } = await t.engine.startCall();
+    const yes = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    const pages: Array<[number | undefined, number | undefined]> = [];
+    const list = t.ledger.list.bind(t.ledger);
+    t.ledger.list = async (from, limit) => (pages.push([from, limit]), list(from, limit));
+    const later = createTestEngine({ config: testConfig(), adapters: { consents, ledger: t.ledger } });
+    await later.engine.revokeConsent({ consentId: yes.consentId, via: "web" });
+    assert.deepEqual(pages, [
+      [1, LEDGER_PAGE],
+      [LEDGER_PAGE + 1, LEDGER_PAGE],
+    ]);
+    assert.equal((await list()).filter((e) => e.event === "consent.revoked").length, 1);
   });
 });

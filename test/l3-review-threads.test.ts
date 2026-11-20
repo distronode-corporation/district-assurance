@@ -152,7 +152,7 @@ describe("L3 review: abandonIntake against a confirmation", () => {
       }
       return got;
     };
-    await assert.rejects(t.engine.abandonIntake(callId));
+    await t.engine.abandonIntake(callId);
     assert.notEqual(await records.getIntakeRecord("ws_test", "rec_1"), null, "the filed record stays");
     assert.deepEqual((await t.engine.state(callId)).recordIds, ["rec_1"]);
   });

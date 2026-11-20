@@ -672,13 +672,15 @@ interface Replaced {
  * to the start or the end of what the marker replaced, so a finding over it covers all of it.
  */
 function toOriginal(at: number, replaced: readonly Replaced[], side: "start" | "end"): number {
-  // The last marker that starts before the offset, by binary search: the markers are sorted and do
-  // not overlap, so each call reads O(log n) of them, never every earlier one.
+  // The last marker that starts before the offset (or at it, for a start: a finding that starts
+  // where a marker starts covers it), by binary search: the markers are sorted and do not overlap,
+  // so each call reads O(log n) of them, never every earlier one.
   let lo = 0;
   let hi = replaced.length;
   while (lo < hi) {
     const mid = (lo + hi) >>> 1;
-    if (replaced[mid]!.start < at) lo = mid + 1;
+    const from = replaced[mid]!.start;
+    if (from < at || (side === "start" && from === at)) lo = mid + 1;
     else hi = mid;
   }
   if (lo === 0) return at;

@@ -5,7 +5,7 @@
 // Trace also sends the two texts that follow a money, contact or access step: a link to the call's
 // receipt, when the flow asks for it and the caller consented, and the security notice after a
 // contact change, which always goes. Code builds both, and neither carries a value.
-import type { ConsentChannel, ConsentRecord, ConsentRevocation, ConsentStore } from "../core/adapters.ts";
+import type { AuditEntry, ConsentChannel, ConsentRecord, ConsentRevocation, ConsentStore } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
@@ -312,7 +312,8 @@ const CHANNELS: readonly ConsentChannel[] = ["call", "text", "web"];
 
 /**
  * Revokes a consent by voice (`call`), text or dashboard (`web`), during its call or long after:
- * the revocation is kept in the ConsentStore and written to the ledger as `consent.revoked`. A
+ * the revocation is kept in the ConsentStore and written to the ledger as `consent.revoked`
+ * (for a call that is gone, only once the ledger holds its `consent.recorded`). A
  * retry, or a second revocation, returns the first one and appends nothing twice. A text or a
  * spoken answer that `isStopRequest` matches is the host's cue to call this.
  */
@@ -340,13 +341,15 @@ export async function revokeConsent(rt: EngineRuntime, input: { consentId: strin
       throw new EngineError("precondition_failed", "the consent is not recorded on its call: there is nothing to revoke yet");
     }
     await rt.flushLedger(consent.callId);
-  } else if (!(await recordedOnLedger(rt, consent))) {
-    // The store alone is no proof: a write that landed after the call settled the consent as not
-    // recorded leaves a yes there that the call never recorded. Only this workspace's
-    // consent.recorded entry for the consent proves it was.
-    throw new EngineError("precondition_failed", "the consent's call is gone and the ledger holds no record of it: there is nothing to revoke");
   }
+  // With the call gone, the store alone is no proof the call recorded the consent: a store write
+  // that landed after the call settled it as not recorded leaves a yes the call never recorded, and
+  // a call removed before its consent.recorded entry was appended leaves no entry. Either way the
+  // withdrawal is kept in the store (a yes there never outlives the caller's no), and the ledger
+  // gets consent.revoked only after this workspace's consent.recorded entry for it.
+  const ledgered = call !== null || (await recordedOnLedger(rt, consent));
   const revoked = stored.revoked ?? (await store.revokeConsent(rt.workspaceId, { consentId: consent.consentId, via, at: rt.now() }));
+  if (!ledgered) return structuredClone(revoked);
   // One entry per consent, however often it is revoked: the event id names the consent, and a
   // ledger appends an id once, so a retry after a failed append completes it.
   await rt.append({
@@ -360,14 +363,23 @@ export async function revokeConsent(rt: EngineRuntime, input: { consentId: strin
   return structuredClone(revoked);
 }
 
+/** Ledger entries read per page when looking for one entry. */
+export const LEDGER_PAGE = 256;
+
 /** Whether this workspace's ledger holds the consent.recorded entry of a consent, on its call. */
 async function recordedOnLedger(rt: EngineRuntime, consent: ConsentRecord): Promise<boolean> {
   // A ledger can be shared by several workspaces: the event id (a JSON tuple starting with the
   // workspace and the call) says whose entry it is.
   const prefix = `${JSON.stringify([rt.workspaceId, consent.callId]).slice(0, -1)},`;
-  return (await rt.adapter("ledger").list()).some(
-    (e) => e.event === "consent.recorded" && e.callId === consent.callId && e.detail.consentId === consent.consentId && e.eventId?.startsWith(prefix) === true,
-  );
+  const recorded = (e: AuditEntry) => e.event === "consent.recorded" && e.callId === consent.callId && e.detail.consentId === consent.consentId && e.eventId?.startsWith(prefix) === true;
+  // Read page by page, stopping at the entry: a shared ledger's whole history is never held at once.
+  const ledger = rt.adapter("ledger");
+  let page = await ledger.list(1, LEDGER_PAGE);
+  while (!page.some(recorded)) {
+    if (page.length < LEDGER_PAGE) return false;
+    page = await ledger.list(page[LEDGER_PAGE - 1]!.seq + 1, LEDGER_PAGE);
+  }
+  return true;
 }
 
 /** Whether a call ends with a receipt: its flow has a `trace.receipt` step, or it ran no flow and receipts are on. */

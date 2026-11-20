@@ -233,7 +233,7 @@ describe("the reference server's sample receiver", () => {
   /** A RecordDelivery over fetch, as a host would write one. */
   const fetchDelivery: RecordDelivery = {
     async post(input) {
-      const res = await fetch(input.url, { method: "POST", headers: input.headers, body: input.body });
+      const res = await fetch(input.url, { method: "POST", headers: input.headers, body: input.body, redirect: "error" });
       await res.arrayBuffer();
       return { status: res.status };
     },

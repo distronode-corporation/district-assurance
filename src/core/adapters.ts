@@ -478,7 +478,8 @@ export interface ConsentStore {
  * Posts a signed record delivery to a business's endpoint (for example with `fetch`, with a
  * timeout). One request per call, no retries of its own: `deliverRecord` signs, retries and
  * records each attempt. Resolves with the HTTP status of any answer, and rejects only when no
- * answer came (a refused connection, a timeout).
+ * answer came (a refused connection, a timeout). It does not follow redirects: a redirect would
+ * resend the signed body and its headers to another origin.
  */
 export interface RecordDelivery {
   post(input: { url: string; headers: Record<string, string>; body: string }): Promise<{ status: number }>;

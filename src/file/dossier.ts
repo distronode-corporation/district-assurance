@@ -431,11 +431,13 @@ export async function confirmIntake(
     // stale, and the record was deleted by id): nothing is filed.
     if (s.intake?.filing?.recordId !== record.recordId || s.intake.releasing !== undefined || s.intake.abandoning === true) return "abandoned";
     // A step-up rule raised while the record was written holds it too: the call files nothing and
-    // emits nothing. The reservation stays, and abandonIntake deletes what the write stored by id,
-    // as for a write whose answer was lost. This write is over, so its claim goes.
+    // emits nothing. The stored row is no confirmed record, so the filing turns into an abandonment
+    // in the same write (no confirmation files it from here on) and the row is deleted below; a
+    // delete that fails is finished by abandonIntake. This write is over, so its claim goes.
     const refused = rt.requireScope(draft, "intake.file", undefined);
     if (refused !== null) {
       delete s.intake.writers![writer];
+      s.intake.abandoning = true;
       return { refused };
     }
     // The store kept nothing (the subject was erased): the call files nothing either, and drops
@@ -453,7 +455,11 @@ export async function confirmIntake(
     draft.emit("intake.confirmed", "caller", { recordId: record.recordId, formId: record.formId, digest: record.digest, confirmedBy: record.confirmedBy });
     return "filed";
   });
-  if (typeof filed === "object") throw filed.refused;
+  if (typeof filed === "object") {
+    // Best effort: the refusal is the answer, and a failed delete leaves the abandonment to finish.
+    await records.deleteIntakeRecords(rt.workspaceId, [record.recordId]).catch(() => undefined);
+    throw filed.refused;
+  }
   if (filed === "abandoned") throw new EngineError("precondition_failed", "the filing was abandoned while it was written, or released by a failing fieldCipher; nothing was filed");
   // The subject was erased (after another process filed it, too): no locally sealed copy stands in for it.
   if (kept === null) throw new EngineError("precondition_failed", "the subject was erased while this record was filed; nothing was filed");
@@ -529,9 +535,10 @@ export async function abandonIntake(rt: EngineRuntime, callId: string): Promise<
   await rt.update(callId, (draft) => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     const filing = s.intake?.filing ?? null;
-    // The reservation this call claimed is gone: another abandonment (or a release) finished it
-    // while this delete was in flight, and the call may hold a new draft since, which stays.
-    if (reserved !== null && filing?.recordId !== reserved.recordId) return;
+    // The reservation read is gone: filed or released before the claim, or finished by another
+    // abandonment while this delete was in flight. The call may hold a new draft since, which stays,
+    // as does the confirmed copy of a record filed meanwhile.
+    if (seen !== null && (reserved === null || filing?.recordId !== reserved.recordId)) return;
     // A filing reserved since the read is not released here: its record was not deleted.
     if (reserved === null && filing !== null) throw new EngineError("precondition_failed", "the intake is being filed");
     draft.apply({ type: "intake_abandoned" });
