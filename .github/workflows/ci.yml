@@ -74,7 +74,13 @@ jobs:
       # 100% lines, statements, functions and branches in every file under src/, each file on
       # its own (c8, .c8rc.json). A file no test loads counts, at 0%. The reference server under
       # examples/ is tested by the same run but not held to the bar.
+      # The same run holds the property and fuzz suites (test/property, test/fuzz, SRV-7): each
+      # property gets a fixed time budget on a fixed seed, so a pull request sees the same cases
+      # every time. fuzz.yml runs them for much longer on a new seed each night.
       - run: npm run test:coverage
+        env:
+          DA_FUZZ_MS: "200"
+          DA_FUZZ_SEED: "14311149"
       - run: npm run build
       # The scripted call, end to end, on fake adapters and a loopback server.
       - run: npm run demo

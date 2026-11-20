@@ -45,6 +45,18 @@ export function chainEntry(input: AuditInput, seq: number, prevHash: string): Au
   return { ...unsigned, hash: hashEntry(unsigned) };
 }
 
+/**
+ * Whether an entry read back from storage still has its hash. A changed entry can hold what
+ * canonical JSON refuses (`1e999` in stored JSON parses as Infinity): that is a break, not a crash.
+ */
+function hashMatches(entry: Omit<AuditEntry, "hash">, hash: string): boolean {
+  try {
+    return hashEntry(entry) === hash;
+  } catch {
+    return false;
+  }
+}
+
 export type ChainCheck = { ok: true; head: { seq: number; hash: string } } | { ok: false; seq: number; reason: "seq" | "prev_hash" | "hash" };
 
 /**
@@ -55,10 +67,12 @@ export function verifyChain(entries: readonly AuditEntry[], from: { seq: number;
   let expectedSeq = from.seq + 1;
   let prevHash = from.hash;
   for (const entry of entries) {
+    // Storage can hand back anything: an entry that is not an object is a break at the seq it holds, never a crash.
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return { ok: false, seq: expectedSeq, reason: "seq" };
     if (entry.seq !== expectedSeq) return { ok: false, seq: entry.seq, reason: "seq" };
     if (entry.prevHash !== prevHash) return { ok: false, seq: entry.seq, reason: "prev_hash" };
     const { hash, ...rest } = entry;
-    if (hashEntry(rest) !== hash) return { ok: false, seq: entry.seq, reason: "hash" };
+    if (!hashMatches(rest, hash)) return { ok: false, seq: entry.seq, reason: "hash" };
     prevHash = hash;
     expectedSeq++;
   }

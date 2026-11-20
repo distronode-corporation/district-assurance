@@ -1,0 +1,77 @@
+name: Fuzz
+
+# The property and fuzz suites (test/property, test/fuzz, SRV-7) for much longer than CI gives
+# them, on a new seed each run. CI runs them for 200 ms per property on one fixed seed; this run
+# gives each property a minute and draws its cases from the run's id, so every night tries cases
+# no run has tried before.
+#
+# A failure prints fast-check's seed and path. Replay that one case with
+# `DA_FUZZ_SEED=<seed> DA_FUZZ_PATH=<path> node --test --test-name-pattern=<property> <file>`, fix
+# the bug, and keep the input in that property's `examples` (or as a fixed test), so CI runs it on
+# every pull request.
+#
+# Alerting is the run status: a failed scheduled run sends GitHub's own failure email to the
+# repository's maintainers. Nothing here opens an issue or posts anywhere.
+#
+# GitHub disables a scheduled workflow in a public repository after 60 days without activity.
+# On a dormant repository, re-enable it from the Actions tab.
+on:
+  schedule:
+    # Daily, away from codeql.yml (Monday 04:27), audit.yml (Monday 06:47) and scorecard.yml
+    # (Tuesday 05:41).
+    - cron: '13 3 * * *'
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Run seed (a non-negative integer). Empty: the run's id."
+        required: false
+        default: ""
+      budget-ms:
+        description: "Milliseconds per property."
+        required: false
+        default: "60000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      # Development dependencies only, with no install scripts: no package in the lockfile has one
+      # (none is marked hasInstallScript), as release.yml installs them.
+      - run: npm ci --ignore-scripts
+      # Inputs reach the step as environment variables, never pasted into the script; the
+      # harness (test/fuzz/harness.ts) refuses a budget that is not a non-negative integer and a
+      # seed that is not an integer.
+      - name: Property and fuzz suites
+        shell: bash
+        env:
+          DA_FUZZ_MS: ${{ inputs.budget-ms || '60000' }}
+          INPUT_SEED: ${{ inputs.seed }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          export DA_FUZZ_SEED="${INPUT_SEED:-$RUN_ID}"
+          echo "run seed: $DA_FUZZ_SEED, ${DA_FUZZ_MS} ms per property"
+          node --test --throw-deprecation --test-reporter=spec "test/property/*.test.ts" "test/fuzz/*.test.ts"

@@ -257,6 +257,11 @@ All notable changes to this project are documented here. The format follows
   config, on the memory adapters with `node:perf_hooks` only, and writes JSON with the machine and
   commit. CI runs it on a small budget; each release compares with the previous release on the
   same runner and reports a case over 20% slower in the run summary, never failing. BENCHMARKS.md.
+- Property and fuzz tests (SRV-7, `test/property`, `test/fuzz`) for the ledger, the keypad collector,
+  `validateConfig`, `canonicalJson`, the Stripe checks, the carrier stubs and the reference server,
+  on `fast-check` (a development dependency only), in CI and nightly (`fuzz.yml`); they found, and
+  this fixes, `parseStripeEvent` reading event types like `constructor` from `Object.prototype` and
+  `verifyChain` throwing on a stored entry changed to hold `1e999` instead of reporting the break.
 
 ### Changed
 
