@@ -342,7 +342,7 @@ describe("L3 review round 3: subject export", () => {
 });
 
 describe("L3 review round 3: revokeConsent once the call is gone", () => {
-  it("keeps the withdrawal of a yes the ledger never recorded in the store, and appends no consent.revoked for it", async () => {
+  it("stores and ledgers the withdrawal of a yes the ledger never recorded, marked priorRecord: false", async () => {
     const consents = new MemoryConsentStore();
     const t = setup({ adapters: { consents } });
     const { callId } = await t.engine.startCall();
@@ -358,9 +358,18 @@ describe("L3 review round 3: revokeConsent once the call is gone", () => {
     const other = createTestEngine({ workspaceId: "ws_other", config: testConfig(), adapters: { consents, ledger: t.ledger } });
     await consents.putConsent("ws_other", yes);
     await other.engine.revokeConsent({ consentId: yes.consentId, via: "web" });
-    assert.equal((await t.ledger.list()).filter((e) => e.event === "consent.revoked").length, 0);
     assert.equal((await later.engine.revokeConsent({ consentId: yes.consentId, via: "web" })).via, "web");
-    assert.deepEqual((await t.ledger.list()).filter((e) => e.event === "consent.revoked").map((e) => e.detail.consentId), [yes.consentId]);
+    const revoked = (await t.ledger.list()).filter((e) => e.event === "consent.revoked");
+    assert.deepEqual(
+      revoked.map((e) => [e.eventId?.startsWith('["ws_other"') === true, e.detail.consentId, e.detail.priorRecord]),
+      [
+        [false, stray.consentId, false],
+        [true, yes.consentId, false],
+        [false, yes.consentId, undefined],
+      ],
+      "every no reaches the ledger once; only the one this workspace recorded carries no priorRecord flag",
+    );
+    assert.deepEqual(Object.keys(revoked[0]!.detail).sort(), ["consentId", "priorRecord", "purpose", "via", "wordingVersion"], "no personal data added");
   });
 
   it("finds the consent.recorded entry past the first page of a long ledger, reading page by page", async () => {

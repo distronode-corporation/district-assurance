@@ -313,7 +313,7 @@ const CHANNELS: readonly ConsentChannel[] = ["call", "text", "web"];
 /**
  * Revokes a consent by voice (`call`), text or dashboard (`web`), during its call or long after:
  * the revocation is kept in the ConsentStore and written to the ledger as `consent.revoked`
- * (for a call that is gone, only once the ledger holds its `consent.recorded`). A
+ * (`priorRecord: false` when the call is gone and the ledger holds no `consent.recorded` for it). A
  * retry, or a second revocation, returns the first one and appends nothing twice. A text or a
  * spoken answer that `isStopRequest` matches is the host's cue to call this.
  */
@@ -345,11 +345,11 @@ export async function revokeConsent(rt: EngineRuntime, input: { consentId: strin
   // With the call gone, the store alone is no proof the call recorded the consent: a store write
   // that landed after the call settled it as not recorded leaves a yes the call never recorded, and
   // a call removed before its consent.recorded entry was appended leaves no entry. Either way the
-  // withdrawal is kept in the store (a yes there never outlives the caller's no), and the ledger
-  // gets consent.revoked only after this workspace's consent.recorded entry for it.
+  // withdrawal is kept in the store (a yes there never outlives the caller's no) and always reaches
+  // the ledger; without this workspace's consent.recorded entry for it, the entry says so
+  // (priorRecord: false), so consent.revoked never stands for a recording the ledger lacks.
   const ledgered = call !== null || (await recordedOnLedger(rt, consent));
   const revoked = stored.revoked ?? (await store.revokeConsent(rt.workspaceId, { consentId: consent.consentId, via, at: rt.now() }));
-  if (!ledgered) return structuredClone(revoked);
   // One entry per consent, however often it is revoked: the event id names the consent, and a
   // ledger appends an id once, so a retry after a failed append completes it.
   await rt.append({
@@ -358,7 +358,7 @@ export async function revokeConsent(rt: EngineRuntime, input: { consentId: strin
     actor: revoked.via === "web" ? "member" : "caller",
     event: "consent.revoked",
     at: revoked.at,
-    detail: { consentId: consent.consentId, purpose: consent.purpose, wordingVersion: consent.wordingVersion, via: revoked.via },
+    detail: { consentId: consent.consentId, purpose: consent.purpose, wordingVersion: consent.wordingVersion, via: revoked.via, ...(ledgered ? {} : { priorRecord: false }) },
   });
   return structuredClone(revoked);
 }
