@@ -139,8 +139,9 @@ export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: 
     brokenSubject = onFile?.pinDigest !== undefined && onFile.pinDigest === onFile.duressDigest;
     // Rehash on a match (ADR-29): the record that matched, if it is of the earlier format, becomes an
     // Argon2id record, only while it is still the one on file. A miss changes nothing. The upgrade is
-    // best effort: a write that fails leaves the earlier record, which still verifies, for the next
-    // match to upgrade, and never changes the outcome of an entry already judged.
+    // best effort and never changes the outcome of an entry already judged: whichever record a
+    // failure leaves on file (the earlier one, or the new one if the write committed before its
+    // error), the next match verifies it.
     upgrade = async (outcome) => {
       const field = outcome === "duress" ? "duressDigest" : "pinDigest";
       const check = outcome === "duress" ? duressCheck : pinCheck;
@@ -148,7 +149,7 @@ export async function judgePin(rt: EngineRuntime, settings: PinSettings, input: 
       try {
         await records.upgradePinDigest(input.workspaceId, subjectKey, field, onFile![field]!, await hashPinRecord(keyed[field]));
       } catch {
-        // Hashing the new record or writing it failed: the earlier record stays, and still verifies.
+        // Hashing or writing the new record failed: the record on file still verifies.
       }
     };
   }

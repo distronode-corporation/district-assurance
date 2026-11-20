@@ -429,7 +429,7 @@ Every check is one Argon2id run (on a stand-in at today's cost when no usable re
 and a constant-time compare of the tag. A record of the earlier format, the bare 64-hex HMAC, still
 verifies, and on a match the PIN factor replaces it with an Argon2id record through
 `RecordStore.upgradePinDigest`, a compare-and-set on the old value (rehash on login), best effort:
-a failed hash or write keeps the outcome and leaves the earlier record for the next match. Lockouts,
+a failed hash or write keeps the outcome, and the next match verifies whichever record it left. Lockouts,
 counters and answers are unchanged. Keypad knowledge stays a keyed HMAC.
 **Why.** The keyed HMAC alone kept records useless without the knowledge key, but anyone holding
 both the store and the key could try every PIN at HMAC speed; OpenSSF's `crypto_password_storage`
