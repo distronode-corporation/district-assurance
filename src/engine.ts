@@ -84,6 +84,22 @@ function lateCounted(record: CallRecord): readonly string[] | null {
   return counted === undefined ? null : counted;
 }
 
+/**
+ * A flow's attach write found the call's counter keys changed since its start was counted
+ * (verification named a subject meanwhile): the count is given back and the start counted again.
+ */
+class FlowKeysMoved extends EngineError {
+  constructor() {
+    super("conflict", "verification named a subject while the flow start was being counted");
+  }
+}
+
+/**
+ * A late count found over a limit on a counter the flow has admitted since it was read (another
+ * verification on the call counted it first): this count is given back and the rest judged again.
+ */
+class LateKeyAdmitted extends Error {}
+
 /** A verification start's subject write found a limited flow it was not counted on: count, then write again. */
 class LateCountNeeded extends EngineError {
   constructor() {
@@ -187,8 +203,12 @@ export class Engine {
   /** The registry's replace for a built-in module, which only this engine holds (`#swapBadge`). */
   #replaceBuiltIn!: (module: AssuranceModule) => void;
   readonly #rt: EngineRuntime;
-  /** Duress alerts this engine is sending now, by id, with when it started: one send at a time, retried after a while. */
-  readonly #sending = new Map<string, number>();
+  /**
+   * Duress alerts this engine is sending now, by id, with when the send started: one send at a time,
+   * retried after a while. Each claim is its own object, so a send that resumes after another took
+   * its alert over neither sends it nor clears the newer claim.
+   */
+  readonly #sending = new Map<string, { since: number }>();
   /** Per call, the owed alerts of the duress alert send scheduled and not yet started (`#sendDuressAlertsSoon`). */
   readonly #sendScheduled = new Map<string, string>();
   #receiptModules: readonly AssuranceModule[];
@@ -540,33 +560,45 @@ export class Engine {
     const definition = this.#flowDefinition(name);
     const revision = this.#config.revision;
     const numberKey = await this.#numberKey(input.callingNumber);
-    const before = await this.#read(callId);
-    this.#keepNumber(before, numberKey);
-    const start = await this.#countFlowStart(before, name, definition);
-    // The start is taken back when nothing was written (the write's own check refused the flow, every
-    // compare-and-set found the call moved, or a read failed first), or when a write with no answer
-    // is read back without this flow. A write that saved and then failed (the ledger down) keeps it.
-    const outcome: WriteOutcome = { write: "none" };
-    try {
-      await this.#update(
-        callId,
-        (draft) => {
-          this.#keepNumber(draft.record, numberKey);
-          this.#attachFlow(draft, name, definition, revision, start);
-        },
-        outcome,
-      );
-    } catch (error) {
-      if (outcome.write === "none" || (outcome.write === "unknown" && !(await this.#holdsFlow(callId, name, start)))) {
-        // A refused take-back is reported beside the start's own error, which comes first.
-        await this.#uncount(start).catch((cleanup: unknown) => {
-          throw new AggregateError([error, cleanup], "the flow did not start, and taking back its count failed");
-        });
+    for (let attempt = 1; ; attempt++) {
+      const before = await this.#read(callId);
+      this.#keepNumber(before, numberKey);
+      const start = await this.#countFlowStart(before, name, definition);
+      // The start is taken back when nothing was written (the write's own check refused the flow, every
+      // compare-and-set found the call moved, or a read failed first), or when a write with no answer
+      // is read back without this flow. A write that saved and then failed (the ledger down) keeps it.
+      const outcome: WriteOutcome = { write: "none" };
+      try {
+        await this.#update(
+          callId,
+          (draft) => {
+            this.#keepNumber(draft.record, numberKey);
+            // Counted on the keys the call had when it was read: a subject verification bound since
+            // (and so never counted on this flow, which was not attached yet) is counted again.
+            if (start.counted !== null && this.#flowKeys(draft.record).some((id) => !start.counted!.includes(id))) throw new FlowKeysMoved();
+            this.#attachFlow(draft, name, definition, revision, start);
+          },
+          outcome,
+        );
+      } catch (error) {
+        if (outcome.write === "none" || (outcome.write === "unknown" && !(await this.#holdsFlow(callId, name, start)))) {
+          // A refused take-back is reported beside the start's own error, which comes first.
+          await this.#uncount(start).catch((cleanup: unknown) => {
+            throw new AggregateError([error, cleanup], "the flow did not start, and taking back its count failed");
+          });
+        }
+        // Counted again under the call's keys now, as many times as a write is tried.
+        if (error instanceof FlowKeysMoved && attempt < MAX_WRITE_ATTEMPTS) continue;
+        throw error;
       }
-      throw error;
+      if (start.over !== null) throw new RateLimitedError(callId);
+      return (await this.flowPosition(callId))!;
     }
-    if (start.over !== null) throw new RateLimitedError(callId);
-    return (await this.flowPosition(callId))!;
+  }
+
+  /** The flow-start counter ids the call's Badge part names now (its subject's and its number's). */
+  #flowKeys(record: CallRecord): string[] {
+    return counterKeys(this.workspaceId, FLOW_START, record.modules[badge.BADGE] as unknown as badge.BadgeSlice).map(counterId);
   }
 
   /**
@@ -716,9 +748,13 @@ export class Engine {
 
   /** Counts the start on the call's limited flow, if it runs one (`beginVerification`). */
   async #admitVerification(callId: string, resolved: badge.ResolvedVerification): Promise<void> {
-    const record = await this.#read(callId);
-    const counted = lateCounted(record);
-    if (counted !== null) await this.#countLateStarts(callId, record, counted, resolved);
+    // Again from a fresh read while a count finds a key over its limit that the flow admitted
+    // meanwhile: the read leaves that key out, so each pass judges fewer keys, and only new ones.
+    for (;;) {
+      const record = await this.#read(callId);
+      const counted = lateCounted(record);
+      if (counted === null || !(await this.#countLateStarts(callId, record, counted, resolved))) return;
+    }
   }
 
   /** The flow-start counters a verification start brings that the call's flow has not counted. */
@@ -726,10 +762,15 @@ export class Engine {
     return counterKeys(this.workspaceId, FLOW_START, badge.verificationKeys(slice, resolved)).filter((key) => !counted.includes(counterId(key)));
   }
 
-  /** Counts a running limited flow's starts on the counters a verification start brings (`beginVerification`). */
-  async #countLateStarts(callId: string, record: CallRecord, counted: readonly string[], resolved: badge.ResolvedVerification): Promise<void> {
+  /**
+   * Counts a running limited flow's starts on the counters a verification start brings
+   * (`beginVerification`). Only keys the flow has not admitted are judged: one another verification
+   * on the call admitted meanwhile is never counted twice, nor a reason to fail the flow. True when
+   * the count must be made again, from a fresh read (`#admitVerification`).
+   */
+  async #countLateStarts(callId: string, record: CallRecord, counted: readonly string[], resolved: badge.ResolvedVerification): Promise<boolean> {
     const keys = this.#lateKeys(this.#slice(record.modules, badge.BADGE) as unknown as badge.BadgeSlice, resolved, counted);
-    if (keys.length === 0) return;
+    if (keys.length === 0) return false;
     const { over, at } = await this.#countStarts(keys);
     // Takes back these counters' counts (none was made when a counter was already at its limit).
     const giveBack = (back: readonly AttemptCounterKey[]) => this.#uncount({ over, counted: null, recorded: at === null ? null : { keys: back, at } });
@@ -745,13 +786,16 @@ export class Engine {
           badge.assertCanBegin(draft);
           const current = draft.record.flow!;
           const now = current.counted!;
+          taken = keys.filter((key) => now.includes(counterId(key)));
           if (over !== null) {
+            // The limit hit is on a key the flow admitted since the read: a duplicate, not this flow's
+            // start over a limit. Nothing is written, and the keys it has not admitted are judged again.
+            if (taken.some((key) => key.scope === over)) throw new LateKeyAdmitted();
             // Fails closed, whatever another process did to the flow meanwhile; the count stays.
             current.status = "failed";
             draft.emit("flow.rate_limited", "code", { flow: current.name, scope: over });
             return;
           }
-          taken = keys.filter((key) => now.includes(counterId(key)));
           now.push(...keys.filter((key) => !now.includes(counterId(key))).map(counterId));
         },
         outcome,
@@ -761,11 +805,14 @@ export class Engine {
       // ones another verification took first. A write with no answer keeps them.
       if (outcome.write === "none") await giveBack(keys);
       if (outcome.write === "saved") await giveBack(taken);
+      if (error instanceof LateKeyAdmitted) return true;
       throw error;
     }
-    // Counters another verification on this call took first: this count is the extra one.
+    // Counters another verification on this call took first: this count is the extra one, given
+    // back whether or not a key it has not admitted was over its limit.
     await giveBack(taken);
     if (over !== null) throw new RateLimitedError(callId);
+    return false;
   }
 
   /** Judges every keypad field at once. The answer is the same for an unknown account and a wrong value. */
@@ -1533,9 +1580,10 @@ export class Engine {
     let delivered = 0;
     for (const alert of badge.owedDuressAlerts(await this.#read(callId))) {
       const now = this.#clock.now().getTime();
-      const since = this.#sending.get(alert.alertId);
-      if (notifier === undefined || (since !== undefined && now - since < 30_000)) continue;
-      this.#sending.set(alert.alertId, now);
+      const held = this.#sending.get(alert.alertId);
+      if (notifier === undefined || (held !== undefined && now - held.since < 30_000)) continue;
+      const claim = { since: now };
+      this.#sending.set(alert.alertId, claim);
       try {
         // Read again once claimed: another send may have delivered and acknowledged it while this
         // one waited on an earlier alert. A read that fails leaves it owed.
@@ -1544,28 +1592,33 @@ export class Engine {
         // write of it was lost (a failed store, a crash), unless the business cleared the subject
         // after the entry was judged. An engine that judged an entry has counters (Badge requires
         // them for every entered factor), and one without them fails here, leaving the alert owed.
-        await flagDuressUnlessCleared(this.#adapters.counters!, this.workspaceId, alert.subjectKey, alert.clears);
-        await this.#withinNotifyTimeout(notifier.notify({ alertId: alert.alertId, workspaceId: this.workspaceId, subjectKey: alert.subjectKey, callId, at: alert.at }));
+        // Bounded like the notify: a counter read that never settles leaves this alert owed, unsent,
+        // and the loop goes on to the next one.
+        await this.#withinNotifyTimeout(flagDuressUnlessCleared(this.#adapters.counters!, this.workspaceId, alert.subjectKey, alert.clears), "the duress flag check");
+        // Another send took the alert over while this one waited (its claim went stale): it is theirs.
+        if (this.#sending.get(alert.alertId) !== claim) continue;
+        await this.#withinNotifyTimeout(notifier.notify({ alertId: alert.alertId, workspaceId: this.workspaceId, subjectKey: alert.subjectKey, callId, at: alert.at }), "the duress notifier");
         await this.#acknowledgeDuressAlert(callId, alert.alertId);
         delivered++;
       } catch {
         // Still owed: the next write, flushLedger or deliverDuressAlerts sends it again.
       } finally {
-        this.#sending.delete(alert.alertId);
+        if (this.#sending.get(alert.alertId) === claim) this.#sending.delete(alert.alertId);
       }
     }
     return delivered;
   }
 
   /**
-   * The notify's answer, or a rejection once `notifyTimeoutMs` passes first. The race handles the
-   * notify's own late rejection, and a late resolve is no longer awaited, so it acknowledges nothing.
+   * The answer (a notify, or the flag check before it), or a rejection once `notifyTimeoutMs` passes
+   * first. The race handles a late rejection, and a late resolve is no longer awaited, so it
+   * acknowledges nothing.
    */
-  async #withinNotifyTimeout(sent: Promise<void>): Promise<void> {
+  async #withinNotifyTimeout(sent: Promise<void>, what: string): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const late = new Promise<never>((_, reject) => {
       // Unref'd: a wait for a notifier never keeps the host's process alive on its own.
-      timer = setTimeout(() => reject(new Error("the duress notifier did not answer in time")), this.#notifyTimeoutMs).unref();
+      timer = setTimeout(() => reject(new Error(`${what} did not answer in time`)), this.#notifyTimeoutMs).unref();
     });
     try {
       await Promise.race([sent, late]);
