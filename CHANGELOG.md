@@ -19,8 +19,9 @@ All notable changes to this project are documented here. The format follows
   signed `refund.updated`, `refund.failed` and `charge.refund.updated` (`parseStripeEvent` kind
   `refund`; the reference server's payments endpoint), found by the provider's refund id. A pending
   refund that succeeds stays counted; one that fails (or is canceled) is released, so the business
-  can refund that amount again; a `payment.refund_updated` entry each time, never one for an event
-  that changes nothing. Final statuses stay final; the receipt is never changed.
+  can refund that amount again, and a succeeded one that fails later is released too; a
+  `payment.refund_updated` entry each time, never one for an event that changes nothing. A failed
+  refund stays failed; the receipt is never changed.
 - M0 skeleton. The engine (`createEngine`) with the call session state machine, the assurance policy
   (levels, scope floors, carrier signal handling), keypad knowledge comparison, the photo ID flow,
   intake forms and confirmed records, payment links and settlement, consent records, the

@@ -333,10 +333,11 @@ export type RefundApplied = { applied: false; unbound?: true } | { applied: true
 
 /**
  * A refund update from the verified payments webhook, recorded against the refund the engine made,
- * after the call ended too. Only a `pending` refund moves: to `succeeded`, or to `failed` (Stripe's
+ * after the call ended too. A `pending` refund moves to `succeeded`, or to `failed` (Stripe's
  * `failed` or `canceled`), which stops counting toward the refunded total so that amount can be
- * refunded again. A refund already `succeeded` or `failed` is final, and an event that changes
- * nothing is not written again. A refund the engine did not make (one made by hand at the
+ * refunded again; a `succeeded` one can still move to `failed` (Stripe documents card refunds that
+ * fail after succeeding). A `failed` refund is final, and an event that changes nothing is not
+ * written again. A refund the engine did not make (one made by hand at the
  * provider), or one whose amount or currency differs from what the engine asked, is not applied.
  * The receipt is never changed.
  */
@@ -374,7 +375,10 @@ export async function applyRefundOutcome(rt: EngineRuntime, outcome: RefundOutco
       return refunds.some((r) => r.status === "requested") ? ({ applied: false, unbound: true } as const) : ({ applied: false } as const);
     }
     const next = status === "succeeded" ? "succeeded" : status === "failed" || status === "canceled" ? "failed" : null;
-    if (record.status !== "pending" || next === null || record.amountMinor !== amountMinor || payment.currency !== currency) return { applied: false } as const;
+    // A pending refund moves to either; a succeeded one can still fail (Stripe documents card
+    // refunds that do); a failed one is final.
+    const moves = record.status === "pending" || (record.status === "succeeded" && next === "failed");
+    if (next === null || !moves || record.amountMinor !== amountMinor || payment.currency !== currency) return { applied: false } as const;
     record.status = next;
     record.settledAt = rt.now();
     draft.emit("payment.refund_updated", "system", { paymentId: payment.paymentId, refundId: record.refundId, providerRef, amountMinor, currency, status: next });

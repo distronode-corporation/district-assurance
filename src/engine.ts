@@ -986,7 +986,7 @@ export class Engine {
 
   /**
    * A verified refund update (`refund.updated`, `refund.failed`, `charge.refund.updated`): a
-   * pending refund's later outcome, recorded against the refund the engine made. One that failed
+   * refund's later outcome, recorded against the refund the engine made. One that failed
    * stops counting toward the refunded total. Works after the call ended; the receipt is never changed.
    */
   applyRefundOutcome(outcome: refunds.RefundOutcome): Promise<refunds.RefundApplied> {

@@ -1022,7 +1022,7 @@ answer on file, a phone number, a link or card data.
 | `payment.outcome_ignored` | `paymentId`, `reason` (`account`): an outcome from another account |
 | `payment.settled` | `paymentId`, `status`, and `late: true` for a payment made after the engine closed its link |
 | `payment.refunded` | `paymentId`, `refundId`, `providerRef`, `amountMinor`, `currency`, `reason`, `status` (`pending`, `succeeded` or `failed`) |
-| `payment.refund_updated` | `paymentId`, `refundId`, `providerRef`, `amountMinor`, `currency`, `status` (`succeeded` or `failed`): a pending refund's later outcome at the provider |
+| `payment.refund_updated` | `paymentId`, `refundId`, `providerRef`, `amountMinor`, `currency`, `status` (`succeeded` or `failed`): a refund's later outcome at the provider |
 | `payment.disputed` | `paymentId`, `disputeId`, `status`, `amountMinor`, `currency` |
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
 | `consent.revoked` | `consentId`, `purpose`, `wordingVersion`, `via` (`call`, `text` or `web`) |
@@ -1780,11 +1780,13 @@ flight at a time. A refund the provider made is learned once the adapter answers
 amountMinor, currency, account?})` applies a verified refund update (Stripe's `refund.updated`,
 `refund.failed` and `charge.refund.updated`; `parseStripeEvent` gives them as `kind: "refund"`, and
 the reference server applies them on its payments endpoint only). It finds the payment by its bound
-payment intent and the refund by the provider's refund id the engine recorded (`providerRef`). Only
-a `pending` refund moves: to `succeeded`, or to `failed` (Stripe's `failed` or `canceled`), written
-as `payment.refund_updated`; a failed one stops counting toward the refunded total, so the business
-can refund that amount again with the next sequence number. A refund already `succeeded` or `failed`
-is final, and an update that changes nothing (`pending`, `requires_action`, a repeat) writes nothing.
+payment intent and the refund by the provider's refund id the engine recorded (`providerRef`). A
+`pending` refund moves to `succeeded` or to `failed` (Stripe's `failed` or `canceled`), and a
+`succeeded` one can still move to `failed` (Stripe documents card refunds that fail after
+succeeding), each written as `payment.refund_updated`; a failed one stops counting toward the
+refunded total, so the business can refund that amount again with the next sequence number. A
+`failed` refund is final, and an update that changes nothing (`pending`, `requires_action`, a
+repeat, a succeeded refund going back) writes nothing.
 It answers `{applied: true, callId, status}`, `{applied: false}` for an update with no payment
 intent, a refund the engine did not make (made by hand at the provider), or one whose amount or
 currency differs from what the engine asked, and `{applied: false, unbound: true}` while the payment

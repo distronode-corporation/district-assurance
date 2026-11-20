@@ -87,15 +87,26 @@ describe("refund updates: a pending refund's later outcome", () => {
     assert.deepEqual(await t.engine.receipt(callId), receipt);
   });
 
-  it("writes nothing again for a repeated event, a still-pending one, or one after the refund is final", async () => {
+  it("writes nothing again for a repeated event, a still-pending one, or one after the refund failed", async () => {
     const t = setup();
     await pendingRefund(t);
     for (const status of ["pending", "requires_action"] as const) assert.deepEqual(await t.engine.applyRefundOutcome(update({ status })), { applied: false });
     assert.equal((await t.engine.applyRefundOutcome(update())).applied, true);
     assert.deepEqual(await t.engine.applyRefundOutcome(update()), { applied: false });
-    // A succeeded refund is final: a late `failed` does not release it.
-    assert.deepEqual(await t.engine.applyRefundOutcome(update({ status: "failed" })), { applied: false });
-    assert.equal((await entries(t, "payment.refund_updated")).length, 1);
+    assert.deepEqual(await t.engine.applyRefundOutcome(update({ status: "pending" })), { applied: false }, "a succeeded refund never goes back to pending");
+    assert.equal((await t.engine.applyRefundOutcome(update({ status: "failed" }))).applied, true);
+    // A failed refund is final: a late `succeeded` does not count it again.
+    assert.deepEqual(await t.engine.applyRefundOutcome(update({ status: "succeeded" })), { applied: false });
+    assert.deepEqual((await entries(t, "payment.refund_updated")).map((d) => d.status), ["succeeded", "failed"]);
+  });
+
+  it("releases a refund that succeeded and later failed, as Stripe documents for some card refunds", async () => {
+    const t = setup();
+    const callId = await pendingRefund(t);
+    assert.equal((await t.engine.applyRefundOutcome(update())).applied, true);
+    assert.deepEqual(await t.engine.applyRefundOutcome(update({ status: "failed" })), { applied: true, callId, status: "failed" });
+    t.payments.refundStatus = "succeeded";
+    assert.equal((await t.engine.refundPayment({ callId, paymentId: "pay_1", reason: "duplicate", sequence: 2 })).status, "succeeded");
   });
 
   it("does not apply an update for a refund the engine did not make, or one whose amount or currency differs", async () => {
