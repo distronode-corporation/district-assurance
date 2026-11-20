@@ -52,6 +52,9 @@ export interface SignedDocument<B> {
 
 export type SignedReceipt = SignedDocument<ReceiptBody>;
 
+/** A kid that can name a key: a non-empty string. */
+const isKid = (kid: unknown): kid is string => typeof kid === "string" && kid !== "";
+
 /** The exact bytes that are signed: the canonical JSON of the body, as UTF-8. */
 export function canonicalPayload(body: unknown): Uint8Array {
   return new TextEncoder().encode(canonicalJson(body));
@@ -70,6 +73,8 @@ export async function signDocument<B>(signer: ReceiptSigner, body: B): Promise<S
 export function verifyDocument(document: SignedDocument<unknown>, keys: ReadonlyArray<JsonWebKey & { kid?: string }>): boolean {
   // A parsed document can be anything: check the envelope before reading it.
   if (typeof document !== "object" || document === null || document.alg !== "ES256" || typeof document.signature !== "string") return false;
+  // A missing or empty kid matches nothing: a document without one never meets a key without one.
+  if (!isKid(document.kid)) return false;
   const jwk = keys.find((k) => k.kid === document.kid);
   if (jwk === undefined) return false;
   try {
@@ -141,6 +146,8 @@ function checkOnce(receipt: SignedReceipt, keys: ReadonlyArray<JsonWebKey & { ki
   // Buffer.from also reads an array of the signature's bytes as that signature: only the base64url
   // string is the receipt format, as the stand-alone verifier holds.
   if (typeof sig !== "string") return { valid: false };
+  // A missing or empty kid matches nothing, on the receipt or on a key.
+  if (!isKid(kid)) return { valid: false };
   // An entry that is not an object is skipped, as the stand-alone verifier skips it.
   const jwk = keys.find((k: unknown) => typeof k === "object" && k !== null && (k as { kid?: unknown }).kid === kid);
   if (jwk === undefined) return { valid: false };
