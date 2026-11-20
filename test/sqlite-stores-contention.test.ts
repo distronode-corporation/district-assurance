@@ -204,8 +204,9 @@ describe("SQLite writes contending for the write lock across connections", { ski
   it("the creating worker fails if the gate wakes it to a phase out of order, and fails its second wait too", async () => {
     const early = await runCreator(newFile(), { phase: 5 });
     assert.match((early.at(-1) as { error?: string }).error ?? "", /phase 5, not 1/);
-    // The first wait passes; the second times out with the database closed.
-    const late = await runCreator(newFile(), { waitMs: 50, onMessage: (message, release) => message.step === "holding" && release(1) });
+    // The release for the first wait is already there (phase 1), so it passes at once, with no
+    // message round trip racing the short timeout; the second wait is the one that times out.
+    const late = await runCreator(newFile(), { phase: 1, waitMs: 50 });
     assert.deepEqual(late.map((m) => m.step), ["holding", "opened", "done"]);
     assert.match((late.at(-1) as { error?: string }).error ?? "", /timed out at phase 1/);
   });
