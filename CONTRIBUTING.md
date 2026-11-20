@@ -48,6 +48,14 @@ editorconfig-checker. Tests use `node:test` and `node:assert`, one file per area
 - Never put real customer data, real phone numbers, keys or secrets in code, tests or issues. Use
   555 numbers, `example.test` hosts and values marked "not a secret".
 
+## Reporting bugs and asking for features
+
+Open a [GitHub issue](https://github.com/distronode-corporation/district-assurance/issues). For a
+bug, say what you ran (the commit, the Node.js version and the flow config or a test that shows
+it), what happened and what you expected. For a feature, say what you need and why; check
+ROADMAP.md first, since planned work already has an issue id there. Issues and their answers stay
+public. The same rule as for code applies: no real customer data, phone numbers, keys or secrets.
+
 ## Reporting security issues
 
 Not in a public issue: see [SECURITY.md](SECURITY.md).

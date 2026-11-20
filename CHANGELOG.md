@@ -335,6 +335,8 @@ All notable changes to this project are documented here. The format follows
   tested over a shared JSON corpus in `test/corpus/`; compose health card numbers before SINs. Bank
   words are English, French and Spanish, read in the languages the call reads number words in:
   English and French on every call, Spanish on a Spanish call and on text with no call.
+- README badges for the OpenSSF Scorecard, the licence and CI on main, and a section in
+  CONTRIBUTING.md on reporting bugs and asking for features through GitHub issues.
 
 ### Changed
 
