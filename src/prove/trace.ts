@@ -340,6 +340,11 @@ export async function revokeConsent(rt: EngineRuntime, input: { consentId: strin
       throw new EngineError("precondition_failed", "the consent is not recorded on its call: there is nothing to revoke yet");
     }
     await rt.flushLedger(consent.callId);
+  } else if (!(await recordedOnLedger(rt, consent))) {
+    // The store alone is no proof: a write that landed after the call settled the consent as not
+    // recorded leaves a yes there that the call never recorded. Only this workspace's
+    // consent.recorded entry for the consent proves it was.
+    throw new EngineError("precondition_failed", "the consent's call is gone and the ledger holds no record of it: there is nothing to revoke");
   }
   const revoked = stored.revoked ?? (await store.revokeConsent(rt.workspaceId, { consentId: consent.consentId, via, at: rt.now() }));
   // One entry per consent, however often it is revoked: the event id names the consent, and a
@@ -353,6 +358,16 @@ export async function revokeConsent(rt: EngineRuntime, input: { consentId: strin
     detail: { consentId: consent.consentId, purpose: consent.purpose, wordingVersion: consent.wordingVersion, via: revoked.via },
   });
   return structuredClone(revoked);
+}
+
+/** Whether this workspace's ledger holds the consent.recorded entry of a consent, on its call. */
+async function recordedOnLedger(rt: EngineRuntime, consent: ConsentRecord): Promise<boolean> {
+  // A ledger can be shared by several workspaces: the event id (a JSON tuple starting with the
+  // workspace and the call) says whose entry it is.
+  const prefix = `${JSON.stringify([rt.workspaceId, consent.callId]).slice(0, -1)},`;
+  return (await rt.adapter("ledger").list()).some(
+    (e) => e.event === "consent.recorded" && e.callId === consent.callId && e.detail.consentId === consent.consentId && e.eventId?.startsWith(prefix) === true,
+  );
 }
 
 /** Whether a call ends with a receipt: its flow has a `trace.receipt` step, or it ran no flow and receipts are on. */

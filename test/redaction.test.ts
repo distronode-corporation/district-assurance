@@ -411,7 +411,7 @@ describe("the Quebec look-back", () => {
     }
     assert.equal(found.length, 400, "every one is still found");
     assert.ok(calls >= 400);
-    assert.ok(longest <= 48, `read ${longest} characters before a run`);
+    assert.ok(longest <= 74, `read ${longest} UTF-16 units before a run`);
   });
 
   it("keeps the letter check at the edge of the window", () => {
@@ -420,6 +420,12 @@ describe("the Quebec look-back", () => {
     assert.deepEqual(findHealthCardNumbers(`${pad}TREM 7501 0112`), [], "a word longer than four letters is no code");
     assert.deepEqual(findHealthCardNumbers(`T${" ".repeat(9)}R E M 7501 0112`), [], "a gap of more than 8 separators ends the letters");
     assert.deepEqual(findHealthCardNumbers(`${"y".repeat(44)}TREM 7501 0112`), [], "the letter before the code is seen at the window's edge");
+    // The longest match (72 units of astral letters and marks) with an astral letter just before it, at the edge of the window.
+    const s = "\u{1D165}".repeat(8);
+    const longest = `\u{1D400}${s}\u{1D401}${s}\u{1D402}${s}\u{1D403}${s}`;
+    assert.equal(longest.length, 72);
+    assert.equal(findHealthCardNumbers(`${longest}75010112`).length, 1);
+    assert.deepEqual(findHealthCardNumbers(`\u{1D404}${longest}75010112`), [], "an astral fifth letter before the longest match is seen");
   });
 });
 

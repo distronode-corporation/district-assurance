@@ -105,6 +105,12 @@ export function validateForm(form: IntakeForm): string[] {
       errors.push(`field ${field.key} names a card or a Social Insurance Number, which intake never collects`);
     }
     errors.push(...rangeErrors(field).map((e) => `field ${field.key}: ${e}`));
+    // The length cap and the pattern's work bound both read it: NaN, 0, a fraction or a string would
+    // lift the cap, make the field impossible to fill, or give the two checks different limits.
+    const maxLength: unknown = field.maxLength;
+    if (maxLength !== undefined && (!Number.isInteger(maxLength) || (maxLength as number) < 1)) {
+      errors.push(`field ${field.key}: maxLength must be a positive whole number`);
+    }
     if (field.pattern !== undefined) {
       const longest = typeof field.maxLength === "number" ? field.maxLength : DEFAULT_MAX_LENGTH;
       const problem = field.type === "text" ? patternProblem(field.pattern, longest) : "pattern is for text fields only";

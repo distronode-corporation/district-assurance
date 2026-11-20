@@ -453,8 +453,9 @@ describe("MemoryRecordStore keys", () => {
     await store.putIntakeRecord(record("north/desk", "r1"));
     await store.deleteIntakeRecords("north", ["desk/r1"]);
     assert.notEqual(await store.getIntakeRecord("north/desk", "r1"), null);
-    await store.putIntakeRecord(record("north/desk", "r1"));
-    assert.equal((await store.listIntakeRecords("north/desk", "s1")).length, 1, "and no tombstone for it either");
+    // Put again with another value: a colliding tombstone would leave the first record and drop this write.
+    await store.putIntakeRecord({ ...record("north/desk", "r1"), values: { issue: "rewritten" } });
+    assert.deepEqual((await store.listIntakeRecords("north/desk", "s1")).map((r) => r.values), [{ issue: "rewritten" }], "and no tombstone for it either");
     const subject = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: "+15550100", knowledge: { dob: DOB } });
     store.putSubject("north/desk", subject);
     assert.equal(await store.getSubject("north", `desk/${subject.subjectKey}`), null);

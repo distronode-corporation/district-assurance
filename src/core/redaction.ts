@@ -509,13 +509,15 @@ function groupedAs(run: readonly DigitPart[], i: number, j: number, breaks: read
 }
 
 // Four letters, each gap and the gap before the digits at most 8 separators, so a match is at most
-// 40 UTF-16 code units (astral letters included) and only a short window before a run is read.
+// 36 characters, 72 UTF-16 code units when each is astral (a letter, or a mark such as U+1D165),
+// and only a short window before a run is read.
 const FOUR_LETTERS_BEFORE = new RegExp(String.raw`(?<!\p{L})(?:\p{L}{4}|\p{L}(?:${SEPARATOR_CLASS}{1,8}\p{L}){3})${SEPARATOR_CLASS}{0,8}$`, "u");
 /**
- * The look-back window, longer than any match (40), so a match never starts at the window's first
- * character and its letter check always sees the real character before it.
+ * The look-back window in UTF-16 code units: the longest match (72) and the character before it
+ * (2 when astral), so a match always fits whole and its letter check always sees the real
+ * character before it.
  */
-const FOUR_LETTERS_WINDOW = 48;
+const FOUR_LETTERS_WINDOW = 74;
 
 /**
  * Where the four letters before a run start, if they are there. Only the last few characters before
@@ -670,13 +672,19 @@ interface Replaced {
  * to the start or the end of what the marker replaced, so a finding over it covers all of it.
  */
 function toOriginal(at: number, replaced: readonly Replaced[], side: "start" | "end"): number {
-  let shift = 0;
-  for (const r of replaced) {
-    if (at <= r.start) break;
-    if (at < r.end) return side === "start" ? r.originalStart : r.originalEnd;
-    shift = r.originalEnd - r.end;
+  // The last marker that starts before the offset, by binary search: the markers are sorted and do
+  // not overlap, so each call reads O(log n) of them, never every earlier one.
+  let lo = 0;
+  let hi = replaced.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (replaced[mid]!.start < at) lo = mid + 1;
+    else hi = mid;
   }
-  return at + shift;
+  if (lo === 0) return at;
+  const r = replaced[lo - 1]!;
+  if (at < r.end) return side === "start" ? r.originalStart : r.originalEnd;
+  return at + r.originalEnd - r.end;
 }
 
 /**
@@ -700,11 +708,20 @@ export function composeRedactors(...redactors: Redactor[]): Redactor {
         const next: Replaced[] = [];
         let delta = 0;
         let k = 0;
+        // The end of the previous finding: an earlier marker's text from here on is still there.
+        let after = 0;
+        // What is left of an earlier marker (all of it, or the parts a finding did not replace) moves by
+        // the length change so far and still maps to everything the marker replaced.
+        const keep = (old: Replaced, upTo: number) => {
+          const from = Math.max(old.start, after);
+          if (from < upTo) next.push({ start: from + delta, end: upTo + delta, originalStart: old.originalStart, originalEnd: old.originalEnd });
+        };
         for (const f of result.findings) {
-          // Earlier markers before this finding move by the length change so far; any it covers go.
           for (; k < replaced.length && replaced[k]!.start < f.end; k++) {
             const old = replaced[k]!;
-            if (old.end <= f.start) next.push({ ...old, start: old.start + delta, end: old.end + delta });
+            keep(old, Math.min(old.end, f.start));
+            // A marker that goes on past this finding is kept for the next one, or for the end.
+            if (old.end > f.end) break;
           }
           const originalStart = toOriginal(f.start, replaced, "start");
           const originalEnd = toOriginal(f.end, replaced, "end");
@@ -713,8 +730,9 @@ export function composeRedactors(...redactors: Redactor[]): Redactor {
           next.push({ start, end, originalStart, originalEnd });
           findings.push({ kind: f.kind, start: originalStart, end: originalEnd });
           delta = end - f.end;
+          after = f.end;
         }
-        for (const old of replaced.slice(k)) next.push({ ...old, start: old.start + delta, end: old.end + delta });
+        for (const old of replaced.slice(k)) keep(old, old.end);
         replaced = next;
         current = result.text;
       }

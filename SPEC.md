@@ -2362,6 +2362,7 @@ refused with `conflict`, to be confirmed again.
     "intakeRecords": [{ "recordId": "...", "subjectKey": "...", "values": {}, "...": "..." }],
     "pinDigestOnFile": true,
     "consents": [{ "consentId": "...", "callId": "...", "subjectKey": "<64 hex>", "purpose": "...", "answer": "yes", "...": "..." }],
+    "revocations": [{ "consentId": "...", "via": "text", "at": "..." }],
     "calls": ["..."],
     "ledgerEntries": [{ "seq": 12, "hash": "...", "event": "intake.confirmed", "callId": "..." }],
     "receipts": [{ "receiptId": "...", "callId": "..." }],
@@ -2378,8 +2379,10 @@ refused with `conflict`, to be confirmed again.
 - `calls` are the calls those records name. `consents` and `receipts` are the ones those call
   records hold (a call record that is gone is skipped). A consent carries the `subjectKey` Badge
   matched on the call when it was recorded (or null), and only those recorded under this subject
-  are listed: a call can match another subject later, and their consents are not this subject's. Consents join from PRV-3's `ConsentStore`
-  once it exists.
+  are listed: a call can match another subject later, and their consents are not this subject's. A
+  consent keeps its original answer; `revocations` holds the revocation the `ConsentStore` keeps for
+  each listed consent (by `consentId`), so a yes since withdrawn reads as withdrawn. Without a
+  `ConsentStore` nothing can be revoked and the list is empty.
 - `ledgerEntries` are this workspace's entries (by the workspace in their `eventId`) whose
   `detail.recordId`, `detail.consentId` or `detail.receiptId` names one of the above: ids only.
 - `heldByHost` lists the subject record, which is the host's data, and a PIN in the host's own

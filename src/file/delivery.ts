@@ -106,6 +106,15 @@ function httpStatus(answer: unknown): number | null {
   return typeof status === "number" && isIntegerIn(status, 100, 599) ? status : null;
 }
 
+/** One post's HTTP status, or null for no answer: a rejection, a throw before any promise, or a status that cannot be read. */
+async function postedStatus(delivery: RecordDelivery, request: { url: string; headers: Record<string, string>; body: string }): Promise<number | null> {
+  try {
+    return httpStatus(await delivery.post(request));
+  } catch {
+    return null;
+  }
+}
+
 function destinationProblem(d: DeliveryDestination): string | null {
   // From the host's configuration, read with no type guarantee: each field is checked for its type first.
   if (!isObject(d)) return "the destination must be an object with destinationId, url and secret";
@@ -150,7 +159,8 @@ export async function deliverRecord(input: DeliverRecordInput): Promise<Delivery
   const message: RecordDeliveryBody = { v: 1, type: "record.confirmed", idempotencyKey, destinationId: destination.destinationId, record };
   const body = canonicalJson(message);
   const sleep = input.sleep ?? timerSleep;
-  for (let attempt = 1; ; attempt++) {
+  // One attempt: signed afresh, posted, and recorded on the ledger with its outcome.
+  const attempt = async (n: number): Promise<{ delivered: boolean; again: boolean; status: number | null }> => {
     const timestamp = Math.floor(clock.now().getTime() / 1000);
     const headers = {
       "content-type": "application/json",
@@ -158,22 +168,27 @@ export async function deliverRecord(input: DeliverRecordInput): Promise<Delivery
       [DELIVERY_SIGNATURE_HEADER]: signDelivery(body, destination.secret, timestamp),
     };
     // The adapter's answer goes into the ledger: only an HTTP status (an integer from 100 to 599)
-    // counts; anything else (a string, NaN, no object) is no answer, retried like a lost one.
-    const status = await delivery.post({ url: destination.url, headers, body }).then(
-      (answer: unknown) => httpStatus(answer),
-      () => null,
-    );
+    // counts; anything else (a string, NaN, no object) is no answer, retried like a lost one. So is
+    // an adapter that throws before it returns a promise, or an answer whose status getter throws.
+    const status = await postedStatus(delivery, { url: destination.url, headers, body });
     const delivered = status !== null && status >= 200 && status < 300;
-    const again = !delivered && attempt < retry.maxAttempts && (status === null || isRetryableStatus(status));
+    const again = !delivered && n < retry.maxAttempts && (status === null || isRetryableStatus(status));
     const outcome: DeliveryOutcome = delivered ? "delivered" : again ? "retry" : "failed";
     await ledger.append({
       callId: record.callId,
       actor: "system",
       event: "delivery.attempted",
       at: clock.now().toISOString(),
-      detail: { recordId: record.recordId, destination: destination.destinationId, attempt, outcome, status },
+      detail: { recordId: record.recordId, destination: destination.destinationId, attempt: n, outcome, status },
     });
-    if (!again) return { delivered, attempts: attempt, status, idempotencyKey };
-    await sleep(deliveryDelay(retry, attempt));
+    return { delivered, again, status };
+  };
+  let attempts = 1;
+  let last = await attempt(attempts);
+  while (last.again) {
+    await sleep(deliveryDelay(retry, attempts));
+    attempts++;
+    last = await attempt(attempts);
   }
+  return { delivered: last.delivered, attempts, status: last.status, idempotencyKey };
 }

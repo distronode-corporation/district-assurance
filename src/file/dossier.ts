@@ -381,7 +381,7 @@ export async function confirmIntake(
   // cipher fails meanwhile then releases nothing, so no failure is logged for a record that ends up
   // stored. A filing already released (that process failed first) is never written.
   const writer = randomUUID();
-  const claim = await rt.update(callId, (draft): "claimed" | "released" | "filed" | "abandoning" | { releasing: FilingFailure } => {
+  const claim = await rt.update(callId, (draft): "claimed" | "released" | "filed" | "abandoning" | { releasing: FilingFailure } | { refused: EngineError } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     // Filed meanwhile by another process: the record the store kept (its ciphertexts) is the answer, and nothing is written again.
     if (s.records.some((r) => r.recordId === record.recordId)) return "filed";
@@ -390,9 +390,14 @@ export async function confirmIntake(
     if (s.intake.releasing !== undefined) return { releasing: s.intake.releasing };
     // An abandonment that stopped part way (its delete failed): nothing is written; abandonIntake finishes it.
     if (s.intake.abandoning === true) return "abandoning";
+    // A step-up rule raised while the record was sealed holds it, as at the reservation: nothing is
+    // written, and the reservation stays for abandonIntake to release.
+    const refused = rt.requireScope(draft, "intake.file", undefined);
+    if (refused !== null) return { refused };
     s.intake.writers = { ...s.intake.writers, [writer]: rt.now() };
     return "claimed";
   });
+  if (typeof claim === "object" && "refused" in claim) throw claim.refused;
   if (typeof claim === "object") await releaseFailedFiling(rt, callId, record, reserved.form, claim.releasing);
   if (claim === "abandoning") throw new EngineError("precondition_failed", "the intake is being abandoned; abandon it again to finish");
   if (claim !== "claimed" && claim !== "filed") throw new EngineError("precondition_failed", "the fieldCipher could not seal the record in another process; nothing was filed and the draft is gone");
@@ -418,13 +423,21 @@ export async function confirmIntake(
   // The record the store kept is the one filed and returned: an idempotent store keeps the first
   // write of a record id, so a retry's fresh ciphertexts are not what it holds.
   const kept = await records.getIntakeRecord(record.workspaceId, record.recordId);
-  const filed = await rt.update(callId, (draft): "filed" | "abandoned" | "erased" => {
+  const filed = await rt.update(callId, (draft): "filed" | "abandoned" | "erased" | { refused: EngineError } => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     if (s.records.some((r) => r.recordId === record.recordId)) return "filed";
     // Abandoned while it was written (abandonIntake deleted the record by id, so the late write
     // stored nothing), or released by a failing cipher in another process (this write's claim went
     // stale, and the record was deleted by id): nothing is filed.
     if (s.intake?.filing?.recordId !== record.recordId || s.intake.releasing !== undefined || s.intake.abandoning === true) return "abandoned";
+    // A step-up rule raised while the record was written holds it too: the call files nothing and
+    // emits nothing. The reservation stays, and abandonIntake deletes what the write stored by id,
+    // as for a write whose answer was lost. This write is over, so its claim goes.
+    const refused = rt.requireScope(draft, "intake.file", undefined);
+    if (refused !== null) {
+      delete s.intake.writers![writer];
+      return { refused };
+    }
     // The store kept nothing (the subject was erased): the call files nothing either, and drops
     // the draft that holds the values.
     if (kept === null) {
@@ -440,6 +453,7 @@ export async function confirmIntake(
     draft.emit("intake.confirmed", "caller", { recordId: record.recordId, formId: record.formId, digest: record.digest, confirmedBy: record.confirmedBy });
     return "filed";
   });
+  if (typeof filed === "object") throw filed.refused;
   if (filed === "abandoned") throw new EngineError("precondition_failed", "the filing was abandoned while it was written, or released by a failing fieldCipher; nothing was filed");
   // The subject was erased (after another process filed it, too): no locally sealed copy stands in for it.
   if (kept === null) throw new EngineError("precondition_failed", "the subject was erased while this record was filed; nothing was filed");
@@ -515,8 +529,11 @@ export async function abandonIntake(rt: EngineRuntime, callId: string): Promise<
   await rt.update(callId, (draft) => {
     const s = draft.slice<DossierSlice>(DOSSIER);
     const filing = s.intake?.filing ?? null;
+    // The reservation this call claimed is gone: another abandonment (or a release) finished it
+    // while this delete was in flight, and the call may hold a new draft since, which stays.
+    if (reserved !== null && filing?.recordId !== reserved.recordId) return;
     // A filing reserved since the read is not released here: its record was not deleted.
-    if (filing !== null && filing.recordId !== reserved?.recordId) throw new EngineError("precondition_failed", "the intake is being filed");
+    if (reserved === null && filing !== null) throw new EngineError("precondition_failed", "the intake is being filed");
     draft.apply({ type: "intake_abandoned" });
     s.intake = null;
     s.confirmed = null;

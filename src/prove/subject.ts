@@ -11,7 +11,7 @@
 // values, and changing them would break the chain or a signature.
 import { createPublicKey, verify, type JsonWebKey } from "node:crypto";
 
-import type { AttemptCounterKey, AttemptCounters, AuditEntry, IntakeRecord, ReceiptSigner, RecordStore } from "../core/adapters.ts";
+import type { AttemptCounterKey, AttemptCounters, AuditEntry, ConsentRevocation, ConsentStore, IntakeRecord, ReceiptSigner, RecordStore } from "../core/adapters.ts";
 import { canonicalJson } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import type { CallRecord, EngineRuntime } from "../core/runtime.ts";
@@ -42,8 +42,10 @@ export interface SubjectExportBody {
   intakeRecords: IntakeRecord[];
   /** Whether a PIN digest is on file. Never the digest. */
   pinDigestOnFile: boolean;
-  /** The consents recorded under the subject on the calls below. */
+  /** The consents recorded under the subject on the calls below, each with its original answer. */
   consents: ConsentRecord[];
+  /** The revocations the ConsentStore holds for those consents (none without one), by consent id. */
+  revocations: ConsentRevocation[];
   /** The calls the intake records name. */
   calls: string[];
   /** The ledger entries naming one of the records, consents or receipts: ids only. */
@@ -136,6 +138,8 @@ export function subjectExportPayload(body: SubjectExportBody): Uint8Array {
 export function verifySubjectExport(exported: SignedSubjectExport, keys: ReadonlyArray<JsonWebKey & { kid?: string }>): boolean {
   try {
     if (exported.alg !== "ES256") return false;
+    // A string kid only: an export and a key that both omit it would otherwise match.
+    if (typeof exported.kid !== "string") return false;
     const jwk = keys.find((k) => k.kid === exported.kid);
     if (jwk === undefined) return false;
     const key = createPublicKey({ key: jwk, format: "jwk" });
@@ -223,6 +227,14 @@ export async function exportSubject(rt: EngineRuntime, input: SubjectRequest & {
     consents.push(...trace.consents.filter((c) => c.subjectKey === subjectKey));
     if (trace.receipt !== null) receipts.push({ receiptId: trace.receipt.body.receiptId, callId });
   }
+  // A revocation is kept apart from its consent, in the ConsentStore: each listed consent's comes
+  // with it, so the export never shows a yes the subject has since withdrawn as standing.
+  const store = rt.adapter("consents") as ConsentStore | undefined;
+  const revocations: ConsentRevocation[] = [];
+  for (const consent of store === undefined ? [] : consents) {
+    const revoked = (await store!.getConsent(rt.workspaceId, consent.consentId))?.revoked ?? null;
+    if (revoked !== null) revocations.push(revoked);
+  }
   // A ledger can be shared by several workspaces: an entry counts only when its event id (a JSON
   // tuple starting with the workspace) says it is this workspace's.
   const prefix = `${JSON.stringify([rt.workspaceId]).slice(0, -1)},`;
@@ -240,6 +252,7 @@ export async function exportSubject(rt: EngineRuntime, input: SubjectRequest & {
     intakeRecords,
     pinDigestOnFile: subject?.pinDigest !== undefined,
     consents,
+    revocations,
     calls,
     ledgerEntries,
     receipts,

@@ -35,6 +35,9 @@ describe("#105 hostile: what a subject request takes", () => {
     const reads: unknown[] = [];
     const get = t.records.getSubject.bind(t.records);
     t.records.getSubject = async (ws, key) => (reads.push(key), get(ws, key));
+    const list = t.records.listIntakeRecords.bind(t.records);
+    t.records.listIntakeRecords = async (ws, key) => (reads.push(key), list(ws, key));
+    const erasuresBefore = await t.records.subjectErasures("ws_test", SUBJECT);
     for (const subjectKey of [[SUBJECT], { toString: () => SUBJECT }, new String(SUBJECT)]) {
       await assert.rejects(t.engine.exportSubject({ workspaceId: "ws_test", subjectKey } as never), rejects("invalid_input"), "export");
       await assert.rejects(t.engine.eraseSubject({ workspaceId: "ws_test", subjectKey } as never), rejects("invalid_input"), "erase");
@@ -43,7 +46,8 @@ describe("#105 hostile: what a subject request takes", () => {
       await assert.rejects(t.engine.exportSubject(input as never), rejects("invalid_input"), `export ${String(input)}`);
       await assert.rejects(t.engine.eraseSubject(input as never), rejects("invalid_input"), `erase ${String(input)}`);
     }
-    assert.deepEqual(reads, []);
+    assert.deepEqual(reads, [], "no subject or record read");
+    assert.equal(await t.records.subjectErasures("ws_test", SUBJECT), erasuresBefore, "the erasure count does not move");
     assert.equal((await t.ledger.list()).length, before);
     assert.equal((await t.records.getSubject("ws_test", SUBJECT))!.pinDigest, pinBefore, "the PIN digest stays");
   });
