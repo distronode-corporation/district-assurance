@@ -1057,6 +1057,7 @@ is refused with nothing stored, and concurrent appends stay one valid chain.
 factory, since the engine only reads them) and intake records are copied in and out, workspaces
 never share a key, keys that differ only in a lone surrogate stay apart, and `putIntakeRecord` is idempotent by `recordId`, also concurrently.
 `MemoryAuditLedger` and `MemoryRecordStore` pass both.
+
 The reference server has optional SQLite stores on `node:sqlite` (SRV-4,
 `examples/reference-server/src/sqlite-stores.ts`; no dependency). `SqliteAuditLedger` keeps each
 entry as `chainEntry` built it, as JSON, in a table whose `seq` is the primary key and whose
@@ -2385,6 +2386,7 @@ other) and `POST /u/:token` (a `multipart/form-data` body with a part named `fil
 link's `maxBytes` plus 16 KiB). Answers: 201 received, 400 no file, 410 link not usable, 413 too
 large, 415 type, 422 scan refused, 503 scan failed, each as a page in the same language. Creating the link, texting
 it to the number on file and writing ledger entries for it are not wired into the engine yet.
+
 ## 17. Card numbers in transcripts
 
 **Runs of digits.** `digitRuns(text)` reads a text into runs of digits. A run is numerals and spoken
@@ -2434,6 +2436,7 @@ separator-only chunks never grow what it keeps; it never returns it, and forgets
 
 **Corpus.** `test/corpus/card-numbers.json` holds the cases for runs, redaction and live detection
 as plain JSON, so an implementation in another language can be tested against the same cases.
+
 ## 17. Redaction
 
 Each detector is its own `Redactor`; a host composes the ones it wants with `composeRedactors`,
@@ -2473,6 +2476,7 @@ with no bank word before it is not found. Health card numbers of other provinces
 yet. Number words ("forty two", "quarante-deux") and "double" forms are planned (PAY-5). The test
 corpus is shared JSON in `test/corpus/`, one file per kind: each case gives a text, its language
 and the exact substrings a redactor must find, in order.
+
 ## 17. Subject requests: access and deletion
 
 Two `Engine` methods the business calls from its own code, for one person's access or deletion
@@ -2558,7 +2562,9 @@ and both carry it out. It never changes
 or removes a ledger entry or a receipt, so `verifyChain` and every receipt still verify. The
 listener is not told (the entry names no call). Attempt counts live per call in the call record;
 counters per subject across calls are VER-1's, and the erase resets them once they exist.
+
 ## 17. Carrier webhooks
+
 `verifyTwilioSignature` follows Twilio's published scheme: the `X-Twilio-Signature` header is
 `base64(HMAC-SHA1(auth token, URL + parameters))`, where URL is the full URL Twilio requested,
 query included, and parameters are the form parameters of the raw body, sorted by name (then by
@@ -2571,6 +2577,7 @@ that port removed (Twilio drops it for HTTPS voice callbacks), and no port but t
 added. The check
 passes if any configured auth token matches. Refusals: `no_secret`, `missing_header`,
 `no_matching_signature`, `body_hash_mismatch`. The scheme has no timestamp.
+
 `verifyTelnyxSignature` follows Telnyx's published scheme: the `telnyx-signature-ed25519` header is
 the base64 Ed25519 signature of `telnyx-timestamp + "|" + raw body`. Public keys are the base64 of
 32 raw bytes; any other value is skipped, and so is a key on one of Ed25519's eight small-order
@@ -2580,8 +2587,61 @@ configured key and the timestamp is within 300 seconds of now (configurable, an 
 returns the same `SignatureCheck` as Stripe's: `no_secret`, `missing_header` (either header),
 `malformed_header` (a signature that is not 64 bytes of base64, a timestamp that is not 1 to 12
 digits), `timestamp_out_of_tolerance`, `no_matching_signature`.
+
 The reference server answers `POST /webhooks/twilio` and `/webhooks/telnyx` with 400
 `{error: "signature", reason}` when the check fails, 200 `{received: true}` when it passes, and
 does nothing else with the body: the engine takes no carrier event yet. Twilio's URL is the
 configured public origin followed by the request target. A carrier with no key configured refuses
 everything.
+
+## 17. The flow simulator
+
+`district-assurance simulate <config.json> --flow <name> --script <name or file>` (the package's
+`bin`; `npm run simulate -- ...` in this repository) runs one flow of a FlowConfig with a scripted
+caller and prints what happens, so a business sees a flow before a real caller meets it. The source
+is `src/cli/simulate.ts`.
+
+- The engine is `createTestEngine`'s: the fixed clock, sequential ids, the in-memory adapters and a
+  throwaway signing key. No network, no key, no environment.
+- The config is refused, with every problem and exit code 1, when it turns on a module that is not
+  built in (`badge`, `dossier`, `paylink`, `trace`, `gate`, `step-up`: an outside module's code is not
+  there to run)
+  or when `validateConfig` finds a problem; an outside module listed with `enabled: false` is left
+  out. A flow the config does not have, or a script that is neither built in nor a valid file, is
+  refused the same way. Bad arguments print the usage and exit 2. A flow that ran exits 0, whether
+  it completed or failed. A step the simulator has no scripted caller for (a type another module
+  adds) prints `step <type> is not simulated`, ends the call there and exits 3.
+- The caller is made up: one subject on file with a 555 number, an answer for every keypad field
+  and a PIN of `minDigits` digits. It acts on whatever step the flow is on: at `badge.verify` it
+  keys the account number, then each factor the step lists (keypad answers, the PIN, the carrier
+  check, the photo ID link), then waits for the result; at `dossier.collect` it answers every field
+  of the step's form with a sample value (a text answer cut to the field's `maxLength`) and
+  confirms; at `paylink.request` it asks to pay and the provider reports the script's outcomes; at
+  `trace.consent` it answers. A refusal by the engine is printed and the caller goes on. After the
+  last step the call ends, abandoning a flow still running, and `flow: <status>` gives the status
+  once the call has ended.
+- A script is `{summary, wrongKeypad, wrongPins, carrier, photoId, consent, payment}`: wrong
+  keypad answers and wrong PINs before the right ones (0 to 5; the caller stops once locked out),
+  the carrier's `identityMatch`, the photo ID outcome, the consent answer, and the payment outcome
+  (`paid`; `paid_later`, completed unpaid then the asynchronous success; `failed`; `expired`). A
+  script file is a JSON object with any of these fields, checked field by field; the rest come
+  from `pass`. Built in:
+
+| Script | |
+|---|---|
+| `pass` | every answer right, the carrier matches, the photo ID is verified, consent yes, paid |
+| `wrong-pin` | one wrong PIN and one wrong keypad answer, then the right ones |
+| `lockout` | wrong PINs and keypad answers until the line stops judging them |
+| `consent-no` | as `pass`, consent no |
+| `payment-paid` | as `pass`, paid later: completed unpaid, then the asynchronous success |
+| `payment-expired` | as `pass`, the link expires |
+
+Output, one line each: the headings `simulate:`, `script:`, `call:`, `step <n>/<count>: <type>
+<fields>`, `flow: <status>` and `receipt:`; `  caller:` what the caller does, then `  decision:` the
+engine's answer or `  refused:` its refusal; `    event <name> (<actor>) <detail>` for every ledger
+entry, as it is appended. Then the signed receipt as JSON, checked against the engine's key set, or
+`receipt: none`. Nothing the caller keys is printed: events carry no values (section 9) and
+decisions say right or wrong, never the digits. A config and a script file are someone else's
+text, so every line, on standard output and standard error, writes C0 and C1 control characters
+and bidi controls and marks as `\u` escapes (`terminalSafe`): a file can never move the cursor,
+set the terminal's title or make one result read as another.

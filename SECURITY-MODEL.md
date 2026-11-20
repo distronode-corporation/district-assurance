@@ -553,6 +553,7 @@ door after the receipt, until its expiry, and that redemption is not in the call
 host revokes a code it no longer wants, and logs redemptions at the door). A code is texted only
 to the call whose in-flight grant has the digest the engine recorded, never one matched on its
 grant id alone (tested).
+
 ### Web sign-in step-up: stolen, replayed or misdirected tokens
 
 Someone replays a step-up token, uses one meant for another person or site, or keeps using one

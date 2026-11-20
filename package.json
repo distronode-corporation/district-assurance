@@ -44,6 +44,9 @@
   "engines": {
     "node": ">=24.2"
   },
+  "bin": {
+    "district-assurance": "./dist/cli/simulate.js"
+  },
   "scripts": {
     "build": "node scripts/clean.mjs && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
@@ -53,7 +56,8 @@
     "demo": "node examples/reference-server/src/demo.ts",
     "serve": "node examples/reference-server/src/main.ts",
     "ui": "node examples/reference-server/src/ui.ts",
-    "demo:e2e": "node examples/reference-server/src/e2e.ts"
+    "demo:e2e": "node examples/reference-server/src/e2e.ts",
+    "simulate": "node src/cli/simulate.ts simulate"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

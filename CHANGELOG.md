@@ -230,6 +230,10 @@ All notable changes to this project are documented here. The format follows
   project's own reporting address, and warning within 30 days (also once when a running server
   gets there, and once at expiry); SECURITY.md adds the scope and a thanks list.
 - Public timestamp anchors for the ledger (PRV-9): `anchorLedger()` appends a `ledger.anchored` entry with a proof from an `Anchor` adapter, `verifyAnchor` checks it offline, and the reference server has an RFC 3161 time-stamp authority adapter and a Rekor v2 one; no new dependency.
+- A flow simulator (MOD-4, #53): `district-assurance simulate <config.json> --flow <name> --script
+  <name or file>` (`npm run simulate --` here) runs a flow on the fakes with a scripted caller
+  (`pass`, `wrong-pin`, `lockout`, `consent-no`, `payment-paid`, `payment-expired`, or a JSON file)
+  and prints each step, decision, event and the receipt; a bad config or an outside module is refused.
 
 ### Changed
 

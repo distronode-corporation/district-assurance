@@ -92,7 +92,15 @@ npm run test:coverage # 100% lines, statements, functions and branches in every 
 npm run demo          # four scripted calls, end to end, on fake adapters and loopback servers
 npm run ui            # the same calls in a browser, step by step, on http://127.0.0.1:8787/
 npm run demo:e2e      # the browser demo with a real Stripe Checkout in test mode (below)
+npm run simulate -- config.json --flow deposit --script pass   # one flow of your own config
 ```
+
+`npm run simulate` (the `district-assurance simulate` command once the package is published) runs
+one flow of a FlowConfig file with a scripted caller on the in-memory adapters, and prints each
+step, each decision, every event and the final receipt. Built-in scripts: `pass`, `wrong-pin`,
+`lockout`, `consent-no`, `payment-paid` and `payment-expired`, or a JSON file of your own. A
+config with any problem, or one that turns on an outside module, is refused with every reason
+([SPEC.md](SPEC.md), section 17).
 
 The demo runs `owner-command` first: the owner of a line keys a PIN, on two engines that share one
 session store as two processes of a host would; one wrong PIN, then the right one, and a grant for
