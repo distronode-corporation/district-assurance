@@ -114,12 +114,17 @@ describe("the redactor the recording used", () => {
       display_name: "[redacted]",
     });
     assert.equal(r.id(id), "acct_redacted0001", "the same placeholder on a second file");
-    assert.deepEqual(r.json({ nested: `{\\"display_name\\": \\"Inner\\"}` }), { nested: `{\\"display_name\\": \\"[redacted]\\"}` });
+    // A body held as JSON text is redacted as that text: the whole display name, escaped quotes and all.
+    const body = JSON.stringify({ display_name: 'Public "Private Business"', next: 1 });
+    assert.deepEqual(JSON.parse(r.json({ body }).body), { display_name: "[redacted]", next: 1 });
+    // A client secret goes whole, underscores and the account's base64 included.
+    const clientSecret = `${["vs", "1AbCdEfGhIjKlMn0"].join("_")}_secret_test_YWNjdF8xQWJD_x-y`;
+    assert.deepEqual(r.json({ client_secret: clientSecret }), { client_secret: "[removed]" });
   });
 
-  it("finds a leak: a key, a webhook secret, an unredacted id, a page path", () => {
-    const found = leaks(["sk", "live", "abc"].join("_") + " " + ["whsec", "abc"].join("_") + " " + ["pi", "3AbCdEfGhIjK1"].join("_") + " https://verify.stripe.com/start/x acct_redacted0001");
-    assert.equal(found.length, 4);
+  it("finds a leak: a key, a webhook secret, an unredacted id, a page path, a secret's tail, an account id in base64", () => {
+    const found = leaks(["sk", "live", "abc"].join("_") + " " + ["whsec", "abc"].join("_") + " " + ["pi", "3AbCdEfGhIjK1"].join("_") + " https://verify.stripe.com/start/x acct_redacted0001 [removed]_tail x_secret_y " + Buffer.from("acct_1").toString("base64"));
+    assert.equal(found.length, 7);
   });
 });
 
@@ -170,7 +175,7 @@ describe("VER-5: Stripe Identity, the recorded test-mode run replayed through `n
     assert.equal(headers["stripe-version"], create!.headers["stripe-version"]);
     assert.equal(typeof headers["idempotency-key"], "string");
     // The text with the single-use link went to the stand-in phone only.
-    assert.ok(printed.some((line) => line.startsWith("stand-in phone +15555550100 received: ") && line.includes("https://verify.stripe.com/redacted")));
+    assert.ok(printed.some((line) => /^stand-in phone \+15555550100 received: .* https:\/\/verify\.stripe\.com\/redacted(?:\s|$)/.test(line)));
   });
 
   it("applies Stripe's recorded `verified` event on the identity webhook, as it did live, once", async () => {

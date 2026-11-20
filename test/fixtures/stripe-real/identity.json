@@ -23,7 +23,7 @@
         ]
       ],
       "status": 200,
-      "body": "{\n  \"id\": \"vs_redacted0001\",\n  \"object\": \"identity.verification_session\",\n  \"client_reference_id\": null,\n  \"client_secret\": \"[removed]_YWNjdF8xVFZDb2kyTG9VRERFZnkzLF9WZkh1ekpvVDV6NUtHV1NqdVc5OGpWcFBkOG9YN1Fu0100iVDlx4kN\",\n  \"created\": 1795202341,\n  \"last_error\": null,\n  \"last_verification_report\": null,\n  \"livemode\": false,\n  \"metadata\": {\n    \"call_id\": \"call_runmwpd4eba_1\"\n  },\n  \"options\": {\n    \"document\": {\n      \"require_matching_selfie\": true\n    }\n  },\n  \"redaction\": null,\n  \"related_customer\": null,\n  \"related_customer_account\": null,\n  \"status\": \"requires_input\",\n  \"type\": \"document\",\n  \"url\": \"https://verify.stripe.com/redacted\"\n}"
+      "body": "{\n  \"id\": \"vs_redacted0001\",\n  \"object\": \"identity.verification_session\",\n  \"client_reference_id\": null,\n  \"client_secret\": \"[removed]\",\n  \"created\": 1795202341,\n  \"last_error\": null,\n  \"last_verification_report\": null,\n  \"livemode\": false,\n  \"metadata\": {\n    \"call_id\": \"call_runmwpd4eba_1\"\n  },\n  \"options\": {\n    \"document\": {\n      \"require_matching_selfie\": true\n    }\n  },\n  \"redaction\": null,\n  \"related_customer\": null,\n  \"related_customer_account\": null,\n  \"status\": \"requires_input\",\n  \"type\": \"document\",\n  \"url\": \"https://verify.stripe.com/redacted\"\n}"
     }
   ],
   "delivery": {

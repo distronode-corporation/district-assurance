@@ -89,26 +89,42 @@ function listen(server: Server): Promise<string> {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${(server.address() as AddressInfo).port}`)));
 }
 
-// The recording proxy: the adapters' apiBase. Each request goes on to Stripe with the test key.
-const proxy = createServer(async (req, res) => {
-  const raw = (await body(req)).toString("utf8");
-  const header = (name: string) => (typeof req.headers[name] === "string" ? (req.headers[name] as string) : null);
-  const headers: Record<string, string> = { authorization: `Bearer ${key}` };
-  for (const name of ["stripe-version", "stripe-account", "idempotency-key", "content-type"]) if (header(name) !== null) headers[name] = header(name)!;
-  const init: RequestInit = { method: req.method!, headers, redirect: "error" };
-  if (raw !== "") init.body = raw;
-  const answer = await fetch(`https://api.stripe.com${req.url}`, init);
-  const text = await answer.text();
-  exchanges.push({
-    method: req.method!,
-    path: req.url!,
-    headers: { "stripe-version": header("stripe-version"), "stripe-account": header("stripe-account"), "idempotency-key": header("idempotency-key") !== null },
-    form: [...new URLSearchParams(raw)],
-    status: answer.status,
-    body: text,
+/**
+ * The only Stripe paths the adapters call: a VerificationSession, a Checkout Session, a session's
+ * read and its expiry. Anything else is refused, so the proxy can send the key nowhere else.
+ */
+const STRIPE_PATH = /^\/v1\/(?:identity\/verification_sessions|checkout\/sessions(?:\/cs_test_[A-Za-z0-9]{1,200}(?:\/expire)?)?)$/;
+
+// The recording proxy: the adapters' apiBase. Each request goes on to Stripe with the test key. A
+// failure answers 502, so the step that asked fails inside the run and the cleanup below still runs.
+const proxy = createServer((req, res) => {
+  void (async () => {
+    const path = req.url ?? "";
+    if (!STRIPE_PATH.test(path)) return void res.writeHead(404).end("{}");
+    const target = new URL(path, "https://api.stripe.com");
+    const raw = (await body(req)).toString("utf8");
+    const header = (name: string) => (typeof req.headers[name] === "string" ? (req.headers[name] as string) : null);
+    const headers: Record<string, string> = { authorization: `Bearer ${key}` };
+    for (const name of ["stripe-version", "stripe-account", "idempotency-key", "content-type"]) if (header(name) !== null) headers[name] = header(name)!;
+    const init: RequestInit = { method: req.method!, headers, redirect: "error" };
+    if (raw !== "") init.body = raw;
+    const answer = await fetch(target, init);
+    const text = await answer.text();
+    exchanges.push({
+      method: req.method!,
+      path,
+      headers: { "stripe-version": header("stripe-version"), "stripe-account": header("stripe-account"), "idempotency-key": header("idempotency-key") !== null },
+      form: [...new URLSearchParams(raw)],
+      status: answer.status,
+      body: text,
+    });
+    for (const id of [...text.matchAll(/"id": ?"((?:cs_test|vs)_[A-Za-z0-9]+)"/g)].map((m) => m[1]!)) ours.add(id);
+    res.writeHead(answer.status, { "content-type": "application/json" }).end(text);
+  })().catch((error: unknown) => {
+    console.error(`proxy: ${error instanceof Error ? error.name : "error"}`);
+    if (!res.headersSent) res.writeHead(502);
+    res.end("{}");
   });
-  for (const id of [...text.matchAll(/"id": ?"((?:cs_test|vs)_[A-Za-z0-9]+)"/g)].map((m) => m[1]!)) ours.add(id);
-  res.writeHead(answer.status, { "content-type": "application/json" }).end(text);
 });
 const apiBase = await listen(proxy);
 
@@ -162,36 +178,65 @@ const world = createDemoWorld({
 const paymentsServer = createReferenceServer({ engine: world.engine, clock: systemClock, stripeSecrets: { identity: [], payments: [secret], connect: [secret] }, log: () => undefined });
 const paymentsBase = await listen(paymentsServer);
 
-// The receiver `stripe listen` forwards to: checks the signature, then hands the same bytes on.
-const receiver = createServer(async (req, res) => {
-  const listener = req.url === "/connect" ? "connect" : "account";
-  const raw = await body(req);
-  const signature = typeof req.headers["stripe-signature"] === "string" ? req.headers["stripe-signature"] : "";
-  const event = JSON.parse(raw.toString("utf8")) as { type: string; data: { object: { id: string } } };
-  const objectId = event.data.object.id;
-  if (!ours.has(objectId)) return void res.writeHead(200).end("{}");
-  const route = event.type.startsWith("identity.") ? "identity" : listener === "connect" ? "connect" : "payments";
-  const target = `${route === "identity" ? identityBase : paymentsBase}/webhooks/stripe/${route}`;
-  const answer = await fetch(target, { method: "POST", headers: { "content-type": "application/json", "stripe-signature": signature }, body: raw });
-  const answerBody: unknown = await answer.json();
-  deliveries.push({
-    listener,
-    route,
-    type: event.type,
-    objectId,
-    body: raw.toString("utf8"),
-    signatureVerified: verifyStripeSignature({ payload: raw, header: signature, secrets: [secret], now: new Date() }).ok,
-    answer: { status: answer.status, body: answerBody },
+// The receiver `stripe listen` forwards to: checks the signature, then hands the same bytes on. A
+// failure answers 500 (Stripe delivers again), and the run's wait for that event times out.
+const receiver = createServer((req, res) => {
+  void (async () => {
+    const listener = req.url === "/connect" ? "connect" : "account";
+    const raw = await body(req);
+    const signature = typeof req.headers["stripe-signature"] === "string" ? req.headers["stripe-signature"] : "";
+    const event = JSON.parse(raw.toString("utf8")) as { type: string; data: { object: { id: string } } };
+    const objectId = event.data.object.id;
+    if (!ours.has(objectId)) return void res.writeHead(200).end("{}");
+    const route = event.type.startsWith("identity.") ? "identity" : listener === "connect" ? "connect" : "payments";
+    const target = `${route === "identity" ? identityBase : paymentsBase}/webhooks/stripe/${route}`;
+    const answer = await fetch(target, { method: "POST", headers: { "content-type": "application/json", "stripe-signature": signature }, body: raw });
+    const answerBody: unknown = await answer.json();
+    deliveries.push({
+      listener,
+      route,
+      type: event.type,
+      objectId,
+      body: raw.toString("utf8"),
+      signatureVerified: verifyStripeSignature({ payload: raw, header: signature, secrets: [secret], now: new Date() }).ok,
+      answer: { status: answer.status, body: answerBody },
+    });
+    res.writeHead(200).end("{}");
+  })().catch((error: unknown) => {
+    console.error(`receiver: ${error instanceof Error ? error.name : "error"}`);
+    if (!res.headersSent) res.writeHead(500);
+    res.end("{}");
   });
-  res.writeHead(200).end("{}");
 });
 const receiverBase = await listen(receiver);
 const events = ["identity.verification_session.verified", "identity.verification_session.requires_input", "checkout.session.completed"].join(",");
 const cli: ChildProcess = spawn("stripe", ["listen", "--events", events, "--forward-to", `${receiverBase}/account`, "--forward-connect-to", `${receiverBase}/connect`], { env: cliEnv });
-await new Promise<void>((resolve, reject) => {
-  cli.stderr!.on("data", (c: Buffer) => c.toString().includes("Ready!") && resolve());
-  cli.on("error", reject);
-});
+
+/** Stops everything this script started. */
+async function cleanUp(): Promise<void> {
+  cli.kill();
+  await world.close();
+  for (const server of [proxy, serve.server, paymentsServer, receiver]) server.close();
+}
+
+// The listener is ready when it says so; one that exits first, fails to start or takes over a
+// minute ends the run, with everything stopped.
+try {
+  await new Promise<void>((resolve, reject) => {
+    const deadline = setTimeout(() => reject(new Error("stripe listen was not ready within a minute")), 60_000);
+    cli.stderr!.on("data", (c: Buffer) => {
+      if (c.toString().includes("Ready!")) {
+        clearTimeout(deadline);
+        resolve();
+      }
+    });
+    cli.on("error", (error) => (clearTimeout(deadline), reject(error)));
+    cli.on("exit", (code) => (clearTimeout(deadline), reject(new Error(`stripe listen exited (${code}) before it was ready`))));
+  });
+} catch (error) {
+  await cleanUp();
+  throw error;
+}
 
 async function delivered(objectId: string, type: string): Promise<Delivery> {
   const until = Date.now() + WAIT_MS;
@@ -272,7 +317,5 @@ try {
   for (const [name, text] of texts) writeFileSync(new URL(name, out), text);
   console.log(`recorded: ${texts.map(([name]) => name).join(", ")}`);
 } finally {
-  cli.kill();
-  await world.close();
-  for (const server of [proxy, serve.server, paymentsServer, receiver]) server.close();
+  await cleanUp();
 }

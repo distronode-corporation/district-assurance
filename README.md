@@ -242,9 +242,12 @@ The server refuses a live key or a secret key: use a restricted test-mode key on
 commit it; the server reads it from the environment. Without `STRIPE_IDENTITY_KEY`, everything
 runs on fakes.
 
-One such run, and paid Checkout links in both payment modes, were recorded in Stripe test mode
-and are replayed offline by `test/stripe-real.test.ts` (recorder:
-`test/fixtures/stripe-real/record.ts`, run by hand; every Stripe id in the files is redacted).
+The same trial call, and paid Checkout links in both payment modes, were recorded once in
+Stripe test mode and are replayed offline by `test/stripe-real.test.ts` (recorder:
+`test/fixtures/stripe-real/record.ts`, run by hand; every Stripe id in the files is redacted). The
+recording did not use a restricted key: its loopback proxy sent the account's secret test key in
+its place (a restricted key is made only in the Dashboard), so it proves the requests and Stripe's
+answers, not a restricted key's permissions.
 
 ## Design rules
 
