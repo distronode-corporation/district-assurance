@@ -172,8 +172,8 @@ state machine, the config, the events and the formats.
 | `POST /webhooks/stripe/identity` | Stripe Identity outcomes, signature checked first |
 | `POST /webhooks/stripe/payments` | Stripe Checkout outcomes on the platform's account, signature checked first, each event applied once |
 | `POST /webhooks/stripe/connect` | Stripe Checkout outcomes from connected accounts (connect mode), with their own signing secret |
-| `POST /webhooks/twilio`, `/telnyx` | `501` until carrier signature checks are built |
 | `GET /r/:token` | a receipt page in English and French, with its signature check, by a capability token the host issued (`/r/:token.json`: the signed receipt) |
+| `POST /webhooks/twilio`, `/telnyx` | carrier webhooks, signature checked, then acknowledged (nothing is applied yet) |
 | `GET /.well-known/receipt-keys.json` | the public key set for receipts |
 | `GET /healthz` | liveness |
 

@@ -345,6 +345,15 @@ its memory (tested); the engine applies each identity session and each payment s
 Record deliveries are signed in the same scheme, each attempt with its own time, and carry one
 idempotency key per record and destination inside the signed body; the reference server's sample
 receiver checks the signature first and applies each key once (tested).
+Telnyx signatures (Ed25519) cover the timestamp and are refused outside a 300-second window
+(tested). Twilio signatures (HMAC-SHA1, compared in constant time) cover the URL and the body but
+no timestamp, so a captured Twilio request verifies again when replayed; the reference server only
+acknowledges carrier webhooks today, and a host that acts on one must apply each event once itself
+(left to the host). The identity is the event, not the call or message: one call sends several
+callbacks with the same call id, so a host keys on the carrier's event id where there is one, and
+on `CallSid` plus `SequenceNumber` for Twilio call-progress callbacks. An unsigned or wrongly
+signed carrier request is refused, and a carrier with no key configured refuses everything
+(tested).
 Identity links are single-use by the provider. The reference server's Stripe Identity adapter
 sends the engine's idempotency key with every create, so a retried `startPhotoId` gets the same
 session and link, never a second one (tested against a local fake). It never logs the link, and its
@@ -352,11 +361,7 @@ errors carry a status and Stripe's error type and code only, never the link, the
 message (tested). It takes a restricted key only, never a secret key, and `npm run serve` takes a
 test-mode one only (tested); the key comes from the environment. It refuses an API base
 that is not `https:`, except `http:` on a loopback host for a local fake, so the key never crosses a
-network in cleartext (tested). Left to the host: whether keypad tones arrive as
-out-of-band events or as in-band audio on each carrier bridge, since in-band tones can be replayed
-acoustically and can reach speech-to-text.
-id once; the engine applies each identity session and each payment settlement once (tested).
-Identity links are single-use by the provider. A document upload link is single use by an atomic
+network in cleartext (tested). A document upload link is single use by an atomic
 claim in the `DocumentStore`: of two uploads at once, one is stored (tested); it expires after 30
 minutes and is bound to one call and one confirmed record of that call (tested). Left to the
 host: whether keypad tones arrive as out-of-band events or as in-band audio on each carrier

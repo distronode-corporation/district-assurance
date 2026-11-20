@@ -209,6 +209,7 @@ All notable changes to this project are documented here. The format follows
   the matched `subjectKey` and an export lists only that subject's consents; a deleted record id
   is never stored again; each erasure gets its own entry, closed by `subject.erasure_completed`,
   and a retry after a partial delete finishes the same one.
+- Carrier webhook signatures (SRV-1): `verifyTwilioSignature` and `verifyTelnyxSignature`, tested against Twilio's published examples and RFC 8032's Ed25519 vector; the reference server's `/webhooks/twilio` and `/webhooks/telnyx` routes check them instead of answering 501.
 
 ### Changed
 

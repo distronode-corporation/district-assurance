@@ -6,16 +6,11 @@ import { describe, it } from "node:test";
 import { NotImplementedError } from "../src/core/errors.ts";
 import { chargeSavedCard, startKeypadCardCapture } from "../src/pay/later.ts";
 import { exportLedger } from "../src/prove/later.ts";
-import { verifyTelnyxSignature, verifyTwilioSignature } from "../src/webhooks/carrier.ts";
-
-const hook = { url: "https://example.test/", headers: {}, body: "", now: new Date(0) };
 
 const STUBS: Array<[string, () => unknown]> = [
   ["PAY-4", () => chargeSavedCard({ callId: "c", paymentId: "p" })],
   ["PAY-6", () => startKeypadCardCapture({ callId: "c", paymentId: "p" })],
   ["PRV-4", () => exportLedger({ fromSeq: 1 })],
-  ["SRV-1", () => verifyTwilioSignature(hook)],
-  ["SRV-1", () => verifyTelnyxSignature(hook)],
 ];
 
 /** Planned work a validator refuses by id (so a config can never reach it mid-call). */

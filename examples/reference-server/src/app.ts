@@ -2,9 +2,9 @@
 // webhooks that finish a photo ID check and a payment (platform-mode payments on the account
 // endpoint, connect-mode payments on the Connect endpoint, each with its own signing secret),
 // serves receipts by capability link with a small receipt page, serves the receipt key set, runs a
-// sample receiver for signed record deliveries, answers 501 on the carrier webhooks that are not
-// built yet, and, with `uploads`, serves the single-use document upload page in English and French
-// (FIL-5). With `ui`, it also serves the demo's browser UI and the routes that run the
+// sample receiver for signed record deliveries, checks the signatures of the carrier webhooks
+// (Twilio, Telnyx), and, with `uploads`, serves the single-use document upload page in English
+// and French (FIL-5). With `ui`, it also serves the demo's browser UI and the routes that run the
 // scripted demo one step at a time. Not hardened for production; ROADMAP.md, "Reference server",
 // lists what that takes.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -21,6 +21,8 @@ import {
   receiptLinkTokenHash,
   verifyReceipt,
   verifyStripeSignature,
+  verifyTelnyxSignature,
+  verifyTwilioSignature,
   type Clock,
   type DocumentScanner,
   type DocumentStore,
@@ -41,6 +43,16 @@ export interface ReferenceServerOptions {
    * the Connect endpoint ("Events from: Connected accounts"), which has its own secret.
    */
   stripeSecrets: { identity: readonly string[]; payments: readonly string[]; connect?: readonly string[] };
+  /** Carrier webhook keys. A carrier left out, or given no key, refuses everything. */
+  carriers?: {
+    /**
+     * The account's auth tokens, and the public origin Twilio calls (`https://voice.example.test`):
+     * Twilio signs the full URL, which a server behind a proxy cannot see.
+     */
+    twilio?: { authTokens: readonly string[]; publicOrigin: string };
+    /** The account's Ed25519 public keys, base64, as the Telnyx portal shows them. */
+    telnyx?: { publicKeys: readonly string[] };
+  };
   clock: Clock;
   /**
    * The sample receiver of record deliveries (`POST /webhooks/records`): the signing secrets it
@@ -309,6 +321,36 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     return [200, { received: true, recordId: delivery.record.recordId }];
   }
 
+  /**
+   * A carrier webhook: the signature is checked, and nothing else yet. The engine takes no carrier
+   * event today (call handling is the host's), so a verified request is acknowledged and dropped.
+   */
+  async function carrierWebhook(req: IncomingMessage, carrier: "twilio" | "telnyx"): Promise<[number, Json]> {
+    const payload = await readBody(req, maxBody);
+    const header = (name: string) => {
+      const value = req.headers[name];
+      return typeof value === "string" ? value : undefined;
+    };
+    const twilio = options.carriers?.twilio;
+    const check =
+      carrier === "twilio"
+        ? verifyTwilioSignature({
+            url: `${twilio?.publicOrigin ?? ""}${req.url!}`,
+            payload,
+            header: header("x-twilio-signature"),
+            authTokens: twilio?.authTokens ?? [],
+          })
+        : verifyTelnyxSignature({
+            payload,
+            signatureHeader: header("telnyx-signature-ed25519"),
+            timestampHeader: header("telnyx-timestamp"),
+            publicKeys: options.carriers?.telnyx?.publicKeys ?? [],
+            now: options.clock.now(),
+          });
+    if (!check.ok) return [400, { error: "signature", reason: check.reason }];
+    return [200, { received: true }];
+  }
+
   async function demoRoute(req: IncomingMessage, runs: DemoRuns, path: string, method: string): Promise<Answer> {
     const host = req.headers.host!;
     const file = files.get(path);
@@ -403,7 +445,7 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
     const carrier = /^\/webhooks\/(twilio|telnyx)$/.exec(path);
     if (carrier !== null) {
       expect("POST");
-      return [501, { error: "not_implemented", issue: "SRV-1", carrier: carrier[1] }];
+      return carrierWebhook(req, carrier[1] as "twilio" | "telnyx");
     }
     // `/r/<token>` is the page, `/r/<token>.json` the signed receipt itself. An unknown token, a
     // malformed one and a call without a receipt all answer the same 404.
