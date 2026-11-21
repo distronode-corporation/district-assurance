@@ -252,6 +252,9 @@ export class MemoryRecordStore implements RecordStore {
     // Checked and stored in one step, with no await between: an erasure or a delete that starts
     // while this write is in the adapter either sees the record or keeps it out.
     if (erasuresSeen !== undefined && record.subjectKey !== null && (this.#erasures.get(scoped(record.workspaceId, record.subjectKey)) ?? 0) > erasuresSeen) return;
+    // The first filing of a recordId is kept, as SQLite's ON CONFLICT DO NOTHING does: a later put
+    // never swaps the contents under a confirmation mark that was given for the first.
+    if (this.#records.has(key)) return;
     this.#records.set(key, structuredClone(record));
   }
 

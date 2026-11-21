@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-20
+
+The first published release.
+
 ### Added
 
 - Stripe test-mode proofs for VER-5 (#18) and PAY-1 (#25), recorded once through the reference
@@ -367,6 +371,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The package is published: `package.json` no longer has `"private": true` (ADR-12), and 0.1.0 is
+  the first version `release.yml` publishes to npm, with provenance. The publish job's
+  `setup-node` names the npm registry (`registry-url`), as npm's trusted publishing guide has it.
 - Breaking for hosts on Node.js older than 24.19: `engines` is `>=24.19` (was `>=24.2`), the first
   Node 24 where `crypto.argon2` is stable (it arrived in 24.7.0 as a release candidate), which PIN
   records use (ADR-4, ADR-29). CI runs 24.19 and the latest 24.
@@ -487,6 +494,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `MemoryRecordStore.putIntakeRecord` keeps the first filing of a `recordId`, as the SQLite store
+  does: a later put with other contents used to replace a confirmed record and keep its mark.
+  `recordStoreContract` checks it.
+- SECURITY-MODEL.md gives a duress PIN record its own namespace, `HMAC-SHA256(knowledgeKey,
+  "duress:" + subjectKey + ":" + pin)`, as the engine keys it; it used to show `"pin:"` for both.
 - The reference server remembers webhook event ids for 4 days (Stripe retries for 3) and at most
   10,000 of them, least recently seen first out, instead of in a set that grew without end.
 - `validateConfig` refuses a policy list with a hole (a sparse `levels[].anyOf`, factor set or
@@ -557,8 +569,9 @@ All notable changes to this project are documented here. The format follows
 
 - PINs and duress PINs on file are Argon2id over the keyed HMAC (ADR-29):
   `$pin1$argon2id$v=19$m=19456,t=2,p=1$<salt>$<tag>`, with a random salt, the cost in the record,
-  one Argon2id run per check whatever is on file, and a constant-time compare. A record below
-  today's cost or above the ceiling, or changed in any field, never matches. Records of the earlier
+  one Argon2id run per check whatever is on file, and a constant-time compare. A record at any
+  cost but today's, or changed in any field, never matches, so a dearer record never takes longer
+  to check than an unknown subject's stand-in. Records of the earlier
   format (the bare keyed HMAC) still verify and are replaced by an Argon2id record on the next match.
   Lockouts are unchanged.
 - A taint now voids the keypad or PIN match made before it: `startPhotoId`, `checkCarrier` and a

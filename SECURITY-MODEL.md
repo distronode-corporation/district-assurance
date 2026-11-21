@@ -165,12 +165,14 @@ start limit, since it forgets only the failures of its own factor kind (`forgetP
 ### Stolen PIN records
 
 Someone who copies the record store, with or without the knowledge key, trying to recover PINs.
-**Controls (ADR-29):** a PIN or duress PIN on file is Argon2id (19 MiB, 2 passes, 1 lane, a random
-16-byte salt) over `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`. Without the key a
+**Controls (ADR-29):** a PIN on file is Argon2id (19 MiB, 2 passes, 1 lane, a random 16-byte
+salt) over `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`, and a duress PIN on file
+over `HMAC-SHA256(knowledgeKey, "duress:" + subjectKey + ":" + pin)`, the same way. Without the key a
 record says nothing, as before (the key can stay in a key store, behind an HMAC function). With the
 key too, every guess costs an Argon2id run, per subject, since each record has its own salt
-(tested). The cost travels in the record and is read strictly: a cost below today's (a downgrade), a
-cost beyond the ceiling, or any changed field never matches, so a record weakened in the store fails
+(tested). The cost travels in the record and is read strictly: any cost but today's (a downgrade,
+or a dearer record, which would take longer to check than an unknown subject's stand-in), or any
+changed field never matches, so a record weakened in the store fails
 closed: even the right PIN fails until the business resets it (tested). Records of the earlier format (the bare keyed HMAC) still
 verify and are replaced on the next match (tested); a subject who never calls again keeps one, which
 the business can only remove by a reset. **Left open:** stretching cannot make a short PIN strong:
@@ -943,10 +945,11 @@ A compromised dependency, action or build, or a release nobody meant to make. **
 package has no runtime dependency. Every workflow action is pinned by full commit SHA, every
 workflow's top-level token is read-only or empty with each job granted only the scopes it uses,
 and no package-manager cache is restored. npm audit and osv-scanner check the lockfile on every
-pull request, weekly, and on each release tag (`supply-chain.yml`). Nothing has been published:
-`"private": true` makes `npm publish` refuse until a release is decided (ADR-12), and the release
-workflow (`release.yml`) has not yet had its dry run on a tag in a fork. In that workflow a tag
-push is only ever a dry run, publishing needs a person to start the workflow by hand on a tag
+pull request, weekly, and on each release tag (`supply-chain.yml`). From 0.1.0 on, every version
+on npm is published by the release workflow (`release.yml`) from its tag, with npm provenance
+(ADR-12); the hand-published placeholder version that reserved the name holds no code, and
+the publish job refuses a package.json marked `"private": true`. In that workflow a tag push is
+only ever a dry run, publishing needs a person to start the workflow by hand on a tag
 with `publish` ticked, and the publish job waits for the `npm-publish` environment's reviewers;
 its first step stops unless that environment has a required reviewer and a deployment rule, so
 an environment created without protection never lets a publish through. It runs only in this
@@ -1053,7 +1056,7 @@ Who is calling, in levels (`src/verify/`).
 | badge-11 | S | A weakly verified caller chooses or resets the owner's PIN on the line. | `enrolPin` needs level 2 or above on the same call and a subject with no PIN on file, refuses weak PINs, and counts each try; only the business resets a PIN (`resetPin`). | covered | `pin.test.ts`: "needs a verification at level 2 or above on this call, on an open call"; `pin.test.ts`: "refuses weak, mismatched and malformed PINs, counting each try, and locks after the PIN's limit"; `pin.test.ts`: "stores the digest submitPin compares, writes pin.enrolled without the digits, and refuses a second PIN" |
 | badge-12 | S | A spoken answer is misheard or injected into speech-to-text. | Spoken answers are normalised by code, exactly or not at all, have their own attempt limit, count alone only at level 1 and never unlock texts. | covered | `verify-spoken.test.ts`: "counts an unusable or wrong answer as an attempt, then stops judging, even the right answer"; `verify-spoken.test.ts`: "can use spoken_knowledge alone at level 1, and only with a factor that is not knowledge above it"; `verify-spoken.test.ts`: "does not unlock texts to the number on file" |
 | badge-13 | I | Keypad digits leak from the host's buffer into a log or a string. | `KeypadCollector` shows no digit, nor how many, through `toString`, JSON or `util.inspect`, and wipes its buffer before its callback runs. | covered | `keypad.test.ts`: "shows no digit, nor how many, through toString, JSON or inspect"; `keypad.test.ts`: "wipes the buffer before the callback runs, even when it throws" |
-| badge-14 | T | A PIN record on file is weakened (its Argon2id cost lowered or set beyond reason) or changed, or an earlier keyed-HMAC record stays weak for good. | Records are read strictly: a cost below today's or above the ceiling, another algorithm, version or spelling never matches, and is never run above the ceiling; a changed parameter, salt or tag gives another tag. An earlier record still matches, and is replaced by an Argon2id record on the next match, only while it is still on file; every check does one Argon2id run and compares in constant time. | covered | `pin-argon2id.test.ts`: "refuses a correctly computed record below today's cost, or above the ceiling, and never upgrades it"; `pin-argon2id.test.ts`: "refuses a record whose parameters, salt, tag or spelling were changed"; `pin-argon2id.test.ts`: "verifies a record of the earlier format, then replaces it with an Argon2id record on the match"; `pin-hash-timing.test.ts`: "runs Argon2id once at today's cost for a missing, refused or earlier record, and once at the record's own cost otherwise" |
+| badge-14 | T | A PIN record on file is weakened (its Argon2id cost lowered or set beyond reason) or changed, or an earlier keyed-HMAC record stays weak for good. | Records are read strictly: any cost but today's, another algorithm, version or spelling never matches, and is never run at its own cost; a changed parameter, salt or tag gives another tag. An earlier record still matches, and is replaced by an Argon2id record on the next match, only while it is still on file; every check does one Argon2id run and compares in constant time. | covered | `pin-argon2id.test.ts`: "refuses a correctly computed record at any cost but today's, and never upgrades it"; `pin-argon2id.test.ts`: "refuses a record whose parameters, salt, tag or spelling were changed"; `pin-argon2id.test.ts`: "verifies a record of the earlier format, then replaces it with an Argon2id record on the match"; `pin-hash-timing.test.ts`: "runs Argon2id once at today's cost whatever is on file, a dearer record included (#149)"; `rel-cr-pin-equal-work.test.ts`: "never runs a dearer record at its own cost: the right PIN fails, as on a stand-in" |
 
 ### Dossier
 
@@ -1169,7 +1172,7 @@ What is published, and how.
 
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
-| release-1 | T | A published package differs from the reviewed source, or cannot be traced to it. | A release workflow (`release.yml`) with a reproducible pack, an exports smoke test and npm provenance. Nothing is published (`"private": true`), and the workflow has not had its dry run on a tag in a fork. | open | SRV-5 |
+| release-1 | T | A published package differs from the reviewed source, or cannot be traced to it. | A release workflow (`release.yml`) with a reproducible pack, an exports smoke test, npm provenance and a signed SBOM attestation, which publishes every version from 0.1.0 on. Open until the first publish (0.1.0) is checked against the reviewed source. | open | SRV-5 |
 | release-2 | E | A host imports a runtime function of a module that was meant to stay internal. | The root entry point keeps the modules' runtime functions out. | covered | `entry-points.test.ts`: "keeps the runtime functions of the modules out of the root" |
 
 ### SessionStore

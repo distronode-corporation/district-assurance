@@ -46,13 +46,13 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-29, says why.
 | M5 Dossier | Read-backs, encrypted fields, delivery, conditional fields, documents by text, Spanish | done |
 | M6 Paylink | Amounts from code, cancel and expiry, the live detector, refunds; the Stripe Checkout adapter in both modes, proven in Stripe test mode. Open: saved cards and keypad capture, gated | PAY-4, PAY-6 |
 | M7 Trace | Key rotation, the stand-alone verifier, consent revocation, ledger export, more redactors, subject requests, monthly reports, a public timestamp anchor, receipt links by text | done |
-| M8 Reference server hardening | Carrier signatures, limits and logs, receipt links, persistent stores, the release workflow, signed releases, fuzz tests, the threat tables, security.txt, benchmarks. Open: the release dry run in a fork and the first release | SRV-5 |
+| M8 Reference server hardening | Carrier signatures, limits and logs, receipt links, persistent stores, the release workflow, signed releases, fuzz tests, the threat tables, security.txt, benchmarks. Open: checking the first published release (0.1.0) | SRV-5 |
 | M9 Host integration and module authors | Transcript forwarding, event delivery, the module author kit, the FlowConfig JSON Schema, factors added after construction, the flow simulator, with a scripted caller for every built-in step | done |
 
 ## What is left
 
-1. **SRV-5:** the release workflow's dry run on a tag in a fork, and the checks on the first real
-   release.
+1. **SRV-5:** the tag push's dry run for v0.1.0, and the checks on the first published release
+   (0.1.0) against the reviewed source.
 2. **Gated, not scheduled:** PAY-4 (saved-card charges) and PAY-6 (keypad card capture); PAY-6
    starts only after an assessor's scoping and a buyer who needs it.
 
@@ -225,21 +225,23 @@ Some buyers will need it; it must never route tones through this engine.
 | security.txt (SRV-9), benchmarks (SRV-10) | `examples/reference-server/src/app.ts`, `bench/` | `test/security-txt-review.test.ts`, `test/bench.test.ts` |
 
 **Proven by:** Server tests over a real socket; vendor test vectors for each signature scheme;
-the release workflow's tests. Its dry run on a tag in a fork has not been done yet: that is SRV-5,
-below.
+the release workflow's tests. Checking the first published release against the reviewed source
+is SRV-5, below.
 
 #### **SRV-5** Release workflow: the dry run in a fork and the first release
 
-The release workflow is built, and nothing is published yet, by decision: `package.json` keeps
-`"private": true`.
+The release workflow is built, and the first release is decided: 0.1.0 (ADR-12). Its release pull
+request removes `"private": true`, and from 0.1.0 on every version is published by `release.yml`
+from its tag. The fork dry run is replaced by the dry run the tag push runs in this repository
+before the manual publish.
 
 *Acceptance*
 
-- The workflow's dry run on a tag in a fork, recorded in the pull request (also asked for by signed releases, SRV-6).
-- `private: true` is removed only in the pull request that decides the first release, and that release is checked against the reviewed source.
+- The tag push's dry run for v0.1.0 passes in this repository before the publish run (also asked for by signed releases, SRV-6).
+- `private: true` is removed only in the pull request that decides the first release, and that release is checked against the reviewed source: npm provenance, the SBOM attestation and the registry tarball's bytes.
 
 *Files:* `.github/workflows/release.yml`, `package.json`  
-*Tests:* A dry run on a tag in a fork  
+*Tests:* The tag push's dry run for v0.1.0  
 *Depends on:* none
 
 ### M9. Host integration and module authors

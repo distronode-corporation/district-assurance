@@ -694,6 +694,21 @@ export function recordStoreContract(factory: (subjects: SeededSubject[]) => Reco
       },
     ],
     [
+      "keeps the first filing of a recordId: a later put with other contents changes nothing, and a confirmed record stays the one confirmed",
+      async (store) => {
+        const first = contractRecord("w", "rec_first");
+        const other = { ...contractRecord("w", "rec_first"), values: { issue: "a different issue", rooms: 1, urgent: false }, digest: "d".repeat(64) };
+        await store.putIntakeRecord(first);
+        await store.confirmIntakeRecord("w", "rec_first");
+        await store.putIntakeRecord(other);
+        assert.deepEqual(await store.getIntakeRecord("w", "rec_first"), first, "the confirmed contents stay");
+        assert.equal(await store.isIntakeRecordConfirmed("w", "rec_first"), true);
+        await store.putIntakeRecord(contractRecord("w", "rec_unconfirmed"));
+        await store.putIntakeRecord({ ...other, recordId: "rec_unconfirmed" });
+        assert.deepEqual(await store.getIntakeRecord("w", "rec_unconfirmed"), contractRecord("w", "rec_unconfirmed"), "an unconfirmed record is kept too");
+      },
+    ],
+    [
       "files concurrent puts, of one record and of many, without losing one",
       async (store) => {
         await Promise.all([

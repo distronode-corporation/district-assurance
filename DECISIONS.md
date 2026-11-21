@@ -126,6 +126,13 @@ with its own release workflow (provenance, reproducible packs), modelled on our 
 packages.
 **Amended (SRV-5):** the release workflow is built (`.github/workflows/release.yml`); the package
 stays private until the pull request that decides the first release removes `"private": true`.
+**Amended (first release, Sean, 2026-11):** the first release is 0.1.0. Its release pull request
+removes `"private": true`, and from 0.1.0 on every version is published by `release.yml` from its
+tag through npm trusted publishing, with provenance. The name is reserved on npm by the
+package's owner with a hand-published placeholder version below 0.1.0, since npm sets a trusted
+publisher only on a package that exists; the placeholder is not a release. The fork dry run
+SRV-5 asked for is replaced by the dry run a tag push runs in this repository before anything is
+published.
 
 ## ADR-13. A small core plus modules, switched by config
 
@@ -303,7 +310,8 @@ minutes by default, configurable from 5 to 60; any popular method that settles w
 is on the call. Stripe documents Interac only in person and pre-authorized debit settles in days.
 Checking the account stops an event from one business settling another's payment. **Revisit**
 when Stripe offers Interac in online Checkout, or a provider's methods need mapping the validator
-cannot see (how wallets map to Checkout's parameters is PAY-1's to prove in test mode).
+cannot see. PAY-1 proved the Checkout mapping in Stripe test mode: Apple Pay and Google Pay go
+as `card`, and Link only beside `card`.
 
 ## ADR-24. Web step-up is an ES256 JWT checked against a JWKS
 
@@ -423,8 +431,9 @@ change to the receipt format, so a new version), or a regulator's guidance that 
 message is the 32 bytes of the keyed HMAC the engine already computed,
 `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)` (or `"duress:"`), with a random 16-byte
 salt and a 32-byte tag. `pin1` names the construction, and the algorithm, version and cost are in the
-string. A record is read strictly: a cost below today's (a downgrade) or above a ceiling of
-`m=262144,t=16,p=8` (refused before any run), another algorithm, version or spelling, never matches.
+string. A record is read strictly: any cost but today's, below it (a downgrade) or above it
+(refused before any run: a dearer record would take longer to check than the stand-in an unknown
+subject gets), another algorithm, version or spelling, never matches.
 Every check is one Argon2id run (on a stand-in at today's cost when no usable record is on file)
 and a constant-time compare of the tag. A record of the earlier format, the bare 64-hex HMAC, still
 verifies, and on a match the PIN factor replaces it with an Argon2id record through

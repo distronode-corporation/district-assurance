@@ -156,6 +156,8 @@ describe("the RecordStore contract", () => {
     }
     assert.deepEqual(await failing(recordStoreContract((subjects) => new Joined(subjects))), [
       "keeps workspaces apart, and never lets two workspace and id pairs share a key",
+      // It replaces a filed record, so a confirmed record's contents can change under its mark.
+      "keeps the first filing of a recordId: a later put with other contents changes nothing, and a confirmed record stays the one confirmed",
       "keeps a record unconfirmed until confirmIntakeRecord marks it, idempotently, and never marks an id it does not hold",
       "deletes a subject's PIN and duress digests, keeps the rest, and deleting a missing one is harmless",
       "upgrades a PIN or duress digest only from the value on file, and changes nothing else",
@@ -174,6 +176,7 @@ describe("the RecordStore contract", () => {
     }
     assert.deepEqual(await failing(recordStoreContract((subjects) => seed(new Strict(), subjects))), [
       "files a record idempotently by recordId",
+      "keeps the first filing of a recordId: a later put with other contents changes nothing, and a confirmed record stays the one confirmed",
       "files concurrent puts, of one record and of many, without losing one",
       "keeps a record unconfirmed until confirmIntakeRecord marks it, idempotently, and never marks an id it does not hold",
     ]);
@@ -189,7 +192,7 @@ describe("the RecordStore contract", () => {
         return this.#records.get(JSON.stringify([workspaceId, recordId])) ?? null;
       }
     }
-    assert.deepEqual(await failing(recordStoreContract((subjects) => seed(new Leaky(), subjects))), ["stores an intake record and returns copies", "keeps a record unconfirmed until confirmIntakeRecord marks it, idempotently, and never marks an id it does not hold"]);
+    assert.deepEqual(await failing(recordStoreContract((subjects) => seed(new Leaky(), subjects))), ["stores an intake record and returns copies", "keeps the first filing of a recordId: a later put with other contents changes nothing, and a confirmed record stays the one confirmed", "keeps a record unconfirmed until confirmIntakeRecord marks it, idempotently, and never marks an id it does not hold"]);
   });
 
   it("catches a store whose digest deletion reaches the same key in another workspace, or drops the rest of the subject", async () => {
