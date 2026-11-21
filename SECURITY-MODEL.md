@@ -165,8 +165,9 @@ start limit, since it forgets only the failures of its own factor kind (`forgetP
 ### Stolen PIN records
 
 Someone who copies the record store, with or without the knowledge key, trying to recover PINs.
-**Controls (ADR-29):** a PIN or duress PIN on file is Argon2id (19 MiB, 2 passes, 1 lane, a random
-16-byte salt) over `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`. Without the key a
+**Controls (ADR-29):** a PIN on file is Argon2id (19 MiB, 2 passes, 1 lane, a random 16-byte
+salt) over `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`, and a duress PIN on file
+over `HMAC-SHA256(knowledgeKey, "duress:" + subjectKey + ":" + pin)`, the same way. Without the key a
 record says nothing, as before (the key can stay in a key store, behind an HMAC function). With the
 key too, every guess costs an Argon2id run, per subject, since each record has its own salt
 (tested). The cost travels in the record and is read strictly: a cost below today's (a downgrade), a

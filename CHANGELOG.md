@@ -494,6 +494,8 @@ The first published release.
 
 ### Fixed
 
+- SECURITY-MODEL.md gives a duress PIN record its own namespace, `HMAC-SHA256(knowledgeKey,
+  "duress:" + subjectKey + ":" + pin)`, as the engine keys it; it used to show `"pin:"` for both.
 - The reference server remembers webhook event ids for 4 days (Stripe retries for 3) and at most
   10,000 of them, least recently seen first out, instead of in a set that grew without end.
 - `validateConfig` refuses a policy list with a hole (a sparse `levels[].anyOf`, factor set or
