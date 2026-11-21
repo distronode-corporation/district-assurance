@@ -31,7 +31,12 @@ const personal = (key: string | null, inPersonal: boolean): boolean => (key !== 
 
 /** Every personal string in `value` replaced, by key and at any depth; `changed` says whether one was. */
 function redactPersonal(value: unknown, key: string | null, inPersonal: boolean): { value: unknown; changed: boolean } {
-  if (typeof value === "string") return personal(key, inPersonal) && value !== REDACTED ? { value: REDACTED, changed: true } : { value, changed: false };
+  if (typeof value === "string") {
+    if (personal(key, inPersonal)) return value === REDACTED ? { value, changed: false } : { value: REDACTED, changed: true };
+    // JSON text held in a string, at any depth: redacted inside, and kept as it was when nothing is.
+    const inner = personalJsonText(value);
+    return { value: inner, changed: inner !== value };
+  }
   let changed = false;
   const each = (k: string | null, x: unknown, within: boolean) => {
     const out = redactPersonal(x, k, within);
@@ -54,6 +59,20 @@ function parsed(text: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * JSON text with a customer's personal details replaced. Text with none is returned as it was,
+ * byte for byte; text with some is written again at its own indentation (Stripe's bodies are
+ * two-space JSON), since a value can hold anything, braces included, and only a parse finds it.
+ */
+function personalJsonText(text: string): string {
+  const value = parsed(text);
+  if (value === undefined) return text;
+  const out = redactPersonal(value, null, false);
+  if (!out.changed) return text;
+  const indent = /^[{[]\r?\n( +)/.exec(text)?.[1]?.length ?? 0;
+  return `${JSON.stringify(out.value, null, indent)}${text.endsWith("\n") ? "\n" : ""}`;
 }
 
 /** Personal strings left in `value`, by key and at any depth, JSON text held in a string included. */
@@ -95,21 +114,7 @@ export class Redactor {
       .replace(HOSTED_PAGE, (_url, host: string) => `https://${host}.stripe.com/redacted`)
       .replace(DISPLAY_NAME, '$1[redacted]"')
       .replace(STRIPE_ID, (real) => this.id(real));
-    return this.#personalText(redacted);
-  }
-
-  /**
-   * JSON text with a customer's personal details replaced. Text with none is returned as it was,
-   * byte for byte; text with some is written again at its own indentation (Stripe's bodies are
-   * two-space JSON), since a value can hold anything, braces included, and only a parse finds it.
-   */
-  #personalText(text: string): string {
-    const value = parsed(text);
-    if (value === undefined) return text;
-    const out = redactPersonal(value, null, false);
-    if (!out.changed) return text;
-    const indent = /^[{[]\r?\n( +)/.exec(text)?.[1]?.length ?? 0;
-    return `${JSON.stringify(out.value, null, indent)}${text.endsWith("\n") ? "\n" : ""}`;
+    return personalJsonText(redacted);
   }
 
   /**

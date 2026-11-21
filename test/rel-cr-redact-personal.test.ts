@@ -61,6 +61,16 @@ describe("the Stripe redactor removes a customer's personal details (#149 review
     assert.deepEqual(out, { customer_details: { address: { line1: "[redacted]" }, email: "[redacted]" } });
   });
 
+  it("redacts JSON text held in JSON text, at any depth, and keeps one with nothing personal as it was (#148 review)", () => {
+    const r = new Redactor();
+    const nested = JSON.stringify({ nested: JSON.stringify({ customer_email: "alice@example.com", n: 1 }) });
+    const out = r.json({ body: nested });
+    assert.deepEqual(JSON.parse(JSON.parse(out.body).nested), { customer_email: "[redacted]", n: 1 });
+    assert.deepEqual(leaks(JSON.stringify(out)), []);
+    const plain = JSON.stringify({ nested: '{"n": 1.50}' });
+    assert.equal(r.text(plain), plain);
+  });
+
   it("keeps a body's bytes when it holds nothing personal, and its indentation when it does", () => {
     const r = new Redactor();
     const plain = '{\n  "object": "event",\n  "n": 1.50\n}';
