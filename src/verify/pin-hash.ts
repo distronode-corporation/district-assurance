@@ -15,12 +15,6 @@ import { hexDigestsEqual } from "../core/hash.ts";
 /** Argon2id's cost for a new record: 19 MiB, 2 passes, 1 lane (the OWASP minimum for Argon2id). */
 export const PIN_HASH_PARAMETERS: Readonly<PinHashParameters> = Object.freeze({ memory: 19456, passes: 2, parallelism: 1 });
 
-/**
- * The most a record on file may ask for. A record above it (a write to the store asking for a
- * gigabyte, say) is refused without being run, as one below `PIN_HASH_PARAMETERS` is.
- */
-export const PIN_HASH_CEILING: Readonly<PinHashParameters> = Object.freeze({ memory: 262144, passes: 16, parallelism: 8 });
-
 /** Argon2id's cost: memory in KiB, passes over it, and lanes. */
 export interface PinHashParameters {
   memory: number;
@@ -37,7 +31,7 @@ const STAND_IN_SALT = Buffer.alloc(SALT_BYTES);
 
 const argon2Async = promisify(argon2);
 
-type OnFile = { kind: "argon2id"; parameters: PinHashParameters; salt: Buffer; tag: Buffer } | { kind: "legacy"; digest: string } | { kind: "none" };
+type OnFile = { kind: "argon2id"; salt: Buffer; tag: Buffer } | { kind: "legacy"; digest: string } | { kind: "none" };
 
 /** Unpadded base64, as the PHC string format writes it. */
 function b64(bytes: Buffer): string {
@@ -45,9 +39,9 @@ function b64(bytes: Buffer): string {
 }
 
 /**
- * What is on file: an Argon2id record within the floor and the ceiling, an earlier keyed HMAC, or
- * nothing usable. Anything else (another algorithm or version, a parameter out of bounds, a
- * non-canonical number or base64, a string that is not a record) is nothing: it never matches.
+ * What is on file: an Argon2id record at today's cost, an earlier keyed HMAC, or nothing usable.
+ * Anything else (another algorithm or version, another cost, a non-canonical number or base64, a
+ * string that is not a record) is nothing: it never matches.
  */
 function readRecord(stored: unknown): OnFile {
   if (typeof stored !== "string") return { kind: "none" };
@@ -60,10 +54,11 @@ function readRecord(stored: unknown): OnFile {
   // One spelling per record: base64 whose unused low bits are set reads as the same bytes.
   if (b64(salt) !== m[4] || b64(tag) !== m[5]) return { kind: "none" };
   for (const name of ["memory", "passes", "parallelism"] as const) {
-    // A downgrade below today's cost is refused, and so is a cost no PIN check should pay.
-    if (parameters[name] < PIN_HASH_PARAMETERS[name] || parameters[name] > PIN_HASH_CEILING[name]) return { kind: "none" };
+    // Only today's cost: a downgrade is refused, and a dearer record is too, since running it at its
+    // own cost would take longer than the stand-in an unknown subject gets (CWE-208).
+    if (parameters[name] !== PIN_HASH_PARAMETERS[name]) return { kind: "none" };
   }
-  return { kind: "argon2id", parameters, salt, tag };
+  return { kind: "argon2id", salt, tag };
 }
 
 function argonInput(keyedPin: string, salt: Buffer, parameters: PinHashParameters) {
@@ -89,15 +84,15 @@ export function hashPinRecordSync(keyedPin: string): string {
 
 /**
  * Whether a keyed PIN matches the record on file, and whether the record should be replaced by an
- * Argon2id one (`upgrade`: an earlier keyed HMAC that matched). Every call does one Argon2id run,
- * at the record's own cost or, for a record that is missing, refused or of the earlier format, at
- * today's cost on a stand-in, so the time never says which it was. Tags and digests are compared
+ * Argon2id one (`upgrade`: an earlier keyed HMAC that matched). Every call does one Argon2id run
+ * at today's cost, on the record or, for a record that is missing, refused or of the earlier
+ * format, on a stand-in, so the time never says which it was. Tags and digests are compared
  * in constant time.
  */
 export async function checkPinRecord(stored: unknown, keyedPin: string): Promise<{ match: boolean; upgrade: boolean }> {
   const onFile = readRecord(stored);
   if (onFile.kind === "argon2id") {
-    const tag = await argon2Async("argon2id", argonInput(keyedPin, onFile.salt, onFile.parameters));
+    const tag = await argon2Async("argon2id", argonInput(keyedPin, onFile.salt, PIN_HASH_PARAMETERS));
     return { match: timingSafeEqual(tag, onFile.tag), upgrade: false };
   }
   await argon2Async("argon2id", argonInput(keyedPin, STAND_IN_SALT, PIN_HASH_PARAMETERS));

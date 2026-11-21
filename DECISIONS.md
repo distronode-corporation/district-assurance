@@ -431,8 +431,9 @@ change to the receipt format, so a new version), or a regulator's guidance that 
 message is the 32 bytes of the keyed HMAC the engine already computed,
 `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)` (or `"duress:"`), with a random 16-byte
 salt and a 32-byte tag. `pin1` names the construction, and the algorithm, version and cost are in the
-string. A record is read strictly: a cost below today's (a downgrade) or above a ceiling of
-`m=262144,t=16,p=8` (refused before any run), another algorithm, version or spelling, never matches.
+string. A record is read strictly: any cost but today's, below it (a downgrade) or above it
+(refused before any run: a dearer record would take longer to check than the stand-in an unknown
+subject gets), another algorithm, version or spelling, never matches.
 Every check is one Argon2id run (on a stand-in at today's cost when no usable record is on file)
 and a constant-time compare of the tag. A record of the earlier format, the bare 64-hex HMAC, still
 verifies, and on a match the PIN factor replaces it with an Argon2id record through

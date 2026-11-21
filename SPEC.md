@@ -508,8 +508,8 @@ the duress PIN is off unless it is set.
   `node:crypto`'s Argon2id (RFC 9106) over the 32 bytes of the keyed PIN, a random 16-byte salt and
   a 32-byte tag, both in unpadded base64. A new record costs `m=19456,t=2,p=1` (19 MiB, 2 passes,
   1 lane). A record is read strictly: another algorithm or version, a number or base64 spelled
-  another way, or a parameter below `m=19456,t=2,p=1` (a downgrade) or above
-  `m=262144,t=16,p=8` (a cost no check should pay, refused before any run) never matches, and a
+  another way, or any cost but `m=19456,t=2,p=1`, below it (a downgrade) or above it (refused
+  before any run, since running it would take longer than a stand-in), never matches, and a
   changed parameter, salt or tag gives another tag, which never matches. A record of the earlier
   format, the bare 64-hex keyed PIN, still matches in constant time; on a match (`pass`, or
   `duress` for a duress record) the PIN factor replaces it with a new Argon2id record through
@@ -805,10 +805,9 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   for a PIN equal to a duress PIN on file.
 - Judging: in `keyed_hash` mode every PIN entry is keyed as both a PIN and a duress PIN and
   checked against both records at once, two Argon2id runs (each on a stand-in when no record is on
-  file), whatever the subject, the entry or the setting. A record is checked at its own stored
-  cost and a stand-in at today's (`PIN_HASH_PARAMETERS`), so the work and the time are the same
-  while every record on file is at today's cost; a record stored at a higher cost takes longer to
-  check, and that difference can show in the response time. Both digests are read from the store on every
+  file), whatever the subject, the entry or the setting. A record is read only at today's cost
+  (`PIN_HASH_PARAMETERS`), the stand-in's too, so the work and the time are the same; a dearer
+  record never matches and is never run at its own cost. Both digests are read from the store on every
   entry, never from the call's copy, so a duress PIN removed, or a PIN reset (which removes both),
   counts even on a call that began verification before it. In `verifier` mode `PinVerifier.verify`
   may answer `{duress: true}`, and `matched` is then ignored. A duress match counts only on a

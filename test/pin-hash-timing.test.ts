@@ -41,7 +41,7 @@ function reset(): void {
 }
 
 describe("the PIN record check takes the same work whatever is on file", () => {
-  it("runs Argon2id once at today's cost for a missing, refused or earlier record, and once at the record's own cost otherwise", async () => {
+  it("runs Argon2id once at today's cost whatever is on file, a dearer record included (#149)", async () => {
     const record = await hashPinRecord(keyed(PIN));
     const cases: Array<[string, unknown, string]> = [
       ["an Argon2id record, the right PIN", record, PIN],
@@ -51,6 +51,10 @@ describe("the PIN record check takes the same work whatever is on file", () => {
       ["no record", undefined, PIN],
       ["a record of nothing", "garbage", PIN],
       ["a downgraded record", record.replace("t=2", "t=1"), PIN],
+      // Never run at its own cost: that would take longer than an unknown subject's stand-in.
+      ["a dearer record", record.replace("t=2", "t=3"), PIN],
+      ["a dearer record by memory", record.replace("m=19456", "m=38912"), PIN],
+      ["a dearer record by lanes", record.replace("p=1", "p=2"), PIN],
     ];
     for (const [label, stored, pin] of cases) {
       reset();

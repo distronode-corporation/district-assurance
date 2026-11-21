@@ -569,8 +569,9 @@ The first published release.
 
 - PINs and duress PINs on file are Argon2id over the keyed HMAC (ADR-29):
   `$pin1$argon2id$v=19$m=19456,t=2,p=1$<salt>$<tag>`, with a random salt, the cost in the record,
-  one Argon2id run per check whatever is on file, and a constant-time compare. A record below
-  today's cost or above the ceiling, or changed in any field, never matches. Records of the earlier
+  one Argon2id run per check whatever is on file, and a constant-time compare. A record at any
+  cost but today's, or changed in any field, never matches, so a dearer record never takes longer
+  to check than an unknown subject's stand-in. Records of the earlier
   format (the bare keyed HMAC) still verify and are replaced by an Argon2id record on the next match.
   Lockouts are unchanged.
 - A taint now voids the keypad or PIN match made before it: `startPhotoId`, `checkCarrier` and a

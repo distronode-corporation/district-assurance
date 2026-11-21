@@ -9,7 +9,7 @@ import { hmacSha256Hex } from "../src/core/hash.ts";
 import { duressDigest, type PinSettings } from "../src/verify/factors.ts";
 import { pinDigest, subjectKeyFor } from "../src/verify/knowledge.ts";
 import { readPinTag } from "../src/verify/pin.ts";
-import { PIN_HASH_CEILING, PIN_HASH_PARAMETERS, checkPinRecord, hashPinRecord, hashPinRecordSync } from "../src/verify/pin-hash.ts";
+import { PIN_HASH_PARAMETERS, checkPinRecord, hashPinRecord, hashPinRecordSync } from "../src/verify/pin-hash.ts";
 import { FakeDuressNotifier, MemoryRecordStore, TEST_KNOWLEDGE_KEY } from "../src/testing/index.ts";
 import { ACCOUNT, PHONE_ON_FILE, PIN, pinOnFile, setup, testConfig, waitOut } from "./helpers.ts";
 
@@ -170,17 +170,17 @@ describe("PIN records: Argon2id over the keyed HMAC", () => {
     assert.deepEqual(await checkPinRecord(noncanonicalTag, keyedPin(PIN)), { match: false, upgrade: false });
   });
 
-  it("refuses a correctly computed record below today's cost, or above the ceiling, and never upgrades it", async () => {
+  it("refuses a correctly computed record at any cost but today's, and never upgrades it", async () => {
     const floor = { ...PIN_HASH_PARAMETERS };
-    assert.deepEqual(await checkPinRecord(recordAt(keyedPin(PIN), floor), keyedPin(PIN)), { match: true, upgrade: false }, "the floor itself passes");
-    assert.deepEqual(await checkPinRecord(recordAt(keyedPin(PIN), { ...floor, memory: 65536, passes: 3, parallelism: 2 }), keyedPin(PIN)), { match: true, upgrade: false }, "a dearer record passes");
+    assert.deepEqual(await checkPinRecord(recordAt(keyedPin(PIN), floor), keyedPin(PIN)), { match: true, upgrade: false }, "today's cost passes");
+    assert.deepEqual(await checkPinRecord(recordAt(keyedPin(PIN), { ...floor, memory: 65536, passes: 3, parallelism: 2 }), keyedPin(PIN)), { match: false, upgrade: false }, "a dearer record is refused (equal work, #149)");
     for (const weaker of [{ ...floor, memory: 8192 }, { ...floor, passes: 1 }]) {
       assert.deepEqual(await checkPinRecord(recordAt(keyedPin(PIN), weaker), keyedPin(PIN)), { match: false, upgrade: false }, JSON.stringify(weaker));
     }
-    // Above the ceiling, refused before any run: the strings are written by hand, never computed.
+    // A cost no check should pay, refused before any run: the strings are written by hand, never computed.
     const salt = b64(Buffer.alloc(16, 1));
     const tag = b64(Buffer.alloc(32, 2));
-    for (const [name, value] of [["m", PIN_HASH_CEILING.memory + 1], ["t", PIN_HASH_CEILING.passes + 1], ["p", PIN_HASH_CEILING.parallelism + 1]] as const) {
+    for (const [name, value] of [["m", 262145], ["t", 17], ["p", 9]] as const) {
       const cost = { m: floor.memory, t: floor.passes, p: floor.parallelism, [name]: value };
       const stored = `$pin1$argon2id$v=19$m=${cost.m},t=${cost.t},p=${cost.p}$${salt}$${tag}`;
       assert.deepEqual(await checkPinRecord(stored, keyedPin(PIN)), { match: false, upgrade: false }, stored);
