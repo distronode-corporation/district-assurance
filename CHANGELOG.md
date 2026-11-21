@@ -494,6 +494,9 @@ The first published release.
 
 ### Fixed
 
+- `MemoryRecordStore.putIntakeRecord` keeps the first filing of a `recordId`, as the SQLite store
+  does: a later put with other contents used to replace a confirmed record and keep its mark.
+  `recordStoreContract` checks it.
 - SECURITY-MODEL.md gives a duress PIN record its own namespace, `HMAC-SHA256(knowledgeKey,
   "duress:" + subjectKey + ":" + pin)`, as the engine keys it; it used to show `"pin:"` for both.
 - The reference server remembers webhook event ids for 4 days (Stripe retries for 3) and at most

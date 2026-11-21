@@ -1176,8 +1176,9 @@ refused with nothing stored, and concurrent appends stay one valid chain.
 `recordStoreContract(factory)` is the suite a `RecordStore` must pass: subjects (seeded by the
 factory, since the engine only reads them) and intake records are copied in and out, workspaces
 never share a key, keys that differ only in a lone surrogate stay apart, `putIntakeRecord` is
-idempotent by `recordId`, also concurrently, and the confirmed flag is kept beside each record
-(below). `MemoryAuditLedger` and `MemoryRecordStore` pass both.
+idempotent by `recordId`, also concurrently, and keeps the first filing of a `recordId` (a later
+put with other contents changes nothing, so a confirmed record stays the one confirmed), and the
+confirmed flag is kept beside each record (below). `MemoryAuditLedger` and `MemoryRecordStore` pass both.
 
 The reference server has optional SQLite stores on `node:sqlite` (SRV-4,
 `examples/reference-server/src/sqlite-stores.ts`; no dependency). `SqliteAuditLedger` keeps each

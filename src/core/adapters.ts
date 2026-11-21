@@ -421,7 +421,9 @@ export interface RecordStore {
    * `erasuresSeen` (what `subjectErasures` answered before the record was reserved), when its
    * subject has been marked erased more times than that since: a confirmation still in flight when
    * its subject was erased must not bring the values back, whether or not the erasure saw it.
-   * A record is stored unconfirmed; a retried write keeps any mark it has.
+   * A record is stored unconfirmed; a retried write keeps any mark it has. The first filing of a
+   * `recordId` is kept: a later write with other contents stores nothing, so a confirmation mark
+   * always belongs to the contents it was given for.
    */
   putIntakeRecord(record: IntakeRecord, erasuresSeen?: number): Promise<void>;
   /**
