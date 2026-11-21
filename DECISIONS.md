@@ -310,7 +310,8 @@ minutes by default, configurable from 5 to 60; any popular method that settles w
 is on the call. Stripe documents Interac only in person and pre-authorized debit settles in days.
 Checking the account stops an event from one business settling another's payment. **Revisit**
 when Stripe offers Interac in online Checkout, or a provider's methods need mapping the validator
-cannot see (how wallets map to Checkout's parameters is PAY-1's to prove in test mode).
+cannot see. PAY-1 proved the Checkout mapping in Stripe test mode: Apple Pay and Google Pay go
+as `card`, and Link only beside `card`.
 
 ## ADR-24. Web step-up is an ES256 JWT checked against a JWKS
 
