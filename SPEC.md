@@ -568,11 +568,12 @@ the duress PIN is off unless it is set.
 - The digits-only part of `weak` is exported from the package root as `isWeakPin(pin: string):
   boolean`, so a host that takes PINs itself (`verifier` mode, or its own sign-up page) refuses
   the same ones: true when every digit is the same or the digits run up or down with 0 following
-  9, as `enrolPin` and `enrolDuressPin` judge them. It judges the pattern only; the length from
-  `minDigits` to `maxDigits`, and a PIN equal to the account number or knowledge on file, are the
-  host's to check. A value that is not one to 32 ASCII digits (`isKeypadEntry`), a value that is
-  not a string, and a single digit are false, never coerced, so a host checks a value is well
-  formed first.
+  9, as `enrolPin` and `enrolDuressPin` judge them. It fails closed: anything that is not a
+  well-formed PIN (one to 32 ASCII digits, `isKeypadEntry`) is true, so refused, never coerced: a
+  value that is not a string, an empty string, any other character, or more than 32 digits. A
+  well-formed PIN is judged on its digit pattern (a single digit is not a run, so false). Length
+  policy (`minDigits` to `maxDigits`) and a PIN equal to the account number or knowledge on file
+  stay host checks.
 - Reset: `resetPin(subjectKey)` is a host call for the business's own staff tools, never on a
   caller's request, and needs the `pin` factor on (and a string subject key: `invalid_input`
   otherwise). In `keyed_hash` mode it removes the digest (`putPinDigest` with null), so the

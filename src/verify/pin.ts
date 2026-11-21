@@ -43,15 +43,15 @@ const SUBJECT_KEY = /^[0-9a-f]{64}$/;
  * Whether a PIN is one the engine refuses as `weak` by its digits alone: every digit the same
  * (1111), or a run up or down the keypad's digits with 0 following 9 (1234, 4321, 7890, 9012). The
  * rule `enrolPin` and `enrolDuressPin` apply, so a host that takes PINs itself (`verifier` mode,
- * its own sign-up) refuses the same ones. It judges the pattern only: the length a workspace
- * allows, and a value equal to the account number or knowledge on file, are the host's to check.
- * Anything that is not one to 32 ASCII digits (`isKeypadEntry`) is false, and so is one digit:
- * check a value is well formed first.
+ * its own sign-up) refuses the same ones. Returns true for anything that is not a well-formed PIN
+ * (one to 32 ASCII digits, `isKeypadEntry`): a value that is not a string, an empty string, any
+ * other character, or more than 32 digits, so it fails closed. A well-formed PIN is judged on its
+ * digit pattern. Length policy and knowledge matches stay host checks.
  */
 export function isWeakPin(pin: string): boolean {
-  // A host passes what its own form or keypad gave it: anything that is not keypad digits is never
-  // judged (a regex test would turn a number or an array into its text first).
-  if (typeof pin !== "string" || !isKeypadEntry(pin)) return false;
+  // A host passes what its own form or keypad gave it: anything that is not keypad digits is weak,
+  // so refused, never coerced (a regex test would turn a number or an array into its text first).
+  if (typeof pin !== "string" || !isKeypadEntry(pin)) return true;
   const steps = new Set<number>();
   for (let i = 1; i < pin.length; i++) steps.add((Number(pin[i]) - Number(pin[i - 1]) + 10) % 10);
   return steps.size === 1 && [0, 1, 9].includes([...steps][0]!);

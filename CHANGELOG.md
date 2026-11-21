@@ -14,8 +14,8 @@ The first published release.
 
 - `isWeakPin(pin)` from the package root: the digits-only rule `enrolPin` and `enrolDuressPin`
   refuse as `weak` (every digit the same, or a run up or down with 0 following 9, as in 1111, 1234,
-  4321 or 7890), so a host that takes PINs itself refuses the same ones. A value that is not one to
-  32 ASCII digits, or not a string, is false and never coerced.
+  4321 or 7890), so a host that takes PINs itself refuses the same ones. It fails closed: a value
+  that is not one to 32 ASCII digits, or not a string, is weak and never coerced.
 - Stripe test-mode proofs for VER-5 (#18) and PAY-1 (#25), recorded once through the reference
   server's own adapters and webhook routes and replayed offline (`test/stripe-real.test.ts`,
   recorder `test/fixtures/stripe-real/record.ts`, every Stripe id redacted): a Stripe Identity

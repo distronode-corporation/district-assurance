@@ -1,5 +1,6 @@
 // `isWeakPin` from the package root, as a host imports it: the digits-only rule `enrolPin` and
-// `enrolDuressPin` refuse as `weak`, so a host taking PINs itself refuses the same ones.
+// `enrolDuressPin` refuse as `weak`, so a host taking PINs itself refuses the same ones. It fails
+// closed: anything that is not a well-formed PIN is weak.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
@@ -8,10 +9,14 @@ import fc from "fast-check";
 import { isWeakPin } from "../src/index.ts";
 import { DIGITS, fuzz, jsonValue, nastyString } from "./fuzz/harness.ts";
 
-/** The rule written out the long way: one digit repeated, or each digit one up or one down (mod 10) from the last. */
-function modelWeak(pin: string): boolean {
-  if (!/^[0-9]{2,32}$/.test(pin)) return false;
-  const digits = [...pin].map(Number);
+/**
+ * The rule written out the long way: anything but one to 32 ASCII digits is weak; one digit is not;
+ * otherwise one digit repeated, or each digit one up or one down (mod 10) from the last.
+ */
+function modelWeak(value: unknown): boolean {
+  if (typeof value !== "string" || !/^[0-9]{1,32}$/.test(value)) return true;
+  if (value.length === 1) return false;
+  const digits = [...value].map(Number);
   const step = (i: number) => (digits[i]! - digits[i - 1]! + 10) % 10;
   const first = step(1);
   return [0, 1, 9].includes(first) && digits.every((_, i) => i === 0 || step(i) === first);
@@ -30,12 +35,13 @@ describe("isWeakPin from the package root", () => {
     }
   });
 
-  it("does not judge one digit or nothing: length is the host's rule", () => {
-    for (const pin of ["", "0", "7"]) assert.equal(isWeakPin(pin), false, JSON.stringify(pin));
+  it("judges one digit on its pattern only: length is the host's rule", () => {
+    for (const pin of ["0", "7"]) assert.equal(isWeakPin(pin), false, pin);
   });
 
-  it("is false for anything that is not one to 32 ASCII digits, never coercing it", () => {
+  it("is true, so refused, for anything that is not one to 32 ASCII digits, never coercing it", () => {
     const hostile: unknown[] = [
+      "",
       undefined,
       null,
       1111,
@@ -65,8 +71,13 @@ describe("isWeakPin from the package root", () => {
       "1111\u0000",
       "1".repeat(33),
       "1234567890".repeat(4),
+      "5831".repeat(9), // a strong pattern, but 36 digits
+      "5831 ",
+      "５８３１", // full-width digits of a strong pattern
+      { toString: () => "5831" },
+      5831,
     ];
-    for (const value of hostile) assert.equal(isWeakPin(value as string), false, typeof value === "symbol" ? value.toString() : JSON.stringify(String(value)));
+    for (const value of hostile) assert.equal(isWeakPin(value as string), true, typeof value === "symbol" ? value.toString() : JSON.stringify(String(value)));
   });
 
   it("agrees with the rule written out, on digits and on anything else", async () => {
@@ -77,7 +88,7 @@ describe("isWeakPin from the package root", () => {
       .map(([start, step, length]) => Array.from({ length }, (_, i) => String((start + i * step) % 10)).join(""));
     await fuzz(
       fc.property(fc.oneof(digits, patterned, nastyString(), jsonValue()), (value) => {
-        assert.equal(isWeakPin(value as string), typeof value === "string" && modelWeak(value));
+        assert.equal(isWeakPin(value as string), modelWeak(value));
       }),
     );
   });
