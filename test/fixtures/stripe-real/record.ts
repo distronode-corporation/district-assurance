@@ -40,7 +40,7 @@ import { createServe } from "../../../examples/reference-server/src/main.ts";
 import { createDemoWorld } from "../../../examples/reference-server/src/script.ts";
 import { STRIPE_API_VERSION, StripeCheckoutLinks, assertTestModeSecretKey } from "../../../examples/reference-server/src/stripe-adapters.ts";
 import { recordedConfig, requestRecordedLink, type RecordedFlow } from "./flows.ts";
-import { type Delivery, receiverStatus, settledDelivery } from "./deliveries.ts";
+import { type Delivery, type PendingDelivery, receiverStatus, settledDelivery } from "./deliveries.ts";
 import { writePrivateFile } from "./private-file.ts";
 import { Redactor, leaks } from "./redact.ts";
 
@@ -64,7 +64,7 @@ interface Exchange {
 }
 
 const exchanges: Exchange[] = [];
-const deliveries: Delivery[] = [];
+const deliveries: PendingDelivery[] = [];
 const ours = new Set<string>();
 
 function body(req: IncomingMessage): Promise<Buffer> {
@@ -183,17 +183,19 @@ const receiver = createServer((req, res) => {
     if (!ours.has(objectId)) return void res.writeHead(200).end("{}");
     const route = event.type.startsWith("identity.") ? "identity" : listener === "connect" ? "connect" : "payments";
     const target = `${route === "identity" ? identityBase : paymentsBase}/webhooks/stripe/${route}`;
-    const answer = await fetch(target, { method: "POST", headers: { "content-type": "application/json", "stripe-signature": signature }, body: raw });
-    const answerBody: unknown = await answer.json();
-    deliveries.push({
+    // Its place is taken as it arrives, and its answer filled in when the server gives it.
+    const entry: PendingDelivery = {
       listener,
       route,
       type: event.type,
       objectId,
       body: raw.toString("utf8"),
       signatureVerified: verifyStripeSignature({ payload: raw, header: signature, secrets: [secret], now: new Date() }).ok,
-      answer: { status: answer.status, body: answerBody },
-    });
+      answer: null,
+    };
+    deliveries.push(entry);
+    const answer = await fetch(target, { method: "POST", headers: { "content-type": "application/json", "stripe-signature": signature }, body: raw });
+    entry.answer = { status: answer.status, body: (await answer.json()) as unknown };
     res.writeHead(receiverStatus(answer.status)).end("{}");
   })().catch((error: unknown) => {
     console.error(`receiver: ${error instanceof Error ? error.name : "error"}`);

@@ -5,7 +5,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { type Delivery, receiverStatus, settledDelivery } from "./fixtures/stripe-real/deliveries.ts";
+import { type Delivery, type PendingDelivery, receiverStatus, settledDelivery } from "./fixtures/stripe-real/deliveries.ts";
 
 const delivery = (status: number, objectId = "cs_test_redacted0001", type = "checkout.session.completed", body: unknown = { received: true, applied: true }): Delivery => ({
   listener: "account",
@@ -36,6 +36,16 @@ describe("the Stripe recorder keeps only applied deliveries (#149 review)", () =
     assert.throws(() => settledDelivery([delivery(200, undefined, undefined, { received: true })], "cs_test_redacted0001", "checkout.session.completed"), /did not apply/);
     const applied = delivery(200);
     assert.equal(settledDelivery([applied, delivery(200, undefined, undefined, { received: true, duplicate: true })], "cs_test_redacted0001", "checkout.session.completed"), applied);
+  });
+
+  it("picks the first delivery by arrival, waiting while its answer is pending, whichever answer finished first (#148 review)", () => {
+    const first = { ...delivery(200), answer: null };
+    const duplicate = delivery(200, undefined, undefined, { received: true, duplicate: true });
+    const log: PendingDelivery[] = [first, duplicate];
+    assert.equal(settledDelivery(log, "cs_test_redacted0001", "checkout.session.completed"), undefined, "the first to arrive has no answer yet");
+    const answered = { ...first, answer: { status: 200, body: { received: true, applied: true } } };
+    assert.equal(settledDelivery([answered, duplicate], "cs_test_redacted0001", "checkout.session.completed"), answered);
+    assert.throws(() => settledDelivery([first, delivery(503)], "cs_test_redacted0001", "checkout.session.completed"), /answered 503/, "a failed answer still fails the run at once");
   });
 
   it("fails loudly on a 500, 503 or 400 answer for the object and type, never recording it", () => {
