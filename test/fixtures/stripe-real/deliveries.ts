@@ -25,6 +25,11 @@ export function receiverStatus(answerStatus: number): number {
   return ok(answerStatus) ? 200 : answerStatus;
 }
 
+/** Settles a delivery whose forwarding to the reference server failed, as a 502, so the run fails at once instead of waiting on it. */
+export function forwardingFailed(entry: PendingDelivery): void {
+  entry.answer = { status: 502, body: { forwarded: false } };
+}
+
 /**
  * The applied delivery of `type` for `objectId`, from deliveries in arrival order, or undefined
  * while none has arrived or the first to arrive has no answer yet (answers can finish out of

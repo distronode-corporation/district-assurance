@@ -40,7 +40,7 @@ import { createServe } from "../../../examples/reference-server/src/main.ts";
 import { createDemoWorld } from "../../../examples/reference-server/src/script.ts";
 import { STRIPE_API_VERSION, StripeCheckoutLinks, assertTestModeSecretKey } from "../../../examples/reference-server/src/stripe-adapters.ts";
 import { recordedConfig, requestRecordedLink, type RecordedFlow } from "./flows.ts";
-import { type Delivery, type PendingDelivery, receiverStatus, settledDelivery } from "./deliveries.ts";
+import { type Delivery, type PendingDelivery, forwardingFailed, receiverStatus, settledDelivery } from "./deliveries.ts";
 import { writePrivateFile } from "./private-file.ts";
 import { Redactor, leaks } from "./redact.ts";
 
@@ -172,8 +172,9 @@ const paymentsBase = await listen(paymentsServer);
 // The receiver `stripe listen` forwards to: checks the signature, then hands the same bytes on. It
 // answers with the reference server's status when that failed (deliveries.ts), and the run's wait
 // for that event then fails at once, never recording it; a failure of the receiver itself answers
-// 500, and that wait times out.
+// 500, and a delivery it was forwarding is settled as failed, so that wait fails at once too.
 const receiver = createServer((req, res) => {
+  let entry: PendingDelivery | undefined;
   void (async () => {
     const listener = req.url === "/connect" ? "connect" : "account";
     const raw = await body(req);
@@ -184,7 +185,7 @@ const receiver = createServer((req, res) => {
     const route = event.type.startsWith("identity.") ? "identity" : listener === "connect" ? "connect" : "payments";
     const target = `${route === "identity" ? identityBase : paymentsBase}/webhooks/stripe/${route}`;
     // Its place is taken as it arrives, and its answer filled in when the server gives it.
-    const entry: PendingDelivery = {
+    entry = {
       listener,
       route,
       type: event.type,
@@ -195,10 +196,13 @@ const receiver = createServer((req, res) => {
     };
     deliveries.push(entry);
     const answer = await fetch(target, { method: "POST", headers: { "content-type": "application/json", "stripe-signature": signature }, body: raw });
-    entry.answer = { status: answer.status, body: (await answer.json()) as unknown };
+    const answerBody = (await answer.json()) as unknown;
+    entry.answer = { status: answer.status, body: answerBody };
     res.writeHead(receiverStatus(answer.status)).end("{}");
   })().catch((error: unknown) => {
     console.error(`receiver: ${error instanceof Error ? error.name : "error"}`);
+    // A delivery that took its place but never got an answer fails the run now, not after the wait.
+    if (entry !== undefined && entry.answer === null) forwardingFailed(entry);
     if (!res.headersSent) res.writeHead(500);
     res.end("{}");
   });

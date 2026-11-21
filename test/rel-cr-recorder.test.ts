@@ -5,7 +5,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { type Delivery, type PendingDelivery, receiverStatus, settledDelivery } from "./fixtures/stripe-real/deliveries.ts";
+import { type Delivery, type PendingDelivery, forwardingFailed, receiverStatus, settledDelivery } from "./fixtures/stripe-real/deliveries.ts";
 
 const delivery = (status: number, objectId = "cs_test_redacted0001", type = "checkout.session.completed", body: unknown = { received: true, applied: true }): Delivery => ({
   listener: "account",
@@ -46,6 +46,13 @@ describe("the Stripe recorder keeps only applied deliveries (#149 review)", () =
     const answered = { ...first, answer: { status: 200, body: { received: true, applied: true } } };
     assert.equal(settledDelivery([answered, duplicate], "cs_test_redacted0001", "checkout.session.completed"), answered);
     assert.throws(() => settledDelivery([first, delivery(503)], "cs_test_redacted0001", "checkout.session.completed"), /answered 503/, "a failed answer still fails the run at once");
+  });
+
+  it("fails at once when forwarding a delivery to the reference server failed, never waiting on it (CodeRabbit CLI)", () => {
+    const entry: PendingDelivery = { ...delivery(200), answer: null };
+    forwardingFailed(entry);
+    assert.deepEqual(entry.answer, { status: 502, body: { forwarded: false } });
+    assert.throws(() => settledDelivery([entry, delivery(200)], "cs_test_redacted0001", "checkout.session.completed"), /answered 502/);
   });
 
   it("fails loudly on a 500, 503 or 400 answer for the object and type, never recording it", () => {
