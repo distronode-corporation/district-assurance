@@ -3,7 +3,9 @@
 // prefix and shape (`acct_redacted0001`, `cs_test_redacted0001`), the same id always the same
 // placeholder across every file of one recording (so a session, its event and its account still
 // line up), hosted page URLs lose their path and fragment, business display names are replaced,
-// and client secrets, keys and webhook signing secrets are removed. Text is redacted in place, so
+// a customer's personal details (every value under `customer_details`, `billing_details`,
+// `shipping_details` or `shipping`, and `customer_email` or `receipt_email`) are replaced, and
+// client secrets, keys and webhook signing secrets are removed. Text is redacted in place, so
 // an event body keeps Stripe's own bytes apart from the replaced values.
 
 /** A Stripe object id: a lower-case prefix (`cs_test` included), then a mixed-case token with a digit and a capital. */
@@ -16,6 +18,18 @@ const CLIENT_SECRET = /\b[a-z]{1,10}(?:_test|_live)?_[A-Za-z0-9]+_secret_[A-Za-z
 const HOSTED_PAGE = /https:\/\/(checkout|verify|connect|pay|invoice)\.stripe\.com\/[^"\s\\]*/g;
 /** A business's display name in JSON text: the whole string literal, escaped characters included. */
 const DISPLAY_NAME = /("display_name"\s*:\s*")(?:[^"\\]|\\.)*"/g;
+/** An object of a customer's personal details in JSON text (one level of nesting, as `address`). */
+const PERSONAL_BLOCK = /"(?:customer_details|billing_details|shipping_details|shipping)"\s*:\s*\{(?:[^{}]|\{[^{}]*\})*\}/g;
+/** A string value in such an object, but `tax_exempt`, which is not personal. */
+const PERSONAL_VALUE = /("(?!tax_exempt")[A-Za-z0-9_]+"\s*:\s*")(?:[^"\\]|\\.)*"/g;
+/** A customer's email address outside those objects. */
+const PERSONAL_KEY = /("(?:customer_email|receipt_email)"\s*:\s*")(?:[^"\\]|\\.)*"/g;
+/** The same three, in JSON text whose quotes may be escaped (a body held inside a fixture file). */
+const PERSONAL_BLOCK_ANY = /\\?"(?:customer_details|billing_details|shipping_details|shipping)\\?"\s*:\s*\{(?:[^{}]|\{[^{}]*\})*\}/g;
+const PERSONAL_VALUE_ANY = /\\?"([A-Za-z0-9_]+)\\?"\s*:\s*\\?"((?:[^"\\]|\\[^"])*?)\\?"/g;
+const PERSONAL_KEY_ANY = /\\?"(?:customer_email|receipt_email)\\?"\s*:\s*\\?"((?:[^"\\]|\\[^"])*?)\\?"/g;
+const REDACTED = "[redacted]";
+
 /** A placeholder this redactor writes. */
 export const PLACEHOLDER = /^[a-z]{1,10}(?:_test|_live)?_redacted\d{4}$/;
 
@@ -42,6 +56,8 @@ export class Redactor {
       .replace(CLIENT_SECRET, "[removed]")
       .replace(HOSTED_PAGE, (_url, host: string) => `https://${host}.stripe.com/redacted`)
       .replace(DISPLAY_NAME, '$1[redacted]"')
+      .replace(PERSONAL_BLOCK, (block) => block.replace(PERSONAL_VALUE, '$1[redacted]"'))
+      .replace(PERSONAL_KEY, '$1[redacted]"')
       .replace(STRIPE_ID, (real) => this.id(real));
   }
 
@@ -60,12 +76,16 @@ export class Redactor {
   }
 }
 
-/** What a redacted file must never hold: a key or secret, or a Stripe id that is not a placeholder. */
+/** What a redacted file must never hold: a key or secret, a Stripe id that is not a placeholder, or a customer's personal detail. */
 export function leaks(text: string): string[] {
   const found = [...text.matchAll(KEY_OR_SECRET)].map((m) => m[0]);
   for (const m of text.matchAll(STRIPE_ID)) if (!PLACEHOLDER.test(m[0])) found.push(m[0]);
   for (const m of text.matchAll(HOSTED_PAGE)) if (!/^https:\/\/[a-z]+\.stripe\.com\/redacted$/.test(m[0])) found.push(m[0]);
   // What a partial redaction leaves: a secret's tail after the marker, base64 of an account id.
   for (const m of text.matchAll(/\[removed\][A-Za-z0-9_-]+|_secret_[A-Za-z0-9]|YWNjdF|FjY3Rf|hY2N0X/g)) found.push(m[0]);
+  for (const block of text.matchAll(PERSONAL_BLOCK_ANY)) {
+    for (const m of block[0].matchAll(PERSONAL_VALUE_ANY)) if (m[1] !== "tax_exempt" && m[2] !== REDACTED) found.push(`${m[1]}: ${m[2]}`);
+  }
+  for (const m of text.matchAll(PERSONAL_KEY_ANY)) if (m[1] !== REDACTED) found.push(m[0]);
   return found;
 }
