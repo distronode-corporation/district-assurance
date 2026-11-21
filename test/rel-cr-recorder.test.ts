@@ -7,14 +7,14 @@ import { describe, it } from "node:test";
 
 import { type Delivery, receiverStatus, settledDelivery } from "./fixtures/stripe-real/deliveries.ts";
 
-const delivery = (status: number, objectId = "cs_test_redacted0001", type = "checkout.session.completed"): Delivery => ({
+const delivery = (status: number, objectId = "cs_test_redacted0001", type = "checkout.session.completed", body: unknown = { received: true, applied: true }): Delivery => ({
   listener: "account",
   route: "payments",
   type,
   objectId,
   body: "{}",
   signatureVerified: true,
-  answer: { status, body: { received: true } },
+  answer: { status, body },
 });
 
 describe("the Stripe recorder keeps only applied deliveries (#149 review)", () => {
@@ -28,6 +28,14 @@ describe("the Stripe recorder keeps only applied deliveries (#149 review)", () =
     assert.equal(settledDelivery([], "cs_test_redacted0001", "checkout.session.completed"), undefined);
     const ok = delivery(200);
     assert.equal(settledDelivery([delivery(200, "cs_test_redacted0002"), delivery(200, "cs_test_redacted0001", "checkout.session.expired"), ok], "cs_test_redacted0001", "checkout.session.completed"), ok);
+  });
+
+  it("fails loudly on a 2xx answer that did not apply the event, and ignores a later duplicate (#148 review)", () => {
+    const unapplied = { received: true, applied: false, handled: false };
+    assert.throws(() => settledDelivery([delivery(200, undefined, undefined, unapplied)], "cs_test_redacted0001", "checkout.session.completed"), /did not apply/);
+    assert.throws(() => settledDelivery([delivery(200, undefined, undefined, { received: true })], "cs_test_redacted0001", "checkout.session.completed"), /did not apply/);
+    const applied = delivery(200);
+    assert.equal(settledDelivery([applied, delivery(200, undefined, undefined, { received: true, duplicate: true })], "cs_test_redacted0001", "checkout.session.completed"), applied);
   });
 
   it("fails loudly on a 500, 503 or 400 answer for the object and type, never recording it", () => {
