@@ -453,9 +453,10 @@ describe("MemoryRecordStore keys", () => {
     await store.putIntakeRecord(record("north/desk", "r1"));
     await store.deleteIntakeRecords("north", ["desk/r1"]);
     assert.notEqual(await store.getIntakeRecord("north/desk", "r1"), null);
-    // Put again with another value: a colliding tombstone would leave the first record and drop this write.
-    await store.putIntakeRecord({ ...record("north/desk", "r1"), values: { issue: "rewritten" } });
-    assert.deepEqual((await store.listIntakeRecords("north/desk", "s1")).map((r) => r.values), [{ issue: "rewritten" }], "and no tombstone for it either");
+    // A delete of north's desk/r2 before north/desk's r2 is first filed: a colliding tombstone would drop this write.
+    await store.deleteIntakeRecords("north", ["desk/r2"]);
+    await store.putIntakeRecord({ ...record("north/desk", "r2"), values: { issue: "filed after" } });
+    assert.deepEqual((await store.listIntakeRecords("north/desk", "s1")).map((r) => [r.recordId, r.values]), [["r1", {}], ["r2", { issue: "filed after" }]], "and no tombstone for it either");
     const subject = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: "+15550100", knowledge: { dob: DOB } });
     store.putSubject("north/desk", subject);
     assert.equal(await store.getSubject("north", `desk/${subject.subjectKey}`), null);
