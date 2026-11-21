@@ -805,7 +805,10 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   for a PIN equal to a duress PIN on file.
 - Judging: in `keyed_hash` mode every PIN entry is keyed as both a PIN and a duress PIN and
   checked against both records at once, two Argon2id runs (each on a stand-in when no record is on
-  file), whatever the subject, the entry or the setting, so the work and the time are the same. Both digests are read from the store on every
+  file), whatever the subject, the entry or the setting. A record is checked at its own stored
+  cost and a stand-in at today's (`PIN_HASH_PARAMETERS`), so the work and the time are the same
+  while every record on file is at today's cost; a record stored at a higher cost takes longer to
+  check, and that difference can show in the response time. Both digests are read from the store on every
   entry, never from the call's copy, so a duress PIN removed, or a PIN reset (which removes both),
   counts even on a call that began verification before it. In `verifier` mode `PinVerifier.verify`
   may answer `{duress: true}`, and `matched` is then ignored. A duress match counts only on a
