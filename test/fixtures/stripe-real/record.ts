@@ -40,6 +40,7 @@ import { createServe } from "../../../examples/reference-server/src/main.ts";
 import { createDemoWorld } from "../../../examples/reference-server/src/script.ts";
 import { STRIPE_API_VERSION, StripeCheckoutLinks, assertTestModeSecretKey } from "../../../examples/reference-server/src/stripe-adapters.ts";
 import { recordedConfig, requestRecordedLink, type RecordedFlow } from "./flows.ts";
+import { type Delivery, receiverStatus, settledDelivery } from "./deliveries.ts";
 import { Redactor, leaks } from "./redact.ts";
 
 const key = process.env.STRIPE_TEST_SECRET_KEY;
@@ -59,17 +60,6 @@ interface Exchange {
   form: Array<[string, string]>;
   status: number;
   body: string;
-}
-
-/** One webhook delivery as it reached this machine, and what the reference server answered. */
-interface Delivery {
-  listener: "account" | "connect";
-  route: "identity" | "payments" | "connect";
-  type: string;
-  objectId: string;
-  body: string;
-  signatureVerified: boolean;
-  answer: { status: number; body: unknown };
 }
 
 const exchanges: Exchange[] = [];
@@ -178,8 +168,10 @@ const world = createDemoWorld({
 const paymentsServer = createReferenceServer({ engine: world.engine, clock: systemClock, stripeSecrets: { identity: [], payments: [secret], connect: [secret] }, log: () => undefined });
 const paymentsBase = await listen(paymentsServer);
 
-// The receiver `stripe listen` forwards to: checks the signature, then hands the same bytes on. A
-// failure answers 500 (Stripe delivers again), and the run's wait for that event times out.
+// The receiver `stripe listen` forwards to: checks the signature, then hands the same bytes on. It
+// answers with the reference server's status when that failed (deliveries.ts), and the run's wait
+// for that event then fails at once, never recording it; a failure of the receiver itself answers
+// 500, and that wait times out.
 const receiver = createServer((req, res) => {
   void (async () => {
     const listener = req.url === "/connect" ? "connect" : "account";
@@ -201,7 +193,7 @@ const receiver = createServer((req, res) => {
       signatureVerified: verifyStripeSignature({ payload: raw, header: signature, secrets: [secret], now: new Date() }).ok,
       answer: { status: answer.status, body: answerBody },
     });
-    res.writeHead(200).end("{}");
+    res.writeHead(receiverStatus(answer.status)).end("{}");
   })().catch((error: unknown) => {
     console.error(`receiver: ${error instanceof Error ? error.name : "error"}`);
     if (!res.headersSent) res.writeHead(500);
@@ -245,7 +237,7 @@ try {
 async function delivered(objectId: string, type: string): Promise<Delivery> {
   const until = Date.now() + WAIT_MS;
   for (;;) {
-    const found = deliveries.find((d) => d.objectId === objectId && d.type === type);
+    const found = settledDelivery(deliveries, objectId, type);
     if (found !== undefined) return found;
     if (listenerExit !== null) throw new Error(`${listenerExit}: no ${type} can arrive`);
     if (Date.now() > until) throw new Error(`no ${type} for the recorded object in ${WAIT_MS / 60_000} minutes`);
