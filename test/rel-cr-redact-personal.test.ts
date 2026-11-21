@@ -48,6 +48,28 @@ describe("the Stripe redactor removes a customer's personal details (#149 review
     }
   });
 
+  it("redacts structured input by its keys, and a value holding braces (CodeRabbit, #148)", () => {
+    const r = new Redactor();
+    assert.deepEqual(r.json({ customer_email: "alice@example.com", customer_details: { email: "alice@example.com", tax_exempt: "none" } }), {
+      customer_email: "[redacted]",
+      customer_details: { email: "[redacted]", tax_exempt: "none" },
+    });
+    const braces = JSON.stringify({ customer_details: { address: { line1: "Suite {4B}" }, email: "alice@example.com" } });
+    assert.ok(leaks(braces).some((f) => f.includes("Suite {4B}")), "the guard finds it");
+    assert.ok(leaks(JSON.stringify({ body: braces })).some((f) => f.includes("alice@example.com")), "in escaped text too");
+    const out = JSON.parse(r.json({ body: braces }).body) as { customer_details: { address: { line1: string }; email: string } };
+    assert.deepEqual(out, { customer_details: { address: { line1: "[redacted]" }, email: "[redacted]" } });
+  });
+
+  it("keeps a body's bytes when it holds nothing personal, and its indentation when it does", () => {
+    const r = new Redactor();
+    const plain = '{\n  "object": "event",\n  "n": 1.50\n}';
+    assert.equal(r.text(plain), plain, "1.50 is kept as Stripe wrote it");
+    const body = `${JSON.stringify(session, null, 2)}\n`;
+    const out = r.text(body);
+    assert.equal(out, `${JSON.stringify(JSON.parse(out), null, 2)}\n`);
+  });
+
   it("finds nothing once redacted, and nothing in a null or empty customer", () => {
     const body = JSON.stringify(session, null, 2);
     const redacted = new Redactor().json({ delivery: { body } });
