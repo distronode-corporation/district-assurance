@@ -617,6 +617,11 @@ export function createReferenceServer(options: ReferenceServerOptions): Server {
       processed.add(event.eventId);
       return [200, { received: true, applied: result.applied }];
     }
+    // So do a platform refund's later outcomes; the same rules: not bound yet is delivered again.
+    if (route === "payments" && event.kind === "refund") {
+      const outcome = event.outcome;
+      apply = () => options.engine.applyRefundOutcome(outcome);
+    }
     if (apply === null) return [200, { received: true, applied: false, handled: false }];
     if (processed.has(event.eventId)) return [200, { received: true, duplicate: true }];
     const result = await apply();

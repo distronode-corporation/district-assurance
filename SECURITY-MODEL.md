@@ -49,8 +49,8 @@ with photo ID links, payment links and texted codes.
 Trying account numbers to learn which exist, or learning which factor failed. **Controls:** all
 keypad fields are judged together and give one answer; an unknown account, a wrong value and a
 non-keypad entry give the same result and the same ledger detail (tested), and the same holds for
-the PIN: an unknown subject, a subject with no PIN and a malformed entry do the same keyed-hash work
-and answer the same (tested), and for spoken answers: an unknown subject, a wrong answer and an
+the PIN: an unknown subject, a subject with no PIN and a malformed entry do the same keyed-hash and
+Argon2id work and answer the same (tested), and for spoken answers: an unknown subject, a wrong answer and an
 unusable transcript give the same result and the same ledger detail (tested); every field is
 compared even after a mismatch; nothing reads back a value on file; links go out only after a
 match, so a text never confirms an account. Failures are counted across calls per subject key, for
@@ -162,11 +162,27 @@ the hour is refused, which says only that the account was busy, never its detail
 early is the host's (`AttemptCounters.reset` on the `flow.start` counter); a pass never lifts a
 start limit, since it forgets only the failures of its own factor kind (`forgetPass`, tested).
 
+### Stolen PIN records
+
+Someone who copies the record store, with or without the knowledge key, trying to recover PINs.
+**Controls (ADR-29):** a PIN or duress PIN on file is Argon2id (19 MiB, 2 passes, 1 lane, a random
+16-byte salt) over `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`. Without the key a
+record says nothing, as before (the key can stay in a key store, behind an HMAC function). With the
+key too, every guess costs an Argon2id run, per subject, since each record has its own salt
+(tested). The cost travels in the record and is read strictly: a cost below today's (a downgrade), a
+cost beyond the ceiling, or any changed field never matches, so a record weakened in the store fails
+closed: even the right PIN fails until the business resets it (tested). Records of the earlier format (the bare keyed HMAC) still
+verify and are replaced on the next match (tested); a subject who never calls again keeps one, which
+the business can only remove by a reset. **Left open:** stretching cannot make a short PIN strong:
+with the store and the key, a 4-digit PIN is 10,000 Argon2id runs, minutes on one core. The
+knowledge key's custody (a key store, SPEC.md section 5) and the lockouts on the line remain the main
+controls, and a longer PIN where the risk is high.
+
 ### Coercion (duress PIN)
 
 An owner made to call under pressure, with the person forcing them listening beside them. **Controls
 (VER-12, off unless Badge's `pin.duress` is set):** the business enrols a second, duress PIN for the
-subject with a host call, never a caller one, stored as its own keyed digest and refused when it
+subject with a host call, never a caller one, stored as its own Argon2id record and refused when it
 equals the PIN, the account number or any keypad knowledge (tested). Every PIN entry is compared
 with both digests, whether or not a duress PIN is on file, so the work, the time and the answer are
 the same (tested). A duress entry gets the same answer, level, grant, events and receipt as the PIN
@@ -797,7 +813,9 @@ and ARRÊTER map to revocation; a longer message that only contains one does not
 store, a consent is written to it before it is recorded on the call, so no recorded consent is
 missing from the store; one still being written when the call ends counts as no consent, is noted
 as `consent.unrecorded` and shows as `not_recorded` on the receipt, so a store outage never keeps
-a call from ending and never leaves a yes behind (tested). The ledger
+a call from ending and never leaves a yes behind (tested). A call record is removed only through
+`removeCall`, which refuses while its outbox holds entries the ledger has not taken, so a
+`consent.recorded` is never lost with its record (tested). The ledger
 detail names the consent and the channel, never a phone number or the message. Left to the host:
 plugging in a `ConsentStore` wherever consents are recorded (without one, consents cannot be
 revoked through the engine), deciding which consents an inbound STOP revokes, checking the store
@@ -840,8 +858,8 @@ as failed, the draft and its values are dropped, `record.filing_failed` names on
 a reason code, and the cipher's own error, which may quote the value, is never passed on
 (tested). Left open: while a draft is open or being filed, its sensitive values sit in the clear
 in the call record, so a durable `SessionStore` holds them until the record is filed or
-abandoned, or the call ends, which drops an open draft (tested). PINs on file are HMACs bound to
-their subject, or stay in the host's own PIN store (`verifier` mode). A delivered record goes
+abandoned, or the call ends, which drops an open draft (tested). PINs on file are Argon2id records
+of an HMAC bound to their subject (ADR-29), or stay in the host's own PIN store (`verifier` mode). A delivered record goes
 only to a destination in the host's configuration, over `https:` (or `http:` to a loopback host)
 and never to a URL with credentials in it; its `delivery.attempted` ledger entries carry the
 record id, the destination's id, the attempt, the outcome and the status, never a field value,
@@ -959,10 +977,11 @@ block, allowing only the endpoints the first real publish run's audit log shows.
 - **Who carries refunds and disputes in platform mode.** The engine now refunds platform payments
   and records their disputes (above), but who bears a lost dispute, and on what terms between the
   platform and the business, is a legal and payment provider question that is not decided.
-  Refund status changes after the provider's first answer (`charge.refund.updated`,
-  `refund.updated`) are not followed yet: a `pending` refund counts as pending until a provider
-  update arrives, and the engine has no path for one, so a pending refund that later fails still
-  counts against the payment until the business refunds the rest by hand at the provider (#117).
+  A `pending` refund counts against the payment until the provider's signed refund update
+  (`refund.updated`, `refund.failed`, `charge.refund.updated`) says how it ended
+  (`applyRefundOutcome`): one that failed is released and can be refunded again. Following Stripe,
+  `succeeded` is not final: a refund that succeeded and later fails is released too, and only
+  `failed` is final. A provider that never sends the update leaves it pending.
 
 ## STRIDE tables
 
@@ -1026,7 +1045,7 @@ Who is calling, in levels (`src/verify/`).
 | badge-2 | S | A caller guesses a PIN across many calls (a 4-digit PIN with 3 attempts per call falls within about 3,300 calls). | Durable failure counters per subject and per calling number, shared by every engine: waits after each failure and a hard lock after 10 failures in 24 hours, checked before a factor is judged. | covered | `verify-counters.test.ts`: "refuses during the wait without judging or using the call's attempt, then locks hard after 10 failures in 24 hours"; `pin.test.ts`: "carries a PIN lock across two calls and two engines, and lifts it only when the window passes or the business resets it"; `verify-counters.test.ts`: "counts an unknown subject by its key too, so a lock never tells which accounts exist" |
 | badge-3 | S | A crash, a failing PIN verifier or a second process gives a caller a free try. | Each attempt is counted in its own write before it is judged. | covered | `pin.test.ts`: "counts the attempt before asking, so a verifier that fails still uses it"; `session-store.test.ts`: "gives concurrent attempts on one call no more than the limit, and judges only one of them at once" |
 | badge-4 | I | A caller learns which accounts exist, or which field was wrong. | All keypad fields are judged together; an unknown account, a wrong value and a non-keypad entry answer the same, and so do the PIN's cases. | covered | `engine.test.ts`: "gives the same answer for an unknown account, a wrong value and a non-keypad entry"; `modules.test.ts`: "never passes a non-keypad entry, even one whose digest is on file"; `pin.test.ts`: "counts malformed, wrong and unknown-subject entries the same way, and locks after the limit" |
-| badge-5 | I | Stored reference values or PIN digests are reversed, or two equal PINs show as equal digests. | Keyed HMACs per workspace key, field and value; PIN digests are bound to their subject. | covered | `modules.test.ts`: "derives stable keyed digests that differ per key, field and value"; `pin.test.ts`: "binds the digest to the subject" |
+| badge-5 | I | Stored reference values or PIN digests are reversed, or two equal PINs show as equal digests. | Keyed HMACs per workspace key, field and value; PIN records are Argon2id over the keyed HMAC, bound to their subject and salted, so a stolen store and key still cost an Argon2id run per guess (ADR-29). | covered | `modules.test.ts`: "derives stable keyed digests that differ per key, field and value"; `pin.test.ts`: "binds the digest to the subject" |
 | badge-6 | I | A factor plug-in reads the knowledge key. | Plug-ins get `hmac(data)`, never the key, and their attempts are limited. | covered | `pin.test.ts`: "judges a host's own factor with the keyed hash, never the key, and limits its attempts" |
 | badge-7 | S | An attacker who took over the number on file (SIM swap, port-out) passes as the caller. | A carrier answer is needed, and a recent SIM change or port inside the window discredits a texted code; a carrier mismatch is a failed factor. | covered | `policy.test.ts`: "needs a carrier answer by default"; `policy.test.ts`: "refuses a recent SIM swap or port, inside the window"; `policy.test.ts`: "does not count a texted code the carrier signals discredit"; `engine.test.ts`: "records a carrier identity mismatch as a failed factor" |
 | badge-8 | E | A result judged for one subject (a factor, a carrier report, a photo ID outcome) is applied after verification restarted for another. | Results are bound to the subject they were judged for, and late outcomes are ignored. | covered | `pin.test.ts`: "never applies a factor judged for a verification that restarted for another subject"; `flows.test.ts`: "ignores a photo ID outcome that arrives after the flow moved on"; `engine.test.ts`: "ignores a photo ID outcome for a link sent before the taint" |
@@ -1035,6 +1054,7 @@ Who is calling, in levels (`src/verify/`).
 | badge-11 | S | A weakly verified caller chooses or resets the owner's PIN on the line. | `enrolPin` needs level 2 or above on the same call and a subject with no PIN on file, refuses weak PINs, and counts each try; only the business resets a PIN (`resetPin`). | covered | `pin.test.ts`: "needs a verification at level 2 or above on this call, on an open call"; `pin.test.ts`: "refuses weak, mismatched and malformed PINs, counting each try, and locks after the PIN's limit"; `pin.test.ts`: "stores the digest submitPin compares, writes pin.enrolled without the digits, and refuses a second PIN" |
 | badge-12 | S | A spoken answer is misheard or injected into speech-to-text. | Spoken answers are normalised by code, exactly or not at all, have their own attempt limit, count alone only at level 1 and never unlock texts. | covered | `verify-spoken.test.ts`: "counts an unusable or wrong answer as an attempt, then stops judging, even the right answer"; `verify-spoken.test.ts`: "can use spoken_knowledge alone at level 1, and only with a factor that is not knowledge above it"; `verify-spoken.test.ts`: "does not unlock texts to the number on file" |
 | badge-13 | I | Keypad digits leak from the host's buffer into a log or a string. | `KeypadCollector` shows no digit, nor how many, through `toString`, JSON or `util.inspect`, and wipes its buffer before its callback runs. | covered | `keypad.test.ts`: "shows no digit, nor how many, through toString, JSON or inspect"; `keypad.test.ts`: "wipes the buffer before the callback runs, even when it throws" |
+| badge-14 | T | A PIN record on file is weakened (its Argon2id cost lowered or set beyond reason) or changed, or an earlier keyed-HMAC record stays weak for good. | Records are read strictly: a cost below today's or above the ceiling, another algorithm, version or spelling never matches, and is never run above the ceiling; a changed parameter, salt or tag gives another tag. An earlier record still matches, and is replaced by an Argon2id record on the next match, only while it is still on file; every check does one Argon2id run and compares in constant time. | covered | `pin-argon2id.test.ts`: "refuses a correctly computed record below today's cost, or above the ceiling, and never upgrades it"; `pin-argon2id.test.ts`: "refuses a record whose parameters, salt, tag or spelling were changed"; `pin-argon2id.test.ts`: "verifies a record of the earlier format, then replaces it with an Argon2id record on the match"; `pin-hash-timing.test.ts`: "runs Argon2id once at today's cost for a missing, refused or earlier record, and once at the record's own cost otherwise" |
 
 ### Dossier
 
@@ -1050,6 +1070,7 @@ Intake the caller confirms (`src/file/`).
 | dossier-6 | R | A caller disputes a value because it was never read back to them. | `buildReadBack` reads the draft back in the call's language, and `confirmIntake` files only a draft that still reads back to the digest the caller heard. | covered | `file-readback.test.ts`: "builds the whole line in form order, skips fields without a value, and ends with the fixed prompt"; `file-readback.test.ts`: "digests the text with the record digest, so any change shows, a sensitive one included"; `intake-readback-hostile.test.ts`: "I3: a value changed after the read-back is refused; changed back, the same read-back files" |
 | dossier-7 | T | A record delivered to the business is forged, changed or replayed on the way. | `deliverRecord` signs each attempt in the Stripe scheme, retries with one idempotency key per record and destination, and the sample receiver checks the signature and applies each key once. | covered | `file-delivery.test.ts`: "posts the record once, signed in the Stripe scheme, and records the attempt without the payload"; `file-delivery.test.ts`: "keeps one idempotency key per record and destination, whoever delivers and how often"; `file-delivery.test.ts`: "verifies the signature, applies each record once, and answers a duplicate with 200" |
 | dossier-8 | S | A document upload link is guessed or reused. | Upload links are 256-bit tokens stored only as a hash, bound to one call and record, expire after 30 minutes and are single use by an atomic claim. | covered | `file-upload.test.ts`: "returns a capability token with a 30-minute expiry, and stores only its hash, bound to the call and record"; `file-upload.test.ts`: "stores one document and spends the link: single use"; `file-upload.test.ts`: "lets only one of two uploads at once through" |
+| dossier-9 | T | A stored row no confirmation committed (a refusal after the write whose delete failed) is delivered, exported or given an upload link as a confirmed record. | The store keeps a confirmed mark beside each record, set only after the filing committed; `deliverRecord`, `exportSubject` and `createUploadLink` read only marked records, and an erasure still deletes the row. | covered | `intake-confirmed-flag.test.ts`: "skips a stored row no confirmation committed: no delivery, no export, no upload link; an erasure still deletes it" |
 
 ### Paylink
 
@@ -1086,6 +1107,7 @@ The hash-chained ledger, receipts and consent (`src/prove/`).
 | trace-10 | R | An outside party cannot check a receipt without this engine. | `scripts/verify-receipt.mjs`, a stand-alone verifier with no dependencies. | covered | `verifier.test.ts`: "prints valid for a receipt and its key set, from a file, standard input or the key set URL"; `verifier.test.ts`: "prints invalid, and exits 1, for a tampered receipt or one the key set cannot verify" |
 | trace-11 | R | A caller withdraws consent and nothing records it. | `revokeConsent` records a revocation by voice, text or dashboard in the `ConsentStore` and the ledger, once, even after the call is gone. | covered | `engine.test.ts`: "stores each consent, and revokes one by text after the call ended, once, in the ledger"; `engine.test.ts`: "never writes consent.revoked before its consent.recorded, even with the recorded entry still pending" |
 | trace-12 | R | An auditor cannot take the ledger out in a verifiable form. | `exportLedger` writes NDJSON with an ES256-signed trailer and a cursor, and `verifyLedgerExport` detects a changed, removed or replaced entry and a run that does not continue the previous one. | covered | `prove.test.ts`: "yields one canonical entry per line and a signed trailer with the head"; `prove.test.ts`: "detects a changed, removed or replaced entry, and a changed trailer"; `prove.test.ts`: "refuses a run that does not continue the previous one" |
+| trace-13 | R | A call record is removed while ledger entries it holds are still pending, and they are lost with it (a `consent.recorded`). | `removeCall` flushes first and refuses while the outbox is not empty; `flushPending` keeps listing the call until it is. | covered | `call-removal.test.ts`: "refuses while the outbox holds an entry, keeps the call listed for the background flush, and removes it once flushed" |
 
 ### Gate
 
@@ -1200,7 +1222,7 @@ Photo ID plus selfie by a texted link (the reference server's Stripe Identity ad
 |---|---|---|---|---|---|
 | identityprovider-1 | S | An identity outcome is applied to the wrong call, twice, or outside verification. | Outcomes are bound to their session, applied once and only while verifying; unknown sessions are ignored. | covered | `engine.test.ts`: "applies identity outcomes once, only while verifying, and ignores unknown sessions"; `pin.test.ts`: "drops a pending photo ID check when the subject changes, and resumes a link after a failure" |
 | identityprovider-2 | E | A link reserved before a taint is created after it and still counts. | The reserved link is voided. | covered | `engine.test.ts`: "voids a photo ID link reserved before the taint and created after it"; `pin.test.ts`: "voids a reserved link when the subject changes before it was created" |
-| identityprovider-3 | S | The real provider adapter mishandles sessions or outcomes. | The reference server's Stripe Identity adapter, tested against a local fake replaying Stripe's answers: one session per idempotency key, an answer it cannot trust refused, and a signed verified event applied end to end. | covered | `stripe-identity.test.ts`: "is the engine's identity adapter: a retry after a failed text resumes with the same key and session"; `stripe-identity.test.ts`: "refuses an answer that is not a session with an https link, without echoing it"; `stripe-identity.test.ts`: "creates the trial call's check in Stripe and applies the signed verified event end to end" |
+| identityprovider-3 | S | The real provider adapter mishandles sessions or outcomes. | The reference server's Stripe Identity adapter, tested against a local fake replaying Stripe's answers: one session per idempotency key, an answer it cannot trust refused, and a signed verified event applied end to end; and a run recorded in Stripe test mode (the request, Stripe's session and its signed `verified` event, redacted) replayed through `npm run serve`'s trial call and identity webhook. | covered | `stripe-identity.test.ts`: "is the engine's identity adapter: a retry after a failed text resumes with the same key and session"; `stripe-identity.test.ts`: "refuses an answer that is not a session with an https link, without echoing it"; `stripe-identity.test.ts`: "creates the trial call's check in Stripe and applies the signed verified event end to end"; `stripe-real.test.ts`: "creates the check with the request the recording sent, and gets Stripe's session"; `stripe-real.test.ts`: "applies Stripe's recorded `verified` event on the identity webhook, as it did live, once" |
 
 ### CarrierSignals
 
@@ -1224,13 +1246,14 @@ Texts to the number on file.
 
 ### PaymentLinks
 
-Hosted payment links (the reference server's minimal Stripe Checkout adapter is one).
+Hosted payment links (the reference server's Stripe Checkout adapter is one).
 
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
 | paymentlinks-1 | T | A retry after a failure creates a second link for one request. | The request stays open and resumes with the same idempotency keys. | covered | `engine.test.ts`: "keeps a request open when creating or texting its link fails, and resumes it with the same keys"; `entry-points.test.ts`: "payment links honour idempotency keys" |
 | paymentlinks-2 | I | Two workspaces' idempotency keys collide at the provider. | Keys are scoped to the workspace. | covered | `races.test.ts`: "scopes provider idempotency keys to the workspace" |
-| paymentlinks-3 | S | The real provider adapter mishandles links or outcomes. | A minimal Stripe Checkout adapter (`StripeCheckoutLinks`) in the reference server, tested against a local fake and proven in Stripe test mode in platform mode only; it sends the `Stripe-Account` header for connect mode, but that is not proven live. | open | PAY-1 |
+| paymentlinks-3 | S | The real provider adapter mishandles links or outcomes. | The reference server's Stripe Checkout adapter (`StripeCheckoutLinks`), tested against a local fake, and runs recorded in Stripe test mode (redacted) replayed through the engine and the reference server: a paid platform link settled on the payments endpoint, a paid direct charge on a connected account settled on the Connect endpoint only, a cancelled connect link expired on the connected account, and Stripe's answers on the wallet and Link mapping. | covered | `stripe-real.test.ts`: "record-platform: the same Checkout Session request, then Stripe's recorded completed event settles it on /webhooks/stripe/payments only"; `stripe-real.test.ts`: "record-connect: the same Checkout Session request, then Stripe's recorded completed event settles it on /webhooks/stripe/connect only"; `stripe-real.test.ts`: "creates the session, then expires it with Stripe-Account when the caller cancels; Stripe answered it expired"; `stripe-real.test.ts`: "offers Apple Pay and Google Pay as `card`: Stripe took the session with card only, and refuses either wallet as a type" |
+| paymentlinks-4 | S | A connected account id carries a header injection, or a payment goes to the wrong account. | The adapter sends `Stripe-Account` only from a well-formed `acct_` id in connect mode, refuses one in platform mode, and refuses either before anything is sent; a connect event settles only on the Connect endpoint. | covered | `stripe-adapters.test.ts`: "connect mode names a well-formed connected account and platform mode none, before anything is sent"; `stripe-real.test.ts`: "connect mode is a direct charge: the Stripe-Account header and nothing else (no on_behalf_of, no transfer_data)" |
 
 ### ReceiptSigner
 
@@ -1268,6 +1291,7 @@ the head and its anchor payload, never the ledger.
 | anchor-7 | D | An authority or a log answers an endless or huge body and the host runs out of memory. | Both reference adapters read at most `maxReplyBytes` (default `MAX_REPLY_BYTES`, 256 KiB), cancel the rest and refuse; an error answer's body is never read. | covered | `anchor-review.test.ts`: "reads at most maxReplyBytes, cancels the rest and refuses"; `anchor-review.test.ts`: "refuses an error answer without reading its body, and a reply with no body" |
 | anchor-8 | T | A Rekor entry reports an index, tree size or root the log never signed. | The index is the entry's top-level `logIndex`; the size and root come from the signed checkpoint; the inclusion proof's own copies, when present, must agree, or the entry is refused (`log`). | covered | `anchor-review.test.ts`: "reads the top-level logIndex and the checkpoint's size and root: the inner copies may be left out"; `anchor-review.test.ts`: "refuses inner copies that disagree with the top-level index or the checkpoint"; `anchor-review.test.ts`: "refuses a checkpoint whose size or root line is not canonical" |
 | anchor-9 | I | A head reaches the public log for an anchor that then fails, or a retry logs it twice. | The Rekor adapter asks the authority first: a refused time-stamp writes nothing to the log. | covered | `anchor-review.test.ts`: "a refused time-stamp writes nothing to the public log"; `anchor-review.test.ts`: "asks the authority, then Rekor, and the proof verifies offline" |
+| anchor-10 | T | A reader and a writer built by the same hand agree, and a real authority's token or a real log's entry is refused or wrongly accepted; or an anchor stops verifying once the authority's certificates expire. | One anchor recorded against DigiCert's TSA and Sigstore's Rekor v2 (log2025-1) and replayed offline: the real token, chain, imprint, entry, inclusion proof and checkpoint verify, changed copies are refused, and certificates are checked at the token's time, not the clock's. | covered | `prove-anchor-real.test.ts`: "verifies offline: the chain to the head, DigiCert's token over it, and the Rekor entry"; `prove-anchor-real.test.ts`: "keeps verifying after every certificate in DigiCert's chain has expired: the chain is checked at the stamped time"; `prove-anchor-real.test.ts`: "is refused under another log key or origin, with a changed proof hash, a wrong index or a shortened path" |
 
 ### AttemptCounters
 
@@ -1416,7 +1440,8 @@ Tells the business that someone is locked out, best effort; the ledger stays the
   has none, atomically, and whose `putPinDigest(null)` also removes the duress digest in the same
   step; the same care for `enrolDuressPin`, `removeDuressPin` and `putDuressDigest`, which stores
   only the duress digest it is given, replaces one on file (only the business sets it), and only
-  while the PIN digest on file is the one given, atomically.
+  while the PIN digest on file is the one given, atomically; and an `upgradePinDigest` that replaces
+  a digest only while it is still the one given, atomically, changing nothing else.
 - A `DuressNotifier` that alerts someone the business named, away from the call, and never
   through anything the caller or the person beside them can see; that never blocks (it queues the
   alert and returns); that drops repeats by `alertId`; and a sweep calling `sweepAlerts` (with a

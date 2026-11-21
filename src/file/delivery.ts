@@ -155,6 +155,8 @@ export async function deliverRecord(input: DeliverRecordInput): Promise<Delivery
   if (problem !== null) throw new EngineError("invalid_input", problem);
   const record = await records.getIntakeRecord(workspaceId, recordId);
   if (record === null) throw new EngineError("invalid_input", `no record ${recordId} in this workspace`);
+  // A row no confirmation committed (one a refusal left when its delete failed) is never sent.
+  if (!(await records.isIntakeRecordConfirmed(workspaceId, recordId))) throw new EngineError("invalid_input", `no confirmed record ${recordId} in this workspace`);
   const idempotencyKey = deliveryIdempotencyKey(workspaceId, recordId, destination.destinationId);
   const message: RecordDeliveryBody = { v: 1, type: "record.confirmed", idempotencyKey, destinationId: destination.destinationId, record };
   const body = canonicalJson(message);

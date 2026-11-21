@@ -45,6 +45,7 @@ function world() {
   const documents = new MemoryDocumentStore();
   const scanner = new FakeScanner();
   void records.putIntakeRecord(intakeRecord("rec_1", "call_1"));
+  void records.confirmIntakeRecord(WS, "rec_1");
   const context = { workspaceId: WS, documents, clock, records, scanner, ids: new SequentialIds() };
   const link = (input: Partial<Parameters<typeof createUploadLink>[0]> = {}) => createUploadLink({ callId: "call_1", recordId: "rec_1", ...input }, context);
   const upload = (token: string, bytes: Uint8Array = JPEG, contentType = "image/jpeg") => acceptUpload({ token, contentType, bytes }, context);
@@ -97,6 +98,7 @@ describe("createUploadLink", () => {
   it("refuses a record that is not the call's, or that does not exist", async () => {
     const w = world();
     await w.records.putIntakeRecord(intakeRecord("rec_other", "call_2"));
+    await w.records.confirmIntakeRecord(WS, "rec_other");
     await assert.rejects(w.link({ recordId: "rec_other" }), rejects("precondition_failed", /not a confirmed record of this call/));
     await assert.rejects(w.link({ recordId: "rec_404" }), rejects("precondition_failed", /not a confirmed record of this call/));
     await assert.rejects(w.link({ callId: "call_2" }), rejects("precondition_failed"));

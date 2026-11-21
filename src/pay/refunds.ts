@@ -302,3 +302,83 @@ export async function applyDisputeOutcome(rt: EngineRuntime, outcome: DisputeOut
     return { applied: true, callId, status } as const;
   });
 }
+
+/** A refund's status in Stripe's words, as its update events give it. */
+export type ProviderRefundStatus = "pending" | "requires_action" | "succeeded" | "failed" | "canceled";
+
+export const PROVIDER_REFUND_STATUSES: readonly ProviderRefundStatus[] = ["pending", "requires_action", "succeeded", "failed", "canceled"];
+
+/**
+ * A refund update event, already parsed from a verified webhook (Stripe's `refund.updated`,
+ * `refund.failed`, `charge.refund.updated`). The engine finds the payment by the payment intent it
+ * bound when the payment was paid, then the refund by the provider's refund id it recorded
+ * (`providerRef`). `account` is set on a connected account's event.
+ */
+export interface RefundOutcome {
+  /** The provider's refund id (for example `re_...`). */
+  providerRef: string;
+  paymentIntentId: string | null;
+  status: ProviderRefundStatus;
+  amountMinor: number;
+  currency: string;
+  account?: string;
+}
+
+/** A refund update's result. `unbound`: its payment, or the engine's own answer for it, is not recorded yet; deliver it again later. */
+export type RefundApplied = { applied: false; unbound?: true } | { applied: true; callId: string; status: "succeeded" | "failed" };
+
+/**
+ * A refund update from the verified payments webhook, recorded against the refund the engine made,
+ * after the call ended too. A `pending` refund moves to `succeeded`, or to `failed` (Stripe's
+ * `failed` or `canceled`), which stops counting toward the refunded total so that amount can be
+ * refunded again; a `succeeded` one can still move to `failed` (Stripe documents card refunds that
+ * fail after succeeding). A `failed` refund is final, and an event that changes nothing is not
+ * written again. A refund the engine did not make (one made by hand at the
+ * provider), or one whose amount or currency differs from what the engine asked, is not applied.
+ * The receipt is never changed.
+ */
+export async function applyRefundOutcome(rt: EngineRuntime, outcome: RefundOutcome): Promise<RefundApplied> {
+  // Read once: the ids looked up are the ones searched, and the status compared is the one recorded.
+  const { providerRef, paymentIntentId, status, amountMinor, currency, account } = outcome;
+  if (
+    typeof providerRef !== "string" ||
+    providerRef === "" ||
+    (paymentIntentId !== null && typeof paymentIntentId !== "string") ||
+    !(PROVIDER_REFUND_STATUSES as readonly unknown[]).includes(status) ||
+    !Number.isSafeInteger(amountMinor) ||
+    amountMinor < 0 ||
+    typeof currency !== "string" ||
+    !/^[a-z]{3}$/.test(currency) ||
+    (account !== undefined && typeof account !== "string")
+  ) {
+    throw new EngineError("invalid_input", "a refund outcome is a refund id, a payment intent or null, a known status, a whole amount, a lower-case currency and, if any, an account");
+  }
+  if (paymentIntentId === null) return { applied: false };
+  const callId = await rt.resolveRef(paymentIntentRef(paymentIntentId));
+  // A connected account's update is never the platform's to wait for: acknowledged, not retried.
+  if (callId === null) return account === undefined ? { applied: false, unbound: true } : { applied: false };
+  return rt.update(callId, (draft) => {
+    const slice = draft.slice<PaylinkSlice>(PAYLINK);
+    const payment = slice.payments.find((p) => p.paymentIntentId === paymentIntentId)!;
+    if (account !== undefined) {
+      draft.emit("payment.outcome_ignored", "system", { paymentId: payment.paymentId, reason: "account" });
+      return { applied: false } as const;
+    }
+    const refunds = payment.refunds ?? [];
+    const record = refunds.find((r) => r.providerRef === providerRef);
+    if (record === undefined) {
+      // The engine's own refund may have been made with its answer still on its way (or lost): the
+      // update waits for the resume that records it. Otherwise this refund is not the engine's.
+      return refunds.some((r) => r.status === "requested") ? ({ applied: false, unbound: true } as const) : ({ applied: false } as const);
+    }
+    const next = status === "succeeded" ? "succeeded" : status === "failed" || status === "canceled" ? "failed" : null;
+    // A pending refund moves to either; a succeeded one can still fail (Stripe documents card
+    // refunds that do); a failed one is final.
+    const moves = record.status === "pending" || (record.status === "succeeded" && next === "failed");
+    if (next === null || !moves || record.amountMinor !== amountMinor || payment.currency !== currency) return { applied: false } as const;
+    record.status = next;
+    record.settledAt = rt.now();
+    draft.emit("payment.refund_updated", "system", { paymentId: payment.paymentId, refundId: record.refundId, providerRef, amountMinor, currency, status: next });
+    return { applied: true, callId, status: next } as const;
+  });
+}

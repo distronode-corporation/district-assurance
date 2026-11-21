@@ -6,12 +6,12 @@ import type { AuditEntry, SubjectRecord } from "../src/core/adapters.ts";
 import { ConfigError, type FlowConfig } from "../src/core/config.ts";
 import type { EngineRuntime } from "../src/core/runtime.ts";
 import { badgeModule } from "../src/verify/badge.ts";
-import { duressDigest, judgePin, pinTag, type PinSettings } from "../src/verify/factors.ts";
+import { judgePin, pinTag, type PinSettings } from "../src/verify/factors.ts";
 import { hmacSha256Hex } from "../src/core/hash.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { readPinTag } from "../src/verify/pin.ts";
 import { FakeDuressNotifier, TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig, waitOut } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, pinOnFile, rejects, setup, testConfig, waitOut } from "./helpers.ts";
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const DURESS = "7391";
@@ -472,9 +472,9 @@ describe("Duress PIN: enrolment by the business", () => {
     assert.deepEqual(await t.engine.enrolDuressPin(OWNER, "12"), { enrolled: false, reason: "malformed" });
     assert.deepEqual(await t.engine.enrolDuressPin(OWNER, "48a6"), { enrolled: false, reason: "malformed" });
     for (const weak of [PIN, ACCOUNT, DOB, "1111", "6789"]) assert.deepEqual(await t.engine.enrolDuressPin(OWNER, weak), { enrolled: false, reason: "weak" }, weak);
-    assert.equal((await t.records.getSubject("ws_test", OWNER))!.duressDigest, duressDigest(TEST_KNOWLEDGE_KEY, OWNER, DURESS), "the earlier duress PIN stands");
+    assert.ok(await pinOnFile((await t.records.getSubject("ws_test", OWNER))!.duressDigest, OWNER, DURESS, "duress"), "the earlier duress PIN stands");
     assert.deepEqual(await t.engine.enrolDuressPin(OWNER, "5038"), { enrolled: true }, "the business replaces it");
-    assert.equal((await t.records.getSubject("ws_test", OWNER))!.duressDigest, duressDigest(TEST_KNOWLEDGE_KEY, OWNER, "5038"));
+    assert.ok(await pinOnFile((await t.records.getSubject("ws_test", OWNER))!.duressDigest, OWNER, "5038", "duress"));
     assert.equal(JSON.stringify(await t.ledger.list()).includes("5038"), false);
   });
 

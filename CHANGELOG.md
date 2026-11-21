@@ -12,6 +12,28 @@ The first published release.
 
 ### Added
 
+- Stripe test-mode proofs for VER-5 (#18) and PAY-1 (#25), recorded once through the reference
+  server's own adapters and webhook routes and replayed offline (`test/stripe-real.test.ts`,
+  recorder `test/fixtures/stripe-real/record.ts`, every Stripe id redacted): a Stripe Identity
+  VerificationSession and Stripe's signed `identity.verification_session.verified` event applied to
+  the trial call; a Checkout Session paid in platform mode and one paid as a direct charge on a
+  connected account, each settled by Stripe's signed `checkout.session.completed` on its own
+  endpoint (the Connect one names the account); a connect link cancelled and expired on the
+  connected account; and Stripe's answers on the payment method mapping.
+- Simulator callers for the rest of the built-in steps (#134): `gate.grant` (the fake door, as
+  every controller the config's Gate targets name, opens or refuses), `step-up.issue` (a token
+  issued and exchanged), and Badge's `text_code`, `spoken_knowledge` and `callback` (the caller
+  goes on on the callback call); script fields `textCode`, `spoken`, `callback` and `door`, and the
+  built-in scripts `text-code-wrong`, `spoken-wrong`, `callback-not-confirmed` and `door-refused`.
+  A flow with every built-in step type runs to the end with exit code 0; nothing keyed or said is
+  printed.
+- A pending refund's later outcome (PAY-9, #117, #132): `applyRefundOutcome` applies Stripe's
+  signed `refund.updated`, `refund.failed` and `charge.refund.updated` (`parseStripeEvent` kind
+  `refund`; the reference server's payments endpoint), found by the provider's refund id. A pending
+  refund that succeeds stays counted; one that fails (or is canceled) is released, so the business
+  can refund that amount again, and a succeeded one that fails later is released too; a
+  `payment.refund_updated` entry each time, never one for an event that changes nothing. A failed
+  refund stays failed; the receipt is never changed.
 - M0 skeleton. The engine (`createEngine`) with the call session state machine, the assurance policy
   (levels, scope floors, carrier signal handling), keypad knowledge comparison, the photo ID flow,
   intake forms and confirmed records, payment links and settlement, consent records, the
@@ -35,7 +57,7 @@ The first published release.
 - The demo runs `owner-command` (a PIN only, on two engines sharing one store), `deposit` and
   `deposit-connect` (one per payment mode), and `entry`, which opens a door through the relay.
 - The reference server's Connect webhook route.
-- ROADMAP.md and ISSUES.md for the modular design, owner-command first; ADR-13 to ADR-28.
+- ROADMAP.md and ISSUES.md for the modular design, owner-command first; ADR-13 to ADR-29.
 - The callback factor (VER-9): a built-in `callback` kind; `requestCallback` ends the call and,
   after a keypad or PIN match, has a new `CallbackDialer` adapter ring the number on file on a new
   callback call, where `applyCallbackOutcome` records it only for a keyed confirmation; possession
@@ -278,6 +300,10 @@ The first published release.
 - Public timestamp anchors for the ledger (PRV-9): `anchorLedger()` appends a `ledger.anchored`
   entry with a proof from an `Anchor` adapter, `verifyAnchor` checks it offline, and the reference
   server has an RFC 3161 time-stamp authority adapter and a Rekor v2 one; no new dependency.
+- Anchors proven against real services (PRV-9): one anchor of a throwaway ledger, made through
+  `anchorLedger()` with DigiCert's public time-stamp authority and Sigstore's Rekor v2 log
+  (log2025-1), recorded in `test/fixtures/anchor/real/` by `test/fixtures/anchor/record-real.ts`
+  and verified offline in `test/prove-anchor-real.test.ts`, including after the certificates expire.
 - A flow simulator (MOD-4): `district-assurance simulate <config.json> --flow <name> --script <name
   or file>` (`npm run simulate --` here) runs a flow on the fakes with a scripted caller (`pass`,
   `wrong-pin`, `lockout`, `consent-no`, `payment-paid`, `payment-expired`, or a JSON file) and
@@ -339,12 +365,48 @@ The first published release.
   tested over a shared JSON corpus in `test/corpus/`; compose health card numbers before SINs. Bank
   words are English, French and Spanish, read in the languages the call reads number words in:
   English and French on every call, Spanish on a Spanish call and on text with no call.
+- README badges for the OpenSSF Scorecard, the licence and CI on main, and a section in
+  CONTRIBUTING.md on reporting bugs and asking for features through GitHub issues.
+- A README badge for the OpenSSF Best Practices badge (project 16957, passing).
 
 ### Changed
 
 - The package is published: `package.json` no longer has `"private": true` (ADR-12), and 0.1.0 is
   the first version `release.yml` publishes to npm, with provenance. The publish job's
   `setup-node` names the npm registry (`registry-url`), as npm's trusted publishing guide has it.
+- Breaking for hosts on Node.js older than 24.19: `engines` is `>=24.19` (was `>=24.2`), the first
+  Node 24 where `crypto.argon2` is stable (it arrived in 24.7.0 as a release candidate), which PIN
+  records use (ADR-4, ADR-29). CI runs 24.19 and the latest 24.
+- Breaking for record stores: `RecordStore` has `upgradePinDigest(workspaceId, subjectKey, field,
+  from, to)`, which replaces `pinDigest` or `duressDigest` only while it is still `from`, atomically
+  (in `MemoryRecordStore`, `SqliteRecordStore` and `recordStoreContract`).
+- Host-facing: `pinDigest` and `duressDigest` return an Argon2id record with a fresh salt, so two
+  calls for the same PIN give different strings that both verify; compare records by checking, never
+  by equality.
+- `StripeCheckoutLinks` takes connect mode (`capabilities.modes` is now `["platform", "connect"]`):
+  a direct charge on the connected account by the `Stripe-Account` header only, as Stripe's
+  direct-charges guide has it. A connect request needs a well-formed `acct_` id and a platform
+  request may name none, both checked before anything is sent; `readLink` checks the account too.
+  Link alone is refused before anything is sent, since Checkout takes `link` only beside `card`
+  (Stripe's recorded answer); Apple Pay and Google Pay still go as `card`.
+- `createServe` (`npm run serve`) takes `ids`, for a run against Stripe repeated within a day.
+- Host-facing: a call record is removed through `Engine.removeCall(callId)`, never in the session
+  store directly. It is refused while the call has not ended and while its outbox holds ledger
+  entries not yet appended (it flushes them first; `flushPending` keeps listing the call), while it
+  still owes a duress alert, a contact notice or its receipt, while a payment link is still open
+  or a refund is not yet final, and while a filed record's confirmed mark is owed (it makes the
+  mark first), so a
+  pending entry such as `consent.recorded` is never lost with its record. `SessionStore` has an
+  optional `remove(workspaceId, callId, expectedVersion)` (in `MemorySessionStore` and
+  `sessionStoreContract`).
+- Breaking for record stores: `RecordStore` has `confirmIntakeRecord(workspaceId, recordId)` and
+  `isIntakeRecordConfirmed(workspaceId, recordId)`. A record is stored unconfirmed and marked once
+  the confirmation that filed it committed; `deliverRecord`, `exportSubject` and `createUploadLink`
+  skip a record without the mark (one a refusal left behind when its delete failed), and an
+  erasure still deletes it. A host store keeps the mark beside each record, and records it stored
+  before this change read as unconfirmed until the host marks them. `MemoryRecordStore`, the
+  reference server's `SqliteRecordStore` (a `confirmed_records` table) and `recordStoreContract`
+  are updated.
 - Breaking, reference server: the `maxBodyBytes` option of `createReferenceServer` is replaced by
   `bodyLimits`, one limit per route that reads a body (SRV-2).
 - Breaking: `CarrierSignalReport` has a required `simSwapChecked`, true only when the carrier was
@@ -500,6 +562,12 @@ The first published release.
 
 ### Security
 
+- PINs and duress PINs on file are Argon2id over the keyed HMAC (ADR-29):
+  `$pin1$argon2id$v=19$m=19456,t=2,p=1$<salt>$<tag>`, with a random salt, the cost in the record,
+  one Argon2id run per check whatever is on file, and a constant-time compare. A record below
+  today's cost or above the ceiling, or changed in any field, never matches. Records of the earlier
+  format (the bare keyed HMAC) still verify and are replaced by an Argon2id record on the next match.
+  Lockouts are unchanged.
 - A taint now voids the keypad or PIN match made before it: `startPhotoId`, `checkCarrier` and a
   payment link refuse until a fresh verification matches (found by the adversarial suite).
 - `sensitive_closed` (`closeSensitive`) is refused while a payment is open (`invalid_transition`):

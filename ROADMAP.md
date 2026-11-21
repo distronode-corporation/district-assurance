@@ -12,7 +12,7 @@ The design: a small core (the session state machine on a shared session store, t
 its levels, redaction, the module registry and the audit ledger) and modules around it: Badge
 (verify), Dossier (file), Paylink (pay), Trace (prove), Gate (entry), step-up (web sign-in), and
 any outside module a host adds. Every module can be turned on, turned off, added and removed per workspace config,
-and flows are config, not code. DECISIONS.md, ADR-13 to ADR-28, says why.
+and flows are config, not code. DECISIONS.md, ADR-13 to ADR-29, says why.
 
 ## How work is proven
 
@@ -44,27 +44,19 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-28, says why.
 | M3 Gate and payment modes | The Gate module with signed access grants, the signed-webhook relay, Seam, Kisi and Verkada, one-time access codes, web sign-in step-up; Paylink's `connect` and `platform` modes, link life and instant methods | done |
 | M4 Badge | Texted codes, spoken answers, carrier and Stripe Identity adapters, the adversarial suite, and the later Badge work (callback, caller ID attestation, the accessible path, duress PIN, risk-based step-up, synthetic voice, limits across flows, lockout alerts) | done |
 | M5 Dossier | Read-backs, encrypted fields, delivery, conditional fields, documents by text, Spanish | done |
-| M6 Paylink | Amounts from code, cancel and expiry, the live detector, refunds; the Stripe Checkout adapter in platform mode. Open: the Checkout adapter's connect mode, pending refunds; saved cards and keypad capture gated | PAY-1, PAY-4, PAY-6, [#132](https://github.com/distronode-corporation/district-assurance/issues/132) |
+| M6 Paylink | Amounts from code, cancel and expiry, the live detector, refunds; the Stripe Checkout adapter in both modes, proven in Stripe test mode. Open: saved cards and keypad capture, gated | PAY-4, PAY-6 |
 | M7 Trace | Key rotation, the stand-alone verifier, consent revocation, ledger export, more redactors, subject requests, monthly reports, a public timestamp anchor, receipt links by text | done |
 | M8 Reference server hardening | Carrier signatures, limits and logs, receipt links, persistent stores, the release workflow, signed releases, fuzz tests, the threat tables, security.txt, benchmarks. Open: checking the first published release (0.1.0) | SRV-5 |
-| M9 Host integration and module authors | Transcript forwarding, event delivery, the module author kit, the FlowConfig JSON Schema, factors added after construction, the flow simulator. Open: simulator callers for the remaining steps | [#134](https://github.com/distronode-corporation/district-assurance/issues/134) |
+| M9 Host integration and module authors | Transcript forwarding, event delivery, the module author kit, the FlowConfig JSON Schema, factors added after construction, the flow simulator, with a scripted caller for every built-in step | done |
 
 ## What is left
 
-1. **PAY-1:** the Stripe Checkout adapter's connect mode and wallet methods, proven in Stripe test
-   mode.
-2. **SRV-5:** the tag push's dry run for v0.1.0, and the checks on the first published release
+1. **SRV-5:** the tag push's dry run for v0.1.0, and the checks on the first published release
    (0.1.0) against the reviewed source.
-3. **[#132](https://github.com/distronode-corporation/district-assurance/issues/132):** reconcile a
-   pending refund with the provider's final status (no refund update webhook or status poll yet;
-   SPEC.md section 14 says what happens today).
-4. **[#134](https://github.com/distronode-corporation/district-assurance/issues/134):** scripted
-   simulator callers for `gate.grant`, `step-up.issue`, callbacks, texted codes and spoken
-   answers; a flow with one of those steps stops there with exit code 3 today.
-5. **Gated, not scheduled:** PAY-4 (saved-card charges) and PAY-6 (keypad card capture); PAY-6
+2. **Gated, not scheduled:** PAY-4 (saved-card charges) and PAY-6 (keypad card capture); PAY-6
    starts only after an assessor's scoping and a buyer who needs it.
 
-Dependencies: PAY-6 needs PAY-1.
+Dependencies: PAY-6 needed PAY-1, which is done.
 
 ## M0. Skeleton (done)
 
@@ -149,7 +141,7 @@ which the engine calls when a call is tainted (SPEC.md section 17), and access c
 | Texted codes with send limits (VER-2) | `src/verify/text-code.ts` | expiry, tries, single use, limits per subject and per calling number, the country allow-list, a refused send that answers like a sent one (`test/verify-text-code.test.ts`, `test/verify-text-code-hostile.test.ts`) |
 | Spoken answers (VER-3) | `src/verify/spoken.ts` | normalised by code, unusable answers counted, never unlocks texts (`test/verify-spoken.test.ts`, `test/verify-spoken-hostile.test.ts`) |
 | Carrier adapters (VER-4) | `examples/reference-server/src/carrier-adapters.ts` | Twilio Lookup and Telnyx Number Lookup against a local fake, failing closed (`test/carrier-adapters.test.ts`, `test/carrier-adapters-hostile.test.ts`) |
-| Stripe Identity (VER-5) | `examples/reference-server/src/stripe-adapters.ts` | sessions, retries under one key, the signed verified event end to end (`test/stripe-identity.test.ts`, `test/stripe-identity-hostile.test.ts`) |
+| Stripe Identity (VER-5) | `examples/reference-server/src/stripe-adapters.ts` | sessions, retries under one key, the signed verified event end to end (`test/stripe-identity.test.ts`, `test/stripe-identity-hostile.test.ts`); a run recorded in Stripe test mode, Stripe's signed `verified` event applied to the trial call, replayed offline (`test/stripe-real.test.ts`) |
 | Adversarial suite (VER-7) | `test/adversarial/` | scripted dialogues in English and Canadian French: no grant without factors, no text before a match, one answer for unknown and wrong, no grant after a taint (`test/adversarial/adversarial.test.ts`) |
 | Callback (VER-9), caller ID attestation (VER-10), the accessible path (VER-11) | `src/verify/callback.ts`, `src/core/policy.ts`, `src/verify/badge.ts` | `test/verify-callback.test.ts`, `test/verify-attestation.test.ts`, `test/verify-accessibility.test.ts` |
 | Duress PIN (VER-12), risk-based step-up (VER-13), synthetic voice (VER-14) | `src/verify/pin.ts`, `src/verify/duress-flag.ts`, `src/verify/badge.ts` | `test/verify-duress.test.ts`, `test/verify-step-up.test.ts`, `test/verify-synthetic-voice.test.ts` |
@@ -177,30 +169,11 @@ mode before it goes live.
 | Cancel and expire open links (PAY-3) | `src/pay/paylink.ts`, `src/engine.ts` | `cancelPaymentLink`, `expirePaymentLinks`, a link expired when the call ends (`test/engine.test.ts`, `test/pay-close-hostile.test.ts`) |
 | Live card-number detector (PAY-5) | `src/core/live-detector.ts`, `src/core/redaction.ts` | partial and spoken numbers over the shared corpus in `test/corpus/` (`test/redaction.test.ts`, `test/redaction-hostile.test.ts`) |
 | Refunds and disputes in platform mode (PAY-8) | `src/pay/refunds.ts` | `test/pay-refunds.test.ts`, `test/pay-refunds-hostile.test.ts` |
-| Stripe Checkout in platform mode (part of PAY-1) | `examples/reference-server/src/stripe-adapters.ts` | `StripeCheckoutLinks` against a local fake (`test/stripe-adapters.test.ts`), and `npm run demo:e2e` with a real Checkout Session in test mode |
-
-Open on GitHub and not written out here:
-[#132](https://github.com/distronode-corporation/district-assurance/issues/132), reconcile a
-pending refund with the provider's final status. Until then a refund the provider leaves pending
-still counts against the payment (SPEC.md section 14).
+| A refund's later outcome, a late failure after success included (PAY-9, #117, #132) | `src/pay/refunds.ts`, `src/webhooks/stripe.ts` | `test/pay-refund-updates.test.ts` |
+| Stripe Checkout in both modes (PAY-1) | `examples/reference-server/src/stripe-adapters.ts` | `StripeCheckoutLinks` against a local fake (`test/stripe-adapters.test.ts`); `npm run demo:e2e` with a real Checkout Session in test mode; runs recorded in Stripe test mode and replayed offline: a paid link in each mode settled by Stripe's signed event on its own endpoint, a direct charge on a connected account, a connect link expired on that account, and the wallet and Link mapping (`test/stripe-real.test.ts`) |
 
 **Proven by:** Unit tests at 100%; the Checkout adapter against a local fake, and in Stripe test
-mode in platform mode (`npm run demo:e2e`). Proving connect mode in test mode is PAY-1, below.
-
-#### **PAY-1** Stripe Checkout adapter: connect mode and wallet methods
-
-`StripeCheckoutLinks` runs in platform mode, proven in Stripe test mode by `npm run demo:e2e`. In
-connect mode it sends the `Stripe-Account` header, but that has not been proven against Stripe.
-
-*Acceptance*
-
-- In `connect` mode, a direct charge on the connected account, proven in Stripe test mode, and `expireLink` on the connected account.
-- How Apple Pay, Google Pay and Link map to Checkout's parameters is proven in test mode, not assumed.
-- Connect-mode events come from the Connect endpoint, with its own signing secret, carry the connected account, and settle the payment end to end with a real test-mode event.
-
-*Files:* `examples/reference-server/src/stripe-adapters.ts`, `examples/reference-server/src/main.ts`  
-*Tests:* test/stripe-adapters.test.ts against a local fake; A recorded manual run in Stripe test mode in the pull request  
-*Depends on:* none
+mode in both modes (`npm run demo:e2e`, `test/stripe-real.test.ts`).
 
 #### **PAY-4** Saved-card charges for level 2 callers (gated)
 
@@ -237,7 +210,7 @@ Some buyers will need it; it must never route tones through this engine.
 | Ledger export (PRV-4) | `src/prove/export.ts` | signed NDJSON runs that resume by cursor, tamper detected (`test/prove.test.ts`, `test/ledger-export-hostile.test.ts`) |
 | More redactors (PRV-6) | `src/core/redaction.ts` | SIN, health card and bank account numbers over the shared corpus (`test/redaction.test.ts`, `test/redaction-more-hostile.test.ts`) |
 | Subject requests (PRV-7) | `src/prove/subject.ts` | a signed export and an erasure that keeps the ledger whole (ADR-28) (`test/prove-subject.test.ts`, `test/subject-requests-hostile.test.ts`) |
-| Monthly reports (PRV-8), a public timestamp anchor (PRV-9), receipt links by text (PRV-10) | `src/prove/report.ts`, `src/prove/anchor.ts`, `src/prove/trace.ts` | `test/prove-report.test.ts`, `test/prove-anchor.test.ts`, `test/prove-receipt-text.test.ts` |
+| Monthly reports (PRV-8), a public timestamp anchor (PRV-9), receipt links by text (PRV-10) | `src/prove/report.ts`, `src/prove/anchor.ts`, `src/prove/trace.ts` | `test/prove-report.test.ts`, `test/prove-anchor.test.ts` and `test/prove-anchor-real.test.ts` (DigiCert's TSA and Sigstore's Rekor v2, recorded), `test/prove-receipt-text.test.ts` |
 
 ### M8. Reference server hardening
 
@@ -281,11 +254,7 @@ before the manual publish.
 | JSON Schema for FlowConfig (MOD-2) | `schema/flow-config.v1.json` | every config `validateConfig` accepts passes the schema (`test/config-schema.test.ts`) |
 | Factors added after construction (MOD-3) | `src/engine.ts`, `src/verify/badge.ts` | `engine.useFactor` and modules that provide factors (`test/factor-plugins-hostile.test.ts`, `test/pin.test.ts`) |
 | Flow simulator (MOD-4) | `src/cli/simulate.ts` | scripted callers on the fakes (`test/simulate.test.ts`) |
-
-Open on GitHub and not written out here:
-[#134](https://github.com/distronode-corporation/district-assurance/issues/134), simulator callers
-for `gate.grant`, `step-up.issue`, callbacks, texted codes and spoken answers. A flow with one of
-those steps stops there with exit code 3 today (SPEC.md section 28).
+| Simulator callers for every built-in step (#134) | `src/cli/simulate.ts` | Gate, step-up, callback, texted code and spoken answers (`test/simulate-all-steps.test.ts`) |
 
 ## Not planned
 

@@ -26,11 +26,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15, windows-2025]
-        # "24.2" is the floor `engines` names (the first Node 24 with import.meta.main, which the
-        # demo uses); 24 is the latest of the line. 3 systems x 2 = 6 jobs.
-        node: ["24.2", 24]
+        # "24.19" is the floor `engines` names (the first Node 24 where crypto.argon2 is stable,
+        # which PIN records use, ADR-29); 24 is the latest of the line. 3 systems x 2 = 6 jobs.
+        node: ["24.19", 24]
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -403,8 +403,9 @@ longer than the window); `MemoryCodeStore` is the reference.
   is compared. An answer that is not 64 lower-case hex is refused with `invalid_input`, whose
   message never quotes it. A function that throws or rejects fails closed: no factor, the attempt
   counted, the error passed to the host (below). `subjectKeyFor`, `knowledgeDigest`, `pinDigest`
-  and `judgeKeypadFactors` take either form and give the same digests for the same key: at once
-  for bytes, as a `Promise` for a function.
+  and `judgeKeypadFactors` take either form and give the same digests for the same key (a
+  `pinDigest` record is salted, so a new one each time, which checks the same): at once for
+  bytes, as a `Promise` for a function.
 - Subject key: `HMAC-SHA256(knowledgeKey, "subject:" + accountNumber)`, hex. A host may instead
   start verification with a subject key its own code chose (`{subjectKey}`, a string of 64
   lower-case hex, read once; anything else is `invalid_input`); choosing the subject is not a
@@ -495,13 +496,30 @@ the duress PIN is off unless it is set.
 
 - An entry is well formed when it is ASCII digits with a length from `minDigits` to `maxDigits`.
   A malformed entry is still an attempt, and fails.
-- `keyed_hash` mode: the stored digest is `pinDigest(knowledgeKey, subjectKey, pin)` =
-  `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)`, in `SubjectRecord.pinDigest`,
-  read from the `RecordStore` on every attempt; the call record's copy of the subject never holds
-  it, so a reset, an enrolment, an erasure (section 26) or any other change since verification
-  began counts at once. The entry is hashed the same way and compared in constant time; an
-  unknown subject, a subject without a digest and a malformed entry do the same work and give the
-  same answer.
+- `keyed_hash` mode: the stored record is `pinDigest(knowledgeKey, subjectKey, pin)`, Argon2id
+  over the keyed PIN `HMAC-SHA256(knowledgeKey, "pin:" + subjectKey + ":" + pin)` (ADR-29), in
+  `SubjectRecord.pinDigest`, read from the `RecordStore` on every attempt; the call record's copy
+  of the subject never holds it, so a reset, an enrolment, an erasure (section 26) or any other
+  change since verification began counts at once. The entry is keyed the same way, run through
+  Argon2id with the record's salt and parameters, and the tag compared in constant time; an
+  unknown subject, a subject without a record and a malformed entry do the same work (one
+  Argon2id run at today's cost on a stand-in) and give the same answer.
+- PIN records (ADR-29): `$pin1$argon2id$v=19$m=<KiB>,t=<passes>,p=<lanes>$<salt>$<tag>`, with
+  `node:crypto`'s Argon2id (RFC 9106) over the 32 bytes of the keyed PIN, a random 16-byte salt and
+  a 32-byte tag, both in unpadded base64. A new record costs `m=19456,t=2,p=1` (19 MiB, 2 passes,
+  1 lane). A record is read strictly: another algorithm or version, a number or base64 spelled
+  another way, or a parameter below `m=19456,t=2,p=1` (a downgrade) or above
+  `m=262144,t=16,p=8` (a cost no check should pay, refused before any run) never matches, and a
+  changed parameter, salt or tag gives another tag, which never matches. A record of the earlier
+  format, the bare 64-hex keyed PIN, still matches in constant time; on a match (`pass`, or
+  `duress` for a duress record) the PIN factor replaces it with a new Argon2id record through
+  `RecordStore.upgradePinDigest(workspaceId, subjectKey, field, from, to)`, which writes only while
+  the field is still `from`, in one atomic step; a miss, a lock or a lost race changes nothing, and
+  the answer to the caller is the same either way. The upgrade is best effort, and the entry keeps its outcome
+  whatever happens to it. As far as the upgrade goes, a failed hash, or a write that fails before
+  it commits, leaves the earlier record, and a write that commits and then errors (a lost
+  acknowledgement) leaves the Argon2id one. A reset or an enrolment meanwhile wins, since the
+  upgrade writes only over the value it read; the next match checks whatever is on file. Lockouts and counters are unchanged.
 - `verifier` mode: the host's `PinVerifier.verify({workspaceId, subjectKey, pin})` decides; the
   PIN is passed once and kept nowhere. It is asked for every attempt: for a malformed entry or an
   account a keypad cannot produce, with a stand-in (`minDigits` zeros, an HMAC subject key) whose
@@ -528,7 +546,8 @@ the duress PIN is off unless it is set.
   up to `maxAttemptsPerCall`; after that it answers `{enrolled: false, reason: "locked"}` without
   judging. The subject is read from the `RecordStore`; one not on file, or one that already has a
   PIN, is refused (`precondition_failed`): only the business changes a PIN on file. Both entries
-  are hashed as `pinDigest` and compared in constant time. Answers: `malformed` (either entry is
+  are keyed as `pin:` digests and compared in constant time, and the digest stored is a new
+  Argon2id record of it. Answers: `malformed` (either entry is
   not digits of a length from `minDigits` to `maxDigits`), `mismatch`, `weak` (every digit the
   same, a run up or down with 0 following 9, as in 1234, 4321 or 7890, or a PIN equal to the
   subject's account number or any keypad knowledge on file, compared as keyed hashes; `weak` does
@@ -776,22 +795,23 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   from `minDigits` to `maxDigits`), `weak` (equal to the PIN on file, the account number or any
   keypad knowledge, compared as keyed hashes; every digit the same; a run; `weak` does not say
   which), or `{enrolled: true}` once `RecordStore.putDuressDigest(workspaceId, subjectKey, digest,
-  ifPinDigest)` stored `duressDigest(knowledgeKey, subjectKey, pin)` = `HMAC-SHA256(knowledgeKey,
-  "duress:" + subjectKey + ":" + pin)`, in `SubjectRecord.duressDigest`. The store writes it only
+  ifPinDigest)` stored `duressDigest(knowledgeKey, subjectKey, pin)`, the Argon2id record (ADR-29)
+  of `HMAC-SHA256(knowledgeKey, "duress:" + subjectKey + ":" + pin)`, in
+  `SubjectRecord.duressDigest`. The store writes it only
   while the subject's PIN digest is still the one it was checked against, atomically, and answers
   whether it did; when not (a reset and a new PIN meanwhile) `enrolDuressPin` throws `conflict` and
   nothing is stored. A second enrolment replaces it. `removeDuressPin(subjectKey)` removes it (same
   checks, except `pin.duress` may be off). Neither writes to the ledger. `enrolPin` answers `weak`
   for a PIN equal to a duress PIN on file.
-- Judging: in `keyed_hash` mode every PIN entry is hashed as both a PIN and a duress PIN and
-  compared with both digests (an empty one when none is on file), whatever the subject, the entry or
-  the setting, so the work and the time are the same. Both digests are read from the store on every
+- Judging: in `keyed_hash` mode every PIN entry is keyed as both a PIN and a duress PIN and
+  checked against both records at once, two Argon2id runs (each on a stand-in when no record is on
+  file), whatever the subject, the entry or the setting, so the work and the time are the same. Both digests are read from the store on every
   entry, never from the call's copy, so a duress PIN removed, or a PIN reset (which removes both),
   counts even on a call that began verification before it. In `verifier` mode `PinVerifier.verify`
   may answer `{duress: true}`, and `matched` is then ignored. A duress match counts only on a
   subject on file, with a well-formed entry, while `pin.duress` is set; otherwise it fails like a
   wrong PIN. An entry that matches both the PIN and the duress PIN (a subject imported with the two
-  PINs equal), in either mode, and in `keyed_hash` mode any entry on a subject whose two digests are
+  PINs equal), in either mode, and in `keyed_hash` mode any entry on a subject whose two records are
   byte for byte equal, fail like a wrong PIN, with no alarm: in `verifier` mode, an answer
   `{matched: true, duress: true}` fails.
 - A duress entry is a pass everywhere the caller can reach: the same `submitPin` answer, the same
@@ -1043,6 +1063,7 @@ answer on file, a phone number, a link or card data.
 | `payment.outcome_ignored` | `paymentId`, `reason` (`account`): an outcome from another account |
 | `payment.settled` | `paymentId`, `status`, and `late: true` for a payment made after the engine closed its link |
 | `payment.refunded` | `paymentId`, `refundId`, `providerRef`, `amountMinor`, `currency`, `reason`, `status` (`pending`, `succeeded` or `failed`) |
+| `payment.refund_updated` | `paymentId`, `refundId`, `providerRef`, `amountMinor`, `currency`, `status` (`succeeded` or `failed`): a refund's later outcome at the provider |
 | `payment.disputed` | `paymentId`, `disputeId`, `status`, `amountMinor`, `currency` |
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
 | `consent.revoked` | `consentId`, `purpose`, `wordingVersion`, `via` (`call`, `text` or `web`) |
@@ -1081,6 +1102,27 @@ consent can be revoked after its call: its `eventId` is `[workspaceId, callId, "
 consentId]`, so a consent is revoked in the ledger once (section 21). The others (the member
 actions of section 6, `access.code_spent`, `ledger.anchored`, the subject erasure entries) are
 described where they are written.
+
+**Removing a call record.** A host removes a call record only through `removeCall(callId)`, never
+in its session store directly: the store's optional `remove(workspaceId, callId, expectedVersion)`
+removes only the version the engine checked, with its pending mark, and keeps the id so it is never
+created again (`startCall` refuses it): its ledger event ids are spent. `removeCall` is refused
+(`precondition_failed`) for a call that has not ended, for one that still owes a duress alert or a
+contact notice (`sweepAlerts` sends it), for one that still owes its receipt (a signing that failed
+after the call ended; `endCall` signs it), for one with a refund of its payment not yet final (in
+flight, with the provider's answer still on its way, which `refundPayment` resumes, or `pending` at
+the provider, which its update settles), for one with a payment link still open (one `endCall`
+could not close at the provider, which `endCall` closes when called again), for one with a filed record whose confirmed mark it could
+not make (the call keeps the marks it owes in `marksOwed` until the record store has them), and for
+one whose outbox still holds entries after it tried to flush them (the ledger refused them): the record is kept, and `flushPending` keeps
+listing it, until they are appended, so no pending entry (a `consent.recorded` written while the
+ledger was down) is ever lost with its record. A write that lands before the removal is read
+again, up to three times (`conflict` after that); an unknown call is `unknown_call`, and a store
+without `remove` is `precondition_failed`. It answers `{removed: true}`. A `succeeded` refund can
+still fail later at the provider, with no bound on when, so it does not hold the record: its late
+failure is recorded only while the host keeps the call record, and once the record is removed the
+update is refused (`unknown_call`). A host that wants late failures recorded keeps call records
+with refunds for as long as its provider can report one.
 
 `flushPending(limit = 100)` is the background flush a host schedules (for example every minute, in
 any process): it asks the store's `pendingCalls` for up to `limit` calls and flushes each in turn,
@@ -1130,8 +1172,9 @@ and eventIds that differ only in a lone surrogate are distinct), a detail carryi
 refused with nothing stored, and concurrent appends stay one valid chain.
 `recordStoreContract(factory)` is the suite a `RecordStore` must pass: subjects (seeded by the
 factory, since the engine only reads them) and intake records are copied in and out, workspaces
-never share a key, keys that differ only in a lone surrogate stay apart, and `putIntakeRecord` is
-idempotent by `recordId`, also concurrently. `MemoryAuditLedger` and `MemoryRecordStore` pass both.
+never share a key, keys that differ only in a lone surrogate stay apart, `putIntakeRecord` is
+idempotent by `recordId`, also concurrently, and the confirmed flag is kept beside each record
+(below). `MemoryAuditLedger` and `MemoryRecordStore` pass both.
 
 The reference server has optional SQLite stores on `node:sqlite` (SRV-4,
 `examples/reference-server/src/sqlite-stores.ts`; no dependency). `SqliteAuditLedger` keeps each
@@ -1240,6 +1283,22 @@ that fixes in time that the ledger was still there, unchanged, and each grows th
   nothing to the public log. Both read at most `maxReplyBytes` of a reply (default
   `MAX_REPLY_BYTES`, 256 KiB), cancel the rest and refuse it, and refuse an error answer without
   reading its body.
+- Proven against real services, once, and replayed offline. `test/fixtures/anchor/record-real.ts`
+  anchored a throwaway ledger (two test calls, no real data) through `anchorLedger()` and
+  `RekorAnchor`, with DigiCert's public RFC 3161 time-stamp authority
+  (`http://timestamp.digicert.com`) and Sigstore's public-good Rekor v2 log
+  (`https://log2025-1.rekor.sigstore.dev`, origin `log2025-1.rekor.sigstore.dev`, its Ed25519 key
+  from Sigstore's TUF-distributed `trusted_root.json`). The answers are kept in
+  `test/fixtures/anchor/real/`, and `test/prove-anchor-real.test.ts` checks them with no network:
+  the token's signature, its SigningCertificate and SigningCertificateV2 (DigiCert signs both),
+  the chain to DigiCert Trusted Root G4 and the message imprint; the entry's signature, its
+  inclusion proof and the log's signed checkpoint (the witnesses' cosignatures are left aside).
+  Certificates are checked at the token's time, never the clock's, so the recorded anchor keeps
+  verifying after DigiCert's certificates expire (the test runs it with the clock at 2040). The
+  recorded TimeStampResp carries three certificates, including a cross-signed copy of the root;
+  as for any token, `verifyAnchor` ignores them and uses the chain the host supplies. The synthetic
+  fixtures (`record.ts`, a throwaway authority and log) stay for the failure paths a real service
+  will not produce on demand.
 
 ### Export
 
@@ -1405,7 +1464,7 @@ anyone holding the key could have signed it.
 
 ### Checking a receipt without this package
 
-`scripts/verify-receipt.mjs` is one file with no dependencies beyond Node 24.2 or later; it can be
+`scripts/verify-receipt.mjs` is one file with no dependencies beyond Node 24.19 or later; it can be
 copied out of the repository on its own. It takes a receipt (a file, or `-` for standard input) and
 a key set (a file, or a URL), and repeats only what a verifier needs: the canonical JSON of
 section 11 and ES256 over it.
@@ -1632,7 +1691,19 @@ none had. A resume needs `intake.file` again, as a first confirmation does: refu
 deletes the record by id first (`RecordStore.deleteIntakeRecords`, which also makes a later write
 of that id store nothing), then drops the draft, so the call can end; a confirmation whose write
 was in flight then fails (`precondition_failed`) and files nothing. A confirmation retried after
-its record was filed (its ledger entry failed) returns the same record. `endCall` is refused while
+its record was filed (its ledger entry failed) returns the same record.
+
+**The confirmed flag.** A record is stored unconfirmed (`putIntakeRecord`); once the write that
+files it on the call commits, the engine marks it with `RecordStore.confirmIntakeRecord(workspaceId,
+recordId)` (idempotent; it marks nothing for an id the store does not hold, never written or
+deleted), and `isIntakeRecordConfirmed(workspaceId, recordId)` reads the mark. The mark is kept
+beside the record, never in it. `deliverRecord`, `exportSubject` and `createUploadLink` read only
+marked records: a row no confirmation committed (one a refusal after the write left behind when its
+delete failed) is never delivered, exported or given an upload link, and an erasure still deletes
+it. The call keeps each mark it owes until the store has it, so a mark lost to a failed store or a
+failed ledger append after the commit is made by a confirmation asked again, which returns the same
+record, or by `removeCall` before the call record goes. `getIntakeRecord` and `listIntakeRecords` return records
+whether marked or not. `endCall` is refused while
 a record is being filed. Provider idempotency keys are JSON tuples of the workspace, the call and the
 operation, so workspaces sharing an adapter never share a key. A flow attached to a running call
 is refused when a step needs a form or a wording the call did not keep.
@@ -1796,9 +1867,26 @@ lost answer (`precondition_failed`): nothing is recorded or ledgered, the refund
 and while an adapter keeps answering that way every later refund of the payment is blocked, since
 one is in flight at a time. A refund the provider made is learned once the adapter answers
 properly. A `pending` refund counts as pending, toward the total, until a provider update for it
-arrives, and the engine has no path for those updates yet: the payments webhook does not apply
-Stripe's `charge.refund.updated` or `refund.updated` (#117). So a pending refund that later fails at
-the provider still counts, and the business refunds the rest by hand at the provider.
+arrives.
+
+**Refund updates (platform mode).** `applyRefundOutcome({providerRef, paymentIntentId, status,
+amountMinor, currency, account?})` applies a verified refund update (Stripe's `refund.updated`,
+`refund.failed` and `charge.refund.updated`; `parseStripeEvent` gives them as `kind: "refund"`, and
+the reference server applies them on its payments endpoint only). It finds the payment by its bound
+payment intent and the refund by the provider's refund id the engine recorded (`providerRef`). A
+`pending` refund moves to `succeeded` or to `failed` (Stripe's `failed` or `canceled`), and a
+`succeeded` one can still move to `failed` (Stripe documents card refunds that fail after
+succeeding), each written as `payment.refund_updated`; a failed one stops counting toward the
+refunded total, so the business can refund that amount again with the next sequence number. A
+`failed` refund is final, and an update that changes nothing (`pending`, `requires_action`, a
+repeat, a succeeded refund going back) writes nothing.
+It answers `{applied: true, callId, status}`, `{applied: false}` for an update with no payment
+intent, a refund the engine did not make (made by hand at the provider), or one whose amount or
+currency differs from what the engine asked, and `{applied: false, unbound: true}` while the payment
+intent is not bound or the engine's own answer for a refund of that payment is still on its way, so
+the host has the event delivered again. A connected account's event is ignored and written down
+(`payment.outcome_ignored`); one whose payment intent is not bound is acknowledged with
+`{applied: false}`, never asked for again. Works after the call ended; the receipt is never changed.
 
 A platform payment paid late (after the engine closed its link) keeps its payment intent too, so
 its disputes and refunds land like any other's.
@@ -1884,9 +1972,11 @@ session's `payment_intent` when it is a string) and
 `charge.dispute.{created,updated,closed,funds_withdrawn,funds_reinstated}` (the dispute id,
 `charge`, `payment_intent` or null, `status`, `amount` and `currency`, and the event's `created` as
 `occurredAt`; never its evidence; a `created` that is present but not Unix seconds, or past what a
-JavaScript `Date` holds, makes the body malformed); other types are reported as ignored, and a body
+JavaScript `Date` holds, makes the body malformed), and `refund.updated`, `refund.failed` and
+`charge.refund.updated` (the refund id as `providerRef`, `payment_intent` or null, `status`, `amount`
+and `currency`; never its failure reason; `refund.created` is ignored); other types are reported as ignored, and a body
 that is not a well-formed event is `null`, including one whose `account` is present but not a string
-(never read as "no account"). The reference server applies dispute events from the platform's
+(never read as "no account"). The reference server applies dispute and refund events from the platform's
 payments endpoint only. `applyPaymentOutcome` answers `{applied: false, unbound: true}` for a link
 no call holds yet (its reference may still be being bound when the provider's event arrives); the
 reference server answers 503 for it and does not remember the event, as for an unbound dispute, so
@@ -1912,6 +2002,26 @@ Requests time out after 10 seconds (`timeoutMs`, a whole number from 1 to 60,000
 redirect. An `apiBase` option must be `https:`, or `http:` on a loopback host (`127.0.0.1`,
 `localhost`, `[::1]`) only, with no credentials in it; anything else, and a bad `timeoutMs`, throws
 in the constructor, never quoting the value.
+
+The reference server's `StripeCheckoutLinks` (an example, not part of the package) is a
+`PaymentLinks` adapter for Stripe Checkout in test mode only (a secret test key, `sk_test_`), with
+`capabilities` `{ modes: ["platform", "connect"], minLinkMinutes: 30, maxLinkMinutes: 1440 }`.
+`createLink` sends one `POST /v1/checkout/sessions` in payment mode with the engine's amount,
+currency, description, `expires_at` (the engine's `expiresAt`), the payment id as
+`client_reference_id` and in metadata, and the call id in metadata. In `platform` mode it is made on
+the platform's own account and the request must name no connected account. In `connect` mode it is
+a direct charge on the business's connected account: the `Stripe-Account` header carrying the
+request's `connectedAccountId`, which must be `acct_` and 1 to 255 letters and digits, and nothing
+else (no `on_behalf_of` or `transfer_data`, which make a destination charge with the platform as
+the merchant). `expireLink` and `readLink` send the same header for a connected account. Either
+refusal is a `TypeError` thrown before anything is sent. The engine's methods map to Checkout's
+`payment_method_types` as Stripe answers them: `card` as `card`, `apple_pay` and `google_pay` as
+`card` (Checkout shows the wallets under it; Stripe refuses them as types), `link` as `link`, which
+Checkout takes only beside `card`, so a request offering Link alone is refused before anything is
+sent. Stripe's `checkout.session.completed` for a connect payment comes to the Connect endpoint,
+names the connected account (`account`), and settles the payment there only. These answers were
+recorded once in Stripe test mode and are replayed offline by `test/stripe-real.test.ts`, with the
+Identity run above.
 
 ## 16. Texts
 
@@ -2497,7 +2607,8 @@ is refused (`invalid_transition`). Without the adapter, consents live on the cal
 not have for this workspace (`invalid_input`), a consent answered "no", and a consent that is not
 recorded on its call, still being stored or settled as not recorded (`precondition_failed`). So
 that `consent.revoked` never precedes `consent.recorded`, it appends the call's pending ledger
-entries first. When the host has removed the call record, the revocation is still stored (a yes
+entries first. A record removed through `removeCall` had its entries appended first, so its
+`consent.recorded` is on the ledger. When the host has removed the call record, the revocation is still stored (a yes
 in the store never outlives the caller's no) and `consent.revoked` is always appended; when this
 workspace's ledger holds no `consent.recorded` entry for the consent (read page by page), its detail
 adds `priorRecord: false`. Otherwise it
@@ -2518,7 +2629,8 @@ each.
 ## 22. Record delivery
 
 `deliverRecord({ workspaceId, recordId, destination, records, delivery, ledger, clock, sleep?,
-retry? })` posts a confirmed record, read from the `RecordStore`, to one destination through the
+retry? })` posts a confirmed record, read from the `RecordStore` (one not marked confirmed is
+`invalid_input`, never sent), to one destination through the
 host's `RecordDelivery` adapter, which makes one HTTP request per call and never retries itself.
 It is a library call the host makes after `confirmIntake` (for example from a job queue), not a
 flow step. A destination is `{ destinationId, url, secret }` from the host's own configuration:
@@ -2730,7 +2842,7 @@ the reservation is refused with `conflict`, to be confirmed again.
 }
 ```
 
-- `intakeRecords` are the subject's, values included; `pinDigestOnFile` says whether a digest is
+- `intakeRecords` are the subject's records marked confirmed, values included; `pinDigestOnFile` says whether a digest is
   on file, never the digest.
 - `calls` are the calls those records name. `consents` and `receipts` are the ones those call
   records hold (a call record that is gone is skipped), so a consent recorded on a call that filed
@@ -2826,26 +2938,34 @@ is `src/cli/simulate.ts`.
   or when `validateConfig` finds a problem; an outside module listed with `enabled: false` is left
   out. A flow the config does not have, or a script that is neither built in nor a valid file, is
   refused the same way. Bad arguments print the usage and exit 2. A flow that ran exits 0, whether
-  it completed or failed. A step the simulator has no scripted caller for (a type another module
-  adds, a Gate or a step-up step: only `badge.verify`, `dossier.collect`, `paylink.request` and
-  `trace.consent` have one) prints `step <type> is not simulated`, and a `badge.verify` step that lists
-  a factor other than `keypad_knowledge`, `pin`, `carrier_identity_match` or `photo_id` prints
-  `step badge.verify factor <kind> is not simulated`; either way the call ends there and the run
-  exits 3, never guessing or skipping part of the step.
+  it completed or failed. Every built-in step type and factor has a scripted caller. A step the
+  simulator has no caller for (a type another module adds) prints `step <type> is not simulated`,
+  and a `badge.verify` step that lists a factor plug-in prints `step badge.verify factor <kind> is
+  not simulated`; either way the call ends there and the run exits 3, never guessing or skipping
+  part of the step.
 - The caller is made up: one subject on file with a 555 number, an answer for every keypad field
-  and a PIN of `minDigits` digits. It acts on whatever step the flow is on: at `badge.verify` it
-  keys the account number, then each factor the step lists (keypad answers, the PIN, the carrier
-  check, the photo ID link), then waits for the result; at `dossier.collect` it answers every field
-  of the step's form with a sample value (a text answer cut to the field's `maxLength`) and
-  confirms; at `paylink.request` it asks to pay and the provider reports the script's outcomes; at
-  `trace.consent` it answers. A refusal by the engine is printed and the caller goes on. After the
+  and every spoken field (a value of the field's format) and a PIN of `minDigits` digits. It acts on
+  whatever step the flow is on: at `badge.verify` it keys the account number, then each factor the
+  step lists (keypad answers, the PIN, spoken answers, the carrier check, a texted code it asks for
+  and keys, the photo ID link), then waits for the result. With `callback`, it asks to be called
+  back once it has keyed: that call ends, whoever answers on the number on file keys the
+  confirmation or not, and the caller goes on on the callback call (`call: the callback call
+  <id>`), keying its entered factors again, right, for the rest of the flow. At `dossier.collect` it
+  answers every field of the step's form with a sample value (a text answer cut to the field's
+  `maxLength`) and confirms; at `paylink.request` it asks to pay and the provider reports the
+  script's outcomes; at `trace.consent` it answers; at `gate.grant` the fake door, which answers as
+  every controller the config's Gate targets name, opens or refuses; at `step-up.issue` it keys a
+  sign-in code and the website exchanges the token, with the site's audience. A refusal by the engine is printed and the caller goes on. After the
   last step the call ends, abandoning a flow still running, and `flow: <status>` gives the status
   once the call has ended.
-- A script is `{summary, wrongKeypad, wrongPins, carrier, photoId, consent, payment}`: wrong keypad
+- A script is `{summary, wrongKeypad, wrongPins, carrier, photoId, consent, payment, textCode,
+  spoken, callback, door}`: wrong keypad
   answers and wrong PINs before the right ones (0 to 5; after each wrong entry the caller waits out
   the wait Badge's `lockout` setting gives for the failures so far, and stops once locked out), the
   carrier's `identityMatch`, the photo ID outcome, the consent answer, and the payment outcome
-  (`paid`; `paid_later`, completed unpaid then the asynchronous success; `failed`; `expired`). A
+  (`paid`; `paid_later`, completed unpaid then the asynchronous success; `failed`; `expired`), the
+texted code keyed (`right` or `wrong`), how spoken answers are heard (`right` or `wrong`), the
+callback (`confirmed` or `not_confirmed`) and the door (`opens` or `refuses`). A
   script file is a JSON object with any of these fields, checked field by field; the rest come from
   `pass`. Built in:
 
@@ -2857,12 +2977,16 @@ is `src/cli/simulate.ts`.
 | `consent-no` | as `pass`, consent no |
 | `payment-paid` | as `pass`, paid later: completed unpaid, then the asynchronous success |
 | `payment-expired` | as `pass`, the link expires |
+| `text-code-wrong` | as `pass`, a wrong texted code |
+| `spoken-wrong` | as `pass`, spoken answers heard as another value |
+| `callback-not-confirmed` | as `pass`, the callback answered without the confirmation |
+| `door-refused` | as `pass`, the door's controller refuses the unlock |
 
 Output, one line each: the headings `simulate:`, `script:`, `call:`, `step <n>/<count>: <type>
 <fields>`, `flow: <status>` and `receipt:`; `  caller:` what the caller does, then `  decision:` the
 engine's answer or `  refused:` its refusal; `    event <name> (<actor>) <detail>` for every ledger
 entry, as it is appended. Then the signed receipt as JSON, checked against the engine's key set, or
-`receipt: none`. Nothing the caller keys is printed: events carry no values (section 9) and
+`receipt: none`. Nothing the caller keys or says is printed (no texted code, sign-in code or transcript either): events carry no values (section 9) and
 decisions say right or wrong, never the digits. A config and a script file are someone else's
 text, so every line, on standard output and standard error, writes C0 and C1 control characters
 and bidi controls and marks as `\u` escapes (`terminalSafe`): a file can never move the cursor,

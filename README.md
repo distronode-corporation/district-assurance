@@ -1,5 +1,10 @@
 # district-assurance
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/distronode-corporation/district-assurance/badge)](https://scorecard.dev/viewer/?uri=github.com/distronode-corporation/district-assurance)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16957/badge)](https://www.bestpractices.dev/projects/16957)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/distronode-corporation/district-assurance/blob/main/LICENSE)
+[![CI](https://github.com/distronode-corporation/district-assurance/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/distronode-corporation/district-assurance/actions/workflows/ci.yml?query=branch%3Amain)
+
 The engine behind District Assurance: TypeScript code that lets an automated phone line be trusted
 with sensitive work. It checks who is calling, files what the caller confirms, takes payment
 without ever touching a card number, and proves each step afterwards with a hash-chained audit
@@ -24,7 +29,7 @@ can be turned on, turned off, added and removed per workspace config.
 |---|---|---|
 | **Badge** (verify) | Who is calling, in levels. Factors are plug-ins: a PIN (against a keyed hash, or the host's own PIN store), keypad knowledge checked against the organisation's records, spoken answers, a texted code, a callback to the number on file, carrier signals on that number, a photo ID plus selfie by a texted link, and any factor a host adds. A flow can use a PIN only or all of them. | Built on fakes, with lockouts across calls per subject and per calling number, PIN enrolment and an optional duress PIN, and Stripe Identity, Twilio Lookup and Telnyx Number Lookup adapters in the reference server. |
 | **Dossier** (file) | Intake the caller confirms: forms the organisation defines, values normalised by code and read back before filing, a structured record with a fingerprint, encrypted sensitive fields, delivery to the organisation and documents by texted link. | Built. |
-| **Paylink** (pay) | Payment by a secure link texted to the number on file (a hosted page such as Stripe Checkout), on the business's own account (`connect`) or the platform's (`platform`), chosen per flow, for an amount the flow or the host's code sets and the caller hears read back. Only methods that settle during the call; the link lives 15 minutes after it is texted by default, and the host calls `expirePaymentLinks` at that deadline (a timer or a sweep) so the engine expires it. The engine never handles card numbers. | Built on fakes, both modes, with refunds and disputes in platform mode, and a minimal Stripe Checkout adapter in the reference server's `npm run demo:e2e`. Charging a saved card (PAY-4) and keypad card capture (PAY-6) are planned. |
+| **Paylink** (pay) | Payment by a secure link texted to the number on file (a hosted page such as Stripe Checkout), on the business's own account (`connect`) or the platform's (`platform`), chosen per flow, for an amount the flow or the host's code sets and the caller hears read back. Only methods that settle during the call; the link lives 15 minutes after it is texted by default, and the host calls `expirePaymentLinks` at that deadline (a timer or a sweep) so the engine expires it. The engine never handles card numbers. | Built on fakes, both modes, with refunds and disputes in platform mode, and a Stripe Checkout adapter in the reference server for both modes, proven in Stripe test mode (`npm run demo:e2e`, and recorded runs replayed in `test/stripe-real.test.ts`). Charging a saved card (PAY-4) and keypad card capture (PAY-6) are planned. |
 | **Trace** (prove) | The hash-chained audit ledger, which is always on and cannot be turned off, plus optional signed receipts (ES256 over canonical JSON) and consent records with fingerprinted wording. | Built, in memory, with receipt key rotation, consent revocation through a host `ConsentStore`, ledger export, public timestamp anchors, monthly reports, and access and deletion requests for one subject. |
 | **Gate** (entry) | The outcome after verification: a signed, time-limited access grant for a door, never sent twice, whose outcome the engine itself records from the door controller's answer, or a one-time access code texted to the number on file. | Built, with the signed-webhook relay, Seam, Kisi and Verkada adapters, one-time access codes and a fake. |
 | **Step-up** (entry) | Web sign-in step-up: a short-lived ES256 token, bound to the nonce a site showed, that the site exchanges once after the caller is verified. | Built. |
@@ -83,7 +88,7 @@ config without them, or with a target naming a controller the engine does not ha
 
 ## Try it
 
-Node.js 24.2 or later. The only dependencies are five development tools.
+Node.js 24.19 or later. The only dependencies are five development tools.
 
 ```sh
 npm ci
@@ -99,12 +104,13 @@ npm run simulate -- config.json --flow deposit --script pass   # one flow of you
 `npm run simulate` (the `district-assurance simulate` command once the package is published) runs
 one flow of a FlowConfig file with a scripted caller on the in-memory adapters, and prints each
 step, each decision, every event and the final receipt. Built-in scripts: `pass`, `wrong-pin`,
-`lockout`, `consent-no`, `payment-paid` and `payment-expired`, or a JSON file of your own. A
+`lockout`, `consent-no`, `payment-paid`, `payment-expired`, `text-code-wrong`, `spoken-wrong`,
+`callback-not-confirmed` and `door-refused`, or a JSON file of your own. A
 config with any problem, or one that turns on an outside module, is refused with every reason
 ([SPEC.md](SPEC.md), section 28). Exit codes: 0 the flow ran, whatever its outcome; 1 a refused
 config, flow or script; 2 bad usage; 3 a valid config whose flow reached a step the simulator has
-no scripted caller for (a Gate step, a step an outside module adds, or a `badge.verify` step with a
-factor other than `keypad_knowledge`, `pin`, `carrier_identity_match` or `photo_id`). Exit 3 is not
+no scripted caller for (a step an outside module adds, or a `badge.verify` step with a factor
+plug-in): every built-in step type and factor has one. Exit 3 is not
 a refusal: the run stops at that step, ends the call and prints what it did up to there.
 
 The demo runs `owner-command` first: the owner of a line keys a PIN, on two engines that share one
@@ -236,6 +242,13 @@ single-use link. To see a photo ID check go from the engine to Stripe and back:
 The server refuses a live key or a secret key: use a restricted test-mode key only, and never
 commit it; the server reads it from the environment. Without `STRIPE_IDENTITY_KEY`, everything
 runs on fakes.
+
+The same trial call, and paid Checkout links in both payment modes, were recorded once in
+Stripe test mode and are replayed offline by `test/stripe-real.test.ts` (recorder:
+`test/fixtures/stripe-real/record.ts`, run by hand; every Stripe id in the files is redacted). The
+recording did not use a restricted key: its loopback proxy sent the account's secret test key in
+its place (a restricted key is made only in the Dashboard), so it proves the requests and Stripe's
+answers, not a restricted key's permissions.
 
 ## Design rules
 

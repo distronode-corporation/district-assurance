@@ -193,9 +193,13 @@ export interface SubjectRecord {
   phoneOnFile: string;
   /** Field name to the HMAC of its value (`knowledgeDigest`). */
   knowledge: Record<string, string>;
-  /** The HMAC of the subject's PIN (`pinDigest`), for the PIN factor in `keyed_hash` mode. */
+  /**
+   * The record of the subject's PIN (`pinDigest`), for the PIN factor in `keyed_hash` mode: Argon2id
+   * over the keyed HMAC, its parameters and salt in the string (ADR-29). A bare 64-hex HMAC of the
+   * earlier format still verifies, and is replaced on the next match.
+   */
   pinDigest?: string;
-  /** The HMAC of the subject's duress PIN (`duressDigest`), set only by the business (VER-12). */
+  /** The record of the subject's duress PIN (`duressDigest`), the same format, set only by the business (VER-12). */
   duressDigest?: string;
   /**
    * Which enrolment stored `pinDigest` (VER-6): written with it by `putPinDigest`, so a call
@@ -348,7 +352,7 @@ export interface WriteHint {
  * `sessionStoreContract` in `district-assurance/testing` is the suite a durable one must pass.
  */
 export interface SessionStore {
-  /** Stores a new session at version 1. False, and nothing written, when the id exists. */
+  /** Stores a new session at version 1. False, and nothing written, when the id exists or was removed. */
   create(workspaceId: string, callId: string, record: JsonValue, hint?: WriteHint): Promise<boolean>;
   get(workspaceId: string, callId: string): Promise<StoredSession | null>;
   /**
@@ -370,6 +374,14 @@ export interface SessionStore {
    * always lists the same first `limit` lets calls that keep failing hold back every other one.
    */
   pendingCalls?(workspaceId: string, limit: number): Promise<string[]>;
+  /**
+   * Optional. Removes a session only if the stored version is `expectedVersion` (true), and its
+   * pending ledger mark with it; false, and nothing removed, when the version moved or the session
+   * is gone. The engine removes a call record only through this (`Engine.removeCall`), once its
+   * outbox is empty. A removed id is never created again (`create` answers false): its ledger
+   * event ids are spent, and a new call under it would have its entries taken for replays.
+   */
+  remove?(workspaceId: string, callId: string, expectedVersion: number): Promise<boolean>;
   /** Points a provider reference (an identity session, a payment link) at a call. The first binding wins. */
   bindRef(workspaceId: string, ref: string, callId: string): Promise<boolean>;
   resolveRef(workspaceId: string, ref: string): Promise<string | null>;
@@ -409,10 +421,20 @@ export interface RecordStore {
    * `erasuresSeen` (what `subjectErasures` answered before the record was reserved), when its
    * subject has been marked erased more times than that since: a confirmation still in flight when
    * its subject was erased must not bring the values back, whether or not the erasure saw it.
+   * A record is stored unconfirmed; a retried write keeps any mark it has.
    */
   putIntakeRecord(record: IntakeRecord, erasuresSeen?: number): Promise<void>;
+  /**
+   * Marks a stored record confirmed, once the confirmation that filed it committed. Idempotent;
+   * marks nothing for a record id the store does not hold (never written, or deleted). The mark is
+   * kept beside the record, never in it.
+   */
+  confirmIntakeRecord(workspaceId: string, recordId: string): Promise<void>;
+  /** Whether a stored record is marked confirmed: false for one never marked and for one the store does not hold. */
+  isIntakeRecordConfirmed(workspaceId: string, recordId: string): Promise<boolean>;
+  /** A stored record, confirmed or not (the engine reads it while filing; readers check the mark). */
   getIntakeRecord(workspaceId: string, recordId: string): Promise<IntakeRecord | null>;
-  /** The intake records filed under a subject key. Records filed under null are never listed. */
+  /** The intake records stored under a subject key, confirmed or not. Records filed under null are never listed. */
   listIntakeRecords(workspaceId: string, subjectKey: string): Promise<IntakeRecord[]>;
   /**
    * Stores a subject's PIN digest (`pinDigest`) with the id of the enrolment that chose it
@@ -450,6 +472,14 @@ export interface RecordStore {
    * rest of the subject record, which is the host's. Idempotent.
    */
   deletePinDigest(workspaceId: string, subjectKey: string): Promise<void>;
+  /**
+   * Replaces a subject's `pinDigest` or `duressDigest` with `to`, a stronger record of the same PIN
+   * (the Argon2id record of an earlier keyed HMAC, ADR-29), only if it is still exactly `from`, in
+   * one atomic step; the answer says whether it replaced. Changes nothing else (`pinEnrolmentId`
+   * and the other digest stay). A subject the store does not have, or whose field is missing or
+   * holds anything else, is left alone, and the answer is false. Never given the PIN itself.
+   */
+  upgradePinDigest(workspaceId: string, subjectKey: string, field: "pinDigest" | "duressDigest", from: string, to: string): Promise<boolean>;
 }
 
 /** How a consent was given or revoked: on the call, by text, or on the host's dashboard. */

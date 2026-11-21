@@ -1,0 +1,53 @@
+{
+  "exchanges": [
+    {
+      "method": "POST",
+      "path": "/v1/identity/verification_sessions",
+      "headers": {
+        "stripe-version": "2025-03-31.basil",
+        "stripe-account": null,
+        "idempotency-key": true
+      },
+      "form": [
+        [
+          "type",
+          "document"
+        ],
+        [
+          "options[document][require_matching_selfie]",
+          "true"
+        ],
+        [
+          "metadata[call_id]",
+          "call_runmwpd4eba_1"
+        ]
+      ],
+      "status": 200,
+      "body": "{\n  \"id\": \"vs_redacted0001\",\n  \"object\": \"identity.verification_session\",\n  \"client_reference_id\": null,\n  \"client_secret\": \"[removed]\",\n  \"created\": 1795202341,\n  \"last_error\": null,\n  \"last_verification_report\": null,\n  \"livemode\": false,\n  \"metadata\": {\n    \"call_id\": \"call_runmwpd4eba_1\"\n  },\n  \"options\": {\n    \"document\": {\n      \"require_matching_selfie\": true\n    }\n  },\n  \"redaction\": null,\n  \"related_customer\": null,\n  \"related_customer_account\": null,\n  \"status\": \"requires_input\",\n  \"type\": \"document\",\n  \"url\": \"https://verify.stripe.com/redacted\"\n}"
+    }
+  ],
+  "delivery": {
+    "listener": "account",
+    "route": "identity",
+    "type": "identity.verification_session.verified",
+    "objectId": "vs_redacted0001",
+    "body": "{\n  \"id\": \"evt_redacted0001\",\n  \"object\": \"event\",\n  \"api_version\": \"2026-04-22.dahlia\",\n  \"created\": 1795202354,\n  \"data\": {\n    \"object\": {\n      \"id\": \"vs_redacted0001\",\n      \"object\": \"identity.verification_session\",\n      \"client_reference_id\": null,\n      \"client_secret\": null,\n      \"created\": 1795202341,\n      \"last_error\": null,\n      \"last_verification_report\": \"vr_redacted0001\",\n      \"livemode\": false,\n      \"metadata\": {\n        \"call_id\": \"call_runmwpd4eba_1\"\n      },\n      \"options\": {\n        \"document\": {\n          \"require_matching_selfie\": true\n        }\n      },\n      \"redaction\": null,\n      \"related_customer\": null,\n      \"related_customer_account\": null,\n      \"status\": \"verified\",\n      \"type\": \"document\",\n      \"url\": null\n    },\n    \"previous_attributes\": {\n      \"last_verification_report\": null,\n      \"status\": \"processing\"\n    }\n  },\n  \"livemode\": false,\n  \"pending_webhooks\": 2,\n  \"request\": {\n    \"id\": null,\n    \"idempotency_key\": null\n  },\n  \"type\": \"identity.verification_session.verified\"\n}",
+    "signatureVerified": true,
+    "answer": {
+      "status": 200,
+      "body": {
+        "received": true,
+        "applied": true
+      }
+    }
+  },
+  "engineEvents": [
+    "call.started {\"locale\":\"en\",\"revision\":\"default\",\"attestation\":\"none\"}",
+    "verification.started {\"subject\":\"account\"}",
+    "sensitive.opened {\"reason\":\"keypad\"}",
+    "verification.factor {\"kind\":\"keypad_knowledge\",\"passed\":true}",
+    "sensitive.closed {}",
+    "identity.link_sent {}",
+    "verification.factor {\"kind\":\"photo_id\",\"passed\":true,\"status\":\"verified\"}"
+  ]
+}

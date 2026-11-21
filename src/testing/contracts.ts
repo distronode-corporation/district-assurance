@@ -179,6 +179,24 @@ export function sessionStoreContract(factory: () => SessionStore | Promise<Sessi
       },
     ],
     [
+      "removes a session only at its stored version, with its pending mark, if it can remove",
+      async (store) => {
+        // `remove` is optional; a store without it has nothing more to keep here.
+        if (store.remove === undefined) return;
+        await store.create("w", "c1", { n: 1 }, { ledgerPending: true });
+        await store.create("w2", "c1", { n: 1 });
+        assert.equal(await store.remove("w", "c1", 2), false, "not at another version");
+        assert.equal(await store.remove("w", "missing", 1), false);
+        assert.equal(await store.remove("w", "c1", 1), true);
+        assert.equal(await store.get("w", "c1"), null);
+        assert.equal(await store.remove("w", "c1", 1), false, "once");
+        assert.notEqual(await store.get("w2", "c1"), null, "workspaces apart");
+        assert.equal(await store.create("w", "c1", { n: 2 }), false, "a removed id is never created again: its ledger event ids are spent");
+        assert.equal(await store.get("w", "c1"), null);
+        if (store.pendingCalls !== undefined) assert.deepEqual(await store.pendingCalls("w", 10), [], "the mark goes with it");
+      },
+    ],
+    [
       "lists the pending calls listed least recently first, so the same few never hold back the rest",
       async (store) => {
         if (store.pendingCalls === undefined) return;
@@ -688,6 +706,28 @@ export function recordStoreContract(factory: (subjects: SeededSubject[]) => Reco
       },
     ],
     [
+      "keeps a record unconfirmed until confirmIntakeRecord marks it, idempotently, and never marks an id it does not hold",
+      async (store) => {
+        assert.equal(await store.isIntakeRecordConfirmed("w", "rec_c"), false);
+        await store.confirmIntakeRecord("w", "rec_c");
+        assert.equal(await store.isIntakeRecordConfirmed("w", "rec_c"), false, "a mark before the write marks nothing");
+        await store.putIntakeRecord(contractRecord("w", "rec_c"));
+        assert.equal(await store.isIntakeRecordConfirmed("w", "rec_c"), false, "a stored record starts unconfirmed");
+        await store.confirmIntakeRecord("w", "rec_c");
+        await store.confirmIntakeRecord("w", "rec_c");
+        assert.equal(await store.isIntakeRecordConfirmed("w", "rec_c"), true);
+        await store.putIntakeRecord(contractRecord("w", "rec_c"));
+        assert.equal(await store.isIntakeRecordConfirmed("w", "rec_c"), true, "a retried write keeps the mark");
+        assert.deepEqual(await store.getIntakeRecord("w", "rec_c"), contractRecord("w", "rec_c"), "the mark is not part of the record");
+        await store.putIntakeRecord(contractRecord("w2", "rec_c"));
+        assert.equal(await store.isIntakeRecordConfirmed("w2", "rec_c"), false, "workspaces apart");
+        await store.deleteIntakeRecords("w", ["rec_c"]);
+        await store.confirmIntakeRecord("w", "rec_c");
+        assert.equal(await store.isIntakeRecordConfirmed("w", "rec_c"), false, "a deleted record is never confirmed");
+        assert.equal(await store.getIntakeRecord("w", "rec_c"), null);
+      },
+    ],
+    [
       "deletes a subject's PIN and duress digests, keeps the rest, and deleting a missing one is harmless",
       async (store) => {
         const key = "2".repeat(64);
@@ -713,6 +753,31 @@ export function recordStoreContract(factory: (subjects: SeededSubject[]) => Reco
         assert.equal(await store.getSubject("w3", key), null);
         // The same key in another workspace keeps both digests.
         assert.deepEqual(await store.getSubject("w2", key), { ...subjects.at(-1)!.subject, pinDigest: pin, duressDigest: duress });
+      },
+    ],
+    [
+      "upgrades a PIN or duress digest only from the value on file, and changes nothing else",
+      async (store) => {
+        const key = "2".repeat(64);
+        const [pin, duress, stronger, other] = ["e".repeat(64), "f".repeat(64), "$pin1$stronger", "$pin1$other"];
+        for (const w of ["w", "w2"]) {
+          assert.equal(await store.putPinDigest(w, key, pin, "enr_up"), true, `${w}: the PIN digest is stored`);
+          assert.equal(await store.putDuressDigest(w, key, duress, pin), true, `${w}: the duress digest is stored`);
+        }
+        assert.equal(await store.upgradePinDigest("w", key, "pinDigest", "0".repeat(64), stronger), false, "not from a value that is not on file");
+        assert.equal(await store.upgradePinDigest("w", key, "pinDigest", duress, stronger), false, "not from the other field's value");
+        assert.equal(await store.upgradePinDigest("w", key, "pinDigest", pin, stronger), true);
+        assert.equal(await store.upgradePinDigest("w", key, "pinDigest", pin, other), false, "a second upgrade from the same value replaces nothing");
+        assert.deepEqual(await store.getSubject("w", key), { ...subjects[1]!.subject, pinDigest: stronger, pinEnrolmentId: "enr_up", duressDigest: duress });
+        assert.equal(await store.upgradePinDigest("w", key, "duressDigest", duress, other), true);
+        assert.deepEqual(await store.getSubject("w", key), { ...subjects[1]!.subject, pinDigest: stronger, pinEnrolmentId: "enr_up", duressDigest: other });
+        // A field that is missing, a subject the store does not have, and another workspace are left alone.
+        await store.putDuressDigest("w", key, null);
+        assert.equal(await store.upgradePinDigest("w", key, "duressDigest", other, stronger), false);
+        assert.equal("duressDigest" in (await store.getSubject("w", key))!, false, "a missing field is not created");
+        assert.equal(await store.upgradePinDigest("w", "f".repeat(64), "pinDigest", pin, stronger), false);
+        assert.equal(await store.getSubject("w", "f".repeat(64)), null);
+        assert.deepEqual(await store.getSubject("w2", key), { ...subjects.at(-1)!.subject, pinDigest: pin, pinEnrolmentId: "enr_up", duressDigest: duress });
       },
     ],
   ];

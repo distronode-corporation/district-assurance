@@ -14,6 +14,8 @@ import {
   type FlowConfig,
   type ReceiptBody,
 } from "../src/index.ts";
+import { hmacSha256Hex } from "../src/core/hash.ts";
+import { checkPinRecord, hashPinRecord } from "../src/verify/pin-hash.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, generateTestSigner, testSubject, type TestEngine } from "../src/testing/index.ts";
 import type { BenchCase } from "./harness.ts";
 
@@ -140,6 +142,17 @@ export const cases: readonly BenchCase[] = [
         await t.engine.endCall(callId);
         return allowed;
       };
+      assert.equal(await run(), true);
+      return run;
+    },
+  },
+  {
+    name: "PIN record check",
+    unit: "one Argon2id check of a keyed PIN against its record (ADR-29)",
+    async setup() {
+      const keyedPin = hmacSha256Hex(TEST_KNOWLEDGE_KEY, `pin:${"a".repeat(64)}:${PIN}`);
+      const record = await hashPinRecord(keyedPin);
+      const run = async (): Promise<boolean> => (await checkPinRecord(record, keyedPin)).match;
       assert.equal(await run(), true);
       return run;
     },

@@ -23,6 +23,13 @@ const duressConfig = () =>
 const tick = async (n = 10) => {
   for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));
 };
+/** Resolves once `ms` of real time pass: the PIN check runs on the thread pool (ADR-29), so a few ticks are not enough to reach its answer. */
+const after = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** Ticks until `done` holds, for at most `ms` of real time. */
+const until = async (done: () => boolean, ms = 5000) => {
+  const end = Date.now() + ms;
+  while (!done() && Date.now() < end) await after(5);
+};
 
 /** A ledger whose appends never settle while `stalled`. */
 class StalledLedger extends MemoryAuditLedger {
@@ -60,6 +67,7 @@ describe("l2fx-e2: stalls stay local", () => {
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     ledger.stalled = true;
     void t.engine.submitPin(callId, DURESS);
+    await until(() => told.length > 0);
     await tick();
     assert.equal(told.length, 1, "the saved alert is sent while the ledger hangs");
     assert.equal(told[0]!.callId, callId);
@@ -73,7 +81,10 @@ describe("l2fx-e2: stalls stay local", () => {
     const { callId } = await t.engine.startCall();
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     counters.stalled = true;
-    const answered = await Promise.race([t.engine.submitPin(callId, "0000"), tick(20).then(() => "stalled" as const)]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stalled = new Promise<"stalled">((r) => (timer = setTimeout(() => r("stalled"), 5000)));
+    const answered = await Promise.race([t.engine.submitPin(callId, "0000"), stalled]);
+    clearTimeout(timer);
     assert.deepEqual(answered, { matched: false, locked: true });
     assert.ok((await t.ledger.list()).some((e) => e.event === "verification.locked"));
     assert.deepEqual(((await t.sessions.get("ws_test", callId))!.record as { outbox: unknown[] }).outbox, [], "the outbox cleared");

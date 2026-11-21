@@ -146,6 +146,30 @@ describe("parseStripeEvent", () => {
     assert.equal(parseStripeEvent(event("charge.dispute.something_new", object))!.kind, "ignored");
   });
 
+  it("maps refund update events: the provider's refund id, its payment intent, status and amount", () => {
+    const object = { id: "re_1", object: "refund", charge: "ch_1", payment_intent: "pi_1", status: "failed", amount: 15000, currency: "cad", failure_reason: "expired_or_canceled_card" };
+    for (const type of ["refund.updated", "refund.failed", "charge.refund.updated"]) {
+      assert.deepEqual(parseStripeEvent(event(type, object)), {
+        eventId: "evt_1",
+        livemode: false,
+        kind: "refund",
+        outcome: { providerRef: "re_1", paymentIntentId: "pi_1", status: "failed", amountMinor: 15000, currency: "cad" },
+      });
+    }
+    assert.deepEqual(parseStripeEvent(event("refund.updated", { ...object, status: "canceled", payment_intent: null }, { account: "acct_1" }))!, {
+      eventId: "evt_1",
+      livemode: false,
+      kind: "refund",
+      outcome: { providerRef: "re_1", paymentIntentId: null, status: "canceled", amountMinor: 15000, currency: "cad", account: "acct_1" },
+    });
+    // A refund with no payment intent named at all (an older charge) is null-placed, never a throw.
+    assert.equal((parseStripeEvent(event("refund.updated", { ...object, payment_intent: undefined })) as { outcome: { paymentIntentId: unknown } }).outcome.paymentIntentId, null);
+    for (const bad of [{ payment_intent: 7 }, { status: "maybe" }, { status: undefined }, { amount: -1 }, { amount: 1.5 }, { amount: "15000" }, { currency: "CAD" }, { currency: undefined }]) {
+      assert.equal(parseStripeEvent(event("refund.updated", { ...object, ...bad })), null, JSON.stringify(bad));
+    }
+    assert.equal(parseStripeEvent(event("refund.created", object))!.kind, "ignored");
+  });
+
   it("names other event types as ignored", () => {
     assert.deepEqual(parseStripeEvent(event("charge.refunded", { id: "ch_1" })), { eventId: "evt_1", livemode: false, kind: "ignored", type: "charge.refunded" });
   });

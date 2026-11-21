@@ -4,9 +4,9 @@ import { describe, it } from "node:test";
 
 import type { AttemptCounterKey } from "../src/core/adapters.ts";
 import type { FlowConfig } from "../src/core/config.ts";
-import { pinDigest, subjectKeyFor } from "../src/verify/knowledge.ts";
+import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { TEST_KNOWLEDGE_KEY, testSubject, type TestEngine } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, setup, testConfig } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, pinOnFile, rejects, setup, testConfig } from "./helpers.ts";
 
 const NEW_ACCOUNT = "20481937";
 const NEW_PHONE = "+15555550142";
@@ -49,8 +49,8 @@ describe("#74 hostile: the PIN a caller chooses", () => {
     const callId = await verified(t);
     const result = await t.engine.enrolPin(callId, swapping(DOB, CHOSEN)).catch((e: unknown) => e);
     const stored = (await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest;
-    assert.notEqual(stored, pinDigest(TEST_KNOWLEDGE_KEY, NEW_SUBJECT, DOB), "the weak value is never on file");
-    if (stored !== undefined) assert.equal(stored, pinDigest(TEST_KNOWLEDGE_KEY, NEW_SUBJECT, CHOSEN), "what is on file is what was checked");
+    assert.equal(await pinOnFile(stored, NEW_SUBJECT, DOB), false, "the weak value is never on file");
+    if (stored !== undefined) assert.ok(await pinOnFile(stored, NEW_SUBJECT, CHOSEN), "what is on file is what was checked");
     assert.ok(result !== undefined);
   });
 
@@ -59,7 +59,7 @@ describe("#74 hostile: the PIN a caller chooses", () => {
     const callId = await verified(t);
     await t.engine.enrolPin(callId, swapping("12", CHOSEN)).catch(() => undefined);
     const stored = (await t.records.getSubject("ws_test", NEW_SUBJECT))!.pinDigest;
-    assert.notEqual(stored, pinDigest(TEST_KNOWLEDGE_KEY, NEW_SUBJECT, "12"));
+    assert.equal(await pinOnFile(stored, NEW_SUBJECT, "12"), false);
   });
 
   it("P2b a PIN that is a string on its first read and not after is still read once", async () => {

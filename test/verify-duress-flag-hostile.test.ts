@@ -198,6 +198,9 @@ describe("#124 hostile: can anyone learn that the flag is set?", () => {
       }) as unknown as AttemptCounters;
       const { t } = await mk({ counters: proxy });
       if (flag) await t.engine.submitPin(await call(t), DURESS);
+      // The duress entry's own off-path work (its alert) is let finish first: the PIN check takes
+      // real time on the thread pool (ADR-29), which would otherwise let it land inside the count.
+      await tick(50);
       const callId = await call(t);
       ops.length = 0;
       await t.engine.submitPin(callId, PIN);
