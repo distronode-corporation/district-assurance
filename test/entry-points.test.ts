@@ -48,6 +48,7 @@ describe("entry points", () => {
       "gateModule",
       "MemorySessionStore",
       "pinDigest",
+      "isWeakPin",
       "hiddenCounterKey",
       "duressFlagKey",
       "PAYMENT_MODES",

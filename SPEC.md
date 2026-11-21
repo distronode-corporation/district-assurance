@@ -565,6 +565,14 @@ the duress PIN is off unless it is set.
   call's enrolment of the same PIN, or one after a reset, never passes for it), checked in the write
   that records it (`{enrolled: true}`, one `pin.enrolled`), even past `maxAttemptsPerCall` (such a
   retry is not counted); any other PIN is refused as one on file, or `locked` past the limit.
+- The digits-only part of `weak` is exported from the package root as `isWeakPin(pin: string):
+  boolean`, so a host that takes PINs itself (`verifier` mode, or its own sign-up page) refuses
+  the same ones: true when every digit is the same or the digits run up or down with 0 following
+  9, as `enrolPin` and `enrolDuressPin` judge them. It judges the pattern only; the length from
+  `minDigits` to `maxDigits`, and a PIN equal to the account number or knowledge on file, are the
+  host's to check. A value that is not one to 32 ASCII digits (`isKeypadEntry`), a value that is
+  not a string, and a single digit are false, never coerced, so a host checks a value is well
+  formed first.
 - Reset: `resetPin(subjectKey)` is a host call for the business's own staff tools, never on a
   caller's request, and needs the `pin` factor on (and a string subject key: `invalid_input`
   otherwise). In `keyed_hash` mode it removes the digest (`putPinDigest` with null), so the
