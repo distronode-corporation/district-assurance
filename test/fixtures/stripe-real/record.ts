@@ -41,6 +41,7 @@ import { createDemoWorld } from "../../../examples/reference-server/src/script.t
 import { STRIPE_API_VERSION, StripeCheckoutLinks, assertTestModeSecretKey } from "../../../examples/reference-server/src/stripe-adapters.ts";
 import { recordedConfig, requestRecordedLink, type RecordedFlow } from "./flows.ts";
 import { type Delivery, receiverStatus, settledDelivery } from "./deliveries.ts";
+import { writePrivateFile } from "./private-file.ts";
 import { Redactor, leaks } from "./redact.ts";
 
 const key = process.env.STRIPE_TEST_SECRET_KEY;
@@ -134,7 +135,7 @@ const page = (name: string, url: string): void => {
     return;
   }
   mkdirSync(urlDir, { recursive: true });
-  writeFileSync(`${urlDir}/${name}.url`, url, { mode: 0o600 });
+  writePrivateFile(`${urlDir}/${name}.url`, url);
   console.log(`open ${name}: the URL is in ${urlDir}/${name}.url`);
 };
 
