@@ -188,7 +188,10 @@ platform's account, and verifies the Connect webhook, whose mode is the signing 
 stripe-node client as it is, or `fetchStripeClient` with no SDK at all. `district-assurance/carrier`
 reads Twilio and Telnyx Lookup answers as carrier signals. `StripeCheckoutLinks` keeps a link's
 `expiresAt` inside Checkout's window by its own clock (wall time unless you pass `now`): give it your
-engine's clock if that is not the wall clock. Your host keeps the accounts, the keys,
+engine's clock if that is not the wall clock. ⚠️ Pass it a client in the same Stripe mode as its
+`mode`: it cannot ask a structural client for its key (`fetchStripeClient` checks the key against
+the mode it is built for), and a client of the other mode would create the session at Stripe before
+the adapter refuses the answer. Your host keeps the accounts, the keys,
 the rate limits and the country policy (SPEC sections 31 and 32).
 
 ## The reference server

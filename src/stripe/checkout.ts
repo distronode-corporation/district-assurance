@@ -258,8 +258,13 @@ export class StripeCheckoutLinks implements PaymentLinks {
       } catch {
         throw failure;
       }
-      // Still open after a refusal: the refusal is the answer (retryable or not, as the expire's own error says).
-      if (now.status === "open") throw failure;
+      if (now.status === "open") {
+        // Still open after an answer that arrived but could not be trusted (a 2xx of the wrong shape):
+        // the same as a 200 that did not show the close, asking again may close it.
+        if (failure.status !== null && failure.status < 300) throw stillOpen();
+        // Still open after a refusal or no answer: the refusal is the answer, retryable or not as it says.
+        throw failure;
+      }
       return { outcome: now.status === "expired" ? "already_expired" : now.status, session: now };
     }
     const direct = this.#status(id, answer);
@@ -272,7 +277,7 @@ export class StripeCheckoutLinks implements PaymentLinks {
 
   async expireLink(input: PaymentLinkClose): Promise<{ state: "expired" | "not_open" }> {
     const { outcome } = await this.expire(input);
-    if (outcome === "open") throw new StripeAdapterError("expire the Checkout Session (still open)", { status: null, type: null, code: null }, { retryable: true });
+    if (outcome === "open") throw stillOpen();
     return { state: outcome === "expired" ? "expired" : "not_open" };
   }
 
@@ -302,6 +307,11 @@ export class StripeCheckoutLinks implements PaymentLinks {
     if (session.id !== id || session.livemode !== (this.mode === "live") || status === undefined || paymentStatus === undefined) return null;
     return { linkId: id, status, paymentStatus, livemode: this.mode === "live" };
   }
+}
+
+/** A session that still reads open after a close was asked for: always worth asking again. */
+function stillOpen(): StripeAdapterError {
+  return new StripeAdapterError("expire the Checkout Session (still open)", { status: null, type: null, code: null }, { retryable: true });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

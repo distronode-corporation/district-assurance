@@ -356,6 +356,13 @@ describe("StripeCheckoutLinks: expire (the host cancels the link when the wait e
     }
   });
 
+  it("⛔ an open session after an untrusted 2xx answer is retryable on both paths: a malformed answer the client threw, or one it returned", async () => {
+    let { client } = fake({ expire: Object.assign(new Error("x"), { statusCode: 200, rawType: "malformed_response" }), retrieve: session() });
+    await assert.rejects(links(client).expireLink(CLOSE), (e: Error) => e instanceof StripeAdapterError && e.retryable && /still open/.test(e.message));
+    ({ client } = fake({ expire: "not an object", retrieve: session() }));
+    await assert.rejects(links(client).expireLink(CLOSE), (e: Error) => e instanceof StripeAdapterError && e.retryable && /still open/.test(e.message));
+  });
+
   it("⛔ after a 5xx or a lost answer, reads the session back: a close or a payment that took effect is answered, an unreadable session throws the expire's error", async () => {
     let { client } = fake({ expire: refusal(500), retrieve: session({ status: "expired" }) });
     assert.equal((await links(client).expire(CLOSE)).outcome, "already_expired");

@@ -3142,7 +3142,8 @@ accepted in test mode only (`checkedApiVersion`), and any other version is refus
 `create`, `retrieve` and `expire`, and Accounts v2 `accounts.create`, `accounts.retrieve` and
 `accountLinks.create`, each with stripe-node's argument order and option names (`stripeAccount`,
 `idempotencyKey`, `timeout`, `maxNetworkRetries`). A stripe-node `Stripe` instance on endive is one
-as it is. `fetchStripeClient(key, { mode, apiVersion?, apiBase?, fetch?, timeoutMs? })` is the same
+as it is. A structural client cannot be asked its key, so the host gives an adapter a client in the
+adapter's own mode; `fetchStripeClient` checks the key against the mode it is built for. `fetchStripeClient(key, { mode, apiVersion?, apiBase?, fetch?, timeoutMs? })` is the same
 surface over `fetch`: it checks the key against `mode` first, sends it only as a bearer header to an
 `https:` base (`http:` only on a loopback host, no credentials in it), never follows a redirect,
 form-encodes v1 bodies byte for byte as stripe-node does (`stripeFormEncode`) and sends v2 bodies as
@@ -3171,7 +3172,10 @@ with an expire: Stripe saves a key's first result, a 500 included, so a keyed ex
 once could not be retried into an answer, and a second expire is Stripe's 400, read back. After any
 failure the session is read: one shown closed answers its outcome; one still open (after Stripe's 400
 too), or an unreadable one, throws the expire's error, retryable for a 429, a 5xx or a lost answer and
-not for a 400. `open` is answered only after a successful expire answer whose session still reads open. `expireLink` answers the
+not for a 400. A session still open after an answer that arrived but could not be trusted (a 2xx of
+the wrong shape, whether the client threw it or returned it) is a retryable error, as after a 200 that
+did not show the close. `open` is answered only after a successful expire answer whose session still
+reads open. `expireLink` answers the
 engine's `expired` or `not_open`, and throws a retryable `StripeAdapterError` for a session still
 open. `createLink` refuses an `expiresAt` under 30 minutes or over 24 hours from the adapter's `now`,
 and an empty method list (no list would be no filter at Stripe). `checkoutExpiresAt(now, minutes =
@@ -3214,9 +3218,10 @@ Lookup v2's `sim_swap` (the date when it is ISO 8601, never older than the perio
 change in, or the period as a lower bound when Twilio says there was none); `twilioIdentityMatch(
 field, minScore)` its `identity_match` (a match at `minScore`, 1 to 100, or more);
 `telnyxPortHours(field, now)` Telnyx Number Lookup's `portability` (from the last moment the port
-date ends anywhere; null when not ported). Each answers a number of hours, null, or a
-`CarrierFieldFailure` (`bad_response`, or `feature_unavailable` with the vendor's code), which
-`isCarrierAnswer` tells apart. `durationHours` reads an ISO 8601 duration in whole hours, and
+date ends anywhere; null when not ported). `twilioSimSwapHours` and `telnyxPortHours` answer a
+number of hours, null (`telnyxPortHours`: not ported), or a `CarrierFieldFailure` (`bad_response`, or
+`feature_unavailable` with the vendor's code); `twilioIdentityMatch` answers `"match"`, `"no_match"`
+or a `CarrierFieldFailure`. `isCarrierAnswer` tells an answer of any of them from a failure. `durationHours` reads an ISO 8601 duration in whole hours, and
 `uncheckedReport` is a report that says nothing is known. The reference server's
 `TwilioLookupSignals` and `TelnyxNumberLookupSignals` use them.
 
