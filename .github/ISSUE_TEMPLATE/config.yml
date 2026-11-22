@@ -1,0 +1,10 @@
+# No blank issues: everything goes through the Bug report or Feature request form, or one of the
+# links below.
+blank_issues_enabled: false
+contact_links:
+  - name: 📖 README
+    url: https://github.com/distronode-corporation/district-assurance#readme
+    about: What the engine does, the quick start, the modules, flows as config and how to check a release.
+  - name: 🔒 Security report
+    url: https://github.com/distronode-corporation/district-assurance/security/advisories/new
+    about: Please do not open a public issue for a vulnerability. Report it privately here (see SECURITY.md).
