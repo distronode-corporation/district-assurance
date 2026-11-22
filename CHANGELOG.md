@@ -29,6 +29,9 @@ All notable changes to this project are documented here. The format follows
   onboarding collects the business's details, and no requirement due from the business restricts a
   payment capability: a freshly created account reads false, never "nothing due, so submitted".
   Pinned with real test-mode v2 Account shapes (`test/fixtures/stripe-v2-accounts/`).
+- `STRIPE_CHECKOUT_CAPABILITIES` and `stripeCheckoutCapabilities(modes)`: Checkout's frozen
+  `PaymentLinkCapabilities`. `StripeCheckoutLinks` checks `expiresAt` against its own clock (wall
+  time unless `now` is given), so a host engine on another clock passes it.
 - `district-assurance/carrier` (SPEC section 32): `twilioSimSwapHours`, `twilioIdentityMatch`,
   `telnyxPortHours`, `durationHours`, `isCarrierAnswer` and `uncheckedReport`.
 - `receiptKeysDocument(signers)` and `RECEIPT_KEYS_CACHE_CONTROL`: the public receipt-keys document,

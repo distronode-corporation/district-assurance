@@ -39,6 +39,20 @@ export const CHECKOUT_DEFAULT_LINK_MINUTES = 35;
 const MINUTE_MS = 60_000;
 
 /**
+ * What Stripe Checkout can do, as the engine's `PaymentLinkCapabilities`: both payment modes, and a
+ * link life from Checkout's 30 minutes to 24 hours. A `StripeCheckoutLinks` built without `modes`
+ * declares exactly this; one built with `modes` declares those modes with the same limits
+ * (`stripeCheckoutCapabilities`). Frozen, so a host can hand it to a config check as it is.
+ */
+export const STRIPE_CHECKOUT_CAPABILITIES: Readonly<PaymentLinkCapabilities> = stripeCheckoutCapabilities(["platform", "connect"]);
+
+/** Checkout's capabilities for `modes` (each once, in order), frozen. */
+export function stripeCheckoutCapabilities(modes: readonly PaymentMode[]): Readonly<PaymentLinkCapabilities> {
+  if (modes.length === 0 || modes.some((m) => m !== "platform" && m !== "connect")) throw new TypeError("modes is platform, connect or both");
+  return Object.freeze({ modes: Object.freeze([...new Set(modes)]), minLinkMinutes: CHECKOUT_MIN_LINK_MINUTES, maxLinkMinutes: CHECKOUT_MAX_LINK_MINUTES });
+}
+
+/**
  * The engine's idempotency key as Stripe's `Idempotency-Key`: as is when Stripe accepts it, else
  * its SHA-256. The same engine key always gives the same header, so a retry returns the same object.
  */
@@ -107,7 +121,11 @@ export interface StripeCheckoutLinksOptions {
   modes?: readonly PaymentMode[];
   /** The version the client sends; default endive. Basil (recorded test runs) is refused in live mode. */
   apiVersion?: StripeApiVersion;
-  /** Default the system clock. Used only to keep `expiresAt` inside Checkout's window. */
+  /**
+   * Default the system clock (wall time). `createLink` keeps `expiresAt` inside Checkout's window by
+   * THIS clock, so a host whose engine runs on another clock (a fixed or a shifted one) passes the
+   * engine's clock here, or links it asks for are refused as too short or too long.
+   */
   now?: () => Date;
 }
 
@@ -147,9 +165,7 @@ export class StripeCheckoutLinks implements PaymentLinks {
     this.apiVersion = checkedApiVersion(mode, apiVersion);
     this.mode = mode;
     this.successUrl = checkedSuccessUrl(successUrl);
-    const allowed = modes ?? ["platform", "connect"];
-    if (allowed.length === 0 || allowed.some((m) => m !== "platform" && m !== "connect")) throw new TypeError("modes is platform, connect or both");
-    this.capabilities = Object.freeze({ modes: Object.freeze([...new Set(allowed)]), minLinkMinutes: CHECKOUT_MIN_LINK_MINUTES, maxLinkMinutes: CHECKOUT_MAX_LINK_MINUTES });
+    this.capabilities = modes === undefined ? STRIPE_CHECKOUT_CAPABILITIES : stripeCheckoutCapabilities(modes);
     this.#client = client;
     this.#now = now ?? (() => new Date());
   }

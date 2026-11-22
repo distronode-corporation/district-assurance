@@ -13,6 +13,7 @@ import {
   CHECKOUT_MIN_LINK_MINUTES,
   STRIPE_API_VERSION,
   STRIPE_BASIL_API_VERSION,
+  STRIPE_CHECKOUT_CAPABILITIES,
   StripeAdapterError,
   StripeCheckoutLinks,
   StripeHttpError,
@@ -28,6 +29,7 @@ import {
   createOnboardingLink,
   fetchStripeClient,
   readConnectStatus,
+  stripeCheckoutCapabilities,
   stripeFormEncode,
   stripeErrorDetail,
   stripeIdempotencyKey,
@@ -47,6 +49,10 @@ interface Calls {
   [name: string]: unknown[][];
 }
 
+function isSignalOptions(value: unknown): boolean {
+  return typeof value === "object" && value !== null && (value as { signal?: unknown }).signal instanceof AbortSignal;
+}
+
 /** An in-memory StripeClientLike: each method answers from `answers[name]` (a value, or an Error to throw), and records its arguments. */
 function fake(answers: Record<string, unknown | unknown[]> = {}): { client: StripeClientLike; calls: Calls } {
   const calls: Calls = {};
@@ -55,7 +61,8 @@ function fake(answers: Record<string, unknown | unknown[]> = {}): { client: Stri
   const method =
     (name: string): Fn =>
     async (...args) => {
-      (calls[name] ??= []).push(structuredClone(args));
+      // A snapshot (arguments are recorded by reference otherwise); an AbortSignal cannot be cloned and is kept as is.
+      (calls[name] ??= []).push(args.map((arg) => (isSignalOptions(arg) ? { ...(arg as object) } : structuredClone(arg))));
       const queue = queues[name] ?? [];
       const next = queue.length > 1 ? queue.shift() : queue[0];
       if (next instanceof Error || (typeof next === "object" && next !== null && "statusCode" in next)) throw next;
@@ -233,6 +240,14 @@ describe("StripeCheckoutLinks: create", () => {
     assert.equal((await links(client, { mode: "live" }).createLink({ ...REQUEST, paymentMethods: ["card"] })).linkId, LIVE_SESSION);
   });
 
+  it("declares Checkout's capabilities as one frozen constant, and the same limits for the modes it is given", () => {
+    assert.deepEqual(STRIPE_CHECKOUT_CAPABILITIES, { modes: ["platform", "connect"], minLinkMinutes: 30, maxLinkMinutes: 1440 });
+    assert.ok(Object.isFrozen(STRIPE_CHECKOUT_CAPABILITIES) && Object.isFrozen(STRIPE_CHECKOUT_CAPABILITIES.modes));
+    assert.equal(links(fake().client).capabilities, STRIPE_CHECKOUT_CAPABILITIES);
+    assert.deepEqual(stripeCheckoutCapabilities(["connect", "connect"]), { modes: ["connect"], minLinkMinutes: 30, maxLinkMinutes: 1440 });
+    for (const modes of [[], ["refund"]]) assert.throws(() => stripeCheckoutCapabilities(modes as never), /platform, connect or both/);
+  });
+
   it("⛔ refuses a mode it does not take, platform with an account, and a malformed account, before anything is sent", async () => {
     const { client, calls } = fake({ create: session() });
     const connectOnly = links(client, { modes: ["connect"] });
@@ -389,8 +404,9 @@ describe("StripeCheckoutLinks: readLink", () => {
     const l = links(client);
     assert.deepEqual(await l.readLink(TEST_SESSION, ACCT), { linkId: TEST_SESSION, status: "complete", paymentStatus: "paid", livemode: false });
     assert.deepEqual(calls.retrieve![0], [TEST_SESSION, {}, { stripeAccount: ACCT }]);
-    assert.equal((await l.readLink(TEST_SESSION)).paymentStatus, "no_payment_required");
-    assert.deepEqual(calls.retrieve![1], [TEST_SESSION, {}, {}]);
+    const signal = new AbortController().signal;
+    assert.equal((await l.readLink(TEST_SESSION, undefined, signal)).paymentStatus, "no_payment_required");
+    assert.equal((calls.retrieve![1]![2] as { signal?: AbortSignal }).signal instanceof AbortSignal, true, "the signal is passed to the client");
     for (let i = 0; i < 5; i++) await assert.rejects(l.readLink(TEST_SESSION), StripeAdapterError);
     await assert.rejects(l.readLink(TEST_SESSION, "acct_x y"), /acct_/);
   });

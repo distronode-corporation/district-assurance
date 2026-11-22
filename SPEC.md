@@ -3115,8 +3115,12 @@ own timeout, never after a cancel; a write never is.
 type and code when they are plain words, never Stripe's message or anything shaped like a key.
 `retryable` is true with no answer, on 429 and on 5xx, and when a step says so.
 
-**Checkout.** `StripeCheckoutLinks(client, { mode, successUrl, modes?, apiVersion?, now? })` is
-section 15's adapter in one mode: session ids must be that mode's (`cs_test_` or `cs_live_`, refused
+**Checkout.** `STRIPE_CHECKOUT_CAPABILITIES` is Checkout's frozen `PaymentLinkCapabilities` (both
+modes, 30 to 1,440 minutes), and `stripeCheckoutCapabilities(modes)` the same for fewer modes.
+`StripeCheckoutLinks(client, { mode, successUrl, modes?, apiVersion?, now? })` declares the one or
+the other. ⚠️ It checks `expiresAt` against its OWN clock, `now` (wall time by default): a host whose
+engine runs on another clock passes the engine's clock as `now`, or its links are refused as too
+short or too long. It is section 15's adapter in one mode: session ids must be that mode's (`cs_test_` or `cs_live_`, refused
 before anything is sent otherwise) and every answer's `livemode` must be that mode's. `expire(close)`
 expires a session and reads back what Stripe holds: `expired` (this call closed it),
 `already_expired` (expired, but not shown closed by this call: an earlier expire, Stripe's own

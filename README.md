@@ -186,7 +186,9 @@ state machine, the config, the events and the formats.
 direct charge on the business's own connected account (Connect onboarding on Accounts v2) or on the
 platform's account, and verifies the Connect webhook, whose mode is the signing secret's. It takes a
 stripe-node client as it is, or `fetchStripeClient` with no SDK at all. `district-assurance/carrier`
-reads Twilio and Telnyx Lookup answers as carrier signals. Your host keeps the accounts, the keys,
+reads Twilio and Telnyx Lookup answers as carrier signals. `StripeCheckoutLinks` keeps a link's
+`expiresAt` inside Checkout's window by its own clock (wall time unless you pass `now`): give it your
+engine's clock if that is not the wall clock. Your host keeps the accounts, the keys,
 the rate limits and the country policy (SPEC sections 31 and 32).
 
 ## The reference server
