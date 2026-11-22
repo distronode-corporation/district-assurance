@@ -33,9 +33,11 @@ export function headerPattern(version) {
 export function changelogSection(changelog, version) {
   const lines = changelog.replace(/\r\n?/g, "\n").split("\n");
   const pattern = headerPattern(version);
-  const start = lines.findIndex((line) => pattern.test(line));
+  // A heading inside a fenced code block is text, not a heading: only lines outside fences count.
+  const outside = outsideFences(lines);
+  const start = lines.findIndex((line, index) => outside[index] && pattern.test(line));
   if (start === -1) throw new Error(`CHANGELOG.md has no dated '## [${version}] - YYYY-MM-DD' section.`);
-  let end = lines.findIndex((line, index) => index > start && line.startsWith("## "));
+  let end = lines.findIndex((line, index) => index > start && outside[index] && line.startsWith("## "));
   if (end === -1) end = lines.length;
   const header = lines[start];
   const body = lines.slice(start + 1, end);
@@ -45,6 +47,33 @@ export function changelogSection(changelog, version) {
 }
 
 const FENCE = /^\s*(`{3,}|~{3,})/;
+
+/** Whether a line closes the fence `open` (the same character, at least as long, nothing after it). */
+function closesFence(line, open) {
+  const close = FENCE.exec(line);
+  return close !== null && close[1][0] === open[0] && close[1].length >= open.length && line.trim() === close[1];
+}
+
+/** For each line, whether it is outside every fenced code block (a fence line itself is not). */
+function outsideFences(lines) {
+  let fence = null;
+  return lines.map((line) => {
+    if (fence !== null) {
+      if (closesFence(line, fence)) fence = null;
+      return false;
+    }
+    const open = FENCE.exec(line);
+    if (open !== null) {
+      fence = open[1];
+      return false;
+    }
+    return true;
+  });
+}
+
+// A table's delimiter row: cells of dashes with optional colons, at least one pipe, outer pipes
+// optional (`--- | ---`, `|:--|--:|`).
+const TABLE_DELIMITER = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$|^\s*\|\s*:?-+:?\s*\|\s*$/;
 // Lines that start a block of their own and are never joined onto the line before: headings, list
 // items, table rows, block quotes, thematic breaks (or setext underlines) and HTML.
 const BLOCK_START = /^\s*(#{1,6}(\s|$)|[-*+]\s|\d{1,9}[.)]\s|\||>|<|=+\s*$|([-*_])(\s*\3){2,}\s*$)/;
@@ -54,20 +83,33 @@ const CLOSED = /^\s*(#{1,6}(\s|$)|\||<|=+\s*$|([-*_])(\s*\3){2,}\s*$)/;
 
 /**
  * Joins hard-wrapped lines: each paragraph, and each list item with its indented continuation
- * lines, becomes one line. Blank lines, headings, list items, tables, block quotes and fenced code
- * blocks stay as they are, and a line ending in a Markdown hard break (two spaces or a backslash)
- * keeps its break.
+ * lines, becomes one line. Blank lines, headings, list items, tables (with or without outer
+ * pipes), block quotes and fenced code blocks stay as they are, and a line ending in a Markdown
+ * hard break (two spaces or a backslash) keeps its break.
  */
 export function unwrap(markdown) {
   const out = [];
+  const lines = markdown.split("\n");
   let fence = null;
+  let table = false;
   let joinable = false;
-  for (const line of markdown.split("\n")) {
+  for (const [index, line] of lines.entries()) {
     if (fence !== null) {
       out.push(line);
-      const close = FENCE.exec(line);
-      if (close !== null && close[1][0] === fence[0] && close[1].length >= fence.length && line.trim() === close[1]) fence = null;
+      if (closesFence(line, fence)) fence = null;
       continue;
+    }
+    // A table, with or without outer pipes, is its header row, its delimiter row and every row up
+    // to a blank line: each kept as it is.
+    if (!table && line.includes("|") && TABLE_DELIMITER.test(lines[index + 1] ?? "")) table = true;
+    if (table) {
+      if (line.trim() === "") {
+        table = false;
+      } else {
+        out.push(line);
+        joinable = false;
+        continue;
+      }
     }
     const open = FENCE.exec(line);
     if (open !== null) {

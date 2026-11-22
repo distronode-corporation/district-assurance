@@ -77,6 +77,14 @@ describe("release notes: the section", () => {
     assert.throws(() => changelogSection(SAMPLE, "Unreleased"), /no dated/);
   });
 
+  it("N3b a heading inside a fenced code block neither ends the section nor starts one", () => {
+    const fenced = "## [2.0.0] - 2026-12-01\n\nBefore.\n\n```md\n## Example\n## [1.0.0] - 2026-11-01\n```\n\nAfter.\n\n## [1.0.0] - 2026-11-01\n\n- Older.\n";
+    assert.equal(changelogSection(fenced, "2.0.0").body, "Before.\n\n```md\n## Example\n## [1.0.0] - 2026-11-01\n```\n\nAfter.");
+    assert.equal(changelogSection(fenced, "1.0.0").body, "- Older.", "the real 1.0.0 header, not the one in the fence");
+    assert.throws(() => changelogSection("```\n## [3.0.0] - 2026-12-01\n```\n", "3.0.0"), /no dated/);
+    assert.equal(changelogSection("## [3.0.0] - 2026-12-01\n\n~~~\n## x\n", "3.0.0").body, "~~~\n## x", "an unclosed fence runs to the end");
+  });
+
   it("N3 CRLF line endings read the same as LF", () => {
     const { header, body } = changelogSection(SAMPLE.replace(/\n/g, "\r\n"), "1.2.0");
     assert.equal(header, "## [1.2.0] - 2026-12-01");
@@ -141,6 +149,10 @@ describe("release notes: unwrapping", () => {
     assert.equal(unwrap("````\n```\nstill code\n````"), "````\n```\nstill code\n````", "a shorter fence does not close a longer one");
     assert.equal(unwrap("- a\n  b\n  - c\n    d\n1. e\n2) f"), "- a b\n  - c d\n1. e\n2) f");
     assert.equal(unwrap("| a |\n|---|\n| 1 |"), "| a |\n|---|\n| 1 |");
+    // GitHub tables need no outer pipes: every row is kept, up to the blank line that ends it.
+    assert.equal(unwrap("Name | Value\n--- | ---\none | two\nthree | four\n\nwrapped\nprose"), "Name | Value\n--- | ---\none | two\nthree | four\n\nwrapped prose");
+    assert.equal(unwrap("a | b\n:--|--:\nc | d"), "a | b\n:--|--:\nc | d");
+    assert.equal(unwrap("text\nwith a | pipe\nand more"), "text with a | pipe and more", "a pipe in prose, with no delimiter row, is prose");
     assert.equal(unwrap("# Heading\nnext"), "# Heading\nnext");
   });
 
