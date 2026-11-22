@@ -36,13 +36,18 @@ All notable changes to this project are documented here. The format follows
   `telnyxPortHours`, `durationHours`, `isCarrierAnswer` and `uncheckedReport`.
 - `receiptKeysDocument(signers)` and `RECEIPT_KEYS_CACHE_CONTROL`: the public receipt-keys document,
   each `kid` once, two different keys under one `kid` refused.
+- `createOwnerPin({ engine, hmac, records, counters, lockout?, now? })` from the package root: the
+  owner PIN of the `owner-command` flow (ADR-20, ADR-31). `status`, `setPin`, `clearPin` and
+  `liftLock` over the engine's own stores, with the owner as the subject `ownerSubjectKey(hmac,
+  workspaceId)`, its PIN counters (the subject's and the line's), and a change that resets before
+  it stores. The PIN length and lockout are read from the engine's config. `records` also needs
+  `createSubject` (`SubjectWriter`: create if absent, atomically), which `MemoryRecordStore` now has.
 
 ### Changed
 
 - The reference server's Checkout adapter is the package's `StripeCheckoutLinks` (its own copy is
   gone), and its carrier adapters use the package's parsers. The recorded Checkout runs replay on
   `2025-03-31.basil`, which the adapter accepts in test mode only.
-
 - The Seam adapter (GAT-5) checked against Seam's current API reference: its requests and the
   fields it reads (`device_id`, `can_remotely_unlock`, `properties.online`, the action attempt's
   `status` and `result.was_confirmed_by_device`) are the documented ones, and a test now replays

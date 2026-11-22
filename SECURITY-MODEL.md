@@ -123,6 +123,21 @@ reset or a removed duress PIN the old one fails even on a call that began verifi
 digits (tested). Who may call `resetPin`, and how the business confirms the request first, is the
 host's (left to the host).
 
+The owner PIN (`createOwnerPin`, ADR-31) is the business setting its owner's PIN from its own tools:
+only a host call changes it, never a caller. The digits are checked (ASCII digits within the
+engine's length, not weak), turned into an Argon2id record through the host's HMAC function, and
+dropped; they are never stored, logged, written to the ledger or put in an error message (tested).
+A change resets first (`resetPin`, which clears the subject's PIN counters) and stores after, so a
+failure in between leaves no PIN, and the owner command refused, rather than the old PIN or an
+unguarded line (tested). The owner subject is created only if absent, never rewritten, so of two
+first PINs at once the second is `conflict` and the first stays (tested); two changes of a PIN on
+file at once may both answer ok, the PIN stored last standing, always one the business set
+(tested; a host that needs one answer per change serializes them). The line's counter survives a change, so changing the PIN never forgives guesses from
+that line (tested). Judging stays the engine's PIN factor (counted before judged, a constant-time
+compare), so wrong PINs up to the hard lock, the window boundary and concurrent attempts behave as
+for any PIN (tested). Lifting a lock early is `Engine.unlock` per counter, with the member in the
+ledger. Who may call these is the host's (left to the host).
+
 ### Spoken answers
 
 A postal code or a reference said aloud is heard by speech-to-text, can reach the model and the
@@ -1057,6 +1072,7 @@ Who is calling, in levels (`src/verify/`).
 | badge-12 | S | A spoken answer is misheard or injected into speech-to-text. | Spoken answers are normalised by code, exactly or not at all, have their own attempt limit, count alone only at level 1 and never unlock texts. | covered | `verify-spoken.test.ts`: "counts an unusable or wrong answer as an attempt, then stops judging, even the right answer"; `verify-spoken.test.ts`: "can use spoken_knowledge alone at level 1, and only with a factor that is not knowledge above it"; `verify-spoken.test.ts`: "does not unlock texts to the number on file" |
 | badge-13 | I | Keypad digits leak from the host's buffer into a log or a string. | `KeypadCollector` shows no digit, nor how many, through `toString`, JSON or `util.inspect`, and wipes its buffer before its callback runs. | covered | `keypad.test.ts`: "shows no digit, nor how many, through toString, JSON or inspect"; `keypad.test.ts`: "wipes the buffer before the callback runs, even when it throws" |
 | badge-14 | T | A PIN record on file is weakened (its Argon2id cost lowered or set beyond reason) or changed, or an earlier keyed-HMAC record stays weak for good. | Records are read strictly: any cost but today's, another algorithm, version or spelling never matches, and is never run at its own cost; a changed parameter, salt or tag gives another tag. An earlier record still matches, and is replaced by an Argon2id record on the next match, only while it is still on file; every check does one Argon2id run and compares in constant time. | covered | `pin-argon2id.test.ts`: "refuses a correctly computed record at any cost but today's, and never upgrades it"; `pin-argon2id.test.ts`: "refuses a record whose parameters, salt, tag or spelling were changed"; `pin-argon2id.test.ts`: "verifies a record of the earlier format, then replaces it with an Argon2id record on the match"; `pin-hash-timing.test.ts`: "runs Argon2id once at today's cost whatever is on file, a dearer record included (#149)"; `rel-cr-pin-equal-work.test.ts`: "never runs a dearer record at its own cost: the right PIN fails, as on a stand-in" |
+| badge-15 | E | Someone other than the business sets, clears or lifts the owner PIN, or a change leaves the line unguarded. | `createOwnerPin` is host calls only, nothing on a call reaches it; a change resets before it stores, so a failure leaves no PIN, never the old one; the digits are never kept. | covered | `owner-pin.test.ts`: "leaves no PIN on file, never an old one, when the store fails after the reset"; `owner-pin.test.ts`: "changes a PIN by resetting first: the old PIN fails, the new passes, the subject's counters go"; `owner-pin.test.ts`: "sets a PIN the engine then judges on the line, with no digits stored or written" |
 
 ### Dossier
 
