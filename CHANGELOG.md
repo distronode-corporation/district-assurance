@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `createOwnerPin({ engine, hmac, records, counters, lockout?, now? })` from the package root: the
+  owner PIN of the `owner-command` flow (ADR-20, ADR-31). `status`, `setPin`, `clearPin` and
+  `liftLock` over the engine's own stores, with the owner as the subject `ownerSubjectKey(hmac,
+  workspaceId)`, its PIN counters (the subject's and the line's), and a change that resets before
+  it stores. The PIN length and lockout are read from the engine's config. `records` also needs
+  `putSubject` (`SubjectWriter`), which `MemoryRecordStore` has.
+
 ### Changed
 
 - The Seam adapter (GAT-5) checked against Seam's current API reference: its requests and the

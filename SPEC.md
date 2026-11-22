@@ -791,6 +791,42 @@ it), per calling number and per subject.
   per-subject limit is the one that holds; the per-number one is a backstop. Lifting either early
   is the host's: `AttemptCounters.reset` with `counterKeys(workspaceId, "flow.start", keys)`.
 
+### Owner PIN (ADR-20, ADR-31)
+
+The PIN a business's owner keys on the business's own line for the `owner-command` flow, kept as an
+ordinary PIN subject, so the engine judges, counts and locks it as any PIN.
+`createOwnerPin({ engine, hmac, records, counters, lockout?, now? })` returns
+`{ subjectKey, status, setPin, clearPin, liftLock }` for the engine's workspace, over the engine's
+own stores and knowledge key (`hmac`, a `KnowledgeHmac` function only; bytes are `invalid_input`).
+
+- Needs Badge on with the `pin` factor in `keyed_hash` mode, read from the engine's config on every
+  call (so a `configure` applies at once); otherwise every method is `precondition_failed`.
+  `lockout` is optional: the engine's Badge lockout locks, so a given one must equal it after
+  defaults, or every method is `precondition_failed`.
+- The owner is the subject `ownerSubjectKey(hmac, workspaceId)` =
+  `subjectKeyFor(hmac, "owner:" + workspaceId)`, which the host passes to `beginVerification` on
+  its phone call. The owner's line (`{ phone }`) is an E.164 number or null; anything else is
+  `invalid_input`. Its PIN counters are the subject's and, with a number, the line's
+  (`HMAC(knowledgeKey, "number:" + phone)`), under the `pin` kind.
+- `status(line)` reads, writing nothing: `pinSet`, `locked` (the hard lock on either counter),
+  `waitSeconds` (until the longest wait after a failure ends, 0 when none), `failures` (the most in
+  the window on either counter) and `remaining` (`lockAfterFailures - failures`, at least 0).
+- `setPin(line, pin)`: `malformed` unless a string of ASCII digits within the engine's `minDigits`
+  to `maxDigits` (never coerced), `weak` by `isWeakPin`. Then, in this order: the new Argon2id record
+  (`pinDigest`), so a key store failure leaves the PIN on file as it was; `Engine.resetPin` when a
+  PIN is on file (it clears the subject's PIN counters, not the line's, and writes `pin.reset`);
+  `putSubject` (the owner subject with the line as `phoneOnFile`, `""` with none, and no knowledge);
+  `putPinDigest`. A store failure after the reset leaves no PIN on file, never the old one: the
+  owner command is refused until the business sets a PIN again. A `putPinDigest` that stores
+  nothing (another change won) is `conflict`. No error message names the PIN.
+- `clearPin()` is `Engine.resetPin` on the owner subject: idempotent, a `pin.reset` each time.
+- `liftLock(line, memberId)` is `Engine.unlock` on each of the owner's PIN counters (the line's
+  only when given), one `verification.unlocked` each, with the member id as `unlock` checks it.
+- Not here, and the host's: who may call these, the owner's verified number, binding a phone call
+  to an engine call, the key store behind `hmac`, and lock notices.
+- `SubjectWriter` (`putSubject(workspaceId, subject)`) is the one write `RecordStore` lacks: it
+  creates the subject or writes its host fields, and may replace the whole record.
+
 ### Duress PIN (VER-12)
 
 A second PIN that an owner made to call under pressure enters instead of the PIN. Off unless
