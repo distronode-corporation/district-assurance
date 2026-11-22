@@ -61,6 +61,18 @@ check everything that is left from that checkpoint on without the entries before
   rather than their position, and an `entries` list holding null or a hole anywhere in it is
   `malformed`, where a hole past the covered seq used to pass. A monthly report names the last
   entry it read, or the base of a ledger pruned to its head, never a head read after its listing.
+- **A receipt link by email** (ADR-34, SPEC section 16): `sendReceiptLink(callId, url)` sends the
+  link to an ended call's receipt by the channel the caller chose for their payment link, and
+  `textReceiptLink` still texts it as before. The email goes only when the call's last payment went
+  by email, Trace's `channels` setting is `["text", "email"]` (the new setting; the default is text
+  only) and the caller's latest answer to the `receipt_email` consent purpose is yes, and only to the
+  subject's verified `emailOnFile`, as the payment link email is: never an address heard or keyed on
+  the call. A channel that was chosen but not consented to sends nothing, never the other channel
+  instead. A config with the email channel on needs the `emails` adapter and a `receipt_email`
+  wording in Trace's settings, checked when the config is saved. The email (`RECEIPT_EMAIL`) names
+  the business, what the call did and the link, nothing else, and the ledger gets one
+  `receipt.link_emailed`.
+
 
 ## [0.3.0] - 2026-11-22
 

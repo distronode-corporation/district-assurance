@@ -874,7 +874,9 @@ working link (the demo UI's in-memory run state does hold its own run's token, t
 host would send it and drop it); an unknown, malformed or not yet usable token gives the same `404`;
 there is no route by call id (tested). The page carries no script, is never cached or indexed, and
 sends no Referer, so the token does not leak to another site (tested). `textReceiptLink` sends the
-host's link only to the number on file and never writes the link to the ledger (tested). `/r/` is
+host's link only to the number on file and `sendReceiptLink` only to that number or, when the caller
+chose email for their payment link and consented to `receipt_email`, to the verified address on file;
+neither ever writes the link to the ledger (tested). `/r/` is
 under the server's per-address rate limit, like every route. Left to the host: issuing the token and
 building the link, a durable store for the hashes (the reference server keeps them in memory, so its
 links end with the process), and expiry or revocation of a link, which are not built.

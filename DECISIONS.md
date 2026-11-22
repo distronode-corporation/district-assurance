@@ -573,3 +573,27 @@ flows have different configs); carrying more than the PIN (a texted code or a ca
 evidence about the line now, which another call's answer is not).
 **Revisit** if a host needs to carry a pass across workspaces or processes that do not share a
 session store, or past 5 minutes.
+
+## ADR-34. A receipt link by email goes only to a verified address, by the caller's consent to `receipt_email`
+
+**Decided.** A receipt link can go by email, as a payment link can (ADR-32's follow-up, 0.3.0 kept
+them apart so that release added one new outbound path). `sendReceiptLink(callId, url)` sends by the
+channel the caller chose for their payment link: email when the call's last payment went by email and
+Trace's `channels` setting is `["text", "email"]`, text otherwise (as `textReceiptLink`). The email
+goes through the same `EmailSender`, only to the subject's verified `emailOnFile` as Badge read the
+subject when verification started, under the caller's standing yes to the `receipt_email` consent
+purpose, whose wording the host configures in Trace's settings and whose answer any `trace.consent`
+step or the host's code records. Email is off by default; turning it on also makes the config need
+the `emails` adapter and a `receipt_email` wording, checked when the config is saved.
+**Why the payment link's channel, not a new choice.** The caller already chose how this call's links
+reach them; asking again about the receipt would spend a question on an answer they gave. The
+receipt keeps its own consent because the payment link's wording promised a payment link, not a
+receipt: `receipt_email` is the ask, and a "no" to it stops the send with no fallback to text, as a
+withdrawn channel consent stops a payment link (the keypress is the consent, ADR-32). The purpose is
+fixed in code, as Paylink's channel purposes are, so the flow asks it with a plain `trace.consent`
+step and the `trace.receipt` step needs no new field: the answer is the ask.
+**Rejected:** an address heard or keyed on the call (it is what an attacker on the call would
+supply); reusing the `payment_link_email` consent for the receipt (the caller consented to a payment
+link, not a receipt); falling back to text when the email cannot be served (the caller chose a
+channel; a fallback would send on one they did not consent to).
+**Revisit** if a host needs a receipt channel choice of its own, or a third channel.

@@ -174,7 +174,7 @@ const OBJECTS: ReadonlyArray<readonly [pointer: string, keys: readonly string[]]
   ["#/$defs/field", keysOf<IntakeField>()(["key", "label", "type", "required", "sensitive", "maxLength", "showIf", "min", "max", "pattern"])],
   ["#/$defs/bilingual", keysOf<IntakeField["label"]>()(["en", "fr", "es"])],
   ["#/$defs/paylinkSettings", keysOf<PaylinkSettings>()(["maxAmountMinor", "mode", "connectedAccountId", "linkLifeMinutes", "paymentMethods", "channels"])],
-  ["#/$defs/traceSettings", keysOf<TraceSettings>()(["receipts", "wordings", "businessName"])],
+  ["#/$defs/traceSettings", keysOf<TraceSettings>()(["receipts", "wordings", "businessName", "channels"])],
   ["#/$defs/wording", keysOf<ConsentWording>()(["purpose", "version", "text"])],
   ["#/$defs/flow", keysOf<FlowDefinition>()(["summary", "steps"])],
   ["#/$defs/badgeVerifyStep", keysOf<BadgeVerifyStep>()(["type", "level", "factors", "scopes"])],

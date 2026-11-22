@@ -1223,6 +1223,7 @@ answer on file, a phone number, a link or card data.
 | `stepup.issued` | `tokenId`, `site`, `scope`, `level`, `verificationGrantId`, `expiresAt` (section 18) |
 | `stepup.exchanged` / `stepup.refused` / `stepup.failed` | `tokenId`, `digest` (and `kid` when signed), `reason` when refused or failed (written by the engine only) |
 | `receipt.link_texted` | `actions` (the classes: `money`, `contact`, `access`) |
+| `receipt.link_emailed` | `actions` (the classes: `money`, `contact`, `access`) |
 | `contact.notice_owed` | none: saved in the same write as the contact change that owes it |
 | `contact.notice_sent` | none |
 | `module.event` | `module`, `event`, `detail` (written by an outside module) |
@@ -2357,8 +2358,8 @@ Code builds every text, in the call's locale, one of `SUPPORTED_LOCALES` (export
 `["en", "fr", "es"]` whose members are the `Locale` type; `isSupportedLocale` checks a host's value).
 Each catalog of code-built words is a `Record<Locale, ...>`: the texts below (`IDENTITY_TEXT`,
 `PAYMENT_TEXT`, `TEXT_CODE_TEXT`, `ACCESS_CODE_TEXT`, `RECEIPT_LINK_TEXT`, `CONTACT_NOTICE_TEXT`,
-`ACTION_WORDS`), the payment link email and the channel prompt's key line (`PAYMENT_EMAIL`,
-`CHANNEL_KEY_TEXT`), `AMOUNT_REGION` and `LIST_REGION` (where amounts and lists are formatted),
+`ACTION_WORDS`), the payment link and receipt link emails and the channel prompt's key line
+(`PAYMENT_EMAIL`, `RECEIPT_EMAIL`, `CHANNEL_KEY_TEXT`), `AMOUNT_REGION` and `LIST_REGION` (where amounts and lists are formatted),
 `AMOUNT_READBACK_TEXT` and `READBACK_WORDING` (the read-backs), `INTERRUPT_LINES`, `BANK_WORDS`,
 `NUMBER_CONNECTORS` and `NUMBER_LANGUAGES_BY_LOCALE` (the number words the redactors read: English
 and French on every call, Spanish too on a Spanish call). A test fails when a catalog lacks a
@@ -2378,8 +2379,8 @@ one-time door code: CODE. It works once, within N min." / "Votre code de porte, 
 CODE. Valable une fois, dans les N min." / "Su código de puerta de un solo uso: CODE. Sirve una
 vez, dentro de N min.", N being the minutes left on the access grant, rounded up, at least 1.
 
-**Payment link email** (purpose `payment_link`, section 14). The one email code builds, to the
-subject's verified address on file only. Subject: "Your secure payment link from BUSINESS" /
+**Payment link email** (purpose `payment_link`, section 14). To the subject's verified address on
+file only. Subject: "Your secure payment link from BUSINESS" /
 "Votre lien de paiement sécurisé de BUSINESS" / "Su enlace de pago seguro de BUSINESS". Body:
 "BUSINESS sent you a secure payment link for AMOUNT. It works once and expires in N minutes."
 then the link on a line of its own, then "If you did not ask for this payment, do not use the
@@ -2402,14 +2403,14 @@ as Badge read it when verification started, before the change, unless the call a
 same subject with that same number; Badge's keypad or PIN match always stands then, since such a
 step follows a level 2 verification. Keeping one writes `contact.notice_owed` in the same write.
 
-**Receipt link** (purpose `receipt_link`). `textReceiptLink(callId, url)` texts the host's
-capability link to an ended call's receipt (section 12, an `https` URL of at most 512 characters
-with no whitespace, no control or format character (such as NEL, a zero-width space or a bidi
-override) and no lone surrogate, else `invalid_input`; a call not ended or without its receipt yet:
-`precondition_failed`). It returns `{texted: true}` only when the flow's `trace.receipt` step has
+**Receipt link** (purposes `receipt_link` and `receipt_email`). `textReceiptLink(callId, url)` texts
+the host's capability link to an ended call's receipt (section 12, an `https` URL of at most 512
+characters with no whitespace, no control or format character (such as NEL, a zero-width space or a
+bidi override) and no lone surrogate, else `invalid_input`; a call not ended or without its receipt
+yet: `precondition_failed`). It returns `{texted: true}` only when the flow's `trace.receipt` step has
 `textLink`, an action was noted, the caller's latest answer to `textLink.consent` is "yes" (a later
 "no" withdraws an earlier "yes"), a keypad or PIN match still stands (or the call kept a number for
-Badge's current subject before a contact change), and no link was texted on this call yet; otherwise
+Badge's current subject before a contact change), and no link was sent on this call yet; otherwise
 `{texted: false}` and nothing is sent. It goes to the first number kept for Badge's current subject
 before a contact change, else that subject's number on file; a number kept for another subject is
 never used. "Receipt from BUSINESS for ACTIONS on your call: URL" / "Reçu de BUSINESS pour ACTIONS
@@ -2418,6 +2419,30 @@ lists, in order, "a payment", "a change to your contact details", "an access req
 paiement", "une modification de vos coordonnées", "une demande d'accès" / "un pago", "un cambio en
 sus datos de contacto", "una solicitud de acceso". No amount, code or personal value. A retry after
 a failure sends with the same idempotency key; the ledger gets one `receipt.link_texted`.
+
+**Receipt link by email** (purpose `receipt_link` too, to the verified address on file).
+`sendReceiptLink(callId, url)` sends the same link by the channel the caller chose for their payment
+link: email when the call's last payment went by email and Trace's `channels` setting is
+`["text", "email"]`, text otherwise, following `textReceiptLink`'s rules exactly. The email goes only
+when the caller's latest answer to the `receipt_email` consent purpose (Trace's settings hold its
+wording, the caller's answer is recorded like any consent) is "yes", a keypad or PIN match still
+stands, and the subject's verified address on file passes `isEmailAddress`: to that address only, as
+Badge read the subject when verification started, never one heard or keyed on the call. The flow
+does not have to ask for it with a `textLink` field: the answer is the ask. A channel that was
+chosen but cannot be served (no answer, a later "no", one still being stored or revoked, no address)
+sends nothing, and the link never falls back to the other channel; a caller who chose email and only
+answered the text purpose gets no link. At most one link per call, whichever channel sent it. The
+email is `RECEIPT_EMAIL`: subject "Your receipt from BUSINESS" / "Votre reçu de BUSINESS" / "Su
+recibo de BUSINESS", body "BUSINESS sent you a receipt for ACTIONS on your call.", the link on a line
+of its own, then "If you did not have this call, do not use the link." / "BUSINESS vous a envoyé un
+reçu pour ACTIONS lors de votre appel." ... "Si vous n'avez pas passé cet appel, n'utilisez pas le
+lien." / "BUSINESS le envió un recibo por ACTIONS durante su llamada." ... "Si no realizó esta
+llamada, no use el enlace.", with ACTIONS as the text's list. Nothing else: no amount, code, phone
+number, account number or personal value, so a forwarded copy holds nothing more. Email is off by
+default: without "email" in Trace's `channels` the link always goes by text (or not at all), and a
+config with it on needs the `emails` adapter and a `receipt_email` wording, checked when it is saved.
+A retry after a failure sends with the same idempotency key; the ledger gets one
+`receipt.link_emailed`.
 
 **Contact change notice** (purpose `contact_changed`). Each subject and number a contact step kept
 is owed a security notice, whatever the caller answered about receipts: it is not a receipt and

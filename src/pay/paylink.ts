@@ -654,6 +654,16 @@ function consentStands(record: CallRecord, channel: PaymentChannel): boolean {
   return (record.modules[TRACE] as unknown as TraceSlice).consents.filter((c) => c.purpose === purpose).at(-1)?.answer === "yes";
 }
 
+/**
+ * The channel the call's last payment link went by: the caller's choice for the payment link, or
+ * text when the call sent none (or was saved before channels existed). Trace reads this to send a
+ * receipt link by the channel the caller chose here.
+ */
+export function paymentChannelOf(record: CallRecord): PaymentChannel {
+  const slice = record.modules[PAYLINK] as PaylinkSlice | undefined;
+  return slice?.payments.at(-1)?.channel ?? "text";
+}
+
 /** Where a link goes, by its channel: the number on file, or the verified address on file with the business's name. */
 interface Destination {
   phone: string;

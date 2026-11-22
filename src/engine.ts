@@ -1381,10 +1381,22 @@ export class Engine {
   /**
    * Texts the link to an ended call's receipt (`url`: the host's capability link, SRV-3) to the
    * number on file, when the flow's `trace.receipt` step has `textLink`, a money, contact or access
-   * step completed, the caller consented and a keypad or PIN factor matched. At most once per call.
+   * step completed, the caller consented and a keypad or PIN factor matched. At most once per call;
+   * a link `sendReceiptLink` sent counts.
    */
   textReceiptLink(callId: string, url: string): Promise<{ texted: boolean }> {
     return trace.textReceiptLink(this.#rt, callId, url, (record) => this.#currentSubject(record));
+  }
+
+  /**
+   * Sends the link to an ended call's receipt by the channel the caller chose for their payment
+   * link: email, to the verified address on file only, when they chose email there, Trace's
+   * `channels` setting has the email channel on and the caller consented to `receipt_email`; by
+   * text, as `textReceiptLink` does, otherwise. At most once per call, whichever channel; a
+   * channel that was chosen but not consented to sends nothing, never the other channel instead.
+   */
+  async sendReceiptLink(callId: string, url: string): Promise<{ sent: boolean; channel: PaymentChannel | null }> {
+    return trace.sendReceiptLink(this.#rt, callId, url, (record) => this.#currentSubject(record), (record) => paylink.paymentChannelOf(record));
   }
 
   async receipt(callId: string): Promise<SignedReceipt | null> {
@@ -1792,9 +1804,9 @@ export class Engine {
    * started from nothing). Only asked about a call whose flow completed a scoped step, so Badge's
    * part exists.
    */
-  #currentSubject(record: CallRecord): { subjectKey: string | null; numberOnFile: string | null } {
+  #currentSubject(record: CallRecord): { subjectKey: string | null; numberOnFile: string | null; emailOnFile: string | null } {
     const s = record.modules[badge.BADGE] as unknown as badge.BadgeSlice;
-    return { subjectKey: s.subject?.subjectKey ?? null, numberOnFile: s.knowledgeMatched ? s.subject!.phoneOnFile : null };
+    return { subjectKey: s.subject?.subjectKey ?? null, numberOnFile: s.knowledgeMatched ? s.subject!.phoneOnFile : null, emailOnFile: s.knowledgeMatched ? (s.subject!.emailOnFile ?? null) : null };
   }
 
   /**
