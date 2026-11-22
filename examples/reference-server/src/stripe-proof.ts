@@ -95,7 +95,7 @@ async function main(): Promise<void> {
   });
   check(new URL(link.url).protocol === "https:", `createOnboardingLink: an https link on ${new URL(link.url).host} (the link is not printed)`);
   const status = await readConnectStatus(client, { mode: "test", accountId: created.accountId, timeoutMs: 10_000 });
-  check(status.chargesEnabled === false, `readConnectStatus: a new account cannot take charges yet (detailsSubmitted ${status.detailsSubmitted})`);
+  check(status.chargesEnabled === false && status.detailsSubmitted === false, "readConnectStatus: a new account can take no charges and has submitted no details");
 
   console.log("\n2. Checkout on a connected account (StripeCheckoutLinks, endive)");
   const account = await chargeableAccount(key, named);

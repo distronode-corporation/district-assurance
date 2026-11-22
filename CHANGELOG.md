@@ -24,6 +24,11 @@ All notable changes to this project are documented here. The format follows
   is the verifying secret's (both modes verifying is invalid, a `livemode` of the other mode is
   `wrong_mode`), and `connectEventAccount`; `StripeAdapterError`, `StripeHttpError` and
   `StripeKeyRefused`, none of which carries Stripe's message or any part of a key.
+- `connectStatusOf` (and so `createConnectAccount` and `readConnectStatus`) reads
+  `detailsSubmitted` true only once Stripe has requested a merchant capability, which it does after
+  onboarding collects the business's details, and no requirement due from the business restricts a
+  payment capability: a freshly created account reads false, never "nothing due, so submitted".
+  Pinned with real test-mode v2 Account shapes (`test/fixtures/stripe-v2-accounts/`).
 - `district-assurance/carrier` (SPEC section 32): `twilioSimSwapHours`, `twilioIdentityMatch`,
   `telnyxPortHours`, `durationHours`, `isCarrierAnswer` and `uncheckedReport`.
 - `receiptKeysDocument(signers)` and `RECEIPT_KEYS_CACHE_CONTROL`: the public receipt-keys document,

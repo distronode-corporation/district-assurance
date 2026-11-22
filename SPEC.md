@@ -3139,8 +3139,12 @@ requires before the merchant configuration; the merchant configuration; the full
 as fees and losses collector; `include` of the merchant configuration and requirements).
 `createConnectAccount` (under the host's idempotency key) and `readConnectStatus` check the account's
 id and its `livemode` against the mode and answer `connectStatusOf`'s two flags: `chargesEnabled`,
-the merchant `card_payments` capability `active`, and `detailsSubmitted`, an `entries` list with no
-requirement awaiting the business currently or past due; anything missing reads false.
+the merchant `card_payments` capability `active`, and `detailsSubmitted`: Stripe has requested a
+merchant capability with a status (it does so only once onboarding has collected the business's
+details; a new account answers `capabilities: null` and no entries), and the `entries` list holds no
+requirement awaiting the business, currently or past due, that restricts a merchant `*_payments`
+capability (one restricting only payouts does not count; one whose impact cannot be read does).
+Anything missing reads false.
 `createOnboardingLink` takes no mode and answers `{ url }` only: an https link, refused unless the
 answer names the requested account, for the owner's own browser only, never texted or emailed.
 

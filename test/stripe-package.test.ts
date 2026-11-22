@@ -3,6 +3,7 @@
 // accepts is proven against Stripe test mode (examples/reference-server/src/stripe-proof.ts); the
 // bytes the SDK and fetchStripeClient send are compared in test/stripe-client-bytes.test.ts.
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { signStripePayload } from "../src/index.ts";
@@ -474,7 +475,15 @@ describe("Connect onboarding (Accounts v2)", () => {
     await assert.rejects(readConnectStatus(fake({ accountRetrieve: refusal(504) }).client, { mode: "test", accountId: ACCT }), (e: Error) => e instanceof StripeAdapterError && e.retryable);
   });
 
-  it("⛔ charges enabled only with card_payments active; details submitted only with nothing due from the business", () => {
+  it("⛔ a fresh account, as Stripe answers it, has not submitted its details; an onboarded one has", () => {
+    // Real test-mode v2 Account shapes (ids replaced, identity and contact removed): test/fixtures/stripe-v2-accounts/.
+    const fixture = (name: string): unknown => JSON.parse(readFileSync(new URL(`./fixtures/stripe-v2-accounts/${name}.json`, import.meta.url), "utf8"));
+    assert.deepEqual(connectStatusOf(fixture("fresh")), { chargesEnabled: false, detailsSubmitted: false });
+    // Onboarded: card payments active; its one requirement left (a bank account, past due) restricts payouts only.
+    assert.deepEqual(connectStatusOf(fixture("onboarded")), { chargesEnabled: true, detailsSubmitted: true });
+  });
+
+  it("⛔ charges enabled only with card_payments active; details submitted only once a capability is requested and nothing due restricts payments", () => {
     for (const [account, charges] of [
       [{}, false],
       [{ configuration: {} }, false],
@@ -485,6 +494,8 @@ describe("Connect onboarding (Accounts v2)", () => {
     ] as const) {
       assert.equal(connectStatusOf(account).chargesEnabled, charges);
     }
+    const requested = { configuration: { merchant: { capabilities: { card_payments: { status: "pending" }, ach_debit_payments: null } } } };
+    const restricts = (capability: string, configuration = "merchant") => ({ restricts_capabilities: [{ capability, configuration, deadline: { status: "past_due" } }] });
     for (const [requirements, submitted] of [
       [null, false],
       [undefined, false],
@@ -496,8 +507,19 @@ describe("Connect onboarding (Accounts v2)", () => {
       [{ entries: [due("eventually_due")] }, true],
       [{ entries: [due("currently_due", "stripe")] }, true],
       [{ entries: ["x", { awaiting_action_from: "user" }] }, true],
+      [{ entries: [{ ...due("past_due"), impact: restricts("stripe_balance.payouts") }] }, true],
+      [{ entries: [{ ...due("past_due"), impact: restricts("card_payments") }] }, false],
+      [{ entries: [{ ...due("currently_due"), impact: restricts("bancontact_payments") }] }, false],
+      [{ entries: [{ ...due("currently_due"), impact: restricts("card_payments", "customer") }] }, true],
+      [{ entries: [{ ...due("currently_due"), impact: { restricts_capabilities: ["x"] } }] }, false],
+      [{ entries: [{ ...due("currently_due"), impact: { restricts_capabilities: [{ configuration: "merchant", capability: 7 }] } }] }, true],
+      [{ entries: [{ ...due("currently_due"), impact: {} }] }, false],
     ] as const) {
-      assert.equal(connectStatusOf({ requirements }).detailsSubmitted, submitted, JSON.stringify(requirements));
+      assert.equal(connectStatusOf({ ...requested, requirements }).detailsSubmitted, submitted, JSON.stringify(requirements));
+    }
+    // ⛔ Nothing requested yet (null, empty, or no status): not submitted, however empty the requirements.
+    for (const capabilities of [null, {}, { card_payments: null }, { card_payments: { status: 7 } }]) {
+      assert.equal(connectStatusOf({ configuration: { merchant: { capabilities } }, requirements: { entries: [] } }).detailsSubmitted, false, JSON.stringify(capabilities));
     }
   });
 });

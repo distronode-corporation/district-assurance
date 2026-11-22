@@ -19,7 +19,13 @@ export const CONNECT_ACCOUNT_INCLUDE: ReadonlyArray<"configuration.merchant" | "
 export interface ConnectStatus {
   /** The merchant configuration's `card_payments` capability is `active`. */
   chargesEnabled: boolean;
-  /** No requirement awaiting the business is currently due or past due. */
+  /**
+   * The business has submitted its onboarding details: Stripe has requested the merchant
+   * configuration's capabilities (it does so only once onboarding has collected the business's
+   * details; a new account answers `capabilities: null`), and no requirement awaiting the business,
+   * currently or past due, restricts a payment capability. A requirement that restricts only payouts
+   * (a bank account still to add) does not hold it back.
+   */
   detailsSubmitted: boolean;
 }
 
@@ -58,14 +64,32 @@ export function connectStatusOf(account: unknown): ConnectStatus {
   const capabilities = isRecord(merchant.capabilities) ? merchant.capabilities : {};
   const card = isRecord(capabilities.card_payments) ? capabilities.card_payments : {};
   const chargesEnabled = card.status === "active";
-  // Requirements not included, or no entries list: nothing establishes that nothing is due.
-  if (!isRecord(a.requirements) || !Array.isArray(a.requirements.entries)) return { chargesEnabled, detailsSubmitted: false };
-  const due = a.requirements.entries.some((entry: unknown) => {
+  // ⛔ "Nothing due" alone is not "submitted": a new account has no entries and nothing requested
+  // (test mode, 2026-11-22: `requirements.entries` empty, `capabilities` null). Collection has
+  // happened only once Stripe has requested a capability with a status.
+  const requested = Object.values(capabilities).some((capability) => isRecord(capability) && typeof capability.status === "string");
+  // Requirements not included, or no entries list: nothing establishes what is due.
+  if (!requested || !isRecord(a.requirements) || !Array.isArray(a.requirements.entries)) return { chargesEnabled, detailsSubmitted: false };
+  const outstanding = a.requirements.entries.some((entry: unknown) => {
     const e = isRecord(entry) ? entry : {};
     const deadline = isRecord(e.minimum_deadline) ? e.minimum_deadline : {};
-    return e.awaiting_action_from === "user" && (deadline.status === "currently_due" || deadline.status === "past_due");
+    return e.awaiting_action_from === "user" && (deadline.status === "currently_due" || deadline.status === "past_due") && restrictsPayments(e);
   });
-  return { chargesEnabled, detailsSubmitted: !due };
+  return { chargesEnabled, detailsSubmitted: !outstanding };
+}
+
+/**
+ * Whether a requirement restricts one of the merchant's payment capabilities (`card_payments` and
+ * the other `*_payments`). One whose impact cannot be read counts as restricting them: unknown is
+ * never "submitted".
+ */
+function restrictsPayments(entry: Record<string, unknown>): boolean {
+  const impact = isRecord(entry.impact) ? entry.impact : null;
+  if (impact === null || !Array.isArray(impact.restricts_capabilities)) return true;
+  return impact.restricts_capabilities.some((item: unknown) => {
+    if (!isRecord(item)) return true;
+    return item.configuration === "merchant" && typeof item.capability === "string" && item.capability.endsWith("_payments");
+  });
 }
 
 function checkedAccount(answer: unknown, mode: StripeMode, step: string): Record<string, unknown> & { id: string } {
