@@ -70,8 +70,15 @@ function decide(world: World = {}) {
     writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`);
     chmodSync(join(bin, name), 0o755);
   };
-  // `git ls-remote --tags origin <ref>`: the peeled line for `^{}`, the tag's own line otherwise.
-  fake("git", tag === null ? "exit 0" : `case "$*" in *'^{}'*) printf '%s\\t%s\\n' "${tag}" "$5" ;; *) printf '%s\\t%s\\n' "${"c".repeat(40)}" "$5" ;; esac`);
+  // `git -c http.extraheader=... ls-remote --tags origin <ref>`: refused (as GitHub refuses a runner's
+  // request with no credential) unless it carries the token's header; then the peeled line for
+  // `^{}`, the tag's own line otherwise.
+  const header = `AUTHORIZATION: basic ${Buffer.from("x-access-token:the-job-token").toString("base64")}`;
+  fake(
+    "git",
+    `if [ "$1" != -c ] || [ "$2" != "http.extraheader=${header}" ]; then echo "fatal: The requested URL returned error: 403" >&2; exit 128; fi\n` +
+      (tag === null ? "exit 0" : `case "$*" in *'^{}'*) printf '%s\\t%s\\n' "${tag}" "\${@: -1}" ;; *) printf '%s\\t%s\\n' "${"c".repeat(40)}" "\${@: -1}" ;; esac`),
+  );
   const document = world.document ?? JSON.stringify({ name: "district-assurance", versions: Object.fromEntries((world.versions ?? ["0.1.0"]).map((v) => [v, {}])) });
   writeFileSync(join(dir, "document.json"), document);
   fake("curl", world.curlFails === true ? "exit 22" : `while [ $# -gt 0 ]; do if [ "$1" = -o ]; then cp "${join(dir, "document.json")}" "$2"; shift; fi; shift; done`);
@@ -108,6 +115,7 @@ function decide(world: World = {}) {
       GITHUB_STEP_SUMMARY: join(dir, "summary"),
       GITHUB_SHA: SHA,
       GITHUB_REPOSITORY: "distronode-corporation/district-assurance",
+      GH_TOKEN: "the-job-token",
       EVENT: world.event ?? "push",
       DRY_RUN: world.dryRun ?? "",
     },
@@ -252,7 +260,7 @@ describe("the shape that keeps an unsigned tag from publishing", () => {
       assert.match(text, issuer);
     }
     const guard = script(job("guard"), "The tag is signed by this workflow on main");
-    assert.match(guard, /git fetch --no-tags origin "\+refs\/tags\/v\$\{VERSION\}:refs\/tags\/v\$\{VERSION\}"/);
+    assert.match(guard, /fetch --no-tags origin "\+refs\/tags\/v\$\{VERSION\}:refs\/tags\/v\$\{VERSION\}"/);
     assert.match(guard, /git cat-file -t/);
     assert.match(guard, /\^\{commit\}"\)" != "\$GITHUB_SHA"/);
   });
@@ -336,5 +344,38 @@ describe("the GitHub release job: creates the release, or repairs the one a fail
     assert.notEqual(wrong.code, 0);
     assert.match(wrong.out, /differs from the one the pack job checked/);
     assert.deepEqual(wrong.calls, [], "nothing asked or attached");
+  });
+});
+
+describe("every git call that reaches GitHub carries the job's token", () => {
+  /** Each run script's commands, with backslash-continued lines joined, and the step text they are in. */
+  function commands(): Array<{ step: string; command: string }> {
+    const out: Array<{ step: string; command: string }> = [];
+    const steps = workflow.split(/\n(?= {6}- )/);
+    for (const step of steps) {
+      const run = step.indexOf("run: |");
+      if (run < 0) continue;
+      const body = step.slice(run).split("\n").slice(1).join("\n").replace(/\\\n\s*/g, " ");
+      for (const line of body.split("\n")) out.push({ step, command: line.trim() });
+    }
+    return out;
+  }
+  const network = /\bgit\b.*?\s(?:fetch|push|pull|clone|ls-remote)\s/;
+
+  it("finds the network calls: the fetch of main, the two tag lookups, the tag push and the guard's fetch", () => {
+    assert.equal(commands().filter((c) => network.test(c.command)).length, 5);
+  });
+
+  it("gives each one the token as a header for that command alone, from github.token, never in a URL", () => {
+    for (const { step, command } of commands().filter((c) => network.test(c.command))) {
+      assert.match(command, /git -c http\.extraheader="AUTHORIZATION: basic \$auth" +(?:fetch|push|ls-remote) /, command);
+      assert.match(step, /auth="\$\(printf 'x-access-token:%s' "\$GH_TOKEN" \| base64 -w0\)"/, command);
+      assert.match(step, /\n {10}GH_TOKEN: \$\{\{ github\.token \}\}\n/, command);
+    }
+    assert.doesNotMatch(workflow, /https:\/\/[^\s"]*@github\.com|x-access-token:[^%]/, "no credential in a URL");
+    // The credential is never written to git's config: every checkout keeps persist-credentials off.
+    const checkouts = workflow.split("uses: actions/checkout@").slice(1);
+    assert.ok(checkouts.length > 0);
+    for (const checkout of checkouts) assert.match(checkout.slice(0, 200), /persist-credentials: false/);
   });
 });

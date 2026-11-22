@@ -146,10 +146,19 @@ jobs:
           package-manager-cache: false
       # A re-run of an old push run, or a dispatch that raced a newer push, may hold a commit main
       # has since moved past; it must still be on main.
+      #
+      # ⛔ EVERY GIT CALL THAT REACHES GITHUB CARRIES THE JOB'S TOKEN, as a header given to that one
+      # command (`git -c http.extraheader=...`), never in a URL and never left in git's config
+      # (checkout runs with persist-credentials: false). A request with no credential is refused
+      # from a runner (HTTP 403, the first push release of 0.2.0), even for this public repository.
       - name: The commit is on main
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" \
+            fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "::error::The commit $GITHUB_SHA is not on main."
             exit 1
@@ -167,8 +176,9 @@ jobs:
             echo "::error::package.json's version '$version' is not a release version."
             exit 1
           fi
-          tag="$(git ls-remote --tags origin "refs/tags/v$version^{}" | cut -f1)"
-          if [ -z "$tag" ]; then tag="$(git ls-remote --tags origin "refs/tags/v$version" | cut -f1)"; fi
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          tag="$(git -c http.extraheader="AUTHORIZATION: basic $auth" ls-remote --tags origin "refs/tags/v$version^{}" | cut -f1)"
+          if [ -z "$tag" ]; then tag="$(git -c http.extraheader="AUTHORIZATION: basic $auth" ls-remote --tags origin "refs/tags/v$version" | cut -f1)"; fi
           # The registry's own document for the package, read for the version's key: a version npm
           # does not have is a missing key, and any failure to fetch or read the document stops
           # the run (fail closed), never reads as "not published". (`npm view` exits 1 alike for
@@ -328,9 +338,13 @@ jobs:
       # tag that was pushed and not a local copy. A lightweight tag, a tag on another commit, an
       # unsigned tag, or one signed by anyone or anything else stops the release here.
       - name: The tag is signed by this workflow on main
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git fetch --no-tags origin "+refs/tags/v${VERSION}:refs/tags/v${VERSION}"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" \
+            fetch --no-tags origin "+refs/tags/v${VERSION}:refs/tags/v${VERSION}"
           if [ "$(git cat-file -t "refs/tags/v${VERSION}")" != "tag" ]; then
             echo "::error::v$VERSION is a lightweight tag; a release tag is annotated and signed by this workflow"
             exit 1
