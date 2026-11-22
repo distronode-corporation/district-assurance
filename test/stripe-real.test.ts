@@ -14,7 +14,8 @@ import { after, before, describe, it } from "node:test";
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { createServe } from "../examples/reference-server/src/main.ts";
 import { createDemoWorld, type DemoWorld } from "../examples/reference-server/src/script.ts";
-import { STRIPE_API_VERSION, StripeCheckoutLinks, checkoutPaymentMethodTypes } from "../examples/reference-server/src/stripe-adapters.ts";
+import { STRIPE_API_VERSION, testModeCheckout } from "../examples/reference-server/src/stripe-adapters.ts";
+import { STRIPE_BASIL_API_VERSION, checkoutPaymentMethodTypes } from "../src/stripe/index.ts";
 import { signStripePayload, systemClock } from "../src/index.ts";
 import { recordedConfig, requestRecordedLink } from "./fixtures/stripe-real/flows.ts";
 import { Redactor, leaks } from "./fixtures/stripe-real/redact.ts";
@@ -214,7 +215,7 @@ describe("PAY-1: Stripe Checkout, the recorded test-mode runs replayed through t
 
   before(async () => {
     const apiBase = await listen(stripe.server);
-    world = createDemoWorld({ payments: new StripeCheckoutLinks(KEY, { apiBase, successUrl: RETURN }), config: recordedConfig(recording.account) });
+    world = createDemoWorld({ payments: testModeCheckout(KEY, { apiBase, successUrl: RETURN, apiVersion: STRIPE_BASIL_API_VERSION, now: () => world.clock.now() }), config: recordedConfig(recording.account) });
     server = createReferenceServer({ engine: world.engine, clock: systemClock, stripeSecrets: { identity: [], payments: [SECRET], connect: [CONNECT_SECRET] }, log: () => undefined });
     base = await listen(server);
   });
@@ -314,7 +315,7 @@ describe("PAY-1: a cancelled link closed on the connected account, as Stripe ans
 
   before(async () => {
     const apiBase = await listen(stripe.server);
-    world = createDemoWorld({ payments: new StripeCheckoutLinks(KEY, { apiBase, successUrl: RETURN }), config: recordedConfig(recording.account) });
+    world = createDemoWorld({ payments: testModeCheckout(KEY, { apiBase, successUrl: RETURN, apiVersion: STRIPE_BASIL_API_VERSION, now: () => world.clock.now() }), config: recordedConfig(recording.account) });
   });
   after(async () => {
     await Promise.all([close(stripe.server), world.close()]);

@@ -12,6 +12,7 @@ anything specific to one host's infrastructure stay out of it.
 change) are what outsiders need to read and trust. Hosting details are not, and publishing them
 would only widen the attack surface. **Revisit** if a second host needs a shared piece that is
 not engine logic.
+**Amended by ADR-30:** the Stripe adapters and the carrier Lookup parsers are now public entry points.
 
 ## ADR-2. One package, not a workspace
 
@@ -33,7 +34,8 @@ Badge's `matchedSubject` (a link goes to the number Badge matched); the other bo
 **Decided.** `node:crypto` provides SHA-256, HMAC, constant-time comparison and ES256. No `jose`,
 no Stripe SDK, no schema library. Development tools only, pinned exactly: `typescript`,
 `@types/node`, `oxlint`, `c8` (with the same `test-exclude` overrides as our other public
-repositories), and `fast-check` for the property and fuzz suites (SRV-7), which `files` never ships.
+repositories), `fast-check` for the property and fuzz suites (SRV-7), and `stripe` for the
+`StripeClientLike` type test and the byte comparison (ADR-30), none of which `files` ships.
 **Why.** Every dependency of a security library is part of its security. The receipt format
 (canonical JSON plus a raw P1363 signature) is simple enough that a JWS library buys nothing; the
 Stripe calls the reference server will make are a few `fetch` requests. **Revisit** if JWS
@@ -463,6 +465,29 @@ calls again keeps an earlier record until a reset.
 **Revisit** when the cost should rise (a new floor in `PIN_HASH_PARAMETERS`, with the old floor kept
 as the lowest accepted and records below the new target rehashed on login, as the earlier format
 is), or when Node changes the API.
+
+## ADR-30. The Stripe adapters and the carrier parsers are public entry points
+
+**Decided.** `district-assurance/stripe` publishes what a host needs to take payments by link in
+test or live mode: `StripeCheckoutLinks`, Connect onboarding on Accounts v2, the Connect webhook
+verifier and the key, mode and error types around them. `district-assurance/carrier` publishes the
+Twilio and Telnyx Lookup field parsers. The adapters take a structural `StripeClientLike`, which a
+stripe-node instance satisfies as it is and `fetchStripeClient` implements over `fetch`, so ADR-3
+holds: no runtime dependency (stripe-node is a development dependency, for the type test and the
+byte comparison only). The reference server uses these exports and keeps no copy of its own.
+**Hosts own storage, credentials, rate limits and country policy.** Nothing in either entry point
+stores a connected account, reads the environment, holds a key beyond the client a host builds, limits
+how often a host calls Stripe or a carrier, or decides which countries a lookup covers. Each mode is
+explicit: a key, a session id and every answer must be the mode's, and the verifying webhook secret
+fixes an event's mode.
+**Why.** A second host (ours) needed the same adapters, with live mode beside test, and porting
+them by hand had already produced two copies that drifted (Checkout on endive takes
+`allowed_payment_method_types`; the reference copy still sent basil's `payment_method_types`). The
+rules in them (which mode a key, an id and an event are in; that an event names the stored account;
+that an expire tells a close from a payment that won the race; that Stripe's message never leaves)
+are what an outsider needs to read and trust, as ADR-1 says of the engine's rules.
+**Revisit** if a host needs a provider other than Stripe for links, or the SDK's shapes move far
+enough that a structural type no longer fits it.
 
 ## ADR-31. The owner PIN is the package's, over the engine's own stores
 

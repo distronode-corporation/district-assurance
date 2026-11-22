@@ -189,8 +189,9 @@ jobs:
             exit 1
           fi
           for required in package/dist/index.js package/dist/index.d.ts package/dist/testing/index.js \
-            package/dist/testing/index.d.ts package/schema/flow-config.v1.json package/package.json package/LICENSE \
-            package/NOTICE; do
+            package/dist/testing/index.d.ts package/dist/stripe/index.js package/dist/stripe/index.d.ts \
+            package/dist/carrier/index.js package/dist/carrier/index.d.ts package/schema/flow-config.v1.json \
+            package/package.json package/LICENSE package/NOTICE; do
             grep -qxF "$required" "$RUNNER_TEMP/contents.txt" || { echo "::error::$required is missing."; exit 1; }
           done
       # The tarball unpacked into an empty project's node_modules, as an install lays it out
@@ -215,6 +216,8 @@ jobs:
           import assert from "node:assert/strict";
           import * as root from "district-assurance";
           import * as testing from "district-assurance/testing";
+          import * as stripe from "district-assurance/stripe";
+          import * as carrier from "district-assurance/carrier";
           import pkg from "district-assurance/package.json" with { type: "json" };
 
           assert.equal(pkg.version, process.argv[2]);
@@ -224,7 +227,13 @@ jobs:
           for (const name of ["createTestEngine", "sessionStoreContract"]) {
             assert.equal(typeof testing[name], "function", `district-assurance/testing exports ${name}`);
           }
-          // Only the three entry points are public: a path inside dist/ is refused.
+          for (const name of ["StripeCheckoutLinks", "fetchStripeClient", "assertStripeKey", "verifyConnectEvent", "connectAccountCreateParams"]) {
+            assert.equal(typeof stripe[name], "function", `district-assurance/stripe exports ${name}`);
+          }
+          for (const name of ["twilioSimSwapHours", "telnyxPortHours", "durationHours"]) {
+            assert.equal(typeof carrier[name], "function", `district-assurance/carrier exports ${name}`);
+          }
+          // Only the published entry points are public: a path inside dist/ is refused.
           await assert.rejects(import("district-assurance/dist/index.js"), { code: "ERR_PACKAGE_PATH_NOT_EXPORTED" });
           // The testing entry builds a working engine from the published files alone.
           const { engine } = testing.createTestEngine();
@@ -235,9 +244,12 @@ jobs:
           cat > smoke-types.ts <<'EOF'
           import { createEngine, type Engine } from "district-assurance";
           import { createTestEngine, sessionStoreContract } from "district-assurance/testing";
+          import { StripeCheckoutLinks, type StripeClientLike } from "district-assurance/stripe";
+          import { twilioSimSwapHours } from "district-assurance/carrier";
 
           const engine: Engine = createTestEngine().engine;
-          export const checks = [createEngine, sessionStoreContract, engine] as const;
+          export const links = (client: StripeClientLike) => new StripeCheckoutLinks(client, { mode: "test", successUrl: "https://example.com/" });
+          export const checks = [createEngine, sessionStoreContract, engine, twilioSimSwapHours] as const;
           EOF
           "$GITHUB_WORKSPACE/node_modules/.bin/tsc" --noEmit --strict --exactOptionalPropertyTypes \
             --target es2024 --lib es2024 --module nodenext --moduleResolution nodenext \

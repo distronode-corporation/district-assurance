@@ -1,0 +1,16 @@
+{
+  "_note": "Shape of a real Stripe test-mode v2 Account read with include configuration.merchant and requirements (2026-09-30.endive), 2026-11-22. Kept: object, livemode, the merchant configuration's applied flag and capabilities, requirements. Removed: every id (replaced), identity, contact, display name, branding, support, descriptors, metadata, created, defaults.",
+  "id": "acct_FIXTUREfresh0000",
+  "object": "v2.core.account",
+  "livemode": false,
+  "configuration": {
+    "merchant": {
+      "applied": true,
+      "capabilities": null
+    }
+  },
+  "requirements": {
+    "entries": [],
+    "summary": null
+  }
+}

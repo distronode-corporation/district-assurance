@@ -1531,7 +1531,13 @@ not an ISO 8601 UTC time. `verifyReceipt` is its `valid`.
 
 `engine.receiptKeys()` returns a key ring's whole `keySet()`, a single signer's one key, or `[]`
 without a signer. The reference server serves it at `GET /.well-known/receipt-keys.json` as
-`{"keys": [...]}`. To rotate without breaking old receipts:
+`{"keys": [...]}`. `receiptKeysDocument(signers)` builds that document for a host that serves it
+itself: every signer's published keys (`receiptKeySet`), in order, each `kid` once. The same key
+under one `kid` twice is kept once, two different keys under one `kid` throw, and so does any private
+JWK member (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth` or `k`) in any signer's set, a key ring's
+included. `RECEIPT_KEYS_CACHE_CONTROL` (`public, max-age=300`) is the header to serve it with; the
+route, its rate limit and where the keys live are the host's. To rotate without breaking old
+receipts:
 
 1. Add the new signer to every process's ring, still with the old `active`, so the new key is
    published before it signs anything.
@@ -2084,25 +2090,29 @@ redirect. An `apiBase` option must be `https:`, or `http:` on a loopback host (`
 `localhost`, `[::1]`) only, with no credentials in it; anything else, and a bad `timeoutMs`, throws
 in the constructor, never quoting the value.
 
-The reference server's `StripeCheckoutLinks` (an example, not part of the package) is a
-`PaymentLinks` adapter for Stripe Checkout in test mode only (a secret test key, `sk_test_`), with
-`capabilities` `{ modes: ["platform", "connect"], minLinkMinutes: 30, maxLinkMinutes: 1440 }`.
-`createLink` sends one `POST /v1/checkout/sessions` in payment mode with the engine's amount,
-currency, description, `expires_at` (the engine's `expiresAt`), the payment id as
+`StripeCheckoutLinks` (in `district-assurance/stripe`, section 31; the reference server uses it) is
+a `PaymentLinks` adapter for Stripe Checkout with `capabilities` `{ modes, minLinkMinutes: 30,
+maxLinkMinutes: 1440 }`, `modes` both by default. `createLink` sends one Checkout Session create in
+payment mode with the engine's amount, currency, description, `expires_at` (the engine's
+`expiresAt`, which must be 30 minutes to 24 hours from the adapter's `now`), the payment id as
 `client_reference_id` and in metadata, and the call id in metadata. In `platform` mode it is made on
 the platform's own account and the request must name no connected account. In `connect` mode it is
 a direct charge on the business's connected account: the `Stripe-Account` header carrying the
 request's `connectedAccountId`, which must be `acct_` and 1 to 255 letters and digits, and nothing
 else (no `on_behalf_of` or `transfer_data`, which make a destination charge with the platform as
-the merchant). `expireLink` and `readLink` send the same header for a connected account. Either
-refusal is a `TypeError` thrown before anything is sent. The engine's methods map to Checkout's
-`payment_method_types` as Stripe answers them: `card` as `card`, `apple_pay` and `google_pay` as
+the merchant). `expire`, `expireLink` and `readLink` send the same header for a connected account.
+Either refusal is a `TypeError` thrown before anything is sent. The engine's methods map to
+Checkout's method types as Stripe answers them: `card` as `card`, `apple_pay` and `google_pay` as
 `card` (Checkout shows the wallets under it; Stripe refuses them as types), `link` as `link`, which
 Checkout takes only beside `card`, so a request offering Link alone is refused before anything is
-sent. Stripe's `checkout.session.completed` for a connect payment comes to the Connect endpoint,
-names the connected account (`account`), and settles the payment there only. These answers were
-recorded once in Stripe test mode and are replayed offline by `test/stripe-real.test.ts`, with the
-Identity run above.
+sent. On API version `2026-09-30.endive` (the default) the types go as
+`allowed_payment_method_types`, since endive removed `payment_method_types` from the create; on
+`2025-03-31.basil`, kept in test mode only to replay the recorded runs, as `payment_method_types`.
+Stripe's `checkout.session.completed` for a connect payment comes to the Connect endpoint, names the
+connected account (`account`), and settles the payment there only. The basil answers were recorded
+once in Stripe test mode and are replayed offline by `test/stripe-real.test.ts`, with the Identity
+run above; the endive calls are proven against Stripe test mode by
+`examples/reference-server/src/stripe-proof.ts`.
 
 ## 16. Texts
 
@@ -3128,7 +3138,8 @@ page refusal is its HTML page):
 
 ## 30. The published package
 
-The package has four entry points and no others: `district-assurance`, `district-assurance/testing`,
+The package has six entry points and no others: `district-assurance`, `district-assurance/testing`,
+`district-assurance/stripe` (section 31), `district-assurance/carrier` (section 32),
 `district-assurance/package.json` and `district-assurance/schema/flow-config.v1.json` (the FlowConfig
 JSON Schema, section 7); any other path is refused by Node. The tarball holds the compiled `dist/`
 (JavaScript and declarations), the schema and the documents `files` names. It is published to
@@ -3141,3 +3152,104 @@ run. Only a manual run on the tag with `publish` ticked, in this repository and 
 `npm-publish` environment's reviewers approve, publishes that tarball with npm provenance. A
 version with a pre-release part goes to the `next` dist-tag. In a fork, or a manual run without
 `publish`, the same run is a dry run.
+
+## 31. Stripe adapters (`district-assurance/stripe`)
+
+The Stripe pieces a host needs to take payments by link, in test or live mode, with no runtime
+dependency (ADR-3, ADR-30). A host owns its storage, credentials, rate limits and country policy;
+nothing here stores, logs or reads the environment.
+
+**Modes and keys.** `StripeMode` is `test` or `live`. `assertStripeKey(key, mode)` accepts only a
+secret (`sk_`) or restricted (`rk_`) key of that mode followed by 8 to 255 letters and digits; a key
+of the other mode, a publishable key, a webhook secret, a short key, one with whitespace and anything
+that is not a string throw `StripeKeyRefused` with a fixed message that never quotes the value.
+`STRIPE_API_VERSION` is `2026-09-30.endive`; `STRIPE_BASIL_API_VERSION` (`2025-03-31.basil`) is
+accepted in test mode only (`checkedApiVersion`), and any other version is refused.
+
+**The client.** `StripeClientLike` is exactly the calls the adapters make: Checkout Sessions
+`create`, `retrieve` and `expire`, and Accounts v2 `accounts.create`, `accounts.retrieve` and
+`accountLinks.create`, each with stripe-node's argument order and option names (`stripeAccount`,
+`idempotencyKey`, `timeout`, `maxNetworkRetries`). A stripe-node `Stripe` instance on endive is one
+as it is. A structural client cannot be asked its key, so the host gives an adapter a client in the
+adapter's own mode; `fetchStripeClient` checks the key against the mode it is built for. `fetchStripeClient(key, { mode, apiVersion?, apiBase?, fetch?, timeoutMs? })` is the same
+surface over `fetch`: it checks the key against `mode` first, sends it only as a bearer header to an
+`https:` base (`http:` only on a loopback host, no credentials in it), never follows a redirect,
+form-encodes v1 bodies byte for byte as stripe-node does (`stripeFormEncode`) and sends v2 bodies as
+JSON. A refusal throws `StripeHttpError` with the HTTP status and Stripe's error type and code; a
+lost answer throws it with a null status; neither carries Stripe's message nor anything shaped like a
+key. An `AbortSignal` in the request options cancels a request on this client, and a read (GET) is
+asked again after a lost answer up to `maxNetworkRetries` times (at most 2), each attempt within its
+own timeout, never after a cancel; a write never is.
+
+**Errors.** `StripeAdapterError` names the step, the HTTP status (or "no answer") and Stripe's error
+type and code when they are plain words, never Stripe's message or anything shaped like a key.
+`retryable` is true with no answer, on 429 and on 5xx, and when a step says so.
+
+**Checkout.** `STRIPE_CHECKOUT_CAPABILITIES` is Checkout's frozen `PaymentLinkCapabilities` (both
+modes, 30 to 1,440 minutes), and `stripeCheckoutCapabilities(modes)` the same for fewer modes.
+`StripeCheckoutLinks(client, { mode, successUrl, modes?, apiVersion?, now? })` declares the one or
+the other. ⚠️ It checks `expiresAt` against its OWN clock, `now` (wall time by default): a host whose
+engine runs on another clock passes the engine's clock as `now`, or its links are refused as too
+short or too long. It is section 15's adapter in one mode: session ids must be that mode's (`cs_test_` or `cs_live_`, refused
+before anything is sent otherwise) and every answer's `livemode` must be that mode's. `expire(close)`
+expires a session and reads back what Stripe holds: `expired` (this call closed it),
+`already_expired` (expired, but not shown closed by this call: an earlier expire, Stripe's own
+deadline, or an answer that was lost or did not show the close; expiring again is safe),
+`complete` (the payer finished first) or `open`, with the session read. No idempotency key is sent
+with an expire: Stripe saves a key's first result, a 500 included, so a keyed expire that failed
+once could not be retried into an answer, and a second expire is Stripe's 400, read back. After any
+failure the session is read: one shown closed answers its outcome; one still open (after Stripe's 400
+too), or an unreadable one, throws the expire's error, retryable for a 429, a 5xx or a lost answer and
+not for a 400. A session still open after an answer that arrived but could not be trusted (a 2xx of
+the wrong shape, whether the client threw it or returned it) is a retryable error, as after a 200 that
+did not show the close. `open` is answered only after a successful expire answer whose session still
+reads open. `expireLink` answers the
+engine's `expired` or `not_open`, and throws a retryable `StripeAdapterError` for a session still
+open. `createLink` refuses an `expiresAt` under 30 minutes or over 24 hours from the adapter's `now`,
+and an empty method list (no list would be no filter at Stripe). `checkoutExpiresAt(now, minutes =
+35)` is a link's default end: Stripe's 30-minute minimum plus 5 minutes for the time to Stripe's
+arrival, from 30 to 1,440 minutes.
+
+**Connect onboarding.** Accounts v2, Standard-equivalent: `connectAccountCreateParams({ country,
+metadata? })` is the create body (the business's own ISO 3166-1 alpha-2 country, which Stripe
+requires before the merchant configuration; the merchant configuration; the full Dashboard; Stripe
+as fees and losses collector; `include` of the merchant configuration and requirements).
+`createConnectAccount` (under the host's idempotency key) and `readConnectStatus` check the account's
+id and its `livemode` against the mode and answer `connectStatusOf`'s two flags: `chargesEnabled`,
+the merchant `card_payments` capability `active`, and `detailsSubmitted`: Stripe has requested a
+merchant capability with a status (it does so only once onboarding has collected the business's
+details; a new account answers `capabilities: null` and no entries), and the `entries` list holds no
+requirement awaiting the business, currently or past due, that restricts a merchant `*_payments`
+capability. One restricting only payouts does not count. An entry that cannot be read holds it
+false; an unreadable deadline counts as due, and an unreadable impact (or restriction) counts as
+restricting payments, each on its own, so a user requirement with no deadline that restricts only
+payouts still does not count. Anything missing reads false.
+`createOnboardingLink` takes no mode and answers `{ url }` only: an https link, refused unless the
+answer names the requested account, for the owner's own browser only, never texted or emailed.
+
+**The Connect webhook.** Direct charges arrive as Connect events, on an endpoint that listens to
+connected accounts; one URL may serve both modes, each mode with its own signing secret.
+`verifyConnectEvent({ payload, header, secrets: { test?, live? }, now, toleranceSeconds? })` checks
+each mode's secrets with `verifyStripeSignature` (section 15, its 300-second window included).
+Exactly one mode must verify: none, or both (the same secret set for both modes), is `invalid`. A
+signed body that is not an event (an `evt_` id, a type, a boolean `livemode`, `data.object`, and an
+`account` that is absent or a well-formed `acct_` id) is `malformed`. The event's `livemode` must be
+the verifying mode's, else `wrong_mode`; otherwise `verified`, with the mode. `connectEventAccount(
+event, storedAccountId)` is `match` only for the stored `acct_` id itself, `missing` for a platform
+event, else `mismatch`: a host applies a Connect event only on `match`.
+
+## 32. Carrier lookups (`district-assurance/carrier`)
+
+The Lookup answers read as section 4's carrier signals (`CarrierSignalReport`), pure: the host fetches the answer with its
+own credentials, rate limits and countries (ADR-30). `twilioSimSwapHours(field, now)` reads Twilio
+Lookup v2's `sim_swap` (the date when it is ISO 8601, never older than the period Twilio flags a
+change in, or the period as a lower bound when Twilio says there was none); `twilioIdentityMatch(
+field, minScore)` its `identity_match` (a match at `minScore`, 1 to 100, or more);
+`telnyxPortHours(field, now)` Telnyx Number Lookup's `portability` (from the last moment the port
+date ends anywhere; null when not ported). `twilioSimSwapHours` and `telnyxPortHours` answer a
+number of hours, null (`telnyxPortHours`: not ported), or a `CarrierFieldFailure` (`bad_response`, or
+`feature_unavailable` with the vendor's code); `twilioIdentityMatch` answers `"match"`, `"no_match"`
+or a `CarrierFieldFailure`. `isCarrierAnswer` tells an answer of any of them from a failure. `durationHours` reads an ISO 8601 duration in whole hours, and
+`uncheckedReport` is a report that says nothing is known. The reference server's
+`TwilioLookupSignals` and `TelnyxNumberLookupSignals` use them.
+

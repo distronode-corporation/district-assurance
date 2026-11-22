@@ -25,7 +25,8 @@ import { DemoRuns } from "./demo-runs.ts";
 import { isProgram } from "./main.ts";
 import { demoConfig } from "./flows.ts";
 import { SCRIPTS, createDemoWorld, pass, verifyToLevel2, type DemoWorld, type ScriptStep, type Scripts, type StepOutcome } from "./script.ts";
-import { StripeApiError, StripeCheckoutLinks, assertTestModeSecretKey, type CheckoutSessionStatus } from "./stripe-adapters.ts";
+import { StripeAdapterError, type CheckoutSessionStatus, type StripeCheckoutLinks } from "../../../src/stripe/index.ts";
+import { assertTestModeSecretKey, testModeCheckout } from "./stripe-adapters.ts";
 
 /** A session id shortened for the screen and the log: its `cs_test_` prefix and a few characters. */
 export function shortSessionId(id: string): string {
@@ -60,7 +61,7 @@ async function endCallWhenDoorsSettle(w: DemoWorld, callId: string): Promise<Sig
 
 /** A lost read (no answer, a dropped body) or Stripe busy or failing on its side. */
 function isTransient(error: unknown): boolean {
-  return !(error instanceof StripeApiError) || error.retryable;
+  return !(error instanceof StripeAdapterError) || error.retryable;
 }
 
 /**
@@ -247,7 +248,7 @@ export async function startE2eDemo(apiKey: string, port: number, options: Omit<E
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new RangeError("port must be an integer from 1 to 65535");
   const log = options.log ?? (() => undefined);
   const base = `http://127.0.0.1:${port}`;
-  const stripe = new StripeCheckoutLinks(apiKey, { successUrl: `${base}/`, ...(options.apiBase === undefined ? {} : { apiBase: options.apiBase }) });
+  const stripe = testModeCheckout(apiKey, { successUrl: `${base}/`, ...(options.apiBase === undefined ? {} : { apiBase: options.apiBase }) });
   const world = createDemoWorld({
     payments: stripe,
     clock: systemClock,
