@@ -30,8 +30,8 @@ The process is the one every repository in the organization follows (its
    [Supported versions](#supported-versions)) rather than being backported.
 4. **Disclosure**: a GitHub security advisory for this repository once the fix is released, and an
    entry in [CHANGELOG.md](CHANGELOG.md).
-5. **Credit**: the reporter is named in the advisory and in the changelog entry, unless they ask to
-   stay anonymous. Say in the report how you would like to be named.
+5. **Credit**: only with your agreement, the reporter is named in the advisory and in the changelog
+   entry (see [Thanks](#thanks)). Say in the report whether, and how, you would like to be named.
 
 A vulnerability in a dependency is found by the dependency checks in
 `.github/workflows/supply-chain.yml` (dependency review on pull requests, npm audit and

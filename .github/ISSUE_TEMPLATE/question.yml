@@ -1,0 +1,17 @@
+name: ❓ Question
+description: Ask how to use district-assurance, or whether it fits what you are building.
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The [README](https://github.com/distronode-corporation/district-assurance#readme), [SPEC.md](https://github.com/distronode-corporation/district-assurance/blob/main/SPEC.md) and [ROADMAP.md](https://github.com/distronode-corporation/district-assurance/blob/main/ROADMAP.md) answer most questions, so they are worth a look first.
+
+        ⚠️ **Nothing you paste here is private.** Never paste real customer data, a real phone number, a card number, a key or a webhook secret.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: What you are trying to do, and what you have tried.
+    validations:
+      required: true

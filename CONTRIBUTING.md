@@ -122,7 +122,7 @@ event, a format, an exit code), change the page that describes it in the same pu
 ## Questions and bugs
 
 Open a [GitHub issue](https://github.com/distronode-corporation/district-assurance/issues), through
-the bug report or feature request form; see [.github/SUPPORT.md](.github/SUPPORT.md). For a bug, say
+the bug report, feature request or question form; see [.github/SUPPORT.md](.github/SUPPORT.md). For a bug, say
 what you ran (the commit, the Node.js version and the flow config or a test that shows it), what
 happened and what you expected. For a feature, say what you need and why; check ROADMAP.md first,
 since planned work already has an issue id there. Issues and their answers stay public. The same

@@ -4,7 +4,7 @@ district-assurance is a modular TypeScript engine for trusted phone calls, maint
 Distronode under the Apache License 2.0. Where to go depends on what you are asking about.
 
 - **A question, a bug or an idea:** [Issues](https://github.com/distronode-corporation/district-assurance/issues),
-  through the bug report or feature request form. The
+  through the bug report, feature request or question form. The
   [README](https://github.com/distronode-corporation/district-assurance#readme), [SPEC.md](../SPEC.md)
   and [ROADMAP.md](../ROADMAP.md) answer most questions, so they are worth a look first.
 - **A security vulnerability:** report it privately through

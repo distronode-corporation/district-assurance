@@ -1,5 +1,5 @@
-# No blank issues: everything goes through the Bug report or Feature request form, or one of the
-# links below.
+# No blank issues: everything goes through the Bug report, Feature request or Question form, or
+# one of the links below.
 blank_issues_enabled: false
 contact_links:
   - name: 📖 README

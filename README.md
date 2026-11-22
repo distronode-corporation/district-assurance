@@ -444,7 +444,8 @@ the events and the formats. [SECURITY-MODEL.md](SECURITY-MODEL.md): the threat m
 
 Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-The licence does not grant permission to use Distronode Corporation's trade names or trademarks,
-the District Assurance name and the Distronode logo among them (section 6 of the licence), so a
-build you distribute must use its own name. Stripe, Twilio and Telnyx are named only to describe
-interoperability; this project is not affiliated with or endorsed by them.
+The licence grants no permission to use Distronode Corporation's trade names or trademarks, the
+District Assurance name and the Distronode logo among them, except as reasonable and customary
+use requires to describe where the work comes from (section 6 of the licence). Stripe, Twilio and
+Telnyx are named only to describe interoperability; this project is not affiliated with or
+endorsed by them.
