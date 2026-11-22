@@ -41,7 +41,7 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-29, says why.
 | M0 Skeleton | The engine, real core pieces, stubs, reference server, demo, CI | done |
 | M1 Modular core | Module registry, Badge, Dossier, Paylink and Trace as modules, factor plug-ins and the PIN factor, FlowConfig with `validateConfig` and flow execution, the shared SessionStore, the ledger always on | done |
 | M2 Owner command | Lockouts across calls (the hard gate before a live PIN), the ledger and record store contracts, policy and config revision in receipts, the keypad collector, key store contracts, PIN enrolment and reset | done |
-| M3 Gate and payment modes | The Gate module with signed access grants, the signed-webhook relay, Seam, Kisi and Verkada, one-time access codes, web sign-in step-up; Paylink's `connect` and `platform` modes, link life and instant methods | done |
+| M3 Gate and payment modes | The Gate module with signed access grants, the signed-webhook relay, Seam, Kisi and Verkada, one-time access codes, web sign-in step-up; Paylink's `connect` and `platform` modes, link life and instant methods. Open: the door adapters' runs against real vendor setups (code complete, tested against local fakes) | GAT-5 (#48), GAT-6 proof (#140) |
 | M4 Badge | Texted codes, spoken answers, carrier and Stripe Identity adapters, the adversarial suite, and the later Badge work (callback, caller ID attestation, the accessible path, duress PIN, risk-based step-up, synthetic voice, limits across flows, lockout alerts) | done |
 | M5 Dossier | Read-backs, encrypted fields, delivery, conditional fields, documents by text, Spanish | done |
 | M6 Paylink | Amounts from code, cancel and expiry, the live detector, refunds; the Stripe Checkout adapter in both modes, proven in Stripe test mode. Open: saved cards and keypad capture, gated | PAY-4, PAY-6 |
@@ -53,7 +53,13 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-29, says why.
 
 1. **SRV-5:** the tag push's dry run for v0.1.0, and the checks on the first published release
    (0.1.0) against the reviewed source.
-2. **Gated, not scheduled:** PAY-4 (saved-card charges) and PAY-6 (keypad card capture); PAY-6
+2. **GAT-5 proof (#48):** the Seam adapter is implemented and tested against a local fake that
+   replays the answer shapes Seam's API reference documents. Owed: answers recorded from Seam's
+   sandbox to replace those fixtures, and one unlock proven by hand there. Using Seam in production
+   also waits on its pricing and its handling of Canadian data being checked.
+3. **GAT-6 proof (#140):** one unlock and one refusal recorded from a real Kisi place and a real
+   Verkada door, with the first host that uses each vendor.
+4. **Gated, not scheduled:** PAY-4 (saved-card charges) and PAY-6 (keypad card capture); PAY-6
    starts only after an assessor's scoping and a buyer who needs it.
 
 Dependencies: PAY-6 needed PAY-1, which is done.
@@ -114,7 +120,7 @@ own owner PIN check. The live call is proven in the host's own repository.
 | Key store contracts (INT-4) | `src/prove/receipt.ts`, `src/verify/knowledge.ts` | DER to P1363 conversion, the knowledge key as an opaque HMAC function (`test/prove.test.ts`, `test/knowledge-key-hostile.test.ts`) |
 | PIN enrolment and reset (VER-6) | `src/verify/pin.ts` | enrolment only at level 2 on the call, weak PINs refused, reset by the business only (`test/pin.test.ts`, `test/pin-enrol-hostile.test.ts`, `test/pin-enrol-races.test.ts`) |
 
-### M3. Gate and payment modes (done)
+### M3. Gate and payment modes (code complete; vendor proofs open)
 
 | Piece | Where | Proof |
 |---|---|---|
@@ -123,13 +129,14 @@ own owner PIN check. The live call is proven in the host's own repository.
 | Signed-webhook relay (GAT-2) | `src/gate/relay.ts`, `examples/reference-server/src/door-relay.ts` | against a loopback HTTP server: 2xx, 4xx, 5xx, redirects, timeouts (`test/gate-relay.test.ts`); replay and tamper refused by the example relay (`npm run demo`) |
 | One-time access codes (GAT-3) | `src/gate/codes.ts` | codes texted to the number on file, stored as keyed hashes, single use, revoked when a call is tainted (`test/gate.test.ts`, `test/gate-codes-hostile.test.ts`) |
 | Web sign-in step-up (GAT-4) | `src/gate/step-up.ts` | an ES256 JWT bound to the site's nonce, its JWKS, one exchange per token (`test/gate-step-up.test.ts`, `test/gate-step-up-hostile.test.ts`) |
-| Seam (GAT-5) | `src/gate/seam.ts` | against a local fake HTTP server: remote unlock checked first, `confirmed` only on the device's confirmation, never retried (`test/gate-seam.test.ts`, `test/gate-seam-hosts.test.ts`) |
+| Seam (GAT-5) | `src/gate/seam.ts` | against a local fake HTTP server replaying the answer shapes and examples Seam's API reference documents: remote unlock checked first, `confirmed` only on the device's confirmation, never retried (`test/gate-seam.test.ts`, `test/gate-seam-hosts.test.ts`). Not yet run in Seam's sandbox (#48) |
 | Kisi and Verkada (GAT-6) | `src/gate/vendors.ts` | each vendor's unlock call against a local fake HTTP server, never retried (`test/gate-vendors.test.ts`, `test/gate-vendors-hosts.test.ts`) |
 | Payment modes (PAY-7) | `src/pay/paylink.ts`, `src/core/adapters.ts` | `connect` and `platform` per step, the account on the request, outcomes from another account ignored (`test/paylink-modes.test.ts`) |
 | Link life and instant methods | `src/pay/paylink.ts`, `src/pay/payment.ts` | 5 to 60 minutes (default 15) from the text, expired by the engine at its deadline; only card, Apple Pay, Google Pay and Link (`test/paylink-modes.test.ts`) |
 | Demo | `examples/reference-server/src/demo.ts` | a deposit in each mode and a Gate unlock through the relay (`npm run demo`) |
 
-The vendor adapters are tested against local fakes; a host runs each once against the vendor's
+The vendor adapters are tested against local fakes; none has yet been run against the vendor
+itself (#48 for Seam, #140 for Kisi and Verkada), and a host runs each once against the vendor's
 own sandbox before it goes live. A momentary unlock that opened its door has nothing to revoke
 (ADR-22); a controller that can withdraw a grant not yet acted on offers the optional `revoke`,
 which the engine calls when a call is tainted (SPEC.md section 17), and access codes have it.

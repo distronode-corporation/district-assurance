@@ -1,6 +1,7 @@
 // The Seam adapter (GAT-5), against a local HTTP server that replays Seam's answers. The answers
-// below follow the shapes of Seam's sandbox (`/devices/get`, `/locks/unlock_door`,
-// `/action_attempts/get`); the device id picks the scenario. No request leaves the machine.
+// below follow the shapes Seam's API reference documents (`/devices/get`, `/locks/unlock_door`,
+// `/action_attempts/get`); they are not yet recorded from Seam's sandbox (#48). The device id
+// picks the scenario. No request leaves the machine.
 import { strict as assert } from "node:assert";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -35,7 +36,7 @@ const grant: SignedAccessGrant = {
 // The grant names the device it opens: the adapter refuses one signed for another (L1 review, T5).
 const input = (target: string) => ({ grant: { ...grant, body: { ...grant.body, target } }, target, idempotencyKey: '["w","c","acc_1","unlock"]' });
 
-// Recorded answers, trimmed to the fields the adapter reads plus a few it must ignore.
+// Answers in Seam's documented shapes, trimmed to the fields the adapter reads plus a few it must ignore.
 const device = (id: string, extra: Record<string, unknown> = {}) => ({
   ok: true,
   device: {
@@ -213,6 +214,44 @@ describe("seamAccessController", () => {
     assert.deepEqual(await seam().unlock(input("dev-unconfirmed")), { outcome: "delivered", providerRef: "aa-unconfirmed", confirmed: false });
     assert.deepEqual(await seam().unlock(input("dev-unconfirmed-later")), { outcome: "delivered", providerRef: "aa-unconfirmed-later", confirmed: false });
     assert.deepEqual(await seam().unlock(input("dev-instant")), { outcome: "delivered", providerRef: "aa-instant", confirmed: true });
+  });
+
+  it("reads the answers Seam's API reference publishes, and sends the requests it shows", async () => {
+    // The response examples on Seam's API reference pages, as published (checked 2026-11-22):
+    // https://www.seam.co/docs/api/locks/unlock_door and https://www.seam.co/docs/api/action_attempts/get.
+    // The device answer keeps only fields documented on https://www.seam.co/docs/api/devices/get.
+    // Seam's own example is a success the device did not confirm, so it is delivered, unconfirmed.
+    const deviceId = "be047431-bf00-4da6-9fc7-0a7796a9b57f";
+    const attemptId = "5f4e3d2c-1b0a-9f8e-7d6c-5b4a3c2d1e0f";
+    const published = {
+      action_attempt: { action_attempt_id: attemptId, action_type: "UNLOCK_DOOR", error: null, result: { was_confirmed_by_device: false }, status: "success" },
+    };
+    const pending = { action_attempt: { ...published.action_attempt, result: null, status: "pending" } };
+    const deviceAnswer = { device: { device_id: deviceId, can_remotely_unlock: true, properties: { online: true } } };
+    const sent: Array<[string, string, unknown, string | null]> = [];
+    const controller = (unlockAnswer: unknown) =>
+      seamAccessController({
+        apiKey: API_KEY,
+        clock,
+        pollIntervalMs: 10,
+        fetch: async (url, init) => {
+          const path = new URL(String(url)).pathname;
+          sent.push([init?.method ?? "", path, JSON.parse(String(init?.body)), new Headers(init?.headers).get("authorization")]);
+          const answer = path === "/devices/get" ? deviceAnswer : path === "/locks/unlock_door" ? unlockAnswer : published;
+          return new Response(JSON.stringify(answer), { status: 200, headers: { "content-type": "application/json" } });
+        },
+      });
+    const target = input(deviceId);
+    assert.deepEqual(await controller(published).unlock(target), { outcome: "delivered", providerRef: attemptId, confirmed: false });
+    assert.deepEqual(await controller(pending).unlock(target), { outcome: "delivered", providerRef: attemptId, confirmed: false });
+    // The requests in the reference's cURL samples: a POST with a JSON body and a bearer key.
+    assert.deepEqual(sent, [
+      ["POST", "/devices/get", { device_id: deviceId }, `Bearer ${API_KEY}`],
+      ["POST", "/locks/unlock_door", { device_id: deviceId }, `Bearer ${API_KEY}`],
+      ["POST", "/devices/get", { device_id: deviceId }, `Bearer ${API_KEY}`],
+      ["POST", "/locks/unlock_door", { device_id: deviceId }, `Bearer ${API_KEY}`],
+      ["POST", "/action_attempts/get", { action_attempt_id: attemptId }, `Bearer ${API_KEY}`],
+    ]);
   });
 
   it("keeps every request on the configured host, even with a base path that starts with //", async () => {

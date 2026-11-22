@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The Seam adapter (GAT-5) checked against Seam's current API reference: its requests and the
+  fields it reads (`device_id`, `can_remotely_unlock`, `properties.online`, the action attempt's
+  `status` and `result.was_confirmed_by_device`) are the documented ones, and a test now replays
+  the reference's own published examples. Its sandbox run is still owed (#48).
+- ROADMAP.md no longer marks M3 done with no open issues: the Seam sandbox proof (#48) and the
+  Kisi and Verkada runs (#140) are listed as what is left.
+
 ## [0.1.0] - 2026-11-20
 
 The first published release.
