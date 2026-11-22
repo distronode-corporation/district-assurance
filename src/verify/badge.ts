@@ -144,6 +144,30 @@ export interface BadgeSlice {
   callback: CallbackState;
   /** Untrusted content seen on this call so far (onUntrusted counts it), so an entry judged across one is known. Absent on calls saved before. */
   taints?: number;
+  /** The PIN pass this call issued (`issuePinPass`), for another call to reuse once. Absent until then. */
+  pinPass?: PinPassRecord;
+  /**
+   * The PIN pass this call reused (`reusePin`) as its PIN factor, from the call that issued it.
+   * Absent on a call that keyed its PIN or reused none, and dropped when its factors are.
+   */
+  pinReuse?: { tokenHash: string; fromCallId: string; passedAt: string };
+}
+
+/**
+ * A PIN pass, as the call that issued it keeps it: never the token, only its SHA-256, and what it
+ * was issued for. `taints` is the call's count when it was issued: a taint since voids it.
+ */
+export interface PinPassRecord {
+  tokenHash: string;
+  subjectKey: string;
+  numberKey: string | null;
+  /** When the PIN factor passed on this call, ISO 8601. */
+  passedAt: string;
+  /** `passedAt` plus 5 minutes: the latest any call may reuse it. */
+  expiresAt: string;
+  taints: number;
+  /** Whether the pass was a duress entry (VER-12): a call that reuses it is a duress call too. */
+  duress: boolean;
 }
 
 /**
@@ -277,7 +301,7 @@ export const DEFAULT_KEYPAD_IDLE_SECONDS = 10;
 
 const SETTINGS_KEYS = ["factors", "grantTtlSeconds", "pin", "lockout", "syntheticVoice", "accessibility"];
 const ACCESSIBILITY_KEYS = ["spokenKeypadFields", "keypadIdleSeconds", "maxKeypadIdleSeconds"];
-const PIN_KEYS = ["mode", "minDigits", "maxDigits", "maxAttemptsPerCall", "duress"];
+const PIN_KEYS = ["mode", "minDigits", "maxDigits", "maxAttemptsPerCall", "duress", "reuse"];
 const THRESHOLD_KEYS = ["spokenKnowledgeAbove", "levelOneAbove"];
 const VENDOR_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 
@@ -496,8 +520,15 @@ export class BadgeModule implements AssuranceModule {
       if (typeof judged.policyVersion === "string") by.policyVersion = judged.policyVersion;
       if (typeof judged.configRevision === "string") by.configRevision = judged.configRevision;
     }
-    return { verification: { ...by, level: state.level, methods: state.level === 0 ? [] : (badge.receiptMethods ?? badge.lastMethods) } };
+    const methods = state.level === 0 ? [] : (badge.receiptMethods ?? badge.lastMethods);
+    // The marker of a PIN reused from another call (`reusePin`), only beside a `pin` the receipt shows.
+    return { verification: { ...by, level: state.level, methods, ...(reusedPin(badge, methods) ? { reused: ["pin"] } : {}) } };
   }
+}
+
+/** Whether the `pin` among these methods is a PIN reused from another call. */
+function reusedPin(s: BadgeSlice, methods: readonly string[]): boolean {
+  return s.pinReuse !== undefined && methods.includes("pin");
 }
 
 /** A link not yet delivered can no longer count: it is void. One delivered stays delivered (and stops any other). */
@@ -555,8 +586,19 @@ function pinSettingsErrors(pin: unknown): string[] {
   else if (!isIntegerIn(pin.maxDigits, pin.minDigits, 12)) errors.push("pin.maxDigits must be from minDigits to 12");
   if (!isIntegerIn(pin.maxAttemptsPerCall, 1, 5)) errors.push("pin.maxAttemptsPerCall must be 1 to 5");
   if (pin.duress !== undefined) errors.push(...duressSettingsErrors(pin.duress));
+  if (pin.reuse !== undefined) errors.push(...reuseSettingsErrors(pin.reuse));
   return errors;
 }
+
+function reuseSettingsErrors(reuse: unknown): string[] {
+  if (!isObject(reuse)) return ["pin.reuse must be an object with maxAgeSeconds"];
+  const errors = unknownKeys(reuse, ["maxAgeSeconds"]).map((k) => `pin.reuse.${k} is not a PIN reuse setting`);
+  if (!isIntegerIn(reuse.maxAgeSeconds, 30, PIN_PASS_MAX_SECONDS)) errors.push(`pin.reuse.maxAgeSeconds must be an integer from 30 to ${PIN_PASS_MAX_SECONDS}`);
+  return errors;
+}
+
+/** The longest a PIN pass lives, from the PIN's pass on the call that issued it: 5 minutes. */
+export const PIN_PASS_MAX_SECONDS = 300;
 
 function duressSettingsErrors(duress: unknown): string[] {
   if (!isObject(duress)) return ["pin.duress must be an object with refuseScopes"];
@@ -745,6 +787,8 @@ export async function startVerification(rt: EngineRuntime, callId: string, resol
     if (draft.record.state.factors.length === 0) {
       s.knowledgeMatched = false;
       s.carrier = null;
+      // A reused PIN is a factor like any other: it goes with them.
+      delete s.pinReuse;
     }
     s.subjectKey = subjectKey;
     s.subject = subject;
@@ -1261,6 +1305,7 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
       capped: level < result.level,
       ...judgedBy,
       ...(voidedByTaint ? { voidedByTaint: true } : {}),
+      ...(reusedPin(s, result.counted) ? { reused: ["pin"] } : {}),
     });
     if (grant !== null) draft.emit("grant.issued", "code", { grantId: grant.grantId, level: grant.level, scopes, expiresAt: grant.expiresAt, ...judgedBy });
     return { level, scopes: grant === null ? [] : scopes };

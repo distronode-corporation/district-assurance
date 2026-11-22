@@ -121,7 +121,7 @@ describe("paylink modes: running", () => {
       { paymentId: "pay_1", amountMinor: 5000, currency: "cad", mode: "platform", paymentMethods: ["card", "apple_pay", "google_pay", "link"], expiresAt: "2026-01-01T00:36:00.000Z", linkId: "cs_fake_1" },
     ]);
     const sent = (await t.ledger.list()).find((e) => e.event === "payment.link_sent")!;
-    assert.deepEqual(sent.detail, { paymentId: "pay_1", linkId: "cs_fake_1", amountMinor: 5000, currency: "cad", amountSource: "price_list", mode: "platform", expiresAt: "2026-01-01T00:16:00.000Z" });
+    assert.deepEqual(sent.detail, { paymentId: "pay_1", linkId: "cs_fake_1", amountMinor: 5000, currency: "cad", amountSource: "price_list", mode: "platform", channel: "text", expiresAt: "2026-01-01T00:16:00.000Z" });
   });
 
   it("takes a connect payment on the business's account, and its receipt says so", async () => {

@@ -85,7 +85,7 @@ describe("Engine pay: amounts from code, read back first (PAY-2)", () => {
     assert.deepEqual(entries.filter((e) => e.event.startsWith("payment.")).map((e) => [e.event, e.detail]), [
       ["payment.amount_read_back", { amountMinor: 15000, currency: "cad", amountSource: "price_list", digest: back.digest }],
       ["payment.amount_confirmed", { digest: back.digest, confirmedBy: "keypad" }],
-      ["payment.link_sent", { paymentId: "pay_1", linkId: "cs_fake_1", amountMinor: 15000, currency: "cad", amountSource: "price_list", mode: "platform", expiresAt: "2026-01-01T00:15:00.000Z" }],
+      ["payment.link_sent", { paymentId: "pay_1", linkId: "cs_fake_1", amountMinor: 15000, currency: "cad", amountSource: "price_list", mode: "platform", channel: "text", expiresAt: "2026-01-01T00:15:00.000Z" }],
     ]);
     assert.equal(entries.find((e) => e.event === "payment.amount_confirmed")!.actor, "caller");
   });

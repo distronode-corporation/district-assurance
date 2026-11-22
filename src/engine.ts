@@ -31,7 +31,7 @@ import type { ReadBack } from "./file/readback.ts";
 import { BUILT_IN_MODULES, builtInModules, defaultConfig } from "./modules.ts";
 import type { AmountReadBack } from "./pay/amount.ts";
 import * as paylink from "./pay/paylink.ts";
-import type { PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
+import type { PaymentChannel, PaymentOutcome, PaymentStatus } from "./pay/payment.ts";
 import { anchorPayload, isAnchorProof } from "./prove/anchor.ts";
 import * as refunds from "./pay/refunds.ts";
 import { detailCarriesCardNumber } from "./prove/ledger.ts";
@@ -46,6 +46,7 @@ import { pinTag, type BadgeSettings, type FactorEntry, type FactorPlugin, type P
 import { flagDuressUnlessCleared } from "./verify/duress-flag.ts";
 import { knowledgeHmac, type KnowledgeHmac, type KnowledgeKey } from "./verify/knowledge.ts";
 import * as pin from "./verify/pin.ts";
+import * as pinPass from "./verify/pin-pass.ts";
 import * as textCode from "./verify/text-code.ts";
 import type { IdentityOutcome } from "./webhooks/stripe.ts";
 
@@ -903,6 +904,23 @@ export class Engine {
     return badge.submitFactor(this.#rt, this.#badge, callId, "pin", pin);
   }
 
+  /**
+   * Issues this call's PIN pass, once: a token another call of the same caller (the same phone
+   * call) may redeem with `reusePin` as its PIN factor, within 5 minutes of the PIN's pass. The
+   * host keeps the token in memory and hands it only to that call; the engine keeps its hash.
+   */
+  issuePinPass(callId: string): Promise<{ token: string; expiresAt: string }> {
+    return pinPass.issuePinPass(this.#rt, callId);
+  }
+
+  /**
+   * Takes a PIN pass issued by another call as this call's PIN factor, once, when Badge's
+   * `pin.reuse` is on. `{reused: false}` means ask for the PIN as usual. The PIN factor only.
+   */
+  reusePin(callId: string, token: string): Promise<{ reused: boolean }> {
+    return pinPass.reusePin(this.#rt, callId, token);
+  }
+
   /** Judges an entry for any factor the caller enters, a host's plug-in included. */
   submitFactor(callId: string, kind: string, entry: FactorEntry): Promise<badge.KeypadResult> {
     return badge.submitFactor(this.#rt, this.#badge, callId, kind, entry);
@@ -1144,7 +1162,20 @@ export class Engine {
     return paylink.confirmPaymentAmount(this.#rt, callId, input);
   }
 
-  /** Texts a payment link. `expiresAt` is the engine's deadline for it: call `expirePaymentLinks` then. */
+  /**
+   * Offers the channels for the next payment link: text and email with a verified address on file
+   * (and the prompt the host reads), or text alone, already chosen, without one.
+   */
+  offerPaymentChannels(callId: string): Promise<paylink.PaymentChannelOffer> {
+    return paylink.offerPaymentChannels(this.#rt, callId);
+  }
+
+  /** The caller keyed their channel: `1` text, `2` email. With both offered, the key is their consent to that channel. */
+  choosePaymentChannel(callId: string, input: { key: string }): Promise<{ channel: PaymentChannel }> {
+    return paylink.choosePaymentChannel(this.#rt, callId, input);
+  }
+
+  /** Sends a payment link, by text or by the channel chosen. `expiresAt` is the engine's deadline for it: call `expirePaymentLinks` then. */
   requestPayment(callId: string, input?: paylink.PaymentInput): Promise<{ paymentId: string; status: PaymentStatus; expiresAt: string | null }> {
     return paylink.requestPayment(this.#rt, callId, input);
   }

@@ -204,13 +204,16 @@ export const traceModule: AssuranceModule = {
  * stays reserved: the next `recordConsent` with the same purpose and answer resumes it with the
  * same record. A call that ends first settles it as not recorded (`settleUnrecorded`): no consent.
  * `subjectOf` names the subject the call matched (or null), which the consent is recorded under:
- * the engine passes it, so Trace never reads Badge's part of the call itself.
+ * the engine passes it, so Trace never reads Badge's part of the call itself. In a flow, the step
+ * must be a `trace.consent` step for this purpose, or, for a consent another module's step takes
+ * as part of its own work (Paylink's channel choice), the step type `onStep` names.
  */
 export async function recordConsent(
   rt: EngineRuntime,
   callId: string,
   input: { purpose: string; answer: "yes" | "no"; channel?: ConsentChannel },
   subjectOf: (record: CallRecord) => string | null,
+  onStep?: string,
 ): Promise<ConsentRecord> {
   // Read once: the purpose a wording was found for is the one checked against the step and stored.
   const { purpose, answer, channel } = input;
@@ -232,8 +235,11 @@ export async function recordConsent(
     if (draft.record.state.phase === "ended") throw new EngineError("invalid_transition", "the call has ended");
     // The caller cannot have heard a wording that has no text in the call's language.
     if (wording.text[draft.record.locale] === undefined) throw new EngineError("precondition_failed", `the wording for ${wording.purpose} has no ${draft.record.locale} text`);
-    const step = stepOfType<TraceConsentStep>(draft.record, "trace.consent");
-    if (step !== null && step.purpose !== purpose) throw new EngineError("precondition_failed", `the flow step asks for consent to ${step.purpose}`);
+    if (onStep !== undefined) stepOfType(draft.record, onStep);
+    else {
+      const step = stepOfType<TraceConsentStep>(draft.record, "trace.consent");
+      if (step !== null && step.purpose !== purpose) throw new EngineError("precondition_failed", `the flow step asks for consent to ${step.purpose}`);
+    }
     const record: ConsentRecord = {
       consentId: rt.ids.next("cns"),
       callId,

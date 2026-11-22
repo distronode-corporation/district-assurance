@@ -26,7 +26,7 @@
        | EngineAdapters (src/core/runtime.ts), interfaces in src/core/adapters.ts
   ledger (AuditLedger)  sessions (SessionStore)  records (RecordStore)
   identity (IdentityProvider)  carrier (CarrierSignals)  messages (MessageSender)
-  payments (PaymentLinks)  signer (ReceiptSigner)  pinVerifier (PinVerifier)
+  emails (EmailSender)  payments (PaymentLinks)  signer (ReceiptSigner)  pinVerifier (PinVerifier)
   amounts (AmountSource)  access (AccessController by name)
   accessSigner (ReceiptSigner)  stepUpSigner (ReceiptSigner)  codes (CodeStore)
   counters (AttemptCounters)  dialer (CallbackDialer)  notifier (Notifier)
@@ -169,7 +169,8 @@ with a `callback.book` step that needs the `callback.book` scope. The rules:
 6. Paylink: `readBackPayment` builds the amount line the host speaks and `confirmPaymentAmount`
    records the caller's yes; `requestPayment` needs `payment.request` and that confirmation, for
    every link, and in a flow the step sets the amount. The link is texted to the number on file,
-   the call enters `paying`, and `applyPaymentOutcome` settles it only on `paid`. The flow moves on
+   or emailed to the verified address on file when a `paylink.channel` step (or
+   `choosePaymentChannel`) had the caller choose email, the call enters `paying`, and `applyPaymentOutcome` settles it only on `paid`. The flow moves on
    when it is paid, and fails when it failed or expired. The link lives 15 minutes from the text
    by default; the host calls `expirePaymentLinks` at `expiresAt`, and the engine expires a link
    still open, at the provider first.

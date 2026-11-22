@@ -17,7 +17,7 @@ import type { GateGrantStep, GateSettings, GateTarget } from "../src/gate/gate.t
 import type { StepUpIssueStep, StepUpSettings, StepUpSite } from "../src/gate/step-up.ts";
 import type { FieldType, IntakeField, IntakeForm } from "../src/file/intake.ts";
 import { builtInModules, defaultConfig } from "../src/modules.ts";
-import type { PaylinkRequestStep, PaylinkSettings } from "../src/pay/paylink.ts";
+import { PAYMENT_CHANNELS, type PaylinkChannelStep, type PaylinkRequestStep, type PaylinkSettings } from "../src/pay/paylink.ts";
 import { INSTANT_PAYMENT_METHODS, PAYMENT_MODES, type AmountSourceKind } from "../src/pay/payment.ts";
 import type { ConsentWording } from "../src/prove/consent.ts";
 import type { TraceConsentStep, TraceReceiptStep, TraceSettings } from "../src/prove/trace.ts";
@@ -168,17 +168,19 @@ const OBJECTS: ReadonlyArray<readonly [pointer: string, keys: readonly string[]]
   ["#/$defs/badgeSettings", keysOf<BadgeVoiceSettings>()(["factors", "grantTtlSeconds", "pin", "lockout", "syntheticVoice", "accessibility"])],
   ["#/$defs/accessibilitySettings", keysOf<AccessibilitySettings>()(["spokenKeypadFields", "keypadIdleSeconds", "maxKeypadIdleSeconds"])],
   ["#/$defs/lockoutSettings", keysOf<LockoutSettings>()(["backoffSeconds", "lockAfterFailures", "windowHours", "flowStartsPerHour"])],
-  ["#/$defs/pinSettings", keysOf<PinSettings>()(["mode", "minDigits", "maxDigits", "maxAttemptsPerCall", "duress"])],
+  ["#/$defs/pinSettings", keysOf<PinSettings>()(["mode", "minDigits", "maxDigits", "maxAttemptsPerCall", "duress", "reuse"])],
   ["#/$defs/dossierSettings", keysOf<DossierSettings>()(["forms"])],
   ["#/$defs/form", keysOf<IntakeForm>()(["formId", "version", "fields"])],
   ["#/$defs/field", keysOf<IntakeField>()(["key", "label", "type", "required", "sensitive", "maxLength", "showIf", "min", "max", "pattern"])],
   ["#/$defs/bilingual", keysOf<IntakeField["label"]>()(["en", "fr", "es"])],
-  ["#/$defs/paylinkSettings", keysOf<PaylinkSettings>()(["maxAmountMinor", "mode", "connectedAccountId", "linkLifeMinutes", "paymentMethods"])],
+  ["#/$defs/paylinkSettings", keysOf<PaylinkSettings>()(["maxAmountMinor", "mode", "connectedAccountId", "linkLifeMinutes", "paymentMethods", "channels"])],
   ["#/$defs/traceSettings", keysOf<TraceSettings>()(["receipts", "wordings", "businessName"])],
   ["#/$defs/wording", keysOf<ConsentWording>()(["purpose", "version", "text"])],
   ["#/$defs/flow", keysOf<FlowDefinition>()(["summary", "steps"])],
   ["#/$defs/badgeVerifyStep", keysOf<BadgeVerifyStep>()(["type", "level", "factors", "scopes"])],
   ["#/$defs/dossierCollectStep", keysOf<DossierCollectStep>()(["type", "form"])],
+  ["#/$defs/paylinkChannelStep", keysOf<PaylinkChannelStep>()(["type"])],
+  ["#/$defs/pinSettings/properties/reuse", keysOf<NonNullable<PinSettings["reuse"]>>()(["maxAgeSeconds"])],
   ["#/$defs/paylinkRequestStep", keysOf<PaylinkRequestStep>()(["type", "amountMinor", "currency", "amountRef", "description", "amountSource", "mode", "linkLifeMinutes", "paymentMethods"])],
   ["#/$defs/traceConsentStep", keysOf<TraceConsentStep>()(["type", "purpose", "require"])],
   ["#/$defs/traceReceiptStep", keysOf<TraceReceiptStep>()(["type", "textLink"])],
@@ -203,6 +205,7 @@ const ENUMS: ReadonlyArray<readonly [pointer: string, members: readonly Json[]]>
   ["#/$defs/paylinkRequestStep/properties/mode", [...PAYMENT_MODES]],
   ["#/$defs/paylinkSettings/properties/mode", [...PAYMENT_MODES]],
   ["#/$defs/paymentMethods/items", [...INSTANT_PAYMENT_METHODS]],
+  ["#/$defs/paylinkSettings/properties/channels/items", [...PAYMENT_CHANNELS]],
   ["#/$defs/policy/properties/attestationCaps/propertyNames", [...ATTESTATIONS]],
   ["#/$defs/policy/properties/spoken/properties/fields/additionalProperties", [...SPOKEN_FORMATS]],
   ["#/$defs/traceConsentStep/properties/require", membersOf<NonNullable<TraceConsentStep["require"]>>()(["yes", "answer"])],
@@ -212,7 +215,7 @@ const ENUMS: ReadonlyArray<readonly [pointer: string, members: readonly Json[]]>
 
 // Every adapter an engine can have (EngineAdapters), so a config's modules never fail for want of one.
 const ALL_ADAPTERS = [
-  "ledger", "sessions", "records", "identity", "carrier", "messages", "payments", "signer", "pinVerifier", "amounts",
+  "ledger", "sessions", "records", "identity", "carrier", "messages", "emails", "payments", "signer", "pinVerifier", "amounts",
   "access", "accessSigner", "stepUpSigner", "codes", "counters", "dialer", "notifier", "duressNotifier", "fieldCipher", "consents", "anchor",
 ];
 

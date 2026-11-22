@@ -166,6 +166,30 @@ counts on its own only at level 1; above it, the policy needs another factor tha
 spoken fields never judges one (tested). Left to the host: passing the caller's answer from its
 speech pipeline in a code path, never through the model, and keeping it out of stored transcripts.
 
+### Reusing a PIN within one phone call
+
+A host that signs an owner in with the PIN on one engine call and runs a payment on another call of
+the same phone call can carry the PIN factor across (0.3.0), so the owner is not asked for it twice
+within minutes. The risks: a pass carried to someone else's call, replayed later or twice, carried
+past a taint or a coercion, or standing in for more than the PIN. **Controls:** reuse is off unless
+Badge's `pin.reuse` is set on the engine that would take it (tested). The pass is a bearer token
+the sign-in call issues once, 32 random bytes the engine keeps only as a SHA-256 (tested), so
+nothing in a store or a log replays it; it lives at most 5 minutes from the PIN's pass, and at most
+`maxAgeSeconds` for the call that takes it (tested). It is spent once: the first call to bind its
+redemption has it, two at once get one pass between them, and a refused redemption spends nothing,
+so it cannot be burned by a wrong call (tested). It is checked against the issuing call's own
+record, not anything the token says: the same subject, the same calling number (both withheld
+included), never the issuing call itself, never after that call was tainted or a synthetic voice
+score held it to level 1, and never while the PIN is locked for the subject or the number (tested).
+A duress entry carries its duress across: the second call reads as a pass and refuses money,
+contact and access (every scope, when its engine has the duress PIN off) (tested). It is the PIN
+factor only: it counts toward a level like a keyed PIN, so under the default policy a payment still
+needs the texted code (or, by the caller's choice, the link goes by email after that code), and a
+reused pass is never passed on again (tested). The ledger marks the factor `reused` with the
+issuing call, and the receipt's `verification.reused` says the PIN was reused, so a reader can
+tell (tested). Left to the host: handing the token only to the next call of the same phone call,
+in memory and never through the model, and never to a call of another line.
+
 ### Moving between flows
 
 Limits that reset between flows could be dodged by moving between them: an owner command, then a
@@ -698,6 +722,34 @@ subject (tested). The ledger records the read-back and the confirmation, with th
 digest but never the reference. Left to the host: speaking the read-back as built, and taking the
 caller's yes by keypad or voice outside the model.
 
+### Payment links by email
+
+A payment link emailed instead of texted (0.3.0) reaches an inbox the business does not control:
+it can be forwarded, read on a shared or stolen device, kept for years, or land at an address that
+is no longer the caller's. And an email is easy to point elsewhere: an attacker on the call says
+"send it to my other address". **Controls:** the engine never takes an address from a call. No entry
+point accepts one; the destination is always `SubjectRecord.emailOnFile`, an address the host
+marked verified, as Badge read the subject, and only after a keypad or PIN match on this call
+(tested). An address that is not a plain one (a quoted part, an IP literal, a comma, a space, a
+control character or a line break, so nothing that could add a recipient or a header) counts as
+none, and then email is not offered at all and the link goes by text (tested). Email is off unless
+Paylink's `channels` turns it on, and the choice is the caller's keypress (1 text, 2 email), fixed in
+code, never the model's; with both offered, the keypress is recorded as a consent to that channel
+under its versioned wording, by digest, and a later "no" to that purpose stops an emailed link
+(tested). What an email holds is fixed by code: the merchant, the amount, the link's life and the
+link (tested). A copy forwarded or read by someone else therefore holds those four things and
+nothing else: never a code, a PIN, a phone number, an account number or the caller's name, and the
+address itself is in no ledger entry, event or receipt (tested). The link is the one a text would
+carry: single use at the provider, closed by the engine at its deadline (15 minutes by default),
+when the caller cancels or the wait ends, and when the call ends, so an old email holds a dead link
+(tested). A payment from a forwarded copy before the deadline is still the caller's agreed amount
+on the business's account, recorded like any other; that is the residual risk the caller accepts by
+choosing email, and the reason the email says what to do if they did not ask for it. Left to the
+host: verifying the address before it is ever set on the subject (a confirmation link, never a
+spoken address), removing it when it stops being the subject's, the `EmailSender`'s own credentials,
+sender authentication (SPF, DKIM, DMARC) so the email cannot be told from a forgery, and the rate at
+which it sends.
+
 ### Money on the wrong account
 
 A webhook from one account settles a payment taken on another, or a config sends money to the
@@ -1093,6 +1145,9 @@ Who is calling, in levels (`src/verify/`).
 | badge-12 | S | A spoken answer is misheard or injected into speech-to-text. | Spoken answers are normalised by code, exactly or not at all, have their own attempt limit, count alone only at level 1 and never unlock texts. | covered | `verify-spoken.test.ts`: "counts an unusable or wrong answer as an attempt, then stops judging, even the right answer"; `verify-spoken.test.ts`: "can use spoken_knowledge alone at level 1, and only with a factor that is not knowledge above it"; `verify-spoken.test.ts`: "does not unlock texts to the number on file" |
 | badge-13 | I | Keypad digits leak from the host's buffer into a log or a string. | `KeypadCollector` shows no digit, nor how many, through `toString`, JSON or `util.inspect`, and wipes its buffer before its callback runs. | covered | `keypad.test.ts`: "shows no digit, nor how many, through toString, JSON or inspect"; `keypad.test.ts`: "wipes the buffer before the callback runs, even when it throws" |
 | badge-14 | T | A PIN record on file is weakened (its Argon2id cost lowered or set beyond reason) or changed, or an earlier keyed-HMAC record stays weak for good. | Records are read strictly: any cost but today's, another algorithm, version or spelling never matches, and is never run at its own cost; a changed parameter, salt or tag gives another tag. An earlier record still matches, and is replaced by an Argon2id record on the next match, only while it is still on file; every check does one Argon2id run and compares in constant time. | covered | `pin-argon2id.test.ts`: "refuses a correctly computed record at any cost but today's, and never upgrades it"; `pin-argon2id.test.ts`: "refuses a record whose parameters, salt, tag or spelling were changed"; `pin-argon2id.test.ts`: "verifies a record of the earlier format, then replaces it with an Argon2id record on the match"; `pin-hash-timing.test.ts`: "runs Argon2id once at today's cost whatever is on file, a dearer record included (#149)"; `rel-cr-pin-equal-work.test.ts`: "never runs a dearer record at its own cost: the right PIN fails, as on a stand-in" |
+| badge-16 | S | A PIN pass is carried to another caller's call, or replayed after its life or a second time. | Off unless `pin.reuse`; a 256-bit token kept only as its hash, at most 5 minutes from the PIN's pass and the taking call's `maxAgeSeconds`, spent once by a first-wins binding, and checked against the issuing call's own subject and calling number. | covered | `pin-pass.test.ts`: "is spent once: a second call gets nothing, the same call again gets the same answer and no second factor"; `pin-pass.test.ts`: "lets exactly one of two calls redeeming at once have it"; `pin-pass.test.ts`: "after its life, or after this call's own shorter maxAgeSeconds"; `pin-pass.test.ts`: "for another subject, another calling number, or none where the sign-in had one" |
+| badge-17 | E | A reused PIN stands in for more than the PIN, or carries a pass past a taint, a synthetic voice or a lock. | The PIN factor only, judged by the policy like a keyed one, never passed on again; refused after a taint of the issuing call, a level 1 voice band on it, or a lock on the PIN now. | covered | `pin-pass.test.ts`: "counts as the PIN factor only: the texted code is still needed, and the receipt marks the PIN reused"; `pin-pass.test.ts`: "for a sign-in call tainted since, or one a synthetic voice score held to level 1"; `pin-pass.test.ts`: "while the PIN is locked for the subject or the number, as a keyed PIN would be"; `pin-pass.test.ts`: "never for a PIN this call reused, so a pass never outlives the PIN keyed" |
+| badge-18 | E | A duress entry at sign-in is laundered into a normal call by reusing the PIN. | A pass from a duress entry, or for a flagged subject, makes the taking call a duress call, which refuses money, contact and access. | covered | `pin-pass.test.ts`: "makes the call a duress call when the PIN keyed was the duress PIN, and the caller cannot tell" |
 | badge-15 | E | Someone other than the business sets, clears or lifts the owner PIN, or two changes at once both answer ok, or a change leaves the line unguarded. | `createOwnerPin` is host calls only, nothing on a call reaches it; a set or clear is one compare-and-set (`RecordStore.replacePinDigest`), so exactly one of two changes lands and the other is a typed conflict; a failure leaves the PIN on file; the digits are never kept. | covered | `owner-pin.test.ts`: "lands exactly one of two changes that read before either writes, every time, in every pairing"; `owner-pin.test.ts`: "keeps the old PIN and number, never no PIN, when the store fails the replacement"; `owner-pin.test.ts`: "sets a PIN the engine then judges on the line, with no digits stored or written" |
 
 ### Dossier
@@ -1113,7 +1168,7 @@ Intake the caller confirms (`src/file/`).
 
 ### Paylink
 
-Payment by a link texted to the number on file (`src/pay/`).
+Payment by a link texted to the number on file, or emailed to the verified address on file when the caller chose it (`src/pay/`).
 
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
@@ -1125,6 +1180,9 @@ Payment by a link texted to the number on file (`src/pay/`).
 | paylink-6 | E | A caller who refused consent is still taken to a payment. | A consent of no fails its step before any money step. | covered | `flows.test.ts`: "fails the flow on a consent of no, before any money step (review blocker 2)" |
 | paylink-7 | E | A link stays payable after the call or after it should have been withdrawn. | Open links are expired when the call ends and at the engine's own deadline, and can be cancelled; money that moves after is recorded and flagged late. | covered | `engine.test.ts`: "expires an open link when the call ends, and records a late payment as paid, flagged"; `engine.test.ts`: "cancels a link through expireLink, once, and the session leaves paying"; `paylink-modes.test.ts`: "expires a texted link at its deadline, at the provider first, and fails the flow" |
 | paylink-8 | E | A payment lands in the wrong Stripe account (the business's or the platform's). | `connect` and `platform` modes: a connect payment is made on the business's account and settles only on an outcome from that account. | covered | `paylink-modes.test.ts`: "takes a connect payment on the business's account, and its receipt says so"; `paylink-modes.test.ts`: "never lets an outcome from another account settle a payment, and writes down one that reaches it"; `paylink-modes.test.ts`: "keeps two connected accounts' payments apart even when their providers give the same link id" |
+| paylink-11 | S | A payment link is emailed to an address heard on the call, or one the model gave. | No entry point takes an address: the email goes only to the subject's verified `emailOnFile`, and an address that is not a plain one counts as none, so the link goes by text. | covered | `paylink-channel.test.ts`: "records the key as consent to email under its wording, then emails the link there and texts nothing"; `paylink-channel.test.ts`: "offers nothing and chooses text without an address, or with one the check refuses"; `paylink-channel.test.ts`: "takes only a plain address: one @, a dot-atom local part, a domain of DNS labels" |
+| paylink-12 | I | A forwarded or stolen email exposes more than the payment. | The email holds the merchant, the amount, the link's life and the link only, never a code or a number; the address is in no ledger entry or receipt; the link is single use and closed at the engine's deadline, a cancel and the end of the call. | covered | `paylink-channel.test.ts`: "records the key as consent to email under its wording, then emails the link there and texts nothing"; `paylink-channel.test.ts`: "cancels and expires an emailed link like a texted one, and a choice serves one link" |
+| paylink-13 | R | A caller denies choosing email, or the choice is the model's. | The channel is the caller's keypress, fixed in code, recorded as a consent to that channel under its versioned wording (by digest); a later "no" stops an emailed link. | covered | `paylink-channel.test.ts`: "refuses an emailed link once the caller says no to the email consent, and for a subject matched since"; `paylink-channel.test.ts`: "refuses a key that is not one offered, or not a string, before anything is written" |
 | paylink-9 | I | Card numbers keyed on the phone reach the engine. | Keypad card capture only through a certified carrier service, gated on an assessor's scoping. Not built: `startKeypadCardCapture` throws. | open | PAY-6 |
 | paylink-10 | E | A saved card is charged for a weakly verified caller. | Saved-card charges gated on level 2 and amounts from code. Not built: `chargeSavedCard` throws. | open | PAY-4 |
 
@@ -1284,6 +1342,16 @@ Texts to the number on file.
 | messagesender-1 | S | A link is texted to the calling number or a number the model gave. | Texts go to the subject's number on file only. | covered | `engine.test.ts`: "reaches level 3 with keypad and photo ID, texting the link to the number on file only" |
 | messagesender-2 | D | Repeated calls flood a customer with texts, or pump premium numbers. | Photo ID links only after a keypad or PIN match, at most one per call; texted codes are limited per subject and per calling number across calls. | covered | `engine.test.ts`: "sends photo ID links only after a match, once per call, in the caller's language"; `verify-text-code.test.ts`: "allows 5 codes per subject per 24 hours, across calls"; `verify-text-code.test.ts`: "limits sends per calling number, across subjects" |
 | messagesender-3 | D | Texted codes are used for SMS pumping across calls. | Send limits per subject and per calling number, held in the shared `CodeStore`, and a destination country allow-list in the policy. | covered | `verify-text-code.test.ts`: "allows 5 codes per subject per 24 hours, across calls"; `verify-text-code.test.ts`: "limits sends per calling number, across subjects"; `verify-text-code.test.ts`: "texts only to countries the policy allows, and counts nothing it refuses for that" |
+
+### EmailSender
+
+Emails to the verified address on file (a payment link the caller chose to get by email).
+
+| Id | STRIDE | Threat | Control | Status | Proof |
+|---|---|---|---|---|---|
+| emailsender-1 | S | A link is emailed to an address the caller or the model gave. | The engine passes only the subject's verified address on file, held to `isEmailAddress`, and only after a keypad or PIN match. | covered | `paylink-channel.test.ts`: "records the key as consent to email under its wording, then emails the link there and texts nothing"; `paylink-channel.test.ts`: "offers nothing and chooses text without an address, or with one the check refuses" |
+| emailsender-2 | T | A retried send emails the link twice, or a failed send loses the request. | The request stays open and resumes with one idempotency key per payment and channel; the sender gives its lease back on a failure. | covered | `paylink-channel.test.ts`: "keeps an emailed request open when the email fails, and resumes it with the same keys"; `paylink-channel.test.ts`: "delivers each idempotency key once" |
+| emailsender-3 | I | Credentials for the email service reach the engine, the ledger or the config. | The port carries no credential: `sendEmail` takes the address, the words, the locale, the purpose and a key, and the sender holds its own. | covered | `paylink-channel.test.ts`: "checks the channels setting, and needs the emails adapter only with email on" |
 
 ### PaymentLinks
 
@@ -1450,6 +1518,13 @@ Tells the business that someone is locked out, best effort; the ledger stays the
   the call ends, a link lives as long as the provider keeps it. Calling `endCall` again when it
   failed at the provider, so the call's open links are expired and its receipt issued.
 - Refunding a late payment (one flagged `late` in the ledger) when the business does not want it.
+- Setting `emailOnFile` only to an address the subject proved they read (a confirmation link, never
+  an address spoken or keyed on a call), and removing it when it stops being theirs; an
+  `EmailSender` that holds its own credentials, authenticates its domain (SPF, DKIM, DMARC) and
+  settles within 60 seconds; writing each channel's consent wording so it names what the caller
+  gets and where.
+- Handing a PIN pass token (`issuePinPass`) only to the next engine call of the same phone call, in
+  memory, never through the model and never to a call on another line.
 - A `FieldCipher` with authenticated encryption under a key the host keeps in a key store, binding
   the context (workspace, record, field) so a ciphertext moved elsewhere fails to decrypt; and
   protecting a durable `SessionStore` as it would the records, since an open draft is in the clear.

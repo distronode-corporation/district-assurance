@@ -24,6 +24,7 @@ const ADAPTERS: Record<AdapterName, true> = {
   identity: true,
   carrier: true,
   messages: true,
+  emails: true,
   payments: true,
   signer: true,
   pinVerifier: true,

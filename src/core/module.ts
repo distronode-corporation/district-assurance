@@ -88,6 +88,12 @@ export interface StepContext {
   adapters: ReadonlySet<string>;
   /** What adapters declare they can do (`capabilities` on the adapter), by adapter name, when known. */
   capabilities: Readonly<Record<string, unknown>>;
+  /**
+   * Another module's settings, for a step that relies on them (Paylink's channel choice reads
+   * Trace's consent wordings): `undefined` for a module on without settings, null for one that is
+   * off or whose settings did not validate. `validateConfig` gives it; absent elsewhere.
+   */
+  settingsOf?(module: string): unknown;
 }
 
 /** What a module sees of a call when it judges its current step. */

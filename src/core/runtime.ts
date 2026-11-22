@@ -14,6 +14,7 @@ import type {
   CodeStore,
   ConsentStore,
   DuressNotifier,
+  EmailSender,
   IdentityProvider,
   MessageSender,
   Notifier,
@@ -81,6 +82,8 @@ export interface EngineAdapters {
   identity?: IdentityProvider;
   carrier?: CarrierSignals;
   messages?: MessageSender;
+  /** Emails a payment link to the subject's verified address on file, when the caller chose email (`paylink.channel`). */
+  emails?: EmailSender;
   payments?: PaymentLinks;
   signer?: ReceiptSigner;
   pinVerifier?: PinVerifier;

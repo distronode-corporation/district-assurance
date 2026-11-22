@@ -11,14 +11,14 @@ import { BANK_WORDS, INTERRUPT_LINES, NUMBER_CONNECTORS, NUMBER_LANGUAGES_BY_LOC
 import { AMOUNT_READBACK_TEXT } from "../src/pay/amount.ts";
 import { READBACK_WORDING } from "../src/file/readback.ts";
 import { ACTION_WORDS, CONTACT_NOTICE_TEXT, LIST_REGION, RECEIPT_LINK_TEXT } from "../src/prove/trace.ts";
-import { AMOUNT_REGION, PAYMENT_TEXT } from "../src/pay/paylink.ts";
+import { AMOUNT_REGION, CHANNEL_KEY_TEXT, PAYMENT_EMAIL, PAYMENT_TEXT } from "../src/pay/paylink.ts";
 import { IDENTITY_TEXT } from "../src/verify/badge.ts";
 import { ACCESS_CODE_TEXT } from "../src/gate/codes.ts";
 import { TEXT_CODE_TEXT } from "../src/verify/text-code.ts";
 import { rejects, setup } from "./helpers.ts";
 
 /** Every catalog in src/, by its exported name. The source scan below fails when one is missing here. */
-const CATALOGS: Record<string, Record<string, unknown>> = { IDENTITY_TEXT, PAYMENT_TEXT, AMOUNT_READBACK_TEXT, AMOUNT_REGION, NUMBER_LANGUAGES_BY_LOCALE, NUMBER_CONNECTORS, INTERRUPT_LINES, BANK_WORDS, ACCESS_CODE_TEXT, TEXT_CODE_TEXT, READBACK_WORDING, ACTION_WORDS, LIST_REGION, RECEIPT_LINK_TEXT, CONTACT_NOTICE_TEXT };
+const CATALOGS: Record<string, Record<string, unknown>> = { IDENTITY_TEXT, PAYMENT_TEXT, AMOUNT_READBACK_TEXT, AMOUNT_REGION, NUMBER_LANGUAGES_BY_LOCALE, NUMBER_CONNECTORS, INTERRUPT_LINES, BANK_WORDS, ACCESS_CODE_TEXT, TEXT_CODE_TEXT, READBACK_WORDING, ACTION_WORDS, LIST_REGION, RECEIPT_LINK_TEXT, CONTACT_NOTICE_TEXT, CHANNEL_KEY_TEXT, PAYMENT_EMAIL };
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -60,9 +60,13 @@ describe("supported locales", () => {
   });
 
   it("each say every sent text in their own words: no locale reuses another's", () => {
-    for (const name of ["IDENTITY_TEXT", "PAYMENT_TEXT"]) {
+    for (const name of ["IDENTITY_TEXT", "PAYMENT_TEXT", "CHANNEL_KEY_TEXT"]) {
       const said = SUPPORTED_LOCALES.map((locale) => (CATALOGS[name]![locale] as (a: string, b: string) => string)("A", "B"));
       assert.equal(new Set(said).size, said.length, name);
+    }
+    for (const part of ["subject", "body"] as const) {
+      const said = SUPPORTED_LOCALES.map((locale) => PAYMENT_EMAIL[locale][part]("A", "$1.00", 15, "https://pay.example.test/1"));
+      assert.equal(new Set(said).size, said.length, `PAYMENT_EMAIL.${part}`);
     }
   });
 

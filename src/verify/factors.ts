@@ -31,6 +31,12 @@ export interface PinSettings {
    * of every money, contact and access scope (for example `owner.command`); it may be empty.
    */
   duress?: { refuseScopes: string[] };
+  /**
+   * PIN reuse, off unless set: a call may take a PIN pass another call of the same caller issued
+   * (`issuePinPass`, `reusePin`) as its PIN factor, within `maxAgeSeconds` (30 to 300) of that PIN's
+   * pass. The PIN factor only: every other factor the policy asks for is still needed.
+   */
+  reuse?: { maxAgeSeconds: number };
 }
 
 /**

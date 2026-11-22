@@ -1,4 +1,5 @@
-// Paylink (pay): payment by a hosted link texted to the number on file. The engine never sees a
+// Paylink (pay): payment by a hosted link sent to the subject on file, by text to the number on
+// file or, when the caller chose it, by email to the verified address on file. The engine never sees a
 // card. In a flow, the `paylink.request` step carries the amount, the payment mode, the link's
 // life and the payment methods, so they are checked when the config is saved; outside a flow the
 // host's code passes the amount and Paylink's settings give the rest. Either way none of it comes
@@ -20,8 +21,14 @@
 // to resume; once a link exists, only the provider's outcome, the engine's deadline, a cancel or
 // the end of the call settles it. Money that moves after the engine closed a link is still
 // recorded as paid, and flagged in the ledger.
-import type { AmountSource, InstantPaymentMethod, PaymentLinkCapabilities, PaymentLinkClose, PaymentMode, SubjectRecord } from "../core/adapters.ts";
+//
+// The channel (`paylink.channel`): when the subject has a verified address on file, the caller
+// chooses text (key 1) or email (key 2), and the keypress is their consent to that channel, under
+// its versioned wording. Without an address the choice is not offered and the link goes by text.
+// Either way it is the same single-use link, with the same deadline, send lease and close.
+import type { AmountSource, EmailSender, InstantPaymentMethod, PaymentLinkCapabilities, PaymentLinkClose, PaymentMode, SubjectRecord } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
+import { isEmailAddress } from "../core/email.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import { stepAmount, type StepUpAmount } from "../core/policy.ts";
@@ -30,6 +37,7 @@ import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } fro
 import type { CallDraft, CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
 import type { SessionState } from "../core/session.ts";
 import { isIntegerIn, isObject, unknownKeys } from "../core/shape.ts";
+import { recordConsent, TRACE, type TraceSettings, type TraceSlice } from "../prove/trace.ts";
 import { matchedSubject } from "../verify/badge.ts";
 import { AMOUNT_REF, buildAmountReadBack, formatAmount, type AmountQuote, type AmountReadBack } from "./amount.ts";
 import {
@@ -44,6 +52,7 @@ import {
   settlementFor,
   validateAmount,
   type AmountSourceKind,
+  type PaymentChannel,
   type PaymentOutcome,
   type PaymentRequest,
   type PaymentStatus,
@@ -71,6 +80,12 @@ export interface PaylinkSettings {
   linkLifeMinutes?: number;
   /** The default payment methods: instant ones only. Default card, Apple Pay, Google Pay and Link. */
   paymentMethods?: InstantPaymentMethod[];
+  /**
+   * The channels a link may go by: `["text"]` (the default) or `["text", "email"]`, which turns on
+   * the `paylink.channel` step and needs the `emails` adapter. Text is always one: it is the channel
+   * when no verified address is on file.
+   */
+  channels?: PaymentChannel[];
 }
 
 /** A step with a fixed amount (`amountMinor` and `currency`) or one the AmountSource resolves (`amountRef`), never both. */
@@ -104,11 +119,49 @@ export interface ReferencedPaymentInput {
 
 export type PaymentInput = FixedPaymentInput | ReferencedPaymentInput;
 
+/** A channel step: the caller chooses how the next payment link reaches them. It has no fields of its own. */
+export interface PaylinkChannelStep extends FlowStep {
+  type: "paylink.channel";
+}
+
+/** The channel chosen for the next link on this call, and for whom. */
+export interface ChannelChoice {
+  channel: PaymentChannel;
+  /** The subject matched when it was chosen: the link goes only to that subject. */
+  subjectKey: string;
+  /** The consent the keypress recorded (`payment_link_text` or `payment_link_email`); null when no choice was offered. */
+  consentId: string | null;
+  at: string;
+}
+
 export interface PaylinkSlice {
   /** Each request, and once a platform payment is paid, its payment intent, refunds and disputes (`refunds.ts`). */
   payments: Array<PaymentRequest & PaymentAfterwards>;
   /** The amount last read back on this call and not yet used by a link (PAY-2). Absent on a call saved before PAY-2. */
   quote?: AmountQuote | null;
+  /** The channel chosen and not yet used by a link. Absent on a call saved before channels existed. */
+  channel?: ChannelChoice | null;
+  /** How many choices were made on this call, for the channel step's status. Absent before the first. */
+  choices?: number;
+}
+
+/** The channels a link can go by, in the order they are offered. */
+export const PAYMENT_CHANNELS: readonly PaymentChannel[] = ["text", "email"];
+
+/** The key the caller presses for each channel. Fixed in code: the host never maps keys to channels. */
+export const PAYMENT_CHANNEL_KEYS: Readonly<Record<PaymentChannel, string>> = Object.freeze({ text: "1", email: "2" });
+
+/** The consent purpose each channel's choice records, with its versioned wording from Trace's settings. */
+export const PAYMENT_CHANNEL_PURPOSES: Readonly<Record<PaymentChannel, string>> = Object.freeze({ text: "payment_link_text", email: "payment_link_email" });
+
+/** What `offerPaymentChannels` answers. */
+export interface PaymentChannelOffer {
+  /** The channels offered, each with its key: text only when no verified address is on file. */
+  channels: Array<{ channel: PaymentChannel; key: string }>;
+  /** The line the host reads, built by code: each channel's consent wording and its key. Null when only text is offered. */
+  prompt: string | null;
+  /** `text` when nothing was offered and the choice is already made (no address on file); null while the caller chooses. */
+  chosen: PaymentChannel | null;
 }
 
 /** How a payment is taken: from the step, then the settings, then the defaults. */
@@ -191,12 +244,40 @@ function providerExpiry(requestedAt: string, lifeMinutes: number, caps: PaymentL
   return deadline(requestedAt, minutes);
 }
 
+/** Problems with Paylink's `channels` setting. */
+function channelsErrors(value: unknown): string[] {
+  if (!Array.isArray(value) || !value.every((c) => (PAYMENT_CHANNELS as readonly unknown[]).includes(c))) return ["channels must list text, and email or not"];
+  if (new Set(value).size !== value.length) return ["channels has duplicates"];
+  return value.includes("text") ? [] : ["channels must include text: it is how a link goes when no verified address is on file"];
+}
+
+/** Whether Paylink's settings turn the email channel on. */
+function emailOn(settings: PaylinkSettings | undefined | null): boolean {
+  return (settings?.channels ?? []).includes("email");
+}
+
+/** Problems with a `paylink.channel` step: the email channel on, and Trace's wordings and business name the choice and the email need. */
+function channelStepErrors(step: FlowStep, ctx: StepContext): string[] {
+  const errors = unknownKeys(step, ["type"]).map((k) => `${k} is not a field of this step`);
+  // Settings that did not validate are reported on their own.
+  if (ctx.settings !== null && !emailOn(ctx.settings as PaylinkSettings | undefined)) errors.push('the channel choice needs "email" in Paylink\'s channels setting');
+  // Without a config in view, or with Trace's settings refused (reported on their own), there is nothing to check against.
+  if (ctx.settingsOf === undefined) return errors;
+  const trace = ctx.settingsOf(TRACE) as TraceSettings | undefined | null;
+  if (trace === null) return errors;
+  for (const purpose of Object.values(PAYMENT_CHANNEL_PURPOSES)) {
+    if (!(trace?.wordings ?? []).some((w) => w.purpose === purpose)) errors.push(`the channel choice needs a wording for ${purpose} in the trace settings`);
+  }
+  if (trace?.businessName === undefined) errors.push("the email channel needs businessName in the trace settings");
+  return errors;
+}
+
 export const paylinkModule: AssuranceModule = {
   manifest: {
     name: PAYLINK,
-    version: "2",
-    summary: "Take a payment by a hosted link texted to the number on file, on the business's account or the platform's.",
-    provides: { factors: [], steps: ["paylink.request"], outcomes: ["payment"] },
+    version: "3",
+    summary: "Take a payment by a hosted link sent to the subject on file, by text or by email, on the business's account or the platform's.",
+    provides: { factors: [], steps: ["paylink.request", "paylink.channel"], outcomes: ["payment"] },
     scopes: { grants: [], needs: { "paylink.request": "payment.request" }, classes: { "payment.request": "money" } },
     adapters: ["payments", "messages"],
   },
@@ -204,7 +285,8 @@ export const paylinkModule: AssuranceModule = {
   validateSettings(settings: unknown): string[] {
     if (settings === undefined) return [];
     if (!isObject(settings)) return ["must be an object"];
-    const errors = unknownKeys(settings, ["maxAmountMinor", "mode", "connectedAccountId", "linkLifeMinutes", "paymentMethods"]).map((k) => `${k} is not a paylink setting`);
+    const errors = unknownKeys(settings, ["maxAmountMinor", "mode", "connectedAccountId", "linkLifeMinutes", "paymentMethods", "channels"]).map((k) => `${k} is not a paylink setting`);
+    if (settings.channels !== undefined) errors.push(...channelsErrors(settings.channels));
     if (settings.maxAmountMinor !== undefined && !isIntegerIn(settings.maxAmountMinor, 1, MAX_LINK_AMOUNT_MINOR)) {
       errors.push(`maxAmountMinor must be an integer from 1 to ${MAX_LINK_AMOUNT_MINOR}`);
     }
@@ -237,11 +319,12 @@ export const paylinkModule: AssuranceModule = {
     return adapterErrors(caps, s.mode ?? "platform", s.linkLifeMinutes ?? DEFAULT_LINK_LIFE_MINUTES);
   },
 
-  requiredAdapters(): string[] {
-    return ["payments", "messages"];
+  requiredAdapters(settings: unknown): string[] {
+    return emailOn(settings as PaylinkSettings | undefined) ? ["payments", "messages", "emails"] : ["payments", "messages"];
   },
 
   validateStep(step: FlowStep, ctx: StepContext): string[] {
+    if (step.type === "paylink.channel") return channelStepErrors(step, ctx);
     const errors = unknownKeys(step, ["type", "amountMinor", "currency", "amountRef", "description", "amountSource", "mode", "linkLifeMinutes", "paymentMethods"]).map(
       (k) => `${k} is not a field of this step`,
     );
@@ -259,20 +342,36 @@ export const paylinkModule: AssuranceModule = {
     return errors;
   },
 
+  validateFlow(steps: readonly FlowStep[]): string[] {
+    // A choice serves the one link after it: each channel step is followed by a request, before another choice.
+    const errors: string[] = [];
+    let waiting = false;
+    steps.forEach((step, index) => {
+      if (step.type === "paylink.channel") {
+        if (waiting) errors.push(`steps[${index}]: a second paylink.channel step before the paylink.request the first one is for`);
+        waiting = true;
+      } else if (step.type === "paylink.request") waiting = false;
+    });
+    if (waiting) errors.push("a paylink.channel step must be followed by the paylink.request step it chooses for");
+    return errors;
+  },
+
   initCall(): JsonValue {
-    return { payments: [], quote: null };
+    return { payments: [], quote: null, channel: null, choices: 0 };
   },
 
   onUntrusted(s: JsonValue): JsonValue {
-    // A confirmation heard before untrusted text entered the call no longer counts: read it back again.
-    return { ...(s as unknown as PaylinkSlice), quote: null } as unknown as JsonValue;
+    // A confirmation, or a channel choice, heard before untrusted text entered the call no longer counts: ask again.
+    return { ...(s as unknown as PaylinkSlice), quote: null, channel: null } as unknown as JsonValue;
   },
 
-  enterStep(_step: FlowStep, s: JsonValue): JsonValue {
-    return (s as unknown as PaylinkSlice).payments.length;
+  enterStep(step: FlowStep, s: JsonValue): JsonValue {
+    const slice = s as unknown as PaylinkSlice;
+    return step.type === "paylink.channel" ? (slice.choices ?? 0) : slice.payments.length;
   },
 
-  stepStatus(_step: FlowStep, view: StepView): StepStatus {
+  stepStatus(step: FlowStep, view: StepView): StepStatus {
+    if (step.type === "paylink.channel") return ((view.slice as unknown as PaylinkSlice).choices ?? 0) > (view.mark as number) ? "complete" : "pending";
     const payments = (view.slice as unknown as PaylinkSlice).payments;
     if (payments.length <= (view.mark as number)) return "pending";
     const status = payments.at(-1)!.status;
@@ -427,6 +526,138 @@ export async function confirmPaymentAmount(rt: EngineRuntime, callId: string, in
   });
 }
 
+// ---- channel ------------------------------------------------------------------------------
+
+/** What a channel choice is judged on: the subject, the channels it can be offered, and the words for them. */
+interface ChannelContext {
+  subject: SubjectRecord;
+  offered: PaymentChannel[];
+  trace: TraceSlice;
+}
+
+/**
+ * The checks a channel offer and a choice make: Paylink on, the flow on its channel step (or no
+ * flow), an open call, `payment.request` covered and a keypad or PIN match standing. Email is
+ * offered only with the email channel on (Paylink's `channels`) and a verified address on file; then the call must have both
+ * channels' wordings in its language and the business's name, or nothing is offered (fail closed).
+ */
+function channelContext(rt: EngineRuntime, record: CallRecord): ChannelContext {
+  rt.settings(PAYLINK);
+  stepOfType<PaylinkChannelStep>(record, "paylink.channel");
+  if (record.state.phase !== "open") throw new EngineError("invalid_transition", `a channel is chosen on an open call, not while ${record.state.phase}`);
+  if (!rt.authorized(record, "payment.request", null)) throw new EngineError("scope_denied", "the grant does not cover payment.request");
+  const subject = matchedSubject(record);
+  const trace = record.modules[TRACE] as unknown as TraceSlice;
+  const email = emailOn(rt.settings<PaylinkSettings | undefined>(PAYLINK)) && isEmailAddress(subject.emailOnFile);
+  if (!email) return { subject, offered: ["text"], trace };
+  for (const channel of PAYMENT_CHANNELS) {
+    const purpose = PAYMENT_CHANNEL_PURPOSES[channel];
+    if (trace.wordings.find((w) => w.purpose === purpose)?.text[record.locale] === undefined) {
+      throw new EngineError("precondition_failed", `the channel choice needs a ${record.locale} wording for ${purpose} on this call`);
+    }
+  }
+  if (trace.businessName === null) throw new EngineError("precondition_failed", "the email channel needs the business's name on this call");
+  return { subject, offered: [...PAYMENT_CHANNELS], trace };
+}
+
+/** Records a choice on the call, for the next link: the step completes, and the ledger names the channel, never the address. */
+function noteChoice(rt: EngineRuntime, draft: CallDraft, channel: PaymentChannel, ctx: ChannelContext, consentId: string | null): void {
+  const slice = draft.slice<PaylinkSlice>(PAYLINK);
+  slice.channel = { channel, subjectKey: ctx.subject.subjectKey, consentId, at: rt.now() };
+  slice.choices = (slice.choices ?? 0) + 1;
+  draft.emit("payment.channel_chosen", consentId === null ? "code" : "caller", { channel, offered: [...ctx.offered], ...(consentId === null ? {} : { consentId }) });
+}
+
+/**
+ * Offers the caller a channel for the next payment link. With a verified address on file it
+ * answers both channels and the prompt the host reads (each channel's consent wording, then its
+ * key, in the call's language) and writes nothing; the caller's key goes to `choosePaymentChannel`.
+ * Without one, nothing is offered: the link goes by text, and that choice is recorded now (the step
+ * completes, `chosen: "text"`).
+ */
+export async function offerPaymentChannels(rt: EngineRuntime, callId: string): Promise<PaymentChannelOffer> {
+  const record = await rt.read(callId);
+  const ctx = channelContext(rt, record);
+  const channels = ctx.offered.map((channel) => ({ channel, key: PAYMENT_CHANNEL_KEYS[channel] }));
+  if (ctx.offered.length > 1) {
+    const locale = record.locale;
+    const prompt = ctx.offered
+      .map((channel) => `${ctx.trace.wordings.find((w) => w.purpose === PAYMENT_CHANNEL_PURPOSES[channel])!.text[locale]!.trim()} ${CHANNEL_KEY_TEXT[locale](PAYMENT_CHANNEL_KEYS[channel])}`)
+      .join(" ");
+    return { channels, prompt, chosen: null };
+  }
+  await rt.update(callId, (draft) => {
+    const now = channelContext(rt, draft.record);
+    // An address that came on file since the read (a restart that read the subject again) is offered next time.
+    if (now.offered.length > 1) throw new EngineError("precondition_failed", "the channels changed while they were offered; offer them again");
+    noteChoice(rt, draft, "text", now, null);
+  });
+  return { channels, prompt: null, chosen: "text" };
+}
+
+/**
+ * The caller keyed their choice: `1` for text, `2` for email (`PAYMENT_CHANNEL_KEYS`), only among
+ * the channels offered. With both offered, the keypress is the caller's consent to that channel:
+ * recorded as a consent to `payment_link_text` or `payment_link_email` under its wording (version
+ * and digest), through the ConsentStore when there is one, before the choice. The choice serves
+ * the next link on the call, for the subject matched now.
+ */
+export async function choosePaymentChannel(rt: EngineRuntime, callId: string, input: { key: string }): Promise<{ channel: PaymentChannel }> {
+  // Read once: the key checked is the one used.
+  const key: unknown = isObject(input) ? input.key : undefined;
+  if (typeof key !== "string") throw new EngineError("invalid_input", "key must be the digit the caller keyed");
+  const ctx = channelContext(rt, await rt.read(callId));
+  const channel = ctx.offered.find((c) => PAYMENT_CHANNEL_KEYS[c] === key);
+  if (channel === undefined) throw new EngineError("invalid_input", `key must be one of ${ctx.offered.map((c) => PAYMENT_CHANNEL_KEYS[c]).join(", ")}`);
+  const consentId =
+    ctx.offered.length > 1
+      ? (await recordConsent(rt, callId, { purpose: PAYMENT_CHANNEL_PURPOSES[channel], answer: "yes", channel: "call" }, (record) => matchedSubject(record).subjectKey, "paylink.channel")).consentId
+      : null;
+  await rt.update(callId, (draft) => {
+    const now = channelContext(rt, draft.record);
+    if (now.subject.subjectKey !== ctx.subject.subjectKey || now.offered.length !== ctx.offered.length) {
+      throw new EngineError("precondition_failed", "the call changed while the choice was recorded; offer the channels again");
+    }
+    noteChoice(rt, draft, channel, now, consentId);
+  });
+  return { channel };
+}
+
+/**
+ * The channel a new link goes by: the one chosen on the call, for this subject, or text when none
+ * was. A choice that recorded a consent needs the caller's latest answer to that purpose to still
+ * be yes (a later no withdraws it). Email needs the channel still on and the address still there.
+ */
+function chosenChannel(record: CallRecord, slice: PaylinkSlice, subject: SubjectRecord): PaymentChannel {
+  const choice = slice.channel ?? null;
+  if (choice === null) return "text";
+  if (choice.subjectKey !== subject.subjectKey) throw new EngineError("precondition_failed", "the channel was chosen for another subject; offer the channels again");
+  if (choice.consentId !== null) {
+    const purpose = PAYMENT_CHANNEL_PURPOSES[choice.channel];
+    const latest = (record.modules[TRACE] as unknown as TraceSlice).consents.filter((c) => c.purpose === purpose).at(-1);
+    if (latest?.answer !== "yes") throw new EngineError("precondition_failed", "the caller withdrew their consent to this channel; offer the channels again");
+  }
+  return choice.channel;
+}
+
+/** Where a link goes, by its channel: the number on file, or the verified address on file with the business's name. */
+interface Destination {
+  phone: string;
+  email: string | null;
+  businessName: string | null;
+  locale: Locale;
+}
+
+function destinationFor(rt: EngineRuntime, record: CallRecord, subject: SubjectRecord, channel: PaymentChannel): Destination {
+  const businessName = (record.modules[TRACE] as unknown as TraceSlice).businessName;
+  if (channel === "email") {
+    // The channel turned off since the choice (or a call resumed on an engine without it), or a subject read again without its address.
+    if (!emailOn(rt.settings<PaylinkSettings | undefined>(PAYLINK))) throw new EngineError("precondition_failed", "the link is to be emailed, and the email channel is off");
+    if (!isEmailAddress(subject.emailOnFile) || businessName === null) throw new EngineError("precondition_failed", "the link is to be emailed, and no verified address is on file now");
+  }
+  return { phone: subject.phoneOnFile, email: channel === "email" ? subject.emailOnFile! : null, businessName, locale: record.locale };
+}
+
 /**
  * The read-back a new link is for. Every link needs one, confirmed by the caller and made for this
  * request and this subject, fixed amount or not: the caller hears every amount before it is sent.
@@ -440,7 +671,8 @@ function confirmedQuote(quote: AmountQuote | null, spec: PaymentInput | undefine
 }
 
 /**
- * Texts a hosted payment link to the number on file. In a flow, the step sets the amount and
+ * Sends a hosted payment link: by text to the number on file, or by email to the verified address
+ * on file when the caller chose email (`choosePaymentChannel`). In a flow, the step sets the amount and
  * `input` must be left out; outside one, the host's code passes it (`amountSource` says where from).
  * Every link needs a read-back on the call (`readBackPayment`) that the caller confirmed
  * (`confirmPaymentAmount`), for this request, and the link is for exactly that amount.
@@ -468,8 +700,8 @@ export async function requestPayment(
     const refused = rt.requireScope(draft, "payment.request", resuming ? last : (slice.quote ?? stepAmount(named) ?? null));
     if (refused !== null) return { refused };
     const { step, subject } = requestContext(rt, draft.record, input, false);
-    const where = { phone: subject.phoneOnFile, locale: draft.record.locale };
     if (resuming) {
+      const where = destinationFor(rt, draft.record, subject, last.channel ?? "text");
       const named = input as Partial<FixedPaymentInput & ReferencedPaymentInput> | undefined;
       // A resume names nothing, the same amount, or the same amountRef request it was made for.
       const same =
@@ -480,6 +712,8 @@ export async function requestPayment(
     }
     // A link already out (or a call not open) is refused as a transition, before the read-back.
     draft.assertCan({ type: "payment_requested", paymentId: "next" });
+    const channel = chosenChannel(draft.record, slice, subject);
+    const where = destinationFor(rt, draft.record, subject, channel);
     // A call saved before PAY-2 has no quote field: the same as no read-back.
     const quote = confirmedQuote(slice.quote ?? null, (step as PaymentInput | null) ?? input, subject);
     const chosen: FixedPaymentInput = { amountMinor: quote.amountMinor, currency: quote.currency, description: quote.description, amountSource: quote.amountSource };
@@ -492,6 +726,8 @@ export async function requestPayment(
     errors.push(...adapterErrors(rt.adapter("payments").capabilities, terms.mode, terms.linkLifeMinutes));
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     slice.quote = null;
+    // A choice serves one link.
+    slice.channel = null;
     const paymentId = rt.ids.next("pay");
     const requestedAt = rt.now();
     draft.apply({ type: "payment_requested", paymentId });
@@ -507,6 +743,7 @@ export async function requestPayment(
       requestedAt,
       settledAt: null,
       textedAt: null,
+      channel,
       // The request the read-back was made for (confirmedQuote held any request named to it).
       requestKey: quote.spec,
       ...terms,
@@ -636,12 +873,27 @@ export async function requestPayment(
     if (still === "held") throw hold!;
     // And the life left, once more: the renewal can take time too.
     if (leftMs() < MIN_LINK_LIFE_MINUTES * 60_000) await closeLate();
-    await rt.adapter("messages").sendText({
-      to: reserved.phone,
-      body: paymentText(reserved.locale, link.url, request.amountMinor, request.currency),
-      purpose: "payment_link",
-      idempotencyKey: rt.idempotencyKey(callId, request.paymentId, "text"),
-    });
+    if (reserved.email !== null) {
+      // The life the email states: the link's, or what the provider has left of it, whichever is shorter.
+      const minutes = Math.min(request.linkLifeMinutes, Math.floor(leftMs() / 60_000));
+      const email = PAYMENT_EMAIL[reserved.locale];
+      const amount = formatAmount(reserved.locale, request.amountMinor, request.currency);
+      await (rt.adapter("emails") as EmailSender).sendEmail({
+        to: reserved.email,
+        subject: email.subject(reserved.businessName!),
+        body: email.body(reserved.businessName!, amount, minutes, link.url),
+        locale: reserved.locale,
+        purpose: "payment_link",
+        idempotencyKey: rt.idempotencyKey(callId, request.paymentId, "email"),
+      });
+    } else {
+      await rt.adapter("messages").sendText({
+        to: reserved.phone,
+        body: paymentText(reserved.locale, link.url, request.amountMinor, request.currency),
+        purpose: "payment_link",
+        idempotencyKey: rt.idempotencyKey(callId, request.paymentId, "text"),
+      });
+    }
   } catch (error) {
     // A sender that fails (the text, or a write before it) gives its own lease back at once, so
     // the immediate retry can claim it; one another sender holds now is left as it is. A release
@@ -668,6 +920,7 @@ export async function requestPayment(
       currency: request.currency,
       amountSource: request.amountSource,
       mode: request.mode,
+      channel: request.channel ?? "text",
       expiresAt: sent.expiresAt,
     });
     return { paymentId: request.paymentId, status: sent.status, expiresAt: sent.expiresAt };
@@ -821,6 +1074,36 @@ export async function expirePaymentLinks(rt: EngineRuntime, callId: string): Pro
   }
   return { expired };
 }
+
+/** The key instruction after each channel's wording in the channel prompt, in every supported locale (SPEC.md section 16). */
+export const CHANNEL_KEY_TEXT: Record<Locale, (key: string) => string> = {
+  en: (key) => `Press ${key}.`,
+  fr: (key) => `Appuyez sur ${key}.`,
+  es: (key) => `Pulse ${key}.`,
+};
+
+/**
+ * The payment link email, in every supported locale (SPEC.md section 16). It names the merchant,
+ * the amount, the link's life and the link, so a forwarded copy holds nothing more: never a code,
+ * a phone number or an account number.
+ */
+export const PAYMENT_EMAIL: Record<Locale, { subject: (business: string) => string; body: (business: string, amount: string, minutes: number, url: string) => string }> = {
+  en: {
+    subject: (business) => `Your secure payment link from ${business}`,
+    body: (business, amount, minutes, url) =>
+      `${business} sent you a secure payment link for ${amount}. It works once and expires in ${minutes} minutes.\n\n${url}\n\nIf you did not ask for this payment, do not use the link.`,
+  },
+  fr: {
+    subject: (business) => `Votre lien de paiement sécurisé de ${business}`,
+    body: (business, amount, minutes, url) =>
+      `${business} vous a envoyé un lien de paiement sécurisé pour ${amount}. Il ne sert qu'une fois et expire dans ${minutes} minutes.\n\n${url}\n\nSi vous n'avez pas demandé ce paiement, n'utilisez pas le lien.`,
+  },
+  es: {
+    subject: (business) => `Su enlace de pago seguro de ${business}`,
+    body: (business, amount, minutes, url) =>
+      `${business} le envió un enlace de pago seguro por ${amount}. Sirve una sola vez y caduca en ${minutes} minutos.\n\n${url}\n\nSi no solicitó este pago, no use el enlace.`,
+  },
+};
 
 /** The payment link text, in every supported locale (SPEC.md section 16). */
 export const PAYMENT_TEXT: Record<Locale, (amount: string, url: string) => string> = {
