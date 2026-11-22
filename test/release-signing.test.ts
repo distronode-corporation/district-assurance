@@ -56,7 +56,7 @@ interface World {
   event?: string;
   dryRun?: string;
   /** What GitHub answers for the tag's release: one with files, none (404), a draft, or a failure. */
-  release?: "complete" | "none" | "draft" | "empty" | "partial" | "fails";
+  release?: "complete" | "none" | "draft" | "empty" | "partial" | "starter" | "fails";
 }
 
 /** The decide step, run with stand-in git and curl, the real node and grep. */
@@ -76,12 +76,14 @@ function decide(world: World = {}) {
   writeFileSync(join(dir, "document.json"), document);
   fake("curl", world.curlFails === true ? "exit 22" : `while [ $# -gt 0 ]; do if [ "$1" = -o ]; then cp "${join(dir, "document.json")}" "$2"; shift; fi; shift; done`);
   const release = world.release ?? "complete";
-  const all = ["district-assurance-1.2.3.tgz", "district-assurance-1.2.3.cdx.json", "district-assurance-1.2.3.tgz.sbom.sigstore.json"].map((name) => ({ name }));
+  const all = ["district-assurance-1.2.3.tgz", "district-assurance-1.2.3.cdx.json", "district-assurance-1.2.3.tgz.sbom.sigstore.json"].map((name) => ({ name, state: "uploaded" }));
   const answer = {
     complete: { draft: false, assets: all },
     draft: { draft: true, assets: all },
     empty: { draft: false, assets: [] },
     partial: { draft: false, assets: all.slice(0, 1) },
+    // A failed upload's placeholder: every name is there, one never finished uploading.
+    starter: { draft: false, assets: [...all.slice(0, 2), { ...all[2]!, state: "starter" }] },
   } as Record<string, unknown>;
   fake(
     "gh",
@@ -145,7 +147,7 @@ describe("the release decision", { skip: unix }, () => {
   });
 
   it("finishes a release that is on npm but whose tag has no GitHub release with its files, from this commit only", () => {
-    for (const release of ["none", "draft", "empty", "partial"] as const) {
+    for (const release of ["none", "draft", "empty", "partial", "starter"] as const) {
       const r = decide({ tag: SHA, versions: ["1.2.3"], release });
       assert.equal(r.code, 0, r.out);
       assert.equal(r.output.state, "resume", release);
