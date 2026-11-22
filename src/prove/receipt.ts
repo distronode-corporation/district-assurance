@@ -291,6 +291,33 @@ export function receiptKeySet(signer: ReceiptSigner | undefined): JsonWebKey[] {
   return typeof (signer as Partial<ReceiptKeyRing>).keySet === "function" ? (signer as ReceiptKeyRing).keySet() : [publishedKey(signer.publicJwk(), signer.keyId)];
 }
 
+/** How long a verifier may keep the published key set: short, so a new key version is seen within minutes. */
+export const RECEIPT_KEYS_CACHE_CONTROL = "public, max-age=300";
+
+/**
+ * The public receipt-keys document a host serves (for example at `/.well-known/receipt-keys.json`):
+ * `{ keys }`, every signer's published keys (`receiptKeySet`) in order, each `kid` once. The same
+ * key under one `kid` twice is kept once; two different keys under one `kid` throw, since a verifier
+ * could not tell which one signed. A private part anywhere throws, as `receiptKeySet` does. The
+ * route, its rate limit and where the keys live are the host's.
+ */
+export function receiptKeysDocument(signers: ReadonlyArray<ReceiptSigner | undefined>): { keys: JsonWebKey[] } {
+  const byKid = new Map<string, string>();
+  const keys: JsonWebKey[] = [];
+  for (const signer of signers) {
+    for (const key of receiptKeySet(signer)) {
+      const kid = String(key.kid);
+      const value = canonicalJson(key);
+      const seen = byKid.get(kid);
+      if (seen === value) continue;
+      if (seen !== undefined) throw new TypeError(`receiptKeysDocument: two different keys are named ${kid}`);
+      byKid.set(kid, value);
+      keys.push(key);
+    }
+  }
+  return { keys };
+}
+
 function publishedKey(jwk: JsonWebKey, kid: string): JsonWebKey {
   if (jwk.d !== undefined) throw new TypeError(`receiptKeyRing: the key ${kid} has a private part, which is never published`);
   if (jwk.kid !== undefined && jwk.kid !== kid) throw new TypeError(`receiptKeyRing: the signer ${kid} publishes a key named ${String(jwk.kid)}`);

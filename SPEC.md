@@ -2015,25 +2015,29 @@ redirect. An `apiBase` option must be `https:`, or `http:` on a loopback host (`
 `localhost`, `[::1]`) only, with no credentials in it; anything else, and a bad `timeoutMs`, throws
 in the constructor, never quoting the value.
 
-The reference server's `StripeCheckoutLinks` (an example, not part of the package) is a
-`PaymentLinks` adapter for Stripe Checkout in test mode only (a secret test key, `sk_test_`), with
-`capabilities` `{ modes: ["platform", "connect"], minLinkMinutes: 30, maxLinkMinutes: 1440 }`.
-`createLink` sends one `POST /v1/checkout/sessions` in payment mode with the engine's amount,
-currency, description, `expires_at` (the engine's `expiresAt`), the payment id as
+`StripeCheckoutLinks` (in `district-assurance/stripe`, section 31; the reference server uses it) is
+a `PaymentLinks` adapter for Stripe Checkout with `capabilities` `{ modes, minLinkMinutes: 30,
+maxLinkMinutes: 1440 }`, `modes` both by default. `createLink` sends one Checkout Session create in
+payment mode with the engine's amount, currency, description, `expires_at` (the engine's
+`expiresAt`, which must be 30 minutes to 24 hours from the adapter's `now`), the payment id as
 `client_reference_id` and in metadata, and the call id in metadata. In `platform` mode it is made on
 the platform's own account and the request must name no connected account. In `connect` mode it is
 a direct charge on the business's connected account: the `Stripe-Account` header carrying the
 request's `connectedAccountId`, which must be `acct_` and 1 to 255 letters and digits, and nothing
 else (no `on_behalf_of` or `transfer_data`, which make a destination charge with the platform as
-the merchant). `expireLink` and `readLink` send the same header for a connected account. Either
-refusal is a `TypeError` thrown before anything is sent. The engine's methods map to Checkout's
-`payment_method_types` as Stripe answers them: `card` as `card`, `apple_pay` and `google_pay` as
+the merchant). `expire`, `expireLink` and `readLink` send the same header for a connected account.
+Either refusal is a `TypeError` thrown before anything is sent. The engine's methods map to
+Checkout's method types as Stripe answers them: `card` as `card`, `apple_pay` and `google_pay` as
 `card` (Checkout shows the wallets under it; Stripe refuses them as types), `link` as `link`, which
 Checkout takes only beside `card`, so a request offering Link alone is refused before anything is
-sent. Stripe's `checkout.session.completed` for a connect payment comes to the Connect endpoint,
-names the connected account (`account`), and settles the payment there only. These answers were
-recorded once in Stripe test mode and are replayed offline by `test/stripe-real.test.ts`, with the
-Identity run above.
+sent. On API version `2026-09-30.endive` (the default) the types go as
+`allowed_payment_method_types`, since endive removed `payment_method_types` from the create; on
+`2025-03-31.basil`, kept in test mode only to replay the recorded runs, as `payment_method_types`.
+Stripe's `checkout.session.completed` for a connect payment comes to the Connect endpoint, names the
+connected account (`account`), and settles the payment there only. The basil answers were recorded
+once in Stripe test mode and are replayed offline by `test/stripe-real.test.ts`, with the Identity
+run above; the endive calls are proven against Stripe test mode by
+`examples/reference-server/src/stripe-proof.ts`.
 
 ## 16. Texts
 
@@ -3059,7 +3063,8 @@ page refusal is its HTML page):
 
 ## 30. The published package
 
-The package has four entry points and no others: `district-assurance`, `district-assurance/testing`,
+The package has six entry points and no others: `district-assurance`, `district-assurance/testing`,
+`district-assurance/stripe` (section 31), `district-assurance/carrier` (section 32),
 `district-assurance/package.json` and `district-assurance/schema/flow-config.v1.json` (the FlowConfig
 JSON Schema, section 7); any other path is refused by Node. The tarball holds the compiled `dist/`
 (JavaScript and declarations), the schema and the documents `files` names. It is published to
@@ -3072,3 +3077,80 @@ run. Only a manual run on the tag with `publish` ticked, in this repository and 
 `npm-publish` environment's reviewers approve, publishes that tarball with npm provenance. A
 version with a pre-release part goes to the `next` dist-tag. In a fork, or a manual run without
 `publish`, the same run is a dry run.
+
+## 31. Stripe adapters (`district-assurance/stripe`)
+
+The Stripe pieces a host needs to take payments by link, in test or live mode, with no runtime
+dependency (ADR-3, ADR-30). A host owns its storage, credentials, rate limits and country policy;
+nothing here stores, logs or reads the environment.
+
+**Modes and keys.** `StripeMode` is `test` or `live`. `assertStripeKey(key, mode)` accepts only a
+secret (`sk_`) or restricted (`rk_`) key of that mode followed by 8 to 255 letters and digits; a key
+of the other mode, a publishable key, a webhook secret, a short key, one with whitespace and anything
+that is not a string throw `StripeKeyRefused` with a fixed message that never quotes the value.
+`STRIPE_API_VERSION` is `2026-09-30.endive`; `STRIPE_BASIL_API_VERSION` (`2025-03-31.basil`) is
+accepted in test mode only (`checkedApiVersion`), and any other version is refused.
+
+**The client.** `StripeClientLike` is exactly the calls the adapters make: Checkout Sessions
+`create`, `retrieve` and `expire`, and Accounts v2 `accounts.create`, `accounts.retrieve` and
+`accountLinks.create`, each with stripe-node's argument order and option names (`stripeAccount`,
+`idempotencyKey`, `timeout`, `maxNetworkRetries`). A stripe-node `Stripe` instance on endive is one
+as it is. `fetchStripeClient(key, { mode, apiVersion?, apiBase?, fetch?, timeoutMs? })` is the same
+surface over `fetch`: it checks the key against `mode` first, sends it only as a bearer header to an
+`https:` base (`http:` only on a loopback host, no credentials in it), never follows a redirect,
+form-encodes v1 bodies byte for byte as stripe-node does (`stripeFormEncode`) and sends v2 bodies as
+JSON. A refusal throws `StripeHttpError` with the HTTP status and Stripe's error type and code; a
+lost answer throws it with a null status; neither carries Stripe's message. An `AbortSignal` in the
+request options cancels a request on this client.
+
+**Errors.** `StripeAdapterError` names the step, the HTTP status (or "no answer") and Stripe's error
+type and code when they are plain words, never Stripe's message or anything shaped like a key.
+`retryable` is true with no answer, on 429 and on 5xx, and when a step says so.
+
+**Checkout.** `StripeCheckoutLinks(client, { mode, successUrl, modes?, apiVersion?, now? })` is
+section 15's adapter in one mode: session ids must be that mode's (`cs_test_` or `cs_live_`, refused
+before anything is sent otherwise) and every answer's `livemode` must be that mode's. `expire(close)`
+expires a session and reads back what Stripe holds: `expired` (this call closed it),
+`already_expired` (it was closed before; expiring again is safe), `complete` (the payer finished
+first) or `open`, with the session read. `expireLink` answers the engine's `expired` or `not_open`
+from it, and throws a retryable `StripeAdapterError` for a session still open. A 429, a 5xx or a lost
+answer from the expire throws a retryable error and is not read back; any other refusal but
+Stripe's 400 for a session that is not open throws one that is not. `checkoutExpiresAt(now,
+minutes = 30)` is a link's default end: Stripe's 30-minute minimum, never under 30 minutes or over
+24 hours.
+
+**Connect onboarding.** Accounts v2, Standard-equivalent: `connectAccountCreateParams({ country,
+metadata? })` is the create body (the business's own ISO 3166-1 alpha-2 country, which Stripe
+requires before the merchant configuration; the merchant configuration; the full Dashboard; Stripe
+as fees and losses collector; `include` of the merchant configuration and requirements).
+`createConnectAccount`, under the host's idempotency key, `createOnboardingLink` (an https link for
+the owner's own browser only, never texted or emailed) and `readConnectStatus` answer
+`connectStatusOf`'s two flags: `chargesEnabled`, the merchant `card_payments` capability `active`,
+and `detailsSubmitted`, no requirement awaiting the business currently or past due; anything missing
+reads false. Each checks the account's id and its `livemode` against the mode.
+
+**The Connect webhook.** Direct charges arrive as Connect events, on an endpoint that listens to
+connected accounts; one URL may serve both modes, each mode with its own signing secret.
+`verifyConnectEvent({ payload, header, secrets: { test?, live? }, now, toleranceSeconds? })` checks
+each mode's secrets with `verifyStripeSignature` (section 15, its 300-second window included).
+Exactly one mode must verify: none, or both (the same secret set for both modes), is `invalid`. A
+signed body that is not an event (an `evt_` id, a type, a boolean `livemode`, `data.object`, and an
+`account` that is absent or a well-formed `acct_` id) is `malformed`. The event's `livemode` must be
+the verifying mode's, else `wrong_mode`; otherwise `verified`, with the mode. `connectEventAccount(
+event, storedAccountId)` is `match` only for the stored `acct_` id itself, `missing` for a platform
+event, else `mismatch`: a host applies a Connect event only on `match`.
+
+## 32. Carrier lookups (`district-assurance/carrier`)
+
+The Lookup answers read as section 4's carrier signals (`CarrierSignalReport`), pure: the host fetches the answer with its
+own credentials, rate limits and countries (ADR-30). `twilioSimSwapHours(field, now)` reads Twilio
+Lookup v2's `sim_swap` (the date when it is ISO 8601, never older than the period Twilio flags a
+change in, or the period as a lower bound when Twilio says there was none); `twilioIdentityMatch(
+field, minScore)` its `identity_match` (a match at `minScore`, 1 to 100, or more);
+`telnyxPortHours(field, now)` Telnyx Number Lookup's `portability` (from the last moment the port
+date ends anywhere; null when not ported). Each answers a number of hours, null, or a
+`CarrierFieldFailure` (`bad_response`, or `feature_unavailable` with the vendor's code), which
+`isCarrierAnswer` tells apart. `durationHours` reads an ISO 8601 duration in whole hours, and
+`uncheckedReport` is a report that says nothing is known. The reference server's
+`TwilioLookupSignals` and `TelnyxNumberLookupSignals` use them.
+

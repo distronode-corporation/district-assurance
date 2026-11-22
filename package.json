@@ -1,6 +1,6 @@
 {
   "name": "district-assurance",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "District Assurance: a modular TypeScript engine for trusted phone calls (verify the caller, file what they confirm, take payment by link, prove each step), with flows as config, and a small reference server. Pre-alpha.",
   "keywords": [
     "voice",
@@ -27,6 +27,14 @@
     "./testing": {
       "types": "./dist/testing/index.d.ts",
       "default": "./dist/testing/index.js"
+    },
+    "./stripe": {
+      "types": "./dist/stripe/index.d.ts",
+      "default": "./dist/stripe/index.js"
+    },
+    "./carrier": {
+      "types": "./dist/carrier/index.d.ts",
+      "default": "./dist/carrier/index.js"
     },
     "./schema/flow-config.v1.json": "./schema/flow-config.v1.json",
     "./package.json": "./package.json"
@@ -70,6 +78,7 @@
     "c8": "12.0.0",
     "fast-check": "4.10.2",
     "oxlint": "1.92.0",
+    "stripe": "23.0.0",
     "typescript": "7.0.2"
   },
   "overrides": {

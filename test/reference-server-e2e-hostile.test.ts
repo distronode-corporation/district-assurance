@@ -9,7 +9,8 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { DemoRuns } from "../examples/reference-server/src/demo-runs.ts";
 import { createDemoWorld, type ScriptStep } from "../examples/reference-server/src/script.ts";
-import { StripeApiError, StripeCheckoutLinks } from "../examples/reference-server/src/stripe-adapters.ts";
+import { testModeCheckout } from "../examples/reference-server/src/stripe-adapters.ts";
+import { StripeAdapterError, type StripeCheckoutLinks } from "../src/stripe/index.ts";
 import type { PaymentLinkRequest } from "../src/index.ts";
 
 const KEY = ["sk", "test", "FAKEFAKEFAKEFAKE0123456789"].join("_");
@@ -55,7 +56,7 @@ describe("hostile #50: the Stripe Checkout adapter", () => {
   let links: StripeCheckoutLinks;
   before(async () => {
     await fake.start();
-    links = new StripeCheckoutLinks(KEY, { apiBase: fake.base, successUrl: RETURN, timeoutMs: 5000 });
+    links = testModeCheckout(KEY, { apiBase: fake.base, successUrl: RETURN, timeoutMs: 5000, now: () => new Date("2026-11-18T12:00:00.000Z") });
   });
   after(() => new Promise<void>((resolve) => fake.server.close(() => resolve())));
   beforeEach(() => {
@@ -99,19 +100,19 @@ describe("hostile #50: the Stripe Checkout adapter", () => {
       { type: "x".repeat(81), code: "<script>" },
     ]) {
       fake.answer = { status: 401, body: { error } };
-      await assert.rejects(links.createLink(request()), (e: unknown) => e instanceof StripeApiError && e.message === "Stripe did not create the Checkout Session (HTTP 401)");
+      await assert.rejects(links.createLink(request()), (e: unknown) => e instanceof StripeAdapterError && e.message === "Stripe did not create the Checkout Session (HTTP 401)" && e.type === null && e.code === null);
     }
     fake.answer = { status: 402, body: { error: { type: "card_error", code: "card_declined" } } };
-    await assert.rejects(links.createLink(request()), /\(HTTP 402, type card_error, code card_declined\)$/, "Stripe's own words still show");
+    await assert.rejects(links.createLink(request()), /\(HTTP 402, card_error, card_declined\)$/, "Stripe's own words still show");
   });
 
   it("S5: refuses a session answer with no livemode, a live one, or the wrong id on a read", async () => {
     for (const body of [session({ livemode: undefined }), session({ livemode: true }), session({ livemode: "false" })]) {
       fake.answer = { status: 200, body };
-      await assert.rejects(links.createLink(request()), StripeApiError, JSON.stringify(body));
+      await assert.rejects(links.createLink(request()), StripeAdapterError, JSON.stringify(body));
     }
     fake.answer = { status: 200, body: session({ id: "cs_test_other" }) };
-    await assert.rejects(links.readLink("cs_test_abc"), StripeApiError);
+    await assert.rejects(links.readLink("cs_test_abc"), StripeAdapterError);
     for (const id of ["cs_live_abc", "cs_test_../x", "cs_test_a?b", "", "cs_test_\u{1F600}"]) await assert.rejects(links.readLink(id), TypeError, id);
   });
 });

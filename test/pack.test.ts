@@ -108,7 +108,20 @@ function tarballCheck(): string {
 }
 
 describe("the release workflow's tarball check, run as written", { skip: process.platform === "win32" ? "bash and tar as on the Linux runner" : false }, () => {
-  const required = ["package/dist/index.js", "package/dist/index.d.ts", "package/dist/testing/index.js", "package/dist/testing/index.d.ts", "package/schema/flow-config.v1.json", "package/package.json", "package/LICENSE", "package/NOTICE"];
+  const required = [
+    "package/dist/index.js",
+    "package/dist/index.d.ts",
+    "package/dist/testing/index.js",
+    "package/dist/testing/index.d.ts",
+    "package/dist/stripe/index.js",
+    "package/dist/stripe/index.d.ts",
+    "package/dist/carrier/index.js",
+    "package/dist/carrier/index.d.ts",
+    "package/schema/flow-config.v1.json",
+    "package/package.json",
+    "package/LICENSE",
+    "package/NOTICE",
+  ];
   const complete = [...required, "package/dist/core/engine.js", "package/README.md", "package/SPEC.md"];
 
   /** Packs these paths into a tarball and runs the step on it: its exit code. */

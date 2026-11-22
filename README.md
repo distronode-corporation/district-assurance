@@ -88,7 +88,7 @@ config without them, or with a target naming a controller the engine does not ha
 
 ## Try it
 
-Node.js 24.19 or later. The only dependencies are five development tools.
+Node.js 24.19 or later. The only dependencies are six development tools (stripe-node among them, for the type test and the byte comparison only; the package never imports it).
 
 ```sh
 npm ci
@@ -181,6 +181,13 @@ await engine.endCall(callId); // in a flow, a receipt only with a trace.receipt 
 durable session store must pass, and `createTestEngine()`, which wires the fakes with a fixed clock
 and sequential ids. [ARCHITECTURE.md](ARCHITECTURE.md) shows the pieces, [SPEC.md](SPEC.md) the
 state machine, the config, the events and the formats.
+
+`district-assurance/stripe` takes payments by link with Stripe Checkout, in test or live mode, as a
+direct charge on the business's own connected account (Connect onboarding on Accounts v2) or on the
+platform's account, and verifies the Connect webhook, whose mode is the signing secret's. It takes a
+stripe-node client as it is, or `fetchStripeClient` with no SDK at all. `district-assurance/carrier`
+reads Twilio and Telnyx Lookup answers as carrier signals. Your host keeps the accounts, the keys,
+the rate limits and the country policy (SPEC sections 31 and 32).
 
 ## The reference server
 

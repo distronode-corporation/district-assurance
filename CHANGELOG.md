@@ -4,9 +4,31 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - Unreleased
+
+### Added
+
+- `district-assurance/stripe` (ADR-30, SPEC section 31): `StripeCheckoutLinks` in test or live mode
+  over a structural `StripeClientLike` (a stripe-node instance fits it as it is) or
+  `fetchStripeClient`, on API version `2026-09-30.endive` with `allowed_payment_method_types`;
+  `assertStripeKey` (a mode's `sk_` or `rk_` key only); `cs_test_` and `cs_live_` ids and every
+  answer's `livemode` held to the mode; `expire` reading back `expired`, `already_expired`,
+  `complete` (paid won the race) or `open`, with a 5xx, 429 or lost answer retryable; Connect
+  onboarding on Accounts v2 (`connectAccountCreateParams`, `createConnectAccount`,
+  `createOnboardingLink`, `readConnectStatus`, `connectStatusOf`); `verifyConnectEvent`, whose mode
+  is the verifying secret's (both modes verifying is invalid, a `livemode` of the other mode is
+  `wrong_mode`), and `connectEventAccount`; `StripeAdapterError`, `StripeHttpError` and
+  `StripeKeyRefused`, none of which carries Stripe's message or any part of a key.
+- `district-assurance/carrier` (SPEC section 32): `twilioSimSwapHours`, `twilioIdentityMatch`,
+  `telnyxPortHours`, `durationHours`, `isCarrierAnswer` and `uncheckedReport`.
+- `receiptKeysDocument(signers)` and `RECEIPT_KEYS_CACHE_CONTROL`: the public receipt-keys document,
+  each `kid` once, two different keys under one `kid` refused.
 
 ### Changed
+
+- The reference server's Checkout adapter is the package's `StripeCheckoutLinks` (its own copy is
+  gone), and its carrier adapters use the package's parsers. The recorded Checkout runs replay on
+  `2025-03-31.basil`, which the adapter accepts in test mode only.
 
 - The Seam adapter (GAT-5) checked against Seam's current API reference: its requests and the
   fields it reads (`device_id`, `can_remotely_unlock`, `properties.online`, the action attempt's

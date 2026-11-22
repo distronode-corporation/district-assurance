@@ -5,31 +5,35 @@
 // identity check's URL is single-use and goes back to the engine only, which texts it to the number
 // on file; it is never written to a log, an error or the ledger.
 //
-// StripeCheckoutLinks (PAY-1): Checkout Sessions in TEST MODE ONLY, in both modes: `platform` on the
-// platform's own account, `connect` as a direct charge on the business's connected account (the
-// `Stripe-Account` header, nothing else; Stripe's direct-charges guide). The constructor refuses any
-// key that is not a secret test key (`sk_test_`), live and restricted keys included, and never puts
-// a key, or Stripe's own error message (which can quote part of one), in an error. The Checkout URL
-// is returned to the engine and never logged here.
-import { createHash } from "node:crypto";
-
+// Checkout (PAY-1) is the package's own `StripeCheckoutLinks` (district-assurance/stripe) over
+// `fetchStripeClient`; `testModeCheckout` below builds it for the demo, in test mode only.
+import { type IdentityProvider } from "../../../src/index.ts";
 import {
-  type IdentityProvider,
-  type InstantPaymentMethod,
-  type PaymentLinkCapabilities,
-  type PaymentLinkRequest,
-  type PaymentLinks,
-  type PaymentMode,
-} from "../../../src/index.ts";
+  STRIPE_BASIL_API_VERSION,
+  StripeCheckoutLinks,
+  StripeKeyRefused,
+  assertStripeKey,
+  fetchStripeClient,
+  stripeIdempotencyKey,
+  stripeMetadataCallId,
+} from "../../../src/stripe/index.ts";
 
-/** The Stripe API version every request pins, so the response shape cannot change under us. */
-export const STRIPE_API_VERSION = "2025-03-31.basil";
+export { StripeKeyRefused, stripeIdempotencyKey, stripeMetadataCallId };
+
+/** Whether a link a payer is texted is an https URL that opens: one with no host (`https://:443`) does not parse. */
+function opensAsHttps(value: string): boolean {
+  return URL.canParse(value) && new URL(value).protocol === "https:";
+}
+
+/**
+ * The version Identity requests pin, so the response shape cannot change under us. It is the
+ * version the Identity run was recorded on (test/fixtures/stripe-real/identity.json).
+ */
+export const STRIPE_API_VERSION = STRIPE_BASIL_API_VERSION;
 
 /** A restricted key, live or test. A secret key (`sk_`) can do anything on the account, so it is refused. */
 const RESTRICTED_KEY = /^rk_(?:test|live)_[A-Za-z0-9]{1,255}$/;
 
-/** What Stripe accepts as an `Idempotency-Key` as is: printable ASCII without spaces, 255 at most. */
-const PLAIN_IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,255}$/;
 
 /** An error type or code from Stripe, echoed only when it is a plain identifier. */
 const STRIPE_IDENTIFIER = /^[a-z0-9_]{1,64}$/;
@@ -78,28 +82,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function identifier(value: unknown): string | null {
   return typeof value === "string" && STRIPE_IDENTIFIER.test(value) ? value : null;
-}
-
-/**
- * The engine's idempotency key as Stripe's `Idempotency-Key`: as is when Stripe accepts it, else
- * its SHA-256 (a workspace or call id with spaces, non-ASCII or a great length). Either way the
- * same engine key always gives the same header, so a retry returns the same check.
- */
-export function stripeIdempotencyKey(engineKey: string): string {
-  return PLAIN_IDEMPOTENCY_KEY.test(engineKey) ? engineKey : `sha256:${createHash("sha256").update(engineKey, "utf8").digest("hex")}`;
-}
-
-/** Stripe's limit on a metadata value, in characters. */
-const METADATA_VALUE_LIMIT = 500;
-
-/**
- * The call id as Stripe metadata: as is when it fits Stripe's 500-character limit, else `sha256:`
- * and its hex SHA-256, so a long host call id still gets a check (Stripe refuses the whole request
- * with a 400 otherwise) and the same call id always sends the same value. It is measured in UTF-8
- * bytes, which is never fewer than characters, so the value fits however Stripe counts.
- */
-export function stripeMetadataCallId(callId: string): string {
-  return Buffer.byteLength(callId, "utf8") <= METADATA_VALUE_LIMIT ? callId : `sha256:${createHash("sha256").update(callId, "utf8").digest("hex")}`;
 }
 
 /** Hosts that never leave the machine, the only ones a key may reach over plain `http:`. */
@@ -205,236 +187,35 @@ export class StripeIdentityProvider implements IdentityProvider {
   }
 }
 
-/** Thrown for a key this adapter will not use. The message never contains the key. */
-export class StripeKeyRefused extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "StripeKeyRefused";
-  }
-}
-
 /**
- * Accepts only a Stripe secret key for test mode (`sk_test_` and the key's characters). A live
- * secret key (`sk_live_`), a restricted key (`rk_live_`, `rk_test_`), a publishable key and
- * anything else are refused, without the key in the message.
+ * The demo's key check: a Stripe secret or restricted key for TEST mode only (`assertStripeKey`);
+ * a live key, a publishable key and anything else are refused, without the key in the message.
  */
 export function assertTestModeSecretKey(key: unknown): asserts key is string {
   if (typeof key !== "string" || key === "") throw new StripeKeyRefused("no Stripe key: set STRIPE_TEST_SECRET_KEY to a test-mode secret key (sk_test_...)");
-  if (key.startsWith("sk_live_") || key.startsWith("rk_live_")) throw new StripeKeyRefused("refused a LIVE Stripe key: this demo runs in test mode only (sk_test_...)");
-  if (!/^sk_test_[A-Za-z0-9]{8,}$/.test(key)) throw new StripeKeyRefused("refused: not a Stripe test-mode secret key (sk_test_...)");
-}
-
-export interface StripeCheckoutOptions {
-  /** Default `https://api.stripe.com`. https only; http only to the loopback (a test's fake). */
-  apiBase?: string;
-  /**
-   * Where Checkout sends the payer once paid (Stripe requires it for a hosted page). https, or
-   * http to the loopback (the demo page).
-   */
-  successUrl: string;
-  /** Per request, default 15000 ms. */
-  timeoutMs?: number;
-}
-
-/** A Checkout Session as read back from Stripe, read only. */
-export interface CheckoutSessionStatus {
-  linkId: string;
-  status: "open" | "complete" | "expired";
-  paymentStatus: "paid" | "unpaid" | "no_payment_required";
-  /** Always false: a live-mode answer is refused. */
-  livemode: false;
-}
-
-const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
-
-/** Whether a link a payer is texted is an https URL that opens: one with no host (`https://:443`) does not parse. */
-function opensAsHttps(value: string): boolean {
-  return URL.canParse(value) && new URL(value).protocol === "https:";
-}
-const SESSION_ID = /^cs_test_[A-Za-z0-9]{1,200}$/;
-
-/** A Stripe connected account id: what goes in the `Stripe-Account` header, and nothing else. */
-const CONNECTED_ACCOUNT = /^acct_[A-Za-z0-9]{1,255}$/;
-
-/**
- * The account a request is made on: none in `platform` mode, the connected account in `connect`
- * mode. A connect request without a well-formed account id, or a platform request naming one, is
- * refused before anything is sent: a header value is never built from anything else.
- */
-function accountFor(mode: PaymentMode, connectedAccountId: string | undefined): string | undefined {
-  if (mode === "platform") {
-    if (connectedAccountId !== undefined) throw new TypeError("platform mode takes no connected account");
-    return undefined;
-  }
-  if (connectedAccountId === undefined || !CONNECTED_ACCOUNT.test(connectedAccountId)) throw new TypeError("connect mode needs a connected account id (acct_...)");
-  return connectedAccountId;
-}
-
-function checkedUrl(value: string, what: string): URL {
-  const url = new URL(value);
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK.has(url.hostname))) throw new TypeError(`${what} must be https (http only to the loopback)`);
-  if (url.username !== "" || url.password !== "") throw new TypeError(`${what} carries no credentials`);
-  return url;
+  assertStripeKey(key, "test");
 }
 
 /**
- * How the engine's instant methods map to Checkout, as Stripe answered in test mode (recorded in
- * test/fixtures/stripe-real/): Apple Pay and Google Pay are wallets of `card` (Stripe refuses
- * `apple_pay` and `google_pay` as payment method types), so they go as `card`; Link goes as `link`,
- * which Checkout takes only beside `card`. Link alone is refused here, before anything is sent,
- * rather than sent for Stripe to refuse or widened to cards the step did not offer.
+ * The demo's Checkout payment links: the package's `StripeCheckoutLinks` in test mode, both payment
+ * modes, over `fetchStripeClient`. `apiVersion` basil replays the recorded runs. `now` is the
+ * engine's clock, against which a link's `expiresAt` is kept inside Checkout's window.
  */
-export function checkoutPaymentMethodTypes(methods: readonly InstantPaymentMethod[]): string[] {
-  const types = new Set<string>();
-  for (const method of methods) types.add(method === "link" ? "link" : "card");
-  if (types.has("link") && !types.has("card")) throw new TypeError("Checkout offers Link only beside cards: add card, apple_pay or google_pay to the step's paymentMethods");
-  return [...types];
-}
-
-/**
- * Stripe Checkout: a Session in payment mode with the engine's instant payment methods, on the
- * platform's own account (`platform`), or as a direct charge on the business's connected account
- * (`connect`: the `Stripe-Account` header; no `on_behalf_of` or `transfer_data`, which are for
- * destination charges, where the platform is the merchant). `expires_at` is the engine's own `expiresAt`, unchanged, so a retry under the
- * same idempotency key sends the same parameters; the engine keeps it inside the declared
- * capabilities. `expireLink` calls `/v1/checkout/sessions/{id}/expire` when the engine's own
- * deadline comes.
- */
-export class StripeCheckoutLinks implements PaymentLinks {
-  /**
-   * Both modes, each proven by a recorded Stripe test-mode run (test/fixtures/stripe-real/).
-   * Checkout's `expires_at` runs from 30 minutes to 24 hours after creation; the engine asks for at
-   * least the minimum plus 5 minutes (35), which covers the time between its request and Stripe's arrival.
-   */
-  readonly capabilities: PaymentLinkCapabilities = { modes: ["platform", "connect"], minLinkMinutes: 30, maxLinkMinutes: 1440 };
-  readonly #apiKey: string;
-  readonly #base: URL;
-  readonly #successUrl: string;
-  readonly #timeoutMs: number;
-
-  constructor(apiKey: string, options: StripeCheckoutOptions) {
-    assertTestModeSecretKey(apiKey);
-    this.#apiKey = apiKey;
-    this.#base = checkedUrl(options.apiBase ?? "https://api.stripe.com", "apiBase");
-    this.#successUrl = checkedUrl(options.successUrl, "successUrl").href;
-    this.#timeoutMs = options.timeoutMs ?? 15_000;
-  }
-
-  async createLink(input: PaymentLinkRequest): Promise<{ linkId: string; url: string }> {
-    const account = accountFor(input.mode, input.connectedAccountId);
-    const expiresAt = Math.floor(Date.parse(input.expiresAt) / 1000);
-    const form: Array<[string, string]> = [
-      ["mode", "payment"],
-      ["line_items[0][quantity]", "1"],
-      ["line_items[0][price_data][currency]", input.currency],
-      ["line_items[0][price_data][unit_amount]", String(input.amountMinor)],
-      ["line_items[0][price_data][product_data][name]", input.description],
-      ...checkoutPaymentMethodTypes(input.paymentMethods).map((type, i): [string, string] => [`payment_method_types[${i}]`, type]),
-      ["expires_at", String(expiresAt)],
-      ["client_reference_id", input.paymentId],
-      ["metadata[payment_id]", input.paymentId],
-      // Stripe keeps at most 500 characters of a metadata value: a longer call id goes hashed, as for Identity.
-      ["metadata[call_id]", stripeMetadataCallId(input.callId)],
-      ["success_url", this.#successUrl],
-    ];
-    const session = await this.#call("POST", "/v1/checkout/sessions", { form, idempotencyKey: input.idempotencyKey, account });
-    const id = session.body.id;
-    const url = session.body.url;
-    if (session.status !== 200 || typeof id !== "string" || !SESSION_ID.test(id) || typeof url !== "string" || !opensAsHttps(url)) {
-      throw new StripeApiError(session.status, `Stripe did not create the Checkout Session (${describeError(session)})`);
-    }
-    if (session.body.livemode !== false) throw new StripeApiError(session.status, "Stripe answered a live-mode session to a test-mode key; refusing it");
-    return { linkId: id, url };
-  }
-
-  async expireLink(input: { linkId: string; mode: PaymentMode; connectedAccountId?: string; idempotencyKey: string }): Promise<{ state: "expired" | "not_open" }> {
-    const id = checkedSessionId(input.linkId);
-    const account = accountFor(input.mode, input.connectedAccountId);
-    const res = await this.#call("POST", `/v1/checkout/sessions/${id}/expire`, { form: [], idempotencyKey: input.idempotencyKey, account });
-    // Stripe's success answer is the session, expired: a 200 that is not this session, expired, in
-    // test mode, does not establish the close, so the session is read back to learn whether it is.
-    if (res.status === 200 && res.body.id === id && res.body.status === "expired" && res.body.livemode === false) return { state: "expired" };
-    if (res.status === 200) {
-      const now = await this.readLink(id, account);
-      if (now.status === "expired") return { state: "expired" };
-      if (now.status !== "open") return { state: "not_open" };
-    }
-    if (res.status === 400) {
-      // Stripe refuses to expire a session that is not open; read it to tell that from a bad request.
-      const now = await this.readLink(id, account);
-      if (now.status !== "open") return { state: "not_open" };
-    }
-    throw new StripeApiError(res.status, `Stripe did not expire the Checkout Session (${describeError(res)})`);
-  }
-
-  /**
-   * Reads a Checkout Session's status from Stripe, on the connected account when one is named.
-   * Read only: it changes nothing. `signal` cancels the read.
-   */
-  async readLink(linkId: string, connectedAccountId?: string, signal?: AbortSignal): Promise<CheckoutSessionStatus> {
-    const id = checkedSessionId(linkId);
-    const account = connectedAccountId === undefined ? undefined : accountFor("connect", connectedAccountId);
-    const res = await this.#call("GET", `/v1/checkout/sessions/${id}`, { account, signal });
-    const { status, payment_status: paymentStatus, livemode } = res.body;
-    if (
-      res.status !== 200 ||
-      res.body.id !== id ||
-      !(status === "open" || status === "complete" || status === "expired") ||
-      !(paymentStatus === "paid" || paymentStatus === "unpaid" || paymentStatus === "no_payment_required") ||
-      livemode !== false
-    ) {
-      throw new StripeApiError(res.status, `Stripe did not answer the Checkout Session (${describeError(res)})`);
-    }
-    return { linkId: id, status, paymentStatus, livemode };
-  }
-
-  async #call(
-    method: "GET" | "POST",
-    path: string,
-    options: { form?: Array<[string, string]>; idempotencyKey?: string; account?: string | undefined; signal?: AbortSignal | undefined },
-  ): Promise<{ status: number; body: Record<string, unknown> }> {
-    // The API version is pinned, as for Identity: create, read and expire keep one contract whatever the account's default.
-    const headers: Record<string, string> = { authorization: `Bearer ${this.#apiKey}`, "stripe-version": STRIPE_API_VERSION };
-    if (options.idempotencyKey !== undefined) headers["idempotency-key"] = stripeIdempotencyKey(options.idempotencyKey);
-    if (options.account !== undefined) headers["stripe-account"] = options.account;
-    const timeout = AbortSignal.timeout(this.#timeoutMs);
-    const init: RequestInit = { method, headers, redirect: "error", signal: options.signal === undefined ? timeout : AbortSignal.any([timeout, options.signal]) };
-    if (options.form !== undefined) {
-      headers["content-type"] = "application/x-www-form-urlencoded";
-      init.body = new URLSearchParams(options.form).toString();
-    }
-    const response = await fetch(new URL(path, this.#base), init);
-    // A body lost on the way (a dropped connection, a timeout) throws as it is: a transport
-    // failure, worth asking again. A body that arrived but is not JSON is Stripe's answer.
-    const text = await response.text();
-    let parsed: unknown = null;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      parsed = null;
-    }
-    return { status: response.status, body: typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {} };
-  }
-}
-
-
-/** Stripe's error types and codes are short snake_case words; anything else, a key above all, is left out. */
-const ERROR_WORD = /^[a-z][a-z0-9_]{0,79}$/;
-const KEY_PREFIX = /^(sk|rk|pk)_/;
-
-function checkedSessionId(linkId: string): string {
-  if (!SESSION_ID.test(linkId)) throw new TypeError("not a test-mode Checkout Session id");
-  return linkId;
-}
-
-/** The HTTP status and Stripe's error type and code, when they are plain words: never its message, which can quote a key. */
-function describeError(res: { status: number; body: Record<string, unknown> }): string {
-  const error = res.body.error;
-  const e = typeof error === "object" && error !== null ? (error as Record<string, unknown>) : {};
-  const parts = [`HTTP ${res.status}`];
-  for (const key of ["type", "code"]) {
-    const word = e[key];
-    if (typeof word === "string" && ERROR_WORD.test(word) && !KEY_PREFIX.test(word)) parts.push(`${key} ${word}`);
-  }
-  return parts.join(", ");
+export function testModeCheckout(
+  apiKey: string,
+  options: { successUrl: string; apiBase?: string; timeoutMs?: number; apiVersion?: typeof STRIPE_BASIL_API_VERSION; now?: () => Date },
+): StripeCheckoutLinks {
+  assertTestModeSecretKey(apiKey);
+  const client = fetchStripeClient(apiKey, {
+    mode: "test",
+    timeoutMs: options.timeoutMs ?? 15_000,
+    ...(options.apiBase === undefined ? {} : { apiBase: options.apiBase }),
+    ...(options.apiVersion === undefined ? {} : { apiVersion: options.apiVersion }),
+  });
+  return new StripeCheckoutLinks(client, {
+    mode: "test",
+    successUrl: options.successUrl,
+    ...(options.apiVersion === undefined ? {} : { apiVersion: options.apiVersion }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
 }

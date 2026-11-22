@@ -5,7 +5,7 @@ import type { JsonWebKey } from "node:crypto";
 import { describe, it } from "node:test";
 
 import type { ReceiptSigner } from "../src/core/adapters.ts";
-import { checkReceipt, receiptKeySet, signReceipt, verifyReceipt } from "../src/prove/receipt.ts";
+import { RECEIPT_KEYS_CACHE_CONTROL, checkReceipt, receiptKeySet, receiptKeysDocument, signReceipt, verifyReceipt } from "../src/prove/receipt.ts";
 import { generateTestSigner } from "../src/testing/fakes.ts";
 import { createTestEngine } from "../src/testing/index.ts";
 
@@ -41,5 +41,27 @@ describe("receipts: receiptKeySet for a single signer (T17)", () => {
     const k1 = generateTestSigner("k1");
     const leaky: ReceiptSigner = { ...k1, publicJwk: () => ({ ...k1.publicJwk(), d: "secret" }) };
     assert.throws(() => receiptKeySet(leaky), /private part/);
+  });
+});
+
+describe("receipts: receiptKeysDocument", () => {
+  it("publishes every signer's keys once each, in order, and none without a signer", () => {
+    const k1 = generateTestSigner("k1");
+    const k2 = generateTestSigner("k2");
+    const doc = receiptKeysDocument([k1, undefined, k2, k1]);
+    assert.deepEqual(
+      doc.keys.map((k) => (k as { kid?: string }).kid),
+      ["k1", "k2"],
+    );
+    assert.deepEqual(receiptKeysDocument([]), { keys: [] });
+    assert.equal(RECEIPT_KEYS_CACHE_CONTROL, "public, max-age=300");
+  });
+
+  it("⛔ refuses two different keys under one kid, and a private part", () => {
+    const a = generateTestSigner("same");
+    const b = generateTestSigner("same");
+    assert.throws(() => receiptKeysDocument([a, b]), /two different keys are named same/);
+    const leaky: ReceiptSigner = { ...a, publicJwk: () => ({ ...a.publicJwk(), d: "secret" }) };
+    assert.throws(() => receiptKeysDocument([leaky]), /private part/);
   });
 });

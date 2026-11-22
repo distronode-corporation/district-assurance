@@ -1,0 +1,139 @@
+// Stripe Connect onboarding on Accounts v2: the business's own Stripe account, connected by
+// Stripe-hosted onboarding, so a payment link is a direct charge on it and the business is the
+// merchant. Standard-equivalent: the merchant configuration, the full Dashboard (the business
+// handles its own refunds and disputes), and Stripe as fees and losses collector. The host stores
+// the account id; nothing here stores anything.
+import type { AccountLinkCreateParams, ConnectAccountCreateParams, StripeClientLike } from "./client.ts";
+import { StripeAdapterError } from "./errors.ts";
+import type { StripeMode } from "./keys.ts";
+
+const CONNECTED_ACCOUNT = /^acct_[A-Za-z0-9]{1,255}$/;
+/** ISO 3166-1 alpha-2, upper case: Stripe refuses the merchant configuration without the business's own country. */
+const COUNTRY = /^[A-Z]{2}$/;
+const METADATA_KEY = /^[A-Za-z0-9_]{1,40}$/;
+
+/** What a v2 Account must include for its status to be read: v2 answers an unincluded field as null. */
+export const CONNECT_ACCOUNT_INCLUDE: ReadonlyArray<"configuration.merchant" | "requirements"> = Object.freeze(["configuration.merchant", "requirements"]);
+
+/** The two flags a host shows. Anything missing reads false: an unknown is never "can take charges". */
+export interface ConnectStatus {
+  /** The merchant configuration's `card_payments` capability is `active`. */
+  chargesEnabled: boolean;
+  /** No requirement awaiting the business is currently due or past due. */
+  detailsSubmitted: boolean;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The v2 Account create body. `country` is the business's own (never guessed from a region or a
+ * dial code: Stripe fixes it once set). `metadata` holds the host's reference to its own record;
+ * put a digest there, not a name or an email.
+ */
+export function connectAccountCreateParams(input: { country: string; metadata?: Record<string, string> }): ConnectAccountCreateParams {
+  if (typeof input.country !== "string" || !COUNTRY.test(input.country)) throw new TypeError("country must be ISO 3166-1 alpha-2, upper case");
+  const metadata: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input.metadata ?? {})) {
+    if (!METADATA_KEY.test(key) || typeof value !== "string" || value.length > 500) throw new TypeError("metadata keys are 1 to 40 word characters and values at most 500");
+    metadata[key] = value;
+  }
+  return {
+    identity: { country: input.country },
+    dashboard: "full",
+    configuration: { merchant: {} },
+    defaults: { responsibilities: { fees_collector: "stripe", losses_collector: "stripe" } },
+    metadata,
+    include: [...CONNECT_ACCOUNT_INCLUDE],
+  };
+}
+
+/** The card's two flags from a v2 Account read with `CONNECT_ACCOUNT_INCLUDE`. */
+export function connectStatusOf(account: unknown): ConnectStatus {
+  const a = isRecord(account) ? account : {};
+  const configuration = isRecord(a.configuration) ? a.configuration : {};
+  const merchant = isRecord(configuration.merchant) ? configuration.merchant : {};
+  const capabilities = isRecord(merchant.capabilities) ? merchant.capabilities : {};
+  const card = isRecord(capabilities.card_payments) ? capabilities.card_payments : {};
+  const chargesEnabled = card.status === "active";
+  if (!isRecord(a.requirements)) return { chargesEnabled, detailsSubmitted: false };
+  const entries = Array.isArray(a.requirements.entries) ? a.requirements.entries : [];
+  const due = entries.some((entry: unknown) => {
+    const e = isRecord(entry) ? entry : {};
+    const deadline = isRecord(e.minimum_deadline) ? e.minimum_deadline : {};
+    return e.awaiting_action_from === "user" && (deadline.status === "currently_due" || deadline.status === "past_due");
+  });
+  return { chargesEnabled, detailsSubmitted: !due };
+}
+
+function checkedAccount(answer: unknown, mode: StripeMode, step: string): Record<string, unknown> & { id: string } {
+  const account = isRecord(answer) ? answer : {};
+  if (typeof account.id !== "string" || !CONNECTED_ACCOUNT.test(account.id) || account.livemode !== (mode === "live")) {
+    throw StripeAdapterError.answer(step);
+  }
+  return account as Record<string, unknown> & { id: string };
+}
+
+/**
+ * Creates the connected account, once: the host passes an idempotency key it derives from its own
+ * record, so two starts at once get Stripe's one account. Answers its id and status.
+ */
+export async function createConnectAccount(
+  client: StripeClientLike,
+  input: { mode: StripeMode; params: ConnectAccountCreateParams; idempotencyKey: string },
+): Promise<{ accountId: string } & ConnectStatus> {
+  let answer: unknown;
+  try {
+    answer = await client.v2.core.accounts.create(input.params, { idempotencyKey: input.idempotencyKey });
+  } catch (err) {
+    throw StripeAdapterError.from("create the connected account", err);
+  }
+  const account = checkedAccount(answer, input.mode, `answer a ${input.mode}-mode connected account`);
+  return { accountId: account.id, ...connectStatusOf(account) };
+}
+
+/**
+ * A fresh, single-use Stripe-hosted onboarding link for the owner's own browser. ⛔ Never text or
+ * email it: it is a bearer link to the business's account setup.
+ */
+export async function createOnboardingLink(client: StripeClientLike, input: { accountId: string; returnUrl: string; refreshUrl: string }): Promise<{ url: string }> {
+  if (!CONNECTED_ACCOUNT.test(input.accountId)) throw new TypeError("not a connected account id (acct_...)");
+  for (const url of [input.returnUrl, input.refreshUrl]) {
+    if (typeof url !== "string" || !URL.canParse(url) || new URL(url).protocol !== "https:") throw new TypeError("returnUrl and refreshUrl must be https");
+  }
+  const params: AccountLinkCreateParams = {
+    account: input.accountId,
+    use_case: { type: "account_onboarding", account_onboarding: { return_url: input.returnUrl, refresh_url: input.refreshUrl } },
+  };
+  let answer: unknown;
+  try {
+    answer = await client.v2.core.accountLinks.create(params);
+  } catch (err) {
+    throw StripeAdapterError.from("create the onboarding link", err);
+  }
+  const url = isRecord(answer) ? answer.url : undefined;
+  if (typeof url !== "string" || !URL.canParse(url) || new URL(url).protocol !== "https:") throw StripeAdapterError.answer("answer an https onboarding link");
+  return { url };
+}
+
+/** Re-reads the connected account from Stripe: the status after onboarding, never an event's copy of it. */
+export async function readConnectStatus(
+  client: StripeClientLike,
+  input: { mode: StripeMode; accountId: string; timeoutMs?: number },
+): Promise<ConnectStatus> {
+  if (!CONNECTED_ACCOUNT.test(input.accountId)) throw new TypeError("not a connected account id (acct_...)");
+  let answer: unknown;
+  try {
+    answer = await client.v2.core.accounts.retrieve(
+      input.accountId,
+      { include: [...CONNECT_ACCOUNT_INCLUDE] },
+      input.timeoutMs === undefined ? {} : { timeout: input.timeoutMs, maxNetworkRetries: 1 },
+    );
+  } catch (err) {
+    throw StripeAdapterError.from("read the connected account", err);
+  }
+  const account = checkedAccount(answer, input.mode, `answer the ${input.mode}-mode connected account`);
+  if (account.id !== input.accountId) throw StripeAdapterError.answer(`answer the ${input.mode}-mode connected account`);
+  return connectStatusOf(account);
+}
