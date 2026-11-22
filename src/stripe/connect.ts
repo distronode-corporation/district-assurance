@@ -71,9 +71,13 @@ export function connectStatusOf(account: unknown): ConnectStatus {
   // Requirements not included, or no entries list: nothing establishes what is due.
   if (!requested || !isRecord(a.requirements) || !Array.isArray(a.requirements.entries)) return { chargesEnabled, detailsSubmitted: false };
   const outstanding = a.requirements.entries.some((entry: unknown) => {
-    const e = isRecord(entry) ? entry : {};
-    const deadline = isRecord(e.minimum_deadline) ? e.minimum_deadline : {};
-    return e.awaiting_action_from === "user" && (deadline.status === "currently_due" || deadline.status === "past_due") && restrictsPayments(e);
+    // An entry that cannot be read is unknown, and unknown is never "submitted".
+    if (!isRecord(entry)) return true;
+    if (entry.awaiting_action_from !== "user") return false;
+    const deadline = isRecord(entry.minimum_deadline) ? entry.minimum_deadline.status : undefined;
+    // Only a readable deadline that is not yet due lets a requirement wait; a missing one counts as due.
+    const due = typeof deadline !== "string" || deadline === "currently_due" || deadline === "past_due";
+    return due && restrictsPayments(entry);
   });
   return { chargesEnabled, detailsSubmitted: !outstanding };
 }
@@ -87,8 +91,9 @@ function restrictsPayments(entry: Record<string, unknown>): boolean {
   const impact = isRecord(entry.impact) ? entry.impact : null;
   if (impact === null || !Array.isArray(impact.restricts_capabilities)) return true;
   return impact.restricts_capabilities.some((item: unknown) => {
-    if (!isRecord(item)) return true;
-    return item.configuration === "merchant" && typeof item.capability === "string" && item.capability.endsWith("_payments");
+    // A restriction whose fields cannot be read is unknown: it counts as restricting payments.
+    if (!isRecord(item) || typeof item.configuration !== "string" || typeof item.capability !== "string") return true;
+    return item.configuration === "merchant" && item.capability.endsWith("_payments");
   });
 }
 

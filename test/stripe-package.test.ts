@@ -506,13 +506,18 @@ describe("Connect onboarding (Accounts v2)", () => {
       [{ entries: [due("eventually_due"), due("past_due")] }, false],
       [{ entries: [due("eventually_due")] }, true],
       [{ entries: [due("currently_due", "stripe")] }, true],
-      [{ entries: ["x", { awaiting_action_from: "user" }] }, true],
+      // ⛔ Unreadable is unknown, never "submitted": an entry that is not an object, a user requirement with no deadline.
+      [{ entries: ["x"] }, false],
+      [{ entries: [{ awaiting_action_from: "user" }] }, false],
+      [{ entries: [{ awaiting_action_from: "user", minimum_deadline: { status: 7 } }] }, false],
+      [{ entries: [{ awaiting_action_from: "user", minimum_deadline: { status: "eventually_due" }, impact: restricts("card_payments") }] }, true],
       [{ entries: [{ ...due("past_due"), impact: restricts("stripe_balance.payouts") }] }, true],
       [{ entries: [{ ...due("past_due"), impact: restricts("card_payments") }] }, false],
       [{ entries: [{ ...due("currently_due"), impact: restricts("bancontact_payments") }] }, false],
       [{ entries: [{ ...due("currently_due"), impact: restricts("card_payments", "customer") }] }, true],
       [{ entries: [{ ...due("currently_due"), impact: { restricts_capabilities: ["x"] } }] }, false],
-      [{ entries: [{ ...due("currently_due"), impact: { restricts_capabilities: [{ configuration: "merchant", capability: 7 }] } }] }, true],
+      [{ entries: [{ ...due("currently_due"), impact: { restricts_capabilities: [{ configuration: "merchant", capability: 7 }] } }] }, false],
+      [{ entries: [{ ...due("currently_due"), impact: { restricts_capabilities: [{ configuration: null, capability: "card_payments" }] } }] }, false],
       [{ entries: [{ ...due("currently_due"), impact: {} }] }, false],
     ] as const) {
       assert.equal(connectStatusOf({ ...requested, requirements }).detailsSubmitted, submitted, JSON.stringify(requirements));
