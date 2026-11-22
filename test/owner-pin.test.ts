@@ -54,7 +54,7 @@ async function ownerRecord(t: TestEngine) {
 function storeWith(t: TestEngine, putPinDigest: () => Promise<boolean>): TestEngine["records"] {
   return {
     getSubject: (workspaceId: string, subjectKey: string) => t.records.getSubject(workspaceId, subjectKey),
-    putSubject: (workspaceId: string, subject: Parameters<TestEngine["records"]["putSubject"]>[1]) => t.records.putSubject(workspaceId, subject),
+    createSubject: (workspaceId: string, subject: Parameters<TestEngine["records"]["createSubject"]>[1]) => t.records.createSubject(workspaceId, subject),
     putPinDigest,
   } as unknown as TestEngine["records"];
 }
@@ -293,6 +293,39 @@ describe("owner PIN", () => {
     const error = (await racing.setPin({ phone: LINE }, OWNER_PIN).catch((e: unknown) => e)) as EngineError;
     assert.ok(error instanceof EngineError && error.code === "conflict");
     assert.equal(error.message.includes(OWNER_PIN), false);
+  });
+
+  it("refuses the second of two first PINs interleaved after the first stored, keeping the first", async () => {
+    const { t, owner } = world();
+    // A barrier: B has read that no PIN is on file, then A runs to the end, then B goes on.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let reads = 0;
+    const records = {
+      getSubject: async (workspaceId: string, subjectKey: string) => {
+        const subject = await t.records.getSubject(workspaceId, subjectKey);
+        if (++reads === 1) await gate;
+        return subject;
+      },
+      createSubject: (workspaceId: string, subject: Parameters<TestEngine["records"]["createSubject"]>[1]) => t.records.createSubject(workspaceId, subject),
+      putPinDigest: (workspaceId: string, subjectKey: string, digest: string | null) => t.records.putPinDigest(workspaceId, subjectKey, digest),
+    } as unknown as TestEngine["records"];
+    const b = createOwnerPin({ engine: t.engine, hmac, records, counters: t.counters }).setPin({ phone: LINE }, NEW_PIN);
+    while (reads === 0) await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(await owner.setPin({ phone: LINE }, OWNER_PIN), { ok: true });
+    release();
+    await assert.rejects(b, rejects("conflict"));
+    const record = (await ownerRecord(t))!;
+    assert.equal(await pinOnFile(record.pinDigest, record.subjectKey, OWNER_PIN), true);
+    assert.deepEqual(await keyOnLine(t, owner, OWNER_PIN), { matched: true, locked: false });
+  });
+
+  it("creates the owner subject once, leaving its number on file as the first PIN set it", async () => {
+    const { t, owner } = world();
+    await owner.setPin({ phone: LINE }, OWNER_PIN);
+    await owner.setPin({ phone: OTHER_LINE }, NEW_PIN);
+    assert.equal((await ownerRecord(t))!.phoneOnFile, LINE);
+    assert.equal(await t.records.createSubject(WS, { subjectKey: (await ownerRecord(t))!.subjectKey, phoneOnFile: "", knowledge: {} }), false);
   });
 
   it("ends two concurrent changes with one PIN on file, one that a successful change set", async () => {

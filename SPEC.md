@@ -815,17 +815,22 @@ own stores and knowledge key (`hmac`, a `KnowledgeHmac` function only; bytes are
   to `maxDigits` (never coerced), `weak` by `isWeakPin`. Then, in this order: the new Argon2id record
   (`pinDigest`), so a key store failure leaves the PIN on file as it was; `Engine.resetPin` when a
   PIN is on file (it clears the subject's PIN counters, not the line's, and writes `pin.reset`);
-  `putSubject` (the owner subject with the line as `phoneOnFile`, `""` with none, and no knowledge);
-  `putPinDigest`. A store failure after the reset leaves no PIN on file, never the old one: the
+  `createSubject` (the owner subject, on the first PIN, with the line as `phoneOnFile`, `""` with
+  none, and no knowledge; an existing one is left as it is); `putPinDigest`, which stores only if no
+  PIN is on file. A store failure after the reset leaves no PIN on file, never the old one: the
   owner command is refused until the business sets a PIN again. A `putPinDigest` that stores
-  nothing (another change won) is `conflict`. No error message names the PIN.
+  nothing (another change stored first) is `conflict`, so of two first PINs at once one is refused.
+  Two changes of a PIN already on file at once may both answer ok, as each reset removes what is on
+  file: the PIN stored last stands, and it is always one the business set. A host that needs one
+  answer per change serializes `setPin` per workspace. No error message names the PIN.
 - `clearPin()` is `Engine.resetPin` on the owner subject: idempotent, a `pin.reset` each time.
 - `liftLock(line, memberId)` is `Engine.unlock` on each of the owner's PIN counters (the line's
   only when given), one `verification.unlocked` each, with the member id as `unlock` checks it.
 - Not here, and the host's: who may call these, the owner's verified number, binding a phone call
   to an engine call, the key store behind `hmac`, and lock notices.
-- `SubjectWriter` (`putSubject(workspaceId, subject)`) is the one write `RecordStore` lacks: it
-  creates the subject or writes its host fields, and may replace the whole record.
+- `SubjectWriter` (`createSubject(workspaceId, subject)`) is the one write `RecordStore` lacks: it
+  stores a subject only if none is under its key, in one atomic step, never changes one it has,
+  and answers whether it stored.
 
 ### Duress PIN (VER-12)
 

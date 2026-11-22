@@ -13,7 +13,7 @@ All notable changes to this project are documented here. The format follows
   `liftLock` over the engine's own stores, with the owner as the subject `ownerSubjectKey(hmac,
   workspaceId)`, its PIN counters (the subject's and the line's), and a change that resets before
   it stores. The PIN length and lockout are read from the engine's config. `records` also needs
-  `putSubject` (`SubjectWriter`), which `MemoryRecordStore` has.
+  `createSubject` (`SubjectWriter`: create if absent, atomically), which `MemoryRecordStore` now has.
 
 ### Changed
 

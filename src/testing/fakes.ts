@@ -241,6 +241,14 @@ export class MemoryRecordStore implements RecordStore {
     this.#subjects.set(scoped(workspaceId, subject.subjectKey), structuredClone(subject));
   }
 
+  /** Stores a subject only if none is stored under its key, in one step (`SubjectWriter`); true when it stored. */
+  async createSubject(workspaceId: string, subject: SubjectRecord): Promise<boolean> {
+    const key = scoped(workspaceId, subject.subjectKey);
+    if (this.#subjects.has(key)) return false;
+    this.#subjects.set(key, structuredClone(subject));
+    return true;
+  }
+
   async getSubject(workspaceId: string, subjectKey: string): Promise<SubjectRecord | null> {
     const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
     return subject === undefined ? null : structuredClone(subject);

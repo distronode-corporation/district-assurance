@@ -20,13 +20,13 @@ import { knowledgeHmac, pinDigest, subjectKeyFor, type KnowledgeHmac } from "./k
 import { isWeakPin } from "./pin.ts";
 
 /**
- * Writes the host's own fields of a subject record (`phoneOnFile`, `knowledge`), creating the
- * record when there is none: the one write `RecordStore` lacks, since the engine never creates a
- * subject. A store may replace the whole record; `setPin` calls it only after any PIN on file was
- * reset and stores the new PIN after it. `MemoryRecordStore` has it.
+ * Creates a subject record, the one write `RecordStore` lacks (the engine never creates a subject):
+ * stores it only if the store has no subject under its key, in one atomic step, and never changes
+ * one it has, so a PIN another change stored meanwhile is never overwritten. The answer says
+ * whether it stored. `MemoryRecordStore` has it.
  */
 export interface SubjectWriter {
-  putSubject(workspaceId: string, subject: SubjectRecord): Promise<void> | void;
+  createSubject(workspaceId: string, subject: SubjectRecord): Promise<boolean>;
 }
 
 export interface OwnerPinOptions {
@@ -34,7 +34,7 @@ export interface OwnerPinOptions {
   engine: Engine;
   /** The engine's own knowledge key, as an HMAC function (the key stays in the key store). */
   hmac: KnowledgeHmac;
-  /** The engine's own record store, with `putSubject`. */
+  /** The engine's own record store, with `createSubject`. */
   records: RecordStore & SubjectWriter;
   /** The engine's own counters store. */
   counters: AttemptCounters;
@@ -172,7 +172,9 @@ export function createOwnerPin(options: OwnerPinOptions): OwnerPin {
       // leaves no PIN on file, so the owner command is refused until the business sets one again:
       // never an unguarded line (RecordStore has no atomic reset-and-replace).
       if (await pinOnFile(key)) await engine.resetPin(key);
-      await records.putSubject(workspaceId, { subjectKey: key, phoneOnFile: phone ?? "", knowledge: {} });
+      // The owner subject, created on the first PIN with the line as its number on file; one already
+      // there is left as it is, so the conditional write below decides between changes at once.
+      await records.createSubject(workspaceId, { subjectKey: key, phoneOnFile: phone ?? "", knowledge: {} });
       if (!(await records.putPinDigest(workspaceId, key, record))) {
         throw new EngineError("conflict", "another PIN was stored for the owner at the same time");
       }

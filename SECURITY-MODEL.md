@@ -129,8 +129,10 @@ engine's length, not weak), turned into an Argon2id record through the host's HM
 dropped; they are never stored, logged, written to the ledger or put in an error message (tested).
 A change resets first (`resetPin`, which clears the subject's PIN counters) and stores after, so a
 failure in between leaves no PIN, and the owner command refused, rather than the old PIN or an
-unguarded line (tested); of two changes at once, one PIN ends on file and a loser is `conflict`
-(tested). The line's counter survives a change, so changing the PIN never forgives guesses from
+unguarded line (tested). The owner subject is created only if absent, never rewritten, so of two
+first PINs at once the second is `conflict` and the first stays (tested); two changes of a PIN on
+file at once may both answer ok, the PIN stored last standing, always one the business set
+(tested; a host that needs one answer per change serializes them). The line's counter survives a change, so changing the PIN never forgives guesses from
 that line (tested). Judging stays the engine's PIN factor (counted before judged, a constant-time
 compare), so wrong PINs up to the hard lock, the window boundary and concurrent attempts behave as
 for any PIN (tested). Lifting a lock early is `Engine.unlock` per counter, with the member in the

@@ -470,8 +470,9 @@ is), or when Node changes the API.
 (`subject:owner:<workspaceId>`), its PIN counters (the subject's and the line's), the lock facts a
 business's tools show, and set, clear and lift, with a change resetting before it stores. It runs
 over the adapters the engine already has (`Engine`, `KnowledgeHmac`, `RecordStore`,
-`AttemptCounters`), plus one minimal interface, `SubjectWriter.putSubject`, because the engine never
-creates a subject and the owner's must exist before `putPinDigest` stores anything. Who may call
+`AttemptCounters`), plus one minimal interface, `SubjectWriter.createSubject` (create if absent,
+atomic, never a rewrite), because the engine never creates a subject and the owner's must exist
+before `putPinDigest` stores anything; a rewrite could drop a PIN another change just stored. Who may call
 it, the owner's verified number, binding a phone call to an engine call, the key store and lock
 notices stay the host's (ADR-1).
 **Why.** These are rules every host of the owner command needs the same way, and a wrong order is a
