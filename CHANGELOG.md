@@ -13,7 +13,12 @@ All notable changes to this project are documented here. The format follows
   `fetchStripeClient`, on API version `2026-09-30.endive` with `allowed_payment_method_types`;
   `assertStripeKey` (a mode's `sk_` or `rk_` key only); `cs_test_` and `cs_live_` ids and every
   answer's `livemode` held to the mode; `expire` reading back `expired`, `already_expired`,
-  `complete` (paid won the race) or `open`, with a 5xx, 429 or lost answer retryable; Connect
+  `complete` (paid won the race) or `open` after any answer, sent with no idempotency key (Stripe
+  saves a key's failed result for every retry), with a session still open after a 5xx, 429 or lost
+  answer retryable; `expiresAt` kept to 30 minutes to 24 hours, the default 35 (`checkoutExpiresAt`);
+  an empty method list refused; reads asked again after a lost answer up to `maxNetworkRetries`
+  (at most 2) on `fetchStripeClient`; an onboarding link refused unless it names the requested
+  account; Connect
   onboarding on Accounts v2 (`connectAccountCreateParams`, `createConnectAccount`,
   `createOnboardingLink`, `readConnectStatus`, `connectStatusOf`); `verifyConnectEvent`, whose mode
   is the verifying secret's (both modes verifying is invalid, a `livemode` of the other mode is

@@ -3100,8 +3100,10 @@ surface over `fetch`: it checks the key against `mode` first, sends it only as a
 `https:` base (`http:` only on a loopback host, no credentials in it), never follows a redirect,
 form-encodes v1 bodies byte for byte as stripe-node does (`stripeFormEncode`) and sends v2 bodies as
 JSON. A refusal throws `StripeHttpError` with the HTTP status and Stripe's error type and code; a
-lost answer throws it with a null status; neither carries Stripe's message. An `AbortSignal` in the
-request options cancels a request on this client.
+lost answer throws it with a null status; neither carries Stripe's message nor anything shaped like a
+key. An `AbortSignal` in the request options cancels a request on this client, and a read (GET) is
+asked again after a lost answer up to `maxNetworkRetries` times (at most 2), each attempt within its
+own timeout, never after a cancel; a write never is.
 
 **Errors.** `StripeAdapterError` names the step, the HTTP status (or "no answer") and Stripe's error
 type and code when they are plain words, never Stripe's message or anything shaped like a key.
@@ -3111,23 +3113,29 @@ type and code when they are plain words, never Stripe's message or anything shap
 section 15's adapter in one mode: session ids must be that mode's (`cs_test_` or `cs_live_`, refused
 before anything is sent otherwise) and every answer's `livemode` must be that mode's. `expire(close)`
 expires a session and reads back what Stripe holds: `expired` (this call closed it),
-`already_expired` (it was closed before; expiring again is safe), `complete` (the payer finished
-first) or `open`, with the session read. `expireLink` answers the engine's `expired` or `not_open`
-from it, and throws a retryable `StripeAdapterError` for a session still open. A 429, a 5xx or a lost
-answer from the expire throws a retryable error and is not read back; any other refusal but
-Stripe's 400 for a session that is not open throws one that is not. `checkoutExpiresAt(now,
-minutes = 30)` is a link's default end: Stripe's 30-minute minimum, never under 30 minutes or over
-24 hours.
+`already_expired` (expired, but not shown closed by this call: an earlier expire, Stripe's own
+deadline, or an answer that was lost or did not show the close; expiring again is safe),
+`complete` (the payer finished first) or `open`, with the session read. No idempotency key is sent
+with an expire: Stripe saves a key's first result, a 500 included, so a keyed expire that failed
+once could not be retried into an answer, and a second expire is Stripe's 400, read back. After any
+failure the session is read: one shown closed answers its outcome; one still open, or an unreadable
+one, throws the expire's error, retryable for a 429, a 5xx or a lost answer. `expireLink` answers the
+engine's `expired` or `not_open`, and throws a retryable `StripeAdapterError` for a session still
+open. `createLink` refuses an `expiresAt` under 30 minutes or over 24 hours from the adapter's `now`,
+and an empty method list (no list would be no filter at Stripe). `checkoutExpiresAt(now, minutes =
+35)` is a link's default end: Stripe's 30-minute minimum plus 5 minutes for the time to Stripe's
+arrival, from 30 to 1,440 minutes.
 
 **Connect onboarding.** Accounts v2, Standard-equivalent: `connectAccountCreateParams({ country,
 metadata? })` is the create body (the business's own ISO 3166-1 alpha-2 country, which Stripe
 requires before the merchant configuration; the merchant configuration; the full Dashboard; Stripe
 as fees and losses collector; `include` of the merchant configuration and requirements).
-`createConnectAccount`, under the host's idempotency key, `createOnboardingLink` (an https link for
-the owner's own browser only, never texted or emailed) and `readConnectStatus` answer
-`connectStatusOf`'s two flags: `chargesEnabled`, the merchant `card_payments` capability `active`,
-and `detailsSubmitted`, no requirement awaiting the business currently or past due; anything missing
-reads false. Each checks the account's id and its `livemode` against the mode.
+`createConnectAccount` (under the host's idempotency key) and `readConnectStatus` check the account's
+id and its `livemode` against the mode and answer `connectStatusOf`'s two flags: `chargesEnabled`,
+the merchant `card_payments` capability `active`, and `detailsSubmitted`, an `entries` list with no
+requirement awaiting the business currently or past due; anything missing reads false.
+`createOnboardingLink` takes no mode and answers `{ url }` only: an https link, refused unless the
+answer names the requested account, for the owner's own browser only, never texted or emailed.
 
 **The Connect webhook.** Direct charges arrive as Connect events, on an endpoint that listens to
 connected accounts; one URL may serve both modes, each mode with its own signing secret.

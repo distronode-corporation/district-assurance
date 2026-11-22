@@ -28,7 +28,13 @@ export interface StripeErrorDetail {
 /** The status, type and code of an error from the SDK or from `fetchStripeClient`, and nothing else. */
 export function stripeErrorDetail(cause: unknown): StripeErrorDetail {
   const detail = typeof cause === "object" && cause !== null ? (cause as Record<string, unknown>) : {};
-  return { status: statusOf(detail.statusCode), type: word(detail.rawType) ?? word(detail.type), code: word(detail.code) };
+  // A rejection from a structural client may be any object, a getter that throws included: reading
+  // it never throws here, and an unreadable error is one with no detail.
+  try {
+    return { status: statusOf(detail.statusCode), type: word(detail.rawType) ?? word(detail.type), code: word(detail.code) };
+  } catch {
+    return { status: null, type: null, code: null };
+  }
 }
 
 /**

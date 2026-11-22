@@ -33,6 +33,10 @@ describe("twilioSimSwapHours", () => {
 
   it("⛔ is no answer for a vendor error, a missing field, a date Date.parse would guess at, or nothing usable", () => {
     assert.deepEqual(twilioSimSwapHours({ error_code: 60606 }, NOW), { reason: "feature_unavailable", code: "60606" });
+    assert.deepEqual(twilioSimSwapHours({ error_code: "E1" }, NOW), { reason: "feature_unavailable", code: "E1" });
+    // ⛔ A code that is not a string or a number is no answer, never converted (a hostile toString cannot throw here).
+    for (const error_code of [{ toString: null }, [1], Number.NaN, true]) assert.deepEqual(twilioSimSwapHours({ error_code }, NOW), { reason: "bad_response" });
+    assert.deepEqual(twilioIdentityMatch({ error_code: { toString: null } }, 80), { reason: "bad_response" });
     assert.deepEqual(twilioSimSwapHours(null, NOW), { reason: "bad_response" });
     assert.deepEqual(twilioSimSwapHours({ last_sim_swap: "x" }, NOW), { reason: "bad_response" });
     assert.deepEqual(twilioSimSwapHours(swap({ last_sim_swap_date: "Jan 1" }), NOW), { reason: "bad_response" });

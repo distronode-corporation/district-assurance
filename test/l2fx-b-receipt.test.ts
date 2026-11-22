@@ -63,5 +63,8 @@ describe("receipts: receiptKeysDocument", () => {
     assert.throws(() => receiptKeysDocument([a, b]), /two different keys are named same/);
     const leaky: ReceiptSigner = { ...a, publicJwk: () => ({ ...a.publicJwk(), d: "secret" }) };
     assert.throws(() => receiptKeysDocument([leaky]), /private part/);
+    // ⛔ A key ring's set is not checked by receiptKeySet: the document refuses a private part in it too.
+    const ring = { ...a, keySet: () => [{ ...a.publicJwk(), kid: "same", d: "secret" }] } as unknown as ReceiptSigner;
+    assert.throws(() => receiptKeysDocument([ring]), /the key same has a private part/);
   });
 });

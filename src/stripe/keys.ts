@@ -46,6 +46,7 @@ export function assertStripeKey(key: unknown, mode: StripeMode): asserts key is 
 
 /** The version to send: endive by default; basil only in test mode. */
 export function checkedApiVersion(mode: StripeMode, apiVersion: StripeApiVersion | undefined): StripeApiVersion {
+  if (mode !== "test" && mode !== "live") throw new StripeKeyRefused("the Stripe mode must be test or live");
   if (apiVersion === undefined || apiVersion === STRIPE_API_VERSION) return STRIPE_API_VERSION;
   if (apiVersion !== STRIPE_BASIL_API_VERSION) throw new StripeKeyRefused(`refused: the Stripe API version must be ${STRIPE_API_VERSION}`);
   if (mode !== "test") throw new StripeKeyRefused(`refused: ${STRIPE_BASIL_API_VERSION} replays test-mode recordings only; live mode runs on ${STRIPE_API_VERSION}`);

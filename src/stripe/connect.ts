@@ -34,11 +34,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 export function connectAccountCreateParams(input: { country: string; metadata?: Record<string, string> }): ConnectAccountCreateParams {
   if (typeof input.country !== "string" || !COUNTRY.test(input.country)) throw new TypeError("country must be ISO 3166-1 alpha-2, upper case");
-  const metadata: Record<string, string> = {};
-  for (const [key, value] of Object.entries(input.metadata ?? {})) {
+  const entries = Object.entries(input.metadata ?? {});
+  for (const [key, value] of entries) {
     if (!METADATA_KEY.test(key) || typeof value !== "string" || value.length > 500) throw new TypeError("metadata keys are 1 to 40 word characters and values at most 500");
-    metadata[key] = value;
   }
+  // fromEntries defines each key as its own property, so even `__proto__` is kept, never a setter call.
+  const metadata = Object.fromEntries(entries) as Record<string, string>;
   return {
     identity: { country: input.country },
     dashboard: "full",
@@ -57,9 +58,9 @@ export function connectStatusOf(account: unknown): ConnectStatus {
   const capabilities = isRecord(merchant.capabilities) ? merchant.capabilities : {};
   const card = isRecord(capabilities.card_payments) ? capabilities.card_payments : {};
   const chargesEnabled = card.status === "active";
-  if (!isRecord(a.requirements)) return { chargesEnabled, detailsSubmitted: false };
-  const entries = Array.isArray(a.requirements.entries) ? a.requirements.entries : [];
-  const due = entries.some((entry: unknown) => {
+  // Requirements not included, or no entries list: nothing establishes that nothing is due.
+  if (!isRecord(a.requirements) || !Array.isArray(a.requirements.entries)) return { chargesEnabled, detailsSubmitted: false };
+  const due = a.requirements.entries.some((entry: unknown) => {
     const e = isRecord(entry) ? entry : {};
     const deadline = isRecord(e.minimum_deadline) ? e.minimum_deadline : {};
     return e.awaiting_action_from === "user" && (deadline.status === "currently_due" || deadline.status === "past_due");
@@ -114,6 +115,8 @@ export async function createOnboardingLink(client: StripeClientLike, input: { ac
   }
   const url = isRecord(answer) ? answer.url : undefined;
   if (typeof url !== "string" || !URL.canParse(url) || new URL(url).protocol !== "https:") throw StripeAdapterError.answer("answer an https onboarding link");
+  // A bearer link to another account's setup is never handed on.
+  if ((answer as Record<string, unknown>).account !== input.accountId) throw StripeAdapterError.answer("answer the onboarding link for the requested account");
   return { url };
 }
 

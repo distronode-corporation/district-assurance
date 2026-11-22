@@ -30,6 +30,12 @@ const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 /** Checkout's `expires_at` runs from 30 minutes to 24 hours after creation. */
 export const CHECKOUT_MIN_LINK_MINUTES = 30;
 export const CHECKOUT_MAX_LINK_MINUTES = 1440;
+/**
+ * The default link life: Stripe's 30-minute minimum plus 5 minutes for the time between this
+ * reading of the clock and Stripe receiving the create (the engine asks for the same margin), so the
+ * default never falls under the minimum Stripe measures from its own arrival.
+ */
+export const CHECKOUT_DEFAULT_LINK_MINUTES = 35;
 const MINUTE_MS = 60_000;
 
 /**
@@ -56,12 +62,14 @@ export function stripeMetadataCallId(callId: string): string {
 export function checkoutPaymentMethodTypes(methods: readonly InstantPaymentMethod[]): Array<"card" | "link"> {
   const types = new Set<"card" | "link">();
   for (const method of methods) types.add(method === "link" ? "link" : "card");
+  // No types would be no filter: Stripe would offer any method it deems eligible, not only instant ones.
+  if (types.size === 0) throw new TypeError("Checkout needs at least one payment method type");
   if (types.has("link") && !types.has("card")) throw new TypeError("Checkout offers Link only beside cards: add card, apple_pay or google_pay to the step's paymentMethods");
   return [...types];
 }
 
-/** The default link life: Stripe's minimum, from `now`. */
-export function checkoutExpiresAt(now: Date, minutes: number = CHECKOUT_MIN_LINK_MINUTES): string {
+/** A link's end, `minutes` from `now`: by default Stripe's minimum plus the dispatch margin (35). */
+export function checkoutExpiresAt(now: Date, minutes: number = CHECKOUT_DEFAULT_LINK_MINUTES): string {
   if (!Number.isInteger(minutes) || minutes < CHECKOUT_MIN_LINK_MINUTES || minutes > CHECKOUT_MAX_LINK_MINUTES) {
     throw new TypeError(`a Checkout link lives from ${CHECKOUT_MIN_LINK_MINUTES} to ${CHECKOUT_MAX_LINK_MINUTES} minutes`);
   }
@@ -78,8 +86,9 @@ export interface CheckoutSessionStatus {
 
 /**
  * What an expire found, read back from Stripe:
- *  - `expired`: this call closed the open session;
- *  - `already_expired`: it was already closed by an earlier expire or by Stripe (idempotent);
+ *  - `expired`: this call's own answer shows it closed the open session;
+ *  - `already_expired`: the session is expired, but not shown closed by this call (an earlier
+ *    expire, Stripe's own deadline, or an answer that was lost or did not show the close);
  *  - `complete`: the payer finished first (paid won the race), nothing was closed;
  *  - `open`: Stripe answered but the session still reads open (only `expire` answers this;
  *    `expireLink` throws a retryable error for it).
@@ -206,28 +215,42 @@ export class StripeCheckoutLinks implements PaymentLinks {
   /**
    * Expires a session now and reads back what it is, so a caller can tell a close it made from one
    * already made and from a payment that won the race. Idempotent: expiring an expired session
-   * answers `already_expired`. A 429, a 5xx or a lost answer throws a retryable
-   * `StripeAdapterError`; any other refusal throws one that is not.
+   * answers `already_expired`.
+   *
+   * ⛔ NO IDEMPOTENCY KEY IS SENT. Stripe saves a key's first result, a 500 included, and answers
+   * every retry under that key with it for a day, so a keyed expire that failed once could never be
+   * retried into an answer. An expire needs no key: a second expire of a closed session is Stripe's
+   * 400, which this reads back. `input.idempotencyKey` is accepted for the `PaymentLinks` contract
+   * and not sent.
+   *
+   * Any failure is followed by a read of the session: Stripe's 400 (the session is not open) and a
+   * 429, a 5xx or a lost answer alike. A session the read shows closed answers its outcome; one still
+   * open, or a read that fails too, throws the expire's own error, retryable for a 429, a 5xx or a
+   * lost answer and not for another refusal.
    */
   async expire(input: PaymentLinkClose): Promise<CheckoutExpireResult> {
     const id = this.#sessionId(input.linkId);
     const account = this.#account(input.mode, input.connectedAccountId);
-    const options = { ...(account === undefined ? {} : { stripeAccount: account }), idempotencyKey: stripeIdempotencyKey(input.idempotencyKey) };
     let answer: unknown;
     try {
-      answer = await this.#client.checkout.sessions.expire(id, {}, options);
+      answer = await this.#client.checkout.sessions.expire(id, {}, account === undefined ? {} : { stripeAccount: account });
     } catch (err) {
       const failure = StripeAdapterError.from("expire the Checkout Session", err);
-      // Stripe refuses (400) to expire a session that is not open: read it to learn what it is.
-      if (failure.status !== 400) throw failure;
-      const now = await this.readLink(id, account);
+      let now: CheckoutSessionStatus;
+      try {
+        now = await this.readLink(id, account);
+      } catch {
+        throw failure;
+      }
+      if (now.status === "open" && failure.status !== 400) throw failure;
       return { outcome: now.status === "expired" ? "already_expired" : now.status, session: now };
     }
     const direct = this.#status(id, answer);
     if (direct?.status === "expired") return { outcome: "expired", session: direct };
-    // An answer that does not show this session expired establishes nothing: read it back.
+    // An answer that does not show this session expired establishes nothing: read it back, and
+    // never claim the close for this call.
     const now = await this.readLink(id, account);
-    return { outcome: now.status, session: now };
+    return { outcome: now.status === "expired" ? "already_expired" : now.status, session: now };
   }
 
   async expireLink(input: PaymentLinkClose): Promise<{ state: "expired" | "not_open" }> {

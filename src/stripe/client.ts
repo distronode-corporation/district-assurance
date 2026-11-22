@@ -134,6 +134,10 @@ export interface FetchStripeClientOptions {
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const PATH_ID = /^[A-Za-z0-9_]{1,255}$/;
 const STRIPE_WORD = /^[a-z0-9_]{1,64}$/;
+/** Anything shaped like a key or a webhook secret is never kept, in any field. */
+const KEY_LIKE = /^(?:sk|rk|pk|whsec)_/i;
+/** The most network retries a read honours. */
+const MAX_READ_RETRIES = 2;
 
 /** The base the key is sent to: https, or http on a loopback host; no credentials in it. */
 function checkedBase(apiBase: string): URL {
@@ -174,12 +178,11 @@ export function fetchStripeClient(key: string, options: FetchStripeClientOptions
     requestOptions: StripeRequestOptions | undefined,
   ): Promise<unknown> {
     const headers: Record<string, string> = { authorization: `Bearer ${key}`, "stripe-version": version };
-    const { stripeAccount, idempotencyKey, timeout, signal } = requestOptions ?? {};
+    const { stripeAccount, idempotencyKey, timeout, signal, maxNetworkRetries } = requestOptions ?? {};
     if (stripeAccount !== undefined) headers["stripe-account"] = stripeAccount;
     if (idempotencyKey !== undefined) headers["idempotency-key"] = idempotencyKey;
     const url = new URL(path, base);
-    const deadline = AbortSignal.timeout(timeout ?? timeoutMs ?? 15_000);
-    const init: RequestInit = { method, headers, redirect: "error", signal: signal === undefined ? deadline : AbortSignal.any([deadline, signal]) };
+    const init: RequestInit = { method, headers, redirect: "error" };
     if (body.kind === "query") {
       const query = stripeFormEncode(body.data);
       if (query !== "") url.search = query;
@@ -190,14 +193,22 @@ export function fetchStripeClient(key: string, options: FetchStripeClientOptions
       headers["content-type"] = "application/x-www-form-urlencoded";
       init.body = stripeFormEncode(body.data);
     }
-    let response: Response;
-    let text: string;
-    try {
-      response = await send(url, init);
-      text = await response.text();
-    } catch {
-      // A transport failure: no answer, worth asking again. Its own error can quote the URL.
-      throw new StripeHttpError(null, null, null);
+    // A read may be asked again after a lost answer, as stripe-node does, when the caller asks for it;
+    // a write never is here (it has its own idempotency rules). Each attempt has its own deadline, so
+    // the whole read is bounded by (retries + 1) deadlines, and a cancelled caller is never retried.
+    const retries = method === "GET" && typeof maxNetworkRetries === "number" && Number.isInteger(maxNetworkRetries) ? Math.min(Math.max(maxNetworkRetries, 0), MAX_READ_RETRIES) : 0;
+    let response: Response | undefined;
+    let text = "";
+    for (let attempt = 0; response === undefined; attempt++) {
+      const deadline = AbortSignal.timeout(timeout ?? timeoutMs ?? 15_000);
+      try {
+        const answered = await send(url, { ...init, signal: signal === undefined ? deadline : AbortSignal.any([deadline, signal]) });
+        text = await answered.text();
+        response = answered;
+      } catch {
+        // A transport failure: no answer, worth asking again. Its own error can quote the URL.
+        if (attempt >= retries || signal?.aborted === true) throw new StripeHttpError(null, null, null);
+      }
     }
     let parsed: unknown = null;
     try {
@@ -216,19 +227,20 @@ export function fetchStripeClient(key: string, options: FetchStripeClientOptions
   return {
     checkout: {
       sessions: {
-        create: (params, o) => call("POST", "/v1/checkout/sessions", { kind: "form", data: { ...params } }, o),
-        retrieve: (id, params, o) => call("GET", `/v1/checkout/sessions/${pathId(id)}`, { kind: "query", data: { ...params } }, o),
-        expire: (id, params, o) => call("POST", `/v1/checkout/sessions/${pathId(id)}/expire`, { kind: "form", data: { ...params } }, o),
+        create: async (params, o) => call("POST", "/v1/checkout/sessions", { kind: "form", data: { ...params } }, o),
+        // async, so a refused id rejects the returned promise rather than throwing at the call.
+        retrieve: async (id, params, o) => call("GET", `/v1/checkout/sessions/${pathId(id)}`, { kind: "query", data: { ...params } }, o),
+        expire: async (id, params, o) => call("POST", `/v1/checkout/sessions/${pathId(id)}/expire`, { kind: "form", data: { ...params } }, o),
       },
     },
     v2: {
       core: {
         accounts: {
-          create: (params, o) => call("POST", "/v2/core/accounts", { kind: "json", data: { ...params } }, o),
-          retrieve: (id, params, o) => call("GET", `/v2/core/accounts/${pathId(id)}`, { kind: "query", data: { ...params } }, o),
+          create: async (params, o) => call("POST", "/v2/core/accounts", { kind: "json", data: { ...params } }, o),
+          retrieve: async (id, params, o) => call("GET", `/v2/core/accounts/${pathId(id)}`, { kind: "query", data: { ...params } }, o),
         },
         accountLinks: {
-          create: (params, o) => call("POST", "/v2/core/account_links", { kind: "json", data: { ...params } }, o),
+          create: async (params, o) => call("POST", "/v2/core/account_links", { kind: "json", data: { ...params } }, o),
         },
       },
     },
@@ -240,5 +252,5 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function wordOrNull(value: unknown): string | null {
-  return typeof value === "string" && STRIPE_WORD.test(value) ? value : null;
+  return typeof value === "string" && STRIPE_WORD.test(value) && !KEY_LIKE.test(value) ? value : null;
 }

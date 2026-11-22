@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 
 import { signStripePayload } from "../src/index.ts";
 import {
+  CHECKOUT_DEFAULT_LINK_MINUTES,
   CHECKOUT_MAX_LINK_MINUTES,
   CHECKOUT_MIN_LINK_MINUTES,
   STRIPE_API_VERSION,
@@ -135,6 +136,9 @@ describe("assertStripeKey", () => {
     assert.equal(checkedApiVersion("test", STRIPE_BASIL_API_VERSION), STRIPE_BASIL_API_VERSION);
     assert.throws(() => checkedApiVersion("live", STRIPE_BASIL_API_VERSION), StripeKeyRefused);
     assert.throws(() => checkedApiVersion("test", "2024-01-01.acacia" as never), StripeKeyRefused);
+    // An unknown mode is refused even on the default version, so no adapter is built in it.
+    assert.throws(() => checkedApiVersion("preview" as never, undefined), /must be test or live/);
+    assert.throws(() => links(fake().client, { mode: "preview" as never }), /must be test or live/);
     assert.throws(() => links(fake().client, { mode: "live", apiVersion: STRIPE_BASIL_API_VERSION }), /replays test-mode recordings only/);
     assert.throws(() => fetchStripeClient(key("rk", "live", "abcdefgh12345678"), { mode: "live", apiVersion: STRIPE_BASIL_API_VERSION }), StripeKeyRefused);
   });
@@ -147,6 +151,12 @@ describe("StripeAdapterError", () => {
     assert.equal(e.retryable, false);
     assert.ok(!e.message.includes("SECRET"));
     assert.deepEqual(stripeErrorDetail({ statusCode: 402, type: "StripeCardError", code: null }), { status: 402, type: "StripeCardError", code: null });
+  });
+
+  it("⛔ never throws on an error object whose fields cannot be read", () => {
+    const hostile = Object.defineProperty({}, "statusCode", { get: () => { throw new Error("boom"); } });
+    assert.deepEqual(stripeErrorDetail(hostile), { status: null, type: null, code: null });
+    assert.equal(StripeAdapterError.from("x", hostile).retryable, true);
   });
 
   it("drops anything that is not a plain word, and anything shaped like a key", () => {
@@ -175,13 +185,16 @@ describe("the Checkout helpers", () => {
     assert.match(stripeMetadataCallId("é".repeat(251)), /^sha256:[0-9a-f]{64}$/);
   });
 
-  it("maps wallets to card, keeps link beside cards, and refuses link alone", () => {
+  it("maps wallets to card, keeps link beside cards, and refuses link alone and an empty list", () => {
     assert.deepEqual(checkoutPaymentMethodTypes(["card", "apple_pay", "google_pay", "link"]), ["card", "link"]);
     assert.throws(() => checkoutPaymentMethodTypes(["link"]), TypeError);
+    assert.throws(() => checkoutPaymentMethodTypes([]), /at least one payment method/);
   });
 
-  it("defaults a link to Stripe's 30-minute minimum, and refuses a life outside 30 minutes to 24 hours", () => {
-    assert.equal(checkoutExpiresAt(NOW), new Date(NOW.getTime() + 30 * 60_000).toISOString());
+  it("defaults a link to Stripe's 30-minute minimum plus a 5-minute dispatch margin, and refuses a life outside 30 minutes to 24 hours", () => {
+    assert.equal(CHECKOUT_DEFAULT_LINK_MINUTES, 35);
+    assert.equal(checkoutExpiresAt(NOW), new Date(NOW.getTime() + 35 * 60_000).toISOString());
+    assert.equal(checkoutExpiresAt(NOW, 30), new Date(NOW.getTime() + 30 * 60_000).toISOString());
     assert.equal(checkoutExpiresAt(NOW, CHECKOUT_MAX_LINK_MINUTES), new Date(NOW.getTime() + 1440 * 60_000).toISOString());
     for (const minutes of [CHECKOUT_MIN_LINK_MINUTES - 1, CHECKOUT_MAX_LINK_MINUTES + 1, 30.5, Number.NaN]) assert.throws(() => checkoutExpiresAt(NOW, minutes), TypeError);
   });
@@ -278,7 +291,8 @@ describe("StripeCheckoutLinks: expire (the host cancels the link when the wait e
     const { client, calls } = fake({ expire: session({ status: "expired" }) });
     const l = links(client);
     assert.deepEqual(await l.expire(CLOSE), { outcome: "expired", session: { linkId: TEST_SESSION, status: "expired", paymentStatus: "unpaid", livemode: false } });
-    assert.deepEqual(calls.expire![0], [TEST_SESSION, {}, { stripeAccount: ACCT, idempotencyKey: "close_1" }]);
+    // ⛔ No idempotency key: Stripe saves a key's first result, a 500 included, for every retry under it.
+    assert.deepEqual(calls.expire![0], [TEST_SESSION, {}, { stripeAccount: ACCT }]);
     assert.equal(calls.retrieve, undefined);
     assert.deepEqual(await l.expireLink(CLOSE), { state: "expired" });
   });
@@ -300,9 +314,10 @@ describe("StripeCheckoutLinks: expire (the host cancels the link when the wait e
     assert.equal((await links(client).expire(CLOSE)).outcome, "complete");
   });
 
-  it("⛔ reads back an answer that is not this session expired: expired, or still open (retryable from expireLink)", async () => {
+  it("⛔ reads back an answer that is not this session expired, never claiming the close: already_expired, or still open (retryable from expireLink)", async () => {
     let { client } = fake({ expire: session({ id: "cs_test_other", status: "expired" }), retrieve: session({ status: "expired" }) });
-    assert.equal((await links(client).expire(CLOSE)).outcome, "expired");
+    assert.equal((await links(client).expire(CLOSE)).outcome, "already_expired");
+    assert.deepEqual(await links(client).expireLink(CLOSE), { state: "not_open" });
     ({ client } = fake({ expire: session(), retrieve: session() }));
     assert.equal((await links(client).expire(CLOSE)).outcome, "open");
     await assert.rejects(links(client).expireLink(CLOSE), (e: Error) => e instanceof StripeAdapterError && e.retryable && /still open/.test(e.message));
@@ -310,7 +325,7 @@ describe("StripeCheckoutLinks: expire (the host cancels the link when the wait e
     assert.equal((await links(client).expire(CLOSE)).outcome, "open");
   });
 
-  it("⛔ surfaces a 5xx, a 429 or a lost answer as a retryable StripeAdapterError, and another 4xx as not retryable", async () => {
+  it("⛔ surfaces a 5xx, a 429 or a lost answer as a retryable StripeAdapterError, and another 4xx as not retryable, when the session reads open", async () => {
     for (const [cause, retryable] of [
       [refusal(500), true],
       [refusal(503), true],
@@ -318,10 +333,19 @@ describe("StripeCheckoutLinks: expire (the host cancels the link when the wait e
       [new Error("ECONNRESET"), true],
       [refusal(401), false],
     ] as const) {
-      const { client, calls } = fake({ expire: cause });
+      const { client, calls } = fake({ expire: cause, retrieve: session() });
       await assert.rejects(links(client).expire(CLOSE), (e: Error) => e instanceof StripeAdapterError && e.retryable === retryable);
-      assert.equal(calls.retrieve, undefined, "no read-back after a failure that is not Stripe's 400");
+      assert.equal(calls.retrieve!.length, 1, "the session is read back after any failure");
     }
+  });
+
+  it("⛔ after a 5xx or a lost answer, reads the session back: a close or a payment that took effect is answered, an unreadable session throws the expire's error", async () => {
+    let { client } = fake({ expire: refusal(500), retrieve: session({ status: "expired" }) });
+    assert.equal((await links(client).expire(CLOSE)).outcome, "already_expired");
+    ({ client } = fake({ expire: new Error("ECONNRESET"), retrieve: session({ status: "complete", payment_status: "paid" }) }));
+    assert.equal((await links(client).expire(CLOSE)).outcome, "complete");
+    ({ client } = fake({ expire: refusal(502), retrieve: refusal(503) }));
+    await assert.rejects(links(client).expire(CLOSE), (e: Error) => e instanceof StripeAdapterError && e.retryable && /expire the Checkout Session \(HTTP 502/.test(e.message));
   });
 
   it("⛔ refuses a cs_test_ id in live mode and a cs_live_ id in test mode, before anything is sent", async () => {
@@ -336,7 +360,7 @@ describe("StripeCheckoutLinks: expire (the host cancels the link when the wait e
   it("expires a platform session with no Stripe-Account header", async () => {
     const { client, calls } = fake({ expire: session({ status: "expired" }) });
     assert.equal((await links(client).expire({ linkId: TEST_SESSION, mode: "platform", idempotencyKey: "close_2" })).outcome, "expired");
-    assert.deepEqual(calls.expire![0]![2], { idempotencyKey: "close_2" });
+    assert.deepEqual(calls.expire![0]![2], {});
   });
 
   it("expires and reads in live mode, and refuses a test-mode answer there", async () => {
@@ -389,6 +413,11 @@ describe("Connect onboarding (Accounts v2)", () => {
       include: ["configuration.merchant", "requirements"],
     });
     assert.deepEqual(connectAccountCreateParams({ country: "FR" }).metadata, {});
+    // An own `__proto__` key (from parsed JSON) is kept as a key, never handed to the prototype setter.
+    const parsed = JSON.parse('{"__proto__":"x","ref":"y"}') as Record<string, string>;
+    const kept = connectAccountCreateParams({ country: "CA", metadata: parsed }).metadata;
+    assert.deepEqual(Object.keys(kept), ["__proto__", "ref"]);
+    assert.equal(Object.getPrototypeOf(kept), Object.prototype);
     for (const country of ["ca", "CAN", "", 124]) assert.throws(() => connectAccountCreateParams({ country: country as string }), /alpha-2/);
     for (const metadata of [{ "bad key": "x" }, { ref: "x".repeat(501) }, { ref: 7 }]) assert.throws(() => connectAccountCreateParams({ country: "CA", metadata: metadata as never }), /metadata/);
   });
@@ -412,11 +441,22 @@ describe("Connect onboarding (Accounts v2)", () => {
   });
 
   it("links the owner's browser to Stripe-hosted onboarding, https only", async () => {
-    const { client, calls } = fake({ linkCreate: [{ url: "https://connect.stripe.com/setup/s/x" }, { url: "http://connect.stripe.com/x" }, { url: 7 }, null] });
+    const { client, calls } = fake({
+      linkCreate: [
+        { account: ACCT, url: "https://connect.stripe.com/setup/s/x" },
+        { account: ACCT, url: "http://connect.stripe.com/x" },
+        { account: ACCT, url: 7 },
+        null,
+        { account: "acct_2Other", url: "https://connect.stripe.com/setup/s/other" },
+        { url: "https://connect.stripe.com/setup/s/none" },
+      ],
+    });
     const input = { accountId: ACCT, returnUrl: "https://example.com/r", refreshUrl: "https://example.com/f" };
     assert.deepEqual(await createOnboardingLink(client, input), { url: "https://connect.stripe.com/setup/s/x" });
     assert.deepEqual(calls.linkCreate![0], [{ account: ACCT, use_case: { type: "account_onboarding", account_onboarding: { return_url: input.returnUrl, refresh_url: input.refreshUrl } } }]);
     for (let i = 0; i < 3; i++) await assert.rejects(createOnboardingLink(client, input), /https onboarding link/);
+    // ⛔ A bearer link for another account, or for none named, is never handed on.
+    for (let i = 0; i < 2; i++) await assert.rejects(createOnboardingLink(client, input), /for the requested account/);
     await assert.rejects(createOnboardingLink(client, { ...input, accountId: "acct_x y" }), /acct_/);
     await assert.rejects(createOnboardingLink(client, { ...input, returnUrl: "http://example.com/r" }), /https/);
     await assert.rejects(createOnboardingLink(fake({ linkCreate: refusal(500) }).client, input), /create the onboarding link/);
@@ -447,7 +487,8 @@ describe("Connect onboarding (Accounts v2)", () => {
     for (const [requirements, submitted] of [
       [null, false],
       [undefined, false],
-      [{}, true],
+      [{}, false],
+      [{ entries: "none" }, false],
       [{ entries: [] }, true],
       [{ entries: [due("currently_due")] }, false],
       [{ entries: [due("eventually_due"), due("past_due")] }, false],
@@ -630,13 +671,51 @@ describe("fetchStripeClient", () => {
     await expectError(502, null, null);
     await expectError(200, "malformed_response", null);
     await expectError(null, null, null);
+    const { fetch: leaky } = stub([json(400, { error: { type: "sk_test_abcdefgh12345678", code: "rk_live_abcdefgh12345678" } }), json(400, { error: { type: "invalid_request_error", code: "whsec_abcdefgh" } })]);
+    const leakyClient = fetchStripeClient(KEY, { mode: "test", fetch: leaky });
+    for (let i = 0; i < 2; i++) {
+      await assert.rejects(leakyClient.checkout.sessions.retrieve(TEST_SESSION), (e: Error) => {
+        assert.ok(e instanceof StripeHttpError && e.code === null && (e.rawType === null || e.rawType === "invalid_request_error"));
+        return true;
+      });
+    }
     assert.equal(StripeAdapterError.from("read", new StripeHttpError(null, null, null)).retryable, true);
   });
 
-  it("⛔ refuses an object id that is not letters, digits and underscores, before anything is sent", async () => {
+  it("⛔ refuses an object id that is not letters, digits and underscores through the returned promise, before anything is sent", async () => {
     const { fetch: f, seen } = stub([]);
     const client = fetchStripeClient(KEY, { mode: "test", fetch: f });
-    await assert.rejects(async () => client.checkout.sessions.retrieve("../v1/charges"), /letters, digits/);
+    const pending = [
+      client.checkout.sessions.retrieve("../v1/charges"),
+      client.checkout.sessions.expire("cs_test_x/../y"),
+      client.v2.core.accounts.retrieve("acct_1 2"),
+    ];
+    for (const p of pending) await assert.rejects(p, /letters, digits/);
     assert.equal(seen.length, 0);
+  });
+
+  it("asks a read again after a lost answer, up to maxNetworkRetries (at most 2), and never a write or a cancelled read", async () => {
+    let { fetch: f, seen } = stub([new Error("ECONNRESET"), json(200, { id: ACCT })]);
+    let client = fetchStripeClient(KEY, { mode: "test", fetch: f });
+    assert.deepEqual(await client.v2.core.accounts.retrieve(ACCT, { include: ["requirements"] }, { maxNetworkRetries: 1, timeout: 50 }), { id: ACCT });
+    assert.equal(seen.length, 2);
+    ({ fetch: f, seen } = stub([new Error("a"), new Error("b"), new Error("c"), new Error("d")]));
+    client = fetchStripeClient(KEY, { mode: "test", fetch: f });
+    await assert.rejects(client.checkout.sessions.retrieve(TEST_SESSION, {}, { maxNetworkRetries: 9 }), StripeHttpError);
+    assert.equal(seen.length, 3, "at most two retries");
+    ({ fetch: f, seen } = stub([new Error("a"), json(200, {})]));
+    client = fetchStripeClient(KEY, { mode: "test", fetch: f });
+    await assert.rejects(client.checkout.sessions.expire(TEST_SESSION, {}, { maxNetworkRetries: 2 }), StripeHttpError);
+    assert.equal(seen.length, 1, "a write is never asked again here");
+    ({ fetch: f, seen } = stub([new Error("a"), json(200, {})]));
+    client = fetchStripeClient(KEY, { mode: "test", fetch: f });
+    const cancelled = new AbortController();
+    cancelled.abort();
+    await assert.rejects(client.checkout.sessions.retrieve(TEST_SESSION, {}, { maxNetworkRetries: 2, signal: cancelled.signal }), StripeHttpError);
+    assert.equal(seen.length, 1, "a cancelled read is not asked again");
+    ({ fetch: f, seen } = stub([new Error("a"), json(200, {})]));
+    client = fetchStripeClient(KEY, { mode: "test", fetch: f });
+    await assert.rejects(client.checkout.sessions.retrieve(TEST_SESSION, {}, { maxNetworkRetries: -1 }), StripeHttpError);
+    assert.equal(seen.length, 1);
   });
 });

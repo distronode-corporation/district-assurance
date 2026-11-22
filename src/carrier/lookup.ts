@@ -11,6 +11,13 @@ const HOUR_MS = 3_600_000;
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
 const UNCHECKED: CarrierSignalReport = { checked: false, simSwapChecked: false, lastSimSwapHoursAgo: null, lastPortHoursAgo: null, identityMatch: "unavailable" };
 
+/** A vendor's error code, as given: a string or a number; anything else is no answer, never converted. */
+function vendorError(code: unknown): CarrierFieldFailure | null {
+  if (code === null || code === undefined) return null;
+  if (typeof code === "string" || (typeof code === "number" && Number.isFinite(code))) return { reason: "feature_unavailable", code: String(code) };
+  return { reason: "bad_response" };
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -44,7 +51,8 @@ export function durationHours(value: string): number | null {
  */
 export function twilioSimSwapHours(field: unknown, now: Date): number | CarrierFieldFailure {
   if (!isObject(field)) return { reason: "bad_response" };
-  if (field.error_code !== null && field.error_code !== undefined) return { reason: "feature_unavailable", code: String(field.error_code) };
+  const error = vendorError(field.error_code);
+  if (error !== null) return error;
   const last = field.last_sim_swap;
   if (!isObject(last)) return { reason: "bad_response" };
   // Only an ISO 8601 time is a date: Date.parse also reads "1" or "Jan 1" as a year long ago.
@@ -61,7 +69,8 @@ export function twilioSimSwapHours(field: unknown, now: Date): number | CarrierF
 export function twilioIdentityMatch(field: unknown, minScore: number): "match" | "no_match" | CarrierFieldFailure {
   if (typeof minScore !== "number" || !(minScore >= 1 && minScore <= 100)) throw new TypeError("minScore must be from 1 to 100");
   if (!isObject(field)) return { reason: "bad_response" };
-  if (field.error_code !== null && field.error_code !== undefined) return { reason: "feature_unavailable", code: String(field.error_code) };
+  const error = vendorError(field.error_code);
+  if (error !== null) return error;
   const score = field.summary_score;
   if (typeof score !== "number" || !(score >= 0 && score <= 100)) return { reason: "bad_response" };
   return score >= minScore ? "match" : "no_match";

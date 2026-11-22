@@ -267,7 +267,7 @@ describe("Stripe Checkout adapter against a local fake", () => {
     assert.deepEqual(await links.expireLink({ linkId: open.linkId, mode: "platform", idempotencyKey: "e1" }), { state: "expired" });
     const expire = fake.seen.find((s) => s.path.endsWith("/expire"))!;
     assert.equal(expire.method, "POST");
-    assert.equal(expire.headers["idempotency-key"], "e1");
+    assert.equal(expire.headers["idempotency-key"], undefined, "an expire carries no key: Stripe would answer a saved failure to every retry");
     assert.deepEqual(await links.expireLink({ linkId: open.linkId, mode: "platform", idempotencyKey: "e2" }), { state: "not_open" });
     const connect = await links.createLink(request({ mode: "connect", connectedAccountId: "acct_x" }));
     fake.sessions.get(connect.linkId)!.status = "complete";
@@ -298,8 +298,9 @@ describe("Stripe Checkout adapter against a local fake", () => {
       };
       // Still open when read back: the close is not established, and asking again may establish it.
       await assert.rejects(expire("a"), (e: unknown) => e instanceof StripeAdapterError && e.retryable && /still open/.test((e as Error).message), body);
+      // Expired when read back, but this call's answer did not show the close: not claimed.
       fake.sessions.get(open.linkId)!.status = "expired";
-      assert.deepEqual(await expire("b"), { state: "expired" }, body);
+      assert.deepEqual(await expire("b"), { state: "not_open" }, body);
       fake.sessions.get(open.linkId)!.status = "complete";
       assert.deepEqual(await expire("c"), { state: "not_open" }, body);
     }

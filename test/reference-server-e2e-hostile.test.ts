@@ -87,10 +87,10 @@ describe("hostile #50: the Stripe Checkout adapter", () => {
     assert.ok(a!.length <= 255, String(a!.length));
   });
 
-  it("S3: expireLink sends a non-ASCII key too", async () => {
+  it("S3: expireLink sends no idempotency key, whatever the engine's key holds (a saved failure would answer every retry)", async () => {
     fake.answer = { status: 200, body: session({ status: "expired" }) };
     assert.deepEqual(await links.expireLink({ linkId: "cs_test_abc", mode: "platform", idempotencyKey: JSON.stringify(["ws", "\u00e9-1", "x"]) }), { state: "expired" });
-    assert.match(fake.seen[0]!["idempotency-key"] as string, /^[\x20-\x7e]+$/);
+    assert.equal(fake.seen[0]!["idempotency-key"], undefined);
   });
 
   it("S4: never echoes a key-shaped or control-laden error type or code", async () => {
