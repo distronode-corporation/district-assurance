@@ -19,7 +19,7 @@ import type { Engine } from "../engine.ts";
 import { counterKeys, isCallingNumber, lockState, lockoutOf, type Lockout } from "./counters.ts";
 import type { BadgeSettings, PinSettings } from "./factors.ts";
 import { knowledgeHmac, pinDigest, subjectKeyFor, type KnowledgeHmac } from "./knowledge.ts";
-import { isWeakPin } from "./pin.ts";
+import { isWeakPin, type PinChangeRef } from "./pin.ts";
 
 /**
  * Creates a subject record, the one write `RecordStore` lacks (the engine never creates a subject):
@@ -85,18 +85,24 @@ export interface OwnerPin {
   /**
    * Stores a new PIN and the line as the number on file, replacing any PIN in one compare-and-set;
    * `OwnerPinConflictError` when another change landed first. `PinChangeUnfinishedError` when the
-   * PIN and number landed but the counter reset or `pin.reset` did not: a `setPin` again finishes it.
+   * PIN and number landed but the counter cleanup or `pin.reset` did not: `finishChange(error)`
+   * finishes it.
    */
   setPin(line: OwnerLine, pin: string): Promise<OwnerPinSetResult>;
   /**
    * Removes the PIN on file, if any, in one compare-and-set, and clears its counters; nothing when
    * none is on file. `OwnerPinConflictError` when another change landed first.
-   * `PinChangeUnfinishedError` when the PIN was removed but the counter reset or `pin.reset` did
-   * not land: `clearPin({ resume: error.at })` finishes it, forgetting only the failures up to `at`;
-   * it is `OwnerPinConflictError` when a PIN is on file again (another change landed since), and
-   * nothing for an owner who has no subject.
+   * `PinChangeUnfinishedError` when the PIN was removed but the counter cleanup or `pin.reset` did
+   * not land: `finishChange(error)` finishes it.
    */
-  clearPin(options?: { resume?: string }): Promise<void>;
+  clearPin(): Promise<void>;
+  /**
+   * Finishes a set or clear that threw `PinChangeUnfinishedError` (`Engine.finishPinChange`): forgets
+   * the owner's PIN failures recorded before it began, never a later one, and appends its
+   * `pin.reset` once, whatever changed since; it never touches the PIN or number on file. Safe to
+   * run again.
+   */
+  finishChange(ref: PinChangeRef): Promise<void>;
   /** Lifts the owner's locks early: the subject's counter and the line's. `memberId` as `Engine.unlock` takes it. */
   liftLock(line: OwnerLine, memberId: string): Promise<void>;
 }
@@ -196,20 +202,16 @@ export function createOwnerPin(options: OwnerPinOptions): OwnerPin {
       return { ok: true };
     },
 
-    async clearPin(options) {
+    async clearPin() {
       settings();
-      const resume: unknown = typeof options === "object" && options !== null ? options.resume : undefined;
       const key = await subjectKey();
-      if (resume === undefined) {
-        const from = await recordOnFile(key);
-        if (from !== null) await replace(key, from, null);
-        return;
-      }
-      // Finishing a removal that landed before its cleanup failed: nothing to finish for an owner
-      // with no subject; the engine runs only the cleanup while no PIN is on file, and answers false
-      // when one is again, which is another change's to keep.
-      if ((await records.getSubject(workspaceId, key)) === null) return;
-      if (!(await engine.replacePin(key, { from: null, to: null, resume: resume as string }))) throw new OwnerPinConflictError();
+      const from = await recordOnFile(key);
+      if (from !== null) await replace(key, from, null);
+    },
+
+    async finishChange(ref) {
+      settings();
+      await engine.finishPinChange(await subjectKey(), ref);
     },
 
     async liftLock(line, memberId) {

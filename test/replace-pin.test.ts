@@ -44,7 +44,7 @@ describe("Engine.replacePin", () => {
     const t = setup();
     const onFile = (await t.records.getSubject("ws_test", SUBJECT))!.pinDigest!;
     const counter = { workspaceId: "ws_test", factor: "pin", scope: "subject" as const, key: SUBJECT };
-    await t.counters.recordFailure(counter, "2026-01-01T00:00:00.000Z", "1970-01-01T00:00:00.000Z");
+    await t.counters.recordFailure(counter, "2025-12-31T23:59:59.999Z", "1970-01-01T00:00:00.000Z");
     assert.equal(await t.engine.replacePin(SUBJECT, { from: onFile, to: null }), true);
     const subject = (await t.records.getSubject("ws_test", SUBJECT))!;
     assert.equal(subject.pinDigest, undefined);
@@ -71,102 +71,98 @@ describe("Engine.replacePin", () => {
     assert.equal(await t.records.getSubject("ws_test", unknown), null);
   });
 
-  it("reports a change whose ledger entry failed after it landed, and finishes it on resume", async () => {
+  it("reports a change whose ledger entry failed after it landed, and finishPinChange finishes it once", async () => {
     assert.equal(root.PinChangeUnfinishedError, PinChangeUnfinishedError);
     const t = setup();
     const onFile = (await t.records.getSubject("ws_test", SUBJECT))!.pinDigest!;
     const next = pinDigest(TEST_KNOWLEDGE_KEY, SUBJECT, NEXT);
-    await t.counters.recordFailure(COUNTER, "2026-01-01T00:00:00.000Z", FOREVER);
+    await t.counters.recordFailure(COUNTER, "2025-12-31T00:00:00.000Z", FOREVER);
     const restore = failing(t.ledger, "append");
     const error = (await t.engine.replacePin(SUBJECT, { from: onFile, to: next, phoneOnFile: "+15555550177" }).catch((e: unknown) => e)) as PinChangeUnfinishedError;
     restore();
     assert.ok(error instanceof PinChangeUnfinishedError);
     assert.equal(error.name, "PinChangeUnfinishedError");
     assert.equal(error.at, t.clock.now().toISOString());
+    assert.match(error.change, /^[0-9a-f]{64}$/);
     assert.match((error.cause as Error).message, /append unavailable/);
-    assert.equal(error.message.includes(NEXT) || error.message.includes(next), false);
+    for (const text of [error.message, error.change, error.at]) assert.equal(text.includes(NEXT) || text.includes(next) || text.includes(onFile), false);
     // What the error reports is what is stored: the new PIN and number are on file.
     const subject = (await t.records.getSubject("ws_test", SUBJECT))!;
     assert.equal(subject.pinDigest, next);
     assert.equal(subject.phoneOnFile, "+15555550177");
     assert.equal((await t.ledger.list()).length, 0);
-    // The same change again, without resume, is a lost compare-and-set; with it, the cleanup runs alone.
-    assert.equal(await t.engine.replacePin(SUBJECT, { from: onFile, to: next }), false);
-    assert.equal(await t.engine.replacePin(SUBJECT, { from: onFile, to: next, resume: error.at }), true);
-    assert.deepEqual((await t.ledger.list()).map((e) => e.event), ["pin.reset"]);
+    await t.engine.finishPinChange(SUBJECT, error);
+    await t.engine.finishPinChange(SUBJECT, { at: error.at, change: error.change });
+    assert.deepEqual((await t.ledger.list()).map((e) => e.event), ["pin.reset"], "appended once, however often it is finished");
     assert.deepEqual(await t.counters.get(COUNTER, FOREVER), []);
-    assert.equal((await t.records.getSubject("ws_test", SUBJECT))!.pinDigest, next, "not written again");
+    assert.equal((await t.records.getSubject("ws_test", SUBJECT))!.pinDigest, next, "the PIN is never written by a finish");
   });
 
-  it("on resume, forgets only the failures up to the change, never one against the new PIN", async () => {
+  it("never forgets a failure recorded at or after the change began, the same millisecond included", async () => {
     const t = setup();
     const onFile = (await t.records.getSubject("ws_test", SUBJECT))!.pinDigest!;
     const next = pinDigest(TEST_KNOWLEDGE_KEY, SUBJECT, NEXT);
     const hidden = hiddenCounterKey("ws_test", "pin", SUBJECT);
-    await t.counters.recordFailure(COUNTER, "2026-01-01T00:00:00.000Z", FOREVER);
-    await t.counters.recordFailure(hidden, "2026-01-01T00:00:00.000Z", FOREVER);
-    // The counters are forgotten, then the ledger fails: the change is unfinished.
+    const start = t.clock.now().getTime();
+    const before = new Date(start - 1).toISOString();
+    const same = new Date(start).toISOString();
+    for (const key of [COUNTER, hidden]) {
+      await t.counters.recordFailure(key, before, FOREVER);
+      // A wrong PIN against the new PIN in the very millisecond the change landed.
+      await t.counters.recordFailure(key, same, FOREVER);
+    }
     const restore = failing(t.ledger, "append");
     const error = (await t.engine.replacePin(SUBJECT, { from: onFile, to: next }).catch((e: unknown) => e)) as PinChangeUnfinishedError;
     restore();
-    assert.ok(error instanceof PinChangeUnfinishedError);
-    assert.deepEqual(await t.counters.get(COUNTER, FOREVER), []);
-    // Wrong PINs against the new PIN, after the change landed, then the resume.
+    assert.equal(error.at, same);
+    for (const key of [COUNTER, hidden]) assert.deepEqual(await t.counters.get(key, FOREVER), [same], "the change forgot only the earlier one");
     t.clock.advance(1_000);
     const later = t.clock.now().toISOString();
-    await t.counters.recordFailure(COUNTER, later, FOREVER);
-    await t.counters.recordFailure(hidden, later, FOREVER);
-    assert.equal(await t.engine.replacePin(SUBJECT, { from: onFile, to: next, resume: error.at }), true);
-    assert.deepEqual(await t.counters.get(COUNTER, FOREVER), [later], "a failure against the new PIN still counts");
-    assert.deepEqual(await t.counters.get(hidden, FOREVER), [later]);
-    assert.deepEqual((await t.ledger.list()).map((e) => e.event), ["pin.reset"]);
+    for (const key of [COUNTER, hidden]) await t.counters.recordFailure(key, later, FOREVER);
+    await t.engine.finishPinChange(SUBJECT, error);
+    for (const key of [COUNTER, hidden]) assert.deepEqual(await t.counters.get(key, FOREVER), [same, later], "nor did the finish forget a later one");
   });
 
-  it("forgets on a change only the failures recorded up to its start", async () => {
+  it("finishes a change whatever changed since, never touching the PIN on file now", async () => {
     const t = setup();
     const onFile = (await t.records.getSubject("ws_test", SUBJECT))!.pinDigest!;
-    t.clock.advance(1_000);
-    const before = new Date(t.clock.now().getTime() - 1).toISOString();
-    const after = new Date(t.clock.now().getTime() + 1).toISOString();
-    await t.counters.recordFailure(COUNTER, before, FOREVER);
-    await t.counters.recordFailure(COUNTER, after, FOREVER);
-    assert.equal(await t.engine.replacePin(SUBJECT, { from: onFile, to: null }), true);
-    assert.deepEqual(await t.counters.get(COUNTER, FOREVER), [after]);
-  });
-
-  it("finishes a removal whose counter cleanup failed, on resume, even without the record it removed", async () => {
-    const t = setup();
-    const onFile = (await t.records.getSubject("ws_test", SUBJECT))!.pinDigest!;
-    await t.counters.recordFailure(COUNTER, "2026-01-01T00:00:00.000Z", FOREVER);
     const restore = failing(t.counters, "removeFailure");
+    await t.counters.recordFailure(COUNTER, "2025-12-31T00:00:00.000Z", FOREVER);
     const error = (await t.engine.replacePin(SUBJECT, { from: onFile, to: null }).catch((e: unknown) => e)) as PinChangeUnfinishedError;
     restore();
     assert.ok(error instanceof PinChangeUnfinishedError);
-    assert.equal((await t.records.getSubject("ws_test", SUBJECT))!.pinDigest, undefined);
-    assert.equal(await t.engine.replacePin(SUBJECT, { from: null, to: null, resume: error.at }), true);
+    // Another change lands before the finish: a new PIN.
+    t.clock.advance(1_000);
+    const newer = pinDigest(TEST_KNOWLEDGE_KEY, SUBJECT, NEXT);
+    assert.equal(await t.engine.replacePin(SUBJECT, { from: null, to: newer }), true);
+    await t.engine.finishPinChange(SUBJECT, error);
+    assert.equal((await t.records.getSubject("ws_test", SUBJECT))!.pinDigest, newer, "the newer PIN stays");
     assert.deepEqual(await t.counters.get(COUNTER, FOREVER), []);
     assert.deepEqual((await t.ledger.list()).map((e) => e.event), ["pin.reset"]);
   });
 
-  it("with resume, still compares and sets a change that has not landed, and refuses a stale one", async () => {
+  it("refuses to finish with anything but a PinChangeUnfinishedError's at and change", async () => {
     const t = setup();
     const at = t.clock.now().toISOString();
-    const onFile = (await t.records.getSubject("ws_test", SUBJECT))!.pinDigest!;
-    const next = pinDigest(TEST_KNOWLEDGE_KEY, SUBJECT, NEXT);
-    assert.equal(await t.engine.replacePin(SUBJECT, { from: "$pin1$stale", to: next, resume: at }), false);
+    const change = "a".repeat(64);
+    const bad: unknown[] = [
+      null,
+      "ref",
+      {},
+      { at },
+      { change },
+      { at: "yesterday", change },
+      { at: "2026-13-45T99:99:99.999Z", change },
+      { at: "2026-01-01", change },
+      { at: new Date(t.clock.now().getTime() + 1).toISOString(), change },
+      { at: 5, change },
+      { at, change: "A".repeat(64) },
+      { at, change: "a".repeat(63) },
+      { at, change: 7 },
+    ];
+    for (const ref of bad) await assert.rejects(t.engine.finishPinChange(SUBJECT, ref as never), rejects("invalid_input"), JSON.stringify(ref));
+    await assert.rejects(t.engine.finishPinChange("nope", { at, change }), rejects("invalid_input", /subjectKey/));
     assert.equal((await t.ledger.list()).length, 0);
-    assert.equal(await t.engine.replacePin(SUBJECT, { from: onFile, to: next, resume: at }), true);
-    assert.deepEqual((await t.ledger.list()).map((e) => e.event), ["pin.reset"]);
-    // A resumed first PIN that landed has nothing to clean up.
-    await t.engine.replacePin(SUBJECT, { from: next, to: null });
-    const first = pinDigest(TEST_KNOWLEDGE_KEY, SUBJECT, PIN);
-    assert.equal(await t.engine.replacePin(SUBJECT, { from: null, to: first }), true);
-    assert.equal(await t.engine.replacePin(SUBJECT, { from: null, to: first, resume: at }), true);
-    assert.equal((await t.ledger.list()).length, 2);
-    // A resumed removal while a PIN is on file again answers false, and a subject the store does not have too.
-    assert.equal(await t.engine.replacePin(SUBJECT, { from: null, to: null, resume: at }), false);
-    assert.equal(await t.engine.replacePin("f".repeat(64), { from: null, to: null, resume: at }), false);
-    assert.equal((await t.ledger.list()).length, 2);
   });
 
   it("refuses hostile input before touching the store", async () => {
@@ -189,11 +185,6 @@ describe("Engine.replacePin", () => {
       { from: onFile, to: null, phoneOnFile: "+0555" },
       { from: onFile, to: null, phoneOnFile: 15555550142 },
       { from: onFile, to: null, phoneOnFile: null },
-      { from: onFile, to: null, resume: "yes" },
-      { from: onFile, to: null, resume: 1 },
-      { from: onFile, to: null, resume: true },
-      { from: onFile, to: null, resume: "2026-13-45T99:99:99.999Z" },
-      { from: onFile, to: null, resume: "2026-01-01" },
     ];
     for (const change of bad) {
       await assert.rejects(t.engine.replacePin(SUBJECT, change as never), rejects("invalid_input"), JSON.stringify(change));

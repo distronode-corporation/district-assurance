@@ -52,7 +52,7 @@ import type { IdentityOutcome } from "./webhooks/stripe.ts";
 export { SUPPORTED_LOCALES, isSupportedLocale } from "./core/runtime.ts";
 export type { CallAccess, EngineAdapters, Locale } from "./core/runtime.ts";
 export type { KeypadResult, OutcomeResult, VerificationResult } from "./verify/badge.ts";
-export type { DuressEnrolmentResult, PinEnrolmentResult, PinReplacement } from "./verify/pin.ts";
+export type { DuressEnrolmentResult, PinChangeRef, PinEnrolmentResult, PinReplacement } from "./verify/pin.ts";
 
 
 /** What an `AttemptCounters` store must have, checked when the engine is built. */
@@ -1034,6 +1034,15 @@ export class Engine {
    */
   replacePin(subjectKey: string, change: pin.PinReplacement): Promise<boolean> {
     return pin.replacePin(this.#rt, subjectKey, change, this.#adapters.counters);
+  }
+
+  /**
+   * Finishes a PIN change that landed but threw `PinChangeUnfinishedError` (pass the error, or its
+   * `at` and `change`): forgets the failures recorded before it began, never a later one, and
+   * appends its `pin.reset` once. Whatever changed since. A host call from the business's own tools.
+   */
+  finishPinChange(subjectKey: string, ref: pin.PinChangeRef): Promise<void> {
+    return pin.finishPinChange(this.#rt, subjectKey, ref, this.#adapters.counters);
   }
 
   /**
