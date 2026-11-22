@@ -4,10 +4,38 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - Unreleased
 
 ### Added
 
+- `district-assurance/stripe` (ADR-30, SPEC section 31): `StripeCheckoutLinks` in test or live mode
+  over a structural `StripeClientLike` (a stripe-node instance fits it as it is) or
+  `fetchStripeClient`, on API version `2026-09-30.endive` with `allowed_payment_method_types`;
+  `assertStripeKey` (a mode's `sk_` or `rk_` key only); `cs_test_` and `cs_live_` ids and every
+  answer's `livemode` held to the mode; `expire` reading back `expired`, `already_expired`,
+  `complete` (paid won the race) or `open` after any answer, sent with no idempotency key (Stripe
+  saves a key's failed result for every retry), with a session still open after a 5xx, 429 or lost
+  answer retryable; `expiresAt` kept to 30 minutes to 24 hours, the default 35 (`checkoutExpiresAt`);
+  an empty method list refused; reads asked again after a lost answer up to `maxNetworkRetries`
+  (at most 2) on `fetchStripeClient`; an onboarding link refused unless it names the requested
+  account; Connect
+  onboarding on Accounts v2 (`connectAccountCreateParams`, `createConnectAccount`,
+  `createOnboardingLink`, `readConnectStatus`, `connectStatusOf`); `verifyConnectEvent`, whose mode
+  is the verifying secret's (both modes verifying is invalid, a `livemode` of the other mode is
+  `wrong_mode`), and `connectEventAccount`; `StripeAdapterError`, `StripeHttpError` and
+  `StripeKeyRefused`, none of which carries Stripe's message or any part of a key.
+- `connectStatusOf` (and so `createConnectAccount` and `readConnectStatus`) reads
+  `detailsSubmitted` true only once Stripe has requested a merchant capability, which it does after
+  onboarding collects the business's details, and no requirement due from the business restricts a
+  payment capability: a freshly created account reads false, never "nothing due, so submitted".
+  Pinned with real test-mode v2 Account shapes (`test/fixtures/stripe-v2-accounts/`).
+- `STRIPE_CHECKOUT_CAPABILITIES` and `stripeCheckoutCapabilities(modes)`: Checkout's frozen
+  `PaymentLinkCapabilities`. `StripeCheckoutLinks` checks `expiresAt` against its own clock (wall
+  time unless `now` is given), so a host engine on another clock passes it.
+- `district-assurance/carrier` (SPEC section 32): `twilioSimSwapHours`, `twilioIdentityMatch`,
+  `telnyxPortHours`, `durationHours`, `isCarrierAnswer` and `uncheckedReport`.
+- `receiptKeysDocument(signers)` and `RECEIPT_KEYS_CACHE_CONTROL`: the public receipt-keys document,
+  each `kid` once, two different keys under one `kid` refused.
 - `createOwnerPin({ engine, hmac, records, counters, lockout?, now? })` from the package root: the
   owner PIN of the `owner-command` flow (ADR-20, ADR-31). `status`, `setPin`, `clearPin` and
   `liftLock` over the engine's own stores, with the owner as the subject `ownerSubjectKey(hmac,
@@ -17,6 +45,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The reference server's Checkout adapter is the package's `StripeCheckoutLinks` (its own copy is
+  gone), and its carrier adapters use the package's parsers. The recorded Checkout runs replay on
+  `2025-03-31.basil`, which the adapter accepts in test mode only.
 - The Seam adapter (GAT-5) checked against Seam's current API reference: its requests and the
   fields it reads (`device_id`, `can_remotely_unlock`, `properties.online`, the action attempt's
   `status` and `result.was_confirmed_by_device`) are the documented ones, and a test now replays

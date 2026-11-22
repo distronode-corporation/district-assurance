@@ -38,7 +38,8 @@ import { randomIds, systemClock, verifyStripeSignature } from "../../../src/inde
 import { createReferenceServer } from "../../../examples/reference-server/src/app.ts";
 import { createServe } from "../../../examples/reference-server/src/main.ts";
 import { createDemoWorld } from "../../../examples/reference-server/src/script.ts";
-import { STRIPE_API_VERSION, StripeCheckoutLinks, assertTestModeSecretKey } from "../../../examples/reference-server/src/stripe-adapters.ts";
+import { STRIPE_API_VERSION, assertTestModeSecretKey, testModeCheckout } from "../../../examples/reference-server/src/stripe-adapters.ts";
+import { STRIPE_BASIL_API_VERSION } from "../../../src/stripe/index.ts";
 import { recordedConfig, requestRecordedLink, type RecordedFlow } from "./flows.ts";
 import { type Delivery, type PendingDelivery, forwardingFailed, receiverStatus, settledDelivery } from "./deliveries.ts";
 import { writePrivateFile } from "./private-file.ts";
@@ -161,7 +162,7 @@ const identityBase = await listen(serve.server);
 // 2 and 3. The payments world and its reference server. Checkout returns the payer to the identity
 // server's page, which is all a success URL needs here.
 const world = createDemoWorld({
-  payments: new StripeCheckoutLinks(key, { apiBase, successUrl: `${identityBase}/` }),
+  payments: testModeCheckout(key, { apiBase, successUrl: `${identityBase}/`, apiVersion: STRIPE_BASIL_API_VERSION }),
   clock: systemClock,
   ids: randomIds,
   config: recordedConfig(account),

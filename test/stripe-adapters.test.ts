@@ -8,7 +8,8 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { DemoRuns, type RunView } from "../examples/reference-server/src/demo-runs.ts";
 import { e2eConfig, e2eScripts, shortSessionId, startE2eDemo } from "../examples/reference-server/src/e2e.ts";
 import { createDemoWorld } from "../examples/reference-server/src/script.ts";
-import { STRIPE_API_VERSION, StripeApiError, StripeCheckoutLinks, StripeKeyRefused, assertTestModeSecretKey, checkoutPaymentMethodTypes, stripeMetadataCallId } from "../examples/reference-server/src/stripe-adapters.ts";
+import { StripeKeyRefused, assertTestModeSecretKey, stripeMetadataCallId, testModeCheckout } from "../examples/reference-server/src/stripe-adapters.ts";
+import { STRIPE_API_VERSION, StripeAdapterError, checkoutPaymentMethodTypes, type StripeCheckoutLinks } from "../src/stripe/index.ts";
 import { systemClock, type Clock, type PaymentLinkRequest } from "../src/index.ts";
 
 // Made up, shaped like a test key; never a real one.
@@ -139,8 +140,9 @@ function request(overrides: Partial<PaymentLinkRequest> = {}): PaymentLinkReques
 }
 
 describe("Stripe Checkout adapter: test-mode keys only", () => {
-  it("refuses live, restricted, publishable and malformed keys, never quoting the key", () => {
-    const refused = ["sk_live_abcdefgh12345678", "rk_live_abcdefgh12345678", "rk_test_abcdefgh12345678", "pk_test_abcdefgh12345678", "sk_test_", "sk_test_short", "sk_test_has space 123456", "", undefined, 42];
+  it("refuses live, publishable and malformed keys, never quoting the key (a restricted TEST key is accepted)", () => {
+    assert.doesNotThrow(() => assertTestModeSecretKey("rk_test_abcdefgh12345678"));
+    const refused = ["sk_live_abcdefgh12345678", "rk_live_abcdefgh12345678", "pk_test_abcdefgh12345678", "sk_test_", "sk_test_short", "sk_test_has space 123456", "", undefined, 42];
     for (const key of refused) {
       assert.throws(
         () => assertTestModeSecretKey(key),
@@ -148,9 +150,9 @@ describe("Stripe Checkout adapter: test-mode keys only", () => {
         String(key),
       );
     }
-    assert.throws(() => new StripeCheckoutLinks("sk_live_abcdefgh12345678", { successUrl: RETURN }), /LIVE Stripe key/);
-    assert.throws(() => new StripeCheckoutLinks("rk_live_abcdefgh12345678", { successUrl: RETURN }), /LIVE Stripe key/);
-    assert.throws(() => new StripeCheckoutLinks("", { successUrl: RETURN }), /set STRIPE_TEST_SECRET_KEY/);
+    assert.throws(() => testModeCheckout("sk_live_abcdefgh12345678", { successUrl: RETURN }), /LIVE Stripe key/);
+    assert.throws(() => testModeCheckout("rk_live_abcdefgh12345678", { successUrl: RETURN }), /LIVE Stripe key/);
+    assert.throws(() => testModeCheckout("", { successUrl: RETURN }), /set STRIPE_TEST_SECRET_KEY/);
     assert.doesNotThrow(() => assertTestModeSecretKey(KEY));
   });
 
@@ -161,12 +163,12 @@ describe("Stripe Checkout adapter: test-mode keys only", () => {
   });
 
   it("talks to https only (http to the loopback), with no credentials in the URL", () => {
-    assert.throws(() => new StripeCheckoutLinks(KEY, { apiBase: "http://api.stripe.com", successUrl: RETURN }), /apiBase must be https/);
-    assert.throws(() => new StripeCheckoutLinks(KEY, { apiBase: "https://u:p@api.stripe.com", successUrl: RETURN }), /carries no credentials/);
-    assert.throws(() => new StripeCheckoutLinks(KEY, { successUrl: "http://example.com/" }), /successUrl must be https/);
-    assert.throws(() => new StripeCheckoutLinks(KEY, {} as never), TypeError, "a hosted page needs a return URL");
-    assert.doesNotThrow(() => new StripeCheckoutLinks(KEY, { successUrl: "https://example.com/done" }));
-    const links = new StripeCheckoutLinks(KEY, { successUrl: RETURN });
+    assert.throws(() => testModeCheckout(KEY, { apiBase: "http://api.stripe.com", successUrl: RETURN }), /apiBase must be https/);
+    assert.throws(() => testModeCheckout(KEY, { apiBase: "https://u:p@api.stripe.com", successUrl: RETURN }), /carries no credentials/);
+    assert.throws(() => testModeCheckout(KEY, { successUrl: "http://example.com/" }), /successUrl must be https/);
+    assert.throws(() => testModeCheckout(KEY, {} as never), TypeError, "a hosted page needs a return URL");
+    assert.doesNotThrow(() => testModeCheckout(KEY, { successUrl: "https://example.com/done" }));
+    const links = testModeCheckout(KEY, { successUrl: RETURN });
     assert.deepEqual(links.capabilities, { modes: ["platform", "connect"], minLinkMinutes: 30, maxLinkMinutes: 1440 });
   });
 
@@ -183,7 +185,7 @@ describe("Stripe Checkout adapter against a local fake", () => {
 
   before(async () => {
     await fake.start();
-    links = new StripeCheckoutLinks(KEY, { apiBase: fake.base, successUrl: RETURN, timeoutMs: 5000 });
+    links = testModeCheckout(KEY, { apiBase: fake.base, successUrl: RETURN, timeoutMs: 5000, now: () => new Date(NOW) });
   });
   after(() => new Promise<void>((resolve) => fake.server.close(() => resolve())));
   beforeEach(() => fake.reset());
@@ -205,7 +207,7 @@ describe("Stripe Checkout adapter against a local fake", () => {
       "line_items[0][price_data][currency]": "cad",
       "line_items[0][price_data][unit_amount]": "2500",
       "line_items[0][price_data][product_data][name]": "Visit deposit",
-      "payment_method_types[0]": "card",
+      "allowed_payment_method_types[0]": "card",
       "expires_at": String(NOW / 1000 + 30 * 60),
       client_reference_id: "pay_1",
       "metadata[payment_id]": "pay_1",
@@ -217,7 +219,8 @@ describe("Stripe Checkout adapter against a local fake", () => {
   it("sends Stripe-Account for a connected account, and the same parameters on a retry", async () => {
     await links.createLink(request({ mode: "connect", connectedAccountId: "acct_x", paymentMethods: ["card", "link"], expiresAt: new Date(NOW + 2 * 3600_000).toISOString() }));
     assert.equal(fake.seen[0]!.headers["stripe-account"], "acct_x");
-    assert.equal(fake.seen[0]!.form.get("payment_method_types[1]"), "link");
+    assert.equal(fake.seen[0]!.form.get("allowed_payment_method_types[1]"), "link");
+    assert.equal(fake.seen[0]!.form.get("payment_method_types[1]"), null, "endive took payment_method_types away");
     assert.equal(fake.seen[0]!.form.get("expires_at"), String(NOW / 1000 + 7200), "the engine's expiresAt, unchanged");
     // A retry under the same idempotency key, later: the same body, so Stripe answers the first Session.
     fake.next = { status: 500, body: "{}" };
@@ -232,31 +235,31 @@ describe("Stripe Checkout adapter against a local fake", () => {
     await assert.rejects(links.createLink(request()), (e: unknown) => {
       const message = (e as Error).message;
       return (
-        e instanceof StripeApiError &&
-        e.name === "StripeApiError" &&
+        e instanceof StripeAdapterError &&
+        e.name === "StripeAdapterError" &&
         e.status === 401 &&
         !e.retryable &&
-        message === "Stripe did not create the Checkout Session (HTTP 401, type invalid_request_error, code api_key_invalid)" &&
+        message === "Stripe did not create the Checkout Session (HTTP 401, invalid_request_error, api_key_invalid)" &&
         !message.includes(KEY)
       );
     });
     fake.next = { status: 429, body: "{}" };
-    await assert.rejects(links.createLink(request()), (e: unknown) => e instanceof StripeApiError && e.retryable);
+    await assert.rejects(links.createLink(request()), (e: unknown) => e instanceof StripeAdapterError && e.retryable);
     fake.next = { status: 500, body: "not json" };
     await assert.rejects(links.createLink(request()), /HTTP 500\)/);
     fake.next = { status: 200, body: "[]" };
-    await assert.rejects(links.createLink(request()), /HTTP 200\)/);
+    await assert.rejects(links.createLink(request()), /HTTP 200, malformed_response\)/);
     fake.next = { status: 200, body: JSON.stringify({ id: "cs_live_x", url: "https://checkout.stripe.com/x", livemode: false }) };
-    await assert.rejects(links.createLink(request()), /did not create/, "a live session id is not an answer to a test key");
+    await assert.rejects(links.createLink(request()), /answer a test-mode Checkout Session/, "a live session id is not an answer to a test key");
     fake.next = { status: 200, body: JSON.stringify({ id: "cs_test_x", url: "http://checkout.stripe.com/x", livemode: false }) };
-    await assert.rejects(links.createLink(request()), /did not create/);
+    await assert.rejects(links.createLink(request()), /answer a test-mode Checkout Session/);
     fake.next = { status: 400, body: JSON.stringify({ error: "a string" }) };
     await assert.rejects(links.createLink(request()), /\(HTTP 400\)/);
   });
 
   it("refuses a live-mode session even from a test key", async () => {
     fake.createLive = true;
-    await assert.rejects(links.createLink(request()), /live-mode session/);
+    await assert.rejects(links.createLink(request()), /answer a test-mode Checkout Session/);
   });
 
   it("expires an open session, and answers not_open for one that is no longer open", async () => {
@@ -264,7 +267,7 @@ describe("Stripe Checkout adapter against a local fake", () => {
     assert.deepEqual(await links.expireLink({ linkId: open.linkId, mode: "platform", idempotencyKey: "e1" }), { state: "expired" });
     const expire = fake.seen.find((s) => s.path.endsWith("/expire"))!;
     assert.equal(expire.method, "POST");
-    assert.equal(expire.headers["idempotency-key"], "e1");
+    assert.equal(expire.headers["idempotency-key"], undefined, "an expire carries no key: Stripe would answer a saved failure to every retry");
     assert.deepEqual(await links.expireLink({ linkId: open.linkId, mode: "platform", idempotencyKey: "e2" }), { state: "not_open" });
     const connect = await links.createLink(request({ mode: "connect", connectedAccountId: "acct_x" }));
     fake.sessions.get(connect.linkId)!.status = "complete";
@@ -273,12 +276,15 @@ describe("Stripe Checkout adapter against a local fake", () => {
     assert.deepEqual(fake.seen.map((s) => [s.method, s.headers["stripe-account"]]), [["POST", "acct_x"], ["GET", "acct_x"]]);
   });
 
-  it("throws when Stripe refuses to expire a session that is still open, or fails", async () => {
+  it("throws when Stripe refuses to expire a session that is still open (its 400, not retryable), or fails (retryable)", async () => {
     const open = await links.createLink(request());
     fake.next = { status: 400, body: JSON.stringify({ error: { type: "invalid_request_error" } }) };
-    await assert.rejects(links.expireLink({ linkId: open.linkId, mode: "platform", idempotencyKey: "e" }), /did not expire the Checkout Session \(HTTP 400, type invalid_request_error\)/);
+    await assert.rejects(
+      links.expireLink({ linkId: open.linkId, mode: "platform", idempotencyKey: "e" }),
+      (e: unknown) => e instanceof StripeAdapterError && !e.retryable && /did not expire the Checkout Session \(HTTP 400, invalid_request_error\)/.test(e.message),
+    );
     fake.next = { status: 503, body: "{}" };
-    await assert.rejects(links.expireLink({ linkId: open.linkId, mode: "platform", idempotencyKey: "e" }), /HTTP 503/);
+    await assert.rejects(links.expireLink({ linkId: open.linkId, mode: "platform", idempotencyKey: "e" }), (e: unknown) => e instanceof StripeAdapterError && e.retryable && /HTTP 503/.test(e.message));
     await assert.rejects(links.expireLink({ linkId: "cs_test_../../v1/x", mode: "platform", idempotencyKey: "e" }), TypeError);
   });
 
@@ -290,10 +296,11 @@ describe("Stripe Checkout adapter against a local fake", () => {
         fake.next = { status: 200, body };
         return links.expireLink({ linkId: open.linkId, mode: "platform", idempotencyKey: key });
       };
-      // Still open when read back: the close is not established.
-      await assert.rejects(expire("a"), /did not expire the Checkout Session \(HTTP 200\)/, body);
+      // Still open when read back: the close is not established, and asking again may establish it.
+      await assert.rejects(expire("a"), (e: unknown) => e instanceof StripeAdapterError && e.retryable && /still open/.test((e as Error).message), body);
+      // Expired when read back, but this call's answer did not show the close: not claimed.
       fake.sessions.get(open.linkId)!.status = "expired";
-      assert.deepEqual(await expire("b"), { state: "expired" }, body);
+      assert.deepEqual(await expire("b"), { state: "not_open" }, body);
       fake.sessions.get(open.linkId)!.status = "complete";
       assert.deepEqual(await expire("c"), { state: "not_open" }, body);
     }
@@ -301,7 +308,7 @@ describe("Stripe Checkout adapter against a local fake", () => {
 
   it("refuses a Checkout URL that opens nothing, bounds the call id in metadata, and pins the API version (L1 review round 2)", async () => {
     fake.next = { status: 200, body: JSON.stringify({ id: "cs_test_x", url: "https://", livemode: false }) };
-    await assert.rejects(links.createLink(request()), /did not create/);
+    await assert.rejects(links.createLink(request()), /answer a test-mode Checkout Session/);
     const long = "c".repeat(501);
     await links.createLink(request({ callId: long }));
     assert.equal(fake.seen.at(-1)!.form.get("metadata[call_id]"), stripeMetadataCallId(long));
@@ -373,7 +380,7 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
   }
 
   async function world(options: Parameters<typeof e2eScripts>[1], clock: Clock = systemClock) {
-    const stripe = new StripeCheckoutLinks(KEY, { apiBase: fake.base, successUrl: RETURN });
+    const stripe = testModeCheckout(KEY, { apiBase: fake.base, successUrl: RETURN, now: () => clock.now() });
     const w = createDemoWorld({ payments: stripe, clock, config: e2eConfig() });
     await w.relayUrl();
     const relay = { close: (done: () => void) => void w.close().then(done) };
@@ -426,7 +433,7 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
       answer = await runs.step(second.runId);
       assert.ok(answer.ok);
       assert.deepEqual([answer.view.results.at(-1)!.detail, answer.view.done], ["failed: internal error", true]);
-      assert.ok(lines.includes(`${WAIT} FAILED: Stripe did not answer the Checkout Session (HTTP 401, type authentication_error)`));
+      assert.ok(lines.includes(`${WAIT} FAILED: Stripe did not read the Checkout Session (HTTP 401, authentication_error)`));
     } finally {
       await new Promise<void>((resolve) => relay.close(() => resolve()));
     }
@@ -494,7 +501,7 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
       const third = await runs.start("visit");
       for (let i = 0; i < 3; i++) await runs.step(third.runId);
       const failed = lines.find((line) => line.includes(") FAILED: "))!;
-      assert.equal(failed, "pay: Checkout link created (Stripe test mode) FAILED: Stripe did not create the Checkout Session (HTTP 400, type idempotency_error)");
+      assert.equal(failed, "pay: Checkout link created (Stripe test mode) FAILED: Stripe did not create the Checkout Session (HTTP 400, idempotency_error)");
     } finally {
       await new Promise<void>((resolve) => relay.close(() => resolve()));
     }
@@ -529,7 +536,7 @@ describe("the live demo's scripts (e2e.ts) on the fake", () => {
   });
 
   it("uses its defaults without a log, and stops a waiting step when told to", async () => {
-    const stripe = new StripeCheckoutLinks(KEY, { apiBase: fake.base, successUrl: RETURN });
+    const stripe = testModeCheckout(KEY, { apiBase: fake.base, successUrl: RETURN });
     const scripts = e2eScripts(stripe);
     assert.deepEqual(Object.keys(scripts), ["owner-command", "visit"]);
     assert.equal(shortSessionId("cs_test_a1b2c3d4e5f6g7"), "cs_test_a1b2c3...");

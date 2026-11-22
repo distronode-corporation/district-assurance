@@ -9,6 +9,10 @@
 // hears why, with the vendor's status and error code, never the number, a name or a credential.
 import type { CarrierSignalReport, CarrierSignals, Clock } from "../../../src/index.ts";
 import { systemClock } from "../../../src/index.ts";
+import { isCarrierAnswer, telnyxPortHours, twilioIdentityMatch, twilioSimSwapHours, uncheckedReport } from "../../../src/carrier/index.ts";
+
+// The parsers moved into the package (district-assurance/carrier); re-exported for the reference server's callers.
+export { durationHours, uncheckedReport } from "../../../src/carrier/index.ts";
 
 export type CarrierVendor = "twilio" | "telnyx";
 
@@ -90,18 +94,10 @@ type Env = Readonly<Record<string, string | undefined>>;
 type Json = Record<string, unknown>;
 type Fetched = { ok: true; body: Json } | { ok: false; failure: Omit<CarrierLookupFailure, "vendor"> };
 
-const UNCHECKED: CarrierSignalReport = { checked: false, simSwapChecked: false, lastSimSwapHoursAgo: null, lastPortHoursAgo: null, identityMatch: "unavailable" };
 const E164 = /^\+[1-9]\d{6,14}$/;
-const HOUR_MS = 3_600_000;
-/** A date and time with a zone, as Twilio writes `last_sim_swap_date`. */
-const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
 const DEFAULT_TIMEOUT_MS = 3000;
 const MAX_TIMEOUT_MS = 60_000;
 
-/** A fresh report that says nothing is known. */
-export function uncheckedReport(): CarrierSignalReport {
-  return { ...UNCHECKED };
-}
 
 /** `work`, or a rejection when `signal` aborts first. The listener goes when either settles. */
 function beforeDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -113,22 +109,6 @@ function beforeDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 
 const isObject = (value: unknown): value is Json => typeof value === "object" && value !== null && !Array.isArray(value);
-
-/** Whole hours from `at` to now, never negative. Rounded down, so a change is never reported older than it is. */
-function hoursSince(at: number, now: Date): number {
-  return Math.max(0, Math.floor((now.getTime() - at) / HOUR_MS));
-}
-
-/** An ISO 8601 duration such as `PT15282H33M44S` or `P3DT4H`, in hours, or null. */
-export function durationHours(value: string): number | null {
-  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(value);
-  if (m === null || value === "P" || value.endsWith("T")) return null;
-  const [, d, h, min, s] = m;
-  const hours = Number(d ?? 0) * 24 + Number(h ?? 0) + Number(min ?? 0) / 60 + Number(s ?? 0) / 3600;
-  // A period too long for a number (hundreds of digits) is not an answer: Infinity hours would
-  // trust a texted code on a SIM swap of any age.
-  return Number.isFinite(hours) ? Math.floor(hours) : null;
-}
 
 function countryList(raw: string | undefined, fallback: readonly string[]): string[] {
   const list = (raw ?? "")
@@ -302,48 +282,15 @@ export class TwilioLookupSignals extends LookupAdapter {
     if (body.valid === false) return this.unavailable({ reason: "invalid_number" });
     if (!this.countryAllowed(body.country_code)) return this.unavailable({ reason: "unsupported_country" });
 
-    const swap = this.#simSwapHours(body.sim_swap);
-    if (typeof swap !== "number" && swap !== null) return this.unavailable(swap);
+    const swap = twilioSimSwapHours(body.sim_swap, this.clock.now());
+    if (!isCarrierAnswer(swap)) return this.unavailable(swap);
     let identityMatch: CarrierSignalReport["identityMatch"] = "unavailable";
     if (identity !== null) {
-      const matched = this.#identityMatch(body.identity_match);
-      if (typeof matched !== "string") return this.unavailable(matched);
+      const matched = twilioIdentityMatch(body.identity_match, this.#minScore);
+      if (!isCarrierAnswer(matched)) return this.unavailable(matched);
       identityMatch = matched;
     }
     return { checked: true, simSwapChecked: true, lastSimSwapHoursAgo: swap, lastPortHoursAgo: null, identityMatch };
-  }
-
-  /**
-   * Hours since the last SIM change: from its date (ISO 8601 only), but when Twilio says it changed
-   * within the period it looked at, never older than that period (0 without a date that fits it);
-   * else, when Twilio says it did not, the length of that period as a lower
-   * bound (the change is at least that old). `swapped_period` is the window Twilio looked at, never
-   * the age of a change. Anything else is not an answer.
-   */
-  #simSwapHours(field: unknown): number | null | Omit<CarrierLookupFailure, "vendor"> {
-    if (!isObject(field)) return { reason: "bad_response" };
-    if (field.error_code !== null && field.error_code !== undefined) return { reason: "feature_unavailable", code: String(field.error_code) };
-    const last = field.last_sim_swap;
-    if (!isObject(last)) return { reason: "bad_response" };
-    // Only an ISO 8601 time is a date: Date.parse also reads "1" or "Jan 1" as a year long ago.
-    const at = typeof last.last_sim_swap_date === "string" && ISO_TIME.test(last.last_sim_swap_date) ? Date.parse(last.last_sim_swap_date) : Number.NaN;
-    const dated = Number.isNaN(at) ? null : hoursSince(at, this.clock.now());
-    const period = typeof last.swapped_period === "string" ? durationHours(last.swapped_period) : null;
-    // A change Twilio flags in its period is at most that old: a date older than the period beside
-    // it (or no period to check it against) never outweighs the flag, and the change reads as now.
-    if (last.swapped_in_period === true) return dated !== null && period !== null && dated <= period ? dated : 0;
-    if (dated !== null) return dated;
-    if (last.swapped_in_period === false && period !== null) return period;
-    return { reason: "bad_response" };
-  }
-
-  #identityMatch(field: unknown): CarrierSignalReport["identityMatch"] | Omit<CarrierLookupFailure, "vendor"> {
-    if (!isObject(field)) return { reason: "bad_response" };
-    if (field.error_code !== null && field.error_code !== undefined) return { reason: "feature_unavailable", code: String(field.error_code) };
-    const score = field.summary_score;
-    // Twilio scores 0 to 100; anything else is not an answer, never a match.
-    if (typeof score !== "number" || !(score >= 0 && score <= 100)) return { reason: "bad_response" };
-    return score >= this.#minScore ? "match" : "no_match";
   }
 }
 
@@ -382,30 +329,12 @@ export class TelnyxNumberLookupSignals extends LookupAdapter {
     const data = fetched.body.data;
     if (!isObject(data)) return { report: this.unavailable({ reason: "bad_response" }), carrier: null };
     if (!this.countryAllowed(data.country_code)) return { report: this.unavailable({ reason: "unsupported_country" }), carrier: null };
-    const port = this.#portHours(data.portability);
+    const port = telnyxPortHours(data.portability, this.clock.now());
     if (typeof port !== "number" && port !== null) return { report: this.unavailable(port), carrier: null };
     return {
       report: { checked: true, simSwapChecked: false, lastSimSwapHoursAgo: null, lastPortHoursAgo: port, identityMatch: "unavailable" },
       carrier: carrierOf(data.carrier),
     };
-  }
-
-  /**
-   * Hours since the last port. Telnyx gives a date without a time or a zone, so the hours run from
-   * the last moment that date ends anywhere (noon UTC the next day, the end of the day at UTC-12),
-   * so a port is never reported older than it can be; a port without a date is 0.
-   */
-  #portHours(field: unknown): number | null | Omit<CarrierLookupFailure, "vendor"> {
-    if (!isObject(field)) return { reason: "bad_response" };
-    const status = typeof field.ported_status === "string" ? field.ported_status.toUpperCase() : "";
-    if (status === "N") return null;
-    if (status !== "Y") return { reason: "feature_unavailable" };
-    const date = typeof field.ported_date === "string" ? field.ported_date : "";
-    const dayOnly = /^\d{4}-\d{2}-\d{2}$/.test(date);
-    // Only an ISO date or time is read: Date.parse takes "1" as 2001 and "Jan 1" as a past date, an
-    // old port where there may have been a new one. Anything else is a port just now (0).
-    const at = dayOnly ? Date.parse(`${date}T00:00:00Z`) + 36 * HOUR_MS : ISO_TIME.test(date) ? Date.parse(date) : Number.NaN;
-    return Number.isNaN(at) ? 0 : hoursSince(at, this.clock.now());
   }
 }
 

@@ -1,0 +1,131 @@
+{
+  "_note": "Shape of a real Stripe test-mode v2 Account read with include configuration.merchant and requirements (2026-09-30.endive), 2026-11-22. Kept: object, livemode, the merchant configuration's applied flag and capabilities, requirements. Removed: every id (replaced), identity, contact, display name, branding, support, descriptors, metadata, created, defaults.",
+  "id": "acct_FIXTUREonboarded00",
+  "object": "v2.core.account",
+  "livemode": false,
+  "configuration": {
+    "merchant": {
+      "applied": true,
+      "capabilities": {
+        "ach_debit_payments": null,
+        "acss_debit_payments": null,
+        "affirm_payments": null,
+        "afterpay_clearpay_payments": null,
+        "alma_payments": null,
+        "amazon_pay_payments": null,
+        "au_becs_debit_payments": null,
+        "bacs_debit_payments": null,
+        "bancontact_payments": {
+          "status": "active",
+          "status_details": []
+        },
+        "blik_payments": {
+          "status": "active",
+          "status_details": []
+        },
+        "blik_recurring_payments": null,
+        "boleto_payments": null,
+        "card_payments": {
+          "status": "active",
+          "status_details": []
+        },
+        "cartes_bancaires_payments": null,
+        "cashapp_payments": null,
+        "eps_payments": {
+          "status": "active",
+          "status_details": []
+        },
+        "fpx_payments": null,
+        "gb_bank_transfer_payments": null,
+        "grabpay_payments": null,
+        "ideal_payments": {
+          "status": "active",
+          "status_details": []
+        },
+        "jcb_payments": null,
+        "jp_bank_transfer_payments": null,
+        "kakao_pay_payments": null,
+        "klarna_payments": {
+          "status": "active",
+          "status_details": []
+        },
+        "konbini_payments": null,
+        "kr_card_payments": null,
+        "link_payments": {
+          "status": "active",
+          "status_details": []
+        },
+        "mobilepay_payments": null,
+        "multibanco_payments": null,
+        "mx_bank_transfer_payments": null,
+        "naver_pay_payments": null,
+        "oxxo_payments": null,
+        "p24_payments": null,
+        "pay_by_bank_payments": {
+          "status": "active",
+          "status_details": []
+        },
+        "payco_payments": null,
+        "paynow_payments": null,
+        "promptpay_payments": null,
+        "revolut_pay_payments": null,
+        "samsung_pay_payments": null,
+        "satispay_payments": null,
+        "sepa_bank_transfer_payments": null,
+        "sepa_debit_payments": null,
+        "sequra_payments": null,
+        "stripe_balance": {
+          "payouts": {
+            "status": "restricted",
+            "status_details": [
+              {
+                "code": "requirements_past_due",
+                "resolution": "provide_info"
+              }
+            ]
+          }
+        },
+        "sunbit_payments": null,
+        "swish_payments": null,
+        "twint_payments": null,
+        "us_bank_transfer_payments": null,
+        "zip_payments": null
+      }
+    }
+  },
+  "requirements": {
+    "entries": [
+      {
+        "awaiting_action_from": "user",
+        "description": "external_account",
+        "errors": [],
+        "impact": {
+          "restricts_capabilities": [
+            {
+              "capability": "stripe_balance.payouts",
+              "configuration": "merchant",
+              "deadline": {
+                "status": "past_due"
+              }
+            }
+          ]
+        },
+        "minimum_deadline": {
+          "status": "past_due"
+        },
+        "reference": null,
+        "requested_reasons": [
+          {
+            "code": "routine_onboarding"
+          }
+        ]
+      }
+    ],
+    "summary": {
+      "minimum_deadline": {
+        "status": "past_due",
+        "time": null
+      }
+    }
+  }
+}
