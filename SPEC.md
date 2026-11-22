@@ -3143,9 +3143,10 @@ the merchant `card_payments` capability `active`, and `detailsSubmitted`: Stripe
 merchant capability with a status (it does so only once onboarding has collected the business's
 details; a new account answers `capabilities: null` and no entries), and the `entries` list holds no
 requirement awaiting the business, currently or past due, that restricts a merchant `*_payments`
-capability (one restricting only payouts does not count; an entry, a deadline or an impact that
-cannot be read counts as due and restricting).
-Anything missing reads false.
+capability. One restricting only payouts does not count. An entry that cannot be read holds it
+false; an unreadable deadline counts as due, and an unreadable impact (or restriction) counts as
+restricting payments, each on its own, so a user requirement with no deadline that restricts only
+payouts still does not count. Anything missing reads false.
 `createOnboardingLink` takes no mode and answers `{ url }` only: an https link, refused unless the
 answer names the requested account, for the owner's own browser only, never texted or emailed.
 
