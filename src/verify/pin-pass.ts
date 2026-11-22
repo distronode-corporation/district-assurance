@@ -18,7 +18,7 @@ import type { AttemptCounterKey } from "../core/adapters.ts";
 import { EngineError } from "../core/errors.ts";
 import { hexDigestsEqual, sha256Hex } from "../core/hash.ts";
 import type { CallRecord, EngineRuntime } from "../core/runtime.ts";
-import { BADGE, PIN_PASS_MAX_SECONDS, allowFactor, assertSameVerification, type BadgeSlice } from "./badge.ts";
+import { BADGE, PIN_PASS_MAX_SECONDS, allowFactor, assertSameVerification, type BadgeSlice, type PinPassRecord } from "./badge.ts";
 import { counterKeys, currentLock, lockoutOf } from "./counters.ts";
 import { duressFlagKey, hiddenCounterKey, hiddenHardLock, hiddenWindowStart, isUnderDuress } from "./duress-flag.ts";
 import type { BadgeSettings } from "./factors.ts";
@@ -50,6 +50,9 @@ export async function issuePinPass(rt: EngineRuntime, callId: string): Promise<{
   rt.settings(BADGE);
   const token = randomBytes(32).toString("base64url");
   const tokenHash = sha256Hex(token);
+  // Bound first: a bind that fails leaves nothing on the call, so the host may ask again. A
+  // reference left bound to a call whose write then failed finds no pass there ("unknown").
+  await rt.bindRef(passRef(tokenHash), callId);
   const { expiresAt } = await rt.update(callId, (draft) => {
     const s = draft.slice<BadgeSlice>(BADGE);
     const state = draft.record.state;
@@ -65,7 +68,6 @@ export async function issuePinPass(rt: EngineRuntime, callId: string): Promise<{
     draft.emit("verification.pin_pass_issued", "code", { expiresAt: until });
     return { expiresAt: until };
   });
-  await rt.bindRef(passRef(tokenHash), callId);
   return { token, expiresAt };
 }
 
@@ -127,22 +129,13 @@ async function judge(
   const fromCallId = await rt.resolveRef(passRef(tokenHash));
   if (fromCallId === null) return "unknown";
   if (fromCallId === callId) return "same_call";
-  let from: CallRecord;
-  try {
-    from = await rt.read(fromCallId);
-  } catch (error) {
-    // The issuing call was removed since (its session retention): nothing is left to check against.
-    if (error instanceof EngineError && error.code === "unknown_call") return "unknown";
-    throw error;
-  }
-  const badge = from.modules[BADGE] as unknown as BadgeSlice | undefined;
-  const pass = badge?.pinPass;
-  if (pass === undefined || !hexDigestsEqual(pass.tokenHash, tokenHash)) return "unknown";
+  const first = await issuer(rt, fromCallId, tokenHash);
+  if (typeof first === "string") return first;
+  const pass = first.pass;
   const now = rt.clock.now();
   if (now.getTime() - Date.parse(pass.passedAt) > maxAgeSeconds * 1000) return "expired";
-  if (from.state.tainted || (badge!.taints ?? 0) !== pass.taints) return "tainted";
-  // A call a synthetic voice score held to level 1 (VER-14) passes nothing on: the voice is not trusted.
-  if ((from.state.syntheticVoice ?? "clear") === "level_1") return "voice";
+  const untrusted = distrusted(first.record, first.badge, pass);
+  if (untrusted !== null) return untrusted;
   if (pass.subjectKey !== current.subjectKey) return "subject";
   if (pass.numberKey !== current.numberKey) return "number";
   if ((await pinLock(rt, current)) !== null) return "locked";
@@ -150,7 +143,36 @@ async function judge(
   const spent = usedRef(tokenHash);
   await rt.bindRef(spent, callId);
   if ((await rt.resolveRef(spent)) !== callId) return "used";
+  // Read again once spent, right before the factor is written: a taint or a voice band that landed
+  // on the issuing call while the counters and the binding were asked refuses it (the pass stays spent).
+  const again = await issuer(rt, fromCallId, tokenHash);
+  if (typeof again === "string") return again;
+  const late = distrusted(again.record, again.badge, again.pass);
+  if (late !== null) return late;
   return { fromCallId, passedAt: pass.passedAt, duress };
+}
+
+/** The issuing call's record and its pass, or `unknown` for a call removed since or a record that no longer holds the pass. */
+async function issuer(rt: EngineRuntime, fromCallId: string, tokenHash: string): Promise<"unknown" | { record: CallRecord; badge: BadgeSlice; pass: PinPassRecord }> {
+  let record: CallRecord;
+  try {
+    record = await rt.read(fromCallId);
+  } catch (error) {
+    // The issuing call was removed since (its session retention): nothing is left to check against.
+    if (error instanceof EngineError && error.code === "unknown_call") return "unknown";
+    throw error;
+  }
+  const badge = record.modules[BADGE] as unknown as BadgeSlice | undefined;
+  const pass = badge?.pinPass;
+  if (pass === undefined || !hexDigestsEqual(pass.tokenHash, tokenHash)) return "unknown";
+  return { record, badge: badge!, pass };
+}
+
+/** Why the issuing call no longer passes its PIN on: a taint since the pass was issued, or a level 1 voice band (VER-14). */
+function distrusted(record: CallRecord, badge: BadgeSlice, pass: PinPassRecord): "tainted" | "voice" | null {
+  if (record.state.tainted || (badge.taints ?? 0) !== pass.taints) return "tainted";
+  // A call a synthetic voice score held to level 1 passes nothing on: the voice is not trusted.
+  return (record.state.syntheticVoice ?? "clear") === "level_1" ? "voice" : null;
 }
 
 /** A lock on the PIN now, for this call's subject or calling number, as a PIN entry would meet it (hidden counter included). */

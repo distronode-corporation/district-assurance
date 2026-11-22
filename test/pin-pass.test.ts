@@ -339,6 +339,63 @@ describe("PIN pass: calls saved before taints and voice bands were kept", () => 
   });
 });
 
+describe("PIN pass: the issuing call changes while the pass is redeemed", () => {
+  it("refuses a pass whose issuing call was tainted, or held to level 1, after the first read, and keeps it spent", async () => {
+    for (const [what, change] of [
+      ["tainted", (t: TestEngine, id: string) => t.engine.markUntrusted(id, "a webhook reply")],
+      ["voice", (t: TestEngine, id: string) => t.engine.reportSyntheticVoice(id, { score: 0.9, vendor: "acme" })],
+    ] as const) {
+      const t = passSetup();
+      const a = await signIn(t);
+      const b = await second(t);
+      // The taint lands on the issuing call while the spend is bound.
+      const bind = t.sessions.bindRef.bind(t.sessions);
+      t.sessions.bindRef = async (ws, ref, id) => {
+        if (ref.startsWith("pin_pass_used:")) await change(t, a.callId);
+        return bind(ws, ref, id);
+      };
+      assert.deepEqual(await t.engine.reusePin(b, a.token), { reused: false }, what);
+      assert.deepEqual(await refusals(t, b), [what]);
+      t.sessions.bindRef = bind;
+      assert.deepEqual(await t.engine.reusePin(await second(t), a.token), { reused: false }, "spent");
+    }
+  });
+
+  it("refuses a pass whose issuing call was removed, or lost its pass, after the first read", async () => {
+    const t = passSetup();
+    const a = await signIn(t);
+    const b = await second(t);
+    const bind = t.sessions.bindRef.bind(t.sessions);
+    t.sessions.bindRef = async (ws, ref, id) => {
+      if (ref.startsWith("pin_pass_used:")) {
+        const stored = (await t.sessions.get(ws, a.callId))!;
+        const record = structuredClone(stored.record) as unknown as CallRecord;
+        delete (record.modules.badge as unknown as BadgeSlice).pinPass;
+        await t.sessions.compareAndSet(ws, a.callId, stored.version, record as never);
+      }
+      return bind(ws, ref, id);
+    };
+    assert.deepEqual(await t.engine.reusePin(b, a.token), { reused: false });
+    assert.deepEqual(await refusals(t, b), ["unknown"]);
+  });
+
+  it("issues nothing when the reference cannot be bound, so the host may ask again", async () => {
+    const t = passSetup();
+    const { callId } = await t.engine.startCall({});
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT, callingNumber: CALLING });
+    await t.engine.submitPin(callId, PIN);
+    const bind = t.sessions.bindRef.bind(t.sessions);
+    t.sessions.bindRef = async () => {
+      throw new Error("store down");
+    };
+    await assert.rejects(t.engine.issuePinPass(callId), /store down/);
+    assert.equal((await badgeOf(t, callId)).pinPass, undefined);
+    t.sessions.bindRef = bind;
+    const { token } = await t.engine.issuePinPass(callId);
+    assert.deepEqual(await t.engine.reusePin(await second(t), token), { reused: true });
+  });
+});
+
 describe("PIN pass: issued", () => {
   it("only for a PIN that passed on this call within 5 minutes, once, on an open, untainted call", async () => {
     const t = passSetup();

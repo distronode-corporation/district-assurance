@@ -983,7 +983,8 @@ a reused PIN reaches level 2 only with a texted code (`[pin, text_code]`), as a 
   tainted, no pass issued on the call before, and a PIN the call keyed itself, not one it reused
   (each `precondition_failed`). The token is 32 random bytes in unpadded base64url, returned once
   and kept nowhere: the call keeps `{tokenHash (SHA-256), subjectKey, numberKey, passedAt,
-  expiresAt, taints, duress}`, and the session store binds `pin_pass:<tokenHash>` to the call.
+  expiresAt, taints, duress}`, and the session store binds `pin_pass:<tokenHash>` to the call,
+  before the write, so a bind that fails leaves no pass on the call and the host may ask again.
   `expiresAt` is `passedAt` plus 5 minutes. Ledger: `verification.pin_pass_issued` (`expiresAt`).
   The host keeps the token in memory and hands it only to the call it opens next for that phone
   call; it is a bearer secret, like an upload link, and never reaches the model.
@@ -999,7 +1000,9 @@ a reused PIN reaches level 2 only with a texted code (`[pin, text_code]`), as a 
   (`number`), the PIN is not locked for the subject or the number now, the duress PIN's hidden
   counter included (`locked`), and no other call redeemed it (`used`). It is spent last, by binding
   `pin_pass_used:<tokenHash>` to the redeeming call (the first binding wins, so of two calls
-  redeeming at once exactly one has it); a refusal for any other reason spends nothing. Otherwise
+  redeeming at once exactly one has it); a refusal for any other reason spends nothing. Once spent,
+  the issuing call is read again right before the factor is written: a taint or a level 1 voice
+  band that landed on it meanwhile refuses the pass (`tainted`, `voice`), which stays spent. Otherwise
   it answers `{reused: false}`, records nothing but `verification.pin_reuse_refused` (`reason`, one
   of those words), and the host asks for the PIN as usual. The same token again on the call that
   redeemed it answers `{reused: true}` and records nothing more. A verification restarted or a
@@ -1049,8 +1052,9 @@ engine has the `messages` adapter when a step needs a contact-class scope (its s
 section 16). A module's optional `validateFlow` makes whole-flow checks of its own: no flow may have
 more `gate.grant` steps than Gate's `maxGrantsPerCall`, or more `step-up.issue` steps than
 step-up's `maxTokensPerCall` (each completes only on a grant or token of its own, so such a flow
-could never finish), and each `paylink.channel` step is followed by a `paylink.request` before the
-next `paylink.channel`. A step validator sees another module's validated settings through the
+could never finish), and each `paylink.channel` step comes after a `badge.verify` step and is followed by a
+`paylink.request` before the next `paylink.channel` (the channel step declares no scope need, since
+a choice is not a money action a receipt names, but it asks for `payment.request` when it runs). A step validator sees another module's validated settings through the
 context's `settingsOf(name)` (null for a module off or whose settings were refused), as
 `paylink.channel` reads Trace's wordings. Cross-checks against a module's settings or the
 policy are skipped when those did not validate (their own problems are reported). The engine
@@ -1060,7 +1064,7 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 |---|---|
 | `badge.verify` | `level` 1 to 3; `factors`, at least one, each on in Badge's settings, together reaching `level` under the policy, and `text_code` only with the policy's `textCodeCountryCodes`; optional `scopes`, each in the policy at or below `level` |
 | `dossier.collect` | `form`, a form id in Dossier's settings |
-| `paylink.channel` | no fields; needs `email` in Paylink's `channels`, Trace's wordings for `payment_link_text` and `payment_link_email`, and Trace's `businessName`; each must be followed by the `paylink.request` it chooses for, before another `paylink.channel` (section 14) |
+| `paylink.channel` | no fields; needs `email` in Paylink's `channels`, Trace's wordings for `payment_link_text` and `payment_link_email`, and Trace's `businessName`; each comes after a `badge.verify` step and must be followed by the `paylink.request` it chooses for, before another `paylink.channel` (section 14) |
 | `paylink.request` | `amountMinor` and `currency`, or instead `amountRef` (1 to 64 of letters, digits, `.`, `:`, `-`, `_`; needs the `amounts` adapter), never both; `description`, `amountSource` (section 14); optional `mode` (`connect` or `platform`; connect needs Paylink's `connectedAccountId`), `linkLifeMinutes` (5 to 60), `paymentMethods` (instant methods only) |
 | `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
 | `trace.receipt` | optional `textLink: {consent}`, a wording purpose in Trace's settings, which also needs Trace's `businessName` and the `messages` adapter (section 16); needs the `signer` adapter |

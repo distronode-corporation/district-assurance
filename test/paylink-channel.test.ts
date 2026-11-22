@@ -157,6 +157,7 @@ describe("paylink channel: config", () => {
     assert.deepEqual(at([verify, channel, channel, pay]), ["steps[2]: a second paylink.channel step before the paylink.request the first one is for"]);
     assert.deepEqual(at([verify, channel, pay, channel, pay]), []);
     assert.deepEqual(at([verify, pay]), [], "a flow without a channel step texts, as before");
+    assert.deepEqual(at([channel, verify, pay]), ["steps[0]: a paylink.channel step comes after a badge.verify step, since it needs payment.request when it runs"]);
   });
 });
 

@@ -346,8 +346,13 @@ export const paylinkModule: AssuranceModule = {
     // A choice serves the one link after it: each channel step is followed by a request, before another choice.
     const errors: string[] = [];
     let waiting = false;
+    let verified = false;
     steps.forEach((step, index) => {
-      if (step.type === "paylink.channel") {
+      if (step.type === "badge.verify") verified = true;
+      else if (step.type === "paylink.channel") {
+        // It needs no scope in the manifest (a choice is not a money action a receipt names), so its
+        // place after the verification is checked here: it asks for payment.request when it runs.
+        if (!verified) errors.push(`steps[${index}]: a paylink.channel step comes after a badge.verify step, since it needs payment.request when it runs`);
         if (waiting) errors.push(`steps[${index}]: a second paylink.channel step before the paylink.request the first one is for`);
         waiting = true;
       } else if (step.type === "paylink.request") waiting = false;
