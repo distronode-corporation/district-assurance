@@ -598,9 +598,9 @@ the duress PIN is off unless it is set.
   `pin.reset` is appended with an `eventId` derived from the change, so it is appended once. A
   first PIN forgets and writes nothing. When either fails after the change landed, `replacePin`
   throws `PinChangeUnfinishedError` (not an `EngineError`; the failure is its `cause`; it carries
-  `at` and `change`, a 64-hex id derived from the subject, `at` and the two salted records, and
-  names no PIN): the report matches the store, where the change is on file, and the error is the
-  proof that it landed. `finishPinChange(subjectKey, { at, change })` finishes it: the same
+  `at` and `change`, a 64-hex id derived from the workspace, the subject, `at` and the two salted
+  records, and names no PIN): the report matches the store, where the change is on file, and the
+  error is the proof that it landed. `finishPinChange(subjectKey, { at, change })` finishes it: the same
   forgetting and the same `pin.reset`, reading no PIN record, so it finishes the change whatever
   landed since and never touches the PIN or number on file; it is safe to run again. A subject
   key that is not 64 lower-case hex, a `from` or `to` that is neither null nor a non-empty string,

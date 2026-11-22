@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { pinDigest, subjectKeyFor } from "../src/verify/knowledge.ts";
 import { PinChangeUnfinishedError } from "../src/verify/pin.ts";
 import { hiddenCounterKey } from "../src/verify/duress-flag.ts";
+import { sha256Hex } from "../src/core/hash.ts";
 import * as root from "../src/index.ts";
 import { TEST_KNOWLEDGE_KEY } from "../src/testing/index.ts";
 import { ACCOUNT, PIN, PHONE_ON_FILE, pinOnFile, rejects, setup, testConfig } from "./helpers.ts";
@@ -85,7 +86,9 @@ describe("Engine.replacePin", () => {
     assert.equal(error.at, t.clock.now().toISOString());
     assert.match(error.change, /^[0-9a-f]{64}$/);
     assert.match((error.cause as Error).message, /append unavailable/);
-    for (const text of [error.message, error.change, error.at]) assert.equal(text.includes(NEXT) || text.includes(next) || text.includes(onFile), false);
+    // The id is a hash, which may hold any digits; only the message is checked for PIN material.
+    assert.equal(error.message.includes(NEXT) || error.message.includes(next) || error.message.includes(onFile), false);
+    assert.equal(error.change, sha256Hex(JSON.stringify(["pin.change", "ws_test", SUBJECT, error.at, onFile, next])), "the id names the workspace, the subject, the start and both records");
     // What the error reports is what is stored: the new PIN and number are on file.
     const subject = (await t.records.getSubject("ws_test", SUBJECT))!;
     assert.equal(subject.pinDigest, next);

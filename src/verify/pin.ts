@@ -308,8 +308,9 @@ export async function replacePin(rt: EngineRuntime, subjectKey: string, change: 
   const at = rt.now();
   const replaced = await rt.adapter("records").replacePinDigest(rt.workspaceId, subjectKey, from as string | null, to as string | null, phoneOnFile as string | undefined);
   if (!replaced || from === null) return replaced;
-  // Salted records make the pair unique to this change, so its id never names another.
-  const ref = { at, change: sha256Hex(JSON.stringify(["pin.change", subjectKey, at, from, to])) };
+  // Salted records make the pair unique to this change, and the workspace keeps two workspaces'
+  // changes apart on a shared ledger, so its id never names another.
+  const ref = { at, change: sha256Hex(JSON.stringify(["pin.change", rt.workspaceId, subjectKey, at, from, to])) };
   try {
     await finish(rt, subjectKey, ref, counters);
   } catch (error) {
