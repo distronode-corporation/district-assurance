@@ -160,6 +160,15 @@ describe("PIN pass: carried to another call", () => {
     assert.deepEqual(await refusals(t, b), ["used"]);
   });
 
+  it("records one factor when one call redeems the same pass twice at once", async () => {
+    const t = passSetup();
+    const a = await signIn(t);
+    const b = await second(t);
+    assert.deepEqual(await Promise.all([t.engine.reusePin(b, a.token), t.engine.reusePin(b, a.token)]), [{ reused: true }, { reused: true }]);
+    assert.equal((await t.engine.state(b)).factors.filter((f) => f.kind === "pin").length, 1);
+    assert.equal((await t.ledger.list()).filter((e) => e.callId === b && e.event === "verification.factor").length, 1);
+  });
+
   it("lets exactly one of two calls redeeming at once have it", async () => {
     const t = passSetup();
     const a = await signIn(t);

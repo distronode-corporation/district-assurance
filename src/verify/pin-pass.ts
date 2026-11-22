@@ -104,6 +104,8 @@ export async function reusePin(rt: EngineRuntime, callId: string, token: string)
     allowFactor(rt, draft.record, "pin");
     // The verification it was judged for, untouched since: a restart and a taint each move the epoch on.
     assertSameVerification(s, current.epoch);
+    // A concurrent redemption of the same pass on this call recorded it first: this one is that one.
+    if ((s.pinPassesSpent ?? []).includes(tokenHash)) return;
     const factor = { kind: "pin", passed: true, at: rt.now() };
     draft.assertCan({ type: "factor_recorded", factor });
     draft.apply({ type: "factor_recorded", factor });
