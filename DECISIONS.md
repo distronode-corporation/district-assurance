@@ -463,3 +463,22 @@ calls again keeps an earlier record until a reset.
 **Revisit** when the cost should rise (a new floor in `PIN_HASH_PARAMETERS`, with the old floor kept
 as the lowest accepted and records below the new target rehashed on login, as the earlier format
 is), or when Node changes the API.
+
+## ADR-31. The owner PIN is the package's, over the engine's own stores
+
+**Decided.** The owner PIN (ADR-20) is `createOwnerPin` in the package: the owner's subject key
+(`subject:owner:<workspaceId>`), its PIN counters (the subject's and the line's), the lock facts a
+business's tools show, and set, clear and lift, with a change resetting before it stores. It runs
+over the adapters the engine already has (`Engine`, `KnowledgeHmac`, `RecordStore`,
+`AttemptCounters`), plus one minimal interface, `SubjectWriter.createSubject` (create if absent,
+atomic, never a rewrite), because the engine never creates a subject and the owner's must exist
+before `putPinDigest` stores anything; a rewrite could drop a PIN another change just stored. Who may call
+it, the owner's verified number, binding a phone call to an engine call, the key store and lock
+notices stay the host's (ADR-1).
+**Why.** These are rules every host of the owner command needs the same way, and a wrong order is a
+security bug (a reset after the store, or a counter left out, would leave a line unguarded or a
+lock unlifted); in the package they are tested to 100% with the engine they depend on. Reading the
+PIN length and the lockout from the engine's config, rather than taking copies, keeps the facts
+the business sees equal to what the engine enforces. **Revisit** if `RecordStore` gains an atomic
+reset-and-replace (then a change never passes through no PIN), or a host needs the owner subject
+under a key of its own.
