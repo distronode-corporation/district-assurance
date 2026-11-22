@@ -27,6 +27,8 @@ export interface PaymentRequest {
   textedAt: string | null;
   /** How the link is sent. Absent on a call saved before channels existed: by text. */
   channel?: PaymentChannel;
+  /** The consent the caller's channel choice recorded, when a choice was offered: a resume sends only while it stands. */
+  channelConsentId?: string;
   /** What the request was made for (PAY-2), so a resume can name the same amountRef. Absent on older calls. */
   requestKey?: string;
   /** Whose account takes the money. */

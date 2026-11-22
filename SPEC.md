@@ -1017,8 +1017,10 @@ a reused PIN reaches level 2 only with a texted code (`[pin, text_code]`), as a 
   engine has the duress PIN off): it reads as a pass, and the call refuses money, contact and
   access. The issuing call already alerted; the second sends no alert of its own.
 - `verification.finished` adds `reused: ["pin"]`, and the receipt's `verification` carries
-  `reused: ["pin"]` (section 12), when the `pin` among its methods is a reused one. A restart that
-  drops the call's factors (another subject, or a taint) drops the reuse with them.
+  `reused: ["pin"]` (section 12), when the `pin` among its methods is a reused one. The marker is
+  kept with the methods when the verification finishes, so the receipt, which shows the last
+  finished verification, says so whatever restart followed. A restart that drops the call's
+  factors (another subject, or a taint) drops the reuse from the next verification.
 
 ## 7. FlowConfig
 
@@ -1916,8 +1918,11 @@ comma, control character or line break). A missing or refused address is no addr
   whose consent the caller withdrew since (their latest answer to that purpose is not "yes"), an
   email channel turned off since, or an address no longer on the call's copy of the subject.
   These are checked when the link is reserved, before the read-back is used up. The request keeps
-  its `channel`; a resume sends it the same way (a request saved before channels existed goes by
-  text).
+  its `channel` and the choice's consent; a resume sends it the same way (a request saved before
+  channels existed goes by text), and only while that consent stands: after a "no" to it (the send
+  failed, then the caller changed their mind), a resume is `precondition_failed`, nothing is sent,
+  and the request stays open with its link, for the host to cancel (`cancelPaymentLink`) or the
+  end of the call to close.
 - An email goes through the `emails` adapter (`EmailSender.sendEmail({to, subject, body, locale,
   purpose: "payment_link", idempotencyKey})`, key `[workspaceId, callId, paymentId, "email"]`),
   never a text as well. Its words are section 16's. It is the same link: one per request, the same

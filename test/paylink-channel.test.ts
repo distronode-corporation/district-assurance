@@ -440,6 +440,44 @@ describe("paylink channel: the same link for both channels", () => {
     assert.equal(t.payments.created.length, 1, "one link");
   });
 
+  it("refuses to resume an emailed request once the caller says no to the email consent, and the link can be cancelled", async () => {
+    let fail = true;
+    const emails = new FakeEmailSender();
+    const flaky: EmailSender = {
+      async sendEmail(input) {
+        if (fail) throw new Error("email provider down");
+        return emails.sendEmail(input);
+      },
+    };
+    const t = setupWith(EMAIL, { config: channelConfig((c) => (c.flows = {})), adapters: { emails: flaky } });
+    const callId = await verified(t, {});
+    await t.engine.choosePaymentChannel(callId, { key: "2" });
+    await confirmAmount(t.engine, callId, request);
+    await assert.rejects(t.engine.requestPayment(callId), /email provider down/);
+    await t.engine.recordConsent(callId, { purpose: "payment_link_email", answer: "no" });
+    fail = false;
+    await assert.rejects(t.engine.requestPayment(callId), rejects("precondition_failed", /withdrew their consent.*cancel the payment/));
+    assert.equal(emails.sent.length, 0, "nothing emailed after the no");
+    assert.deepEqual(await t.engine.cancelPaymentLink(callId, "pay_1"), { paymentId: "pay_1", status: "expired" });
+    assert.equal(emails.sent.length, 0);
+    // A text request that recorded no consent (nothing was offered) resumes as before.
+    const plain = setupWith(null, { config: channelConfig((c) => (c.flows = {})) });
+    const other = await verified(plain, {});
+    await plain.engine.offerPaymentChannels(other);
+    await confirmAmount(plain.engine, other, request);
+    const create = plain.payments.createLink.bind(plain.payments);
+    let down = true;
+    plain.payments.createLink = async (input) => {
+      if (down) {
+        down = false;
+        throw new Error("provider down");
+      }
+      return create(input);
+    };
+    await assert.rejects(plain.engine.requestPayment(other), /provider down/);
+    assert.equal((await plain.engine.requestPayment(other)).status, "open");
+  });
+
   it("refuses to resume an emailed request on an engine with the email channel off", async () => {
     const sessions = new MemorySessionStore();
     let fail = true;

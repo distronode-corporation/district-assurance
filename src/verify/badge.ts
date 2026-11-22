@@ -151,6 +151,11 @@ export interface BadgeSlice {
    * Absent on a call that keyed its PIN or reused none, and dropped when its factors are.
    */
   pinReuse?: { tokenHash: string; fromCallId: string; passedAt: string };
+  /**
+   * Whether the `pin` among `lastMethods` is a reused PIN pass, kept with them when the verification
+   * finished, so the receipt says so whatever restart followed. Absent on a call saved before it.
+   */
+  lastReused?: boolean;
   /** Every PIN pass this call recorded as its factor, by hash, never dropped: a pass serves one verification of one call. */
   pinPassesSpent?: string[];
 }
@@ -523,8 +528,9 @@ export class BadgeModule implements AssuranceModule {
       if (typeof judged.configRevision === "string") by.configRevision = judged.configRevision;
     }
     const methods = state.level === 0 ? [] : (badge.receiptMethods ?? badge.lastMethods);
-    // The marker of a PIN reused from another call (`reusePin`), only beside a `pin` the receipt shows.
-    return { verification: { ...by, level: state.level, methods, ...(reusedPin(badge, methods) ? { reused: ["pin"] } : {}) } };
+    // The marker of a PIN reused from another call (`reusePin`), kept with the methods it finished
+    // with, and only beside a `pin` the receipt shows.
+    return { verification: { ...by, level: state.level, methods, ...(badge.lastReused === true && methods.includes("pin") ? { reused: ["pin"] } : {}) } };
   }
 }
 
@@ -1296,6 +1302,7 @@ export async function finishVerification(rt: EngineRuntime, callId: string): Pro
     s.finished++;
     s.lastLevel = level;
     s.lastMethods = result.counted;
+    s.lastReused = reusedPin(s, result.counted);
     s.lastJudgedBy = judgedBy;
     // Held below what its counted methods reach, by a band or an attestation cap (decision 11): the
     // receipt shows only the methods that support the level it shows. The ledger keeps them all.

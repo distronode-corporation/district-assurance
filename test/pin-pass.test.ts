@@ -135,6 +135,19 @@ describe("PIN pass: carried to another call", () => {
     assert.equal((await badgeOf(t, b)).pinReuse, undefined, "another subject: the reused PIN goes with the other factors");
   });
 
+  it("keeps the reused marker on the receipt with the verification it finished, after a restart for another subject", async () => {
+    const t = passSetup();
+    const a = await signIn(t);
+    const b = await second(t);
+    await t.engine.reusePin(b, a.token);
+    await textCode(t, b);
+    assert.equal((await t.engine.finishVerification(b)).level, 2);
+    await t.engine.beginVerification(b, { accountNumber: OTHER_ACCOUNT, callingNumber: CALLING });
+    const receipt = (await t.engine.endCall(b))!;
+    assert.deepEqual(receipt.body.verification.methods, ["pin", "text_code"]);
+    assert.deepEqual(receipt.body.verification.reused, ["pin"]);
+  });
+
   it("is spent once: a second call gets nothing, the same call again gets the same answer and no second factor", async () => {
     const t = passSetup();
     const a = await signIn(t);

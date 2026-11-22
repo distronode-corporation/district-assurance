@@ -637,16 +637,18 @@ export async function choosePaymentChannel(rt: EngineRuntime, callId: string, in
  * was. A choice that recorded a consent needs the caller's latest answer to that purpose to still
  * be yes (a later no withdraws it). Email needs the channel still on and the address still there.
  */
-function chosenChannel(record: CallRecord, slice: PaylinkSlice, subject: SubjectRecord): PaymentChannel {
+function chosenChannel(record: CallRecord, slice: PaylinkSlice, subject: SubjectRecord): { channel: PaymentChannel; consentId: string | null } {
   const choice = slice.channel ?? null;
-  if (choice === null) return "text";
+  if (choice === null) return { channel: "text", consentId: null };
   if (choice.subjectKey !== subject.subjectKey) throw new EngineError("precondition_failed", "the channel was chosen for another subject; offer the channels again");
-  if (choice.consentId !== null) {
-    const purpose = PAYMENT_CHANNEL_PURPOSES[choice.channel];
-    const latest = (record.modules[TRACE] as unknown as TraceSlice).consents.filter((c) => c.purpose === purpose).at(-1);
-    if (latest?.answer !== "yes") throw new EngineError("precondition_failed", "the caller withdrew their consent to this channel; offer the channels again");
-  }
-  return choice.channel;
+  if (choice.consentId !== null && !consentStands(record, choice.channel)) throw new EngineError("precondition_failed", "the caller withdrew their consent to this channel; offer the channels again");
+  return { channel: choice.channel, consentId: choice.consentId };
+}
+
+/** Whether the caller's latest answer to a channel's consent purpose on this call is still yes (a later no withdraws it). */
+function consentStands(record: CallRecord, channel: PaymentChannel): boolean {
+  const purpose = PAYMENT_CHANNEL_PURPOSES[channel];
+  return (record.modules[TRACE] as unknown as TraceSlice).consents.filter((c) => c.purpose === purpose).at(-1)?.answer === "yes";
 }
 
 /** Where a link goes, by its channel: the number on file, or the verified address on file with the business's name. */
@@ -710,6 +712,12 @@ export async function requestPayment(
     if (refused !== null) return { refused };
     const { step, subject } = requestContext(rt, draft.record, input, false);
     if (resuming) {
+      // A request whose channel the caller consented to resumes only while that consent stands: a
+      // "no" since (the send failed, then the caller changed their mind) sends nothing. The request
+      // stays open with its link reserved, for the host to cancel (`cancelPaymentLink`) or the end of the call to close.
+      if (last.channelConsentId !== undefined && !consentStands(draft.record, last.channel!)) {
+        throw new EngineError("precondition_failed", "the caller withdrew their consent to this channel; cancel the payment (cancelPaymentLink) and offer the channels again");
+      }
       const where = destinationFor(rt, draft.record, subject, last.channel ?? "text");
       const named = input as Partial<FixedPaymentInput & ReferencedPaymentInput> | undefined;
       // A resume names nothing, the same amount, or the same amountRef request it was made for.
@@ -721,7 +729,7 @@ export async function requestPayment(
     }
     // A link already out (or a call not open) is refused as a transition, before the read-back.
     draft.assertCan({ type: "payment_requested", paymentId: "next" });
-    const channel = chosenChannel(draft.record, slice, subject);
+    const { channel, consentId } = chosenChannel(draft.record, slice, subject);
     const where = destinationFor(rt, draft.record, subject, channel);
     // A call saved before PAY-2 has no quote field: the same as no read-back.
     const quote = confirmedQuote(slice.quote ?? null, (step as PaymentInput | null) ?? input, subject);
@@ -753,6 +761,7 @@ export async function requestPayment(
       settledAt: null,
       textedAt: null,
       channel,
+      ...(consentId === null ? {} : { channelConsentId: consentId }),
       // The request the read-back was made for (confirmedQuote held any request named to it).
       requestKey: quote.spec,
       ...terms,
