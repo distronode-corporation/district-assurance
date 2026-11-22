@@ -66,10 +66,11 @@ export interface MessageSender {
 
 /**
  * Why an email is sent. `payment_link`: a payment link the caller chose to get by email instead of
- * by text (SPEC.md, section 14). It carries the merchant, the amount, the link's life and the link,
+ * by text (SPEC.md, section 14). `receipt_link`: a link to the call's receipt, again to the
+ * verified address on file only (SPEC.md, section 16). Either carries the merchant and a link,
  * never a code, a phone number or an account number.
  */
-export type EmailPurpose = "payment_link";
+export type EmailPurpose = "payment_link" | "receipt_link";
 
 /**
  * Emails sent by code. The destination is always the subject's verified address on file
