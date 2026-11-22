@@ -25,6 +25,8 @@ const EXTRA_SETTINGS: Record<string, unknown> = {
     ],
   },
   "step-up": { issuer: "https://verify.example.test", sites: [{ id: "portal", audience: "https://portal.example.test" }] },
+  // The email channel on, so the sample channel step is valid (its wordings are Trace's, checked by validateConfig).
+  paylink: { channels: ["text", "email"] },
 };
 const settingsOf = (name: string) => (Object.hasOwn(EXTRA_SETTINGS, name) ? EXTRA_SETTINGS[name] : config.modules[name]!.settings);
 // The scopes the two modules' steps need, as their own tests set them.
@@ -34,7 +36,7 @@ policy.scopes["entry.sign_in"] = 2;
 const BUILT_IN_SAMPLES: Record<string, FlowStep[]> = {
   badge: [{ type: "badge.verify", level: 1, factors: ["keypad_knowledge"], scopes: ["status.read"] }],
   dossier: [{ type: "dossier.collect", form: "repair" }],
-  paylink: [{ type: "paylink.request", amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" }],
+  paylink: [{ type: "paylink.channel" }, { type: "paylink.request", amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" }],
   trace: [{ type: "trace.consent", purpose: "texts", require: "answer" }, { type: "trace.receipt" }],
   gate: [
     { type: "gate.grant", target: "front-door" },

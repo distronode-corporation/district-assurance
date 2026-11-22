@@ -524,3 +524,52 @@ security bug (two changes both answering ok, a counter left out, or a facts lock
 from the one enforced); in the package they are tested to 100% with the engine they depend on.
 **Revisit** if a host needs the owner subject under a key of its own, or a store cannot offer a
 compare-and-set on one field (then a version column is the fallback).
+
+## ADR-32. A payment link by email goes only to a verified address, by the caller's keypress
+
+**Decided.** Paylink can email a payment link instead of texting it (0.3.0). A new adapter,
+`EmailSender.sendEmail({to, subject, body, locale, purpose, idempotencyKey})`, sends it; the port
+carries no credential. The destination is only `SubjectRecord.emailOnFile`, an address the host
+marked verified, held to a strict plain-address check; no entry point takes an address. Email is
+off unless Paylink's `channels` setting names it, which also makes the config need the `emails`
+adapter. A `paylink.channel` step, driven by the host, offers text (key 1) and email (key 2) when an
+address is on file, and nothing (text, chosen at once) when none is. With both offered, the
+keypress is the caller's consent, recorded by Trace as `payment_link_text` or `payment_link_email`
+under the call's versioned wording, by digest. It is the same single-use link, deadline, send lease
+and close; `payment.link_sent` names the channel.
+**Why the keypress as the consent.** A static `trace.consent` step cannot know which channel's
+purpose to ask for before the caller chooses, and a flow cannot branch (ADR-14). Reading each
+channel's wording with its key and taking the key as the yes to that wording records exactly what
+the caller heard and chose, with no extra question. So Paylink calls Trace's `recordConsent` for
+its own step (amending ADR-2: Paylink imports Badge's `matchedSubject` and Trace's
+`recordConsent`). **Why a setting, not just the step.** An engine without an email service must
+still run Paylink, and a business must be able to stop emailing links without editing every flow;
+a setting is where the adapter requirement can be checked when the config is saved.
+**Rejected:** taking an address spoken or keyed on the call (it is what an attacker on the call
+would supply); a free-text email body from the host (a forwarded copy must hold nothing but the
+merchant, the amount, the expiry and the link); emailing a receipt in the same change (kept apart,
+as a follow-up, so this change holds one new outbound path).
+**Revisit** if a host needs another email purpose, or a channel beyond text and email.
+
+## ADR-33. A PIN pass carries the PIN factor to another call of the same caller, once
+
+**Decided.** A host that signs an owner in with the PIN on one engine call and then runs a flow on
+another engine call of the same phone call may carry the PIN factor across (0.3.0), when Badge's
+`pin.reuse: {maxAgeSeconds}` is on for the taking engine. The sign-in call issues a pass
+(`issuePinPass`): 32 random bytes, of which it keeps only the SHA-256, bound in the session store,
+alive at most 5 minutes from the PIN's pass. The taking call redeems it (`reusePin`) once: its
+redemption is a session store binding, first wins. Everything else is checked against the issuing
+call's own record (subject, calling number, taint, voice band, the PIN's lock now). It records a
+passed `pin` factor marked `reused` with the issuing call, carries a duress entry's duress across,
+and the receipt's `verification.reused` is `["pin"]`. The PIN factor only: the policy still needs
+every other factor (under the default policy, the texted code).
+**Why a bearer token held by the engine.** It is the pattern upload links already use: nothing
+stored replays it, any process of the workspace can redeem it, and single use is one atomic
+binding. **Rejected:** naming the issuing call by its id (call ids are in receipts, so they are not
+secrets); a signed token with its own key (a fourth signing key and its rotation, for a life of 5
+minutes inside one workspace's own store, where the record is the authority anyway); keeping the
+PIN's pass on one engine call across flows (a call runs one flow, and the host's sign-in and its
+flows have different configs); carrying more than the PIN (a texted code or a carrier answer is
+evidence about the line now, which another call's answer is not).
+**Revisit** if a host needs to carry a pass across workspaces or processes that do not share a
+session store, or past 5 minutes.

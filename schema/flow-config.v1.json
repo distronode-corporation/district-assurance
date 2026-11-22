@@ -215,6 +215,15 @@
           "properties": {
             "refuseScopes": { "type": "array", "uniqueItems": true, "items": { "type": "string" } }
           }
+        },
+        "reuse": {
+          "description": "PIN reuse, off when absent: a PIN pass another call of the same caller issued counts as this call's PIN factor within maxAgeSeconds of its pass (SPEC.md, section 6).",
+          "type": "object",
+          "required": ["maxAgeSeconds"],
+          "additionalProperties": false,
+          "properties": {
+            "maxAgeSeconds": { "type": "integer", "minimum": 30, "maximum": 300 }
+          }
         }
       }
     },
@@ -313,7 +322,14 @@
         "mode": { "description": "The mode for a step that names none; default platform.", "enum": ["connect", "platform"] },
         "connectedAccountId": { "description": "The business's account at the provider, which connect mode needs; it needs an explicit mode.", "type": "string", "pattern": "^[A-Za-z0-9_-]{1,255}$" },
         "linkLifeMinutes": { "$ref": "#/$defs/linkLifeMinutes" },
-        "paymentMethods": { "$ref": "#/$defs/paymentMethods" }
+        "paymentMethods": { "$ref": "#/$defs/paymentMethods" },
+        "channels": {
+          "description": "The channels a link may go by: text always, and email to turn on the paylink.channel step (it needs the emails adapter); default text only.",
+          "type": "array",
+          "uniqueItems": true,
+          "contains": { "const": "text" },
+          "items": { "enum": ["text", "email"] }
+        }
       }
     },
     "linkLifeMinutes": { "description": "How long a texted link lives, 5 to 60 minutes; default 15.", "type": "integer", "minimum": 5, "maximum": 60 },
@@ -372,6 +388,7 @@
         { "if": { "properties": { "type": { "const": "badge.verify" } } }, "then": { "$ref": "#/$defs/badgeVerifyStep" } },
         { "if": { "properties": { "type": { "const": "dossier.collect" } } }, "then": { "$ref": "#/$defs/dossierCollectStep" } },
         { "if": { "properties": { "type": { "const": "paylink.request" } } }, "then": { "$ref": "#/$defs/paylinkRequestStep" } },
+        { "if": { "properties": { "type": { "const": "paylink.channel" } } }, "then": { "$ref": "#/$defs/paylinkChannelStep" } },
         { "if": { "properties": { "type": { "const": "trace.consent" } } }, "then": { "$ref": "#/$defs/traceConsentStep" } },
         { "if": { "properties": { "type": { "const": "trace.receipt" } } }, "then": { "$ref": "#/$defs/traceReceiptStep" } },
         { "if": { "properties": { "type": { "const": "gate.grant" } } }, "then": { "$ref": "#/$defs/gateGrantStep" } },
@@ -396,6 +413,13 @@
       "properties": {
         "type": true,
         "form": { "type": "string" }
+      }
+    },
+    "paylinkChannelStep": {
+      "description": "The caller chooses how the next payment link reaches them: key 1 text, key 2 email to the verified address on file (SPEC.md, section 14). Needs email in Paylink's channels, and Trace's wordings for payment_link_text and payment_link_email and its businessName.",
+      "additionalProperties": false,
+      "properties": {
+        "type": true
       }
     },
     "paylinkRequestStep": {

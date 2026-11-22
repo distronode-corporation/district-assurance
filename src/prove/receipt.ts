@@ -21,9 +21,11 @@ export interface ReceiptBody {
   issuedAt: string;
   /**
    * `policyVersion` and `configRevision` name the policy and the FlowConfig revision that judged the
-   * call's last finished verification; both are absent when no verification finished.
+   * call's last finished verification; both are absent when no verification finished. `reused`
+   * is `["pin"]` when the `pin` in `methods` is a PIN pass reused from another call of the same
+   * caller (SPEC.md, section 6), and absent otherwise, so the format stays version 1.
    */
-  verification: { level: AssuranceLevel; methods: FactorKind[]; policyVersion?: string; configRevision?: string };
+  verification: { level: AssuranceLevel; methods: FactorKind[]; policyVersion?: string; configRevision?: string; reused?: ["pin"] };
   /** The caller ID attestation the call started with. Optional, so the format stays version 1; never a method. */
   attestation?: Attestation;
   records: Array<{ recordId: string; formId: string; digest: string }>;

@@ -6,8 +6,46 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-22
+
+### Added
+
+- A payment link by text or by email (ADR-32, SPEC sections 14 and 16). `EmailSender`, a new
+  `emails` adapter (`sendEmail({to, subject, body, locale, purpose, idempotencyKey})`, no
+  credentials in the port), and `SubjectRecord.emailOnFile`, a verified address the host sets,
+  kept like `phoneOnFile` and never in the ledger, an event or a receipt. `isEmailAddress` is the
+  plain-address check it is held to; anything else counts as no address. Paylink's `channels`
+  setting (`["text"]` by default, `["text", "email"]` to turn email on, which needs the `emails`
+  adapter) and the `paylink.channel` step: `offerPaymentChannels` answers both channels and the
+  prompt the host reads (each channel's consent wording and its key, `CHANNEL_KEY_TEXT`) with an
+  address on file, or chooses text at once without one; `choosePaymentChannel({key})` takes key 1
+  (text) or 2 (email), fixed in code (`PAYMENT_CHANNEL_KEYS`), and records the keypress as a consent
+  to `payment_link_text` or `payment_link_email` (`PAYMENT_CHANNEL_PURPOSES`) under the call's
+  versioned wording, by digest. `requestPayment` sends the next link by the channel chosen, for the
+  subject chosen for, while the caller's latest answer to that purpose is yes; the same single-use
+  link, deadline, send lease, cancel and close apply to both channels. `PAYMENT_EMAIL` holds the
+  email in English, French and Spanish: the merchant, the amount, the link's life and the link,
+  never a code or a number. `payment.channel_chosen` is a new ledger event. `FakeEmailSender` in
+  `district-assurance/testing`, and `createTestEngine` wires it as `emails`.
+- PIN passes (ADR-33, SPEC section 6): `issuePinPass(callId)` on a call whose PIN passed in the last
+  5 minutes returns a single-use token, kept only as its SHA-256; `reusePin(callId, token)` on
+  another call of the same caller (the same subject and calling number, Badge's `pin.reuse:
+  {maxAgeSeconds}` on, 30 to 300) records it as that call's PIN factor, once. The PIN factor only:
+  the policy's other factors, a texted code under the default policy, are still needed. Refused
+  after a taint of the issuing call, a level 1 synthetic voice band on it, a lock on the PIN now, or
+  a second redemption (`verification.pin_reuse_refused` with the reason), and a duress entry's
+  duress is carried across. `verification.pin_pass_issued` is a new ledger event;
+  `verification.factor` carries `reused: true` and `fromCallId`, and `verification.finished` and
+  the receipt's `verification` carry `reused: ["pin"]` (optional, so receipts stay `v: 1`).
+- `StepContext.settingsOf(name)`: a step validator reads another module's validated settings
+  (`validateConfig` gives it), as `paylink.channel` checks Trace's wordings and business name.
+- `schema/flow-config.v1.json` describes Paylink's `channels`, the `paylink.channel` step and
+  Badge's `pin.reuse`.
+
 ### Changed
 
+- `payment.link_sent` names the link's `channel` (`text` or `email`). A request saved before
+  channels existed goes by text. Paylink's manifest is version 3 and provides `paylink.channel`.
 - Releases are made by `release.yml` on its own when a release pull request merges: on a push to
   main whose `package.json` version has no tag and is not on npm (any other push is a no-op), it
   creates the annotated tag `vX.Y.Z` on that commit, signs it with gitsign (keyless, under the

@@ -2,6 +2,7 @@ export * from "./adapters.ts";
 export * from "./canonical.ts";
 export * from "./clock.ts";
 export * from "./config.ts";
+export * from "./email.ts";
 export * from "./errors.ts";
 export * from "./events.ts";
 export * from "./flow.ts";

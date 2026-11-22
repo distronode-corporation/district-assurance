@@ -8,6 +8,9 @@ export type AmountSourceKind = "intake_record" | "business_endpoint" | "price_li
 
 export type PaymentStatus = "open" | "paid" | "failed" | "expired";
 
+/** How a payment link reaches the caller: a text to the number on file, or an email to the verified address on file. */
+export type PaymentChannel = "text" | "email";
+
 export interface PaymentRequest {
   paymentId: string;
   callId: string;
@@ -20,8 +23,12 @@ export interface PaymentRequest {
   status: PaymentStatus;
   requestedAt: string;
   settledAt: string | null;
-  /** When the link was texted; null while it is still being created or sent (and can be resumed). */
+  /** When the link was sent (texted, or emailed); null while it is still being created or sent (and can be resumed). */
   textedAt: string | null;
+  /** How the link is sent. Absent on a call saved before channels existed: by text. */
+  channel?: PaymentChannel;
+  /** The consent the caller's channel choice recorded, when a choice was offered: a resume sends only while it stands. */
+  channelConsentId?: string;
   /** What the request was made for (PAY-2), so a resume can name the same amountRef. Absent on older calls. */
   requestKey?: string;
   /** Whose account takes the money. */

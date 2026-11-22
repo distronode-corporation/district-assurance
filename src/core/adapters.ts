@@ -65,6 +65,27 @@ export interface MessageSender {
 }
 
 /**
+ * Why an email is sent. `payment_link`: a payment link the caller chose to get by email instead of
+ * by text (SPEC.md, section 14). It carries the merchant, the amount, the link's life and the link,
+ * never a code, a phone number or an account number.
+ */
+export type EmailPurpose = "payment_link";
+
+/**
+ * Emails sent by code. The destination is always the subject's verified address on file
+ * (`SubjectRecord.emailOnFile`), resolved by the engine, never an address heard or keyed on the
+ * call. The sender holds its own credentials; nothing here carries one. Like `sendText`,
+ * `sendEmail` must settle (sent or failed) within 60 seconds: Paylink holds a payment link against
+ * a concurrent expiry for that long while it is being sent (its send lease). A retried send with
+ * the same idempotency key must not deliver the email twice.
+ */
+export interface EmailSender {
+  sendEmail(input: { to: string; subject: string; body: string; locale: Locale; purpose: EmailPurpose; idempotencyKey: string }): Promise<{
+    messageId: string;
+  }>;
+}
+
+/**
  * Whose account takes the money. `connect`: the business's own account at the provider (for
  * example a Stripe direct charge on a connected account); the business is the merchant.
  * `platform`: the platform's own account; the platform is the merchant.
@@ -191,6 +212,14 @@ export interface SubjectRecord {
    * and a callback is refused.
    */
   phoneOnFile: string;
+  /**
+   * An email address the subject has proved they read (the host's own check, for example a
+   * confirmation link), and the only address a payment link is ever emailed to. Distinct from
+   * `phoneOnFile` and kept the same way: never in the ledger, a receipt or an event. Left out, or
+   * anything `isEmailAddress` refuses, means no address on file, and a payment link goes by text.
+   * The host never sets an address it has not verified, and never one heard or keyed on a call.
+   */
+  emailOnFile?: string;
   /** Field name to the HMAC of its value (`knowledgeDigest`). */
   knowledge: Record<string, string>;
   /**

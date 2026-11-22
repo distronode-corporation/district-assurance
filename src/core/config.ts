@@ -120,6 +120,9 @@ export function validateConfig(config: unknown, registry: ModuleRegistry): strin
     problems.push(...(module.checkAdapters?.(settings, registry.capabilities) ?? []).map((e) => `modules.${name}: ${e}`));
   }
 
+  // Another module's settings, for a step that relies on them: null when that module is off or its settings did not validate.
+  const otherSettings = (module: string): unknown => (validSettings.has(module) ? validSettings.get(module) : null);
+
   // Flows: every step's module on, every step valid, and every scope a step needs reached before it.
   const flows = isObject(config.flows) ? config.flows : null;
   if (flows === null) problems.push("flows: must be an object");
@@ -153,7 +156,7 @@ export function validateConfig(config: unknown, registry: ModuleRegistry): strin
         return;
       }
       owners.add(owner);
-      const ctx: StepContext = { settings: validSettings.has(ownerName) ? validSettings.get(ownerName) : null, policy, adapters: registry.adapters, capabilities: registry.capabilities };
+      const ctx: StepContext = { settings: validSettings.has(ownerName) ? validSettings.get(ownerName) : null, policy, adapters: registry.adapters, capabilities: registry.capabilities, settingsOf: otherSettings };
       problems.push(...owner.validateStep(step as FlowStep, ctx).map((e) => `${stepAt} (${type}): ${e}`));
       const scope = owner.manifest.scopes.needs[type];
       if (scope !== undefined && policy !== null) {
@@ -186,7 +189,7 @@ export function validateConfig(config: unknown, registry: ModuleRegistry): strin
     for (const owner of owners) {
       const ownerName = owner.manifest.name;
       if (owner.validateFlow === undefined || !validSettings.has(ownerName)) continue;
-      const ctx: StepContext = { settings: validSettings.get(ownerName), policy, adapters: registry.adapters, capabilities: registry.capabilities };
+      const ctx: StepContext = { settings: validSettings.get(ownerName), policy, adapters: registry.adapters, capabilities: registry.capabilities, settingsOf: otherSettings };
       problems.push(...owner.validateFlow(flow.steps as FlowStep[], ctx).map((e) => `${at} (${ownerName}): ${e}`));
     }
   }

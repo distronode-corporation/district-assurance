@@ -3,6 +3,7 @@ export {
   BADGE,
   BadgeModule,
   DEFAULT_KEYPAD_IDLE_SECONDS,
+  PIN_PASS_MAX_SECONDS,
   badgeModule,
   type BadgeSlice,
   type BadgeVerifyStep,
@@ -11,8 +12,10 @@ export {
   type KeypadResult,
   type KeypadTiming,
   type OutcomeResult,
+  type PinPassRecord,
   type VerificationResult,
 } from "./badge.ts";
+export type { PinReuseRefusal } from "./pin-pass.ts";
 export {
   TEXT_CODE_DIGITS,
   TEXT_CODE_LIMITS,

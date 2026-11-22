@@ -155,7 +155,7 @@ step-up included. `examples/modules/callback.ts` is an example outside module th
 |---|---|---|---|
 | `badge` | `badge.verify` | | `records`; `counters` with any factor the caller enters (`keypad_knowledge`, `pin`, `spoken_knowledge`, plug-ins); `carrier` with `carrier_identity_match`; `identity`, `messages` with `photo_id`; `messages`, `codes` with `text_code`; `dialer`, `counters` with `callback`; `pinVerifier` with `pin` in verifier mode; `duressNotifier` with `pin.duress` |
 | `dossier` | `dossier.collect` | `intake.file` | `records`; `fieldCipher` once a form has a sensitive field |
-| `paylink` | `paylink.request` | `payment.request` | `payments`, `messages`; `amounts` for a step with `amountRef` |
+| `paylink` | `paylink.request`, `paylink.channel` | `payment.request` (the request; the channel step needs none, and checks `payment.request` itself) | `payments`, `messages`; `amounts` for a step with `amountRef`; `emails` with `email` in its `channels` |
 | `trace` | `trace.consent`, `trace.receipt` | | `ledger`; `signer` unless `receipts` is false; `consents` (optional) to revoke consents (section 21) |
 | `gate` | `gate.grant` | `entry.open` | `access` (door controllers by name), `accessSigner` |
 
@@ -327,8 +327,9 @@ the amount, the time or the signal's cause; `authorize` writes then. On a duress
 it is also false for every scope whose class is not `none` and for every scope in the duress
 `refuseScopes`.
 
-Links and callbacks go only to the subject's number on file, and only after a `keypad_knowledge`
-or `pin` factor passed since verification last started from nothing and since the session was last
+Links and callbacks go only to the subject's number on file (or, for a payment link the caller
+chose to get by email, its verified address on file, section 14), and only after a `keypad_knowledge`
+or `pin` factor passed (a PIN pass reused from another call included, section 6) since verification last started from nothing and since the session was last
 tainted: `markUntrusted` voids the match, so no text, callback, carrier check or payment link goes
 out on it until a fresh verification matches again. A plug-in's pass does not unlock texts or
 callbacks.
@@ -966,6 +967,61 @@ A second PIN that an owner made to call under pressure enters instead of the PIN
   changed entry. The ledger otherwise holds the same entries; the receipt's ledger head and the
   `receipt.issued` digest differ only as the tag's bytes do.
 
+### PIN passes (0.3.0)
+
+A host that runs a sign-in on one engine call (an owner keying the PIN on the business's line) and
+then a flow on another engine call of the same phone call can carry the PIN factor across, once,
+instead of asking for the PIN again. The PIN factor only: every other factor the second call's
+policy asks for (a texted code, a carrier match) is still needed there, so under the default policy
+a reused PIN reaches level 2 only with a texted code (`[pin, text_code]`), as a keyed one does.
+
+- Settings: Badge's `pin.reuse: {maxAgeSeconds}` (30 to 300) turns reuse on for the calls this
+  engine verifies; without it `reusePin` is `precondition_failed`. `PIN_PASS_MAX_SECONDS` is 300.
+- `issuePinPass(callId)` on the sign-in call returns `{token, expiresAt}`. It needs the call's last
+  `pin` factor passed (a duress entry counts as a pass, VER-12), a keypad or PIN match standing,
+  at most 5 minutes since that pass, a call that has not ended (`invalid_transition`) and was never
+  tainted, no pass issued on the call before, and a PIN the call keyed itself, not one it reused
+  (each `precondition_failed`). The token is 32 random bytes in unpadded base64url, returned once
+  and kept nowhere: the call keeps `{tokenHash (SHA-256), subjectKey, numberKey, passedAt,
+  expiresAt, taints, duress}`, and the session store binds `pin_pass:<tokenHash>` to the call,
+  before the write, so a bind that fails leaves no pass on the call and the host may ask again.
+  `expiresAt` is `passedAt` plus 5 minutes. Ledger: `verification.pin_pass_issued` (`expiresAt`).
+  The host keeps the token in memory and hands it only to the call it opens next for that phone
+  call; it is a bearer secret, like an upload link, and never reaches the model.
+- `reusePin(callId, token)` on the second call needs Badge's `pin.reuse`, the `pin` factor allowed
+  by the current `badge.verify` step (`precondition_failed`), a running verification for a subject
+  (`invalid_transition`), and a token of the right shape (`invalid_input`). It answers `{reused:
+  true}` and records a passed `pin` factor only when all of these hold, checked against the issuing
+  call's own record: a call issued it (`unknown` otherwise, also for a call removed since or a
+  record that no longer holds the pass), it is not this call (`same_call`), its pass is no older
+  than the lower of `maxAgeSeconds` and 300 seconds (`expired`), the issuing call was never tainted
+  (`tainted`), no synthetic voice score held it to level 1 (`voice`, section 4), its subject is this
+  call's (`subject`), its calling number's keyed hash is this call's, both withheld included
+  (`number`), the PIN is not locked for the subject or the number now, the duress PIN's hidden
+  counter included (`locked`), and no other call redeemed it (`used`). It is spent last, by binding
+  `pin_pass_used:<tokenHash>` to the redeeming call (the first binding wins, so of two calls
+  redeeming at once exactly one has it); a refusal for any other reason spends nothing. Once spent,
+  the issuing call is read again right before the factor is written: a taint or a level 1 voice
+  band that landed on it meanwhile refuses the pass (`tainted`, `voice`), which stays spent. Otherwise
+  it answers `{reused: false}`, records nothing but `verification.pin_reuse_refused` (`reason`, one
+  of those words), and the host asks for the PIN as usual. The same token again on the call that
+  redeemed it answers `{reused: true}` and records nothing more while its factor stands; once a
+  restart dropped that factor, the call never records the same pass again (`used`). A verification restarted or a
+  taint while the pass was checked refuses it (`precondition_failed`), and the pass stays spent.
+- The factor is recorded as any PIN pass: it counts as the keypad or PIN match that lets a code or a
+  link go to the subject on file, uses no PIN attempt of the call, and changes no counter across
+  calls. Ledger: `verification.factor` with `kind: "pin"`, `passed: true`, `reused: true`,
+  `fromCallId` (the issuing call) and the PIN `tag` (below), whose outcome is the issuing pass's.
+  A pass from a duress entry, or for a subject under the duress flag, makes this call a duress call
+  too (its `duress` set, the scopes Badge's settings refuse, or every scope of the policy when this
+  engine has the duress PIN off): it reads as a pass, and the call refuses money, contact and
+  access. The issuing call already alerted; the second sends no alert of its own.
+- `verification.finished` adds `reused: ["pin"]`, and the receipt's `verification` carries
+  `reused: ["pin"]` (section 12), when the `pin` among its methods is a reused one. The marker is
+  kept with the methods when the verification finishes, so the receipt, which shows the last
+  finished verification, says so whatever restart followed. A restart that drops the call's
+  factors (another subject, or a taint) drops the reuse from the next verification.
+
 ## 7. FlowConfig
 
 ```json
@@ -999,7 +1055,12 @@ engine has the `messages` adapter when a step needs a contact-class scope (its s
 section 16). A module's optional `validateFlow` makes whole-flow checks of its own: no flow may have
 more `gate.grant` steps than Gate's `maxGrantsPerCall`, or more `step-up.issue` steps than
 step-up's `maxTokensPerCall` (each completes only on a grant or token of its own, so such a flow
-could never finish). Cross-checks against a module's settings or the
+could never finish), and each `paylink.channel` step comes after a `badge.verify` step (the last one before it) whose
+level reaches `payment.request` and whose `scopes`, when listed, grant it, and is followed by a
+`paylink.request` before the next `paylink.channel` (the channel step declares no scope need, since
+a choice is not a money action a receipt names, but it asks for `payment.request` when it runs). A step validator sees another module's validated settings through the
+context's `settingsOf(name)` (null for a module off or whose settings were refused), as
+`paylink.channel` reads Trace's wordings. Cross-checks against a module's settings or the
 policy are skipped when those did not validate (their own problems are reported). The engine
 refuses a config with any problem (`ConfigError`, code `invalid_input`, with `problems`).
 
@@ -1007,6 +1068,7 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 |---|---|
 | `badge.verify` | `level` 1 to 3; `factors`, at least one, each on in Badge's settings, together reaching `level` under the policy, and `text_code` only with the policy's `textCodeCountryCodes`; optional `scopes`, each in the policy at or below `level` |
 | `dossier.collect` | `form`, a form id in Dossier's settings |
+| `paylink.channel` | no fields; needs `email` in Paylink's `channels`, Trace's wordings for `payment_link_text` and `payment_link_email`, and Trace's `businessName`; each comes after a `badge.verify` step that grants `payment.request` and must be followed by the `paylink.request` it chooses for, before another `paylink.channel` (section 14) |
 | `paylink.request` | `amountMinor` and `currency`, or instead `amountRef` (1 to 64 of letters, digits, `.`, `:`, `-`, `_`; needs the `amounts` adapter), never both; `description`, `amountSource` (section 14); optional `mode` (`connect` or `platform`; connect needs Paylink's `connectedAccountId`), `linkLifeMinutes` (5 to 60), `paymentMethods` (instant methods only) |
 | `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
 | `trace.receipt` | optional `textLink: {consent}`, a wording purpose in Trace's settings, which also needs Trace's `businessName` and the `messages` adapter (section 16); needs the `signer` adapter |
@@ -1015,7 +1077,9 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 
 Settings: Badge (sections 4, 5a and 6); Dossier `{forms}` (section 13, ids unique; a sensitive
 field needs the `fieldCipher` adapter; field rules as section 13 lists); Paylink `{maxAmountMinor?,
-mode?, connectedAccountId?, linkLifeMinutes?, paymentMethods?}` (`maxAmountMinor` 1 to
+mode?, connectedAccountId?, linkLifeMinutes?, paymentMethods?, channels?}` (`channels`: `["text"]`
+by default, or `["text", "email"]`, which needs the `emails` adapter; text is always one;
+`maxAmountMinor` 1 to
 1,000,000; `mode` default `platform`, and `connect` needs `connectedAccountId`, 1 to 255 letters,
 digits, `-` or `_`; a `connectedAccountId` needs an explicit `mode`, so a business account never
 quietly defaults to the platform's; the other two are the defaults for steps that name none and
@@ -1112,7 +1176,7 @@ answer on file, a phone number, a link or card data.
 | `flow.abandoned` | `flow`, `step` |
 | `flow.rate_limited` | `flow`, `scope` (`subject` or `number`): never the subject key, the number or its hash |
 | `verification.started` | `subject`: `account`, `host` or `callback` (with `requestedOn`, the call that asked) |
-| `verification.factor` | `kind`, `passed` (and `status` for photo ID, `tag` for the PIN, section 6) |
+| `verification.factor` | `kind`, `passed` (and `status` for photo ID, `tag` for the PIN, section 6; `reused: true` and `fromCallId` for a PIN pass reused from another call) |
 | `verification.factor_error` | `kind` (the judge threw; no factor recorded, the attempt stays counted) |
 | `verification.carrier_checked` | `checked`, `textCodeTrusted`, `identityMatch` |
 | `verification.locked` | `kind`, `scope` (`subject` or `number`), `hard`, `until`: never the subject key, the number or its hash |
@@ -1122,8 +1186,10 @@ answer on file, a phone number, a link or card data.
 | `identity.link_sent` | none |
 | `verification.code_sent` | none |
 | `verification.code_refused` | `reason`: `country`, `subject_limit`, `number_limit` or `send_failed` |
-| `verification.finished` | `level` (after any attestation cap or synthetic voice band), `methods`, `discounted`, `capped` (true when an attestation cap or a synthetic voice band lowered the level), `policyVersion`, `configRevision`; `voidedByTaint: true` when a taint landed in that verification |
+| `verification.finished` | `level` (after any attestation cap or synthetic voice band), `methods`, `discounted`, `capped` (true when an attestation cap or a synthetic voice band lowered the level), `policyVersion`, `configRevision`; `voidedByTaint: true` when a taint landed in that verification; `reused: ["pin"]` when its `pin` is a reused PIN pass |
 | `verification.synthetic_voice` | `vendor`, `band` (never the score) |
+| `verification.pin_pass_issued` | `expiresAt` (section 6, PIN passes): never the token or its hash |
+| `verification.pin_reuse_refused` | `reason`: `unknown`, `same_call`, `expired`, `used`, `tainted`, `voice`, `subject`, `number` or `locked` |
 | `grant.issued` | `grantId`, `level`, `scopes`, `expiresAt`, `policyVersion`, `configRevision` |
 | `pin.enrolled` | none (never the digits, the digest or their length) |
 | `pin.reset` | `subjectKey`; actor `member`, `callId` null |
@@ -1138,7 +1204,8 @@ answer on file, a phone number, a link or card data.
 | `redaction.applied` | `kinds` (counts per kind) |
 | `payment.amount_read_back` | `amountMinor`, `currency`, `amountSource`, `digest` (never the `amountRef`) |
 | `payment.amount_confirmed` | `digest`, `confirmedBy` |
-| `payment.link_sent` | `paymentId`, `linkId`, `amountMinor`, `currency`, `amountSource`, `mode`, `expiresAt` |
+| `payment.channel_chosen` | `channel` (`text` or `email`), `offered` (the channels offered), `consentId` when the choice was offered (actor `caller`; `code` when only text was, with no consent): never the address |
+| `payment.link_sent` | `paymentId`, `linkId`, `amountMinor`, `currency`, `amountSource`, `mode`, `channel` (`text` or `email`), `expiresAt` |
 | `payment.link_expired` | `paymentId`, `provider` (`expired`, `not_open`, or `not_created` when no link was created), and `reason`: none when the engine's deadline came, else `not_sent_in_time`, `not_created_in_time`, `cancelled` or `call_ended` |
 | `payment.outcome_ignored` | `paymentId`, `reason` (`account`): an outcome from another account |
 | `payment.settled` | `paymentId`, `status`, and `late: true` for a payment made after the engine closed its link |
@@ -1483,6 +1550,10 @@ empty part.
   reached); both are absent when no verification finished on the call. They are optional, so the
   format stays at `v: 1`, and a reader that does not know them still checks the signature over the
   whole body.
+- `verification.reused` is `["pin"]` when the `pin` in `methods` is a PIN pass reused from another
+  call of the same caller (section 6, PIN passes), and absent otherwise, so the format stays at
+  `v: 1`. A receipt never names the call the pass came from; the ledger's `verification.factor`
+  does (`fromCallId`).
 - `attestation` is the caller ID attestation the call started with (section 4); it is optional in
   the format, so a receipt without it is still version 1, and the engine always writes it.
 - A receipt never carries a synthetic voice band, vendor or score, since a receipt can reach the
@@ -1808,6 +1879,62 @@ can create a link and still fail to answer), and calling `requestPayment` again 
 same payment id and idempotency keys; a different amount is refused. `requestPayment` returns the
 status it saw last and `expiresAt`.
 
+**Channels: text or email (0.3.0).** A link goes by text to the number on file, as before, or by
+email to the subject's verified address on file (`SubjectRecord.emailOnFile`), when Paylink's
+`channels` is `["text", "email"]` and the caller chose email. The engine never takes an address
+from a call: no entry point accepts one, and the destination is always the address on file as
+Badge read the subject when verification started, held to `isEmailAddress` (at most 254 ASCII
+characters, one `@`, an unquoted dot-atom local part of at most 64, a domain of two or more DNS
+labels with a top-level domain of letters or an `xn--` label; no quoted part, IP literal, space,
+comma, control character or line break). A missing or refused address is no address.
+
+- `offerPaymentChannels(callId)` needs Paylink on, the flow on a `paylink.channel` step (or no
+  flow; another step is `precondition_failed`), an open call (`invalid_transition`),
+  `payment.request` covered (`scope_denied`) and a keypad or PIN match (`precondition_failed`).
+  With the email channel on and an address on file, it answers `{channels: [{channel: "text", key:
+  "1"}, {channel: "email", key: "2"}], prompt, chosen: null}` and writes nothing. `prompt` is built
+  by code in the call's locale: each channel's consent wording (Trace's `payment_link_text`, then
+  `payment_link_email`) followed by its key line from `CHANNEL_KEY_TEXT` ("Press 1." / "Appuyez sur
+  1." / "Pulse 1."), joined by spaces. The call must keep both wordings in its locale and a
+  business name, else `precondition_failed` (fail closed). Without the email channel or an
+  address, nothing is offered: it answers `{channels: [{channel: "text", key: "1"}], prompt: null,
+  chosen: "text"}`, records the choice of text (`payment.channel_chosen`, actor `code`, no consent)
+  and the step completes. An address that came on file between its read and its write is
+  `precondition_failed`: offer again.
+- `choosePaymentChannel(callId, {key})` takes the key the caller pressed: `PAYMENT_CHANNEL_KEYS`,
+  `1` for text and `2` for email, fixed in code, only among the channels offered. A `key` that is
+  not a string is `invalid_input` ("key must be the digit the caller keyed"), one not offered is
+  `invalid_input` naming the keys offered, both before anything is written. With both offered,
+  the keypress is the caller's consent to that channel: Trace records it as a consent (`answer:
+  "yes"`, channel `call`) to `payment_link_text` or `payment_link_email`
+  (`PAYMENT_CHANNEL_PURPOSES`) under the call's wording for it (its version and digest, section
+  21), through the ConsentStore when there is one, inside the `paylink.channel` step. Then one write
+  records the choice for the subject matched now (`payment.channel_chosen`, actor `caller`, with the
+  `consentId`), and the step completes. A call whose subject or channels changed in between is
+  `precondition_failed`: the consent stays recorded, and the host offers again.
+- `requestPayment` sends the next link by the channel chosen on the call (text when none was), and
+  the choice is used up by that link: the next one goes by text unless the caller chooses again. A
+  choice made for another subject than the one matched now is `precondition_failed`; so is a choice
+  whose consent the caller withdrew since (their latest answer to that purpose is not "yes"), an
+  email channel turned off since, or an address no longer on the call's copy of the subject.
+  These are checked when the link is reserved, before the read-back is used up. The request keeps
+  its `channel` and the choice's consent; a resume sends it the same way (a request saved before
+  channels existed goes by text), and only while that consent stands: after a "no" to it (the send
+  failed, then the caller changed their mind), a resume is `precondition_failed`, nothing is sent,
+  and the same holds for a "no" recorded while the link is created or bound (checked again in the
+  write right before the send, which gives the lease back),
+  and the request stays open with its link, for the host to cancel (`cancelPaymentLink`) or the
+  end of the call to close.
+- An email goes through the `emails` adapter (`EmailSender.sendEmail({to, subject, body, locale,
+  purpose: "payment_link", idempotencyKey})`, key `[workspaceId, callId, paymentId, "email"]`),
+  never a text as well. Its words are section 16's. It is the same link: one per request, the same
+  idempotency keys at the provider, the same life (`linkLifeMinutes` from the send, never past what
+  the provider was asked for), the same send lease and its renewal before the send (an adapter
+  that does not settle within 60 seconds can see its link expired under it), the same
+  `cancelPaymentLink`, `expirePaymentLinks` and end of the call, and the same late payments. A
+  failed email leaves the request open and gives the lease back, and a resume emails again with
+  the same key. `payment.link_sent` names the `channel`.
+
 **Modes.** `connect` takes the money on the business's own account at the provider (a direct
 charge; the business is the merchant), `platform` on the platform's own account (the platform is
 the merchant). The step's `mode`, else Paylink's `mode`, else `platform`. The request to
@@ -2120,13 +2247,15 @@ Code builds every text, in the call's locale, one of `SUPPORTED_LOCALES` (export
 `["en", "fr", "es"]` whose members are the `Locale` type; `isSupportedLocale` checks a host's value).
 Each catalog of code-built words is a `Record<Locale, ...>`: the texts below (`IDENTITY_TEXT`,
 `PAYMENT_TEXT`, `TEXT_CODE_TEXT`, `ACCESS_CODE_TEXT`, `RECEIPT_LINK_TEXT`, `CONTACT_NOTICE_TEXT`,
-`ACTION_WORDS`), `AMOUNT_REGION` and `LIST_REGION` (where amounts and lists are formatted),
+`ACTION_WORDS`), the payment link email and the channel prompt's key line (`PAYMENT_EMAIL`,
+`CHANNEL_KEY_TEXT`), `AMOUNT_REGION` and `LIST_REGION` (where amounts and lists are formatted),
 `AMOUNT_READBACK_TEXT` and `READBACK_WORDING` (the read-backs), `INTERRUPT_LINES`, `BANK_WORDS`,
 `NUMBER_CONNECTORS` and `NUMBER_LANGUAGES_BY_LOCALE` (the number words the redactors read: English
 and French on every call, Spanish too on a Spanish call). A test fails when a catalog lacks a
 supported locale, when a `Record<Locale, ...>` in `src/` is not one it checks, or when code picks
-words by comparing a locale instead, so a new locale grows every catalog. The destination is
-always the subject's number on file. Identity link: "Your one-time identity check link: URL" /
+words by comparing a locale instead, so a new locale grows every catalog. The destination of a
+text is always the subject's number on file, and of the one email its verified address on file.
+Identity link: "Your one-time identity check link: URL" /
 "Votre lien de vérification d'identité, à usage unique : URL" / "Su enlace de verificación de
 identidad, de un solo uso: URL". Payment link: "Your secure payment link for AMOUNT: URL" /
 "Votre lien de paiement sécurisé pour AMOUNT : URL" / "Su enlace de pago seguro por AMOUNT: URL",
@@ -2138,6 +2267,20 @@ uso: CODE. Caduca en 10 minutos. No lo comparta con nadie." Access code (section
 one-time door code: CODE. It works once, within N min." / "Votre code de porte, à usage unique :
 CODE. Valable une fois, dans les N min." / "Su código de puerta de un solo uso: CODE. Sirve una
 vez, dentro de N min.", N being the minutes left on the access grant, rounded up, at least 1.
+
+**Payment link email** (purpose `payment_link`, section 14). The one email code builds, to the
+subject's verified address on file only. Subject: "Your secure payment link from BUSINESS" /
+"Votre lien de paiement sécurisé de BUSINESS" / "Su enlace de pago seguro de BUSINESS". Body:
+"BUSINESS sent you a secure payment link for AMOUNT. It works once and expires in N minutes."
+then the link on a line of its own, then "If you did not ask for this payment, do not use the
+link." / "BUSINESS vous a envoyé un lien de paiement sécurisé pour AMOUNT. Il ne sert qu'une fois
+et expire dans N minutes." ... "Si vous n'avez pas demandé ce paiement, n'utilisez pas le lien."
+/ "BUSINESS le envió un enlace de pago seguro por AMOUNT. Sirve una sola vez y caduca en N
+minutos." ... "Si no solicitó este pago, no use el enlace.", where BUSINESS is Trace's
+`businessName` as the call kept it, AMOUNT is formatted as for the text, and N is the link's life,
+or the whole minutes the provider has left of it when that is less. It never carries a code, a
+phone number, an account number or the caller's name: a copy forwarded or read by someone else
+holds the merchant, the amount, the expiry and a link that works once.
 
 **Actions.** When a flow step whose needed scope is of class money, contact or access completes
 (section 4), the call notes the class, once each. An outside module that changes contact details,

@@ -13,6 +13,8 @@ import type {
   CodeStore,
   DuressAlert,
   DuressNotifier,
+  EmailPurpose,
+  EmailSender,
   ConsentRecord,
   ConsentRevocation,
   ConsentStore,
@@ -129,6 +131,21 @@ export class FakeMessageSender implements MessageSender {
   async sendText(input: { to: string; body: string; purpose: MessagePurpose; idempotencyKey: string }): Promise<{ messageId: string }> {
     const messageId = `msg_fake_${this.sent.length + 1}`;
     this.sent.push({ to: input.to, body: input.body, purpose: input.purpose, messageId });
+    return { messageId };
+  }
+}
+
+/** Records every email instead of sending it, and answers each idempotency key once, like a sender that never delivers one twice. */
+export class FakeEmailSender implements EmailSender {
+  readonly sent: Array<{ to: string; subject: string; body: string; locale: Locale; purpose: EmailPurpose; messageId: string }> = [];
+  readonly #byKey = new Map<string, string>();
+
+  async sendEmail(input: { to: string; subject: string; body: string; locale: Locale; purpose: EmailPurpose; idempotencyKey: string }): Promise<{ messageId: string }> {
+    const seen = this.#byKey.get(input.idempotencyKey);
+    if (seen !== undefined) return { messageId: seen };
+    const messageId = `email_fake_${this.sent.length + 1}`;
+    this.#byKey.set(input.idempotencyKey, messageId);
+    this.sent.push({ to: input.to, subject: input.subject, body: input.body, locale: input.locale, purpose: input.purpose, messageId });
     return { messageId };
   }
 }

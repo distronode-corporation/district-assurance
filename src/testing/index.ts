@@ -8,6 +8,7 @@ import {
   FakeAccessController,
   FakeCallbackDialer,
   FakeCarrierSignals,
+  FakeEmailSender,
   FakeIdentityProvider,
   FakeMessageSender,
   FakePaymentLinks,
@@ -32,6 +33,7 @@ export interface TestEngine {
   identity: FakeIdentityProvider;
   carrier: FakeCarrierSignals;
   messages: FakeMessageSender;
+  emails: FakeEmailSender;
   payments: FakePaymentLinks;
   records: MemoryRecordStore;
   ledger: MemoryAuditLedger;
@@ -63,6 +65,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     identity: new FakeIdentityProvider(),
     carrier: new FakeCarrierSignals(),
     messages: new FakeMessageSender(),
+    emails: new FakeEmailSender(),
     payments: new FakePaymentLinks(),
     records: new MemoryRecordStore(),
     ledger: new MemoryAuditLedger(),
@@ -78,6 +81,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     identity: parts.identity,
     carrier: parts.carrier,
     messages: parts.messages,
+    emails: parts.emails,
     payments: parts.payments,
     records: parts.records,
     ledger: parts.ledger,
