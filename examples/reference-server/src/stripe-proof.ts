@@ -16,7 +16,7 @@
 //    endive creates a CAD 1.00 session with `allowed_payment_method_types`, reads it, expires it
 //    (`expired`) and expires it again (`already_expired`).
 // 3. `verifyConnectEvent` over checkout.session.completed, checkout.session.expired and
-//    account.updated bodies carrying the real objects, each signed with Stripe's own
+//    account.updated bodies carrying the real objects (read with the same client), each signed with Stripe's own
 //    `webhooks.generateTestHeaderString`; plus a live event under the test secret (`wrong_mode`),
 //    the same secret in both modes (`invalid`) and a stale signature (`invalid`).
 // Every Stripe object id is printed.
@@ -35,6 +35,7 @@ import {
   createOnboardingLink,
   fetchStripeClient,
   readConnectStatus,
+  stripeErrorDetail,
   verifyConnectEvent,
 } from "../../../src/stripe/index.ts";
 
@@ -125,11 +126,11 @@ async function main(): Promise<void> {
   check(again.outcome === "already_expired", `expire again: ${again.outcome} (idempotent)`);
 
   console.log("\n3. verifyConnectEvent under Stripe's own test header");
-  // Read raw, for real objects to put in the event bodies: the SDK here builds bodies, never decides.
-  const sdk = new Stripe(key, { apiVersion: STRIPE_API_VERSION });
-  const expiredSession = await sdk.checkout.sessions.retrieve(session.linkId, {}, { stripeAccount: account });
-  const v1Account = await sdk.accounts.retrieve(created.accountId);
-  check(expiredSession.livemode === false && v1Account.id === created.accountId, "the objects for the event bodies are test mode");
+  // Real objects for the event bodies, read raw through the same client and the same scopes the
+  // adapters use (no v1 Accounts read, which a host's restricted key need not have).
+  const expiredSession = (await client.checkout.sessions.retrieve(session.linkId, {}, { stripeAccount: account })) as Record<string, unknown>;
+  const accountObject = (await client.v2.core.accounts.retrieve(created.accountId, { include: ["configuration.merchant", "requirements"] })) as Record<string, unknown>;
+  check(expiredSession.livemode === false && accountObject.id === created.accountId, "the objects for the event bodies are test mode");
   const secret = `whsec_${randomBytes(24).toString("hex")}`;
   const now = Math.floor(Date.now() / 1000);
   const body = (type: string, object: unknown, eventAccount: string, livemode = false) =>
@@ -138,7 +139,7 @@ async function main(): Promise<void> {
   for (const [type, object, eventAccount] of [
     ["checkout.session.completed", completed, account],
     ["checkout.session.expired", expiredSession, account],
-    ["account.updated", v1Account, created.accountId],
+    ["account.updated", accountObject, created.accountId],
   ] as const) {
     const payload = body(type, object, eventAccount);
     const header = Stripe.webhooks.generateTestHeaderString({ payload, secret });
@@ -162,6 +163,7 @@ main().catch((err: unknown) => {
   // Our messages and the adapters' errors carry no key and no Stripe message; anything else is named by its class only.
   const e = err as { name?: unknown; message?: unknown };
   const safe = typeof e.message === "string" && (/^(PROOF FAILED|Refused)/.test(e.message) || ["StripeAdapterError", "StripeKeyRefused", "StripeHttpError"].includes(String(e.name)));
-  console.error(safe ? String(e.message) : `failed: ${String(e.name ?? "error")}`);
+  const detail = stripeErrorDetail(err);
+  console.error(safe ? String(e.message) : `failed: ${String(e.name ?? "error")} (status ${String(detail.status)}, ${String(detail.type)}, ${String(detail.code)})`);
   process.exit(1);
 });
