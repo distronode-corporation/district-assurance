@@ -242,7 +242,8 @@ export class StripeCheckoutLinks implements PaymentLinks {
       } catch {
         throw failure;
       }
-      if (now.status === "open" && failure.status !== 400) throw failure;
+      // Still open after a refusal: the refusal is the answer (retryable or not, as the expire's own error says).
+      if (now.status === "open") throw failure;
       return { outcome: now.status === "expired" ? "already_expired" : now.status, session: now };
     }
     const direct = this.#status(id, answer);

@@ -276,12 +276,12 @@ describe("Stripe Checkout adapter against a local fake", () => {
     assert.deepEqual(fake.seen.map((s) => [s.method, s.headers["stripe-account"]]), [["POST", "acct_x"], ["GET", "acct_x"]]);
   });
 
-  it("throws (retryable) when Stripe refuses to expire a session that is still open, or fails", async () => {
+  it("throws when Stripe refuses to expire a session that is still open (its 400, not retryable), or fails (retryable)", async () => {
     const open = await links.createLink(request());
     fake.next = { status: 400, body: JSON.stringify({ error: { type: "invalid_request_error" } }) };
     await assert.rejects(
       links.expireLink({ linkId: open.linkId, mode: "platform", idempotencyKey: "e" }),
-      (e: unknown) => e instanceof StripeAdapterError && e.retryable && /still open/.test(e.message),
+      (e: unknown) => e instanceof StripeAdapterError && !e.retryable && /did not expire the Checkout Session \(HTTP 400, invalid_request_error\)/.test(e.message),
     );
     fake.next = { status: 503, body: "{}" };
     await assert.rejects(links.expireLink({ linkId: open.linkId, mode: "platform", idempotencyKey: "e" }), (e: unknown) => e instanceof StripeAdapterError && e.retryable && /HTTP 503/.test(e.message));

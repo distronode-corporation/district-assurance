@@ -66,5 +66,9 @@ describe("receipts: receiptKeysDocument", () => {
     // ⛔ A key ring's set is not checked by receiptKeySet: the document refuses a private part in it too.
     const ring = { ...a, keySet: () => [{ ...a.publicJwk(), kid: "same", d: "secret" }] } as unknown as ReceiptSigner;
     assert.throws(() => receiptKeysDocument([ring]), /the key same has a private part/);
+    for (const member of ["p", "q", "dp", "dq", "qi", "oth", "k"]) {
+      const other = { ...a, keySet: () => [{ ...a.publicJwk(), kid: "same", [member]: "secret" }] } as unknown as ReceiptSigner;
+      assert.throws(() => receiptKeysDocument([other]), /private part/, member);
+    }
   });
 });

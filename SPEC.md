@@ -1462,7 +1462,13 @@ not an ISO 8601 UTC time. `verifyReceipt` is its `valid`.
 
 `engine.receiptKeys()` returns a key ring's whole `keySet()`, a single signer's one key, or `[]`
 without a signer. The reference server serves it at `GET /.well-known/receipt-keys.json` as
-`{"keys": [...]}`. To rotate without breaking old receipts:
+`{"keys": [...]}`. `receiptKeysDocument(signers)` builds that document for a host that serves it
+itself: every signer's published keys (`receiptKeySet`), in order, each `kid` once. The same key
+under one `kid` twice is kept once, two different keys under one `kid` throw, and so does any private
+JWK member (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth` or `k`) in any signer's set, a key ring's
+included. `RECEIPT_KEYS_CACHE_CONTROL` (`public, max-age=300`) is the header to serve it with; the
+route, its rate limit and where the keys live are the host's. To rotate without breaking old
+receipts:
 
 1. Add the new signer to every process's ring, still with the old `active`, so the new key is
    published before it signs anything.
@@ -3118,8 +3124,9 @@ deadline, or an answer that was lost or did not show the close; expiring again i
 `complete` (the payer finished first) or `open`, with the session read. No idempotency key is sent
 with an expire: Stripe saves a key's first result, a 500 included, so a keyed expire that failed
 once could not be retried into an answer, and a second expire is Stripe's 400, read back. After any
-failure the session is read: one shown closed answers its outcome; one still open, or an unreadable
-one, throws the expire's error, retryable for a 429, a 5xx or a lost answer. `expireLink` answers the
+failure the session is read: one shown closed answers its outcome; one still open (after Stripe's 400
+too), or an unreadable one, throws the expire's error, retryable for a 429, a 5xx or a lost answer and
+not for a 400. `open` is answered only after a successful expire answer whose session still reads open. `expireLink` answers the
 engine's `expired` or `not_open`, and throws a retryable `StripeAdapterError` for a session still
 open. `createLink` refuses an `expiresAt` under 30 minutes or over 24 hours from the adapter's `now`,
 and an empty method list (no list would be no filter at Stripe). `checkoutExpiresAt(now, minutes =

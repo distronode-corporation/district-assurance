@@ -291,6 +291,9 @@ export function receiptKeySet(signer: ReceiptSigner | undefined): JsonWebKey[] {
   return typeof (signer as Partial<ReceiptKeyRing>).keySet === "function" ? (signer as ReceiptKeyRing).keySet() : [publishedKey(signer.publicJwk(), signer.keyId)];
 }
 
+/** The JWK members that hold private material: EC and RSA `d`, RSA's primes and CRT values, and an octet key's `k`. */
+const PRIVATE_JWK_MEMBERS = ["d", "p", "q", "dp", "dq", "qi", "oth", "k"] as const;
+
 /** How long a verifier may keep the published key set: short, so a new key version is seen within minutes. */
 export const RECEIPT_KEYS_CACHE_CONTROL = "public, max-age=300";
 
@@ -306,8 +309,10 @@ export function receiptKeysDocument(signers: ReadonlyArray<ReceiptSigner | undef
   const keys: JsonWebKey[] = [];
   for (const signer of signers) {
     for (const key of receiptKeySet(signer)) {
-      // A key ring's set is not checked by receiptKeySet: a private part is refused here too.
-      if (key.d !== undefined) throw new TypeError(`receiptKeysDocument: the key ${String(key.kid)} has a private part, which is never published`);
+      // A key ring's set is not checked by receiptKeySet: a private part of any key type is refused here too.
+      if (PRIVATE_JWK_MEMBERS.some((member) => Object.hasOwn(key, member))) {
+        throw new TypeError(`receiptKeysDocument: the key ${String(key.kid)} has a private part, which is never published`);
+      }
       const kid = String(key.kid);
       const value = canonicalJson(key);
       const seen = byKid.get(kid);

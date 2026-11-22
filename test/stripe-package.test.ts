@@ -321,8 +321,9 @@ describe("StripeCheckoutLinks: expire (the host cancels the link when the wait e
     ({ client } = fake({ expire: session(), retrieve: session() }));
     assert.equal((await links(client).expire(CLOSE)).outcome, "open");
     await assert.rejects(links(client).expireLink(CLOSE), (e: Error) => e instanceof StripeAdapterError && e.retryable && /still open/.test(e.message));
+    // Stripe's 400 on a session that still reads open (a refusal, not a closed session): its own, non-retryable error.
     ({ client } = fake({ expire: refusal(400), retrieve: session() }));
-    assert.equal((await links(client).expire(CLOSE)).outcome, "open");
+    await assert.rejects(links(client).expire(CLOSE), (e: Error) => e instanceof StripeAdapterError && !e.retryable && /HTTP 400/.test(e.message));
   });
 
   it("⛔ surfaces a 5xx, a 429 or a lost answer as a retryable StripeAdapterError, and another 4xx as not retryable, when the session reads open", async () => {
