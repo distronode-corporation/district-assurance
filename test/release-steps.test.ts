@@ -172,6 +172,17 @@ describe("the previous release the benchmarks compare with", { skip: unix }, () 
     assert.match(r.summary, /No earlier tag has a published GitHub release/);
   });
 
+  it("finds the baseline for a version whose own tag does not exist yet (a dry run), tagging it in the clone only", () => {
+    // git as a clone that lacks v0.3.0 until the step tags it: the listing then has it first.
+    const older = tags.filter((t) => t !== "v0.3.0");
+    const fakeGit = `if [ "$1" = tag ]; then printf '%s\\n' "$2" > "$RUNNER_TEMP/made"; exit 0; fi; [ -f "$RUNNER_TEMP/made" ] && cat "$RUNNER_TEMP/made"; printf '%s\\n' ${older.join(" ")}`;
+    const r = runStep(previous, { git: fakeGit, gh: gh(["v0.2.0", "v0.1.0"]) }, { VERSION: "0.3.0", GITHUB_REPOSITORY: "o/r", GH_TOKEN: "x" });
+    assert.equal(r.code, 0, r.out);
+    assert.equal(r.output, "tag=v0.2.0\n");
+    assert.match(previous, /git tag "v\$VERSION" HEAD > \/dev\/null 2>&1 \|\| true/);
+    assert.doesNotMatch(previous, /git push/);
+  });
+
   it("skips the comparison when there is no baseline", () => {
     assert.match(step(job("bench"), "Compare with the previous release"), /if: steps\.previous\.outputs\.tag != ''/);
   });

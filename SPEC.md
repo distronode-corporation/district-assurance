@@ -3153,9 +3153,15 @@ the file list, and a smoke test that unpacks the tarball into an empty project, 
 point and type-checks a strict consumer. The commit must be on main, and the version needs a
 dated CHANGELOG.md section. It then publishes that tarball with npm provenance, in this
 repository only, in the `npm-publish` environment, which admits main only. A version with a
-pre-release part goes to the `next` dist-tag. A manual run with `dry_run` ticked is a dry run: no
-tag, no signature, no publish. A fork never tags or publishes. A tag pushed by hand starts
-nothing.
+pre-release part goes to the `next` dist-tag. When the tag is already on this commit and the
+version is not on npm, or is on npm but the tag has no GitHub release with its files (a run that
+tagged or published and then failed), the run resumes: it signs nothing again, verifies the
+tag, and publishes only when npm does not already serve the very same bytes, then makes the
+GitHub release. A version on npm without its tag, a tag on another commit while the version is
+not on npm, a commit not on main, and a release with no dated CHANGELOG.md section fail the run,
+for a person to look at. A manual run with `dry_run` ticked is a dry run, even for a released
+version: no tag, no signature, no publish. A fork never tags or publishes. A tag pushed by hand
+starts nothing.
 
 ## 31. Stripe adapters (`district-assurance/stripe`)
 

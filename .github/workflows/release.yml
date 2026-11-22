@@ -7,10 +7,14 @@ name: Release
 # on npm, and is a no-op (success, nothing done) otherwise, so an ordinary merge changes nothing.
 #
 #   decide        reads main's version and decides: `release` (no tag, not on npm), `resume` (the
-#                 tag is on this very commit and the version is not on npm: a run that tagged and
-#                 then failed), or `done` (tagged and published: the no-op). Anything else (a
-#                 version on npm without its tag, a tag on another commit, a run off main, a
-#                 commit not on main, a release with no dated CHANGELOG.md section) fails.
+#                 tag is on this very commit and either the version is not on npm, or it is but
+#                 the tag has no GitHub release with its files: a run that tagged, or published,
+#                 and then failed), or `done` (tagged, published and released: the no-op). Anything
+#                 else (a version on npm without its tag, a tag on another commit while the version
+#                 is not on npm, a run off main, a commit not on main, a release with no dated
+#                 CHANGELOG.md section) fails. A resume publishes nothing twice: the publish job's
+#                 registry check skips the publish when npm already serves the very same bytes, and
+#                 fails when it serves other bytes, before the GitHub release is made.
 #   tag           `release` only: creates the annotated tag `vX.Y.Z` on this exact commit, signed
 #                 with gitsign (keyless Sigstore signing under this workflow's GitHub OIDC
 #                 identity, so no long-lived key exists anywhere), verifies it, and pushes it with
@@ -151,6 +155,7 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           DRY_RUN: ${{ inputs.dry_run }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version="$(node -p 'require("./package.json").version')"
@@ -174,7 +179,27 @@ jobs:
           if [ "$EVENT" = "workflow_dispatch" ] && [ "$DRY_RUN" = "true" ]; then dry=true; fi
           if [ -n "$tag" ] && [ -n "$published" ]; then
             state="done"
-            echo "v$version is tagged and $version is on npm: nothing to release." | tee -a "$GITHUB_STEP_SUMMARY"
+            # Tagged here and on npm: done only once the tag's GitHub release has its files. A 404
+            # is "no release yet"; any other failure to ask stops the run.
+            if [ "$tag" = "$GITHUB_SHA" ]; then
+              complete=""
+              if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$version" > "$RUNNER_TEMP/release.json" 2> "$RUNNER_TEMP/release.err"; then
+                complete="$(node -e '
+                  const release = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+                  process.stdout.write(release.draft === false && Array.isArray(release.assets) && release.assets.length > 0 ? "yes" : "");
+                ' "$RUNNER_TEMP/release.json")"
+              elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/release.err"; then
+                cat "$RUNNER_TEMP/release.err"
+                echo "::error::GitHub could not be asked whether v$version has its release."
+                exit 1
+              fi
+              if [ -z "$complete" ]; then state="resume"; fi
+            fi
+            if [ "$state" = "done" ]; then
+              echo "v$version is tagged and released, and $version is on npm: nothing to release." | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              echo "v$version is on this commit and $version is on npm, but its GitHub release is missing: finishing it." | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
           elif [ -n "$tag" ]; then
             if [ "$tag" != "$GITHUB_SHA" ]; then
               echo "::error::v$version is on $tag, not this commit ($GITHUB_SHA), and $version is not on npm. Re-run the run that made the tag."
@@ -311,7 +336,8 @@ jobs:
   ci:
     needs: [decide, guard]
     if: >-
-      ${{ always() && needs.decide.result == 'success' && needs.decide.outputs.state != 'done' &&
+      ${{ always() && needs.decide.result == 'success' &&
+        (needs.decide.outputs.state != 'done' || needs.decide.outputs.dry == 'true') &&
         (needs.guard.result == 'success' || (needs.decide.outputs.dry == 'true' && needs.guard.result == 'skipped')) }}
     permissions:
       contents: read
@@ -320,7 +346,8 @@ jobs:
   supply-chain:
     needs: [decide, guard]
     if: >-
-      ${{ always() && needs.decide.result == 'success' && needs.decide.outputs.state != 'done' &&
+      ${{ always() && needs.decide.result == 'success' &&
+        (needs.decide.outputs.state != 'done' || needs.decide.outputs.dry == 'true') &&
         (needs.guard.result == 'success' || (needs.decide.outputs.dry == 'true' && needs.guard.result == 'skipped')) }}
     permissions:
       contents: read
@@ -329,7 +356,8 @@ jobs:
   pack:
     needs: [decide, guard]
     if: >-
-      ${{ always() && needs.decide.result == 'success' && needs.decide.outputs.state != 'done' &&
+      ${{ always() && needs.decide.result == 'success' &&
+        (needs.decide.outputs.state != 'done' || needs.decide.outputs.dry == 'true') &&
         (needs.guard.result == 'success' || (needs.decide.outputs.dry == 'true' && needs.guard.result == 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -849,7 +877,8 @@ jobs:
   bench:
     needs: [decide, guard]
     if: >-
-      ${{ always() && needs.decide.result == 'success' && needs.decide.outputs.state != 'done' &&
+      ${{ always() && needs.decide.result == 'success' &&
+        (needs.decide.outputs.state != 'done' || needs.decide.outputs.dry == 'true') &&
         (needs.guard.result == 'success' || (needs.decide.outputs.dry == 'true' && needs.guard.result == 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -881,6 +910,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # The version's own tag marks where to start, so it is made here, in this runner's clone
+          # only and never pushed, when it does not exist yet (a dry run of a new version).
+          git tag "v$VERSION" HEAD > /dev/null 2>&1 || true
           previous=""
           found=false
           for tag in $(git -c versionsort.suffix=- tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname); do

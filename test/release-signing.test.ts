@@ -55,6 +55,8 @@ interface World {
   changelog?: string;
   event?: string;
   dryRun?: string;
+  /** What GitHub answers for the tag's release: one with files, none (404), a draft, or a failure. */
+  release?: "complete" | "none" | "draft" | "empty" | "fails";
 }
 
 /** The decide step, run with stand-in git and curl, the real node and grep. */
@@ -73,6 +75,16 @@ function decide(world: World = {}) {
   const document = world.document ?? JSON.stringify({ name: "district-assurance", versions: Object.fromEntries((world.versions ?? ["0.1.0"]).map((v) => [v, {}])) });
   writeFileSync(join(dir, "document.json"), document);
   fake("curl", world.curlFails === true ? "exit 22" : `while [ $# -gt 0 ]; do if [ "$1" = -o ]; then cp "${join(dir, "document.json")}" "$2"; shift; fi; shift; done`);
+  const release = world.release ?? "complete";
+  const answer = { complete: { draft: false, assets: [{ name: "x.tgz" }] }, draft: { draft: true, assets: [{ name: "x.tgz" }] }, empty: { draft: false, assets: [] } } as Record<string, unknown>;
+  fake(
+    "gh",
+    release === "none"
+      ? `echo 'gh: Not Found (HTTP 404)' >&2; exit 1`
+      : release === "fails"
+        ? `echo 'gh: Server Error (HTTP 502)' >&2; exit 1`
+        : `printf '%s' '${JSON.stringify(answer[release])}'`,
+  );
   writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "district-assurance", version }));
   writeFileSync(join(dir, "CHANGELOG.md"), world.changelog ?? CHANGELOG);
   writeFileSync(join(dir, "output"), "");
@@ -87,6 +99,7 @@ function decide(world: World = {}) {
       GITHUB_OUTPUT: join(dir, "output"),
       GITHUB_STEP_SUMMARY: join(dir, "summary"),
       GITHUB_SHA: SHA,
+      GITHUB_REPOSITORY: "distronode-corporation/district-assurance",
       EVENT: world.event ?? "push",
       DRY_RUN: world.dryRun ?? "",
     },
@@ -123,6 +136,26 @@ describe("the release decision", { skip: unix }, () => {
       assert.match(r.out, /no dated '## \[1\.2\.3\] - YYYY-MM-DD' section/, changelog);
       assert.equal(r.output.state, undefined, "nothing decided");
     }
+  });
+
+  it("finishes a release that is on npm but whose tag has no GitHub release with its files, from this commit only", () => {
+    for (const release of ["none", "draft", "empty"] as const) {
+      const r = decide({ tag: SHA, versions: ["1.2.3"], release });
+      assert.equal(r.code, 0, r.out);
+      assert.equal(r.output.state, "resume", release);
+      assert.match(r.summary, /GitHub release is missing/, release);
+    }
+    // A later merge, on another commit, is a no-op whatever the old release holds: GitHub is not asked.
+    const later = decide({ tag: OTHER, versions: ["1.2.3"], release: "fails" });
+    assert.equal(later.code, 0, later.out);
+    assert.equal(later.output.state, "done");
+  });
+
+  it("fails closed when GitHub cannot be asked about the tag's release", () => {
+    const r = decide({ tag: SHA, versions: ["1.2.3"], release: "fails" });
+    assert.notEqual(r.code, 0);
+    assert.match(r.out, /could not be asked whether v1\.2\.3 has its release/);
+    assert.equal(r.output.state, undefined);
   });
 
   it("resumes a run that tagged this very commit and then failed before npm had the version", () => {
@@ -221,7 +254,8 @@ describe("the shape that keeps an unsigned tag from publishing", () => {
       const text = job(name);
       assert.match(text, /needs: \[decide, guard\]/, name);
       assert.match(text, /needs\.guard\.result == 'success' \|\| \(needs\.decide\.outputs\.dry == 'true' && needs\.guard\.result == 'skipped'\)/, name);
-      assert.match(text, /needs\.decide\.outputs\.state != 'done'/, name);
+      // A no-op skips them; an explicit dry run goes through them even for a released version.
+      assert.match(text, /\(needs\.decide\.outputs\.state != 'done' \|\| needs\.decide\.outputs\.dry == 'true'\)/, name);
     }
     assert.match(job("publish"), /needs: \[decide, guard, ci, supply-chain, pack\]/);
     assert.match(job("dry-run"), /needs\.decide\.outputs\.dry == 'true'/);
