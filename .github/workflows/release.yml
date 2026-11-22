@@ -184,10 +184,14 @@ jobs:
             if [ "$tag" = "$GITHUB_SHA" ]; then
               complete=""
               if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$version" > "$RUNNER_TEMP/release.json" 2> "$RUNNER_TEMP/release.err"; then
+                # Published, with all three files the release job attaches: anything less is repaired.
                 complete="$(node -e '
                   const release = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
-                  process.stdout.write(release.draft === false && Array.isArray(release.assets) && release.assets.length > 0 ? "yes" : "");
-                ' "$RUNNER_TEMP/release.json")"
+                  const v = process.argv[2];
+                  const names = new Set((Array.isArray(release.assets) ? release.assets : []).map((asset) => asset?.name));
+                  const files = [".tgz", ".cdx.json", ".tgz.sbom.sigstore.json"].map((suffix) => "district-assurance-" + v + suffix);
+                  process.stdout.write(release.draft === false && files.every((file) => names.has(file)) ? "yes" : "");
+                ' "$RUNNER_TEMP/release.json" "$version")"
               elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/release.err"; then
                 cat "$RUNNER_TEMP/release.err"
                 echo "::error::GitHub could not be asked whether v$version has its release."
@@ -752,9 +756,21 @@ jobs:
 
           To check this release, see "Checking a release" in README.md.
           EOF
-          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "v$VERSION" --notes-file notes.md "${prerelease[@]}" \
-            "$FILE" "district-assurance-$VERSION.cdx.json" "$FILE.sbom.sigstore.json"
+          files=("$FILE" "district-assurance-$VERSION.cdx.json" "$FILE.sbom.sigstore.json")
+          # A resumed release may find the tag's release already there (a run that made it and
+          # then failed, or a draft): it then gets the same three files, replacing any copy, and is
+          # published. Only "not found" creates one; any other failure to ask stops the job.
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft > /dev/null 2> view.err; then
+            gh release upload "v$VERSION" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}"
+            gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --title "v$VERSION" --notes-file notes.md --draft=false "${prerelease[@]}"
+          elif grep -qi 'release not found' view.err; then
+            gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "v$VERSION" --notes-file notes.md "${prerelease[@]}" "${files[@]}"
+          else
+            cat view.err
+            echo "::error::GitHub could not be asked whether v$VERSION has a release."
+            exit 1
+          fi
 
   dry-run:
     needs: [decide, ci, supply-chain, pack]

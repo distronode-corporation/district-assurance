@@ -56,7 +56,7 @@ interface World {
   event?: string;
   dryRun?: string;
   /** What GitHub answers for the tag's release: one with files, none (404), a draft, or a failure. */
-  release?: "complete" | "none" | "draft" | "empty" | "fails";
+  release?: "complete" | "none" | "draft" | "empty" | "partial" | "fails";
 }
 
 /** The decide step, run with stand-in git and curl, the real node and grep. */
@@ -76,7 +76,13 @@ function decide(world: World = {}) {
   writeFileSync(join(dir, "document.json"), document);
   fake("curl", world.curlFails === true ? "exit 22" : `while [ $# -gt 0 ]; do if [ "$1" = -o ]; then cp "${join(dir, "document.json")}" "$2"; shift; fi; shift; done`);
   const release = world.release ?? "complete";
-  const answer = { complete: { draft: false, assets: [{ name: "x.tgz" }] }, draft: { draft: true, assets: [{ name: "x.tgz" }] }, empty: { draft: false, assets: [] } } as Record<string, unknown>;
+  const all = ["district-assurance-1.2.3.tgz", "district-assurance-1.2.3.cdx.json", "district-assurance-1.2.3.tgz.sbom.sigstore.json"].map((name) => ({ name }));
+  const answer = {
+    complete: { draft: false, assets: all },
+    draft: { draft: true, assets: all },
+    empty: { draft: false, assets: [] },
+    partial: { draft: false, assets: all.slice(0, 1) },
+  } as Record<string, unknown>;
   fake(
     "gh",
     release === "none"
@@ -139,7 +145,7 @@ describe("the release decision", { skip: unix }, () => {
   });
 
   it("finishes a release that is on npm but whose tag has no GitHub release with its files, from this commit only", () => {
-    for (const release of ["none", "draft", "empty"] as const) {
+    for (const release of ["none", "draft", "empty", "partial"] as const) {
       const r = decide({ tag: SHA, versions: ["1.2.3"], release });
       assert.equal(r.code, 0, r.out);
       assert.equal(r.output.state, "resume", release);
@@ -270,5 +276,63 @@ describe("the shape that keeps an unsigned tag from publishing", () => {
       assert.equal(/^ +id-token: write/m.test(job(name)), ["tag", "publish"].includes(name), `id-token in ${name}`);
       assert.equal(/^ +contents: write/m.test(job(name)), ["tag", "github-release"].includes(name), `contents: write in ${name}`);
     }
+  });
+});
+
+describe("the GitHub release job: creates the release, or repairs the one a failed run left", { skip: unix }, () => {
+  const VERSION = "1.2.3";
+  const FILE = `district-assurance-${VERSION}.tgz`;
+  const bytes = "the checked tarball";
+
+  /** The Create the release step with a stand-in gh that logs its calls; `view` is what `gh release view` does. */
+  function create(view: "exists" | "missing" | "fails", expected?: string) {
+    const dir = join(root, String(n++));
+    const bin = join(dir, "bin");
+    const release = join(dir, "release");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(release, { recursive: true });
+    writeFileSync(join(release, FILE), bytes);
+    const sha = spawnSync("sha256sum", [join(release, FILE)], { encoding: "utf8" }).stdout.split(" ")[0]!;
+    const onView = { exists: "exit 0", missing: "echo 'release not found' >&2; exit 1", fails: "echo 'HTTP 502' >&2; exit 1" }[view];
+    writeFileSync(join(bin, "gh"), `#!/usr/bin/env bash\necho "$*" >> "${join(dir, "calls")}"\nif [ "$2" = view ]; then ${onView}; fi\nexit 0\n`);
+    chmodSync(join(bin, "gh"), 0o755);
+    const r = spawnSync("bash", ["-c", script(job("github-release"), "Create the release")], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, RUNNER_TEMP: dir, GH_TOKEN: "x", GITHUB_REPOSITORY: "o/r", FILE, VERSION, EXPECTED_SHA256: expected ?? sha },
+    });
+    let calls: string[] = [];
+    try {
+      calls = readFileSync(join(dir, "calls"), "utf8").trim().split("\n");
+    } catch {
+      calls = [];
+    }
+    return { code: r.status, out: `${r.stdout}${r.stderr}`, calls: calls.map((c) => c.split(" ").slice(0, 2).join(" ")) };
+  }
+
+  it("creates the release with the three files when the tag has none", () => {
+    const r = create("missing");
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(r.calls, ["release view", "release create"]);
+  });
+
+  it("uploads the three files to a release a failed run left, replacing any copy, and publishes it", () => {
+    const r = create("exists");
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(r.calls, ["release view", "release upload", "release edit"]);
+    const step = script(job("github-release"), "Create the release");
+    assert.match(step, /gh release upload "v\$VERSION" --repo "\$GITHUB_REPOSITORY" --clobber "\$\{files\[@\]\}"/);
+    assert.match(step, /--draft=false/);
+  });
+
+  it("stops when GitHub cannot be asked, and checks the tarball before any call", () => {
+    const failed = create("fails");
+    assert.notEqual(failed.code, 0);
+    assert.match(failed.out, /could not be asked whether v1\.2\.3 has a release/);
+    assert.deepEqual(failed.calls, ["release view"]);
+    const wrong = create("missing", "0".repeat(64));
+    assert.notEqual(wrong.code, 0);
+    assert.match(wrong.out, /differs from the one the pack job checked/);
+    assert.deepEqual(wrong.calls, [], "nothing asked or attached");
   });
 });
