@@ -22,9 +22,19 @@ report a problem with a running service to that operator, through the contact in
 
 ## Checking a release
 
-Each release is published to npm with provenance and carries a CycloneDX SBOM with a signed
-attestation, both signed through Sigstore by the release workflow. Check them with
-`npm audit signatures` and `gh attestation verify`, as README.md shows under
+A release is made by the release workflow alone, once the code owner has approved the release
+pull request and it has merged ([How releases work](README.md#how-releases-work)). From 0.2.0 on,
+its tag is signed by that workflow with gitsign; each release is published to npm with
+provenance and carries a CycloneDX SBOM with a signed attestation, all signed through Sigstore by
+the release workflow. Check the tag with
+
+```sh
+gitsign verify-tag vX.Y.Z \
+  --certificate-identity https://github.com/distronode-corporation/district-assurance/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+and the package with `npm audit signatures` and `gh attestation verify`, as README.md shows under
 [Checking a release](README.md#checking-a-release). If a check fails for a version we published,
 report it as a vulnerability, below.
 

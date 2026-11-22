@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Releases are made by `release.yml` on its own when a release pull request merges: on a push to
+  main whose `package.json` version has no tag and is not on npm (any other push is a no-op), it
+  creates the annotated tag `vX.Y.Z` on that commit, signs it with gitsign (keyless, under the
+  workflow's GitHub OIDC identity), verifies it against `release.yml@refs/heads/main`, pushes it,
+  and then builds and publishes as before. There is no tag trigger, so a hand-pushed tag starts
+  nothing, and only a version under a tag the workflow made and signed on main is ever published
+  (a manual dry run builds without a tag and never publishes); a stray tag of the version stops
+  the release and never ships. The `npm-publish` environment admits main only and needs no reviewer: the approved
+  release pull request is the gate. README.md has "How releases work" and the `gitsign verify-tag`
+  command; the SBOM attestation's source ref is `refs/heads/main` from 0.2.0 on.
+
 ## [0.2.0] - 2026-11-22
 
 ### Added

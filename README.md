@@ -292,12 +292,51 @@ biometrics. No recording. No production storage: only the in-memory adapters and
 server's optional SQLite stores. No configuration UI.
 No regulated identity proofing: it checks a caller against the organisation's own records.
 
+## How releases work
+
+One human gate: a release pull request, approved by the code owner, that sets `package.json`'s
+version and dates its `## [X.Y.Z] - YYYY-MM-DD` section in CHANGELOG.md. When it merges,
+`.github/workflows/release.yml` does the rest on its own, on that merge commit of main:
+
+1. It releases only a version that has no tag `vX.Y.Z` and is not on npm; on every other push to
+   main it does nothing. It refuses a commit that is not on main and a version with no dated
+   CHANGELOG.md section.
+2. It creates the annotated tag `vX.Y.Z` on that commit and signs it with
+   [gitsign](https://github.com/sigstore/gitsign): keyless Sigstore signing under the workflow's
+   own GitHub OIDC identity, with the signature and its transparency log entry in the tag. There
+   is no long-lived signing key. It verifies the signature, pushes the tag, fetches it back and
+   verifies it again; nothing is built from a tag that fails.
+3. It builds, checks and publishes to npm with provenance, signs an SBOM attestation, and makes
+   the tag's GitHub release with the tarball, the SBOM and the attestation's bundle.
+
+Anyone with write access to this repository can create a `v*` tag, but only a version under a
+tag that this workflow made and signed, running on main, is ever published: the release checks
+the tag with `gitsign verify-tag` before it builds, and there is no tag trigger, so a tag pushed
+by hand starts nothing. (A dry run, started by hand with `dry_run` ticked, builds and packs
+without a tag or a signature, and never publishes.) A stray tag of the version, on another commit, stops the release (the run
+fails, for a person to look at) and never ships. The repository's tag rules forbid moving or
+deleting a `v*` tag (an admin can bypass them). Tags up to v0.1.0 were pushed by hand and are not
+signed.
+
 ## Checking a release
 
-From 0.1.0 on, every version on npm is built and published by `.github/workflows/release.yml`
-from its tag, with npm provenance, and you can check two things before you trust it. (The
-placeholder version below 0.1.0 that reserved the name on npm is not a release and holds no
-code.)
+From 0.1.0 on, every version on npm is built and published by `.github/workflows/release.yml`,
+with npm provenance, and from 0.2.0 on its tag is signed by that workflow, so you can check three
+things before you trust it. (The placeholder version below 0.1.0 that reserved the name on npm
+is not a release and holds no code.)
+
+Which commit it is: the tag's gitsign signature. With
+[gitsign](https://github.com/sigstore/gitsign) installed, in a clone with the tags fetched:
+
+```sh
+gitsign verify-tag vX.Y.Z \
+  --certificate-identity https://github.com/distronode-corporation/district-assurance/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+It succeeds only when the signature is valid, its entry is in Sigstore's transparency log, and it
+was made by that workflow file running on main of this repository. The release workflow runs the
+same check, and builds and publishes nothing from a tag that fails it.
 
 Where it came from: npm provenance, signed through Sigstore and logged in its public transparency
 log, ties the tarball to the commit and the workflow run that built it, and the registry signs the
@@ -317,9 +356,12 @@ npm pack district-assurance@X.Y.Z
 gh attestation verify district-assurance-X.Y.Z.tgz \
   --repo distronode-corporation/district-assurance \
   --signer-workflow distronode-corporation/district-assurance/.github/workflows/release.yml \
-  --source-ref refs/tags/vX.Y.Z \
+  --source-ref refs/heads/main \
   --predicate-type https://cyclonedx.org/bom
 ```
+
+From 0.2.0 on the release runs on main, so the source ref is `refs/heads/main`; for 0.1.0, which
+was released from its tag, it is `--source-ref refs/tags/v0.1.0`.
 
 Add `--format json --jq '.[].verificationResult.statement.predicate'` to print the SBOM that was
 signed. The tag's GitHub release has the same tarball (with its SHA-256), the SBOM and the

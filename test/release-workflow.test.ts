@@ -36,37 +36,46 @@ function nodeScript(step: string): string {
 }
 
 const dir = mkdtempSync(join(tmpdir(), "release-"));
-function environmentCheck(environment: unknown): { ok: boolean; out: string } {
-  const file = join(dir, `env-${Math.random().toString(36).slice(2)}.json`);
-  writeFileSync(file, typeof environment === "string" ? environment : JSON.stringify(environment));
-  const run = spawnSync(process.execPath, ["-e", nodeScript("The npm-publish environment requires a reviewer"), file], { encoding: "utf8" });
+function environmentCheck(environment: unknown, policies: unknown): { ok: boolean; out: string } {
+  const write = (name: string, value: unknown) => {
+    const file = join(dir, `${name}-${Math.random().toString(36).slice(2)}.json`);
+    writeFileSync(file, typeof value === "string" ? value : JSON.stringify(value));
+    return file;
+  };
+  const run = spawnSync(process.execPath, ["-e", nodeScript("The npm-publish environment admits only main"), write("env", environment), write("policies", policies)], { encoding: "utf8" });
   return { ok: run.status === 0, out: run.stdout + run.stderr };
 }
 
-const reviewers = { type: "required_reviewers", reviewers: [{ type: "User", reviewer: { login: "someone" } }] };
-const tagRule = { protected_branches: false, custom_branch_policies: true };
+const custom = { protected_branches: false, custom_branch_policies: true };
+const mainOnly = { total_count: 1, branch_policies: [{ id: 1, name: "main", type: "branch" }] };
 
-describe("hostile #119: the npm-publish environment check", () => {
-  it("lets a publish through only with a required reviewer and custom deployment rules", () => {
-    assert.equal(environmentCheck({ protection_rules: [reviewers], deployment_branch_policy: tagRule }).ok, true);
+describe("the npm-publish environment check: main only", () => {
+  it("lets a publish through only when the environment's one custom deployment rule is the branch main", () => {
+    assert.equal(environmentCheck({ protection_rules: [], deployment_branch_policy: custom }, mainOnly).ok, true);
+    // A reviewer is no longer required, and one left on the environment does not stop it.
+    const reviewers = { type: "required_reviewers", reviewers: [{ type: "User", reviewer: { login: "someone" } }] };
+    assert.equal(environmentCheck({ protection_rules: [reviewers], deployment_branch_policy: custom }, mainOnly).ok, true);
   });
 
-  it("fails closed on every environment that would not hold a publish back", () => {
-    const refused: unknown[] = [
-      {},
-      { protection_rules: [] },
-      { protection_rules: [reviewers] },
-      { protection_rules: [reviewers], deployment_branch_policy: null },
-      { protection_rules: [reviewers], deployment_branch_policy: { protected_branches: true, custom_branch_policies: false } },
-      { protection_rules: [{ type: "required_reviewers", reviewers: [] }], deployment_branch_policy: tagRule },
-      { protection_rules: [{ type: "wait_timer", wait_timer: 30 }], deployment_branch_policy: tagRule },
-      { protection_rules: [{ type: "required_reviewers" }], deployment_branch_policy: tagRule },
-      { protection_rules: [reviewers], deployment_branch_policy: { custom_branch_policies: "true" } },
-      { message: "Not Found", status: "404" },
-      "not json",
-      "",
+  it("fails closed on every environment that would admit anything but main", () => {
+    const refused: Array<[unknown, unknown]> = [
+      [{}, mainOnly],
+      [{ deployment_branch_policy: null }, mainOnly],
+      [{ deployment_branch_policy: { protected_branches: true, custom_branch_policies: false } }, mainOnly],
+      [{ deployment_branch_policy: { protected_branches: false, custom_branch_policies: "true" } }, mainOnly],
+      [{ deployment_branch_policy: { custom_branch_policies: true } }, mainOnly],
+      [{ deployment_branch_policy: custom }, { branch_policies: [] }],
+      [{ deployment_branch_policy: custom }, { branch_policies: [{ name: "v*", type: "tag" }] }],
+      [{ deployment_branch_policy: custom }, { branch_policies: [{ name: "main", type: "tag" }] }],
+      [{ deployment_branch_policy: custom }, { branch_policies: [{ name: "*", type: "branch" }] }],
+      [{ deployment_branch_policy: custom }, { branch_policies: [{ name: "main", type: "branch" }, { name: "v*", type: "tag" }] }],
+      [{ deployment_branch_policy: custom }, {}],
+      [{ deployment_branch_policy: custom }, { message: "Not Found", status: "404" }],
+      [{ message: "Not Found", status: "404" }, mainOnly],
+      ["not json", mainOnly],
+      [{ deployment_branch_policy: custom }, ""],
     ];
-    for (const environment of refused) assert.equal(environmentCheck(environment).ok, false, JSON.stringify(environment));
+    for (const [environment, policies] of refused) assert.equal(environmentCheck(environment, policies).ok, false, JSON.stringify([environment, policies]));
   });
 });
 
@@ -94,14 +103,14 @@ describe("hostile #119: what the workflow can be made to run", () => {
     assert.deepEqual(runScripts(lf(raw.replace(/\r?\n/g, "\r\n"))), runScripts(workflow));
   });
 
-  it("publishes only from a manual run on a tag of this repository, and a tag push never does", () => {
-    const publish = workflow.slice(workflow.indexOf("  publish:"), workflow.indexOf("  dry-run:"));
+  it("publishes only in this repository, after the guard passed on its own signed tag, never on a dry run", () => {
+    const publish = workflow.slice(workflow.indexOf("  publish:"), workflow.indexOf("  github-release:"));
     assert.match(publish, /github\.repository == 'distronode-corporation\/district-assurance'/);
-    assert.match(publish, /github\.event_name == 'workflow_dispatch'/);
-    assert.match(publish, /github\.ref_type == 'tag'/);
-    assert.match(publish, /inputs\.publish/);
+    assert.match(publish, /needs\.decide\.outputs\.dry == 'false'/);
+    assert.match(publish, /needs\.guard\.result == 'success'/);
+    for (const need of ["ci", "supply-chain", "pack"]) assert.match(publish, new RegExp(`needs\\.${need}\\.result == 'success'`), need);
     assert.match(publish, /environment: npm-publish/);
-    assert.doesNotMatch(workflow.slice(0, workflow.indexOf("jobs:")), /id-token: write/, "no OIDC scope outside the publish job");
+    assert.doesNotMatch(workflow.slice(0, workflow.indexOf("jobs:")), /id-token: write/, "no OIDC scope at the top level");
     // The private guard is tested on fixture manifests (test/release-steps.test.ts), so the pull
     // request that removes "private" for the first release (ADR-12) does not have to edit this file.
   });
