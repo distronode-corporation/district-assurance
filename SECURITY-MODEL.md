@@ -979,9 +979,12 @@ version with no dated CHANGELOG.md section. It creates the annotated tag on that
 it with gitsign, keyless under its own GitHub OIDC identity, with the transparency log entry in
 the signature, so no long-lived signing key exists; it verifies the tag against
 `release.yml@refs/heads/main` and GitHub's issuer before pushing it, and a guard job fetches it
-back and verifies it again before anything is built (tested). There is no tag trigger, so a tag
-pushed by hand starts nothing, and the repository's tag rules let only the workflow create a `v*`
-tag. The publish job runs in the `npm-publish` environment, which the trusted publisher is bound
+back and verifies it again before anything is built (tested). Anyone with write access can
+create a `v*` tag, but there is no tag trigger, so a tag pushed by hand starts nothing, and only a
+tag the workflow made and signed on main gets past the guard: a stray tag of the version on
+another commit fails the decision, and an unsigned one on the release commit fails the guard, so
+neither ever builds or ships (tested); it does stop the release until a person removes it. The
+repository's tag rules forbid moving or deleting a `v*` tag; an admin can bypass them. The publish job runs in the `npm-publish` environment, which the trusted publisher is bound
 to and which admits main only; its first step stops unless that environment's one deployment
 rule is main, so an environment created without protection, or widened, never lets a publish
 through (tested). It runs only in this repository, on a commit that is on main, after CI and the

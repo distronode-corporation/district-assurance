@@ -48,8 +48,11 @@ name: Release
 #                 the same runner, and a case more than 20% slower reported in the run summary
 #                 (BENCHMARKS.md). It never fails or holds up a release.
 #
-# A tag pushed by hand starts nothing (there is no tag trigger), and the repository's tag rules
-# let only this workflow create a `v*` tag. A manual run (workflow_dispatch) on main is the
+# Anyone with write access can create a `v*` tag, but a tag pushed by hand starts nothing (there
+# is no tag trigger), and only a tag this file made and signed on main gets past the guard: a
+# stray tag of the version on another commit fails `decide`, and an unsigned one on this commit
+# fails the guard, so neither ever ships. The repository's tag rules forbid moving or deleting a
+# `v*` tag (an admin can bypass them). A manual run (workflow_dispatch) on main is the
 # fallback when a push run did not start or failed: it decides the same way, so it releases only
 # what a push run would have, and resumes a run that tagged and then failed.
 #
@@ -278,8 +281,8 @@ jobs:
           gitsign verify-tag "v$VERSION" \
             --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/main" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
-      # A tag creation, which the repository's tag rules allow only to their bypass list: this
-      # workflow's token pushes as GitHub Actions, which must be on it.
+      # The workflow's own token pushes it. The repository's tag rules forbid moving or deleting a
+      # `v*` tag once it exists, so this push is the tag's one write.
       - name: Push the tag
         env:
           GH_TOKEN: ${{ github.token }}
