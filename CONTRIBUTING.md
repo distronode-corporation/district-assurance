@@ -44,7 +44,13 @@ editorconfig-checker. Tests use `node:test` and `node:assert`, one file per area
 - A new `NotImplementedError` names a ROADMAP.md issue and is added to `test/stubs.test.ts`, which
   fails otherwise.
 - A decision with alternatives gets an ADR in DECISIONS.md.
-- Add a line under "Unreleased" in CHANGELOG.md.
+- Add a line under "Unreleased" in CHANGELOG.md. From 0.4.0 on, write it for the people who use
+  the package, not as an API list: a version's section opens with a short plain paragraph, then
+  `### Added`, `### Changed` or `### Fixed` bullets that each start with a **bold plain phrase**
+  followed by readable sentences, as in
+  [bridgewatch's CHANGELOG](https://github.com/distronode-corporation/bridgewatch/blob/main/CHANGELOG.md).
+  The release workflow copies the section as it is into the GitHub release's notes
+  (`scripts/release-notes.mjs`).
 - Never put real customer data, real phone numbers, keys or secrets in code, tests or issues. Use
   555 numbers, `example.test` hosts and values marked "not a secret".
 
