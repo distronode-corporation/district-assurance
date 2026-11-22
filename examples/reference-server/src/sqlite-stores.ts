@@ -501,6 +501,18 @@ export class SqliteRecordStore implements RecordStore {
     });
   }
 
+  async replacePinDigest(workspaceId: string, subjectKey: string, from: string | null, to: string | null, phoneOnFile?: string): Promise<boolean> {
+    return this.#update(workspaceId, subjectKey, (subject) => {
+      if ((subject.pinDigest ?? null) !== from) return false;
+      if (to === null) delete subject.pinDigest;
+      else subject.pinDigest = to;
+      delete subject.pinEnrolmentId;
+      delete subject.duressDigest;
+      if (phoneOnFile !== undefined) subject.phoneOnFile = phoneOnFile;
+      return true;
+    });
+  }
+
   async upgradePinDigest(workspaceId: string, subjectKey: string, field: "pinDigest" | "duressDigest", from: string, to: string): Promise<boolean> {
     return this.#update(workspaceId, subjectKey, (subject) => {
       if (subject[field] !== from) return false;

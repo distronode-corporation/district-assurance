@@ -468,17 +468,27 @@ is), or when Node changes the API.
 
 **Decided.** The owner PIN (ADR-20) is `createOwnerPin` in the package: the owner's subject key
 (`subject:owner:<workspaceId>`), its PIN counters (the subject's and the line's), the lock facts a
-business's tools show, and set, clear and lift, with a change resetting before it stores. It runs
-over the adapters the engine already has (`Engine`, `KnowledgeHmac`, `RecordStore`,
-`AttemptCounters`), plus one minimal interface, `SubjectWriter.createSubject` (create if absent,
-atomic, never a rewrite), because the engine never creates a subject and the owner's must exist
-before `putPinDigest` stores anything; a rewrite could drop a PIN another change just stored. Who may call
-it, the owner's verified number, binding a phone call to an engine call, the key store and lock
-notices stay the host's (ADR-1).
+business's tools show, and set, clear and lift. It runs over the adapters the engine already has
+(`Engine`, `KnowledgeHmac`, `RecordStore`, `AttemptCounters`), plus one minimal interface,
+`SubjectWriter.createSubject` (create if absent, atomic, never a rewrite), because the engine never
+creates a subject and the owner's must exist before its PIN is stored. A set or a clear is one
+compare-and-set, `RecordStore.replacePinDigest(workspaceId, subjectKey, from, to, phoneOnFile?)`,
+through `Engine.replacePin` (which also clears the counters and writes `pin.reset` when a PIN was
+replaced): it lands only while the record on file is still `from`, and writes the owner's number on
+file in the same step. Of two changes at once one lands and the other is `OwnerPinConflictError`.
+The lockout and PIN length come only from the engine's config. Who may call it, the owner's
+verified number, binding a phone call to an engine call, the key store and lock notices stay the
+host's (ADR-1).
+**Why the record as the token, not a version.** A version needs a counter beside every subject in
+every store and a read of it before each change; the record already is a token that changes on
+every setting, because each is freshly salted (ADR-29), so two settings of the same digits never
+compare equal. It is also the pattern `upgradePinDigest` already uses (compare against the exact
+value on file), so a store has one kind of compare-and-set to get right. **Why the engine's
+method.** A change must also clear the subject's PIN counters and write `pin.reset`, and only the
+engine holds the ledger; doing those after the compare-and-set lands means a lost race changes
+nothing at all.
 **Why.** These are rules every host of the owner command needs the same way, and a wrong order is a
-security bug (a reset after the store, or a counter left out, would leave a line unguarded or a
-lock unlifted); in the package they are tested to 100% with the engine they depend on. Reading the
-PIN length and the lockout from the engine's config, rather than taking copies, keeps the facts
-the business sees equal to what the engine enforces. **Revisit** if `RecordStore` gains an atomic
-reset-and-replace (then a change never passes through no PIN), or a host needs the owner subject
-under a key of its own.
+security bug (two changes both answering ok, a counter left out, or a facts lockout that differs
+from the one enforced); in the package they are tested to 100% with the engine they depend on.
+**Revisit** if a host needs the owner subject under a key of its own, or a store cannot offer a
+compare-and-set on one field (then a version column is the fallback).

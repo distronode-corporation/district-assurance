@@ -17,6 +17,7 @@ import { hexDigestsEqual } from "../core/hash.ts";
 import { capCallLevel } from "../core/policy.ts";
 import type { CallRecord, EngineRuntime } from "../core/runtime.ts";
 import { BADGE, type BadgeSlice } from "./badge.ts";
+import { isCallingNumber } from "./counters.ts";
 import { hiddenCounterKey } from "./duress-flag.ts";
 import { PIN_OUTCOMES, pinTag, type BadgeSettings, type PinOutcome, type PinSettings } from "./factors.ts";
 import { isKeypadEntry } from "./knowledge.ts";
@@ -247,6 +248,42 @@ export async function resetPin(rt: EngineRuntime, subjectKey: string, counters: 
   // subject, the one a duress PIN entry could not clear included. The duress flag stays.
   await counters?.reset(hiddenCounterKey(rt.workspaceId, "pin", subjectKey));
   await rt.adapter("ledger").append({ callId: null, actor: "member", event: "pin.reset", at: rt.now(), detail: { subjectKey } });
+}
+
+/** What `replacePin` takes: the PIN record expected on file, the one to put there, and the number on file to write with it. */
+export interface PinReplacement {
+  /** The record on file now (`SubjectRecord.pinDigest`), or null when none is. */
+  from: string | null;
+  /** The new record (`pinDigest`), or null to remove the PIN. */
+  to: string | null;
+  /** Written in the same step: E.164, or "" for no number on file. Absent: left as it is. */
+  phoneOnFile?: string;
+}
+
+/**
+ * The business replaces or removes a subject's PIN in one compare-and-set (`RecordStore.replacePinDigest`):
+ * false, changing nothing, when the record on file is no longer `from`, so of two changes at once
+ * one answers false. A host call from the business's own tools, `keyed_hash` mode only. When a PIN
+ * was on file, its counters are cleared after (the hidden one included, VER-12) and `pin.reset`
+ * is appended, as `resetPin` does; a first PIN clears and writes nothing.
+ */
+export async function replacePin(rt: EngineRuntime, subjectKey: string, change: PinReplacement, counters: AttemptCounters | undefined): Promise<boolean> {
+  const settings = pinSettings(rt);
+  if (settings.mode !== "keyed_hash") throw new EngineError("precondition_failed", "in verifier mode the host's own PIN store replaces the PIN");
+  if (typeof subjectKey !== "string" || !SUBJECT_KEY.test(subjectKey)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
+  // Each field read once: a getter read again could change a value after it was checked.
+  const { from, to, phoneOnFile }: { [K in keyof PinReplacement]?: unknown } = typeof change === "object" && change !== null ? change : {};
+  const errors: string[] = [];
+  if (from !== null && (typeof from !== "string" || from === "")) errors.push("from must be the PIN record on file, or null");
+  if (to !== null && (typeof to !== "string" || to === "")) errors.push("to must be a PIN record, or null");
+  if (phoneOnFile !== undefined && !(typeof phoneOnFile === "string" && (phoneOnFile === "" || isCallingNumber(phoneOnFile)))) errors.push("phoneOnFile must be E.164 or empty");
+  if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+  const replaced = await rt.adapter("records").replacePinDigest(rt.workspaceId, subjectKey, from as string | null, to as string | null, phoneOnFile as string | undefined);
+  if (!replaced || from === null) return replaced;
+  await counters?.reset({ workspaceId: rt.workspaceId, factor: "pin", scope: "subject", key: subjectKey });
+  await counters?.reset(hiddenCounterKey(rt.workspaceId, "pin", subjectKey));
+  await rt.adapter("ledger").append({ callId: null, actor: "member", event: "pin.reset", at: rt.now(), detail: { subjectKey } });
+  return true;
 }
 
 /** Why a duress PIN was not stored, or that it was. `weak` does not say which rule it broke. */
