@@ -151,6 +151,8 @@ export interface BadgeSlice {
    * Absent on a call that keyed its PIN or reused none, and dropped when its factors are.
    */
   pinReuse?: { tokenHash: string; fromCallId: string; passedAt: string };
+  /** Every PIN pass this call recorded as its factor, by hash, never dropped: a pass serves one verification of one call. */
+  pinPassesSpent?: string[];
 }
 
 /**

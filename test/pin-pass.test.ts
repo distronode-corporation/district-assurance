@@ -147,6 +147,19 @@ describe("PIN pass: carried to another call", () => {
     assert.deepEqual(await refusals(t, c), ["used"]);
   });
 
+  it("is never recorded twice on one call, even after a restart dropped its factor", async () => {
+    const t = passSetup();
+    const a = await signIn(t);
+    const b = await second(t);
+    assert.deepEqual(await t.engine.reusePin(b, a.token), { reused: true });
+    await t.engine.finishVerification(b);
+    await t.engine.beginVerification(b, { accountNumber: OTHER_ACCOUNT, callingNumber: CALLING });
+    await t.engine.finishVerification(b);
+    await t.engine.beginVerification(b, { accountNumber: ACCOUNT, callingNumber: CALLING });
+    assert.deepEqual(await t.engine.reusePin(b, a.token), { reused: false });
+    assert.deepEqual(await refusals(t, b), ["used"]);
+  });
+
   it("lets exactly one of two calls redeeming at once have it", async () => {
     const t = passSetup();
     const a = await signIn(t);

@@ -1005,7 +1005,8 @@ a reused PIN reaches level 2 only with a texted code (`[pin, text_code]`), as a 
   band that landed on it meanwhile refuses the pass (`tainted`, `voice`), which stays spent. Otherwise
   it answers `{reused: false}`, records nothing but `verification.pin_reuse_refused` (`reason`, one
   of those words), and the host asks for the PIN as usual. The same token again on the call that
-  redeemed it answers `{reused: true}` and records nothing more. A verification restarted or a
+  redeemed it answers `{reused: true}` and records nothing more while its factor stands; once a
+  restart dropped that factor, the call never records the same pass again (`used`). A verification restarted or a
   taint while the pass was checked refuses it (`precondition_failed`), and the pass stays spent.
 - The factor is recorded as any PIN pass: it counts as the keypad or PIN match that lets a code or a
   link go to the subject on file, uses no PIN attempt of the call, and changes no counter across
@@ -1052,7 +1053,8 @@ engine has the `messages` adapter when a step needs a contact-class scope (its s
 section 16). A module's optional `validateFlow` makes whole-flow checks of its own: no flow may have
 more `gate.grant` steps than Gate's `maxGrantsPerCall`, or more `step-up.issue` steps than
 step-up's `maxTokensPerCall` (each completes only on a grant or token of its own, so such a flow
-could never finish), and each `paylink.channel` step comes after a `badge.verify` step and is followed by a
+could never finish), and each `paylink.channel` step comes after a `badge.verify` step (the last one before it) whose
+level reaches `payment.request` and whose `scopes`, when listed, grant it, and is followed by a
 `paylink.request` before the next `paylink.channel` (the channel step declares no scope need, since
 a choice is not a money action a receipt names, but it asks for `payment.request` when it runs). A step validator sees another module's validated settings through the
 context's `settingsOf(name)` (null for a module off or whose settings were refused), as
@@ -1064,7 +1066,7 @@ refuses a config with any problem (`ConfigError`, code `invalid_input`, with `pr
 |---|---|
 | `badge.verify` | `level` 1 to 3; `factors`, at least one, each on in Badge's settings, together reaching `level` under the policy, and `text_code` only with the policy's `textCodeCountryCodes`; optional `scopes`, each in the policy at or below `level` |
 | `dossier.collect` | `form`, a form id in Dossier's settings |
-| `paylink.channel` | no fields; needs `email` in Paylink's `channels`, Trace's wordings for `payment_link_text` and `payment_link_email`, and Trace's `businessName`; each comes after a `badge.verify` step and must be followed by the `paylink.request` it chooses for, before another `paylink.channel` (section 14) |
+| `paylink.channel` | no fields; needs `email` in Paylink's `channels`, Trace's wordings for `payment_link_text` and `payment_link_email`, and Trace's `businessName`; each comes after a `badge.verify` step that grants `payment.request` and must be followed by the `paylink.request` it chooses for, before another `paylink.channel` (section 14) |
 | `paylink.request` | `amountMinor` and `currency`, or instead `amountRef` (1 to 64 of letters, digits, `.`, `:`, `-`, `_`; needs the `amounts` adapter), never both; `description`, `amountSource` (section 14); optional `mode` (`connect` or `platform`; connect needs Paylink's `connectedAccountId`), `linkLifeMinutes` (5 to 60), `paymentMethods` (instant methods only) |
 | `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
 | `trace.receipt` | optional `textLink: {consent}`, a wording purpose in Trace's settings, which also needs Trace's `businessName` and the `messages` adapter (section 16); needs the `signer` adapter |

@@ -157,7 +157,19 @@ describe("paylink channel: config", () => {
     assert.deepEqual(at([verify, channel, channel, pay]), ["steps[2]: a second paylink.channel step before the paylink.request the first one is for"]);
     assert.deepEqual(at([verify, channel, pay, channel, pay]), []);
     assert.deepEqual(at([verify, pay]), [], "a flow without a channel step texts, as before");
-    assert.deepEqual(at([channel, verify, pay]), ["steps[0]: a paylink.channel step comes after a badge.verify step, since it needs payment.request when it runs"]);
+    const refused = (i: number) => `steps[${i}]: a paylink.channel step comes after a badge.verify step that grants payment.request, since it needs that scope when it runs`;
+    assert.deepEqual(at([channel, verify, pay]), [refused(0)]);
+    const levelOne = { type: "badge.verify", level: 1, factors: ["keypad_knowledge"] };
+    assert.deepEqual(at([levelOne, channel, verify, pay]), [refused(1)], "a level 1 verification does not reach payment.request");
+    assert.deepEqual(at([{ ...verify, scopes: ["intake.file"] }, channel, verify, pay]), [refused(1)], "a verification that does not grant it");
+    assert.deepEqual(at([verify, levelOne, channel, pay]).at(-1), refused(2), "the later verification is the one the call holds");
+    assert.deepEqual(at([{ ...verify, scopes: undefined }, channel, pay]).filter((p) => p.includes("paylink.channel step comes")), [], "every scope the level reaches");
+    assert.deepEqual(
+      validateConfig(channelConfig((c) => delete c.policy.scopes["payment.request"]), registry(ALL)).filter((p) => p.includes("paylink.channel step comes")),
+      ["flows.deposit (paylink): " + refused(1)],
+      "a policy without the scope",
+    );
+    assert.deepEqual(paylinkModule.validateFlow!([verify, channel, pay] as never, { settings: {}, policy: null, adapters: new Set(), capabilities: {} }), [], "no policy in view");
   });
 });
 

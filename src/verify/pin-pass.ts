@@ -92,7 +92,8 @@ export async function reusePin(rt: EngineRuntime, callId: string, token: string)
   if (before.state.phase !== "verifying" || current.subjectKey === null) throw new EngineError("invalid_transition", "a PIN pass is reused in a running verification, for a subject");
   const tokenHash = sha256Hex(token);
   if (current.pinReuse !== undefined && hexDigestsEqual(current.pinReuse.tokenHash, tokenHash)) return { reused: true };
-  const judged = await judge(rt, callId, current, tokenHash, Math.min(reuse.maxAgeSeconds, PIN_PASS_MAX_SECONDS));
+  // A pass this call recorded once, whose factor a restart dropped since, is never recorded again.
+  const judged = (current.pinPassesSpent ?? []).includes(tokenHash) ? "used" : await judge(rt, callId, current, tokenHash, Math.min(reuse.maxAgeSeconds, PIN_PASS_MAX_SECONDS));
   if (typeof judged === "string") {
     await rt.update(callId, (draft) => draft.emit("verification.pin_reuse_refused", "code", { reason: judged }));
     return { reused: false };
@@ -110,6 +111,7 @@ export async function reusePin(rt: EngineRuntime, callId: string, token: string)
     // With the duress PIN turned off on this config, its list of scopes to refuse is unknown: every scope is refused (fail closed).
     if (duress) s.duress ??= { refuseScopes: settings.pin!.duress === undefined ? Object.keys(rt.policy.scopes) : [...settings.pin!.duress.refuseScopes] };
     s.pinReuse = { tokenHash, fromCallId, passedAt };
+    s.pinPassesSpent = [...(s.pinPassesSpent ?? []), tokenHash];
     draft.emit("verification.factor", "code", { kind: "pin", passed: true, reused: true, fromCallId }, duress ? "duress" : "pass");
   });
   return { reused: true };
