@@ -100,16 +100,14 @@ export function unwrap(markdown) {
       continue;
     }
     // A table, with or without outer pipes, is its header row, its delimiter row and every row up
-    // to a blank line: each kept as it is.
+    // to a blank line or the start of another block (a fence, a heading, a list item, a quote, a
+    // rule, HTML), as in GFM: each row kept as it is. The line that ends it is handled below.
+    if (table && (line.trim() === "" || FENCE.test(line) || (BLOCK_START.test(line) && !line.trimStart().startsWith("|")))) table = false;
     if (!table && line.includes("|") && TABLE_DELIMITER.test(lines[index + 1] ?? "")) table = true;
     if (table) {
-      if (line.trim() === "") {
-        table = false;
-      } else {
-        out.push(line);
-        joinable = false;
-        continue;
-      }
+      out.push(line);
+      joinable = false;
+      continue;
     }
     const open = FENCE.exec(line);
     if (open !== null) {

@@ -152,6 +152,10 @@ describe("release notes: unwrapping", () => {
     // GitHub tables need no outer pipes: every row is kept, up to the blank line that ends it.
     assert.equal(unwrap("Name | Value\n--- | ---\none | two\nthree | four\n\nwrapped\nprose"), "Name | Value\n--- | ---\none | two\nthree | four\n\nwrapped prose");
     assert.equal(unwrap("a | b\n:--|--:\nc | d"), "a | b\n:--|--:\nc | d");
+    // Another block ends a table without a blank line, and is itself handled: a fence stays code.
+    assert.equal(unwrap("a | b\n--- | ---\nc | d\n```\nfirst\n\nsecond\nthird\n```"), "a | b\n--- | ---\nc | d\n```\nfirst\n\nsecond\nthird\n```");
+    assert.equal(unwrap("a | b\n--- | ---\nc | d\n- item\n  wrapped"), "a | b\n--- | ---\nc | d\n- item wrapped");
+    assert.equal(unwrap("| a |\n|---|\n| b |\n# Next\ntext\nmore"), "| a |\n|---|\n| b |\n# Next\ntext more");
     assert.equal(unwrap("text\nwith a | pipe\nand more"), "text with a | pipe and more", "a pipe in prose, with no delimiter row, is prose");
     assert.equal(unwrap("# Heading\nnext"), "# Heading\nnext");
   });
