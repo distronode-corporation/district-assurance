@@ -486,9 +486,11 @@ compare equal. It is also the pattern `upgradePinDigest` already uses (compare a
 value on file), so a store has one kind of compare-and-set to get right. **Why the engine's
 method.** A change must also clear the subject's PIN counters and write `pin.reset`, and only the
 engine holds the ledger; doing those after the compare-and-set lands means a lost race changes
-nothing at all. If they fail after it landed, the engine says so (`PinChangeUnfinishedError`) and a
-retry with `resume` finishes them, recognising its own change by the salted record on file (or, for
-a removal, by none on file) rather than by a marker the stores would have to keep.
+nothing at all. Only the failures recorded up to the change's start are forgotten, so a guess at
+the new PIN after it landed always counts. If the cleanup fails after it landed, the engine says so
+(`PinChangeUnfinishedError`, with that start as `at`) and a retry with `resume: at` finishes it,
+recognising its own change by the salted record on file (or, for a removal, by none on file) rather
+than by a marker the stores would have to keep, and forgetting nothing recorded after `at`.
 **Why.** These are rules every host of the owner command needs the same way, and a wrong order is a
 security bug (two changes both answering ok, a counter left out, or a facts lockout that differs
 from the one enforced); in the package they are tested to 100% with the engine they depend on.

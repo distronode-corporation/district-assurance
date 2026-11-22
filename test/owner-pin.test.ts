@@ -390,26 +390,49 @@ describe("owner PIN", () => {
     await owner.setPin({ phone: LINE }, OWNER_PIN);
     await keyOnLine(t, owner, "000001");
     const counters = t.counters as unknown as Record<string, unknown>;
-    counters.reset = async () => {
+    counters.removeFailure = async () => {
       throw new Error("counters unavailable");
     };
-    await assert.rejects(owner.clearPin(), PinChangeUnfinishedError);
-    delete counters.reset;
+    const error = (await owner.clearPin().catch((e: unknown) => e)) as PinChangeUnfinishedError;
+    delete counters.removeFailure;
+    assert.ok(error instanceof PinChangeUnfinishedError);
     assert.equal((await owner.status({ phone: null })).pinSet, false);
     // Without resume, a clear with no PIN on file does nothing; with it, the cleanup runs.
-    for (const options of [undefined, null, {}, { resume: false }]) await owner.clearPin(options as never);
+    for (const options of [undefined, null, {}]) await owner.clearPin(options as never);
     assert.equal((await events(t, "pin.reset")).length, 0);
     assert.equal((await owner.status({ phone: null })).failures, 1);
-    await owner.clearPin({ resume: true });
+    await owner.clearPin({ resume: error.at });
     assert.equal((await events(t, "pin.reset")).length, 1);
     assert.equal((await owner.status({ phone: null })).failures, 0);
   });
 
-  it("resumes nothing for an owner who never had a subject", async () => {
+  it("refuses a clear's resume as a conflict when a PIN was set since, leaving that PIN and its counters", async () => {
     const { t, owner } = world();
-    await owner.clearPin({ resume: true });
+    await owner.setPin({ phone: LINE }, OWNER_PIN);
+    const counters = t.counters as unknown as Record<string, unknown>;
+    counters.removeFailure = async () => {
+      throw new Error("counters unavailable");
+    };
+    await keyOnLine(t, owner, "000001");
+    const error = (await owner.clearPin().catch((e: unknown) => e)) as PinChangeUnfinishedError;
+    delete counters.removeFailure;
+    assert.ok(error instanceof PinChangeUnfinishedError);
+    // A first PIN lands before the resume: the resume is another change's to lose.
+    assert.deepEqual(await owner.setPin({ phone: LINE }, NEW_PIN), { ok: true });
+    await assert.rejects(owner.clearPin({ resume: error.at }), OwnerPinConflictError);
+    assert.equal((await owner.status({ phone: null })).pinSet, true);
+    assert.equal((await owner.status({ phone: null })).failures, 1, "the counters are left as they are");
+    assert.equal((await events(t, "pin.reset")).length, 0);
+  });
+
+  it("resumes nothing for an owner who never had a subject, and refuses a resume that is not a time", async () => {
+    const { t, owner } = world();
+    await owner.clearPin({ resume: t.clock.now().toISOString() });
     assert.equal(await ownerRecord(t), null);
     assert.equal((await t.ledger.list()).length, 0);
+    await owner.setPin({ phone: LINE }, OWNER_PIN);
+    await owner.clearPin();
+    for (const resume of [true, "yesterday", 5]) await assert.rejects(owner.clearPin({ resume } as never), rejects("invalid_input", /resume/));
   });
 
   it("refreshes the number on file on every set, and writes no number for a line without one", async () => {

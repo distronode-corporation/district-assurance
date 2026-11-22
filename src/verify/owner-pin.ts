@@ -92,9 +92,11 @@ export interface OwnerPin {
    * Removes the PIN on file, if any, in one compare-and-set, and clears its counters; nothing when
    * none is on file. `OwnerPinConflictError` when another change landed first.
    * `PinChangeUnfinishedError` when the PIN was removed but the counter reset or `pin.reset` did
-   * not land: `clearPin({ resume: true })` finishes it (with no PIN on file, it runs those alone).
+   * not land: `clearPin({ resume: error.at })` finishes it, forgetting only the failures up to `at`;
+   * it is `OwnerPinConflictError` when a PIN is on file again (another change landed since), and
+   * nothing for an owner who has no subject.
    */
-  clearPin(options?: { resume?: boolean }): Promise<void>;
+  clearPin(options?: { resume?: string }): Promise<void>;
   /** Lifts the owner's locks early: the subject's counter and the line's. `memberId` as `Engine.unlock` takes it. */
   liftLock(line: OwnerLine, memberId: string): Promise<void>;
 }
@@ -196,12 +198,18 @@ export function createOwnerPin(options: OwnerPinOptions): OwnerPin {
 
     async clearPin(options) {
       settings();
-      const resume = typeof options === "object" && options !== null && options.resume === true;
+      const resume: unknown = typeof options === "object" && options !== null ? options.resume : undefined;
       const key = await subjectKey();
-      const from = await recordOnFile(key);
-      if (from !== null) await replace(key, from, null);
-      // A removal that landed before its cleanup failed: the engine runs only the cleanup.
-      else if (resume) await engine.replacePin(key, { from: null, to: null, resume: true });
+      if (resume === undefined) {
+        const from = await recordOnFile(key);
+        if (from !== null) await replace(key, from, null);
+        return;
+      }
+      // Finishing a removal that landed before its cleanup failed: nothing to finish for an owner
+      // with no subject; the engine runs only the cleanup while no PIN is on file, and answers false
+      // when one is again, which is another change's to keep.
+      if ((await records.getSubject(workspaceId, key)) === null) return;
+      if (!(await engine.replacePin(key, { from: null, to: null, resume: resume as string }))) throw new OwnerPinConflictError();
     },
 
     async liftLock(line, memberId) {

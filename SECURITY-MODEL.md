@@ -135,7 +135,10 @@ and two clears, in both orders, with every racer reading before any writes). A f
 PIN and number on file as they were, never no PIN and never a mix (tested). A failure after the
 compare-and-set landed (the counter reset or `pin.reset`) is reported as `PinChangeUnfinishedError`,
 so the business is never told a change failed that is on file, and a resume finishes the counter
-reset and the ledger entry without writing the PIN again (tested). The line's counter
+cleanup and the ledger entry without writing the PIN again (tested). A change forgets only the PIN
+failures recorded up to its own start, and a resume only those up to the same instant, so a wrong
+PIN keyed against the new PIN after it landed always counts toward the lock (tested); a clear's
+resume after another PIN was set is a conflict that leaves that PIN and its counters alone (tested). The line's counter
 survives a change, so changing the PIN never forgives guesses from that line (tested). Judging
 stays the engine's PIN factor (counted before judged, a constant-time compare), so wrong PINs up to
 the hard lock, the window boundary and concurrent attempts behave as for any PIN (tested). The

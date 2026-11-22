@@ -19,9 +19,11 @@ All notable changes to this project are documented here. The format follows
 - `Engine.replacePin(subjectKey, { from, to, phoneOnFile? })` and
   `RecordStore.replacePinDigest(workspaceId, subjectKey, from, to, phoneOnFile?)`: the business
   replaces or removes a PIN in one compare-and-set against the record on file, with the number on
-  file in the same step. A counter reset or `pin.reset` that fails after the change landed throws
-  `PinChangeUnfinishedError`, and the same change with `resume: true` finishes it; the owner PIN's
-  `clearPin({ resume: true })` does so for a clear. A new required `RecordStore` method: a host's own store adds it
+  file in the same step. A landed change forgets the subject's PIN failures recorded up to its start,
+  never a later one. A counter cleanup or `pin.reset` that fails after the change landed throws
+  `PinChangeUnfinishedError` (with that start as `at`), and the same change with `resume: at`
+  finishes it; the owner PIN's `clearPin({ resume: at })` does so for a clear, and is
+  `OwnerPinConflictError` when a PIN was set since. A new required `RecordStore` method: a host's own store adds it
   (`recordStoreContract` has a case for it). `MemoryRecordStore` and the reference server's
   `SqliteRecordStore` have it.
 

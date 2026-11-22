@@ -592,18 +592,20 @@ the duress PIN is off unless it is set.
   It answers false, changing nothing, when the record on file is no longer `from` or the store has
   no such subject, so of two changes from the same record one lands. Records are salted, so `from`
   names one setting of a PIN, never an earlier setting of the same digits. When a PIN was on file
-  and the change landed, the subject's PIN counters (the hidden one included) are cleared and
-  `pin.reset` is appended, as for `resetPin`; a first PIN clears and writes nothing. When either of
-  those fails after the change landed, `replacePin` throws `PinChangeUnfinishedError` (not an
-  `EngineError`; the failure is its `cause`, and it names no PIN): the report matches the store,
-  where the change is on file. The same change again with `resume: true` finishes it: when the
-  record on file is already `to` (a salted record no other change wrote; for a removal, no PIN on
-  file, whatever `from` says), nothing is written again and only the counter reset and `pin.reset`
-  run; otherwise it is an ordinary compare-and-set, so a different change still gets false. A
-  resumed removal may write a second `pin.reset` when the first one had landed. A subject key that
-  is not 64 lower-case hex, a `from` or `to` that is neither null nor a non-empty string, a
-  `phoneOnFile` that is neither E.164 nor `""`, and a `resume` that is not a boolean are
-  `invalid_input`.
+  and the change landed, the subject's PIN failures (the hidden ones included) recorded up to the
+  change's start (`at`, the engine's clock before the compare-and-set) are forgotten, and no later
+  one, which may be against the new PIN; then `pin.reset` is appended. A first PIN forgets and
+  writes nothing. When either of those fails after the change landed, `replacePin` throws
+  `PinChangeUnfinishedError` (not an `EngineError`; the failure is its `cause`, its `at` is the
+  change's start, and it names no PIN): the report matches the store, where the change is on file.
+  The same change again with `resume: error.at` finishes it: when the record on file is already
+  `to` (a salted record no other change wrote; for a removal, no PIN on file, whatever `from`
+  says), nothing is written again, the failures up to `at` are forgotten (never one recorded
+  since) and `pin.reset` is appended; otherwise it is an ordinary compare-and-set, so a different
+  change still gets false. A resumed removal may write a second `pin.reset` when the first one had
+  landed. A subject key that is not 64 lower-case hex, a `from` or `to` that is neither null nor a
+  non-empty string, a `phoneOnFile` that is neither E.164 nor `""`, and a `resume` that is not an
+  ISO 8601 time as `at` gives it are `invalid_input`.
 
 **Lockouts across calls (VER-1).** Every factor the caller enters (keypad knowledge, the PIN, spoken
 answers, plug-ins) is also counted across calls, in an `AttemptCounters` store every engine of the
@@ -847,9 +849,12 @@ own stores and knowledge key (`hmac`, a `KnowledgeHmac` function only; bytes are
   not the host's job. A store failure leaves the PIN and number on file as they were. When the
   change landed but its counter reset or `pin.reset` failed, the method throws
   `PinChangeUnfinishedError`, matching the store (the change is on file): `setPin` again finishes a
-  set (a new change from the record now on file), and `clearPin({ resume: true })` finishes a clear
-  (with no PIN on file it runs the counter reset and `pin.reset` alone; without `resume`, a clear
-  with no PIN on file does nothing, so two clears at once still end in one conflict).
+  set (a new change from the record now on file, which forgets the failures up to its own start),
+  and `clearPin({ resume: error.at })` finishes a clear: with no PIN on file it forgets the
+  failures up to `at` and appends `pin.reset`; with a PIN on file again (another change landed
+  since) it is `OwnerPinConflictError` and changes nothing; for an owner with no subject it does
+  nothing. Without `resume`, a clear with no PIN on file does nothing, so two clears at once still
+  end in one conflict.
 - `liftLock(line, memberId)` is `Engine.unlock` on each of the owner's PIN counters (the line's
   only when given), one `verification.unlocked` each, with the member id as `unlock` checks it.
 - Not here, and the host's: who may call these, the owner's verified number, binding a phone call

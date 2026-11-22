@@ -17,7 +17,7 @@ import { hexDigestsEqual } from "../core/hash.ts";
 import { capCallLevel } from "../core/policy.ts";
 import type { CallRecord, EngineRuntime } from "../core/runtime.ts";
 import { BADGE, type BadgeSlice } from "./badge.ts";
-import { isCallingNumber } from "./counters.ts";
+import { forgetUpTo, isCallingNumber } from "./counters.ts";
 import { hiddenCounterKey } from "./duress-flag.ts";
 import { PIN_OUTCOMES, pinTag, type BadgeSettings, type PinOutcome, type PinSettings } from "./factors.ts";
 import { isKeypadEntry } from "./knowledge.ts";
@@ -39,6 +39,7 @@ export type PinEnrolmentResult =
     };
 
 const SUBJECT_KEY = /^[0-9a-f]{64}$/;
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /**
  * Whether a PIN is one the engine refuses as `weak` by its digits alone: every digit the same
@@ -259,21 +260,26 @@ export interface PinReplacement {
   /** Written in the same step: E.164, or "" for no number on file. Absent: left as it is. */
   phoneOnFile?: string;
   /**
-   * True to finish a change that threw `PinChangeUnfinishedError`: when the record on file is
-   * already `to`, the change is taken as landed and only its counter reset and `pin.reset` run.
+   * To finish a change that threw `PinChangeUnfinishedError`: its `at`. When the record on file is
+   * already `to`, the change is taken as landed and only its cleanup runs, forgetting the PIN
+   * failures recorded up to `at` and none after.
    */
-  resume?: boolean;
+  resume?: string;
 }
 
 /**
- * A PIN change landed (the new record, or none, and the number are on file), but clearing its
+ * A PIN change landed (the new record, or none, and the number are on file), but forgetting its
  * counters or appending `pin.reset` failed after. Not a refusal: the host finishes it by asking for
- * the same change again with `resume: true`. Names no PIN; the store's or ledger's error is `cause`.
+ * the same change again with `resume: at`. Names no PIN; the store's or ledger's error is `cause`.
  */
 export class PinChangeUnfinishedError extends Error {
-  constructor(cause: unknown) {
+  /** When the change began, ISO 8601: its cleanup forgets the PIN failures up to this, never later ones. */
+  readonly at: string;
+
+  constructor(at: string, cause: unknown) {
     super("the PIN change is on file, but its counters or its pin.reset entry were not written; finish it with resume", { cause });
     this.name = "PinChangeUnfinishedError";
+    this.at = at;
   }
 }
 
@@ -281,9 +287,10 @@ export class PinChangeUnfinishedError extends Error {
  * The business replaces or removes a subject's PIN in one compare-and-set (`RecordStore.replacePinDigest`):
  * false, changing nothing, when the record on file is no longer `from`, so of two changes at once
  * one answers false. A host call from the business's own tools, `keyed_hash` mode only. When a PIN
- * was on file, its counters are cleared after (the hidden one included, VER-12) and `pin.reset`
- * is appended, as `resetPin` does; a first PIN clears and writes nothing. A failure of those after
- * the change landed is `PinChangeUnfinishedError`, finished with `resume`.
+ * was on file, the subject's PIN failures recorded up to the change's start are forgotten after it
+ * lands (the hidden ones included, VER-12), never a later one, and `pin.reset` is appended; a first
+ * PIN forgets and writes nothing. A failure of those after the change landed is
+ * `PinChangeUnfinishedError`, finished with `resume`.
  */
 export async function replacePin(rt: EngineRuntime, subjectKey: string, change: PinReplacement, counters: AttemptCounters | undefined): Promise<boolean> {
   const settings = pinSettings(rt);
@@ -295,24 +302,32 @@ export async function replacePin(rt: EngineRuntime, subjectKey: string, change: 
   if (from !== null && (typeof from !== "string" || from === "")) errors.push("from must be the PIN record on file, or null");
   if (to !== null && (typeof to !== "string" || to === "")) errors.push("to must be a PIN record, or null");
   if (phoneOnFile !== undefined && !(typeof phoneOnFile === "string" && (phoneOnFile === "" || isCallingNumber(phoneOnFile)))) errors.push("phoneOnFile must be E.164 or empty");
-  if (resume !== undefined && typeof resume !== "boolean") errors.push("resume must be a boolean");
+  if (resume !== undefined && !(typeof resume === "string" && ISO_TIME.test(resume) && Number.isFinite(Date.parse(resume)))) errors.push("resume must be the at of a PinChangeUnfinishedError");
   if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
   const records = rt.adapter("records");
+  // The change's start: failures up to it are the old PIN's to forget; one recorded after may be against the new PIN.
+  const at = (resume as string | undefined) ?? rt.now();
   // A resumed change that already landed is not written again: `to` on file is its own (records are
   // salted, so no other change wrote the same one), or, for a removal, no PIN is on file.
-  const onFile = resume === true ? await records.getSubject(rt.workspaceId, subjectKey) : null;
+  const onFile = resume === undefined ? null : await records.getSubject(rt.workspaceId, subjectKey);
   const landed = onFile !== null && (onFile.pinDigest ?? null) === to;
   const replaced = landed || (await records.replacePinDigest(rt.workspaceId, subjectKey, from as string | null, to as string | null, phoneOnFile as string | undefined));
-  // A first PIN has nothing to clear. A resumed removal does: the PIN it removed is gone, whatever `from` says.
+  // A first PIN has nothing to forget. A resumed removal does: the PIN it removed is gone, whatever `from` says.
   if (!replaced || (from === null && !(landed && to === null))) return replaced;
   try {
-    await counters?.reset({ workspaceId: rt.workspaceId, factor: "pin", scope: "subject", key: subjectKey });
-    await counters?.reset(hiddenCounterKey(rt.workspaceId, "pin", subjectKey));
+    // Badge never runs without the counters adapter (the config check refuses it).
+    await forgetBefore(counters!, subjectKey, rt.workspaceId, new Date(at));
     await rt.adapter("ledger").append({ callId: null, actor: "member", event: "pin.reset", at: rt.now(), detail: { subjectKey } });
   } catch (error) {
-    throw new PinChangeUnfinishedError(error);
+    throw new PinChangeUnfinishedError(at, error);
   }
   return true;
+}
+
+/** Forgets the subject's PIN failures, and its hidden ones (VER-12), recorded up to `at`; later ones stay. */
+async function forgetBefore(counters: AttemptCounters, subjectKey: string, workspaceId: string, at: Date): Promise<void> {
+  await forgetUpTo(counters, { workspaceId, factor: "pin", scope: "subject", key: subjectKey }, at);
+  await forgetUpTo(counters, hiddenCounterKey(workspaceId, "pin", subjectKey), at);
 }
 
 /** Why a duress PIN was not stored, or that it was. `weak` does not say which rule it broke. */
