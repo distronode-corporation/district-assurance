@@ -1,50 +1,67 @@
 name: Release
 
-# Checks a version tag and, only when a person asks for it, publishes it to npm with provenance.
-# Nothing here runs on its own: a person pushes a tag `vX.Y.Z` that matches package.json, or
-# starts the workflow by hand on such a tag. Every run, in this repository or a fork, does all
-# of this:
-#   ci            the CI workflow (ci.yml) on the tagged commit: lint, typecheck, 100% coverage,
+# Releases main's version, on its own, when a release pull request merges. One human gate: the
+# release pull request, approved by the code owner, that sets package.json's version and dates
+# its CHANGELOG.md section (README.md, "How releases work"). Every push to main runs this
+# workflow; it releases only when main's package.json version has no tag `vX.Y.Z` yet and is not
+# on npm, and is a no-op (success, nothing done) otherwise, so an ordinary merge changes nothing.
+#
+#   decide        reads main's version and decides: `release` (no tag, not on npm), `resume` (the
+#                 tag is on this very commit and the version is not on npm: a run that tagged and
+#                 then failed), or `done` (tagged and published: the no-op). Anything else (a
+#                 version on npm without its tag, a tag on another commit, a run off main, a
+#                 commit not on main, a release with no dated CHANGELOG.md section) fails.
+#   tag           `release` only: creates the annotated tag `vX.Y.Z` on this exact commit, signed
+#                 with gitsign (keyless Sigstore signing under this workflow's GitHub OIDC
+#                 identity, so no long-lived key exists anywhere), verifies it, and pushes it with
+#                 the workflow's own token.
+#   guard         fetches the tag back as the server holds it and requires it to be annotated, to
+#                 name this commit, and to carry a valid gitsign signature, in the transparency
+#                 log, made by this file on main of this repository (the identity README.md tells
+#                 users to expect). Nothing is built or published from a tag that fails it.
+#   ci            the CI workflow (ci.yml) on the commit: lint, typecheck, 100% coverage,
 #                 build and demo, on every system and Node version it covers.
-#   supply-chain  npm audit and osv-scanner on the tagged lockfile (supply-chain.yml).
-#   pack          requires the tagged commit to be on main, builds and packs twice and requires
+#   supply-chain  npm audit and osv-scanner on the lockfile (supply-chain.yml).
+#   pack          requires the commit to be on main, builds and packs twice and requires
 #                 the same bytes (a reproducible pack), checks the file list, and unpacks the
 #                 tarball into an empty project to import and type-check its three entry points
 #                 (the exports smoke test).
 # Then exactly one of:
-#   publish       this repository only, on a manual run on a tag with `publish` ticked, and only
-#                 after the `npm-publish` environment's reviewers approve. It rebuilds, requires
-#                 the pack job's SHA-256, writes and checks a CycloneDX SBOM of the published
-#                 package, signs an SBOM attestation for the tarball through Sigstore, keeps the
-#                 release files, and publishes that tarball. A rerun after npm accepted it
-#                 publishes nothing again when the registry serves the very same bytes, and
-#                 fails when it serves other bytes under the version.
+#   publish       this repository only, in the `npm-publish` environment (main only). It
+#                 rebuilds, requires the pack job's SHA-256, writes and checks a CycloneDX SBOM of
+#                 the published package, signs an SBOM attestation for the tarball through
+#                 Sigstore, keeps the release files, and publishes that tarball. A rerun after npm
+#                 accepted it publishes nothing again when the registry serves the very same
+#                 bytes, and fails when it serves other bytes under the version.
 #   github-release  after publish: a GitHub release on the tag with the tarball, the SBOM and
 #                 the attestation's Sigstore bundle attached.
-#   dry-run       everything else (a tag push, a fork, or a manual run without `publish`): the
-#                 same rebuild, comparison and SBOM check, and `npm publish --dry-run` (skipped
-#                 for a package.json with `"private": true`). Nothing is signed: only the
-#                 publish job may ask for an OIDC token.
+#   dry-run       a manual run with `dry_run` ticked: no tag, no signature, and the same
+#                 rebuild, comparison and SBOM check, and `npm publish --dry-run` (skipped for a
+#                 package.json with `"private": true`). Only the tag and publish jobs may ask for
+#                 an OIDC token.
 # And beside them, needed by nothing:
 #   bench         the benchmarks of the previous release and of this one, one after the other on
 #                 the same runner, and a case more than 20% slower reported in the run summary
 #                 (BENCHMARKS.md). It never fails or holds up a release.
 #
-# A tag push never publishes. Publishing takes two separate acts by people: a manual run with
-# `publish` ticked and an approval in the `npm-publish` environment, on a tag of a version whose
-# package.json is not private. The tagged commit must also be on main.
+# A tag pushed by hand starts nothing (there is no tag trigger), and the repository's tag rules
+# let only this workflow create a `v*` tag. A manual run (workflow_dispatch) on main is the
+# fallback when a push run did not start or failed: it decides the same way, so it releases only
+# what a push run would have, and resumes a run that tagged and then failed.
 #
-# The `npm-publish` environment has required reviewers and a `v*` tag rule. GitHub creates an
-# environment named by a job the first time that job runs, WITHOUT protection rules, so the
-# publish job does not take the environment's existence on trust: its first step reads it back
-# and stops unless it has a required reviewer and a deployment rule, so an environment that lost
-# or never had its protection never lets a publish through.
+# The `npm-publish` environment admits only main, and has no required reviewer: the release
+# pull request's approval is the gate. GitHub creates an environment named by a job the first
+# time that job runs, WITHOUT protection rules, so the publish job does not take the
+# environment's existence on trust: its first step reads it back and stops unless its deployment
+# rule admits main and nothing else, so an environment that lost or never had that rule never
+# lets a publish through.
 #
-# What each signature covers. npm provenance (the publish step) ties the tarball to this
-# commit and this workflow, and npm's registry signs it; `npm audit signatures` checks both.
-# Provenance does not say what is in the package, so the SBOM attestation does: its subject
-# is the tarball's SHA-256 and its predicate the SBOM, and `gh attestation verify` checks it.
-# README.md ("Checking a release") gives both commands.
+# What each signature covers. The tag's gitsign signature ties the version to the commit and to
+# this workflow on main; `gitsign verify-tag` checks it. npm provenance (the publish step) ties
+# the tarball to this commit and this workflow, and npm's registry signs it; `npm audit
+# signatures` checks both. Provenance does not say what is in the package, so the SBOM
+# attestation does: its subject is the tarball's SHA-256 and its predicate the SBOM, and
+# `gh attestation verify` checks it. README.md ("Checking a release") gives the three commands.
 #
 # The package was private until the first release was decided (DECISIONS.md, ADR-12), and the
 # release pull request for 0.1.0 removed `"private": true`. The publish job still fails on a
@@ -56,21 +73,22 @@ name: Release
 # `release.yml` and the environment `npm-publish`, with `npm publish` ticked as an allowed
 # action: a trusted publisher created since September 2026 allows only `npm stage publish`
 # until it is, and the publish step below runs `npm publish`, so without it the step fails.
-# The environment, with required reviewers and a tag rule of `v*`, is set up in the
-# repository's settings.
+# The environment, with its deployment rule of main only, is set up in the repository's
+# settings.
 #
 # First publication: npm sets a trusted publisher only on a package that already exists, so this
 # workflow cannot create the package (with no token and no trusted publisher it has no
-# credential, and the publish step fails closed). The package's owner reserves the name by hand
-# with a placeholder version that is not a release, the trusted publisher above is then set up,
-# and every release, from 0.1.0 on, is published by a manual run of this workflow.
+# credential, and the publish step fails closed). The package's owner reserved the name by hand
+# with a placeholder version that is not a release, the trusted publisher above was then set up,
+# and every release, from 0.1.0 on, is published by this workflow. Tags up to v0.1.0 were pushed
+# by hand and are not signed.
 on:
   push:
-    tags: ['v[0-9]*.[0-9]*.[0-9]*']
+    branches: [main]
   workflow_dispatch:
     inputs:
-      publish:
-        description: Publish to npm (this repository only; otherwise a dry run). Run it on a tag.
+      dry_run:
+        description: A dry run (no tag, no signature, no publish), even when the version is new.
         type: boolean
         default: false
 
@@ -78,23 +96,241 @@ on:
 permissions:
   contents: read
 
-# One release per tag at a time, never cancelled half way.
+# One release at a time, never cancelled half way: a second push waits, then sees the tag.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
+  decide:
+    # Upstream only: a fork's main never tags or publishes.
+    if: github.repository == 'distronode-corporation/district-assurance'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.decide.outputs.version }}
+      state: ${{ steps.decide.outputs.state }}
+      dry: ${{ steps.decide.outputs.dry }}
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      # The tag's certificate names this file on main, the identity README.md tells users to
+      # expect, so a run on any other ref would sign under another identity.
+      - name: Only from main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::A release runs from main, not $REF."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The whole history, for the check that the commit is on main.
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      # A re-run of an old push run, or a dispatch that raced a newer push, may hold a commit main
+      # has since moved past; it must still be on main.
+      - name: The commit is on main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::The commit $GITHUB_SHA is not on main."
+            exit 1
+          fi
+      - name: Decide
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::package.json's version '$version' is not a release version."
+            exit 1
+          fi
+          tag="$(git ls-remote --tags origin "refs/tags/v$version^{}" | cut -f1)"
+          if [ -z "$tag" ]; then tag="$(git ls-remote --tags origin "refs/tags/v$version" | cut -f1)"; fi
+          # The registry's own document for the package, read for the version's key: a version npm
+          # does not have is a missing key, and any failure to fetch or read the document stops
+          # the run (fail closed), never reads as "not published". (`npm view` exits 1 alike for
+          # a missing version and for a failed request, so it cannot tell them apart.)
+          curl -fsS --retry 3 -o "$RUNNER_TEMP/packument.json" https://registry.npmjs.org/district-assurance
+          published="$(node -e '
+            const doc = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+            if (typeof doc.versions !== "object" || doc.versions === null) process.exit(1);
+            process.stdout.write(Object.hasOwn(doc.versions, process.argv[2]) ? "yes" : "");
+          ' "$RUNNER_TEMP/packument.json" "$version")"
+          dry=false
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$DRY_RUN" = "true" ]; then dry=true; fi
+          if [ -n "$tag" ] && [ -n "$published" ]; then
+            state="done"
+            echo "v$version is tagged and $version is on npm: nothing to release." | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ -n "$tag" ]; then
+            if [ "$tag" != "$GITHUB_SHA" ]; then
+              echo "::error::v$version is on $tag, not this commit ($GITHUB_SHA), and $version is not on npm. Re-run the run that made the tag."
+              exit 1
+            fi
+            state="resume"
+            echo "v$version is on this commit and $version is not on npm: resuming." | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ -n "$published" ]; then
+            echo "::error::$version is on npm but has no tag v$version: a person must look."
+            exit 1
+          else
+            state="release"
+            if ! grep -Eq "^## \[${version//./\\.}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}\$" CHANGELOG.md; then
+              echo "::error::CHANGELOG.md has no dated '## [$version] - YYYY-MM-DD' section."
+              exit 1
+            fi
+            echo "Releasing $version." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          {
+            echo "version=$version"
+            echo "state=$state"
+            echo "dry=$dry"
+          } >> "$GITHUB_OUTPUT"
+
+  tag:
+    needs: decide
+    if: needs.decide.outputs.state == 'release' && needs.decide.outputs.dry == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # push the tag
+      id-token: write # the OIDC token gitsign exchanges for its signing certificate
+    env:
+      VERSION: ${{ needs.decide.outputs.version }}
+      # The upstream release, checked against a pinned SHA-256. Move both together, and with the
+      # copy in the guard job.
+      GITSIGN_VERSION: 0.18.0
+      GITSIGN_SHA256: 2bc625472a08fea3bb6a57982c7d8b4978d1032251d305ceef3bf2ded0ca4483
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install gitsign
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/gitsign" \
+            "https://github.com/sigstore/gitsign/releases/download/v${GITSIGN_VERSION}/gitsign_${GITSIGN_VERSION}_linux_amd64"
+          echo "${GITSIGN_SHA256}  $RUNNER_TEMP/gitsign" | sha256sum -c -
+          install -m 0755 "$RUNNER_TEMP/gitsign" /usr/local/bin/gitsign
+          gitsign --version
+      # Signs this run's commit, then verifies the new tag against the identity users are told to
+      # expect before anything is pushed.
+      - name: Create the signed tag
+        env:
+          # Embeds the transparency log entry, with its inclusion proof, in the signature, so
+          # verify-tag checks it there instead of searching the log, which can miss an entry made
+          # seconds earlier (district-core-rust's first signed release failed that way).
+          # Verification is no less strict.
+          GITSIGN_REKOR_MODE: offline
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config gpg.format x509
+          git config gpg.x509.program gitsign
+          git tag -s -m "district-assurance $VERSION" "v$VERSION" "$GITHUB_SHA"
+          gitsign verify-tag "v$VERSION" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/main" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      # A tag creation, which the repository's tag rules allow only to their bypass list: this
+      # workflow's token pushes as GitHub Actions, which must be on it.
+      - name: Push the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" \
+            push origin "refs/tags/v$VERSION"
+
+  # ⛔ ONLY A TAG THIS WORKFLOW SIGNED IS RELEASED. Everything after it needs this job.
+  guard:
+    needs: [decide, tag]
+    if: >-
+      ${{ always() && needs.decide.result == 'success' && needs.decide.outputs.dry == 'false' &&
+        (needs.decide.outputs.state == 'resume' ||
+         (needs.decide.outputs.state == 'release' && needs.tag.result == 'success')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.decide.outputs.version }}
+      # The same pin as the tag job's. Move both together.
+      GITSIGN_VERSION: 0.18.0
+      GITSIGN_SHA256: 2bc625472a08fea3bb6a57982c7d8b4978d1032251d305ceef3bf2ded0ca4483
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install gitsign
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/gitsign" \
+            "https://github.com/sigstore/gitsign/releases/download/v${GITSIGN_VERSION}/gitsign_${GITSIGN_VERSION}_linux_amd64"
+          echo "${GITSIGN_SHA256}  $RUNNER_TEMP/gitsign" | sha256sum -c -
+          install -m 0755 "$RUNNER_TEMP/gitsign" /usr/local/bin/gitsign
+          gitsign --version
+      # The tag object is fetched as the server holds it, so the check reads the annotated, signed
+      # tag that was pushed and not a local copy. A lightweight tag, a tag on another commit, an
+      # unsigned tag, or one signed by anyone or anything else stops the release here.
+      - name: The tag is signed by this workflow on main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "+refs/tags/v${VERSION}:refs/tags/v${VERSION}"
+          if [ "$(git cat-file -t "refs/tags/v${VERSION}")" != "tag" ]; then
+            echo "::error::v$VERSION is a lightweight tag; a release tag is annotated and signed by this workflow"
+            exit 1
+          fi
+          if [ "$(git rev-parse "refs/tags/v${VERSION}^{commit}")" != "$GITHUB_SHA" ]; then
+            echo "::error::v$VERSION does not name $GITHUB_SHA, the commit this run checked out"
+            exit 1
+          fi
+          gitsign verify-tag "v$VERSION" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/main" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
   ci:
+    needs: [decide, guard]
+    if: >-
+      ${{ always() && needs.decide.result == 'success' && needs.decide.outputs.state != 'done' &&
+        (needs.guard.result == 'success' || (needs.decide.outputs.dry == 'true' && needs.guard.result == 'skipped')) }}
     permissions:
       contents: read
     uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository]
 
   supply-chain:
+    needs: [decide, guard]
+    if: >-
+      ${{ always() && needs.decide.result == 'success' && needs.decide.outputs.state != 'done' &&
+        (needs.guard.result == 'success' || (needs.decide.outputs.dry == 'true' && needs.guard.result == 'skipped')) }}
     permissions:
       contents: read
     uses: ./.github/workflows/supply-chain.yml # zizmor: ignore[self-repository]
 
   pack:
+    needs: [decide, guard]
+    if: >-
+      ${{ always() && needs.decide.result == 'success' && needs.decide.outputs.state != 'done' &&
+        (needs.guard.result == 'success' || (needs.decide.outputs.dry == 'true' && needs.guard.result == 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -110,7 +346,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # The whole history, for the check that the tagged commit is on main.
+          # The whole history, for the check that the commit is on main.
           fetch-depth: 0
       # No package-manager cache anywhere in this file: a restored cache is one more input to
       # what gets published.
@@ -118,30 +354,25 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      # A manual run on a branch stops here, and so does a tag that does not name the version.
-      - name: The ref is the tag of package.json's version
+      # The version the decide job read, read again from this checkout of the same commit.
+      - name: package.json's version is the one decided
         id: ref
         env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
+          DECIDED: ${{ needs.decide.outputs.version }}
         run: |
           set -euo pipefail
-          if [ "$REF_TYPE" != "tag" ]; then
-            echo "::error::A release runs on a tag, not on the $REF_TYPE '$REF_NAME'."
-            exit 1
-          fi
           version="$(node -p 'require("./package.json").version')"
-          if [ "$REF_NAME" != "v$version" ]; then
-            echo "::error::The tag '$REF_NAME' does not match package.json's version $version (expected v$version)."
+          if [ "$version" != "$DECIDED" ]; then
+            echo "::error::package.json's version $version is not the decided $DECIDED."
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      # Only a commit already on main is released: a tag on a side branch stops here.
-      - name: The tagged commit is on main
+      # Only a commit already on main is released.
+      - name: The commit is on main
         run: |
           set -euo pipefail
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::The tagged commit $GITHUB_SHA is not on main."
+            echo "::error::The commit $GITHUB_SHA is not on main."
             exit 1
           fi
       # Development dependencies only (the package has no runtime dependency), with no install
@@ -263,17 +494,18 @@ jobs:
           retention-days: 30
 
   publish:
-    needs: [ci, supply-chain, pack]
-    # Upstream only, so a fork never tries, and only a manual run on a tag with the box ticked:
-    # a tag push is a dry run.
+    needs: [decide, guard, ci, supply-chain, pack]
+    # Upstream only, so a fork never tries, and only after the guard passed on this workflow's own
+    # signed tag and every check passed: a dry run never publishes.
     if: >-
-      github.repository == 'distronode-corporation/district-assurance' &&
-      github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && inputs.publish
+      ${{ always() && github.repository == 'distronode-corporation/district-assurance' &&
+        needs.decide.outputs.dry == 'false' && needs.guard.result == 'success' &&
+        needs.ci.result == 'success' && needs.supply-chain.result == 'success' && needs.pack.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # Waits for the environment's required reviewers: the last person in the loop. One maintainer
-    # today, so self-review is allowed; a second reviewer is required once there is one
-    # (SECURITY-MODEL.md, "Supply chain and releases").
+    # The environment the trusted publisher is bound to. It admits only main and has no required
+    # reviewer: the code-owner-approved release pull request is the human gate (SECURITY-MODEL.md,
+    # "Supply chain and releases").
     environment: npm-publish
     permissions:
       contents: read
@@ -283,7 +515,7 @@ jobs:
       id-token: write
       # Stores the SBOM attestation in this repository, where `gh attestation verify` finds it.
       attestations: write
-      # Reads the npm-publish environment's protection rules back (the first step).
+      # Reads the npm-publish environment's deployment rules back (the first step).
       actions: read
     steps:
       # Audit, not block, until the first real publish: its audit log gives the endpoint list, and
@@ -291,25 +523,28 @@ jobs:
       - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
-      # The approval this job waited for is only as good as the environment's rules, and an
-      # environment GitHub created on first use has none. Fails closed: no reviewer, no deployment
-      # rule, or no answer from the API, and nothing is published.
-      - name: The npm-publish environment requires a reviewer
+      # The environment is only as good as its rules, and an environment GitHub created on first use
+      # has none. Fails closed: a deployment rule that admits anything but main (or nothing at
+      # all), or no answer from the API, and nothing is published.
+      - name: The npm-publish environment admits only main
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           gh api "repos/$GITHUB_REPOSITORY/environments/npm-publish" > "$RUNNER_TEMP/environment.json"
+          gh api "repos/$GITHUB_REPOSITORY/environments/npm-publish/deployment-branch-policies" > "$RUNNER_TEMP/policies.json"
           node -e '
-            const env = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
-            const reviewers = (env.protection_rules ?? []).filter((rule) => rule.type === "required_reviewers").flatMap((rule) => rule.reviewers ?? []);
-            const deploymentRule = env.deployment_branch_policy?.custom_branch_policies === true;
-            if (reviewers.length === 0 || !deploymentRule) {
-              console.log("::error::The npm-publish environment needs required reviewers and a v* tag rule before anything is published.");
+            const read = (file) => JSON.parse(require("node:fs").readFileSync(file, "utf8"));
+            const env = read(process.argv[1]);
+            const policies = read(process.argv[2]).branch_policies;
+            const custom = env.deployment_branch_policy?.custom_branch_policies === true && env.deployment_branch_policy?.protected_branches === false;
+            const mainOnly = Array.isArray(policies) && policies.length === 1 && policies[0]?.type === "branch" && policies[0]?.name === "main";
+            if (!custom || !mainOnly) {
+              console.log("::error::The npm-publish environment must admit main only (one custom branch rule, main) before anything is published.");
               process.exit(1);
             }
-            console.log(`npm-publish: ${reviewers.length} required reviewer(s), custom deployment rules`);
-          ' "$RUNNER_TEMP/environment.json"
+            console.log("npm-publish: deployments from main only");
+          ' "$RUNNER_TEMP/environment.json" "$RUNNER_TEMP/policies.json"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -446,6 +681,7 @@ jobs:
   # `contents: write` and `id-token: write` are never held together.
   github-release:
     needs: [pack, publish]
+    if: ${{ always() && needs.publish.result == 'success' && needs.pack.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -493,10 +729,11 @@ jobs:
             "$FILE" "district-assurance-$VERSION.cdx.json" "$FILE.sbom.sigstore.json"
 
   dry-run:
-    needs: [ci, supply-chain, pack]
+    needs: [decide, ci, supply-chain, pack]
+    # A manual run with `dry_run` ticked: no tag, nothing signed, nothing published.
     if: >-
-      ${{ !(github.repository == 'distronode-corporation/district-assurance' &&
-        github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && inputs.publish) }}
+      ${{ always() && needs.decide.outputs.dry == 'true' &&
+        needs.ci.result == 'success' && needs.supply-chain.result == 'success' && needs.pack.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -610,6 +847,10 @@ jobs:
   # Shared runners are noisy, so one run never fails a release: no job needs this one, and it
   # continues on error. The benchmarks import only the sources and Node, so there is no install.
   bench:
+    needs: [decide, guard]
+    if: >-
+      ${{ always() && needs.decide.result == 'success' && needs.decide.outputs.state != 'done' &&
+        (needs.guard.result == 'success' || (needs.decide.outputs.dry == 'true' && needs.guard.result == 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     continue-on-error: true
@@ -636,7 +877,7 @@ jobs:
       - name: The previous release
         id: previous
         env:
-          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ needs.decide.outputs.version }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -648,7 +889,7 @@ jobs:
               if [ "$released" = "true" ]; then previous="$tag"; break; fi
               echo "$tag has no published GitHub release with its files: not a baseline."
             fi
-            if [ "$tag" = "$REF_NAME" ]; then found=true; fi
+            if [ "$tag" = "v$VERSION" ]; then found=true; fi
           done
           echo "Previous release: ${previous:-none}"
           echo "tag=$previous" >> "$GITHUB_OUTPUT"

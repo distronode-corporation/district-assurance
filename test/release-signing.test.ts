@@ -1,0 +1,240 @@
+// The release workflow releases main's version on its own, once, under a tag it signed itself:
+// the decide step's every branch (the no-op included) run as the runner runs it, and the shape
+// that keeps an unsigned or hand-pushed tag from ever publishing.
+import { strict as assert } from "node:assert";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, it } from "node:test";
+
+const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+
+/** A job's text, from its name to the next job. */
+function job(name: string): string {
+  const start = workflow.indexOf(`\n  ${name}:\n`);
+  assert.ok(start >= 0, name);
+  const next = workflow.slice(start + 1).search(/\n {2}[a-z][a-z-]*:\n/);
+  return next < 0 ? workflow.slice(start) : workflow.slice(start, start + 1 + next);
+}
+
+/** A step's `run: |` script, dedented, as the runner gets it. */
+function script(jobText: string, name: string): string {
+  const at = jobText.indexOf(`      - name: ${name}\n`);
+  assert.ok(at >= 0, name);
+  const end = jobText.indexOf("\n      - ", at + 1);
+  const lines = jobText.slice(at, end < 0 ? undefined : end).split("\n");
+  const run = lines.findIndex((l) => l.trim() === "run: |");
+  assert.ok(run >= 0, `a run block in ${name}`);
+  const indent = lines[run + 1]!.length - lines[run + 1]!.trimStart().length;
+  const body: string[] = [];
+  for (const line of lines.slice(run + 1)) {
+    if (line.trim() !== "" && line.length - line.trimStart().length < indent) break;
+    body.push(line.slice(indent));
+  }
+  return body.join("\n");
+}
+
+const root = mkdtempSync(join(tmpdir(), "da-release-signing-"));
+after(() => rmSync(root, { recursive: true, force: true }));
+let n = 0;
+
+const SHA = "a".repeat(40);
+const OTHER = "b".repeat(40);
+const CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-11-22\n\n### Added\n\n- a line\n";
+
+interface World {
+  version?: string;
+  /** The commit `v<version>` names on the remote (peeled), or none. */
+  tag?: string | null;
+  /** The versions the registry document lists. */
+  versions?: string[];
+  /** The registry document as served, when not the default. */
+  document?: string;
+  curlFails?: boolean;
+  changelog?: string;
+  event?: string;
+  dryRun?: string;
+}
+
+/** The decide step, run with stand-in git and curl, the real node and grep. */
+function decide(world: World = {}) {
+  const dir = join(root, String(n++));
+  const bin = join(dir, "bin");
+  mkdirSync(bin, { recursive: true });
+  const version = world.version ?? "1.2.3";
+  const tag = world.tag === undefined ? null : world.tag;
+  const fake = (name: string, body: string) => {
+    writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`);
+    chmodSync(join(bin, name), 0o755);
+  };
+  // `git ls-remote --tags origin <ref>`: the peeled line for `^{}`, the tag's own line otherwise.
+  fake("git", tag === null ? "exit 0" : `case "$*" in *'^{}'*) printf '%s\\t%s\\n' "${tag}" "$5" ;; *) printf '%s\\t%s\\n' "${"c".repeat(40)}" "$5" ;; esac`);
+  const document = world.document ?? JSON.stringify({ name: "district-assurance", versions: Object.fromEntries((world.versions ?? ["0.1.0"]).map((v) => [v, {}])) });
+  writeFileSync(join(dir, "document.json"), document);
+  fake("curl", world.curlFails === true ? "exit 22" : `while [ $# -gt 0 ]; do if [ "$1" = -o ]; then cp "${join(dir, "document.json")}" "$2"; shift; fi; shift; done`);
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "district-assurance", version }));
+  writeFileSync(join(dir, "CHANGELOG.md"), world.changelog ?? CHANGELOG);
+  writeFileSync(join(dir, "output"), "");
+  writeFileSync(join(dir, "summary"), "");
+  const r = spawnSync("bash", ["-c", script(job("decide"), "Decide")], {
+    cwd: dir,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      RUNNER_TEMP: dir,
+      GITHUB_OUTPUT: join(dir, "output"),
+      GITHUB_STEP_SUMMARY: join(dir, "summary"),
+      GITHUB_SHA: SHA,
+      EVENT: world.event ?? "push",
+      DRY_RUN: world.dryRun ?? "",
+    },
+  });
+  const output = Object.fromEntries(
+    readFileSync(join(dir, "output"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => l.split("=") as [string, string]),
+  );
+  return { code: r.status, out: `${r.stdout}${r.stderr}`, output, summary: readFileSync(join(dir, "summary"), "utf8") };
+}
+
+const unix = process.platform === "win32" ? "bash and stand-in commands as on the Linux runner" : false;
+
+describe("the release decision", { skip: unix }, () => {
+  it("is a no-op, and a success, when main's version is tagged and on npm: an ordinary merge changes nothing", () => {
+    const r = decide({ tag: SHA, versions: ["0.1.0", "1.2.3"] });
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(r.output, { version: "1.2.3", state: "done", dry: "false" });
+    assert.match(r.summary, /nothing to release/);
+  });
+
+  it("releases a version with no tag that is not on npm and has a dated CHANGELOG.md section", () => {
+    const r = decide();
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(r.output, { version: "1.2.3", state: "release", dry: "false" });
+  });
+
+  it("refuses to release a version whose CHANGELOG.md section is missing, undated or only a prefix", () => {
+    for (const changelog of ["# Changelog\n\n## [Unreleased]\n", "## [1.2.3] - Unreleased\n", "## [1.2.3]\n", "## [1.2.30] - 2026-11-22\n", "## [1x2x3] - 2026-11-22\n", "## [1.2.3] - 2026-11-22 (late)\n"]) {
+      const r = decide({ changelog });
+      assert.notEqual(r.code, 0, changelog);
+      assert.match(r.out, /no dated '## \[1\.2\.3\] - YYYY-MM-DD' section/, changelog);
+      assert.equal(r.output.state, undefined, "nothing decided");
+    }
+  });
+
+  it("resumes a run that tagged this very commit and then failed before npm had the version", () => {
+    const r = decide({ tag: SHA });
+    assert.equal(r.code, 0, r.out);
+    assert.equal(r.output.state, "resume");
+  });
+
+  it("refuses a tag on another commit while the version is not on npm", () => {
+    const r = decide({ tag: OTHER });
+    assert.notEqual(r.code, 0);
+    assert.match(r.out, /is on b+, not this commit/);
+  });
+
+  it("refuses a version on npm that has no tag, for a person to look at", () => {
+    const r = decide({ versions: ["1.2.3"] });
+    assert.notEqual(r.code, 0);
+    assert.match(r.out, /on npm but has no tag/);
+  });
+
+  it("fails closed when the registry cannot be asked, or answers something that is not a package document", () => {
+    for (const world of [{ curlFails: true }, { document: "not json" }, { document: "{}" }, { document: JSON.stringify({ versions: null }) }, { document: "" }] as World[]) {
+      const r = decide(world);
+      assert.notEqual(r.code, 0, JSON.stringify(world));
+      assert.equal(r.output.state, undefined, `never read as "not published": ${JSON.stringify(world)}`);
+    }
+  });
+
+  it("refuses a package.json version that is not a release version", () => {
+    for (const version of ["1.2", "v1.2.3", "1.2.3 ", "latest", "1.2.3+build"]) {
+      const r = decide({ version });
+      assert.notEqual(r.code, 0, version);
+    }
+  });
+
+  it("a manual run with dry_run ticked is a dry run; a push, or dry_run unticked, never is", () => {
+    assert.equal(decide({ event: "workflow_dispatch", dryRun: "true" }).output.dry, "true");
+    assert.equal(decide({ event: "workflow_dispatch", dryRun: "false" }).output.dry, "false");
+    assert.equal(decide({ event: "push", dryRun: "true" }).output.dry, "false");
+  });
+});
+
+describe("the shape that keeps an unsigned tag from publishing", () => {
+  const head = workflow.slice(0, workflow.indexOf("\njobs:"));
+
+  it("runs on a push to main and by hand, never on a tag push, one run at a time and never cancelled", () => {
+    const on = head.slice(head.indexOf("\non:"), head.indexOf("\npermissions:"));
+    assert.match(on, /\n {2}push:\n {4}branches: \[main\]\n/);
+    assert.match(on, /\n {2}workflow_dispatch:/);
+    assert.doesNotMatch(on, /tags:/);
+    assert.match(head, /\nconcurrency:\n {2}group: release\n {2}cancel-in-progress: false\n/);
+  });
+
+  it("decides only upstream, and only from main", () => {
+    assert.match(job("decide"), /if: github\.repository == 'distronode-corporation\/district-assurance'/);
+    assert.match(script(job("decide"), "Only from main"), /"\$REF" != "refs\/heads\/main"/);
+    assert.match(script(job("decide"), "The commit is on main"), /git merge-base --is-ancestor "\$GITHUB_SHA" origin\/main/);
+  });
+
+  it("tags only a new version, signs it offline with the pinned gitsign, verifies it before pushing, and pushes with the workflow token", () => {
+    const tag = job("tag");
+    assert.match(tag, /if: needs\.decide\.outputs\.state == 'release' && needs\.decide\.outputs\.dry == 'false'/);
+    assert.match(tag, /contents: write/);
+    assert.match(tag, /id-token: write/);
+    assert.match(tag, /GITSIGN_REKOR_MODE: offline/);
+    const sign = script(tag, "Create the signed tag");
+    assert.match(sign, /git tag -s -m "district-assurance \$VERSION" "v\$VERSION" "\$GITHUB_SHA"/);
+    assert.ok(sign.indexOf("git tag -s") < sign.indexOf("gitsign verify-tag"), "verified after it is made");
+    assert.match(script(tag, "Push the tag"), /push origin "refs\/tags\/v\$VERSION"/);
+    assert.ok(tag.indexOf("Create the signed tag") < tag.indexOf("Push the tag"), "verified before it is pushed");
+  });
+
+  it("checks the gitsign download against the same pinned SHA-256 in both jobs that run it", () => {
+    for (const name of ["tag", "guard"]) {
+      assert.match(job(name), /GITSIGN_VERSION: 0\.18\.0\n/, name);
+      assert.match(job(name), /GITSIGN_SHA256: 2bc625472a08fea3bb6a57982c7d8b4978d1032251d305ceef3bf2ded0ca4483\n/, name);
+      assert.match(script(job(name), "Install gitsign"), /sha256sum -c -/, name);
+    }
+  });
+
+  it("verifies the tag as the server holds it against this file on main and GitHub's issuer, in the signing job and the guard", () => {
+    const identity = /--certificate-identity "https:\/\/github\.com\/\$\{GITHUB_REPOSITORY\}\/\.github\/workflows\/release\.yml@refs\/heads\/main"/;
+    const issuer = /--certificate-oidc-issuer https:\/\/token\.actions\.githubusercontent\.com/;
+    for (const text of [script(job("tag"), "Create the signed tag"), script(job("guard"), "The tag is signed by this workflow on main")]) {
+      assert.match(text, identity);
+      assert.match(text, issuer);
+    }
+    const guard = script(job("guard"), "The tag is signed by this workflow on main");
+    assert.match(guard, /git fetch --no-tags origin "\+refs\/tags\/v\$\{VERSION\}:refs\/tags\/v\$\{VERSION\}"/);
+    assert.match(guard, /git cat-file -t/);
+    assert.match(guard, /\^\{commit\}"\)" != "\$GITHUB_SHA"/);
+  });
+
+  it("builds and publishes nothing unless the guard passed, except a dry run, which never publishes", () => {
+    for (const name of ["ci", "supply-chain", "pack", "bench"]) {
+      const text = job(name);
+      assert.match(text, /needs: \[decide, guard\]/, name);
+      assert.match(text, /needs\.guard\.result == 'success' \|\| \(needs\.decide\.outputs\.dry == 'true' && needs\.guard\.result == 'skipped'\)/, name);
+      assert.match(text, /needs\.decide\.outputs\.state != 'done'/, name);
+    }
+    assert.match(job("publish"), /needs: \[decide, guard, ci, supply-chain, pack\]/);
+    assert.match(job("dry-run"), /needs\.decide\.outputs\.dry == 'true'/);
+    assert.doesNotMatch(job("dry-run"), /id-token|contents: write/);
+  });
+
+  it("holds the OIDC scope only in the tag and publish jobs, and write access to contents only in the tag and release jobs", () => {
+    const jobs = [...workflow.matchAll(/\n {2}([a-z][a-z-]*):\n/g)].map((m) => m[1]!).filter((name) => workflow.indexOf(`\n  ${name}:\n`) > workflow.indexOf("\njobs:"));
+    assert.ok(jobs.length >= 10, jobs.join(", "));
+    for (const name of jobs) {
+      // The keys themselves, not a comment that names them.
+      assert.equal(/^ +id-token: write/m.test(job(name)), ["tag", "publish"].includes(name), `id-token in ${name}`);
+      assert.equal(/^ +contents: write/m.test(job(name)), ["tag", "github-release"].includes(name), `contents: write in ${name}`);
+    }
+  });
+});

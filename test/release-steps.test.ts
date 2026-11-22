@@ -157,7 +157,7 @@ describe("the previous release the benchmarks compare with", { skip: unix }, () 
   /** gh answers for `release view <tag>`: true for a published release with files. */
   const gh = (published: string[]) => `tag="$3"; case " ${published.join(" ")} " in *" $tag "*) echo true ;; *) echo false ;; esac`;
   const run = (published: string[]) =>
-    runStep(previous, { git: `printf '%s\\n' ${tags.join(" ")}`, gh: gh(published) }, { REF_NAME: "v0.3.0", GITHUB_REPOSITORY: "o/r", GH_TOKEN: "x" });
+    runStep(previous, { git: `printf '%s\\n' ${tags.join(" ")}`, gh: gh(published) }, { VERSION: "0.3.0", GITHUB_REPOSITORY: "o/r", GH_TOKEN: "x" });
 
   it("takes the nearest earlier tag that has a published GitHub release with its files", () => {
     const r = run(["v0.2.0", "v0.1.0"]);
