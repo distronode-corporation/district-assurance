@@ -970,28 +970,36 @@ package has no runtime dependency. Every workflow action is pinned by full commi
 workflow's top-level token is read-only or empty with each job granted only the scopes it uses,
 and no package-manager cache is restored. npm audit and osv-scanner check the lockfile on every
 pull request, weekly, and on each release tag (`supply-chain.yml`). From 0.1.0 on, every version
-on npm is published by the release workflow (`release.yml`) from its tag, with npm provenance
-(ADR-12); the hand-published placeholder version that reserved the name holds no code, and
-the publish job refuses a package.json marked `"private": true`. In that workflow a tag push is
-only ever a dry run, publishing needs a person to start the workflow by hand on a tag
-with `publish` ticked, and the publish job waits for the `npm-publish` environment's reviewers;
-its first step stops unless that environment has a required reviewer and a deployment rule, so
-an environment created without protection never lets a publish through. It runs only in this
-repository, on a tagged commit that is on main, after CI and the supply-chain checks pass on the
-tag. The tarball must be byte-identical across two builds and a third on a fresh runner, holds
+on npm is published by the release workflow (`release.yml`), with npm provenance (ADR-12); the
+hand-published placeholder version that reserved the name holds no code, and the publish job
+refuses a package.json marked `"private": true`. The one human gate is the release pull request,
+approved by the code owner: when it merges, the workflow releases main's version only if it has
+no tag and is not on npm (any other push is a no-op), and refuses a commit not on main and a
+version with no dated CHANGELOG.md section. It creates the annotated tag on that commit and signs
+it with gitsign, keyless under its own GitHub OIDC identity, with the transparency log entry in
+the signature, so no long-lived signing key exists; it verifies the tag against
+`release.yml@refs/heads/main` and GitHub's issuer before pushing it, and a guard job fetches it
+back and verifies it again before anything is built (tested). There is no tag trigger, so a tag
+pushed by hand starts nothing, and the repository's tag rules let only the workflow create a `v*`
+tag. The publish job runs in the `npm-publish` environment, which the trusted publisher is bound
+to and which admits main only; its first step stops unless that environment's one deployment
+rule is main, so an environment created without protection, or widened, never lets a publish
+through (tested). It runs only in this repository, on a commit that is on main, after CI and the
+supply-chain checks pass on it. The tarball must be byte-identical across two builds and a third on a fresh runner, holds
 only `dist/` and the listed documents, and passes an unpack-and-import smoke test before it is
 published. There is no npm token: trusted publishing uses the publish job's short-lived OIDC
-token, the only job granted `id-token: write`, and npm provenance ties the tarball to the commit
+token (the tag job's, the only other job granted `id-token: write`, signs only the tag), and npm provenance ties the tarball to the commit
 and workflow that built it. The same job writes a CycloneDX SBOM of the published package,
 refuses it if it names any runtime dependency, and signs an SBOM attestation for the tarball
 through Sigstore before publishing; a separate job with `contents: write` and no OIDC token
 attaches the tarball, the SBOM and the attestation's bundle to the tag's GitHub release. The
 release files are kept before the publish, and a rerun after npm accepted the version publishes
 nothing again when the registry serves the very bytes checked (npm's sha512 integrity), and fails
-when it serves other bytes under that version (tested). `npm audit signatures` and
-`gh attestation verify` check a release (README.md, "Checking a release"). One maintainer can
-approve a publish today, so the environment does not prevent self-review; once there is a second
-maintainer, a second reviewer is required (the environment's "prevent self-review" on). The
+when it serves other bytes under that version (tested). `gitsign verify-tag`,
+`npm audit signatures` and `gh attestation verify` check a release (README.md, "Checking a
+release"). The release pull request's approval is the only person's act, so a compromised
+maintainer account that can approve one can release; the default branch's rules (the code
+owner's approval, required checks) are what hold that act. The
 runners' egress is audited, not blocked (harden-runner); before the second publish it switches to
 block, allowing only the endpoints the first real publish run's audit log shows.
 

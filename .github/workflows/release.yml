@@ -264,7 +264,7 @@ jobs:
     if: >-
       ${{ always() && needs.decide.result == 'success' && needs.decide.outputs.dry == 'false' &&
         (needs.decide.outputs.state == 'resume' ||
-         (needs.decide.outputs.state == 'release' && needs.tag.result == 'success')) }}
+        (needs.decide.outputs.state == 'release' && needs.tag.result == 'success')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

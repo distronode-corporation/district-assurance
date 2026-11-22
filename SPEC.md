@@ -3143,15 +3143,19 @@ The package has six entry points and no others: `district-assurance`, `district-
 `district-assurance/package.json` and `district-assurance/schema/flow-config.v1.json` (the FlowConfig
 JSON Schema, section 7); any other path is refused by Node. The tarball holds the compiled `dist/`
 (JavaScript and declarations), the schema and the documents `files` names. It is published to
-npm as `district-assurance` from 0.1.0 on (ADR-12). A release is a version tag
-`vX.Y.Z` matching `package.json`, run by `.github/workflows/release.yml`: the CI workflow and the
-supply-chain checks on the tag, two builds that must pack to the same bytes, a check of the file
-list, and a smoke test that unpacks the tarball into an empty project, imports each entry point
-and type-checks a strict consumer. The tagged commit must be on main. A tag push is always a dry
-run. Only a manual run on the tag with `publish` ticked, in this repository and after the
-`npm-publish` environment's reviewers approve, publishes that tarball with npm provenance. A
-version with a pre-release part goes to the `next` dist-tag. In a fork, or a manual run without
-`publish`, the same run is a dry run.
+npm as `district-assurance` from 0.1.0 on (ADR-12). A release is made by
+`.github/workflows/release.yml` on a push to main whose `package.json` version has no tag
+`vX.Y.Z` and is not on npm (on any other push it does nothing): it creates the annotated tag on
+that commit, signed with gitsign under the workflow's own OIDC identity, verifies it against
+`release.yml@refs/heads/main` (and again as the server holds it), then runs the CI workflow and
+the supply-chain checks on the commit, two builds that must pack to the same bytes, a check of
+the file list, and a smoke test that unpacks the tarball into an empty project, imports each entry
+point and type-checks a strict consumer. The commit must be on main, and the version needs a
+dated CHANGELOG.md section. It then publishes that tarball with npm provenance, in this
+repository only, in the `npm-publish` environment, which admits main only. A version with a
+pre-release part goes to the `next` dist-tag. A manual run with `dry_run` ticked is a dry run: no
+tag, no signature, no publish. A fork never tags or publishes. A tag pushed by hand starts
+nothing.
 
 ## 31. Stripe adapters (`district-assurance/stripe`)
 
