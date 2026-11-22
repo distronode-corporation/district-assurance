@@ -8,6 +8,7 @@ import { EngineError } from "../src/core/errors.ts";
 import * as root from "../src/index.ts";
 import { knowledgeHmac, subjectKeyFor } from "../src/verify/knowledge.ts";
 import { OwnerPinConflictError, createOwnerPin, ownerSubjectKey, type OwnerPin, type OwnerPinOptions } from "../src/verify/owner-pin.ts";
+import { PinChangeUnfinishedError } from "../src/verify/pin.ts";
 import { MemoryAttemptCounters, TEST_KNOWLEDGE_KEY, createTestEngine, type TestEngine } from "../src/testing/index.ts";
 import { pinOnFile, rejects, testConfig, waitOut } from "./helpers.ts";
 
@@ -360,6 +361,55 @@ describe("owner PIN", () => {
         }
       }
     }
+  });
+
+  it("reports a set whose cleanup failed after it landed, and a set again finishes it", async () => {
+    const { t, owner } = world();
+    await owner.setPin({ phone: LINE }, OWNER_PIN);
+    await keyOnLine(t, owner, "000001");
+    const ledger = t.ledger as unknown as Record<string, unknown>;
+    ledger.append = async () => {
+      throw new Error("ledger unavailable");
+    };
+    const error = (await owner.setPin({ phone: OTHER_LINE }, NEW_PIN).catch((e: unknown) => e)) as Error;
+    delete ledger.append;
+    assert.ok(error instanceof PinChangeUnfinishedError);
+    assert.equal(error.message.includes(NEW_PIN), false);
+    // The report matches the store: the new PIN and number are on file.
+    assert.equal((await ownerRecord(t))!.phoneOnFile, OTHER_LINE);
+    assert.equal((await owner.status({ phone: null })).pinSet, true);
+    waitOut(t);
+    assert.deepEqual(await owner.setPin({ phone: OTHER_LINE }, NEW_PIN), { ok: true });
+    assert.equal((await events(t, "pin.reset")).length, 1);
+    assert.equal((await owner.status({ phone: null })).failures, 0);
+    assert.deepEqual(await keyOnLine(t, owner, NEW_PIN, OTHER_LINE), { matched: true, locked: false });
+  });
+
+  it("reports a clear whose cleanup failed after it landed, and clearPin with resume finishes it", async () => {
+    const { t, owner } = world();
+    await owner.setPin({ phone: LINE }, OWNER_PIN);
+    await keyOnLine(t, owner, "000001");
+    const counters = t.counters as unknown as Record<string, unknown>;
+    counters.reset = async () => {
+      throw new Error("counters unavailable");
+    };
+    await assert.rejects(owner.clearPin(), PinChangeUnfinishedError);
+    delete counters.reset;
+    assert.equal((await owner.status({ phone: null })).pinSet, false);
+    // Without resume, a clear with no PIN on file does nothing; with it, the cleanup runs.
+    for (const options of [undefined, null, {}, { resume: false }]) await owner.clearPin(options as never);
+    assert.equal((await events(t, "pin.reset")).length, 0);
+    assert.equal((await owner.status({ phone: null })).failures, 1);
+    await owner.clearPin({ resume: true });
+    assert.equal((await events(t, "pin.reset")).length, 1);
+    assert.equal((await owner.status({ phone: null })).failures, 0);
+  });
+
+  it("resumes nothing for an owner who never had a subject", async () => {
+    const { t, owner } = world();
+    await owner.clearPin({ resume: true });
+    assert.equal(await ownerRecord(t), null);
+    assert.equal((await t.ledger.list()).length, 0);
   });
 
   it("refreshes the number on file on every set, and writes no number for a line without one", async () => {

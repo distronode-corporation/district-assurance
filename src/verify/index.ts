@@ -26,7 +26,7 @@ export {
 export { CALLBACK, CALLBACKS_PLACED, MAX_CALLBACKS_PER_DAY, type CallbackOutcome } from "./callback.ts";
 export { DEFAULT_LOCKOUT, counterKeys, lockState, lockoutOf, numberKeyFor, type Lock, type Lockout, type LockoutSettings } from "./counters.ts";
 export { duressClearedSubject, duressFlagKey, hiddenCounterKey } from "./duress-flag.ts";
-export { isWeakPin } from "./pin.ts";
+export { PinChangeUnfinishedError, isWeakPin } from "./pin.ts";
 export { OwnerPinConflictError, createOwnerPin, ownerSubjectKey, type OwnerLine, type OwnerPin, type OwnerPinOptions, type OwnerPinSetResult, type OwnerPinStatus, type SubjectWriter } from "./owner-pin.ts";
 export * from "./factors.ts";
 export * from "./knowledge.ts";

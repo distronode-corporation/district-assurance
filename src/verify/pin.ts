@@ -258,6 +258,23 @@ export interface PinReplacement {
   to: string | null;
   /** Written in the same step: E.164, or "" for no number on file. Absent: left as it is. */
   phoneOnFile?: string;
+  /**
+   * True to finish a change that threw `PinChangeUnfinishedError`: when the record on file is
+   * already `to`, the change is taken as landed and only its counter reset and `pin.reset` run.
+   */
+  resume?: boolean;
+}
+
+/**
+ * A PIN change landed (the new record, or none, and the number are on file), but clearing its
+ * counters or appending `pin.reset` failed after. Not a refusal: the host finishes it by asking for
+ * the same change again with `resume: true`. Names no PIN; the store's or ledger's error is `cause`.
+ */
+export class PinChangeUnfinishedError extends Error {
+  constructor(cause: unknown) {
+    super("the PIN change is on file, but its counters or its pin.reset entry were not written; finish it with resume", { cause });
+    this.name = "PinChangeUnfinishedError";
+  }
 }
 
 /**
@@ -265,24 +282,36 @@ export interface PinReplacement {
  * false, changing nothing, when the record on file is no longer `from`, so of two changes at once
  * one answers false. A host call from the business's own tools, `keyed_hash` mode only. When a PIN
  * was on file, its counters are cleared after (the hidden one included, VER-12) and `pin.reset`
- * is appended, as `resetPin` does; a first PIN clears and writes nothing.
+ * is appended, as `resetPin` does; a first PIN clears and writes nothing. A failure of those after
+ * the change landed is `PinChangeUnfinishedError`, finished with `resume`.
  */
 export async function replacePin(rt: EngineRuntime, subjectKey: string, change: PinReplacement, counters: AttemptCounters | undefined): Promise<boolean> {
   const settings = pinSettings(rt);
   if (settings.mode !== "keyed_hash") throw new EngineError("precondition_failed", "in verifier mode the host's own PIN store replaces the PIN");
   if (typeof subjectKey !== "string" || !SUBJECT_KEY.test(subjectKey)) throw new EngineError("invalid_input", "subjectKey must be 64 lower-case hex characters");
   // Each field read once: a getter read again could change a value after it was checked.
-  const { from, to, phoneOnFile }: { [K in keyof PinReplacement]?: unknown } = typeof change === "object" && change !== null ? change : {};
+  const { from, to, phoneOnFile, resume }: { [K in keyof PinReplacement]?: unknown } = typeof change === "object" && change !== null ? change : {};
   const errors: string[] = [];
   if (from !== null && (typeof from !== "string" || from === "")) errors.push("from must be the PIN record on file, or null");
   if (to !== null && (typeof to !== "string" || to === "")) errors.push("to must be a PIN record, or null");
   if (phoneOnFile !== undefined && !(typeof phoneOnFile === "string" && (phoneOnFile === "" || isCallingNumber(phoneOnFile)))) errors.push("phoneOnFile must be E.164 or empty");
+  if (resume !== undefined && typeof resume !== "boolean") errors.push("resume must be a boolean");
   if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
-  const replaced = await rt.adapter("records").replacePinDigest(rt.workspaceId, subjectKey, from as string | null, to as string | null, phoneOnFile as string | undefined);
-  if (!replaced || from === null) return replaced;
-  await counters?.reset({ workspaceId: rt.workspaceId, factor: "pin", scope: "subject", key: subjectKey });
-  await counters?.reset(hiddenCounterKey(rt.workspaceId, "pin", subjectKey));
-  await rt.adapter("ledger").append({ callId: null, actor: "member", event: "pin.reset", at: rt.now(), detail: { subjectKey } });
+  const records = rt.adapter("records");
+  // A resumed change that already landed is not written again: `to` on file is its own (records are
+  // salted, so no other change wrote the same one), or, for a removal, no PIN is on file.
+  const onFile = resume === true ? await records.getSubject(rt.workspaceId, subjectKey) : null;
+  const landed = onFile !== null && (onFile.pinDigest ?? null) === to;
+  const replaced = landed || (await records.replacePinDigest(rt.workspaceId, subjectKey, from as string | null, to as string | null, phoneOnFile as string | undefined));
+  // A first PIN has nothing to clear. A resumed removal does: the PIN it removed is gone, whatever `from` says.
+  if (!replaced || (from === null && !(landed && to === null))) return replaced;
+  try {
+    await counters?.reset({ workspaceId: rt.workspaceId, factor: "pin", scope: "subject", key: subjectKey });
+    await counters?.reset(hiddenCounterKey(rt.workspaceId, "pin", subjectKey));
+    await rt.adapter("ledger").append({ callId: null, actor: "member", event: "pin.reset", at: rt.now(), detail: { subjectKey } });
+  } catch (error) {
+    throw new PinChangeUnfinishedError(error);
+  }
   return true;
 }
 

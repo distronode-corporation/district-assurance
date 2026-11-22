@@ -82,10 +82,19 @@ export interface OwnerPin {
   subjectKey(): Promise<string>;
   /** Whether a PIN is on file, and the lock facts of the owner's counters, read without writing. */
   status(line: OwnerLine): Promise<OwnerPinStatus>;
-  /** Stores a new PIN and the line as the number on file, replacing any PIN in one compare-and-set; `OwnerPinConflictError` when another change landed first. */
+  /**
+   * Stores a new PIN and the line as the number on file, replacing any PIN in one compare-and-set;
+   * `OwnerPinConflictError` when another change landed first. `PinChangeUnfinishedError` when the
+   * PIN and number landed but the counter reset or `pin.reset` did not: a `setPin` again finishes it.
+   */
   setPin(line: OwnerLine, pin: string): Promise<OwnerPinSetResult>;
-  /** Removes the PIN on file, if any, in one compare-and-set, and clears its counters; nothing when none is on file. `OwnerPinConflictError` when another change landed first. */
-  clearPin(): Promise<void>;
+  /**
+   * Removes the PIN on file, if any, in one compare-and-set, and clears its counters; nothing when
+   * none is on file. `OwnerPinConflictError` when another change landed first.
+   * `PinChangeUnfinishedError` when the PIN was removed but the counter reset or `pin.reset` did
+   * not land: `clearPin({ resume: true })` finishes it (with no PIN on file, it runs those alone).
+   */
+  clearPin(options?: { resume?: boolean }): Promise<void>;
   /** Lifts the owner's locks early: the subject's counter and the line's. `memberId` as `Engine.unlock` takes it. */
   liftLock(line: OwnerLine, memberId: string): Promise<void>;
 }
@@ -185,11 +194,14 @@ export function createOwnerPin(options: OwnerPinOptions): OwnerPin {
       return { ok: true };
     },
 
-    async clearPin() {
+    async clearPin(options) {
       settings();
+      const resume = typeof options === "object" && options !== null && options.resume === true;
       const key = await subjectKey();
       const from = await recordOnFile(key);
       if (from !== null) await replace(key, from, null);
+      // A removal that landed before its cleanup failed: the engine runs only the cleanup.
+      else if (resume) await engine.replacePin(key, { from: null, to: null, resume: true });
     },
 
     async liftLock(line, memberId) {

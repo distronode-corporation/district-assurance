@@ -132,7 +132,10 @@ A set or a clear is one compare-and-set against the record read on file
 file in the same step, so of two changes at once exactly one lands and the other changes nothing
 and is an `OwnerPinConflictError` (tested for two first PINs, two changes, a change and a clear,
 and two clears, in both orders, with every racer reading before any writes). A failure leaves the
-PIN and number on file as they were, never no PIN and never a mix (tested). The line's counter
+PIN and number on file as they were, never no PIN and never a mix (tested). A failure after the
+compare-and-set landed (the counter reset or `pin.reset`) is reported as `PinChangeUnfinishedError`,
+so the business is never told a change failed that is on file, and a resume finishes the counter
+reset and the ledger entry without writing the PIN again (tested). The line's counter
 survives a change, so changing the PIN never forgives guesses from that line (tested). Judging
 stays the engine's PIN factor (counted before judged, a constant-time compare), so wrong PINs up to
 the hard lock, the window boundary and concurrent attempts behave as for any PIN (tested). The
