@@ -478,6 +478,23 @@ describe("paylink channel: the same link for both channels", () => {
     assert.equal((await plain.engine.requestPayment(other)).status, "open");
   });
 
+  it("sends nothing when the caller says no to the channel's consent while the link is created", async () => {
+    const t = setupWith(EMAIL, { config: channelConfig((c) => (c.flows = {})) });
+    const callId = await verified(t, {});
+    await t.engine.choosePaymentChannel(callId, { key: "2" });
+    await confirmAmount(t.engine, callId, request);
+    const create = t.payments.createLink.bind(t.payments);
+    t.payments.createLink = async (input) => {
+      await t.engine.recordConsent(callId, { purpose: "payment_link_email", answer: "no" });
+      return create(input);
+    };
+    await assert.rejects(t.engine.requestPayment(callId), rejects("precondition_failed", /withdrew their consent.*cancel the payment/));
+    assert.equal(t.emails.sent.length, 0);
+    assert.equal((await slice(t, callId)).payments[0]!.sendingSince, null, "the lease is given back");
+    assert.deepEqual(await t.engine.cancelPaymentLink(callId, "pay_1"), { paymentId: "pay_1", status: "expired" });
+    assert.deepEqual(t.payments.expired.map((e) => e.linkId), ["cs_fake_1"]);
+  });
+
   it("refuses to resume an emailed request on an engine with the email channel off", async () => {
     const sessions = new MemorySessionStore();
     let fail = true;

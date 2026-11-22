@@ -645,6 +645,9 @@ function chosenChannel(record: CallRecord, slice: PaylinkSlice, subject: Subject
   return { channel: choice.channel, consentId: choice.consentId };
 }
 
+/** A request's channel consent withdrawn: it stays open with its link, for the host to cancel or the end of the call to close. */
+const WITHDRAWN = "the caller withdrew their consent to this channel; cancel the payment (cancelPaymentLink) and offer the channels again";
+
 /** Whether the caller's latest answer to a channel's consent purpose on this call is still yes (a later no withdraws it). */
 function consentStands(record: CallRecord, channel: PaymentChannel): boolean {
   const purpose = PAYMENT_CHANNEL_PURPOSES[channel];
@@ -716,7 +719,7 @@ export async function requestPayment(
       // "no" since (the send failed, then the caller changed their mind) sends nothing. The request
       // stays open with its link reserved, for the host to cancel (`cancelPaymentLink`) or the end of the call to close.
       if (last.channelConsentId !== undefined && !consentStands(draft.record, last.channel!)) {
-        throw new EngineError("precondition_failed", "the caller withdrew their consent to this channel; cancel the payment (cancelPaymentLink) and offer the channels again");
+        throw new EngineError("precondition_failed", WITHDRAWN);
       }
       const where = destinationFor(rt, draft.record, subject, last.channel ?? "text");
       const named = input as Partial<FixedPaymentInput & ReferencedPaymentInput> | undefined;
@@ -866,10 +869,12 @@ export async function requestPayment(
     const held = claimedAt;
     let renewed = held;
     let hold: EngineError | null = null;
-    const still = await rt.update(callId, (draft): "ok" | "closed" | "taken" | "held" => {
+    const still = await rt.update(callId, (draft): "ok" | "closed" | "taken" | "held" | "withdrawn" => {
       const pending = find(draft, request.paymentId);
       if (pending.status !== "open" || draft.record.state.phase === "ended" || pending.closingSince !== undefined) return "closed";
       if (pending.textedAt !== null || pending.sendingSince !== held) return "taken";
+      // A "no" to the channel's consent while the link was created or bound: nothing is sent.
+      if (pending.channelConsentId !== undefined && !consentStands(draft.record, pending.channel!)) return "withdrawn";
       // Checked again before the text: a signal raised, or a time window opened, while the link was
       // being created holds the request (VER-13). The link id is kept, so a resume finds the same link.
       try {
@@ -887,6 +892,7 @@ export async function requestPayment(
       await expireAtProvider(rt, callId, request, link.linkId);
       throw new EngineError("precondition_failed", "the payment request was closed while its link was being sent; the link was expired and never texted");
     }
+    if (still === "withdrawn") throw new EngineError("precondition_failed", WITHDRAWN);
     if (still === "taken") throw new EngineError("precondition_failed", "another process took over texting this payment link");
     if (still === "held") throw hold!;
     // And the life left, once more: the renewal can take time too.

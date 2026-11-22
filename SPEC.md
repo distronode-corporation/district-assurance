@@ -1921,6 +1921,8 @@ comma, control character or line break). A missing or refused address is no addr
   its `channel` and the choice's consent; a resume sends it the same way (a request saved before
   channels existed goes by text), and only while that consent stands: after a "no" to it (the send
   failed, then the caller changed their mind), a resume is `precondition_failed`, nothing is sent,
+  and the same holds for a "no" recorded while the link is created or bound (checked again in the
+  write right before the send, which gives the lease back),
   and the request stays open with its link, for the host to cancel (`cancelPaymentLink`) or the
   end of the call to close.
 - An email goes through the `emails` adapter (`EmailSender.sendEmail({to, subject, body, locale,
