@@ -38,7 +38,9 @@ name: Release
 #                 accepted it publishes nothing again when the registry serves the very same
 #                 bytes, and fails when it serves other bytes under the version.
 #   github-release  after publish: a GitHub release on the tag with the tarball, the SBOM and
-#                 the attestation's Sigstore bundle attached.
+#                 the attestation's Sigstore bundle attached. Its notes are the version's
+#                 CHANGELOG.md section and a link to it (the link alone when the section is over
+#                 20 KB), then the files (scripts/release-notes.mjs).
 #   dry-run       a manual run with `dry_run` ticked: no tag, no signature, and the same
 #                 rebuild, comparison and SBOM check, and `npm publish --dry-run` (skipped for a
 #                 package.json with `"private": true`). Only the tag and publish jobs may ask for
@@ -232,10 +234,9 @@ jobs:
             exit 1
           else
             state="release"
-            if ! grep -Eq "^## \[${version//./\\.}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}\$" CHANGELOG.md; then
-              echo "::error::CHANGELOG.md has no dated '## [$version] - YYYY-MM-DD' section."
-              exit 1
-            fi
+            # The dated '## [X.Y.Z] - YYYY-MM-DD' section; the github-release job reads the same
+            # section with the same script for the release notes.
+            node scripts/release-notes.mjs check "$version"
             echo "Releasing $version." | tee -a "$GITHUB_STEP_SUMMARY"
           fi
           {
@@ -743,6 +744,14 @@ jobs:
       - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
+      # For CHANGELOG.md and scripts/release-notes.mjs, the release notes' source.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-${{ needs.pack.outputs.version }}
@@ -765,7 +774,12 @@ jobs:
           fi
           prerelease=()
           case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac
-          cat > notes.md <<EOF
+          # The version's CHANGELOG.md section (the one the decide job's guard found), then the files.
+          node "$GITHUB_WORKSPACE/scripts/release-notes.mjs" notes "$VERSION" "$GITHUB_REPOSITORY" > notes.md
+          cat >> notes.md <<EOF
+
+          ---
+
           district-assurance $VERSION, published to npm with provenance.
 
           | File | |

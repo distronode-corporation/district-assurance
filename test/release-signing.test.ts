@@ -3,7 +3,7 @@
 // that keeps an unsigned or hand-pushed tag from ever publishing.
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -38,6 +38,13 @@ function script(jobText: string, name: string): string {
 const root = mkdtempSync(join(tmpdir(), "da-release-signing-"));
 after(() => rmSync(root, { recursive: true, force: true }));
 let n = 0;
+
+/** A checkout in `dir` as the job sees one: CHANGELOG.md and the release-notes script it runs. */
+function checkout(dir: string, changelog: string) {
+  mkdirSync(join(dir, "scripts"), { recursive: true });
+  copyFileSync(new URL("../scripts/release-notes.mjs", import.meta.url), join(dir, "scripts", "release-notes.mjs"));
+  writeFileSync(join(dir, "CHANGELOG.md"), changelog);
+}
 
 const SHA = "a".repeat(40);
 const OTHER = "b".repeat(40);
@@ -101,7 +108,7 @@ function decide(world: World = {}) {
         : `printf '%s' '${JSON.stringify(answer[release])}'`,
   );
   writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "district-assurance", version }));
-  writeFileSync(join(dir, "CHANGELOG.md"), world.changelog ?? CHANGELOG);
+  checkout(dir, world.changelog ?? CHANGELOG);
   writeFileSync(join(dir, "output"), "");
   writeFileSync(join(dir, "summary"), "");
   const r = spawnSync("bash", ["-c", script(job("decide"), "Decide")], {
@@ -302,6 +309,7 @@ describe("the GitHub release job: creates the release, or repairs the one a fail
     mkdirSync(bin, { recursive: true });
     mkdirSync(release, { recursive: true });
     writeFileSync(join(release, FILE), bytes);
+    checkout(dir, "# Changelog\n\n## [1.2.3] - 2026-11-22\n\nA plain paragraph,\nwrapped.\n\n### Added\n\n- **A line.**\n");
     const sha = spawnSync("sha256sum", [join(release, FILE)], { encoding: "utf8" }).stdout.split(" ")[0]!;
     const onView = { exists: "exit 0", missing: "echo 'release not found' >&2; exit 1", fails: "echo 'HTTP 502' >&2; exit 1" }[view];
     writeFileSync(join(bin, "gh"), `#!/usr/bin/env bash\necho "$*" >> "${join(dir, "calls")}"\nif [ "$2" = view ]; then ${onView}; fi\nexit 0\n`);
@@ -309,7 +317,7 @@ describe("the GitHub release job: creates the release, or repairs the one a fail
     const r = spawnSync("bash", ["-c", script(job("github-release"), "Create the release")], {
       cwd: dir,
       encoding: "utf8",
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, RUNNER_TEMP: dir, GH_TOKEN: "x", GITHUB_REPOSITORY: "o/r", FILE, VERSION, EXPECTED_SHA256: expected ?? sha },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, RUNNER_TEMP: dir, GITHUB_WORKSPACE: dir, GH_TOKEN: "x", GITHUB_REPOSITORY: "o/r", FILE, VERSION, EXPECTED_SHA256: expected ?? sha },
     });
     let calls: string[] = [];
     try {
@@ -317,13 +325,32 @@ describe("the GitHub release job: creates the release, or repairs the one a fail
     } catch {
       calls = [];
     }
-    return { code: r.status, out: `${r.stdout}${r.stderr}`, calls: calls.map((c) => c.split(" ").slice(0, 2).join(" ")) };
+    let notes = "";
+    try {
+      notes = readFileSync(join(release, "notes.md"), "utf8");
+    } catch {
+      notes = "";
+    }
+    return { code: r.status, out: `${r.stdout}${r.stderr}`, calls: calls.map((c) => c.split(" ").slice(0, 2).join(" ")), notes };
   }
 
   it("creates the release with the three files when the tag has none", () => {
     const r = create("missing");
     assert.equal(r.code, 0, r.out);
     assert.deepEqual(r.calls, ["release view", "release create"]);
+  });
+
+  it("writes the notes: the CHANGELOG.md section, unwrapped, its link, then the files", () => {
+    const r = create("missing");
+    assert.equal(r.code, 0, r.out);
+    assert.ok(
+      r.notes.startsWith(
+        "A plain paragraph, wrapped.\n\n### Added\n\n- **A line.**\n\nThe full changelog is in the [1.2.3 section of CHANGELOG.md](https://github.com/o/r/blob/main/CHANGELOG.md#123---2026-11-22).\n\n---\n\ndistrict-assurance 1.2.3, published to npm with provenance.\n",
+      ),
+      r.notes,
+    );
+    assert.ok(r.notes.includes(`| \`${FILE}\` | the published tarball, SHA-256 \``));
+    assert.ok(r.notes.endsWith('To check this release, see "Checking a release" in README.md.\n'));
   });
 
   it("uploads the three files to a release a failed run left, replacing any copy, and publishes it", () => {
