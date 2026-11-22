@@ -156,6 +156,13 @@ describe("release notes: unwrapping", () => {
     assert.equal(unwrap("a | b\n--- | ---\nc | d\n```\nfirst\n\nsecond\nthird\n```"), "a | b\n--- | ---\nc | d\n```\nfirst\n\nsecond\nthird\n```");
     assert.equal(unwrap("a | b\n--- | ---\nc | d\n- item\n  wrapped"), "a | b\n--- | ---\nc | d\n- item wrapped");
     assert.equal(unwrap("| a |\n|---|\n| b |\n# Next\ntext\nmore"), "| a |\n|---|\n| b |\n# Next\ntext more");
+    // An autolink is inline: a row that starts with one stays in the table, and HTML still ends it.
+    assert.equal(
+      unwrap("a | b\n--- | ---\n<https://example.com> | x\none | two\nthree | four"),
+      "a | b\n--- | ---\n<https://example.com> | x\none | two\nthree | four",
+    );
+    assert.equal(unwrap("a | b\n--- | ---\nc | d\n<details>\ntext"), "a | b\n--- | ---\nc | d\n<details>\ntext");
+    assert.equal(unwrap("see\n<https://example.com>\nfor more"), "see <https://example.com> for more");
     assert.equal(unwrap("text\nwith a | pipe\nand more"), "text with a | pipe and more", "a pipe in prose, with no delimiter row, is prose");
     assert.equal(unwrap("# Heading\nnext"), "# Heading\nnext");
   });
@@ -167,6 +174,7 @@ describe("release notes: unwrapping", () => {
     assert.equal(unwrap("* * *\nafter"), "* * *\nafter");
     assert.equal(unwrap("hard  \nbreak\nback\\\nslash"), "hard  \nbreak back\\\nslash");
     assert.equal(unwrap("<br>\nnext"), "<br>\nnext");
+    assert.equal(unwrap("<!-- a comment -->\nnext"), "<!-- a comment -->\nnext");
   });
 });
 

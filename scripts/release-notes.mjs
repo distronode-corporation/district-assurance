@@ -75,11 +75,12 @@ function outsideFences(lines) {
 // optional (`--- | ---`, `|:--|--:|`).
 const TABLE_DELIMITER = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$|^\s*\|\s*:?-+:?\s*\|\s*$/;
 // Lines that start a block of their own and are never joined onto the line before: headings, list
-// items, table rows, block quotes, thematic breaks (or setext underlines) and HTML.
-const BLOCK_START = /^\s*(#{1,6}(\s|$)|[-*+]\s|\d{1,9}[.)]\s|\||>|<|=+\s*$|([-*_])(\s*\3){2,}\s*$)/;
+// items, table rows, block quotes, thematic breaks (or setext underlines) and HTML blocks (a tag
+// or a comment; an autolink such as `<https://...>` is inline text).
+const BLOCK_START = /^\s*(#{1,6}(\s|$)|[-*+]\s|\d{1,9}[.)]\s|\||>|<(\/?[A-Za-z][A-Za-z0-9-]*(\s|\/?>|$)|!--)|=+\s*$|([-*_])(\s*\5){2,}\s*$)/;
 // Lines nothing may be joined onto: headings, table rows, thematic breaks, setext underlines and
 // HTML.
-const CLOSED = /^\s*(#{1,6}(\s|$)|\||<|=+\s*$|([-*_])(\s*\3){2,}\s*$)/;
+const CLOSED = /^\s*(#{1,6}(\s|$)|\||<(\/?[A-Za-z][A-Za-z0-9-]*(\s|\/?>|$)|!--)|=+\s*$|([-*_])(\s*\5){2,}\s*$)/;
 
 /**
  * Joins hard-wrapped lines: each paragraph, and each list item with its indented continuation
