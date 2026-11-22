@@ -1,9 +1,33 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/distronode-logo-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset=".github/assets/distronode-logo-light.png">
+  <img alt="Distronode" src=".github/assets/distronode-logo-light.png" width="220">
+</picture>
+
 # district-assurance
 
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/distronode-corporation/district-assurance/badge)](https://scorecard.dev/viewer/?uri=github.com/distronode-corporation/district-assurance)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16957/badge)](https://www.bestpractices.dev/projects/16957)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/distronode-corporation/district-assurance/badge)](https://scorecard.dev/viewer/?uri=github.com/distronode-corporation/district-assurance)
+[![Latest release](https://img.shields.io/github/v/release/distronode-corporation/district-assurance?label=release)](https://github.com/distronode-corporation/district-assurance/releases/latest)
+[![npm](https://img.shields.io/npm/v/district-assurance)](https://www.npmjs.com/package/district-assurance)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/distronode-corporation/district-assurance/blob/main/LICENSE)
 [![CI](https://github.com/distronode-corporation/district-assurance/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/distronode-corporation/district-assurance/actions/workflows/ci.yml?query=branch%3Amain)
+
+**A modular TypeScript engine for trusted phone calls: verify the caller, file what they confirm,
+take payment by link, and prove each step.**
+
+```sh
+npm install district-assurance   # the engine, for Node.js 24.19 or later
+git clone https://github.com/distronode-corporation/district-assurance && cd district-assurance
+npm ci && npm run demo           # four scripted calls, end to end, on your own machine
+```
+
+Made by [Distronode](https://www.distronode.com) · more open source at
+[github.com/distronode-corporation](https://github.com/distronode-corporation) ·
+[project page](https://www.distronode.com/district-assurance) ·
+[CHANGELOG](CHANGELOG.md) · [Roadmap](ROADMAP.md)
+
+## What it is
 
 The engine behind District Assurance: TypeScript code that lets an automated phone line be trusted
 with sensitive work. It checks who is calling, files what the caller confirms, takes payment
@@ -17,6 +41,140 @@ end on your own machine.
 > change, and before 1.0 a minor version may break it. Nothing here is certified: no PCI DSS
 > attestation, no SOC 2 report, no regulated identity proofing. Do not put it in front of real
 > callers.
+
+## Quick start
+
+Node.js 24.19 or later. The only dependencies are six development tools (stripe-node among them, for the type test and the byte comparison only; the package never imports it).
+
+```sh
+npm ci
+npm test              # node:test over the TypeScript sources
+npm run typecheck
+npm run test:coverage # 100% lines, statements, functions and branches in every src/ file
+npm run demo          # four scripted calls, end to end, on fake adapters and loopback servers
+npm run ui            # the same calls in a browser, step by step, on http://127.0.0.1:8787/
+npm run demo:e2e      # the browser demo with a real Stripe Checkout in test mode (below)
+npm run simulate -- config.json --flow deposit --script pass   # one flow of your own config
+```
+
+`npm run simulate` (the `district-assurance simulate` command in the published package) runs
+one flow of a FlowConfig file with a scripted caller on the in-memory adapters, and prints each
+step, each decision, every event and the final receipt. Built-in scripts: `pass`, `wrong-pin`,
+`lockout`, `consent-no`, `payment-paid`, `payment-expired`, `text-code-wrong`, `spoken-wrong`,
+`callback-not-confirmed` and `door-refused`, or a JSON file of your own. A
+config with any problem, or one that turns on an outside module, is refused with every reason
+([SPEC.md](SPEC.md), section 28). Exit codes: 0 the flow ran, whatever its outcome; 1 a refused
+config, flow or script; 2 bad usage; 3 a valid config whose flow reached a step the simulator has
+no scripted caller for (a step an outside module adds, or a `badge.verify` step with a factor
+plug-in): every built-in step type and factor has one. Exit 3 is not
+a refusal: the run stops at that step, ends the call and prints what it did up to there.
+
+The demo runs `owner-command` first: the owner of a line keys a PIN, on two engines that share one
+session store as two processes of a host would; one wrong PIN, then the right one, and a grant for
+owner commands only. Then `deposit`: a made-up caller is verified to level 2 by keypad and a
+carrier match, files a repair request, has a card number read aloud removed from the transcript,
+hears the amount the flow sets read back and confirms it, receives a payment link for that amount,
+pays (a signed Stripe webhook), consents, and the signed receipt and the key set are fetched from
+the server and checked (and a one-byte change fails); that money goes to the platform's account.
+`deposit-connect` takes a deposit on the business's own account: a webhook without the connected
+account is ignored, the Connect one settles it. Last, `entry`: a verified caller gets a signed 30-second access grant, the relay adapter
+posts it to an example door relay, which checks it with Gate's public key and opens the pretend
+door; the same grant sent again, and a changed copy, are refused. Nothing leaves the machine.
+
+`npm run ui` serves a small page (plain HTML, CSS and JavaScript, no build step) that runs the
+same script one step at a time and shows the session state, the ledger entries and the signed
+receipt, which the page verifies itself against the public key set
+([examples/reference-server/README.md](examples/reference-server/README.md)).
+
+### The demo with a real Stripe Checkout
+
+`npm run demo:e2e` is the browser demo with one real piece: a Stripe Checkout Session in test
+mode. Everything else stays on your machine and is made up (the caller, the carrier, the texts, the
+ledger, and an example door relay on another loopback port). It takes a payment in Stripe's test
+mode only and touches no production system.
+
+1. Set `STRIPE_TEST_SECRET_KEY` to a secret key from your own Stripe account in test mode (it
+   starts with `sk_test_`). The demo refuses any other key, live and restricted keys included,
+   reads it once at start-up, and never prints it.
+2. Run `npm run demo:e2e` and open `http://127.0.0.1:8787/`.
+3. Pick `owner-command` and run it (a keypad PIN to level 1). Then pick `visit` and run it step by
+   step: level 2, then "Open the Stripe Checkout page (test mode)" and pay with the test card
+   `4242 4242 4242 4242` (any future date, any CVC). The next step reads the session back from
+   Stripe until it is paid, then the door relay checks the signed grant and opens the pretend door,
+   and the call ends with a signed receipt the page verifies, with its ledger entries below.
+
+Payment completion is read back from Stripe (a read-only poll of the Checkout Session), not taken
+from a webhook, so there is nothing to forward and no `stripe listen` to run.
+
+## Install
+
+```sh
+npm install district-assurance
+```
+
+Node.js 24.19 or later. The package has four entry points: `district-assurance` (the engine),
+`district-assurance/testing` (fakes and test helpers), `district-assurance/stripe` and
+`district-assurance/carrier` (described under [Using the engine](#using-the-engine)), plus the
+JSON schema for FlowConfig, `district-assurance/schema/flow-config.v1.json`. It also installs the
+`district-assurance simulate` command ([Quick start](#quick-start)).
+
+### Verify a release
+
+From 0.1.0 on, every version on npm is built and published by `.github/workflows/release.yml`,
+with npm provenance, and from 0.2.0 on its tag is signed by that workflow, so you can check three
+things before you trust it. (The placeholder version below 0.1.0 that reserved the name on npm
+is not a release and holds no code.)
+
+Which commit it is: the tag's gitsign signature. With
+[gitsign](https://github.com/sigstore/gitsign) installed, in a clone with the tags fetched:
+
+```sh
+gitsign verify-tag vX.Y.Z \
+  --certificate-identity https://github.com/distronode-corporation/district-assurance/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+It succeeds only when the signature is valid, its entry is in Sigstore's transparency log, and it
+was made by that workflow file running on main of this repository. The release workflow runs the
+same check, and builds and publishes nothing from a tag that fails it.
+
+Where it came from: npm provenance, signed through Sigstore and logged in its public transparency
+log, ties the tarball to the commit and the workflow run that built it, and the registry signs the
+tarball too. In a project that has installed it:
+
+```sh
+npm install district-assurance
+npm audit signatures   # registry signatures and provenance of everything installed
+```
+
+What is in it: a CycloneDX SBOM of the published package (development tools left out), with a
+Sigstore-signed attestation whose subject is the tarball itself. Fetch the registry's tarball and
+check the attestation against this repository, the release workflow and the tag:
+
+```sh
+npm pack district-assurance@X.Y.Z
+gh attestation verify district-assurance-X.Y.Z.tgz \
+  --repo distronode-corporation/district-assurance \
+  --signer-workflow distronode-corporation/district-assurance/.github/workflows/release.yml \
+  --source-ref refs/heads/main \
+  --predicate-type https://cyclonedx.org/bom
+```
+
+From 0.2.0 on the release runs on main, so the source ref is `refs/heads/main`; for 0.1.0, which
+was released from its tag, it is `--source-ref refs/tags/v0.1.0`.
+
+Add `--format json --jq '.[].verificationResult.statement.predicate'` to print the SBOM that was
+signed. The tag's GitHub release has the same tarball (with its SHA-256), the SBOM and the
+attestation's Sigstore bundle; `--bundle district-assurance-X.Y.Z.tgz.sbom.sigstore.json` checks
+against that bundle instead of looking the attestation up.
+
+### Uninstall
+
+```sh
+npm uninstall district-assurance
+```
+
+A clone of this repository, for the demo, is removed by deleting its folder.
 
 ## A core and six modules
 
@@ -85,70 +243,6 @@ configuration UI: config and API come first.
 This config turns Gate on, so the engine needs Gate's adapters: its door controllers (`access`)
 and its grant signer (`accessSigner`), as in "Using the engine" below. The validator refuses the
 config without them, or with a target naming a controller the engine does not have.
-
-## Try it
-
-Node.js 24.19 or later. The only dependencies are six development tools (stripe-node among them, for the type test and the byte comparison only; the package never imports it).
-
-```sh
-npm ci
-npm test              # node:test over the TypeScript sources
-npm run typecheck
-npm run test:coverage # 100% lines, statements, functions and branches in every src/ file
-npm run demo          # four scripted calls, end to end, on fake adapters and loopback servers
-npm run ui            # the same calls in a browser, step by step, on http://127.0.0.1:8787/
-npm run demo:e2e      # the browser demo with a real Stripe Checkout in test mode (below)
-npm run simulate -- config.json --flow deposit --script pass   # one flow of your own config
-```
-
-`npm run simulate` (the `district-assurance simulate` command once the package is published) runs
-one flow of a FlowConfig file with a scripted caller on the in-memory adapters, and prints each
-step, each decision, every event and the final receipt. Built-in scripts: `pass`, `wrong-pin`,
-`lockout`, `consent-no`, `payment-paid`, `payment-expired`, `text-code-wrong`, `spoken-wrong`,
-`callback-not-confirmed` and `door-refused`, or a JSON file of your own. A
-config with any problem, or one that turns on an outside module, is refused with every reason
-([SPEC.md](SPEC.md), section 28). Exit codes: 0 the flow ran, whatever its outcome; 1 a refused
-config, flow or script; 2 bad usage; 3 a valid config whose flow reached a step the simulator has
-no scripted caller for (a step an outside module adds, or a `badge.verify` step with a factor
-plug-in): every built-in step type and factor has one. Exit 3 is not
-a refusal: the run stops at that step, ends the call and prints what it did up to there.
-
-The demo runs `owner-command` first: the owner of a line keys a PIN, on two engines that share one
-session store as two processes of a host would; one wrong PIN, then the right one, and a grant for
-owner commands only. Then `deposit`: a made-up caller is verified to level 2 by keypad and a
-carrier match, files a repair request, has a card number read aloud removed from the transcript,
-hears the amount the flow sets read back and confirms it, receives a payment link for that amount,
-pays (a signed Stripe webhook), consents, and the signed receipt and the key set are fetched from
-the server and checked (and a one-byte change fails); that money goes to the platform's account.
-`deposit-connect` takes a deposit on the business's own account: a webhook without the connected
-account is ignored, the Connect one settles it. Last, `entry`: a verified caller gets a signed 30-second access grant, the relay adapter
-posts it to an example door relay, which checks it with Gate's public key and opens the pretend
-door; the same grant sent again, and a changed copy, are refused. Nothing leaves the machine.
-
-`npm run ui` serves a small page (plain HTML, CSS and JavaScript, no build step) that runs the
-same script one step at a time and shows the session state, the ledger entries and the signed
-receipt, which the page verifies itself against the public key set
-([examples/reference-server/README.md](examples/reference-server/README.md)).
-
-## Try the demo
-
-`npm run demo:e2e` is the browser demo with one real piece: a Stripe Checkout Session in test
-mode. Everything else stays on your machine and is made up (the caller, the carrier, the texts, the
-ledger, and an example door relay on another loopback port). It takes a payment in Stripe's test
-mode only and touches no production system.
-
-1. Set `STRIPE_TEST_SECRET_KEY` to a secret key from your own Stripe account in test mode (it
-   starts with `sk_test_`). The demo refuses any other key, live and restricted keys included,
-   reads it once at start-up, and never prints it.
-2. Run `npm run demo:e2e` and open `http://127.0.0.1:8787/`.
-3. Pick `owner-command` and run it (a keypad PIN to level 1). Then pick `visit` and run it step by
-   step: level 2, then "Open the Stripe Checkout page (test mode)" and pay with the test card
-   `4242 4242 4242 4242` (any future date, any CVC). The next step reads the session back from
-   Stripe until it is paid, then the door relay checks the signed grant and opens the pretend door,
-   and the call ends with a signed receipt the page verifies, with its ledger entries below.
-
-Payment completion is read back from Stripe (a read-only poll of the Checkout Session), not taken
-from a webhook, so there is nothing to forward and no `stripe listen` to run.
 
 ## Using the engine
 
@@ -292,7 +386,9 @@ biometrics. No recording. No production storage: only the in-memory adapters and
 server's optional SQLite stores. No configuration UI.
 No regulated identity proofing: it checks a caller against the organisation's own records.
 
-## How releases work
+## Releases
+
+### How releases work
 
 One human gate: a release pull request, approved by the code owner, that sets `package.json`'s
 version and dates its `## [X.Y.Z] - YYYY-MM-DD` section in CHANGELOG.md. When it merges,
@@ -318,62 +414,38 @@ fails, for a person to look at) and never ships. The repository's tag rules forb
 deleting a `v*` tag (an admin can bypass them). Tags up to v0.1.0 were pushed by hand and are not
 signed.
 
-## Checking a release
+### Checking a release
 
-From 0.1.0 on, every version on npm is built and published by `.github/workflows/release.yml`,
-with npm provenance, and from 0.2.0 on its tag is signed by that workflow, so you can check three
-things before you trust it. (The placeholder version below 0.1.0 that reserved the name on npm
-is not a release and holds no code.)
-
-Which commit it is: the tag's gitsign signature. With
-[gitsign](https://github.com/sigstore/gitsign) installed, in a clone with the tags fetched:
-
-```sh
-gitsign verify-tag vX.Y.Z \
-  --certificate-identity https://github.com/distronode-corporation/district-assurance/.github/workflows/release.yml@refs/heads/main \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
-```
-
-It succeeds only when the signature is valid, its entry is in Sigstore's transparency log, and it
-was made by that workflow file running on main of this repository. The release workflow runs the
-same check, and builds and publishes nothing from a tag that fails it.
-
-Where it came from: npm provenance, signed through Sigstore and logged in its public transparency
-log, ties the tarball to the commit and the workflow run that built it, and the registry signs the
-tarball too. In a project that has installed it:
-
-```sh
-npm install district-assurance
-npm audit signatures   # registry signatures and provenance of everything installed
-```
-
-What is in it: a CycloneDX SBOM of the published package (development tools left out), with a
-Sigstore-signed attestation whose subject is the tarball itself. Fetch the registry's tarball and
-check the attestation against this repository, the release workflow and the tag:
-
-```sh
-npm pack district-assurance@X.Y.Z
-gh attestation verify district-assurance-X.Y.Z.tgz \
-  --repo distronode-corporation/district-assurance \
-  --signer-workflow distronode-corporation/district-assurance/.github/workflows/release.yml \
-  --source-ref refs/heads/main \
-  --predicate-type https://cyclonedx.org/bom
-```
-
-From 0.2.0 on the release runs on main, so the source ref is `refs/heads/main`; for 0.1.0, which
-was released from its tag, it is `--source-ref refs/tags/v0.1.0`.
-
-Add `--format json --jq '.[].verificationResult.statement.predicate'` to print the SBOM that was
-signed. The tag's GitHub release has the same tarball (with its SHA-256), the SBOM and the
-attestation's Sigstore bundle; `--bundle district-assurance-X.Y.Z.tgz.sbom.sigstore.json` checks
-against that bundle instead of looking the attestation up.
+Moved to [Verify a release](#verify-a-release).
 
 ## Documents
 
-[ARCHITECTURE.md](ARCHITECTURE.md), [SPEC.md](SPEC.md), [SECURITY-MODEL.md](SECURITY-MODEL.md),
-[DECISIONS.md](DECISIONS.md), [ROADMAP.md](ROADMAP.md), [ISSUES.md](ISSUES.md),
-[CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md).
+[ARCHITECTURE.md](ARCHITECTURE.md): the pieces. [SPEC.md](SPEC.md): the state machine, the config,
+the events and the formats. [SECURITY-MODEL.md](SECURITY-MODEL.md): the threat model.
+[DECISIONS.md](DECISIONS.md): the decisions and their reasons. [ISSUES.md](ISSUES.md), and
+[BENCHMARKS.md](BENCHMARKS.md).
 
-## License
+## Contributing, security and conduct
 
-Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+- [CONTRIBUTING.md](CONTRIBUTING.md): the principles, the setup and the whole local gate.
+- [SECURITY.md](SECURITY.md): the supported versions, and how to report a vulnerability privately
+  through
+  [GitHub's private vulnerability reporting](https://github.com/distronode-corporation/district-assurance/security/advisories/new),
+  not in a public issue.
+- [ROADMAP.md](ROADMAP.md): what is planned.
+- [GOVERNANCE.md](GOVERNANCE.md): who maintains the project, how a change is accepted, how a
+  release is made, and how the project continues without any one person.
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+- [SUPPORT](.github/SUPPORT.md): bugs and feature requests go to
+  [Issues](https://github.com/distronode-corporation/district-assurance/issues).
+- [CHANGELOG.md](CHANGELOG.md).
+
+## License and trademarks
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+The licence grants no permission to use Distronode Corporation's trade names or trademarks, the
+District Assurance name and the Distronode logo among them, except as reasonable and customary
+use requires to describe where the work comes from (section 6 of the licence). Stripe, Twilio and
+Telnyx are named only to describe interoperability; this project is not affiliated with or
+endorsed by them.

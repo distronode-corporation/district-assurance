@@ -1,8 +1,19 @@
 # Changelog
 
-All notable changes to this project are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
-[Semantic Versioning](https://semver.org/).
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
+project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+From 0.4.0 on, each version's section is written for the people who use the package: a short
+plain paragraph, then `### Added`, `### Changed` or `### Fixed` bullets that each start with a
+**bold plain phrase** followed by readable sentences. The sections up to 0.3.0 are kept as they
+were written.
+
+Release workflow note: `.github/workflows/release.yml` takes the section for the version being
+released out of this file, from its dated `## [X.Y.Z] - YYYY-MM-DD` heading to the next `## `
+heading, and uses it as the GitHub release's text, with a link back here
+(`scripts/release-notes.mjs`). A release with no dated section is refused.
 
 ## [Unreleased]
 
