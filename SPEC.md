@@ -596,7 +596,7 @@ the duress PIN is off unless it is set.
   recorded strictly before the change's start (`at`, the engine's clock read before the
   compare-and-set) are forgotten, and none at or after it, which may be against the new PIN; then
   `pin.reset` is appended with an `eventId` derived from the change, so it is appended once. A
-  first PIN forgets and writes nothing. When either fails after the change landed, `replacePin`
+  first PIN (`from` null) forgets nothing and appends nothing. When either fails after the change landed, `replacePin`
   throws `PinChangeUnfinishedError` (not an `EngineError`; the failure is its `cause`; it carries
   `at` and `change`, a 64-hex id derived from the workspace, the subject, `at` and the two salted
   records, and names no PIN): the report matches the store, where the change is on file, and the

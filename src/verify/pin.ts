@@ -292,8 +292,8 @@ export class PinChangeUnfinishedError extends Error implements PinChangeRef {
  * false, changing nothing, when the record on file is no longer `from`, so of two changes at once
  * one answers false. A host call from the business's own tools, `keyed_hash` mode only. When a PIN
  * was on file, the change is then finished (`finishPinChange`): the subject's PIN failures recorded
- * before its start are forgotten, and `pin.reset` is appended. A first PIN forgets and writes
- * nothing. A failure of those after the change landed is `PinChangeUnfinishedError`.
+ * before its start are forgotten, and `pin.reset` is appended. A first PIN (`from` null) forgets
+ * nothing and appends nothing. A failure of those after the change landed is `PinChangeUnfinishedError`.
  */
 export async function replacePin(rt: EngineRuntime, subjectKey: string, change: PinReplacement, counters: AttemptCounters | undefined): Promise<boolean> {
   keyedPinSubject(rt, subjectKey);

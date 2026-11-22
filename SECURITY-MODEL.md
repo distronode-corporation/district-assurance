@@ -1475,8 +1475,9 @@ Tells the business that someone is locked out, best effort; the ledger stays the
   while the PIN digest on file is the one given, atomically; an `upgradePinDigest` that replaces
   a digest only while it is still the one given, atomically, changing nothing else; and a
   `replacePinDigest` that replaces or removes the PIN digest only while it is still the one given
-  (or none, for null), with the duress digest, the enrolment id and the number given, in one atomic
-  step (`recordStoreContract` checks the outcome, not the atomicity).
+  (or none, for null), and in the same atomic step deletes the duress digest and the enrolment id
+  and writes the number only when `phoneOnFile` is given (`recordStoreContract` checks the
+  outcome, not the atomicity).
 - A `DuressNotifier` that alerts someone the business named, away from the call, and never
   through anything the caller or the person beside them can see; that never blocks (it queues the
   alert and returns); that drops repeats by `alertId`; and a sweep calling `sweepAlerts` (with a

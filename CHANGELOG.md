@@ -47,8 +47,9 @@ All notable changes to this project are documented here. The format follows
 - `Engine.replacePin(subjectKey, { from, to, phoneOnFile? })` and
   `RecordStore.replacePinDigest(workspaceId, subjectKey, from, to, phoneOnFile?)`: the business
   replaces or removes a PIN in one compare-and-set against the record on file, with the number on
-  file in the same step. A landed change forgets the subject's PIN failures recorded before it
-  began, never one at or after. A counter cleanup or `pin.reset` that fails after the change landed
+  file in the same step. A landed change from a PIN on file forgets the subject's PIN failures
+  recorded before it began, never one at or after, and appends `pin.reset`; a first PIN (`from`
+  null) forgets nothing and appends nothing. A counter cleanup or `pin.reset` that fails after the change landed
   throws `PinChangeUnfinishedError` (with `at` and `change`), and
   `Engine.finishPinChange(subjectKey, error)` (the owner PIN's `finishChange(error)`) finishes it,
   whatever changed since, appending its `pin.reset` once. A new required `RecordStore` method: a
