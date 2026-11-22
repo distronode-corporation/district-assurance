@@ -49,9 +49,10 @@ name: Release
 #                 (BENCHMARKS.md). It never fails or holds up a release.
 #
 # Anyone with write access can create a `v*` tag, but a tag pushed by hand starts nothing (there
-# is no tag trigger), and only a tag this file made and signed on main gets past the guard: a
-# stray tag of the version on another commit fails `decide`, and an unsigned one on this commit
-# fails the guard, so neither ever ships. The repository's tag rules forbid moving or deleting a
+# is no tag trigger), and only a tag this file made and signed on main gets past the guard, which
+# every publishing run needs: a stray tag of the version on another commit fails `decide`, and an
+# unsigned one on this commit fails the guard, so neither ever ships. (A dry run skips the guard,
+# builds and packs without a tag, and never publishes.) The repository's tag rules forbid moving or deleting a
 # `v*` tag (an admin can bypass them). A manual run (workflow_dispatch) on main is the
 # fallback when a push run did not start or failed: it decides the same way, so it releases only
 # what a push run would have, and resumes a run that tagged and then failed.

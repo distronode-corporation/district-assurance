@@ -983,8 +983,9 @@ back and verifies it again before anything is built (tested). Anyone with write 
 create a `v*` tag, but there is no tag trigger, so a tag pushed by hand starts nothing, and only a
 tag the workflow made and signed on main gets past the guard: a stray tag of the version on
 another commit fails the decision, and an unsigned one on the release commit fails the guard, so
-neither ever builds or ships (tested); it does stop the release until a person removes it. The
-repository's tag rules forbid moving or deleting a `v*` tag; an admin can bypass them. The publish job runs in the `npm-publish` environment, which the trusted publisher is bound
+neither is ever released (tested); it does stop the release until a person removes it. A manual
+dry run builds and packs without a tag or a signature, and never publishes. The repository's tag
+rules forbid moving or deleting a `v*` tag; an admin can bypass them. The publish job runs in the `npm-publish` environment, which the trusted publisher is bound
 to and which admits main only; its first step stops unless that environment's one deployment
 rule is main, so an environment created without protection, or widened, never lets a publish
 through (tested). It runs only in this repository, on a commit that is on main, after CI and the

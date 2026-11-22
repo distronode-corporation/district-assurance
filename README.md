@@ -309,10 +309,11 @@ version and dates its `## [X.Y.Z] - YYYY-MM-DD` section in CHANGELOG.md. When it
 3. It builds, checks and publishes to npm with provenance, signs an SBOM attestation, and makes
    the tag's GitHub release with the tarball, the SBOM and the attestation's bundle.
 
-Anyone with write access to this repository can create a `v*` tag, but only a tag that this
-workflow made and signed, running on main, builds or publishes anything: the release checks it
-with `gitsign verify-tag` before anything else, and there is no tag trigger, so a tag pushed by
-hand starts nothing. A stray tag of the version, on another commit, stops the release (the run
+Anyone with write access to this repository can create a `v*` tag, but only a version under a
+tag that this workflow made and signed, running on main, is ever published: the release checks
+the tag with `gitsign verify-tag` before it builds, and there is no tag trigger, so a tag pushed
+by hand starts nothing. (A dry run, started by hand with `dry_run` ticked, builds and packs
+without a tag or a signature, and never publishes.) A stray tag of the version, on another commit, stops the release (the run
 fails, for a person to look at) and never ships. The repository's tag rules forbid moving or
 deleting a `v*` tag (an admin can bypass them). Tags up to v0.1.0 were pushed by hand and are not
 signed.
