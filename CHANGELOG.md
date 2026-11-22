@@ -36,12 +36,25 @@ All notable changes to this project are documented here. The format follows
   `telnyxPortHours`, `durationHours`, `isCarrierAnswer` and `uncheckedReport`.
 - `receiptKeysDocument(signers)` and `RECEIPT_KEYS_CACHE_CONTROL`: the public receipt-keys document,
   each `kid` once, two different keys under one `kid` refused.
-- `createOwnerPin({ engine, hmac, records, counters, lockout?, now? })` from the package root: the
-  owner PIN of the `owner-command` flow (ADR-20, ADR-31). `status`, `setPin`, `clearPin` and
-  `liftLock` over the engine's own stores, with the owner as the subject `ownerSubjectKey(hmac,
-  workspaceId)`, its PIN counters (the subject's and the line's), and a change that resets before
-  it stores. The PIN length and lockout are read from the engine's config. `records` also needs
-  `createSubject` (`SubjectWriter`: create if absent, atomically), which `MemoryRecordStore` now has.
+- `createOwnerPin({ engine, hmac, records, counters, now? })` from the package root: the owner PIN
+  of the `owner-command` flow (ADR-20, ADR-31). `status`, `setPin`, `clearPin` and `liftLock` over
+  the engine's own stores, with the owner as the subject `ownerSubjectKey(hmac, workspaceId)` and
+  its PIN counters (the subject's and the line's). A set or clear is one compare-and-set: of two
+  at once exactly one lands and the other throws `OwnerPinConflictError` (code `conflict`, no PIN
+  in it). Every set that lands refreshes the owner's number on file in the same step. The PIN
+  length and lockout come only from the engine's config. `records` also needs `createSubject`
+  (`SubjectWriter`: create if absent, atomically), which `MemoryRecordStore` now has.
+- `Engine.replacePin(subjectKey, { from, to, phoneOnFile? })` and
+  `RecordStore.replacePinDigest(workspaceId, subjectKey, from, to, phoneOnFile?)`: the business
+  replaces or removes a PIN in one compare-and-set against the record on file, with the number on
+  file in the same step. A landed change from a PIN on file forgets the subject's PIN failures
+  recorded before it began, never one at or after, and appends `pin.reset`; a first PIN (`from`
+  null) forgets nothing and appends nothing. A counter cleanup or `pin.reset` that fails after the change landed
+  throws `PinChangeUnfinishedError` (with `at` and `change`), and
+  `Engine.finishPinChange(subjectKey, error)` (the owner PIN's `finishChange(error)`) finishes it,
+  whatever changed since, appending its `pin.reset` once. A new required `RecordStore` method: a
+  host's own store adds it (`recordStoreContract` has a case for it). `MemoryRecordStore` and the reference server's
+  `SqliteRecordStore` have it.
 
 ### Changed
 

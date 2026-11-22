@@ -583,6 +583,30 @@ the duress PIN is off unless it is set.
   its own PIN. Either way it clears the subject's PIN failure counters when the engine has a
   `counters` adapter (VER-1), its hidden one (VER-12) included, but not a duress flag, and appends
   `pin.reset` to the ledger with no call.
+- Replace: `replacePin(subjectKey, { from, to, phoneOnFile? })` is a host call for the business's
+  own tools, `keyed_hash` mode only (`precondition_failed` otherwise), that replaces or removes a
+  PIN in one compare-and-set: `RecordStore.replacePinDigest(workspaceId, subjectKey, from, to,
+  phoneOnFile?)` sets `pinDigest` to `to` (null: removes it) only while it is still exactly `from`
+  (null: none on file), removes `pinEnrolmentId` and `duressDigest` (a duress PIN belongs to the PIN
+  it was enrolled against), and writes `phoneOnFile` when given (E.164 or `""`), in one atomic step.
+  It answers false, changing nothing, when the record on file is no longer `from` or the store has
+  no such subject, so of two changes from the same record one lands. Records are salted, so `from`
+  names one setting of a PIN, never an earlier setting of the same digits. When a PIN was on file
+  and the change landed, it is finished: the subject's PIN failures (the hidden ones included)
+  recorded strictly before the change's start (`at`, the engine's clock read before the
+  compare-and-set) are forgotten, and none at or after it, which may be against the new PIN; then
+  `pin.reset` is appended with an `eventId` derived from the change, so it is appended once. A
+  first PIN (`from` null) forgets nothing and appends nothing. When either fails after the change landed, `replacePin`
+  throws `PinChangeUnfinishedError` (not an `EngineError`; the failure is its `cause`; it carries
+  `at` and `change`, a 64-hex id derived from the workspace, the subject, `at` and the two salted
+  records, and names no PIN): the report matches the store, where the change is on file, and the
+  error is the proof that it landed. `finishPinChange(subjectKey, { at, change })` finishes it: the same
+  forgetting and the same `pin.reset`, reading no PIN record, so it finishes the change whatever
+  landed since and never touches the PIN or number on file; it is safe to run again. A subject
+  key that is not 64 lower-case hex, a `from` or `to` that is neither null nor a non-empty string,
+  and a `phoneOnFile` that is neither E.164 nor `""` are `invalid_input`; so are an `at` that is
+  not an ISO 8601 time as `at` gives it or is later than now, and a `change` that is not 64
+  lower-case hex.
 
 **Lockouts across calls (VER-1).** Every factor the caller enters (keypad knowledge, the PIN, spoken
 answers, plug-ins) is also counted across calls, in an `AttemptCounters` store every engine of the
@@ -795,14 +819,14 @@ it), per calling number and per subject.
 
 The PIN a business's owner keys on the business's own line for the `owner-command` flow, kept as an
 ordinary PIN subject, so the engine judges, counts and locks it as any PIN.
-`createOwnerPin({ engine, hmac, records, counters, lockout?, now? })` returns
+`createOwnerPin({ engine, hmac, records, counters, now? })` returns
 `{ subjectKey, status, setPin, clearPin, liftLock }` for the engine's workspace, over the engine's
 own stores and knowledge key (`hmac`, a `KnowledgeHmac` function only; bytes are `invalid_input`).
 
 - Needs Badge on with the `pin` factor in `keyed_hash` mode, read from the engine's config on every
-  call (so a `configure` applies at once); otherwise every method is `precondition_failed`.
-  `lockout` is optional: the engine's Badge lockout locks, so a given one must equal it after
-  defaults, or every method is `precondition_failed`.
+  call (so a `configure` applies at once); otherwise every method is `precondition_failed`. The
+  lockout the facts are read with is the engine's Badge `lockout`, its only source: there is no
+  option to pass another.
 - The owner is the subject `ownerSubjectKey(hmac, workspaceId)` =
   `subjectKeyFor(hmac, "owner:" + workspaceId)`, which the host passes to `beginVerification` on
   its phone call. The owner's line (`{ phone }`) is an E.164 number or null; anything else is
@@ -812,18 +836,22 @@ own stores and knowledge key (`hmac`, a `KnowledgeHmac` function only; bytes are
   `waitSeconds` (until the longest wait after a failure ends, 0 when none), `failures` (the most in
   the window on either counter) and `remaining` (`lockAfterFailures - failures`, at least 0).
 - `setPin(line, pin)`: `malformed` unless a string of ASCII digits within the engine's `minDigits`
-  to `maxDigits` (never coerced), `weak` by `isWeakPin`. Then, in this order: the new Argon2id record
-  (`pinDigest`), so a key store failure leaves the PIN on file as it was; `Engine.resetPin` when a
-  PIN is on file (it clears the subject's PIN counters, not the line's, and writes `pin.reset`);
-  `createSubject` (the owner subject, on the first PIN, with the line as `phoneOnFile`, `""` with
-  none, and no knowledge; an existing one is left as it is); `putPinDigest`, which stores only if no
-  PIN is on file. A store failure after the reset leaves no PIN on file, never the old one: the
-  owner command is refused until the business sets a PIN again. A `putPinDigest` that stores
-  nothing (another change stored first) is `conflict`, so of two first PINs at once one is refused.
-  Two changes of a PIN already on file at once may both answer ok, as each reset removes what is on
-  file: the PIN stored last stands, and it is always one the business set. A host that needs one
-  answer per change serializes `setPin` per workspace. No error message names the PIN.
-- `clearPin()` is `Engine.resetPin` on the owner subject: idempotent, a `pin.reset` each time.
+  to `maxDigits` (never coerced), `weak` by `isWeakPin`. Then: the new Argon2id record
+  (`pinDigest`), so a key store failure changes nothing; the record on file is read; on the first
+  PIN, `createSubject` (the owner subject with no number and no knowledge; one already there is
+  left as it is); then `Engine.replacePin` from the record read to the new one, with the line as
+  `phoneOnFile` (`""` with none), in one compare-and-set. The number on file is refreshed on every
+  set that lands, and only then.
+- `clearPin()`: nothing when no PIN is on file; otherwise `Engine.replacePin` from the record read
+  to none, in one compare-and-set. The number on file stays.
+- Of two changes at once (two sets, a set and a clear, two clears, or two first PINs), exactly one
+  lands and the other changes nothing and throws `OwnerPinConflictError` (an `EngineError` with code
+  `conflict`, whose message names no PIN); the host may read `status` and try again. Serializing is
+  not the host's job. A store failure leaves the PIN and number on file as they were. When the
+  change landed but its counter cleanup or `pin.reset` failed, the method throws
+  `PinChangeUnfinishedError`, matching the store (the change is on file), and
+  `finishChange(error)` (`Engine.finishPinChange`) finishes a set or a clear, whatever changed
+  since. A clear with no PIN on file does nothing, so two clears at once still end in one conflict.
 - `liftLock(line, memberId)` is `Engine.unlock` on each of the owner's PIN counters (the line's
   only when given), one `verification.unlocked` each, with the member id as `unlock` checks it.
 - Not here, and the host's: who may call these, the owner's verified number, binding a phone call

@@ -795,6 +795,28 @@ export function recordStoreContract(factory: (subjects: SeededSubject[]) => Reco
         assert.deepEqual(await store.getSubject("w2", key), { ...subjects.at(-1)!.subject, pinDigest: pin, pinEnrolmentId: "enr_up", duressDigest: duress });
       },
     ],
+    [
+      "replaces or removes a PIN only from the value on file, with its duress PIN and enrolment id, and the number given",
+      async (store) => {
+        const key = "2".repeat(64);
+        const [first, second, duress] = ["$pin1$first", "$pin1$second", "f".repeat(64)];
+        assert.equal(await store.putPinDigest("w2", key, first, "enr_w2"), true, "w2: the PIN digest is stored");
+        assert.equal(await store.replacePinDigest("w", key, "0".repeat(64), first), false, "not from a value when none is on file");
+        assert.equal(await store.replacePinDigest("w", key, null, first, "+15555550177"), true);
+        assert.deepEqual(await store.getSubject("w", key), { ...subjects[1]!.subject, pinDigest: first, phoneOnFile: "+15555550177" });
+        assert.equal(await store.replacePinDigest("w", key, null, second), false, "not from none when one is on file");
+        assert.equal(await store.putDuressDigest("w", key, duress, first), true);
+        assert.equal(await store.replacePinDigest("w", key, first, second, ""), true);
+        assert.deepEqual(await store.getSubject("w", key), { ...subjects[1]!.subject, pinDigest: second, phoneOnFile: "" }, "the duress PIN goes with the PIN it was enrolled against");
+        assert.equal(await store.replacePinDigest("w", key, first, null), false, "a second replacement from the same value replaces nothing");
+        assert.equal(await store.replacePinDigest("w", key, second, null), true);
+        assert.deepEqual(await store.getSubject("w", key), { ...subjects[1]!.subject, phoneOnFile: "" }, "removed, and the number kept when none is given");
+        // A subject the store does not have, and another workspace, are left alone.
+        assert.equal(await store.replacePinDigest("w", "f".repeat(64), null, first), false);
+        assert.equal(await store.getSubject("w", "f".repeat(64)), null);
+        assert.deepEqual(await store.getSubject("w2", key), { ...subjects.at(-1)!.subject, pinDigest: first, pinEnrolmentId: "enr_w2" });
+      },
+    ],
   ];
   return cases.map(([name, body]) => ({ name, run: async () => body(await factory(structuredClone(subjects))) }));
 }

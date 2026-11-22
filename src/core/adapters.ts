@@ -482,6 +482,17 @@ export interface RecordStore {
    * holds anything else, is left alone, and the answer is false. Never given the PIN itself.
    */
   upgradePinDigest(workspaceId: string, subjectKey: string, field: "pinDigest" | "duressDigest", from: string, to: string): Promise<boolean>;
+  /**
+   * The business replaces or removes a subject's PIN in one compare-and-set (`Engine.replacePin`):
+   * only if `pinDigest` is still exactly `from` (null: none on file), sets it to `to` (null:
+   * removes it), removes `pinEnrolmentId` and `duressDigest` (a duress PIN belongs to the PIN it
+   * was enrolled against, VER-12), and, given `phoneOnFile`, writes it, all in one atomic step; the
+   * answer says whether it replaced. Of two replacements from the same value, one replaces and the
+   * other answers false. Records are salted, so `from` names one setting of the PIN, never an
+   * earlier setting of the same digits. A subject the store does not have is left alone, and the
+   * answer is false. Never given the PIN itself.
+   */
+  replacePinDigest(workspaceId: string, subjectKey: string, from: string | null, to: string | null, phoneOnFile?: string): Promise<boolean>;
 }
 
 /** How a consent was given or revoked: on the call, by text, or on the host's dashboard. */

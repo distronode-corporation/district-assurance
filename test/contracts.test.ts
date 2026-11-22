@@ -153,6 +153,9 @@ describe("the RecordStore contract", () => {
       async upgradePinDigest() {
         return false;
       }
+      async replacePinDigest() {
+        return false;
+      }
     }
     assert.deepEqual(await failing(recordStoreContract((subjects) => new Joined(subjects))), [
       "keeps workspaces apart, and never lets two workspace and id pairs share a key",
@@ -161,7 +164,25 @@ describe("the RecordStore contract", () => {
       "keeps a record unconfirmed until confirmIntakeRecord marks it, idempotently, and never marks an id it does not hold",
       "deletes a subject's PIN and duress digests, keeps the rest, and deleting a missing one is harmless",
       "upgrades a PIN or duress digest only from the value on file, and changes nothing else",
+      "replaces or removes a PIN only from the value on file, with its duress PIN and enrolment id, and the number given",
     ]);
+  });
+
+  it("catches a store whose PIN replacement ignores the record on file, or drops the number", async () => {
+    const name = "replaces or removes a PIN only from the value on file, with its duress PIN and enrolment id, and the number given";
+    class LastWriterWins extends MemoryRecordStore {
+      override async replacePinDigest(workspaceId: string, subjectKey: string, _from: string | null, to: string | null, phoneOnFile?: string) {
+        const subject = await this.getSubject(workspaceId, subjectKey);
+        return subject === null ? false : super.replacePinDigest(workspaceId, subjectKey, subject.pinDigest ?? null, to, phoneOnFile);
+      }
+    }
+    class NumberDropping extends MemoryRecordStore {
+      override async replacePinDigest(workspaceId: string, subjectKey: string, from: string | null, to: string | null) {
+        return super.replacePinDigest(workspaceId, subjectKey, from, to);
+      }
+    }
+    assert.deepEqual(await failing(recordStoreContract((subjects) => seed(new LastWriterWins(), subjects))), [name]);
+    assert.deepEqual(await failing(recordStoreContract((subjects) => seed(new NumberDropping(), subjects))), [name]);
   });
 
   it("catches a store that refuses a retried record", async () => {

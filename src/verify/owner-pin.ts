@@ -4,8 +4,10 @@
 // The owner is the subject: `subjectKey = HMAC(knowledgeKey, "subject:owner:" + workspaceId)`, so
 // the owner's PIN subject never collides with an account number keyed on the line. The business
 // sets the PIN from its own signed-in tools (SPEC.md section 6: only the business changes a PIN on
-// file), never a caller: the new record is computed first, then any PIN on file is reset through
-// `Engine.resetPin` (which also clears the PIN counters), then the record is stored. Judging a keyed
+// file), never a caller: the new record is computed first, then put in place of the one read on
+// file in one compare-and-set (`Engine.replacePin`, over `RecordStore.replacePinDigest`), with the
+// owner's number on file, so of two changes at once exactly one lands and the other is an
+// `OwnerPinConflictError`. A change clears the subject's PIN counters after. Judging a keyed
 // PIN stays the engine's (`submitPin`, a constant-time comparison of the Argon2id tag): nothing here
 // compares a PIN, and the digits are never stored, logged or put in an error message.
 //
@@ -14,10 +16,10 @@
 import type { AttemptCounterKey, AttemptCounters, RecordStore, SubjectRecord } from "../core/adapters.ts";
 import { EngineError } from "../core/errors.ts";
 import type { Engine } from "../engine.ts";
-import { counterKeys, isCallingNumber, lockState, lockoutOf, type Lockout, type LockoutSettings } from "./counters.ts";
+import { counterKeys, isCallingNumber, lockState, lockoutOf, type Lockout } from "./counters.ts";
 import type { BadgeSettings, PinSettings } from "./factors.ts";
 import { knowledgeHmac, pinDigest, subjectKeyFor, type KnowledgeHmac } from "./knowledge.ts";
-import { isWeakPin } from "./pin.ts";
+import { isWeakPin, type PinChangeRef } from "./pin.ts";
 
 /**
  * Creates a subject record, the one write `RecordStore` lacks (the engine never creates a subject):
@@ -36,14 +38,8 @@ export interface OwnerPinOptions {
   hmac: KnowledgeHmac;
   /** The engine's own record store, with `createSubject`. */
   records: RecordStore & SubjectWriter;
-  /** The engine's own counters store. */
+  /** The engine's own counters store. The lockout the facts are read with is the engine's Badge `lockout`, its only source. */
   counters: AttemptCounters;
-  /**
-   * The lockout the facts are read with. Optional: the engine's Badge `lockout` (defaults filled
-   * in) is the one that locks, so when given it must equal it, or every call is refused
-   * (`precondition_failed`): facts read under another lockout would misstate the tries left.
-   */
-  lockout?: LockoutSettings;
   /** Reads the time for `status`. Default: the system clock. */
   now?: () => Date;
 }
@@ -70,15 +66,43 @@ export interface OwnerPinStatus {
 /** A PIN the business chose: stored, or refused. `weak` does not say which rule it broke. */
 export type OwnerPinSetResult = { ok: true } | { ok: false; reason: "malformed" | "weak" };
 
+/**
+ * Another change to the owner PIN landed between this one's read and its write, so this one changed
+ * nothing. The host may read `status` and try again. Names no PIN.
+ */
+export class OwnerPinConflictError extends EngineError {
+  constructor() {
+    super("conflict", "another change to the owner PIN landed first; nothing was changed");
+    this.name = "OwnerPinConflictError";
+  }
+}
+
 export interface OwnerPin {
   /** The owner's PIN subject key, for `beginVerification` on the host's phone call. */
   subjectKey(): Promise<string>;
   /** Whether a PIN is on file, and the lock facts of the owner's counters, read without writing. */
   status(line: OwnerLine): Promise<OwnerPinStatus>;
-  /** Stores a new PIN, replacing any (reset first, so its counters go too). */
+  /**
+   * Stores a new PIN and the line as the number on file, replacing any PIN in one compare-and-set;
+   * `OwnerPinConflictError` when another change landed first. `PinChangeUnfinishedError` when the
+   * PIN and number landed but the counter cleanup or `pin.reset` did not: `finishChange(error)`
+   * finishes it.
+   */
   setPin(line: OwnerLine, pin: string): Promise<OwnerPinSetResult>;
-  /** Removes the PIN on file, if any, and clears its counters. Idempotent; each call is a `pin.reset` in the ledger. */
+  /**
+   * Removes the PIN on file, if any, in one compare-and-set, and clears its counters; nothing when
+   * none is on file. `OwnerPinConflictError` when another change landed first.
+   * `PinChangeUnfinishedError` when the PIN was removed but the counter cleanup or `pin.reset` did
+   * not land: `finishChange(error)` finishes it.
+   */
   clearPin(): Promise<void>;
+  /**
+   * Finishes a set or clear that threw `PinChangeUnfinishedError` (`Engine.finishPinChange`): forgets
+   * the owner's PIN failures recorded before it began, never a later one, and appends its
+   * `pin.reset` once, whatever changed since; it never touches the PIN or number on file. Safe to
+   * run again.
+   */
+  finishChange(ref: PinChangeRef): Promise<void>;
   /** Lifts the owner's locks early: the subject's counter and the line's. `memberId` as `Engine.unlock` takes it. */
   liftLock(line: OwnerLine, memberId: string): Promise<void>;
 }
@@ -93,12 +117,11 @@ export function ownerSubjectKey(hmac: KnowledgeHmac, workspaceId: string): Promi
 
 /** The owner PIN of the engine's workspace, over the engine's own stores and knowledge key. */
 export function createOwnerPin(options: OwnerPinOptions): OwnerPin {
-  const { engine, records, counters, lockout: given, now = () => new Date() } = options;
+  const { engine, records, counters, now = () => new Date() } = options;
   if (typeof options.hmac !== "function") throw new EngineError("invalid_input", "hmac must be the knowledge HMAC function");
   // The answer is checked to be 64 lower-case hex, so a misbehaving key store fails loudly.
   const hmac = knowledgeHmac(options.hmac);
   const workspaceId = engine.workspaceId;
-  const givenLockout = given === undefined ? undefined : lockoutOf(given);
 
   /** Badge's PIN settings and lockout now (a `configure` may change them), or a refusal. */
   function settings(): { pin: PinSettings; lockout: Lockout } {
@@ -106,11 +129,7 @@ export function createOwnerPin(options: OwnerPinOptions): OwnerPin {
     const badge = engine.isEnabled("badge") ? (engine.config.modules.badge!.settings as unknown as BadgeSettings) : null;
     const pin = badge?.factors.includes("pin") === true ? badge.pin : undefined;
     if (pin?.mode !== "keyed_hash") throw new EngineError("precondition_failed", "the owner PIN needs Badge's pin factor on, in keyed_hash mode");
-    const lockout = lockoutOf(badge!.lockout);
-    if (givenLockout !== undefined && JSON.stringify(givenLockout) !== JSON.stringify(lockout)) {
-      throw new EngineError("precondition_failed", "lockout must equal the engine's Badge lockout");
-    }
-    return { pin, lockout };
+    return { pin, lockout: lockoutOf(badge!.lockout) };
   }
 
   function phoneOf(line: OwnerLine): string | null {
@@ -127,8 +146,15 @@ export function createOwnerPin(options: OwnerPinOptions): OwnerPin {
     return counterKeys(workspaceId, "pin", { subjectKey: key, numberKey: phone === null ? null : await hmac(`number:${phone}`) });
   }
 
-  async function pinOnFile(key: string): Promise<boolean> {
-    return typeof (await records.getSubject(workspaceId, key))?.pinDigest === "string";
+  /** The PIN record on file, or null: what a change compares against. */
+  async function recordOnFile(key: string): Promise<string | null> {
+    const subject = await records.getSubject(workspaceId, key);
+    return typeof subject?.pinDigest === "string" ? subject.pinDigest : null;
+  }
+
+  async function replace(key: string, from: string | null, to: string | null, phoneOnFile?: string): Promise<void> {
+    const change = phoneOnFile === undefined ? { from, to } : { from, to, phoneOnFile };
+    if (!(await engine.replacePin(key, change))) throw new OwnerPinConflictError();
   }
 
   return {
@@ -151,7 +177,7 @@ export function createOwnerPin(options: OwnerPinOptions): OwnerPin {
         else if (lock !== null) until = Math.max(until, Date.parse(lock.until));
       }
       return {
-        pinSet: await pinOnFile(key),
+        pinSet: (await recordOnFile(key)) !== null,
         locked,
         waitSeconds: Math.ceil((until - at.getTime()) / 1000),
         failures,
@@ -168,22 +194,24 @@ export function createOwnerPin(options: OwnerPinOptions): OwnerPin {
       const key = await subjectKey();
       // The new record first (the key store and Argon2id), so a failure there leaves the PIN on file as it was.
       const record = await pinDigest(hmac, key, pin);
-      // A change: the old PIN and its counters go first. A failure between this and the write below
-      // leaves no PIN on file, so the owner command is refused until the business sets one again:
-      // never an unguarded line (RecordStore has no atomic reset-and-replace).
-      if (await pinOnFile(key)) await engine.resetPin(key);
-      // The owner subject, created on the first PIN with the line as its number on file; one already
-      // there is left as it is, so the conditional write below decides between changes at once.
-      await records.createSubject(workspaceId, { subjectKey: key, phoneOnFile: phone ?? "", knowledge: {} });
-      if (!(await records.putPinDigest(workspaceId, key, record))) {
-        throw new EngineError("conflict", "another PIN was stored for the owner at the same time");
-      }
+      const from = await recordOnFile(key);
+      // The owner subject, created on the first PIN with no number; one already there is left as it
+      // is. The number is written by the compare-and-set, so only a change that lands writes it.
+      if (from === null) await records.createSubject(workspaceId, { subjectKey: key, phoneOnFile: "", knowledge: {} });
+      await replace(key, from, record, phone ?? "");
       return { ok: true };
     },
 
     async clearPin() {
       settings();
-      await engine.resetPin(await subjectKey());
+      const key = await subjectKey();
+      const from = await recordOnFile(key);
+      if (from !== null) await replace(key, from, null);
+    },
+
+    async finishChange(ref) {
+      settings();
+      await engine.finishPinChange(await subjectKey(), ref);
     },
 
     async liftLock(line, memberId) {

@@ -318,6 +318,18 @@ export class MemoryRecordStore implements RecordStore {
     return true;
   }
 
+  async replacePinDigest(workspaceId: string, subjectKey: string, from: string | null, to: string | null, phoneOnFile?: string): Promise<boolean> {
+    // No await: one atomic step.
+    const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
+    if (subject === undefined || (subject.pinDigest ?? null) !== from) return false;
+    if (to === null) delete subject.pinDigest;
+    else subject.pinDigest = to;
+    delete subject.pinEnrolmentId;
+    delete subject.duressDigest;
+    if (phoneOnFile !== undefined) subject.phoneOnFile = phoneOnFile;
+    return true;
+  }
+
   async upgradePinDigest(workspaceId: string, subjectKey: string, field: "pinDigest" | "duressDigest", from: string, to: string): Promise<boolean> {
     // No await: one atomic step.
     const subject = this.#subjects.get(scoped(workspaceId, subjectKey));
