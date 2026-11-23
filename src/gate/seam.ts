@@ -43,6 +43,12 @@ export interface SeamAccessControllerOptions {
   fetch?: typeof fetch;
   /** Read for the grant's expiry. Default: the system clock. */
   clock?: Clock;
+  /**
+   * The monotonic clock the confirmation window is measured on, in milliseconds. Default:
+   * `performance.now`. The tests inject one they control, so a loaded runner's slow tick cannot
+   * lapse a window the test never meant to time.
+   */
+  nowMs?: () => number;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
@@ -138,13 +144,14 @@ export function seamAccessController(options: SeamAccessControllerOptions): Acce
 
   /**
    * Step 4. The attempt once it left "pending", or a pending one when it did not in time or could
-   * not be read. The whole wait is held to `confirmWithinMs` of elapsed time (a monotonic clock):
-   * each pause and each request is cut to what is left.
+   * not be read. The whole wait is held to `confirmWithinMs` of elapsed time on `nowMs` (a
+   * monotonic clock, `performance.now` by default): each pause and each request is cut to what is left.
    */
   async function settle(attemptId: string): Promise<{ status: AttemptStatus; byDevice: boolean }> {
     const pending = { status: "pending" as const, byDevice: false };
-    const deadline = performance.now() + confirmWithinMs;
-    const left = () => deadline - performance.now();
+    const nowMs = options.nowMs ?? (() => performance.now());
+    const deadline = nowMs() + confirmWithinMs;
+    const left = () => deadline - nowMs();
     for (;;) {
       const remaining = left();
       if (remaining <= 0) return pending;

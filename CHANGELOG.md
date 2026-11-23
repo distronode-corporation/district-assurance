@@ -119,6 +119,14 @@ check everything that is left from that checkpoint on without the entries before
   host cancels it and offers the channels again (#167).
 
 
+### Fixed
+
+- **The Seam confirm window no longer flakes on a loaded runner.** `seamAccessController` takes a
+  `nowMs` option, the monotonic clock its confirmation window is measured on, defaulting to
+  `performance.now`; the adapter test injects one it controls, so one slow event-loop tick cannot
+  let the window lapse before the first poll reads the attempt as still pending (#168).
+
+
 ## [0.3.0] - 2026-11-22
 
 ### Added

@@ -138,7 +138,10 @@ describe("seamAccessController", () => {
   });
   // The grant above is issued at the fixed clock's start and lives a minute.
   const clock = new FixedClock();
-  const seam = (options: Partial<SeamAccessControllerOptions> = {}) => seamAccessController({ apiKey: API_KEY, baseUrl: base, allowLoopbackForTests: true, pollIntervalMs: 10, confirmWithinMs: 100, timeoutMs: 200, clock, ...options });
+  // The confirmation window is measured on an injected monotonic clock (#168): a constant one for
+  // the cases that are not about timing, so a loaded runner's slow tick can never lapse a window
+  // the test did not mean to time, and a ticking one for the deadline cases below.
+  const seam = (options: Partial<SeamAccessControllerOptions> = {}) => seamAccessController({ apiKey: API_KEY, baseUrl: base, allowLoopbackForTests: true, pollIntervalMs: 10, confirmWithinMs: 100, timeoutMs: 200, clock, nowMs: () => 0, ...options });
   const unlocks = (target: string) => seen.filter((s) => s.path === "/locks/unlock_door" && s.body.device_id === target).length;
   const polls = (attemptId: string) => seen.filter((s) => s.path === "/action_attempts/get" && s.body.action_attempt_id === attemptId).length;
 
@@ -274,6 +277,10 @@ describe("seamAccessController", () => {
   });
 
   it("is delivered but unconfirmed while the attempt is pending or cannot be read, and never unlocks twice", async () => {
+    // A ticking window clock: each read moves it 10 ms on, as Seam's time would, so the deadline
+    // cases lapse their window on the injected clock, not on the runner's load.
+    let ticked = 0;
+    const ticking = () => (ticked += 10);
     for (const [target, ref] of [
       ["dev-stuck", "aa-stuck"],
       ["dev-poll-down", "aa-poll-down"],
@@ -281,23 +288,26 @@ describe("seamAccessController", () => {
       ["dev-poll-other", "aa-poll-other"],
       ["dev-poll-slow", "aa-poll-slow"],
     ] as const) {
-      assert.deepEqual(await seam({ timeoutMs: 100 }).unlock(input(target)), { outcome: "delivered", providerRef: ref, confirmed: false }, target);
+      assert.deepEqual(await seam({ timeoutMs: 100, nowMs: ticking }).unlock(input(target)), { outcome: "delivered", providerRef: ref, confirmed: false }, target);
       assert.equal(unlocks(target), 1, target);
     }
     const asked = polls("aa-stuck");
-    // Real timers (settle paces with setTimeout against performance.now, which mock timers do not
-    // drive), so the count is bounded, not exact. Fence post: a poll after each pause, at 10, 20, ...,
-    // 100 ms, and one more when the last pause is cut to a sliver of the window: ceil(100 / 10) + 1.
+    // The pauses are real timers (settle paces with setTimeout, which mock timers do not drive),
+    // so the count is bounded, not exact: a poll after each pause until the ticked window is spent.
     const maxPolls = Math.ceil(100 / 10) + 1;
     assert.ok(asked >= 1 && asked <= maxPolls, `asked within the confirmation window, then stopped (${asked})`);
     // The whole wait is held to confirmWithinMs of elapsed time, however slow Seam answers.
     const started = performance.now();
-    assert.deepEqual(await seam({ timeoutMs: 5000, confirmWithinMs: 100 }).unlock(input("dev-poll-slow")), { outcome: "delivered", providerRef: "aa-poll-slow", confirmed: false });
+    assert.deepEqual(await seam({ timeoutMs: 5000, confirmWithinMs: 100, nowMs: ticking }).unlock(input("dev-poll-slow")), { outcome: "delivered", providerRef: "aa-poll-slow", confirmed: false });
     const took = performance.now() - started;
     assert.ok(took < 1000, `a hanging poll is cut to the window left, not the request timeout (${Math.round(took)} ms)`);
     assert.equal(polls("aa-poll-down"), 1, "a failed read ends the asking");
     assert.deepEqual(await seam({ confirmWithinMs: 0 }).unlock(input("dev-ok")), { outcome: "delivered", providerRef: "aa-ok", confirmed: false });
     assert.equal(polls("aa-ok"), 1, "a window of 0 never asks");
+    // The default window clock is performance.now: a window of 0 never asks on it either.
+    const bare = seamAccessController({ apiKey: API_KEY, baseUrl: base, allowLoopbackForTests: true, confirmWithinMs: 0, timeoutMs: 200, clock });
+    assert.deepEqual(await bare.unlock(input("dev-ok")), { outcome: "delivered", providerRef: "aa-ok", confirmed: false });
+    assert.equal(polls("aa-ok"), 1, "a window of 0 never asks, on the default clock too");
   });
 
   it("refuses, without unlocking, a device that cannot unlock remotely, is offline, or cannot be checked", async () => {
