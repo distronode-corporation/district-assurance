@@ -191,6 +191,7 @@ export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<st
     throw new EngineError("precondition_failed", "exportLedger: the ledger is pruned; give the checkpoint it was pruned below, with the keys that verify it");
   }
   if (checkpoint !== undefined) {
+    if (!isObject(checkpoint)) throw new EngineError("invalid_input", "exportLedger: not a signed ledger_checkpoint document");
     const check = verifyLedgerCheckpoint(checkpoint.checkpoint, checkpoint.keys);
     if (!check.ok) {
       throw new EngineError("invalid_input", check.reason === "signature" ? "exportLedger: the checkpoint's signature does not verify against the key set" : "exportLedger: not a signed ledger_checkpoint document");

@@ -526,8 +526,18 @@ export function verifyAnchor(anchored: AuditEntry, entries: readonly AuditEntry[
   if (!isObject(detail) || !Array.isArray(entries) || !Array.isArray(tsa)) return { ok: false, reason: "malformed" };
   // A pruned ledger's anchor starts at the checkpoint, which must verify under the key set it came
   // with: a checkpoint that is not a signed document is malformed input, and one whose signature
-  // does not verify fails `checkpoint`, never `token` (that reason is the time-stamp's).
-  const checkpointCheck = checkpoint === undefined ? null : verifyLedgerCheckpoint(checkpoint.checkpoint, checkpoint.keys);
+  // does not verify fails `checkpoint`, never `token` (that reason is the time-stamp's). Its
+  // wrapper is read inside the boundary, so a trust object with getters answers once, never throws.
+  let checkpointCheck: ReturnType<typeof verifyLedgerCheckpoint> | null = null;
+  if (checkpoint !== undefined) {
+    if (!isObject(checkpoint)) return { ok: false, reason: "malformed" };
+    try {
+      const { checkpoint: signed, keys: checkpointKeys } = checkpoint as LedgerCheckpointRef;
+      checkpointCheck = verifyLedgerCheckpoint(signed, checkpointKeys);
+    } catch {
+      return { ok: false, reason: "malformed" };
+    }
+  }
   if (checkpointCheck !== null && !checkpointCheck.ok) return { ok: false, reason: checkpointCheck.reason === "signature" ? "checkpoint" : "malformed" };
   const { seq, proof: given } = detail;
   // A plain copy of the proof: a getter in it answers once, here, and anything not plain data is malformed.
@@ -542,10 +552,13 @@ export function verifyAnchor(anchored: AuditEntry, entries: readonly AuditEntry[
   }
   let chain: ReturnType<typeof verifyChain>;
   try {
-    // An export holding nothing (null or a hole) where an entry should be is malformed. verifyChain
-    // reports any other value that is not an entry as a break in the chain (SRV-7), but it reads an
-    // object's fields, and one whose field throws when read is malformed too, never a throw.
-    if (entries.some((e) => e === null || e === undefined)) return { ok: false, reason: "malformed" };
+    // An export holding nothing (null, or a hole of a sparse list, which `some` and `filter` skip)
+    // where an entry should be is malformed, wherever it sits. verifyChain reports any other value
+    // that is not an entry as a break in the chain (SRV-7), but it reads an object's fields, and
+    // one whose field throws when read is malformed too, never a throw.
+    for (let at = 0; at < entries.length; at++) {
+      if (!(at in entries) || entries[at] === null || entries[at] === undefined) return { ok: false, reason: "malformed" };
+    }
     // The entries up to the covered seq: from seq 1 on a whole ledger, or from the checkpoint's
     // point on a pruned one, where the chain runs from the checkpoint instead of the genesis.
     const covered: unknown[] = entries.filter((e) => (e as AuditEntry).seq <= (seq as number));

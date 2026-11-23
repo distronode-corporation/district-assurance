@@ -614,6 +614,13 @@ export function auditLedgerContract(factory: () => AuditLedger | Promise<AuditLe
         // everything held continues its chain, and the head names the last of it (or the base).
         assert.deepEqual(await ledger.base(), point);
         const held = await ledger.list();
+        // A store that acknowledged both appends must hold exactly them: one it quietly dropped
+        // leaves a shorter chain that still verifies, so the acknowledged entries are compared.
+        // Nothing rejected (asserted above), so both settled results are fulfilled.
+        const acknowledged = [settled[1]!, settled[2]!]
+          .map((r) => (r as PromiseFulfilledResult<AuditEntry>).value)
+          .sort((a, b) => a.seq - b.seq);
+        assert.deepEqual(held, acknowledged, "every append the store acknowledged is held");
         assert.ok(held.every((e) => e.seq > point.seq), "no pruned entry survives the race");
         const check = verifyChain(held, point);
         assert.ok(check.ok, "the chain a pruned ledger still holds continues from the checkpoint");

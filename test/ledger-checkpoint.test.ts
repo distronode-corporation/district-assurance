@@ -296,6 +296,25 @@ describe("pruneLedger", () => {
     assert.deepEqual(await pruneLedger(racing, { ledgerId: "ws_1", checkpoint: signed, keys }), { seq: 3, hash: signed.body.hash });
   });
 
+  it("checks the prunedCount the signature vouches for, not the caller's object read again later", async () => {
+    const ledger = await ledgerOf(4);
+    await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: await checkpoint(ledger, 2), keys });
+    const second = await checkpoint(ledger, 4);
+    // The caller's object changes under the base read: the count checked is the one the signature
+    // verified, read once before any await, never the caller's later word.
+    const mutating: AuditLedger = {
+      append: (i) => ledger.append(i),
+      head: () => ledger.head(),
+      list: (fromSeq?: number, limit?: number) => ledger.list(fromSeq, limit),
+      base: async () => {
+        second.body.prunedCount = 99;
+        return ledger.base();
+      },
+      prune: (point: { seq: number; hash: string }) => ledger.prune(point),
+    };
+    assert.deepEqual(await pruneLedger(mutating, { ledgerId: "ws_1", checkpoint: second, keys }), { seq: 4, hash: second.body.hash });
+  });
+
   it("keeps a pruned eventId spent: a replay is refused, never a second entry", async () => {
     const ledger = new MemoryAuditLedger();
     const first = await ledger.append(input(1, "evt_once"));
@@ -351,6 +370,7 @@ describe("exportLedger on a pruned ledger", () => {
     await assert.rejects(run(ledger, { fromSeq: 1, checkpoint: { checkpoint: otherLedger, keys } }), rejects("invalid_input", /names the ledger ws_other/), "a checkpoint that names another ledger");
     await assert.rejects(run(ledger, { fromSeq: 1, checkpoint: { checkpoint: { alg: "ES256", kid: "k1", signature: "AAAA", body: 7 } as never, keys } }), rejects("invalid_input", /not a signed ledger_checkpoint/));
     await assert.rejects(run(ledger, { fromSeq: 1, checkpoint: { checkpoint: { alg: "ES256", kid: "k1", signature: "AAAA", body: { v: 1, type: "ledger_checkpoint", ledgerId: "ws_1", seq: 3, hash: "ab".repeat(32), prunedCount: 3, at: clock.now().toISOString() } } as never, keys } }), rejects("invalid_input", /signature does not verify/));
+    await assert.rejects(run(ledger, { fromSeq: 1, checkpoint: null as never }), rejects("invalid_input", /not a signed ledger_checkpoint/), "a checkpoint reference that is not an object");
     const text = await run(ledger, { fromSeq: 1, checkpoint: { checkpoint: signed, keys } });
     const check = verifyLedgerExport(text, keys, undefined, signed);
     assert.ok(check.ok);

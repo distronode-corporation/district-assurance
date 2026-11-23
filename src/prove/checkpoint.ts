@@ -232,6 +232,9 @@ export async function pruneLedger(ledger: AuditLedger, input: PruneLedgerInput):
   if (check.body.ledgerId !== ledgerId) {
     throw new EngineError("invalid_input", `pruneLedger: the checkpoint names the ledger ${check.body.ledgerId}, not ${ledgerId}`);
   }
+  // Read once, before any await: the caller's object can change under a later read, and the count
+  // the signature vouches for is the one the verification read.
+  const prunedCount = check.body.prunedCount;
   const base = await ledgerBase(ledger);
   const point = check.point;
   // A checkpoint the ledger has already pruned past never prunes again: the base only moves forward.
@@ -240,8 +243,8 @@ export async function pruneLedger(ledger: AuditLedger, input: PruneLedgerInput):
   }
   // The same checkpoint handed in again after its prune: already done, and pruning nothing.
   if (point.seq === base.seq) return point;
-  if (check.body.prunedCount !== point.seq - base.seq) {
-    throw new EngineError("invalid_input", `pruneLedger: the checkpoint says it cuts ${check.body.prunedCount} entries, but this prune cuts ${point.seq - base.seq}: sign it again after the last prune`);
+  if (prunedCount !== point.seq - base.seq) {
+    throw new EngineError("invalid_input", `pruneLedger: the checkpoint says it cuts ${prunedCount} entries, but this prune cuts ${point.seq - base.seq}: sign it again after the last prune`);
   }
   // The checkpoint must name this ledger's entry at its seq, read once before anything is removed.
   const [entry] = await ledger.list(point.seq, 1);
