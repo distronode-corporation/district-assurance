@@ -16,7 +16,7 @@ function codesOf(dir: string): string[] {
     if (entry.isDirectory()) found.push(...codesOf(at));
     else if (entry.name.endsWith(".ts")) {
       const text = readFileSync(at, "utf8");
-      for (const m of text.matchAll(/problem\("([a-z][a-z0-9_.]*)"/g)) found.push(m[1]!);
+      for (const m of text.matchAll(/problem\(\s*"([a-z][a-z0-9_.]*)"/g)) found.push(m[1]!);
       for (const m of text.matchAll(/code: "([a-z][a-z0-9_.]*)"/g)) found.push(m[1]!);
     }
   }
@@ -205,6 +205,7 @@ const PINNED: readonly string[] = [
   "policy.scope_class_missing",
   "policy.scope_classes_shape",
   "policy.scope_floor",
+  "policy.scope_level",
   "policy.scopes_shape",
   "policy.shape",
   "policy.sim_swap_window",
