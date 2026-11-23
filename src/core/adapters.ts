@@ -75,7 +75,8 @@ export type EmailPurpose = "payment_link" | "receipt_link";
 /**
  * Emails sent by code. The destination is always the subject's verified address on file
  * (`SubjectRecord.emailOnFile`), resolved by the engine, never an address heard or keyed on the
- * call. The sender holds its own credentials; nothing here carries one. Like `sendText`,
+ * call; a receipt link email goes to the one kept for the subject when the call's action was
+ * noted. The sender holds its own credentials; nothing here carries one. Like `sendText`,
  * `sendEmail` must settle (sent or failed) within 60 seconds: Paylink holds a payment link against
  * a concurrent expiry for that long while it is being sent (its send lease). A retried send with
  * the same idempotency key must not deliver the email twice.

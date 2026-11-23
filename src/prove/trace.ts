@@ -31,8 +31,9 @@ export interface TraceSettings {
   /**
    * The channels a receipt link may go by: `["text"]` (the default) or `["text", "email"]`, which
    * turns on receipt links by email (`sendReceiptLink`): it needs the `emails` adapter and a
-   * `receipt_email` wording, and goes only to the subject's verified address on file. Text is
-   * always one: it is the channel when the caller chose text for their payment link, or chose nothing.
+   * `receipt_email` wording, and goes only to the address kept for the subject when the call's
+   * action was noted, the verified address on file as the call held it then. Text is always one:
+   * it is the channel when the caller chose text for their payment link, or chose nothing.
    */
   channels?: PaymentChannel[];
 }
