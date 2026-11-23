@@ -65,10 +65,10 @@ export interface TraceTexts {
   /** One notice per contact change, in order, but never two to the same subject's same number. */
   notices: ContactNotice[];
   /**
-   * The address on file for a subject as Badge held it when the call's first action was noted, one
-   * per subject, and `null` when that first observation saw no address, so a later action never
-   * fills one in: a receipt email goes to the one kept here, never to an address the host's
-   * records changed to later on the call (a recheck re-reads the subject).
+   * The address on file for a subject as Badge first read it when a verification started, one per
+   * subject, and `null` when that first read saw no address, so a later read never fills one in:
+   * both the receipt email and the payment link email go to the one kept here, never to an address
+   * the host's records changed to later on the call (a recheck re-reads the subject).
    */
   emails: Array<{ subjectKey: string; to: string | null }>;
   /** Whether a receipt link went out on this call, whichever channel sent it. */
@@ -513,6 +513,30 @@ function textsOf(record: CallRecord): TraceTexts {
 }
 
 /**
+ * The address kept for a subject, the receipt email's rule: the one on file as the call first saw
+ * the subject, before anything on it changed the records. Undefined when nothing was kept yet,
+ * null when that first look saw no address, the address otherwise: never the one on file now.
+ */
+export function keptEmailAddress(record: CallRecord, subjectKey: string): string | null | undefined {
+  const kept = textsOf(record).emails.find((e) => e.subjectKey === subjectKey);
+  return kept === undefined ? undefined : kept.to;
+}
+
+/**
+ * Keeps the address on file for a subject as the call first reads it, once per subject (a later
+ * read never overwrites, and a first read of no address keeps null), and answers the address kept
+ * now. Badge calls this as a verification starts; the payment link email pins its destination to
+ * the kept address (ADR-36), so both emails go by one rule.
+ */
+export function keepEmailAddress(draft: CallDraft, subject: { subjectKey: string; emailOnFile?: string | null | undefined }): string | null {
+  const texts = textsOf(draft.record);
+  if (!texts.emails.some((e) => e.subjectKey === subject.subjectKey)) {
+    texts.emails.push({ subjectKey: subject.subjectKey, to: subject.emailOnFile === undefined ? null : subject.emailOnFile });
+  }
+  return texts.emails.find((e) => e.subjectKey === subject.subjectKey)?.to ?? null;
+}
+
+/**
  * A money, contact or access action happened on the call, for `subject`, the matched subject as
  * Badge read it when verification started: a flow step that needed such a scope completed, or an
  * outside module said it changed contact details (`ModuleCallView.contactChanged`). Each class is
@@ -526,13 +550,6 @@ export function noteAction(draft: CallDraft, action: ActionClass, subjectOf: () 
   // Read before anything changes, so a refusal leaves the call as it was.
   const subject = subjectOf();
   if (!texts.actions.includes(action)) texts.actions.push(action);
-  // The address on file as Badge holds the subject now, kept at the call's first action for them,
-  // and a first observation of no address is kept too, so a later re-read never fills one in: the
-  // receipt email goes to this one, as the notice below keeps the number, never to an address the
-  // host's records changed to later on the call.
-  if (subject.subjectKey !== null && !texts.emails.some((e) => e.subjectKey === subject.subjectKey)) {
-    texts.emails.push({ subjectKey: subject.subjectKey, to: subject.emailOnFile });
-  }
   if (action !== "contact") return;
   // A contact action owes a notice to its subject, so it needs a standing keypad or PIN match.
   if (subject.subjectKey === null || subject.numberOnFile === null) {
@@ -691,8 +708,8 @@ export async function textReceiptLink(
  * email when their last delivered payment link went by email and Trace's `channels` setting still
  * has the email channel on, text otherwise. At most one link per call from this entry point,
  * whichever channel. The email goes only when a keypad or PIN match still stands, as the text
- * channel requires one, and only to the address kept for the subject when the call's first action
- * was noted (as the contact notice keeps the number), held to `isEmailAddress`, under the
+ * channel requires one, and only to the address kept for the subject when the call's verification
+ * first read it (as the contact notice keeps the number), held to `isEmailAddress`, under the
  * caller's standing yes to `receipt_email`; it never carries the address anywhere else. A channel
  * that was chosen but cannot be served (a withdrawn or missing yes, no address kept, one the
  * plain-address check refuses, no standing match) sends nothing: the link never falls back to the
@@ -714,7 +731,7 @@ export async function sendReceiptLink(
     const current = subject(ctx.record);
     // A keypad or PIN match still stands, exactly as the text channel requires one.
     if (current.numberOnFile === null) return { sent: false, channel: null };
-    // The address kept when the call's first action was noted, never the one on file now: a host's
+    // The address kept when the call's verification first read the subject, never the one on file now: a host's
     // records can change under the call, and a recheck re-reads them.
     const kept = ctx.texts.emails.find((e) => e.subjectKey === current.subjectKey);
     const to = kept !== undefined && kept.to !== null && isEmailAddress(kept.to) ? kept.to : null;

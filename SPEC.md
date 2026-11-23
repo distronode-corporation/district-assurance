@@ -2015,13 +2015,19 @@ same payment id and idempotency keys; a different amount is refused. `requestPay
 status it saw last and `expiresAt`.
 
 **Channels: text or email (0.3.0).** A link goes by text to the number on file, as before, or by
-email to the subject's verified address on file (`SubjectRecord.emailOnFile`), when Paylink's
-`channels` is `["text", "email"]` and the caller chose email. The engine never takes an address
-from a call: no entry point accepts one, and the destination is always the address on file as
-Badge read the subject when verification started, held to `isEmailAddress` (at most 254 ASCII
-characters, one `@`, an unquoted dot-atom local part of at most 64, a domain of two or more DNS
-labels with a top-level domain of letters or an `xn--` label; no quoted part, IP literal, space,
-comma, control character or line break). A missing or refused address is no address.
+email to the address the call kept for the subject, the same one a receipt email goes
+to, when Paylink's `channels` is `["text", "email"]` and the caller chose email. The engine never
+takes an address from a call: no entry point accepts one, and the destination is always the address
+the call kept for the subject before anything on the call changed it (kept at the call's first verification start, once
+per subject), kept on the choice and then on the request, so a resume sends to the same place; held to `isEmailAddress` (at
+most 254 ASCII characters, one `@`, an unquoted dot-atom local part of at most 64, a domain of two
+or more DNS labels with a top-level domain of letters or an `xn--` label; no quoted part, IP
+literal, space, comma, control character or line break). Email is offered only while the address
+on file is still the kept one: once the host's records changed it (a keypad recheck re-reads the
+subject) the offer is text alone, before or after the choice, and a change or removal since never
+redirects the link. A choice or a request that kept no address sends no email, never whatever is on
+file now: an emailed request left open by a 0.3.0 engine is refused until the host cancels it and
+offers the channels again. A missing or refused address is no address.
 
 - `offerPaymentChannels(callId)` needs Paylink on, the flow on a `paylink.channel` step (or no
   flow; another step is `precondition_failed`), an open call (`invalid_transition`),
@@ -2390,8 +2396,8 @@ and French on every call, Spanish too on a Spanish call). A test fails when a ca
 supported locale, when a `Record<Locale, ...>` in `src/` is not one it checks, or when code picks
 words by comparing a locale instead, so a new locale grows every catalog. The destination of a
 text is always the subject's number on file; the payment link email goes to the verified address on
-file, and the receipt link email to the one kept for the subject when the call's first action was
-noted (below).
+file, and the receipt link email to the one kept for the subject when the call's verification
+first read it (below).
 Identity link: "Your one-time identity check link: URL" /
 "Votre lien de vérification d'identité, à usage unique : URL" / "Su enlace de verificación de
 identidad, de un solo uso: URL". Payment link: "Your secure payment link for AMOUNT: URL" /
@@ -2428,10 +2434,10 @@ is no number to alert. Each contact action also keeps the matched subject and it
 as Badge read it when verification started, before the change, unless the call already kept that
 same subject with that same number; Badge's keypad or PIN match always stands then, since such a
 step follows a level 2 verification. Keeping one writes `contact.notice_owed` in the same write.
-Every action, of whichever class, also keeps the subject's address on file as Badge held it at that
-moment, once per subject (the first action's, and a first observation of no address is kept too, so a
-later one never fills it in), never one a later recheck re-read: that kept address is where a receipt
-link email goes (below).
+A verification's start also keeps the subject's address on file as Badge reads it then, once per
+subject (the first read's, and a first read of no address is kept too, so a later one never fills it
+in), never one a later recheck re-reads: that kept address is where the receipt link email and the
+payment link email go (below, section 14).
 
 **Receipt link** (purposes `receipt_link` and `receipt_email`). `textReceiptLink(callId, url)` texts
 the host's capability link to an ended call's receipt (section 12, an `https` URL of at most 512
@@ -2457,11 +2463,13 @@ is `["text", "email"]`, text otherwise, following `textReceiptLink`'s rules exac
 only when a keypad or PIN match still stands, exactly as the text channel requires one, and the
 caller's latest answer to the `receipt_email` consent purpose (Trace's settings hold
 its wording, the caller's answer is recorded like any consent) is "yes", and only to the address
-kept for the subject when the call's first action was noted, the address on file as Badge held it
-then, held to `isEmailAddress`: never an address the host's records changed to later on the call,
+kept for the subject when the call's verification first read it, the address on file as Badge held
+it then, held to `isEmailAddress`: never an address the host's records changed to later on the call,
 never one a recheck re-read, never one heard or keyed on the call. A call with nothing kept (one
-saved before this, a first action that noted no address, or a record holding one the plain-address
-check refuses) sends no email. The flow does not have to ask for it with a `textLink` field: the answer is
+saved before this, a first verification that read no address, or a record holding one the plain-address
+check refuses) sends no email. The email needs the caller's number on file too: that a keypad or
+PIN match still stands shows as the number the text channel would use, so with no standing match
+(a taint ended it) no email receipt goes out either. That fails closed. The flow does not have to ask for it with a `textLink` field: the answer is
 the ask. A channel that was chosen but cannot be served (no answer, a later "no", one still being
 stored or revoked, no address kept) sends nothing, and the link never falls back to the other
 channel; a caller who chose email and only answered the text purpose gets no link from

@@ -45,6 +45,7 @@ import {
 import { counterKeys, currentLock, isCallingNumber, lockoutOf, lockoutSettingsErrors, forgetPass, recordFailures, removeOwnOnNumbers, type Lock } from "./counters.ts";
 import { clearsSoFar, duressClearedData, duressFlagKey, flagDuressUnlessCleared, forgetHidden, hiddenCounterKey, hiddenHardLock, hiddenWindowStart, isUnderDuress, recordClear } from "./duress-flag.ts";
 import { isKeypadEntry } from "./knowledge.ts";
+import { keepEmailAddress } from "../prove/trace.ts";
 import type { TextCodeState } from "./text-code.ts";
 
 export const BADGE = "badge";
@@ -801,6 +802,10 @@ export async function startVerification(rt: EngineRuntime, callId: string, resol
     s.subjectKey = subjectKey;
     s.subject = subject;
     if (numberKey !== null) s.numberKey = numberKey;
+    // The address on file as this verification reads the subject, kept at the call's first look at
+    // it (ADR-36): a recheck after the host's records changed re-reads the subject, but what was
+    // kept stands, and both the payment and the receipt email go to it.
+    if (subject !== null && subjectKey !== null) keepEmailAddress(draft, { subjectKey, emailOnFile: subject.emailOnFile });
     draft.emit("verification.started", "code", { subject: byHost ? "host" : "account" });
   });
 }
