@@ -8,7 +8,7 @@ import type { CallRecord } from "../src/core/runtime.ts";
 import type { JsonValue } from "../src/core/canonical.ts";
 import { validateConfig, type FlowConfig } from "../src/core/config.ts";
 import type { AssuranceModule } from "../src/core/module.ts";
-import { contactNoticeText, receiptLinkText } from "../src/prove/trace.ts";
+import { contactNoticeText, noteAction, receiptLinkText } from "../src/prove/trace.ts";
 import { TEST_KNOWLEDGE_KEY, testSubject, type TestEngine } from "../src/testing/index.ts";
 import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, rejects, setup, testConfig, wording } from "./helpers.ts";
 
@@ -123,6 +123,25 @@ async function depositCall(t: TestEngine, answer: "yes" | "no", locale: "en" | "
 
 const texts = (t: TestEngine, purpose: MessagePurpose) => t.messages.sent.filter((m) => m.purpose === purpose);
 const events = async (t: TestEngine, name: string) => (await t.ledger.list()).filter((e) => e.event === name);
+
+describe("noting actions", () => {
+  it("refuses a contact action with no matched subject, notes a money one, and keeps no address without a subject", () => {
+    // The engine's own scope checks refuse a contact change without a match before this guard runs;
+    // the guard is what answers when they do not. A money action notes with no subject: its step
+    // can complete after a taint, and no address is kept for the receipt email (fail closed).
+    const emitted: string[] = [];
+    const draftOf = () =>
+      ({
+        record: { modules: { trace: { wordings: [], consents: [], storing: null, unrecorded: [], endedHead: null, receipt: null, businessName: null, texts: { actions: [], notices: [], emails: [], receiptLink: "none" } } } },
+        emit: (name: string) => emitted.push(name),
+      }) as unknown as Parameters<typeof noteAction>[0];
+    assert.throws(() => noteAction(draftOf(), "contact", () => ({ subjectKey: null, numberOnFile: null, emailOnFile: null })), (e: unknown) => e instanceof Error && /have not matched/.test(e.message));
+    const draft = draftOf();
+    noteAction(draft, "money", () => ({ subjectKey: null, numberOnFile: null, emailOnFile: null }));
+    const texts = (draft.record as unknown as { modules: { trace: { texts: { actions: string[]; emails: unknown[]; notices: unknown[] } } } }).modules.trace.texts;
+    assert.deepEqual([texts.actions, texts.emails, texts.notices, emitted], [["money"], [], [], []]);
+  });
+});
 
 describe("receipt link text", () => {
   it("is sent after a money flow, with consent, to the number on file, once, and carries no values", async () => {

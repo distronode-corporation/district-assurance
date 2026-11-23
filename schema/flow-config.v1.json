@@ -356,7 +356,14 @@
       "properties": {
         "receipts": { "type": "boolean" },
         "wordings": { "type": "array", "items": { "$ref": "#/$defs/wording" } },
-        "businessName": { "description": "The name a texted receipt link names, 1 to 64 characters on one line.", "type": "string", "minLength": 1 }
+        "businessName": { "description": "The name a texted receipt link names, 1 to 64 characters on one line.", "type": "string", "minLength": 1 },
+        "channels": {
+          "description": "The channels a receipt link may go by: text always, and email to turn on receipt links by email (it needs the emails adapter and a receipt_email wording); default text only.",
+          "type": "array",
+          "uniqueItems": true,
+          "contains": { "const": "text" },
+          "items": { "enum": ["text", "email"] }
+        }
       }
     },
     "wording": {

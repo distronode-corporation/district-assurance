@@ -5,14 +5,16 @@
 // Trace also sends the two texts that follow a money, contact or access step: a link to the call's
 // receipt, when the flow asks for it and the caller consented, and the security notice after a
 // contact change, which always goes. Code builds both, and neither carries a value.
-import type { AuditEntry, ConsentChannel, ConsentRecord, ConsentRevocation, ConsentStore } from "../core/adapters.ts";
+import type { AuditEntry, ConsentChannel, ConsentRecord, ConsentRevocation, ConsentStore, EmailSender } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
+import { isEmailAddress } from "../core/email.ts";
 import { stepOfType } from "../core/flow.ts";
 import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
 import type { ScopeClass } from "../core/policy.ts";
 import { LOCALES, type CallDraft, type CallRecord, type EngineRuntime, type Locale } from "../core/runtime.ts";
 import { isObject, unknownKeys } from "../core/shape.ts";
+import type { PaymentChannel } from "../pay/payment.ts";
 import { wordingDigest, type ConsentWording } from "./consent.ts";
 import { detailCarriesCardNumber } from "./ledger.ts";
 import { receiptDigest, signReceipt, type ReceiptBody, type SignedReceipt } from "./receipt.ts";
@@ -26,7 +28,18 @@ export interface TraceSettings {
   wordings?: ConsentWording[];
   /** The name the texts sign with (1 to 64 characters). Needed by a flow that texts a receipt link. */
   businessName?: string;
+  /**
+   * The channels a receipt link may go by: `["text"]` (the default) or `["text", "email"]`, which
+   * turns on receipt links by email (`sendReceiptLink`): it needs the `emails` adapter and a
+   * `receipt_email` wording, and goes only to the address kept for the subject when the call's
+   * action was noted, the verified address on file as the call held it then. Text is always one:
+   * it is the channel when the caller chose text for their payment link, or chose nothing.
+   */
+  channels?: PaymentChannel[];
 }
+
+/** The consent purpose a receipt link by email is sent under, fixed in code: the wording for it is the host's, in Trace's settings. */
+export const RECEIPT_EMAIL_PURPOSE = "receipt_email";
 
 export interface TraceReceiptStep extends FlowStep {
   type: "trace.receipt";
@@ -51,7 +64,20 @@ export interface TraceTexts {
   actions: ActionClass[];
   /** One notice per contact change, in order, but never two to the same subject's same number. */
   notices: ContactNotice[];
+  /**
+   * The address on file for a subject as Badge held it when the call's first action was noted, one
+   * per subject, and `null` when that first observation saw no address, so a later action never
+   * fills one in: a receipt email goes to the one kept here, never to an address the host's
+   * records changed to later on the call (a recheck re-reads the subject).
+   */
+  emails: Array<{ subjectKey: string; to: string | null }>;
+  /** Whether a receipt link went out on this call, whichever channel sent it. */
   receiptLink: "none" | "sent";
+  /**
+   * The channels whose send is recorded on the ledger (`receipt.link_texted`, `receipt.link_emailed`),
+   * in the order they were recorded. Absent on a call saved before receipt links had channels.
+   */
+  receiptLinkChannels?: ("text" | "email")[];
 }
 
 export interface TraceConsentStep extends FlowStep {
@@ -118,6 +144,22 @@ function settingsOf(rt: EngineRuntime): TraceSettings {
   return rt.settings<TraceSettings | undefined>(TRACE) ?? {};
 }
 
+/** Whether a receipt link may go by email under these settings (Paylink's `channels` shape: text always, email to turn it on). */
+function receiptEmailOn(settings: TraceSettings | undefined): boolean {
+  return (settings?.channels ?? []).includes("email");
+}
+
+/** Problems with Trace's `channels` setting: text always, email at most once, and email needs its wording. */
+function channelsErrors(value: unknown, wordings: unknown): string[] {
+  if (!Array.isArray(value) || !value.every((c) => c === "text" || c === "email")) return ["channels must list text, and email or not"];
+  if (new Set(value).size !== value.length) return ["channels has duplicates"];
+  if (!value.includes("text")) return ["channels must include text: it is how a receipt link goes when the caller chose text, or nothing, for their payment link"];
+  if (value.includes("email") && !(Array.isArray(wordings) && wordings.some((w: unknown) => isObject(w) && w.purpose === RECEIPT_EMAIL_PURPOSE))) {
+    return [`the email channel needs a ${RECEIPT_EMAIL_PURPOSE} wording in the trace settings`];
+  }
+  return [];
+}
+
 export const traceModule: AssuranceModule = {
   manifest: {
     name: TRACE,
@@ -132,7 +174,7 @@ export const traceModule: AssuranceModule = {
   validateSettings(settings: unknown): string[] {
     if (settings === undefined) return [];
     if (!isObject(settings)) return ["must be an object"];
-    const errors = unknownKeys(settings, ["receipts", "wordings", "businessName"]).map((k) => `${k} is not a trace setting`);
+    const errors = unknownKeys(settings, ["receipts", "wordings", "businessName", "channels"]).map((k) => `${k} is not a trace setting`);
     if (settings.receipts !== undefined && typeof settings.receipts !== "boolean") errors.push("receipts must be true or false");
     const name = settings.businessName;
     if (name !== undefined && (typeof name !== "string" || !BUSINESS_NAME.test(name) || name.trim() === "")) errors.push("businessName must be 1 to 64 characters on one line");
@@ -142,11 +184,14 @@ export const traceModule: AssuranceModule = {
       const purposes = settings.wordings.map((w: unknown) => (isObject(w) ? w.purpose : undefined));
       if (new Set(purposes).size !== purposes.length) errors.push("two wordings have the same purpose");
     }
+    if (settings.channels !== undefined) errors.push(...channelsErrors(settings.channels, settings.wordings));
     return errors;
   },
 
   requiredAdapters(settings: unknown): string[] {
-    return (settings as TraceSettings | undefined)?.receipts === false ? ["ledger"] : ["ledger", "signer"];
+    const trace = settings as TraceSettings | undefined;
+    const adapters = (trace?.receipts === false ? ["ledger"] : ["ledger", "signer"]) as string[];
+    return receiptEmailOn(trace) ? [...adapters, "emails"] : adapters;
   },
 
   validateStep(step: FlowStep, ctx: StepContext): string[] {
@@ -169,7 +214,7 @@ export const traceModule: AssuranceModule = {
   initCall(settings: unknown): JsonValue {
     const wordings = (settings as TraceSettings | undefined)?.wordings ?? [];
     const businessName = (settings as TraceSettings | undefined)?.businessName ?? null;
-    const texts: TraceTexts = { actions: [], notices: [], receiptLink: "none" };
+    const texts: TraceTexts = { actions: [], notices: [], emails: [], receiptLink: "none" };
     return { wordings: structuredClone(wordings), consents: [], storing: null, unrecorded: [], endedHead: null, receipt: null, businessName, texts } as unknown as JsonValue;
   },
 
@@ -459,8 +504,11 @@ export async function issueReceipt(
 
 function textsOf(record: CallRecord): TraceTexts {
   const slice = record.modules[TRACE] as unknown as TraceSlice;
-  // A call stored before PRV-10 has no texts yet: it loads with none.
-  slice.texts ??= { actions: [], notices: [], receiptLink: "none" };
+  // A call stored before PRV-10 has no texts yet, and one stored before receipt links had channels
+  // keeps neither list: both load with none.
+  slice.texts ??= { actions: [], notices: [], emails: [], receiptLink: "none" };
+  slice.texts.emails ??= [];
+  slice.texts.receiptLinkChannels ??= [];
   return slice.texts;
 }
 
@@ -473,15 +521,25 @@ function textsOf(record: CallRecord): TraceTexts {
  * identical texts to one number). The notice owed is saved in the same write as the change, and
  * `contact.notice_owed` goes to the ledger with it, so a sweep can find a call that never ends.
  */
-export function noteAction(draft: CallDraft, action: ActionClass, subjectOf: () => { subjectKey: string; phoneOnFile: string }): void {
+export function noteAction(draft: CallDraft, action: ActionClass, subjectOf: () => { subjectKey: string | null; numberOnFile: string | null; emailOnFile: string | null }): void {
   const texts = textsOf(draft.record);
-  // A contact action owes a notice to its subject, so it needs one (subjectOf throws without);
-  // read before anything changes, so a refusal leaves the call as it was.
-  const subject = action === "contact" ? subjectOf() : null;
+  // Read before anything changes, so a refusal leaves the call as it was.
+  const subject = subjectOf();
   if (!texts.actions.includes(action)) texts.actions.push(action);
-  if (subject === null) return;
-  if (texts.notices.some((n) => n.subjectKey === subject.subjectKey && n.to === subject.phoneOnFile)) return;
-  texts.notices.push({ subjectKey: subject.subjectKey, to: subject.phoneOnFile, sent: false });
+  // The address on file as Badge holds the subject now, kept at the call's first action for them,
+  // and a first observation of no address is kept too, so a later re-read never fills one in: the
+  // receipt email goes to this one, as the notice below keeps the number, never to an address the
+  // host's records changed to later on the call.
+  if (subject.subjectKey !== null && !texts.emails.some((e) => e.subjectKey === subject.subjectKey)) {
+    texts.emails.push({ subjectKey: subject.subjectKey, to: subject.emailOnFile });
+  }
+  if (action !== "contact") return;
+  // A contact action owes a notice to its subject, so it needs a standing keypad or PIN match.
+  if (subject.subjectKey === null || subject.numberOnFile === null) {
+    throw new EngineError("precondition_failed", "the keypad or PIN checks have not matched on this call");
+  }
+  if (texts.notices.some((n) => n.subjectKey === subject.subjectKey && n.to === subject.numberOnFile)) return;
+  texts.notices.push({ subjectKey: subject.subjectKey, to: subject.numberOnFile, sent: false });
   draft.emit("contact.notice_owed", "code", {});
 }
 
@@ -530,13 +588,92 @@ export async function sendContactNotice(rt: EngineRuntime, callId: string): Prom
 }
 
 /**
+ * What a receipt link send is judged on, read once. Throws the refusals both channels share: a
+ * link that is not an https URL of the right shape, a call that has not ended, a call with no
+ * receipt yet.
+ */
+async function receiptLinkContext(rt: EngineRuntime, callId: string, url: string): Promise<{ record: CallRecord; slice: TraceSlice; step: TraceReceiptStep | undefined; texts: TraceTexts }> {
+  if (!isReceiptLink(url)) throw new EngineError("invalid_input", "the receipt link must be an https URL of at most 512 characters");
+  const record = await rt.read(callId);
+  if (record.state.phase !== "ended") throw new EngineError("precondition_failed", "a receipt link is texted once the call has ended");
+  const slice = record.modules[TRACE] as unknown as TraceSlice;
+  if (slice.receipt === null) throw new EngineError("precondition_failed", "the call has no receipt yet");
+  const step = record.flow?.steps.find((s): s is TraceReceiptStep => s.type === "trace.receipt");
+  return { record, slice, step, texts: textsOf(record) };
+}
+
+/**
+ * Whether the caller's latest answer to a purpose on this call is a standing yes: answers are
+ * appended, so a later "no" withdraws an earlier "yes", and an answer still being stored when the
+ * call ended (not_recorded) may be a later "no", so any one for the purpose sends nothing (fail
+ * closed). A revocation is kept in the ConsentStore, not on the call: the yes is read back from the
+ * store, and one revoked, or not found there, sends nothing. A read that fails sends nothing too.
+ */
+async function consentStands(rt: EngineRuntime, slice: TraceSlice, purpose: string | undefined): Promise<boolean> {
+  if (purpose === undefined) return false;
+  if (slice.consents.findLast((c) => c.purpose === purpose)?.answer !== "yes") return false;
+  if (consentsOf(slice).unrecorded.some((c) => c.purpose === purpose)) return false;
+  const store = consentStore(rt);
+  if (store !== null) {
+    const latest = slice.consents.findLast((c) => c.purpose === purpose)!;
+    if ((await store.getConsent(rt.workspaceId, latest.consentId))?.revoked !== null) return false;
+  }
+  return true;
+}
+
+/**
+ * Records the send. `receiptLink` is the once-per-call guard, exactly the value a process running
+ * 0.3.0 reads; each channel's own entry is written when that channel's send is not recorded yet, so
+ * two entry points racing still log one entry per channel that really sent, and no channel logs
+ * twice (two processes can both send one message, by its key).
+ */
+async function recordLinkSent(rt: EngineRuntime, callId: string, channel: "text" | "email"): Promise<void> {
+  await rt.update(callId, (draft) => {
+    const s = textsOf(draft.record);
+    const recorded = (s.receiptLinkChannels ??= []);
+    if (recorded.includes(channel)) return;
+    recorded.push(channel);
+    s.receiptLink = "sent";
+    draft.emit(channel === "email" ? "receipt.link_emailed" : "receipt.link_texted", "code", { actions: [...s.actions] });
+  });
+}
+
+/**
+ * Texts the receipt link by the text channel's own rules: the flow's `trace.receipt` step asks for
+ * it (`textLink`), the caller's latest answer to that consent purpose is yes, and the number is the
+ * one kept for Badge's current subject before a contact change, else that subject's number on file.
+ * Answers whether the text went out.
+ */
+async function textTheLink(
+  rt: EngineRuntime,
+  callId: string,
+  url: string,
+  ctx: { record: CallRecord; slice: TraceSlice; step: TraceReceiptStep | undefined; texts: TraceTexts },
+  subject: (record: CallRecord) => { subjectKey: string | null; numberOnFile: string | null },
+): Promise<boolean> {
+  if (!(await consentStands(rt, ctx.slice, ctx.step?.textLink?.consent))) return false;
+  const current = subject(ctx.record);
+  const kept = ctx.texts.notices.find((n) => n.subjectKey === current.subjectKey);
+  const to = kept?.to ?? current.numberOnFile;
+  if (to === null) return false;
+  await rt.adapter("messages").sendText({
+    to,
+    body: receiptLinkText(ctx.record.locale, ctx.slice.businessName!, ctx.texts.actions, url),
+    purpose: "receipt_link",
+    idempotencyKey: rt.idempotencyKey(callId, "receipt-link", "text"),
+  });
+  await recordLinkSent(rt, callId, "text");
+  return true;
+}
+
+/**
  * Texts a link to an ended call's receipt (the host's capability link, SRV-3) to the number on
  * file, at most once per call. It goes only when the flow's `trace.receipt` step asks for it, a
  * money, contact or access step completed, the caller said "yes" to the step's consent purpose, and
  * a keypad or PIN factor matched; after a contact change, to the number on file before it. Only the
  * caller's latest answer for the purpose counts. The link goes only to a number of the subject
  * Badge holds last (`subject`), whose receipt it is, never to a number kept for another subject.
- * `texted` is false when any of that does not hold, or the link was texted already.
+ * `texted` is false when any of that does not hold, or a link was sent already (by either channel).
  */
 export async function textReceiptLink(
   rt: EngineRuntime,
@@ -544,45 +681,63 @@ export async function textReceiptLink(
   url: string,
   subject: (record: CallRecord) => { subjectKey: string | null; numberOnFile: string | null },
 ): Promise<{ texted: boolean }> {
-  if (!isReceiptLink(url)) throw new EngineError("invalid_input", "the receipt link must be an https URL of at most 512 characters");
-  const record = await rt.read(callId);
-  if (record.state.phase !== "ended") throw new EngineError("precondition_failed", "a receipt link is texted once the call has ended");
-  const slice = record.modules[TRACE] as unknown as TraceSlice;
-  if (slice.receipt === null) throw new EngineError("precondition_failed", "the call has no receipt yet");
-  const step = record.flow?.steps.find((s): s is TraceReceiptStep => s.type === "trace.receipt");
-  const texts = slice.texts;
-  const consent = step?.textLink?.consent;
-  // Answers are appended: a later "no" withdraws an earlier "yes".
-  // An answer still being stored when the call ended (not_recorded) may be a later "no": any one
-  // for the purpose sends nothing (fail closed).
-  const consented = slice.consents.findLast((c) => c.purpose === consent)?.answer === "yes" && !consentsOf(slice).unrecorded.some((c) => c.purpose === consent);
-  if (consent === undefined || texts.receiptLink === "sent" || texts.actions.length === 0 || !consented) return { texted: false };
-  // A revocation is kept in the ConsentStore, not on the call: the yes is read back from the store
-  // first, and one revoked, or not found there, sends nothing. A read that fails sends nothing too.
-  const store = consentStore(rt);
-  if (store !== null) {
-    const latest = slice.consents.findLast((c) => c.purpose === consent)!;
-    if ((await store.getConsent(rt.workspaceId, latest.consentId))?.revoked !== null) return { texted: false };
-  }
-  const current = subject(record);
-  const kept = texts.notices.find((n) => n.subjectKey === current.subjectKey);
-  const to = kept?.to ?? current.numberOnFile;
-  if (to === null) return { texted: false };
-  await rt.adapter("messages").sendText({
-    to,
-    body: receiptLinkText(record.locale, slice.businessName!, texts.actions, url),
-    purpose: "receipt_link",
-    idempotencyKey: rt.idempotencyKey(callId, "receipt-link", "text"),
-  });
-  return rt.update(callId, (draft) => {
-    const s = draft.slice<TraceSlice>(TRACE).texts;
-    // Two processes can both send (one text, by its key): the first records it, once.
-    if (s.receiptLink !== "sent") {
-      s.receiptLink = "sent";
-      draft.emit("receipt.link_texted", "code", { actions: [...s.actions] });
+  const ctx = await receiptLinkContext(rt, callId, url);
+  if (ctx.texts.receiptLink !== "none" || ctx.texts.actions.length === 0) return { texted: false };
+  return { texted: await textTheLink(rt, callId, url, ctx, subject) };
+}
+
+/**
+ * Sends a link to an ended call's receipt by the channel the caller chose for their payment link:
+ * email when their last delivered payment link went by email and Trace's `channels` setting still
+ * has the email channel on, text otherwise. At most one link per call from this entry point,
+ * whichever channel. The email goes only when a keypad or PIN match still stands, as the text
+ * channel requires one, and only to the address kept for the subject when the call's first action
+ * was noted (as the contact notice keeps the number), held to `isEmailAddress`, under the
+ * caller's standing yes to `receipt_email`; it never carries the address anywhere else. A channel
+ * that was chosen but cannot be served (a withdrawn or missing yes, no address kept, one the
+ * plain-address check refuses, no standing match) sends nothing: the link never falls back to the
+ * other channel, and a host that runs `textReceiptLink` beside this can still text on its own
+ * consent, so a host that adopts this calls it alone. The text channel follows
+ * `textReceiptLink`'s rules exactly.
+ */
+export async function sendReceiptLink(
+  rt: EngineRuntime,
+  callId: string,
+  url: string,
+  subject: (record: CallRecord) => { subjectKey: string | null; numberOnFile: string | null; emailOnFile: string | null },
+  paymentChannel: (record: CallRecord) => PaymentChannel,
+): Promise<{ sent: boolean; channel: PaymentChannel | null }> {
+  const ctx = await receiptLinkContext(rt, callId, url);
+  if (ctx.texts.receiptLink !== "none" || ctx.texts.actions.length === 0) return { sent: false, channel: null };
+  // The settings are read now: a business turns the email channel off without editing a flow.
+  if (paymentChannel(ctx.record) === "email" && receiptEmailOn(settingsOf(rt))) {
+    const current = subject(ctx.record);
+    // A keypad or PIN match still stands, exactly as the text channel requires one.
+    if (current.numberOnFile === null) return { sent: false, channel: null };
+    // The address kept when the call's first action was noted, never the one on file now: a host's
+    // records can change under the call, and a recheck re-reads them.
+    const kept = ctx.texts.emails.find((e) => e.subjectKey === current.subjectKey);
+    const to = kept !== undefined && kept.to !== null && isEmailAddress(kept.to) ? kept.to : null;
+    if (to !== null && (await consentStands(rt, ctx.slice, RECEIPT_EMAIL_PURPOSE))) {
+      // The call keeps its business name from the start, and a payment went out by email, which
+      // needed it, so it is there.
+      const business = ctx.slice.businessName!;
+      const email = RECEIPT_EMAIL[ctx.record.locale];
+      await (rt.adapter("emails") as EmailSender).sendEmail({
+        to,
+        subject: email.subject(business),
+        body: email.body(business, actionKinds(ctx.record.locale, ctx.texts.actions), url),
+        locale: ctx.record.locale,
+        purpose: "receipt_link",
+        idempotencyKey: rt.idempotencyKey(callId, "receipt-link", "email"),
+      });
+      await recordLinkSent(rt, callId, "email");
+      return { sent: true, channel: "email" };
     }
-    return { texted: true };
-  });
+    // The email channel was chosen and cannot be served: nothing goes out, and never by text instead.
+    return { sent: false, channel: null };
+  }
+  return (await textTheLink(rt, callId, url, ctx, subject)) ? { sent: true, channel: "text" } : { sent: false, channel: null };
 }
 
 function isReceiptLink(url: unknown): boolean {
@@ -610,6 +765,26 @@ export const RECEIPT_LINK_TEXT: Record<Locale, (businessName: string, kinds: str
   es: (businessName, kinds, url) => `Recibo de ${businessName} por ${kinds} durante su llamada: ${url}`,
 };
 
+/**
+ * The receipt link email, in each supported locale. It names the business, what the call did and
+ * the link, so a forwarded copy holds nothing more: never an amount, a code, a phone number or a
+ * personal value.
+ */
+export const RECEIPT_EMAIL: Record<Locale, { subject: (business: string) => string; body: (business: string, kinds: string, url: string) => string }> = {
+  en: {
+    subject: (business) => `Your receipt from ${business}`,
+    body: (business, kinds, url) => `${business} sent you a receipt for ${kinds} on your call.\n\n${url}\n\nIf you did not have this call, do not use the link.`,
+  },
+  fr: {
+    subject: (business) => `Votre reçu de ${business}`,
+    body: (business, kinds, url) => `${business} vous a envoyé un reçu pour ${kinds} lors de votre appel.\n\n${url}\n\nSi vous n'avez pas passé cet appel, n'utilisez pas le lien.`,
+  },
+  es: {
+    subject: (business) => `Su recibo de ${business}`,
+    body: (business, kinds, url) => `${business} le envió un recibo por ${kinds} durante su llamada.\n\n${url}\n\nSi no realizó esta llamada, no use el enlace.`,
+  },
+};
+
 /** The contact change notice, in each supported locale. */
 export const CONTACT_NOTICE_TEXT: Record<Locale, (businessName: string | null) => string> = {
   en: (businessName) => `${businessName ?? "Security notice"}: the contact details on your account were changed during a call. If it was not you, contact us right away.`,
@@ -619,10 +794,14 @@ export const CONTACT_NOTICE_TEXT: Record<Locale, (businessName: string | null) =
     `${businessName ?? "Aviso de seguridad"}: los datos de contacto de su cuenta se cambiaron durante una llamada. Si no fue usted, comuníquese con nosotros de inmediato.`,
 };
 
+/** The call's actions as one list, in the locale's words ("a payment and a change to your contact details"). */
+function actionKinds(locale: Locale, actions: readonly ActionClass[]): string {
+  return new Intl.ListFormat(LIST_REGION[locale], { type: "conjunction" }).format(actions.map((a) => ACTION_WORDS[locale][a]));
+}
+
 /** The receipt text: the business and the kinds of action, never an amount, a code or a personal value. */
 export function receiptLinkText(locale: Locale, businessName: string, actions: readonly ActionClass[], url: string): string {
-  const kinds = new Intl.ListFormat(LIST_REGION[locale], { type: "conjunction" }).format(actions.map((a) => ACTION_WORDS[locale][a]));
-  return RECEIPT_LINK_TEXT[locale](businessName, kinds, url);
+  return RECEIPT_LINK_TEXT[locale](businessName, actionKinds(locale, actions), url);
 }
 
 /** The security notice of a contact change: no values, not even which detail changed. */

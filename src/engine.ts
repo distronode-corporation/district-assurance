@@ -1381,10 +1381,22 @@ export class Engine {
   /**
    * Texts the link to an ended call's receipt (`url`: the host's capability link, SRV-3) to the
    * number on file, when the flow's `trace.receipt` step has `textLink`, a money, contact or access
-   * step completed, the caller consented and a keypad or PIN factor matched. At most once per call.
+   * step completed, the caller consented and a keypad or PIN factor matched. At most once per call;
+   * a link `sendReceiptLink` sent counts.
    */
   textReceiptLink(callId: string, url: string): Promise<{ texted: boolean }> {
     return trace.textReceiptLink(this.#rt, callId, url, (record) => this.#currentSubject(record));
+  }
+
+  /**
+   * Sends the link to an ended call's receipt by the channel the caller chose for their payment
+   * link: email, to the verified address on file only, when they chose email there, Trace's
+   * `channels` setting has the email channel on and the caller consented to `receipt_email`; by
+   * text, as `textReceiptLink` does, otherwise. At most once per call, whichever channel; a
+   * channel that was chosen but not consented to sends nothing, never the other channel instead.
+   */
+  async sendReceiptLink(callId: string, url: string): Promise<{ sent: boolean; channel: PaymentChannel | null }> {
+    return trace.sendReceiptLink(this.#rt, callId, url, (record) => this.#currentSubject(record), (record) => paylink.paymentChannelOf(record));
   }
 
   async receipt(callId: string): Promise<SignedReceipt | null> {
@@ -1492,7 +1504,7 @@ export class Engine {
       newId: (prefix) => this.#ids.next(prefix),
       authorized: (scope) => this.#authorized(draft.record, scope),
       emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
-      contactChanged: () => trace.noteAction(draft, "contact", () => badge.matchedSubject(draft.record)),
+      contactChanged: () => trace.noteAction(draft, "contact", () => this.#currentSubject(draft.record)),
     };
     const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);
     draft.record.modules[name] = structuredClone(next);
@@ -1707,10 +1719,10 @@ export class Engine {
       // A money, contact or access step is what a receipt text names, and a contact one owes a notice.
       // Such a step follows a level 2 verification, which a keypad or PIN match always unlocked. Only
       // a contact step needs the match to stand (its notice goes to the matched subject's number):
-      // matchedSubject fails closed if it does not. A payment texted before a taint still completes
+      // Trace's noteAction fails closed if it does not. A payment texted before a taint still completes
       // when the provider reports it, without the match, which stays void.
       const action = this.#actionClass(owner!, step.type);
-      if (action !== null) trace.noteAction(draft, action, () => badge.matchedSubject(record));
+      if (action !== null) trace.noteAction(draft, action, () => this.#currentSubject(record));
       flow.index++;
       const next = flow.steps[flow.index];
       if (next === undefined) {
@@ -1792,9 +1804,9 @@ export class Engine {
    * started from nothing). Only asked about a call whose flow completed a scoped step, so Badge's
    * part exists.
    */
-  #currentSubject(record: CallRecord): { subjectKey: string | null; numberOnFile: string | null } {
+  #currentSubject(record: CallRecord): { subjectKey: string | null; numberOnFile: string | null; emailOnFile: string | null } {
     const s = record.modules[badge.BADGE] as unknown as badge.BadgeSlice;
-    return { subjectKey: s.subject?.subjectKey ?? null, numberOnFile: s.knowledgeMatched ? s.subject!.phoneOnFile : null };
+    return { subjectKey: s.subject?.subjectKey ?? null, numberOnFile: s.knowledgeMatched ? s.subject!.phoneOnFile : null, emailOnFile: s.knowledgeMatched ? (s.subject!.emailOnFile ?? null) : null };
   }
 
   /**
