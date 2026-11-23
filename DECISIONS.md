@@ -585,8 +585,9 @@ subject when the call's first action was noted (the address on file as Badge hel
 per subject, as the contact notice keeps the number before a change), under the caller's standing yes
 to the `receipt_email` consent purpose, whose wording the host configures in Trace's settings and
 whose answer any `trace.consent` step or the host's code records: never an address the host's
-records changed to later on the call, which a recheck would re-read, and a call with nothing kept
-sends no email (fail closed). Email is off by default; turning it on also makes the config need the
+records changed to later on the call, which a recheck would re-read (a first observation of no
+address is kept too, so a later one never fills it in), and a call with nothing kept sends no email
+(fail closed). Email is off by default; turning it on also makes the config need the
 `emails` adapter and a `receipt_email` wording, checked when the config is saved.
 `textReceiptLink` stays as its own entry point, once per call on the text consent, so a host that
 adopts `sendReceiptLink` calls it alone: running both can send both, each on its own consent.

@@ -67,9 +67,10 @@ check everything that is left from that checkpoint on without the entries before
   payment link went by email, Trace's `channels` setting is `["text", "email"]` (the new setting;
   the default is text only) and the caller's latest answer to the `receipt_email` consent purpose is
   yes, and only to the address kept for the subject when the call's first action was noted (the
-  address on file as Badge held it then, as the contact notice keeps the number before a change):
-  never an address the host's records changed to later on the call, never one heard or keyed on the
-  call, and a call with nothing kept sends no email. A channel that was chosen but not consented to
+  address on file as Badge held it then, as the contact notice keeps the number before a change; a
+  first observation of no address is kept too, so a later one never fills it in): never an address
+  the host's records changed to later on the call, never one heard or keyed on the call, and a call
+  with nothing kept sends no email. A channel that was chosen but not consented to
   sends nothing, never the other channel instead. `textReceiptLink` stays its own entry point, once
   per call on the text consent, so a host that adopts `sendReceiptLink` calls it alone, never both.
   A config with the email channel on needs the `emails` adapter and a `receipt_email` wording in

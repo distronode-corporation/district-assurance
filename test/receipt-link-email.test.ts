@@ -72,6 +72,8 @@ function config(patch: (c: FlowConfig) => void = () => undefined): FlowConfig {
       "deposit-quiet": { steps: [verify, channel, pay, askEmail, { type: "trace.receipt" }] },
       // A keypad recheck after the payment, as a flow that re-reads the subject on file (PRV-10's repay).
       "deposit-recheck": { steps: [verify, channel, pay, askEmail, askTexts, { type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }, receipt] },
+      // Two payments around a recheck: the first saw no address, the recheck read one the host added.
+      "deposit-late-address": { steps: [verify, channel, pay, { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["payment.request"] }, channel, pay, askEmail, askTexts, receipt] },
       // A contact change between the payment and the recheck: both the notice and the kept address
       // are read from before the change.
       "change-recheck": { steps: [{ type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["payment.request", "contact.update"] }, channel, pay, { type: "acme.change_phone" }, askEmail, askTexts, { type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }, receipt] },
@@ -486,6 +488,36 @@ describe("receipt link email", () => {
     assert.deepEqual(await byText.engine.sendReceiptLink(texted, LINK), { sent: true, channel: "text" });
     assert.equal(sent.messages.sent.filter((m) => m.purpose === "receipt_link").length, 1, "the delivered text link's channel");
     assert.equal(sent.emails.sent.filter((m) => m.purpose === "receipt_link").length, 1, "the failed email request never becomes the receipt channel");
+  });
+
+  it("keeps a first observation of no address, and a later re-read never fills one in", async () => {
+    const t = engine(null);
+    const callId = await verified(t, "deposit-late-address");
+    const offered = await t.engine.offerPaymentChannels(callId);
+    assert.deepEqual([offered.channels, offered.chosen], [[{ channel: "text", key: "1" }], "text"], "text chosen at once with no address on file");
+    await confirmAmount(t.engine, callId);
+    await t.engine.requestPayment(callId);
+    await t.engine.applyPaymentOutcome({ kind: "completed", linkId: t.payments.created.at(-1)!.linkId, paymentStatus: "paid" });
+    // The host adds an address to its records, and the recheck step reads it.
+    const added = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } });
+    added.emailOnFile = "attacker@evil.test";
+    t.records.putSubject("ws_test", added);
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.checkCarrier(callId);
+    await t.engine.finishVerification(callId);
+    await t.engine.offerPaymentChannels(callId);
+    await t.engine.choosePaymentChannel(callId, { key: "2" });
+    await confirmAmount(t.engine, callId);
+    await t.engine.requestPayment(callId);
+    await t.engine.applyPaymentOutcome({ kind: "completed", linkId: t.payments.created.at(-1)!.linkId, paymentStatus: "paid" });
+    assert.equal(emails(t, "payment_link").length, 1, "the second payment went by email, on the caller's keypress for it then");
+    await t.engine.recordConsent(callId, { purpose: "receipt_email", answer: "yes" });
+    await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "yes" });
+    await t.engine.endCall(callId);
+    assert.deepEqual(await t.engine.sendReceiptLink(callId, LINK), { sent: false, channel: null }, "the receipt never emails the address the call did not start with");
+    assert.equal(emails(t, "receipt_link").length, 0);
+    assert.equal(texts(t, "receipt_link").length, 0, "and nothing by text instead");
   });
 
   it("refuses a bad link, a call that has not ended, or one without a receipt", async () => {

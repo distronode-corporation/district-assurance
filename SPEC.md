@@ -2405,8 +2405,9 @@ as Badge read it when verification started, before the change, unless the call a
 same subject with that same number; Badge's keypad or PIN match always stands then, since such a
 step follows a level 2 verification. Keeping one writes `contact.notice_owed` in the same write.
 Every action, of whichever class, also keeps the subject's address on file as Badge held it at that
-moment, once per subject (the first action's), never one a later recheck re-read: that kept address
-is where a receipt link email goes (below).
+moment, once per subject (the first action's, and a first observation of no address is kept too, so a
+later one never fills it in), never one a later recheck re-read: that kept address is where a receipt
+link email goes (below).
 
 **Receipt link** (purposes `receipt_link` and `receipt_email`). `textReceiptLink(callId, url)` texts
 the host's capability link to an ended call's receipt (section 12, an `https` URL of at most 512
@@ -2434,8 +2435,8 @@ its wording, the caller's answer is recorded like any consent) is "yes", and onl
 kept for the subject when the call's first action was noted, the address on file as Badge held it
 then, held to `isEmailAddress`: never an address the host's records changed to later on the call,
 never one a recheck re-read, never one heard or keyed on the call. A call with nothing kept (one
-saved before this, an action noted with no address, or a record holding one the plain-address check
-refuses) sends no email. The flow does not have to ask for it with a `textLink` field: the answer is
+saved before this, a first action that noted no address, or a record holding one the plain-address
+check refuses) sends no email. The flow does not have to ask for it with a `textLink` field: the answer is
 the ask. A channel that was chosen but cannot be served (no answer, a later "no", one still being
 stored or revoked, no address kept) sends nothing, and the link never falls back to the other
 channel; a caller who chose email and only answered the text purpose gets no link from

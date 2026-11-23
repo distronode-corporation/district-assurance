@@ -65,10 +65,11 @@ export interface TraceTexts {
   notices: ContactNotice[];
   /**
    * The address on file for a subject as Badge held it when the call's first action was noted, one
-   * per subject: a receipt email goes to the one kept here, never to an address the host's records
-   * changed to later on the call (a recheck re-reads the subject).
+   * per subject, and `null` when that first observation saw no address, so a later action never
+   * fills one in: a receipt email goes to the one kept here, never to an address the host's
+   * records changed to later on the call (a recheck re-reads the subject).
    */
-  emails: Array<{ subjectKey: string; to: string }>;
+  emails: Array<{ subjectKey: string; to: string | null }>;
   /** Whether a receipt link went out on this call, whichever channel sent it. */
   receiptLink: "none" | "sent";
   /**
@@ -524,10 +525,11 @@ export function noteAction(draft: CallDraft, action: ActionClass, subjectOf: () 
   // Read before anything changes, so a refusal leaves the call as it was.
   const subject = subjectOf();
   if (!texts.actions.includes(action)) texts.actions.push(action);
-  // The address on file as Badge holds the subject now, kept at the call's first action for them:
-  // the receipt email goes to this one, as the notice below keeps the number, never to an address
-  // the host's records changed to later on the call.
-  if (subject.subjectKey !== null && subject.emailOnFile !== null && !texts.emails.some((e) => e.subjectKey === subject.subjectKey)) {
+  // The address on file as Badge holds the subject now, kept at the call's first action for them,
+  // and a first observation of no address is kept too, so a later re-read never fills one in: the
+  // receipt email goes to this one, as the notice below keeps the number, never to an address the
+  // host's records changed to later on the call.
+  if (subject.subjectKey !== null && !texts.emails.some((e) => e.subjectKey === subject.subjectKey)) {
     texts.emails.push({ subjectKey: subject.subjectKey, to: subject.emailOnFile });
   }
   if (action !== "contact") return;
@@ -710,7 +712,7 @@ export async function sendReceiptLink(
     // The address kept when the call's first action was noted, never the one on file now: a host's
     // records can change under the call, and a recheck re-reads them.
     const kept = ctx.texts.emails.find((e) => e.subjectKey === current.subjectKey);
-    const to = kept !== undefined && isEmailAddress(kept.to) ? kept.to : null;
+    const to = kept !== undefined && kept.to !== null && isEmailAddress(kept.to) ? kept.to : null;
     if (to !== null && (await consentStands(rt, ctx.slice, RECEIPT_EMAIL_PURPOSE))) {
       // The call keeps its business name from the start, and a payment went out by email, which
       // needed it, so it is there.
