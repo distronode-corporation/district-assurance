@@ -59,7 +59,7 @@ check everything that is left from that checkpoint on without the entries before
   `verifyAnchor` takes the checkpoint in its `trust` the same way, so an anchor written after a
   prune is checked from the checkpoint's point; the covered entries are now taken by their `seq`
   rather than their position, and an `entries` list holding null or a hole anywhere in it is
-  `malformed`, where a hole past the covered seq used to pass. A monthly report names the last
+  `malformed`, where a trailing null or a hole past the covered seq used to pass. A monthly report names the last
   entry it read, or the base of a ledger pruned to its head, never a head read after its listing.
 
 ## [0.3.0] - 2026-11-22

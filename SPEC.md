@@ -1584,7 +1584,8 @@ once, ahead of time.
   ledger's `prune` removes every entry at or below it as one step, after which the base is read
   back. A second pruner racing the first answers the point, pruning nothing: the same checkpoint
   twice, or a deeper checkpoint that moved the base past this one, is never an error read as a
-  failed prune that happened. Refused with `precondition_failed`: a ledger without `prune` and `base`, a checkpoint
+  failed prune that happened. Refused with `precondition_failed`: a ledger without `prune`,
+  `base` or `spentEventId` (the tombstone answer is part of pruning), a checkpoint
   the ledger has already pruned past (the base only moves forward), a point the ledger does not
   hold, and a prune that did not move the base. Refused with `invalid_input`: a checkpoint that
   does not verify, one that names another ledger, and one whose `prunedCount` names another gap

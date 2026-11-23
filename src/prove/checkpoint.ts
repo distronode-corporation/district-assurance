@@ -217,7 +217,9 @@ export interface PruneLedgerInput {
  * nothing and answers the point.
  */
 export async function pruneLedger(ledger: AuditLedger, input: PruneLedgerInput): Promise<ChainPoint> {
-  if (ledger.prune === undefined || ledger.base === undefined) {
+  // Without the tombstone answer a pruning ledger would free replayed ids as it pruned them, and
+  // the engine could not read a spent id either: such a ledger cannot prune.
+  if (ledger.prune === undefined || ledger.base === undefined || ledger.spentEventId === undefined) {
     throw new EngineError("precondition_failed", "pruneLedger: this ledger cannot prune");
   }
   const { ledgerId, keys } = input;

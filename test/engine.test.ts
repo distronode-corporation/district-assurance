@@ -1769,6 +1769,7 @@ describe("Engine consent revocation", () => {
         return ledger.append(input);
       },
       spentEventId: (id: string) => ledger.spentEventId(id),
+      base: () => ledger.base(),
     });
     const t = setup({ adapters: { consents: new MemoryConsentStore(), ledger: flaky } });
     const { callId } = await t.engine.startCall();
@@ -1824,6 +1825,7 @@ describe("Engine consent revocation", () => {
         return ledger.append(input);
       },
       spentEventId: (id: string) => ledger.spentEventId(id),
+      base: () => ledger.base(),
     });
     const t = setup({ adapters: { consents: new MemoryConsentStore(), ledger: flaky } });
     const { callId } = await t.engine.startCall();
