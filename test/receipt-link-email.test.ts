@@ -4,13 +4,13 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import type { ConsentRecord, ConsentStore, EmailPurpose, MessagePurpose } from "../src/core/adapters.ts";
+import type { ConsentRecord, ConsentStore, EmailPurpose, EmailSender, MessagePurpose, MessageSender } from "../src/core/adapters.ts";
 import type { AssuranceModule } from "../src/core/module.ts";
 import { validateConfig, type FlowConfig } from "../src/core/config.ts";
 import { ModuleRegistry } from "../src/core/module.ts";
 import { builtInModules } from "../src/modules.ts";
 import { RECEIPT_EMAIL_PURPOSE, traceModule } from "../src/prove/trace.ts";
-import { MemoryConsentStore, TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../src/testing/index.ts";
+import { FakeEmailSender, FakeMessageSender, MemoryConsentStore, TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, confirmAmount, rejects, testConfig, wording } from "./helpers.ts";
 
 const EMAIL = "pat.caller@example.test";
@@ -64,6 +64,7 @@ function config(patch: (c: FlowConfig) => void = () => undefined): FlowConfig {
     c.modules.acme = { settings: {} };
     c.flows = {
       deposit: { steps: [verify, channel, pay, askEmail, askTexts, receipt] },
+      "deposit-twice": { steps: [verify, channel, pay, askEmail, askTexts, channel, pay, receipt] },
       "change-only": { steps: [verifyContact, { type: "acme.change_phone" }, askTexts, receipt] },
       "deposit-asked-twice": { steps: [verify, channel, pay, askEmail, askEmail, askTexts, receipt] },
       "deposit-no-choice": { steps: [verify, pay, askTexts, receipt] },
@@ -324,6 +325,57 @@ describe("receipt link email", () => {
     assert.deepEqual(await t.engine.sendReceiptLink(answered, LINK), { sent: true, channel: "text" }, "no payment on the call: the channel is text");
     assert.equal(emails(t, "receipt_link").length, 0);
     assert.equal(texts(t, "receipt_link").length, 1);
+  });
+
+  it("follows the last link the caller actually received, never a request whose send failed", async () => {
+    // The provider adapters fail only where the test wants a request whose link was never delivered.
+    const sent = { emails: new FakeEmailSender(), messages: new FakeMessageSender() };
+    const down = { emails: false, messages: false };
+    const flaky: { emails: EmailSender; messages: MessageSender } = {
+      emails: { async sendEmail(input) { if (down.emails) throw new Error("email provider down"); return sent.emails.sendEmail(input); } },
+      messages: { async sendText(input) { if (down.messages) throw new Error("carrier down"); return sent.messages.sendText(input); } },
+    };
+    const wired = (adapters: { emails: EmailSender; messages: MessageSender }): TestEngine => {
+      const t = createTestEngine({ config: config(), modules: [acmeModule()], adapters: { emails: adapters.emails, messages: adapters.messages } });
+      t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+      const subject = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } });
+      subject.emailOnFile = EMAIL;
+      t.records.putSubject("ws_test", subject);
+      return t;
+    };
+    const paidThenFailed = async (t: TestEngine, first: "1" | "2", second: "1" | "2", answers: { receipt_email?: "yes" | "no"; receipt_texts?: "yes" | "no" }): Promise<string> => {
+      const callId = await verified(t, "deposit-twice");
+      const offer = await t.engine.offerPaymentChannels(callId);
+      assert.equal(offer.channels.length, 2);
+      await t.engine.choosePaymentChannel(callId, { key: first });
+      await confirmAmount(t.engine, callId);
+      await t.engine.requestPayment(callId);
+      await t.engine.applyPaymentOutcome({ kind: "completed", linkId: t.payments.created.at(-1)!.linkId, paymentStatus: "paid" });
+      await t.engine.recordConsent(callId, { purpose: "receipt_email", answer: answers.receipt_email ?? "no" });
+      await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: answers.receipt_texts ?? "no" });
+      await t.engine.offerPaymentChannels(callId);
+      await t.engine.choosePaymentChannel(callId, { key: second });
+      await confirmAmount(t.engine, callId);
+      down[first === "2" ? "messages" : "emails"] = true;
+      await assert.rejects(t.engine.requestPayment(callId), first === "2" ? /carrier down/ : /email provider down/);
+      down.emails = false;
+      down.messages = false;
+      await t.engine.endCall(callId);
+      return callId;
+    };
+    // The email link was received; the text request after it failed, and the receipt still goes by email.
+    const byEmail = wired(flaky);
+    const emailed = await paidThenFailed(byEmail, "2", "1", { receipt_email: "yes" });
+    assert.deepEqual(await byEmail.engine.sendReceiptLink(emailed, LINK), { sent: true, channel: "email" });
+    assert.equal(sent.emails.sent.filter((m) => m.purpose === "receipt_link").length, 1, "the delivered email link's channel");
+    assert.equal(sent.messages.sent.filter((m) => m.purpose === "receipt_link").length, 0, "the failed text request never becomes the receipt channel");
+    // The reverse: a text link received, an email request after it that failed.
+    const byText = wired(flaky);
+    const texted = await paidThenFailed(byText, "1", "2", { receipt_texts: "yes" });
+    assert.equal(sent.emails.sent.filter((m) => m.purpose === "receipt_link").length, 1, "still only the first call's");
+    assert.deepEqual(await byText.engine.sendReceiptLink(texted, LINK), { sent: true, channel: "text" });
+    assert.equal(sent.messages.sent.filter((m) => m.purpose === "receipt_link").length, 1, "the delivered text link's channel");
+    assert.equal(sent.emails.sent.filter((m) => m.purpose === "receipt_link").length, 1, "the failed email request never becomes the receipt channel");
   });
 
   it("refuses a bad link, a call that has not ended, or one without a receipt", async () => {
