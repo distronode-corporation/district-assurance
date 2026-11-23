@@ -581,8 +581,8 @@ them apart so that release added one new outbound path). `sendReceiptLink(callId
 channel the caller chose for their payment link: email when the call's last delivered payment link
 went by email and Trace's `channels` setting is `["text", "email"]`, text otherwise (as
 `textReceiptLink`). The email goes through the same `EmailSender`, only to the address kept for the
-subject when the call's first action was noted (the address on file as Badge held it then, kept once
-per subject, as the contact notice keeps the number before a change), under the caller's standing yes
+subject when the call's verification first read it (the address on file as Badge held it then, kept
+once per subject, as the contact notice keeps the number before a change), under the caller's standing yes
 to the `receipt_email` consent purpose, whose wording the host configures in Trace's settings and
 whose answer any `trace.consent` step or the host's code records: never an address the host's
 records changed to later on the call, which a recheck would re-read (a first observation of no
@@ -621,4 +621,27 @@ that spoke.
 **Revisit** if a problem's wording needs to change: the sentence changes with the release, the
 code and its params do not. The codes are API, stable from 0.4.0 on, and `test/config-codes.test.ts`
 pins the full list.
+
+## ADR-36. A payment link email goes to the address the call kept, one rule with the receipt
+
+**Decided.** The destination of a payment link email is the address the call kept for the subject,
+the same list the receipt email reads: kept as the verification first reads the subject, once per
+subject, a first read of no address kept as none, and then kept on the choice and on the request.
+Email is offered only while the address on file is still the kept one; a choice or a request that
+kept no address sends no email, never one read fresh.
+**Why one kept address, not a pin at the choice alone.** A choice-time pin does not close the
+issue's own shape: the host's records can change the address before the choice, and a pin taken
+then sends to the changed address while the receipt goes to the earlier one, two rules disagreeing
+on one call. Holding both emails to the kept address gives one rule; and offering email only while
+the on-file address still matches it means a changed address ends the offer, so the caller is never
+asked to consent to an address the call no longer trusts. **Why kept over refusing the channel
+after a contact action:** refusing would drop a consented channel for unrelated contact changes;
+keeping still sends where the caller consented, and stops the offer once the records moved.
+One consequence, kept on purpose: an address the host adds during a call is not trusted for
+payment links either; that call uses text, as it always did for the receipt email. One mixed-deploy
+window remains, one-time and low severity: a call verified under 0.3.0 and still open at the
+upgrade pins at its first offer under this version, so a change plus a recheck in that window can
+still redirect that one call's link.
+**Revisit** if a host needs a mid-call address change to redirect a payment link: that needs a
+fresh consent to the new address, not a looser pin.
 

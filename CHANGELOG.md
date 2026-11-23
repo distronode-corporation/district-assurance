@@ -76,9 +76,9 @@ check everything that is left from that checkpoint on without the entries before
   payment link went by email, Trace's `channels` setting is `["text", "email"]` (the new setting;
   the default is text only), a keypad or PIN match still stands and the caller's latest answer to
   the `receipt_email` consent purpose is yes, and only to the address kept for the subject when the
-  call's first action was noted (the
+  call's verification first read it (the
   address on file as Badge held it then, as the contact notice keeps the number before a change; a
-  first observation of no address is kept too, so a later one never fills it in): never an address
+  first read of no address is kept too, so a later one never fills it in): never an address
   the host's records changed to later on the call, never one heard or keyed on the call, and a call
   with nothing kept sends no email. A channel that was chosen but not consented to
   sends nothing, never the other channel instead. `textReceiptLink` stays its own entry point, once
@@ -98,7 +98,26 @@ check everything that is left from that checkpoint on without the entries before
   (TS2322) and at run time (`.join()` prints `[object Object]`); `problemMessage` reads the sentence
   back out of a problem. An outside module may still answer plain sentences (kept under the code
   naming the validator that spoke, with no params, so a dashboard falls back to the sentence for
-  those), and every sentence itself is unchanged, byte for byte.
+  those), and every sentence itself is unchanged, byte for byte.- **A payment link no longer goes by email to an address added during the call; text is offered
+  instead.** The kept address decides, as it does for a receipt email, and a call that started with
+  no address keeps trusting none added later.
+
+- **A payment link no longer goes by email to an address added during the call; text is offered
+  instead.** The kept address decides, as it does for a receipt email, and a call that started with
+  no address keeps trusting none added later.
+
+### Fixed
+
+- **A payment link email goes to the address the call kept.** The destination is the address kept
+  for the subject as the call's verification first reads it, once per subject, the same one a
+  receipt email goes to,
+  kept on the channel choice and then on the request so a resume sends to the same place, and email
+  is offered only while the address on file is still that one: an address the host's records
+  changed during the call (a keypad recheck re-reads the subject) never receives the link, before
+  or after the choice, and a choice or a request that kept no address is refused, never redirected
+  to whatever is on file now. An emailed request left open by a 0.3.0 engine is refused until the
+  host cancels it and offers the channels again (#167).
+
 
 ## [0.3.0] - 2026-11-22
 

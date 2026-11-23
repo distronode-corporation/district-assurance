@@ -37,7 +37,7 @@ import { problem, problemMessage, type AssuranceModule, type FlowStep, type Step
 import type { CallDraft, CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
 import type { SessionState } from "../core/session.ts";
 import { isIntegerIn, isObject, unknownKeys } from "../core/shape.ts";
-import { recordConsent, TRACE, type TraceSettings, type TraceSlice } from "../prove/trace.ts";
+import { keepEmailAddress, keptEmailAddress, recordConsent, TRACE, type TraceSettings, type TraceSlice } from "../prove/trace.ts";
 import { matchedSubject } from "../verify/badge.ts";
 import { AMOUNT_REF, buildAmountReadBack, formatAmount, type AmountQuote, type AmountReadBack } from "./amount.ts";
 import {
@@ -129,6 +129,12 @@ export interface ChannelChoice {
   channel: PaymentChannel;
   /** The subject matched when it was chosen: the link goes only to that subject. */
   subjectKey: string;
+  /**
+   * On an email choice: the address the call kept for the subject, the same one a receipt email
+   * goes to, the destination a link by email goes to and the request keeps. Absent on a text
+   * choice, and on a choice a 0.3.0 engine recorded.
+   */
+  to?: string | null;
   /** The consent the keypress recorded (`payment_link_text` or `payment_link_email`); null when no choice was offered. */
   consentId: string | null;
   at: string;
@@ -561,7 +567,14 @@ function channelContext(rt: EngineRuntime, record: CallRecord): ChannelContext {
   if (!rt.authorized(record, "payment.request", null)) throw new EngineError("scope_denied", "the grant does not cover payment.request");
   const subject = matchedSubject(record);
   const trace = record.modules[TRACE] as unknown as TraceSlice;
-  const email = emailOn(rt.settings<PaylinkSettings | undefined>(PAYLINK)) && isEmailAddress(subject.emailOnFile);
+  // Email is offered only while the address on file is still the one the call kept for the
+  // subject at its first read, as the verification started, the same one a receipt email goes to
+  // (ADR-36): a change to the host's records since (a recheck re-reads the subject) stops the
+  // offer, never redirects the link, and a call that has kept nothing (a verification that started
+  // under 0.3.0) offers what is on file now, this engine's first look.
+  const kept = keptEmailAddress(record, subject.subjectKey);
+  const pin = kept !== undefined ? kept : subject.emailOnFile;
+  const email = emailOn(rt.settings<PaylinkSettings | undefined>(PAYLINK)) && isEmailAddress(pin) && pin === subject.emailOnFile;
   if (!email) return { subject, offered: ["text"], trace };
   for (const channel of PAYMENT_CHANNELS) {
     const purpose = PAYMENT_CHANNEL_PURPOSES[channel];
@@ -576,7 +589,14 @@ function channelContext(rt: EngineRuntime, record: CallRecord): ChannelContext {
 /** Records a choice on the call, for the next link: the step completes, and the ledger names the channel, never the address. */
 function noteChoice(rt: EngineRuntime, draft: CallDraft, channel: PaymentChannel, ctx: ChannelContext, consentId: string | null): void {
   const slice = draft.slice<PaylinkSlice>(PAYLINK);
-  slice.channel = { channel, subjectKey: ctx.subject.subjectKey, consentId, at: rt.now() };
+  // The destination a link by email goes to: the address the call kept at its first read of the
+  // subject, as the verification started (ADR-36), never the one on file at request time. A call
+  // whose verification started under a 0.3.0 engine kept nothing: this engine's first look at it
+  // is now, and it is kept here, in the one shared list, so a later verification cannot keep a
+  // different address while this choice pins another. Kept as no address means no address, however
+  // the records changed since.
+  const pin = keepEmailAddress(draft, ctx.subject);
+  slice.channel = { channel, subjectKey: ctx.subject.subjectKey, ...(channel === "email" ? { to: pin } : {}), consentId, at: rt.now() };
   slice.choices = (slice.choices ?? 0) + 1;
   draft.emit("payment.channel_chosen", consentId === null ? "code" : "caller", { channel, offered: [...ctx.offered], ...(consentId === null ? {} : { consentId }) });
 }
@@ -678,14 +698,22 @@ interface Destination {
   locale: Locale;
 }
 
-function destinationFor(rt: EngineRuntime, record: CallRecord, subject: SubjectRecord, channel: PaymentChannel): Destination {
+function destinationFor(rt: EngineRuntime, record: CallRecord, subject: SubjectRecord, channel: PaymentChannel, pinnedEmail: string | null | undefined): Destination {
   const businessName = (record.modules[TRACE] as unknown as TraceSlice).businessName;
   if (channel === "email") {
     // The channel turned off since the choice (or a call resumed on an engine without it), or a subject read again without its address.
     if (!emailOn(rt.settings<PaylinkSettings | undefined>(PAYLINK))) throw new EngineError("precondition_failed", "the link is to be emailed, and the email channel is off");
-    if (!isEmailAddress(subject.emailOnFile) || businessName === null) throw new EngineError("precondition_failed", "the link is to be emailed, and no verified address is on file now");
+    // The destination is pinned at the choice, the moment the caller consented, and a resume
+    // carries the same pin on its request: an address the host's records changed to later on the
+    // call (a keypad recheck re-reads the subject) never receives the link, and a choice or a
+    // request that kept no address (none on file then, or a call saved before the pin) is
+    // refused, never redirected to whatever is on file now.
+    if (pinnedEmail === undefined || pinnedEmail === null || !isEmailAddress(pinnedEmail) || businessName === null) {
+      throw new EngineError("precondition_failed", "the link is to be emailed, and no verified address was kept when the caller chose email");
+    }
+    return { phone: subject.phoneOnFile, email: pinnedEmail, businessName, locale: record.locale };
   }
-  return { phone: subject.phoneOnFile, email: channel === "email" ? subject.emailOnFile! : null, businessName, locale: record.locale };
+  return { phone: subject.phoneOnFile, email: null, businessName, locale: record.locale };
 }
 
 /**
@@ -737,7 +765,7 @@ export async function requestPayment(
       if (last.channelConsentId !== undefined && !consentStands(draft.record, last.channel!)) {
         throw new EngineError("precondition_failed", WITHDRAWN);
       }
-      const where = destinationFor(rt, draft.record, subject, last.channel ?? "text");
+      const where = destinationFor(rt, draft.record, subject, last.channel ?? "text", last.emailTo);
       const named = input as Partial<FixedPaymentInput & ReferencedPaymentInput> | undefined;
       // A resume names nothing, the same amount, or the same amountRef request it was made for.
       const same =
@@ -749,7 +777,7 @@ export async function requestPayment(
     // A link already out (or a call not open) is refused as a transition, before the read-back.
     draft.assertCan({ type: "payment_requested", paymentId: "next" });
     const { channel, consentId } = chosenChannel(draft.record, slice, subject);
-    const where = destinationFor(rt, draft.record, subject, channel);
+    const where = destinationFor(rt, draft.record, subject, channel, slice.channel !== null && slice.channel !== undefined && slice.channel.subjectKey === subject.subjectKey ? slice.channel.to : undefined);
     // A call saved before PAY-2 has no quote field: the same as no read-back.
     const quote = confirmedQuote(slice.quote ?? null, (step as PaymentInput | null) ?? input, subject);
     const chosen: FixedPaymentInput = { amountMinor: quote.amountMinor, currency: quote.currency, description: quote.description, amountSource: quote.amountSource };
@@ -781,6 +809,9 @@ export async function requestPayment(
       textedAt: null,
       channel,
       ...(consentId === null ? {} : { channelConsentId: consentId }),
+      // The address this request's email goes to, pinned at the choice: a resume sends to the
+      // same place. Absent on a text request, and on one saved before the pin.
+      ...(channel === "email" ? { emailTo: where.email } : {}),
       // The request the read-back was made for (confirmedQuote held any request named to it).
       requestKey: quote.spec,
       ...terms,

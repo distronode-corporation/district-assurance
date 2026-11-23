@@ -8,7 +8,7 @@ import type { ConsentStore, EmailSender } from "../src/core/adapters.ts";
 import type { FlowConfig } from "../src/core/config.ts";
 import { validateConfig } from "../src/core/config.ts";
 import { isEmailAddress } from "../src/core/email.ts";
-import { ModuleRegistry } from "../src/core/module.ts";
+import { ModuleRegistry, type AssuranceModule } from "../src/core/module.ts";
 import type { CallRecord } from "../src/core/runtime.ts";
 import { builtInModules } from "../src/modules.ts";
 import { wordingDigest } from "../src/prove/consent.ts";
@@ -35,6 +35,41 @@ function channelConfig(patch: (c: FlowConfig) => void = () => undefined): FlowCo
     patch(c);
   });
 }
+
+/** A host's outside module: a step that changes contact details in the host's own systems. */
+function acmeModule(): AssuranceModule {
+  return {
+    manifest: {
+      name: "acme",
+      version: "1",
+      summary: "Changes contact details in the host's own systems.",
+      provides: { factors: [], steps: ["acme.change_phone"], outcomes: [] },
+      scopes: { grants: [], needs: { "acme.change_phone": "contact.update" } },
+      adapters: [],
+    },
+    validateSettings: () => [],
+    requiredAdapters: () => [],
+    validateStep: () => [],
+    initCall: () => ({ done: 0 }),
+    enterStep: (_step, slice) => (slice as { done: number }).done,
+    stepStatus: (_step, view) => ((view.slice as { done: number }).done > (view.mark as number) ? "complete" : "pending"),
+  };
+}
+
+/** The flows with a contact change between the channel steps, in both orders, and the module that notes it. */
+const changedFlows = (c: FlowConfig) => {
+  c.policy.scopes["contact.update"] = 2;
+  c.modules.acme = { settings: {} };
+  const both = { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["payment.request", "contact.update"] };
+  const change = { type: "acme.change_phone" };
+  // The address changes after the caller chose email: the choice's kept address still decides.
+  c.flows["pin-after"] = { steps: [both, channel, change, both, pay, { type: "trace.receipt" }] } as never;
+  // The address changes before the choice: email is not offered at all.
+  c.flows["pin-before"] = { steps: [both, change, both, channel, pay, { type: "trace.receipt" }] } as never;
+  // The address changes with nothing noted on the call, then a recheck re-reads it (the final
+  // probe's shape): the keep at the verification start stands, so email is not offered either.
+  c.flows["pin-recheck"] = { steps: [both, both, channel, pay, { type: "trace.receipt" }] } as never;
+};
 
 /** A test engine with one subject on file, with a verified email address unless `email` is null. */
 function setupWith(email: string | null = EMAIL, options: TestEngineOptions = {}): TestEngine {
@@ -371,17 +406,100 @@ describe("paylink channel: refusals and changes", () => {
     await assert.rejects(t.engine.choosePaymentChannel(en, { key: "2" }), rejects("precondition_failed", /needs the business's name/));
   });
 
-  it("refuses to choose text alone when an address came on file between the read and the write", async () => {
-    const t = setupWith(null);
+  it("offers email again only while the address on file is still the kept one", async () => {
+    const t = setupWith();
+    const callId = await verified(t, {});
+    const first = await t.engine.offerPaymentChannels(callId);
+    assert.equal(first.channels.length, 2, "the kept address is the one on file: both channels");
+    // The call's copy of the subject changes, as a recheck after the host's records changed would
+    // re-read it. The changed address is not the kept one, so email is no longer offered, the key
+    // for it is refused, and the re-offer is text alone.
+    const stored = (await t.sessions.get("ws_test", callId))!;
+    const record = structuredClone(stored.record) as unknown as CallRecord;
+    (record.modules.badge as unknown as { subject: { emailOnFile?: string } }).subject.emailOnFile = "moved@example.test";
+    await t.sessions.compareAndSet("ws_test", callId, stored.version, record as never);
+    await assert.rejects(t.engine.choosePaymentChannel(callId, { key: "2" }), rejects("invalid_input", /key must be one of 1/), "email is no longer offered, so its key is refused");
+    const reoffered = await t.engine.offerPaymentChannels(callId);
+    assert.deepEqual([reoffered.channels, reoffered.chosen], [[{ channel: "text", key: "1" }], "text"], "text alone, chosen at once");
+  });
+
+  it("offers no email when the records changed before the choice, with nothing noted on the call", async () => {
+    // The final probe's shape (#167): no contact action, so the address kept at the verification
+    // start is all the call has, and the recheck after the change does not overwrite it.
+    const t = createTestEngine({ config: channelConfig(changedFlows), modules: [acmeModule()] });
+    const subject = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } });
+    subject.emailOnFile = EMAIL;
+    t.records.putSubject("ws_test", subject);
+    const callId = await verified(t, { flow: "pin-recheck" });
+    const changed = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } });
+    changed.emailOnFile = "attacker@evil.test";
+    t.records.putSubject("ws_test", changed);
+    await recheck(t, callId);
+    const offered = await t.engine.offerPaymentChannels(callId);
+    assert.deepEqual([offered.channels, offered.chosen], [[{ channel: "text", key: "1" }], "text"], "the kept address is not the one on file now, so text alone");
+    await confirmAmount(t.engine, callId);
+    assert.equal((await t.engine.requestPayment(callId)).status, "open");
+    assert.equal(t.messages.sent.at(-1)!.to, PHONE_ON_FILE, "the link goes by text");
+    assert.equal(t.emails.sent.length, 0, "nothing is emailed, never to the changed address");
+  });
+
+  it("keeps what is on file now for a call whose verification started under 0.3.0", async () => {
+    // A 0.3.0 engine kept no address at its verification start, and no real flow can produce that
+    // record under this engine, so the kept entry is edited out: this engine's first look at the
+    // subject is the offer, and both channels are offered on the address on file then.
+    const t = setupWith();
+    const callId = await verified(t, {});
+    const stored = (await t.sessions.get("ws_test", callId))!;
+    const record = structuredClone(stored.record) as unknown as CallRecord;
+    const texts = ((record.modules.trace as unknown as { texts?: { emails?: unknown[] } }).texts ??= {});
+    (texts.emails ??= []).length = 0;
+    await t.sessions.compareAndSet("ws_test", callId, stored.version, record as never);
+    const offered = await t.engine.offerPaymentChannels(callId);
+    assert.deepEqual(offered.channels, [
+      { channel: "text", key: "1" },
+      { channel: "email", key: "2" },
+    ], "nothing was kept, so the address on file now is this engine's first look");
+    await t.engine.choosePaymentChannel(callId, { key: "2" });
+    await confirmAmount(t.engine, callId, request);
+    assert.equal((await t.engine.requestPayment(callId)).status, "open");
+    assert.equal(t.emails.sent.at(-1)!.to, EMAIL, "the choice pinned what was on file at the first look");
+    // The choice kept that first look in the one shared list, so a later verification under this
+    // engine cannot keep a different address while the choice pins another: the records change and
+    // a recheck re-reads them, and the offer still compares against the kept address.
+    await t.engine.applyPaymentOutcome({ kind: "completed", linkId: t.payments.created.at(-1)!.linkId, paymentStatus: "paid" });
+    const moved = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } });
+    moved.emailOnFile = "moved@example.test";
+    t.records.putSubject("ws_test", moved);
+    await recheck(t, callId);
+    const after = await t.engine.offerPaymentChannels(callId);
+    assert.deepEqual(after.channels, [{ channel: "text", key: "1" }], "the later verification kept nothing new: the choice's kept address stands");
+    // The same shape with no address on file: the text-only offer records the choice, and the pin
+    // it keeps is no address.
+    const bare = setupWith(null);
+    const bareCall = await verified(bare, {});
+    const bareStored = (await bare.sessions.get("ws_test", bareCall))!;
+    const bareRecord = structuredClone(bareStored.record) as unknown as CallRecord;
+    const bareTexts = ((bareRecord.modules.trace as unknown as { texts?: { emails?: unknown[] } }).texts ??= {});
+    (bareTexts.emails ??= []).length = 0;
+    await bare.sessions.compareAndSet("ws_test", bareCall, bareStored.version, bareRecord as never);
+    const bareOffered = await bare.engine.offerPaymentChannels(bareCall);
+    assert.deepEqual([bareOffered.channels, bareOffered.chosen], [[{ channel: "text", key: "1" }], "text"], "nothing kept and nothing on file: text alone");
+  });
+
+  it("refuses a text-only offer whose re-read would offer both, as a call that changed between the reads", async () => {
+    const t = setupWith();
     const callId = await verified(t, {});
     const real = t.sessions.get.bind(t.sessions);
     let reads = 0;
-    t.sessions.get = async (ws, id) => {
+    t.sessions.get = async (ws: string, id: string) => {
       const got = await real(ws, id);
-      if (++reads === 2) ((got!.record as unknown as CallRecord).modules.badge as unknown as { subject: { emailOnFile?: string } }).subject.emailOnFile = EMAIL;
+      // The outer read sees the copy changed away from the kept address (text alone); the update's
+      // re-read sees it back (both). Only an edit between the two reads can produce that, and the
+      // offer refuses rather than record a choice against an offer the caller did not hear.
+      if (++reads === 1) ((got!.record as unknown as CallRecord).modules.badge as unknown as { subject: { emailOnFile?: string } }).subject.emailOnFile = "moved@example.test";
       return got;
     };
-    await assert.rejects(t.engine.offerPaymentChannels(callId), rejects("precondition_failed", /channels changed/));
+    await assert.rejects(t.engine.offerPaymentChannels(callId), rejects("precondition_failed", /the channels changed while they were offered; offer them again/));
   });
 
   it("refuses a choice when the call moved on while its consent was stored", async () => {
@@ -415,6 +533,14 @@ describe("paylink channel: refusals and changes", () => {
     await assert.rejects(t.engine.choosePaymentChannel(callId, { key: "2" }), rejects("precondition_failed", /call changed while the choice was recorded/));
   });
 });
+
+/** A level-2 keypad and carrier recheck, as a flow that re-reads the subject on file. */
+async function recheck(t: TestEngine, callId: string): Promise<void> {
+  await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+  await t.engine.submitKeypad(callId, { dob: DOB });
+  await t.engine.checkCarrier(callId);
+  assert.equal((await t.engine.finishVerification(callId)).level, 2);
+}
 
 describe("paylink channel: the same link for both channels", () => {
   it("keeps an emailed request open when the email fails, and resumes it with the same keys", async () => {
@@ -517,16 +643,70 @@ describe("paylink channel: the same link for both channels", () => {
     await assert.rejects(plain.engine.requestPayment(callId), rejects("precondition_failed", /the email channel is off/));
   });
 
-  it("refuses an emailed link once the address is gone from the call's copy of the subject", async () => {
+  it("sends the emailed link to the address the call kept, not one the records changed to after the choice (#167)", async () => {
+    // The pin-after order: the caller chooses email, then the host's records change the address,
+    // the contact step notes the change, and a keypad recheck re-reads the subject. The link still
+    // goes to the address kept at the choice, the same one a receipt email would go to.
+    const t = createTestEngine({ config: channelConfig(changedFlows), modules: [acmeModule()] });
+    const subject = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } });
+    subject.emailOnFile = EMAIL;
+    t.records.putSubject("ws_test", subject);
+    const callId = await verified(t, { flow: "pin-after" });
+    assert.deepEqual((await t.engine.offerPaymentChannels(callId)).channels, [
+      { channel: "text", key: "1" },
+      { channel: "email", key: "2" },
+    ]);
+    await t.engine.choosePaymentChannel(callId, { key: "2" });
+    const changed = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } });
+    changed.emailOnFile = "attacker@evil.test";
+    t.records.putSubject("ws_test", changed);
+    await t.engine.updateModule(callId, "acme", (x) => ({ done: (x as { done: number }).done + 1 }));
+    await recheck(t, callId);
+    await confirmAmount(t.engine, callId);
+    assert.equal((await t.engine.requestPayment(callId)).status, "open");
+    assert.equal(t.emails.sent.at(-1)!.to, EMAIL, "the address kept at the choice decides, not the one on file now");
+    assert.equal(t.emails.sent.some((m) => m.to === "attacker@evil.test"), false, "the changed address never receives the link");
+  });
+
+  it("offers no email once the address on file has changed from the one the call kept", async () => {
+    // The pin-before order: the change and the recheck come before the choice. The address kept is
+    // the one from before the change, it is not what is on file now, so email is not offered at
+    // all and the link goes by text: one rule, shared with the receipt email.
+    const t = createTestEngine({ config: channelConfig(changedFlows), modules: [acmeModule()] });
+    const subject = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } });
+    subject.emailOnFile = EMAIL;
+    t.records.putSubject("ws_test", subject);
+    const callId = await verified(t, { flow: "pin-before" });
+    const changed = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } });
+    changed.emailOnFile = "attacker@evil.test";
+    t.records.putSubject("ws_test", changed);
+    await t.engine.updateModule(callId, "acme", (x) => ({ done: (x as { done: number }).done + 1 }));
+    await recheck(t, callId);
+    const offer = await t.engine.offerPaymentChannels(callId);
+    assert.deepEqual(offer.channels, [{ channel: "text", key: "1" }], "the changed address is not the kept one, so email is not offered");
+    assert.equal(offer.prompt, null);
+    assert.equal(offer.chosen, "text", "the offer itself records text, the only channel left");
+    await confirmAmount(t.engine, callId);
+    assert.equal((await t.engine.requestPayment(callId)).status, "open");
+    assert.equal(t.messages.sent.at(-1)!.to, PHONE_ON_FILE, "the link goes by text");
+    assert.equal(t.emails.sent.length, 0, "nothing is emailed, never to the changed address");
+  });
+
+  it("refuses an emailed link on a choice that kept no address, as a 0.3.0 choice did, and never redirects", async () => {
     const t = setupWith();
     const callId = await verified(t, {});
     await t.engine.choosePaymentChannel(callId, { key: "2" });
     await confirmAmount(t.engine, callId, request);
+    // A choice a 0.3.0 engine recorded kept no address, and no real flow can produce one now (the
+    // offer requires a kept address), so this one shape is edited into the record: an emailed
+    // request left over from 0.3.0 is refused until the host cancels it and offers again.
     const stored = (await t.sessions.get("ws_test", callId))!;
     const record = structuredClone(stored.record) as unknown as CallRecord;
-    delete (record.modules.badge as unknown as { subject: { emailOnFile?: string } }).subject.emailOnFile;
+    const paylink = record.modules.paylink as unknown as { channel?: { to?: string | null } };
+    delete paylink.channel!.to;
     await t.sessions.compareAndSet("ws_test", callId, stored.version, record as never);
-    await assert.rejects(t.engine.requestPayment(callId), rejects("precondition_failed", /no verified address is on file now/));
+    await assert.rejects(t.engine.requestPayment(callId), rejects("precondition_failed", /no verified address was kept when the caller chose email/));
+    assert.equal(t.emails.sent.length, 0);
   });
 
   it("cancels and expires an emailed link like a texted one, and a choice serves one link", async () => {

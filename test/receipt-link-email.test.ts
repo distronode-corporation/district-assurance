@@ -504,18 +504,24 @@ describe("receipt link email", () => {
     await t.engine.submitKeypad(callId, { dob: DOB });
     await t.engine.checkCarrier(callId);
     await t.engine.finishVerification(callId);
-    await t.engine.offerPaymentChannels(callId);
-    await t.engine.choosePaymentChannel(callId, { key: "2" });
+    // The call kept its first look at the subject: no address. The address the host added since is
+    // not the kept one, so email is not offered for the second payment either, the same rule the
+    // receipt follows below: the link goes by text, never to an address the call did not start with.
+    const again = await t.engine.offerPaymentChannels(callId);
+    assert.deepEqual([again.channels, again.chosen], [[{ channel: "text", key: "1" }], "text"], "the added address is not the kept one, so text again");
     await confirmAmount(t.engine, callId);
     await t.engine.requestPayment(callId);
     await t.engine.applyPaymentOutcome({ kind: "completed", linkId: t.payments.created.at(-1)!.linkId, paymentStatus: "paid" });
-    assert.equal(emails(t, "payment_link").length, 1, "the second payment went by email, on the caller's keypress for it then");
+    assert.equal(emails(t, "payment_link").length, 0, "no payment link ever emails the address the call did not start with");
+    assert.equal(texts(t, "payment_link").length, 2, "both payments went by text");
     await t.engine.recordConsent(callId, { purpose: "receipt_email", answer: "yes" });
     await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "yes" });
     await t.engine.endCall(callId);
-    assert.deepEqual(await t.engine.sendReceiptLink(callId, LINK), { sent: false, channel: null }, "the receipt never emails the address the call did not start with");
-    assert.equal(emails(t, "receipt_link").length, 0);
-    assert.equal(texts(t, "receipt_link").length, 0, "and nothing by text instead");
+    // The payment went by text (the caller's only offered channel), so the receipt follows it by
+    // text, on the caller's receipt_texts yes; the kept rule keeps the email out either way.
+    assert.deepEqual(await t.engine.sendReceiptLink(callId, LINK), { sent: true, channel: "text" }, "the receipt follows the payment's channel, text");
+    assert.equal(emails(t, "receipt_link").length, 0, "the receipt never emails the address the call did not start with");
+    assert.equal(texts(t, "receipt_link").length, 1);
   });
 
   it("refuses a bad link, a call that has not ended, or one without a receipt", async () => {
