@@ -330,16 +330,14 @@ describe("receipt link email", () => {
     assert.equal(emails(t, "receipt_link").length, 1, "only the well-formed one went out");
   });
 
-  it("still goes to the address kept under the match that stood when the action was noted, after a taint", async () => {
+  it("sends nothing once the keypad or PIN match no longer stands, on either channel", async () => {
     const t = engine();
     const callId = await paidCall(t, "2");
     await t.engine.recordConsent(callId, { purpose: "receipt_email", answer: "yes" });
     await t.engine.markUntrusted(callId, "crm_note");
     await t.engine.endCall(callId);
-    // The kept address was captured while the match stood, as the text keeps a number from before a
-    // contact change: a taint afterwards moves neither. The subject's own address receives the receipt.
-    assert.deepEqual(await t.engine.sendReceiptLink(callId, LINK), { sent: true, channel: "email" });
-    assert.deepEqual(emails(t, "receipt_link").map((m) => m.to), [EMAIL]);
+    assert.deepEqual(await t.engine.sendReceiptLink(callId, LINK), { sent: false, channel: null }, "the email channel needs the match too");
+    assert.equal(emails(t, "receipt_link").length, 0);
     assert.equal(texts(t, "receipt_link").length, 0);
   });
 

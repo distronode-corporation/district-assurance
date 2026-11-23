@@ -1719,7 +1719,7 @@ export class Engine {
       // A money, contact or access step is what a receipt text names, and a contact one owes a notice.
       // Such a step follows a level 2 verification, which a keypad or PIN match always unlocked. Only
       // a contact step needs the match to stand (its notice goes to the matched subject's number):
-      // matchedSubject fails closed if it does not. A payment texted before a taint still completes
+      // Trace's noteAction fails closed if it does not. A payment texted before a taint still completes
       // when the provider reports it, without the match, which stays void.
       const action = this.#actionClass(owner!, step.type);
       if (action !== null) trace.noteAction(draft, action, () => this.#currentSubject(record));

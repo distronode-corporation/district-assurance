@@ -2430,7 +2430,8 @@ a failure sends with the same idempotency key; the ledger gets one `receipt.link
 `sendReceiptLink(callId, url)` sends the same link by the channel the caller chose for their payment
 link: email when the call's last delivered payment link went by email and Trace's `channels` setting
 is `["text", "email"]`, text otherwise, following `textReceiptLink`'s rules exactly. The email goes
-only when the caller's latest answer to the `receipt_email` consent purpose (Trace's settings hold
+only when a keypad or PIN match still stands, exactly as the text channel requires one, and the
+caller's latest answer to the `receipt_email` consent purpose (Trace's settings hold
 its wording, the caller's answer is recorded like any consent) is "yes", and only to the address
 kept for the subject when the call's first action was noted, the address on file as Badge held it
 then, held to `isEmailAddress`: never an address the host's records changed to later on the call,
@@ -2442,7 +2443,7 @@ stored or revoked, no address kept) sends nothing, and the link never falls back
 channel; a caller who chose email and only answered the text purpose gets no link from
 `sendReceiptLink`. `textReceiptLink` is its own entry point, though: it still texts on the text
 purpose's consent, so a host that adopts `sendReceiptLink` calls it alone, never both. At most one
-link per call, whichever channel sent it. The email is `RECEIPT_EMAIL`: subject "Your receipt from
+link per call from `sendReceiptLink`, whichever channel it sends. The email is `RECEIPT_EMAIL`: subject "Your receipt from
 BUSINESS" / "Votre reçu de BUSINESS" / "Su recibo de BUSINESS", body "BUSINESS sent you a receipt
 for ACTIONS on your call.", the link on a line of its own, then "If you did not have this call, do
 not use the link." / "BUSINESS vous a envoyé un reçu pour ACTIONS lors de votre appel." ... "Si vous
@@ -2452,8 +2453,8 @@ list. Nothing else: no amount, code, phone number, account number or personal va
 copy holds nothing more. Email is off by default: without "email" in Trace's `channels` the link
 always goes by text (or not at all), and a config with it on needs the `emails` adapter and a
 `receipt_email` wording, checked when it is saved. A retry after a failure sends with the same
-idempotency key; the ledger gets one `receipt.link_texted` and one `receipt.link_emailed`, one
-entry per channel that sent, each written once even when both entry points race.
+idempotency key; the ledger gets at most one entry per channel that sent (`receipt.link_texted`,
+`receipt.link_emailed`), each written once even when both entry points race.
 
 **Contact change notice** (purpose `contact_changed`). Each subject and number a contact step kept
 is owed a security notice, whatever the caller answered about receipts: it is not a receipt and

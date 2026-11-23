@@ -65,8 +65,9 @@ check everything that is left from that checkpoint on without the entries before
   link to an ended call's receipt by the channel the caller chose for their payment link, and
   `textReceiptLink` still texts it as before. The email goes only when the call's last delivered
   payment link went by email, Trace's `channels` setting is `["text", "email"]` (the new setting;
-  the default is text only) and the caller's latest answer to the `receipt_email` consent purpose is
-  yes, and only to the address kept for the subject when the call's first action was noted (the
+  the default is text only), a keypad or PIN match still stands and the caller's latest answer to
+  the `receipt_email` consent purpose is yes, and only to the address kept for the subject when the
+  call's first action was noted (the
   address on file as Badge held it then, as the contact notice keeps the number before a change; a
   first observation of no address is kept too, so a later one never fills it in): never an address
   the host's records changed to later on the call, never one heard or keyed on the call, and a call
@@ -75,8 +76,8 @@ check everything that is left from that checkpoint on without the entries before
   per call on the text consent, so a host that adopts `sendReceiptLink` calls it alone, never both.
   A config with the email channel on needs the `emails` adapter and a `receipt_email` wording in
   Trace's settings, checked when the config is saved. The email (`RECEIPT_EMAIL`) names the
-  business, what the call did and the link, nothing else, and the ledger gets one
-  `receipt.link_texted` and one `receipt.link_emailed`, one entry per channel that sent.
+  business, what the call did and the link, nothing else, and the ledger gets at most one entry per
+  channel that sent (`receipt.link_texted`, `receipt.link_emailed`).
 
 
 ## [0.3.0] - 2026-11-22

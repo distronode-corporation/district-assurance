@@ -689,14 +689,16 @@ export async function textReceiptLink(
 /**
  * Sends a link to an ended call's receipt by the channel the caller chose for their payment link:
  * email when their last delivered payment link went by email and Trace's `channels` setting still
- * has the email channel on, text otherwise. At most one link per call, whichever channel. The
- * email goes only to the address kept for the subject when the call's first action was noted
- * (as the contact notice keeps the number), held to `isEmailAddress`, under the caller's standing
- * yes to `receipt_email`; it never carries the address anywhere else. A channel that was chosen
- * but cannot be served (a withdrawn or missing yes, no address kept, one the plain-address check
- * refuses) sends nothing: the link never falls back to the other channel, and a host that runs
- * `textReceiptLink` beside this can still text on its own consent, so a host that adopts this
- * calls it alone. The text channel follows `textReceiptLink`'s rules exactly.
+ * has the email channel on, text otherwise. At most one link per call from this entry point,
+ * whichever channel. The email goes only when a keypad or PIN match still stands, as the text
+ * channel requires one, and only to the address kept for the subject when the call's first action
+ * was noted (as the contact notice keeps the number), held to `isEmailAddress`, under the
+ * caller's standing yes to `receipt_email`; it never carries the address anywhere else. A channel
+ * that was chosen but cannot be served (a withdrawn or missing yes, no address kept, one the
+ * plain-address check refuses, no standing match) sends nothing: the link never falls back to the
+ * other channel, and a host that runs `textReceiptLink` beside this can still text on its own
+ * consent, so a host that adopts this calls it alone. The text channel follows
+ * `textReceiptLink`'s rules exactly.
  */
 export async function sendReceiptLink(
   rt: EngineRuntime,
@@ -710,6 +712,8 @@ export async function sendReceiptLink(
   // The settings are read now: a business turns the email channel off without editing a flow.
   if (paymentChannel(ctx.record) === "email" && receiptEmailOn(settingsOf(rt))) {
     const current = subject(ctx.record);
+    // A keypad or PIN match still stands, exactly as the text channel requires one.
+    if (current.numberOnFile === null) return { sent: false, channel: null };
     // The address kept when the call's first action was noted, never the one on file now: a host's
     // records can change under the call, and a recheck re-reads them.
     const kept = ctx.texts.emails.find((e) => e.subjectKey === current.subjectKey);
