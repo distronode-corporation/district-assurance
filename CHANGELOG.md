@@ -63,15 +63,19 @@ check everything that is left from that checkpoint on without the entries before
   entry it read, or the base of a ledger pruned to its head, never a head read after its listing.
 - **A receipt link by email** (ADR-34, SPEC section 16): `sendReceiptLink(callId, url)` sends the
   link to an ended call's receipt by the channel the caller chose for their payment link, and
-  `textReceiptLink` still texts it as before. The email goes only when the call's last payment went
-  by email, Trace's `channels` setting is `["text", "email"]` (the new setting; the default is text
-  only) and the caller's latest answer to the `receipt_email` consent purpose is yes, and only to the
-  subject's verified `emailOnFile`, as the payment link email is: never an address heard or keyed on
-  the call. A channel that was chosen but not consented to sends nothing, never the other channel
-  instead. A config with the email channel on needs the `emails` adapter and a `receipt_email`
-  wording in Trace's settings, checked when the config is saved. The email (`RECEIPT_EMAIL`) names
-  the business, what the call did and the link, nothing else, and the ledger gets one
-  `receipt.link_emailed`.
+  `textReceiptLink` still texts it as before. The email goes only when the call's last delivered
+  payment link went by email, Trace's `channels` setting is `["text", "email"]` (the new setting;
+  the default is text only) and the caller's latest answer to the `receipt_email` consent purpose is
+  yes, and only to the address kept for the subject when the call's first action was noted (the
+  address on file as Badge held it then, as the contact notice keeps the number before a change):
+  never an address the host's records changed to later on the call, never one heard or keyed on the
+  call, and a call with nothing kept sends no email. A channel that was chosen but not consented to
+  sends nothing, never the other channel instead. `textReceiptLink` stays its own entry point, once
+  per call on the text consent, so a host that adopts `sendReceiptLink` calls it alone, never both.
+  A config with the email channel on needs the `emails` adapter and a `receipt_email` wording in
+  Trace's settings, checked when the config is saved. The email (`RECEIPT_EMAIL`) names the
+  business, what the call did and the link, nothing else, and the ledger gets one
+  `receipt.link_texted` and one `receipt.link_emailed`, one entry per channel that sent.
 
 
 ## [0.3.0] - 2026-11-22

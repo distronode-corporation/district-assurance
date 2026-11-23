@@ -63,8 +63,19 @@ export interface TraceTexts {
   actions: ActionClass[];
   /** One notice per contact change, in order, but never two to the same subject's same number. */
   notices: ContactNotice[];
-  /** The channel a receipt link went by on this call, at most one link, whichever channel. */
-  receiptLink: "none" | "text" | "email";
+  /**
+   * The address on file for a subject as Badge held it when the call's first action was noted, one
+   * per subject: a receipt email goes to the one kept here, never to an address the host's records
+   * changed to later on the call (a recheck re-reads the subject).
+   */
+  emails: Array<{ subjectKey: string; to: string }>;
+  /** Whether a receipt link went out on this call, whichever channel sent it. */
+  receiptLink: "none" | "sent";
+  /**
+   * The channels whose send is recorded on the ledger (`receipt.link_texted`, `receipt.link_emailed`),
+   * in the order they were recorded. Absent on a call saved before receipt links had channels.
+   */
+  receiptLinkChannels?: ("text" | "email")[];
 }
 
 export interface TraceConsentStep extends FlowStep {
@@ -201,7 +212,7 @@ export const traceModule: AssuranceModule = {
   initCall(settings: unknown): JsonValue {
     const wordings = (settings as TraceSettings | undefined)?.wordings ?? [];
     const businessName = (settings as TraceSettings | undefined)?.businessName ?? null;
-    const texts: TraceTexts = { actions: [], notices: [], receiptLink: "none" };
+    const texts: TraceTexts = { actions: [], notices: [], emails: [], receiptLink: "none" };
     return { wordings: structuredClone(wordings), consents: [], storing: null, unrecorded: [], endedHead: null, receipt: null, businessName, texts } as unknown as JsonValue;
   },
 
@@ -491,12 +502,11 @@ export async function issueReceipt(
 
 function textsOf(record: CallRecord): TraceTexts {
   const slice = record.modules[TRACE] as unknown as TraceSlice;
-  // A call stored before PRV-10 has no texts yet: it loads with none.
-  slice.texts ??= { actions: [], notices: [], receiptLink: "none" };
-  // A call stored before receipt links had channels texted its link: "sent" was texted. Read and
-  // written through a wider view, since the stored value is one the type has since narrowed away.
-  const stored: { receiptLink: string } = slice.texts;
-  if (stored.receiptLink === "sent") stored.receiptLink = "text";
+  // A call stored before PRV-10 has no texts yet, and one stored before receipt links had channels
+  // keeps neither list: both load with none.
+  slice.texts ??= { actions: [], notices: [], emails: [], receiptLink: "none" };
+  slice.texts.emails ??= [];
+  slice.texts.receiptLinkChannels ??= [];
   return slice.texts;
 }
 
@@ -509,15 +519,24 @@ function textsOf(record: CallRecord): TraceTexts {
  * identical texts to one number). The notice owed is saved in the same write as the change, and
  * `contact.notice_owed` goes to the ledger with it, so a sweep can find a call that never ends.
  */
-export function noteAction(draft: CallDraft, action: ActionClass, subjectOf: () => { subjectKey: string; phoneOnFile: string }): void {
+export function noteAction(draft: CallDraft, action: ActionClass, subjectOf: () => { subjectKey: string | null; numberOnFile: string | null; emailOnFile: string | null }): void {
   const texts = textsOf(draft.record);
-  // A contact action owes a notice to its subject, so it needs one (subjectOf throws without);
-  // read before anything changes, so a refusal leaves the call as it was.
-  const subject = action === "contact" ? subjectOf() : null;
+  // Read before anything changes, so a refusal leaves the call as it was.
+  const subject = subjectOf();
   if (!texts.actions.includes(action)) texts.actions.push(action);
-  if (subject === null) return;
-  if (texts.notices.some((n) => n.subjectKey === subject.subjectKey && n.to === subject.phoneOnFile)) return;
-  texts.notices.push({ subjectKey: subject.subjectKey, to: subject.phoneOnFile, sent: false });
+  // The address on file as Badge holds the subject now, kept at the call's first action for them:
+  // the receipt email goes to this one, as the notice below keeps the number, never to an address
+  // the host's records changed to later on the call.
+  if (subject.subjectKey !== null && subject.emailOnFile !== null && !texts.emails.some((e) => e.subjectKey === subject.subjectKey)) {
+    texts.emails.push({ subjectKey: subject.subjectKey, to: subject.emailOnFile });
+  }
+  if (action !== "contact") return;
+  // A contact action owes a notice to its subject, so it needs a standing keypad or PIN match.
+  if (subject.subjectKey === null || subject.numberOnFile === null) {
+    throw new EngineError("precondition_failed", "the keypad or PIN checks have not matched on this call");
+  }
+  if (texts.notices.some((n) => n.subjectKey === subject.subjectKey && n.to === subject.numberOnFile)) return;
+  texts.notices.push({ subjectKey: subject.subjectKey, to: subject.numberOnFile, sent: false });
   draft.emit("contact.notice_owed", "code", {});
 }
 
@@ -599,12 +618,19 @@ async function consentStands(rt: EngineRuntime, slice: TraceSlice, purpose: stri
   return true;
 }
 
-/** Records the send, once, whichever channel: two processes can both send (one message, by its key), and the first records it. */
-async function recordLinkSent(rt: EngineRuntime, callId: string, channel: Exclude<TraceTexts["receiptLink"], "none">): Promise<void> {
+/**
+ * Records the send. `receiptLink` is the once-per-call guard, exactly the value a process running
+ * 0.3.0 reads; each channel's own entry is written when that channel's send is not recorded yet, so
+ * two entry points racing still log one entry per channel that really sent, and no channel logs
+ * twice (two processes can both send one message, by its key).
+ */
+async function recordLinkSent(rt: EngineRuntime, callId: string, channel: "text" | "email"): Promise<void> {
   await rt.update(callId, (draft) => {
     const s = textsOf(draft.record);
-    if (s.receiptLink !== "none") return;
-    s.receiptLink = channel;
+    const recorded = (s.receiptLinkChannels ??= []);
+    if (recorded.includes(channel)) return;
+    recorded.push(channel);
+    s.receiptLink = "sent";
     draft.emit(channel === "email" ? "receipt.link_emailed" : "receipt.link_texted", "code", { actions: [...s.actions] });
   });
 }
@@ -659,12 +685,15 @@ export async function textReceiptLink(
 
 /**
  * Sends a link to an ended call's receipt by the channel the caller chose for their payment link:
- * email when they chose email there and Trace's `channels` setting still has the email channel on,
- * text otherwise. At most one link per call, whichever channel. The email goes only to the subject's
- * verified address on file (`subject`), under the caller's standing yes to `receipt_email`; it
- * never carries the address anywhere else. A channel that was chosen but cannot be served (a
- * withdrawn or missing yes, no address on file) sends nothing: the link never falls back to the
- * other channel. The text channel follows `textReceiptLink`'s rules exactly.
+ * email when their last delivered payment link went by email and Trace's `channels` setting still
+ * has the email channel on, text otherwise. At most one link per call, whichever channel. The
+ * email goes only to the address kept for the subject when the call's first action was noted
+ * (as the contact notice keeps the number), held to `isEmailAddress`, under the caller's standing
+ * yes to `receipt_email`; it never carries the address anywhere else. A channel that was chosen
+ * but cannot be served (a withdrawn or missing yes, no address kept, one the plain-address check
+ * refuses) sends nothing: the link never falls back to the other channel, and a host that runs
+ * `textReceiptLink` beside this can still text on its own consent, so a host that adopts this
+ * calls it alone. The text channel follows `textReceiptLink`'s rules exactly.
  */
 export async function sendReceiptLink(
   rt: EngineRuntime,
@@ -678,7 +707,10 @@ export async function sendReceiptLink(
   // The settings are read now: a business turns the email channel off without editing a flow.
   if (paymentChannel(ctx.record) === "email" && receiptEmailOn(settingsOf(rt))) {
     const current = subject(ctx.record);
-    const to = current.emailOnFile !== null && isEmailAddress(current.emailOnFile) ? current.emailOnFile : null;
+    // The address kept when the call's first action was noted, never the one on file now: a host's
+    // records can change under the call, and a recheck re-reads them.
+    const kept = ctx.texts.emails.find((e) => e.subjectKey === current.subjectKey);
+    const to = kept !== undefined && isEmailAddress(kept.to) ? kept.to : null;
     if (to !== null && (await consentStands(rt, ctx.slice, RECEIPT_EMAIL_PURPOSE))) {
       // The call keeps its business name from the start, and a payment went out by email, which
       // needed it, so it is there.

@@ -72,6 +72,9 @@ function config(patch: (c: FlowConfig) => void = () => undefined): FlowConfig {
       "deposit-quiet": { steps: [verify, channel, pay, askEmail, { type: "trace.receipt" }] },
       // A keypad recheck after the payment, as a flow that re-reads the subject on file (PRV-10's repay).
       "deposit-recheck": { steps: [verify, channel, pay, askEmail, askTexts, { type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }, receipt] },
+      // A contact change between the payment and the recheck: both the notice and the kept address
+      // are read from before the change.
+      "change-recheck": { steps: [{ type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["payment.request", "contact.update"] }, channel, pay, { type: "acme.change_phone" }, askEmail, askTexts, { type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }, receipt] },
     };
     patch(c);
   });
@@ -253,30 +256,88 @@ describe("receipt link email", () => {
     assert.equal(emails(t, "receipt_link").length, 0);
   });
 
-  it("needs an address on file: a subject read again without its address sends nothing", async () => {
+  it("goes to the address kept when the call's action was noted, never one the host's records changed to before a recheck", async () => {
     const t = engine();
     const callId = await paidCall(t, "2", "deposit-recheck");
     await t.engine.recordConsent(callId, { purpose: "receipt_email", answer: "yes" });
     await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "yes" });
-    // The host drops the address in its own records, and the recheck step reads the subject again.
-    t.records.putSubject("ws_test", testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } }));
+    const changed = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } });
+    changed.emailOnFile = "attacker@evil.test";
+    t.records.putSubject("ws_test", changed);
     await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
     await t.engine.submitKeypad(callId, { dob: DOB });
     assert.equal((await t.engine.finishVerification(callId)).level, 1);
     await t.engine.endCall(callId);
-    assert.deepEqual(await t.engine.sendReceiptLink(callId, LINK), { sent: false, channel: null });
-    assert.equal(emails(t, "receipt_link").length, 0);
+    assert.deepEqual(await t.engine.sendReceiptLink(callId, LINK), { sent: true, channel: "email" });
+    assert.deepEqual(emails(t, "receipt_link").map((m) => m.to), [EMAIL], "the address on file when the payment completed");
+    assert.equal(emails(t, "receipt_link").some((m) => m.to !== EMAIL), false);
     assert.equal(texts(t, "receipt_link").length, 0, "never by text instead");
   });
 
-  it("sends nothing once the keypad or PIN match no longer stands", async () => {
+  it("keeps the address through a contact change too, as the text keeps the number from before it", async () => {
+    const contactChanged = async (t: TestEngine, key: "1" | "2"): Promise<string> => {
+      const callId = await paidCall(t, key, "change-recheck");
+      const changed = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: NEW_PHONE, knowledge: { dob: DOB } });
+      changed.emailOnFile = "new-owner@evil.test";
+      t.records.putSubject("ws_test", changed);
+      await t.engine.updateModule(callId, "acme", (s) => ({ done: (s as { done: number }).done + 1 }));
+      await t.engine.recordConsent(callId, { purpose: "receipt_email", answer: "yes" });
+      await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "yes" });
+      await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+      await t.engine.submitKeypad(callId, { dob: DOB });
+      await t.engine.finishVerification(callId);
+      await t.engine.endCall(callId);
+      return callId;
+    };
+    const emailed = engine();
+    const emailCall = await contactChanged(emailed, "2");
+    assert.deepEqual(await emailed.engine.sendReceiptLink(emailCall, LINK), { sent: true, channel: "email" });
+    assert.deepEqual(emails(emailed, "receipt_link").map((m) => m.to), [EMAIL], "the address from before the change");
+    assert.equal(texts(emailed, "receipt_link").length, 0);
+    const texted = engine();
+    const textCall = await contactChanged(texted, "1");
+    assert.deepEqual(await texted.engine.sendReceiptLink(textCall, LINK), { sent: true, channel: "text" });
+    assert.deepEqual(texts(texted, "receipt_link").map((m) => m.to), [PHONE_ON_FILE], "the number from before the change, as the notice kept it");
+    assert.deepEqual(await texted.engine.textReceiptLink(textCall, LINK), { texted: false }, "at most one link per call, whichever entry point sent it");
+  });
+
+  it("never emails a malformed address, whoever's records hold it now", async () => {
+    const t = engine();
+    const callId = await paidCall(t, "2", "deposit-recheck");
+    await t.engine.recordConsent(callId, { purpose: "receipt_email", answer: "yes" });
+    await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "yes" });
+    const changed = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } });
+    changed.emailOnFile = "pat@example.test\r\nBcc: other@example.test";
+    t.records.putSubject("ws_test", changed);
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    await t.engine.endCall(callId);
+    assert.deepEqual(await t.engine.sendReceiptLink(callId, LINK), { sent: true, channel: "email" });
+    assert.deepEqual(emails(t, "receipt_link").map((m) => m.to), [EMAIL], "the kept address, never the malformed one");
+    // A record whose kept address is not a plain address (storage that was tampered with) sends nothing.
+    const good = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } });
+    good.emailOnFile = EMAIL;
+    t.records.putSubject("ws_test", good);
+    const hostile = await emailedCall(t, { receipt_email: "yes" });
+    const stored = (await t.sessions.get("ws_test", hostile))!;
+    const textsSlice = (stored.record as { modules: { trace: { texts: { emails: Array<{ subjectKey: string; to: string }> } } } }).modules.trace.texts;
+    textsSlice.emails[0]!.to = "pat@example.test\r\nBcc: other@example.test";
+    assert.deepEqual(await t.sessions.compareAndSet("ws_test", hostile, stored.version, stored.record), { ok: true, version: stored.version + 1 });
+    assert.deepEqual(await t.engine.sendReceiptLink(hostile, LINK), { sent: false, channel: null });
+    assert.equal(emails(t, "receipt_link").length, 1, "only the well-formed one went out");
+  });
+
+  it("still goes to the address kept under the match that stood when the action was noted, after a taint", async () => {
     const t = engine();
     const callId = await paidCall(t, "2");
     await t.engine.recordConsent(callId, { purpose: "receipt_email", answer: "yes" });
     await t.engine.markUntrusted(callId, "crm_note");
     await t.engine.endCall(callId);
-    assert.deepEqual(await t.engine.sendReceiptLink(callId, LINK), { sent: false, channel: null });
-    assert.equal(emails(t, "receipt_link").length, 0);
+    // The kept address was captured while the match stood, as the text keeps a number from before a
+    // contact change: a taint afterwards moves neither. The subject's own address receives the receipt.
+    assert.deepEqual(await t.engine.sendReceiptLink(callId, LINK), { sent: true, channel: "email" });
+    assert.deepEqual(emails(t, "receipt_link").map((m) => m.to), [EMAIL]);
     assert.equal(texts(t, "receipt_link").length, 0);
   });
 
@@ -295,16 +356,65 @@ describe("receipt link email", () => {
     assert.equal((await events(t, "receipt.link_emailed")).length, 1);
   });
 
-  it("counts a link texted before channels existed as already sent", async () => {
+  it("counts a link a 0.3.0 process recorded as sent, and never emails a call with no kept address", async () => {
     const t = engine();
     const callId = await emailedCall(t, { receipt_email: "yes", receipt_texts: "yes" });
-    // A call record written by 0.3.0 holds "sent" for a link it texted.
+    // A call record written by 0.3.0 holds "sent" for a link it texted, and no channels and no kept address.
     const stored = (await t.sessions.get("ws_test", callId))!;
-    (stored.record as { modules: { trace: { texts: { receiptLink: string } } } }).modules.trace.texts.receiptLink = "sent";
+    const textsSlice = (stored.record as { modules: { trace: { texts: { receiptLink: string; receiptLinkChannels?: unknown; emails?: unknown } } } }).modules.trace.texts;
+    textsSlice.receiptLink = "sent";
+    delete textsSlice.receiptLinkChannels;
+    delete textsSlice.emails;
     assert.deepEqual(await t.sessions.compareAndSet("ws_test", callId, stored.version, stored.record), { ok: true, version: stored.version + 1 });
     assert.deepEqual(await t.engine.textReceiptLink(callId, LINK), { texted: false });
     assert.deepEqual(await t.engine.sendReceiptLink(callId, LINK), { sent: false, channel: null });
+    // And a 0.3.0 call that never sent its link keeps no address either: no email, fail closed.
+    const fresh = await emailedCall(t, { receipt_email: "yes" });
+    const unsent = (await t.sessions.get("ws_test", fresh))!;
+    delete (unsent.record as { modules: { trace: { texts: { emails?: unknown } } } }).modules.trace.texts.emails;
+    assert.deepEqual(await t.sessions.compareAndSet("ws_test", fresh, unsent.version, unsent.record), { ok: true, version: unsent.version + 1 });
+    assert.deepEqual(await t.engine.sendReceiptLink(fresh, LINK), { sent: false, channel: null }, "no address kept: nothing is sent");
+    assert.equal(emails(t, "receipt_link").length, 0);
     assert.equal(texts(t, "receipt_link").length, 0);
+  });
+
+  it("sends both entry points at once, and the ledger logs one entry per channel that sent", async () => {
+    const t = engine();
+    const callId = await emailedCall(t, { receipt_email: "yes", receipt_texts: "yes" });
+    const both = await Promise.all([t.engine.textReceiptLink(callId, LINK), t.engine.sendReceiptLink(callId, LINK)]);
+    assert.deepEqual(both, [{ texted: true }, { sent: true, channel: "email" }]);
+    assert.deepEqual([texts(t, "receipt_link").length, emails(t, "receipt_link").length], [1, 1], "one message per channel, by each channel's key");
+    assert.equal((await events(t, "receipt.link_texted")).length, 1);
+    assert.equal((await events(t, "receipt.link_emailed")).length, 1, "the email that really went out is logged, not swallowed by the text's entry");
+  });
+
+  it("records nothing while the email keeps failing, and a retry sends it once", async () => {
+    const inner = new FakeEmailSender();
+    let down = false;
+    const flaky = { async sendEmail(input: { to: string; subject: string; body: string; locale: "en" | "fr" | "es"; purpose: EmailPurpose; idempotencyKey: string }) { if (down) throw new Error("smtp down"); return inner.sendEmail(input); } };
+    const t = createTestEngine({ config: config(), modules: [acmeModule()], adapters: { emails: flaky } });
+    t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+    const subject = testSubject(TEST_KNOWLEDGE_KEY, { accountNumber: ACCOUNT, phoneOnFile: PHONE_ON_FILE, knowledge: { dob: DOB } });
+    subject.emailOnFile = EMAIL;
+    t.records.putSubject("ws_test", subject);
+    const callId = await emailedCall(t, { receipt_email: "yes" });
+    down = true;
+    await assert.rejects(t.engine.sendReceiptLink(callId, LINK), /smtp down/);
+    assert.equal(inner.sent.filter((m) => m.purpose === "receipt_link").length, 0, "nothing went out");
+    assert.equal((await t.ledger.list()).some((e) => e.event === "receipt.link_emailed"), false, "and nothing was recorded");
+    down = false;
+    assert.deepEqual(await t.engine.sendReceiptLink(callId, LINK), { sent: true, channel: "email" }, "the retry sends it");
+    assert.equal(inner.sent.filter((m) => m.purpose === "receipt_link").length, 1, "once, by its key");
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "receipt.link_emailed").length, 1);
+  });
+
+  it("an email chooser who says no to receipt_email gets nothing from sendReceiptLink, and textReceiptLink is its own entry point", async () => {
+    const t = engine();
+    const callId = await emailedCall(t, { receipt_email: "no", receipt_texts: "yes" });
+    assert.deepEqual(await t.engine.sendReceiptLink(callId, LINK), { sent: false, channel: null }, "no fallback to text");
+    assert.deepEqual(await t.engine.textReceiptLink(callId, LINK), { texted: true }, "the text entry point runs on its own consent");
+    assert.equal(emails(t, "receipt_link").length, 0);
+    assert.equal(texts(t, "receipt_link").length, 1);
   });
 
   it("goes by text on a call that paid nothing, and a text channel that is not consented to sends nothing", async () => {

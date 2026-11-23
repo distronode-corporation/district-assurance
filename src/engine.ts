@@ -1504,7 +1504,7 @@ export class Engine {
       newId: (prefix) => this.#ids.next(prefix),
       authorized: (scope) => this.#authorized(draft.record, scope),
       emit: (event, detail) => draft.emit("module.event", "code", { module: name, event, detail }),
-      contactChanged: () => trace.noteAction(draft, "contact", () => badge.matchedSubject(draft.record)),
+      contactChanged: () => trace.noteAction(draft, "contact", () => this.#currentSubject(draft.record)),
     };
     const next = fn(structuredClone(this.#slice(draft.record.modules, name)), view);
     draft.record.modules[name] = structuredClone(next);
@@ -1722,7 +1722,7 @@ export class Engine {
       // matchedSubject fails closed if it does not. A payment texted before a taint still completes
       // when the provider reports it, without the match, which stays void.
       const action = this.#actionClass(owner!, step.type);
-      if (action !== null) trace.noteAction(draft, action, () => badge.matchedSubject(record));
+      if (action !== null) trace.noteAction(draft, action, () => this.#currentSubject(record));
       flow.index++;
       const next = flow.steps[flow.index];
       if (next === undefined) {
