@@ -11,11 +11,15 @@ import {
   missingRequired,
   normaliseFieldValue,
   shownValues,
-  validateForm,
+  validateForm as validateFormProblems,
   type IntakeField,
-  type IntakeForm,
-} from "../src/file/intake.ts";
-import { MAX_LINK_AMOUNT_MINOR, settlementFor, validateAmount } from "../src/pay/payment.ts";
+  type IntakeForm } from "../src/file/intake.ts";
+import { problemMessage } from "../src/core/module.ts";
+import { MAX_LINK_AMOUNT_MINOR, settlementFor, validateAmount as validateAmountProblems } from "../src/pay/payment.ts";
+
+/** The sentences of the shared intake and payment validators, as the tests read them. */
+const validateForm = (form: IntakeForm): string[] => validateFormProblems(form).map(problemMessage);
+const validateAmount = (amountMinor: number, currency: string, maxMinor?: number): string[] => validateAmountProblems(amountMinor, currency, maxMinor).map(problemMessage);
 import { isKeypadEntry, judgeKeypadFactors, knowledgeDigest, knowledgeHmac, pinDigest, subjectKeyFor } from "../src/verify/knowledge.ts";
 import { pinOnFile } from "./helpers.ts";
 
@@ -277,7 +281,7 @@ describe("file: field rules and conditional fields", () => {
 
   it("refuses a showIf value its target's rules would refuse, and keeps the endpoints", () => {
     const on = (target: IntakeField, equals: string | number | boolean) =>
-      validateForm({ formId: "x", version: "1", fields: [target, f("dep", "text", { showIf: { field: target.key, equals } })] }).filter((e) => e.startsWith("field dep"));
+      validateForm({ formId: "x", version: "1", fields: [target, f("dep", "text", { showIf: { field: target.key, equals } })] }).map(problemMessage).filter((e) => e.startsWith("field dep"));
     const refused = (key: string) => [`field dep: showIf.equals is not a value field ${key} can take`];
     const count = f("count", "number", { min: 1, max: 10 });
     assert.deepEqual(on(count, 10), []);

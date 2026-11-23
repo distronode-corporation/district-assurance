@@ -14,7 +14,7 @@ import type { CallRecord } from "../src/core/runtime.ts";
 import { FixedClock } from "../src/testing/fakes.ts";
 import { TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../src/testing/index.ts";
 import { DEFAULT_KEYPAD_IDLE_SECONDS, badgeModule } from "../src/verify/badge.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, waitOut } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig, waitOut, messages } from "./helpers.ts";
 
 const POSTAL = "K1A0B1";
 const SPOKEN = { fields: { postal_code: "ca_postal_code" as const }, maxAttemptsPerCall: 2 };
@@ -204,7 +204,7 @@ describe("a spoken PIN", () => {
   });
 
   it("cannot be turned on in Badge's settings", () => {
-    const errors = badgeModule().validateSettings({ factors: ["spoken_knowledge", "keypad_knowledge"], accessibility: { spokenKeypadFields: ["pin"] } });
+    const errors = messages(badgeModule().validateSettings({ factors: ["spoken_knowledge", "keypad_knowledge"], accessibility: { spokenKeypadFields: ["pin"] } }));
     assert.deepEqual(errors, ["accessibility.spokenKeypadFields cannot hold the PIN: a PIN is never taken by speech"]);
     assert.throws(() => createTestEngine({ config: accessibleConfig({ spokenKeypadFields: ["pin"] }) }), ConfigError);
   });
@@ -213,7 +213,7 @@ describe("a spoken PIN", () => {
 describe("Badge's accessibility settings", () => {
   const badge = badgeModule();
   const base = ["keypad_knowledge", "spoken_knowledge"];
-  const check = (accessibility: unknown, factors: unknown = base) => badge.validateSettings({ factors, accessibility });
+  const check = (accessibility: unknown, factors: unknown = base) => messages(badge.validateSettings({ factors, accessibility }));
 
   it("accept the speech fields and the timeouts", () => {
     assert.deepEqual(check({ spokenKeypadFields: ["dob"], keypadIdleSeconds: 5, maxKeypadIdleSeconds: 300 }), []);
@@ -241,8 +241,8 @@ describe("Badge's accessibility settings", () => {
     const settings = { factors: base, accessibility: { spokenKeypadFields: ["dob", "pet_name"] } };
     const ctx = (s: unknown, p: StepContext["policy"] = policy): StepContext => ({ settings: s, policy: p, adapters: new Set<string>(), capabilities: {} });
     const step = { type: "badge.verify", level: 1, factors: ["spoken_knowledge"] };
-    assert.deepEqual(badge.validateStep(step, ctx(settings)), ["spoken keypad field pet_name is not one of the policy's keypad fields"]);
-    assert.deepEqual(badge.validateStep(step, ctx({ factors: base })), []);
+    assert.deepEqual(messages(badge.validateStep(step, ctx(settings))), ["spoken keypad field pet_name is not one of the policy's keypad fields"]);
+    assert.deepEqual(messages(badge.validateStep(step, ctx({ factors: base }))), []);
     assert.deepEqual(badge.validateStep({ ...step, factors: ["keypad_knowledge"] }, ctx(settings)), [], "a step without spoken answers");
     assert.deepEqual(badge.validateStep(step, ctx(settings, null)), [], "the policy did not validate");
   });

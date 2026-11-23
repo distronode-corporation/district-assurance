@@ -7,7 +7,7 @@ import { canonicalJson, type JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import { hexDigestsEqual } from "../core/hash.ts";
-import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
+import { problem, type AssuranceModule, type FlowStep, type StepContext, type StepStatus, type StepView, type StructuredProblem, type ValidationProblem } from "../core/module.ts";
 import type { CallRecord, EngineRuntime, FieldCipher, Locale } from "../core/runtime.ts";
 import type { SessionState } from "../core/session.ts";
 import { isDenseArray, isObject, unknownKeys } from "../core/shape.ts";
@@ -64,20 +64,20 @@ export interface DossierSlice {
 
 const FORM_ID = /^[a-z][a-z0-9_-]{0,63}$/;
 
-function formErrors(form: unknown, index: number): string[] {
+function formErrors(form: unknown, index: number): StructuredProblem[] {
   const at = `forms[${index}]`;
   if (!isObject(form) || typeof form.formId !== "string" || typeof form.version !== "string" || !isDenseArray(form.fields)) {
-    return [`${at} must be { formId, version, fields }`];
+    return [problem("dossier.form_shape", `${at} must be { formId, version, fields }`, { index })];
   }
   const fieldsOk = form.fields.every(
     (f: unknown) => isObject(f) && typeof f.key === "string" && isObject(f.label) && typeof f.label.en === "string" && typeof f.label.fr === "string",
   );
-  if (!fieldsOk) return [`${at} (${form.formId}): every field needs a key and an English and French label`];
+  if (!fieldsOk) return [problem("dossier.field_shape", `${at} (${form.formId}): every field needs a key and an English and French label`, { index, form: form.formId })];
   const typed = form as unknown as IntakeForm;
-  const errors = validateForm(typed).map((e) => `${at} (${typed.formId}): ${e}`);
-  if (!FORM_ID.test(typed.formId)) errors.push(`${at}: formId must be lower-case letters, digits, hyphens or underscores`);
+  const errors = validateForm(typed).map((e) => problem(e.code, `${at} (${typed.formId}): ${e.message}`, { index, form: typed.formId, ...e.params }));
+  if (!FORM_ID.test(typed.formId)) errors.push(problem("dossier.form_id", `${at}: formId must be lower-case letters, digits, hyphens or underscores`, { index }));
   for (const field of typed.fields) {
-    if (!["text", "number", "date", "yes_no"].includes(field.type)) errors.push(`${at} (${typed.formId}): field ${field.key} has an unknown type`);
+    if (!["text", "number", "date", "yes_no"].includes(field.type)) errors.push(problem("dossier.field_type", `${at} (${typed.formId}): field ${field.key} has an unknown type`, { index, form: typed.formId, field: field.key }));
   }
   return errors;
 }
@@ -97,12 +97,12 @@ export const dossierModule: AssuranceModule = {
     adapters: ["records"],
   },
 
-  validateSettings(settings: unknown): string[] {
-    if (!isObject(settings) || !isDenseArray(settings.forms)) return ["must be an object with a list of forms"];
-    const errors = unknownKeys(settings, ["forms"]).map((k) => `${k} is not a dossier setting`);
+  validateSettings(settings: unknown): ValidationProblem[] {
+    if (!isObject(settings) || !isDenseArray(settings.forms)) return [problem("dossier.settings_shape", "must be an object with a list of forms")];
+    const errors = unknownKeys(settings, ["forms"]).map((k) => problem("dossier.unknown_setting", `${k} is not a dossier setting`, { key: k }));
     settings.forms.forEach((f: unknown, i: number) => errors.push(...formErrors(f, i)));
     const ids = settings.forms.map((f: unknown) => (isObject(f) ? f.formId : undefined));
-    if (new Set(ids).size !== ids.length) errors.push("two forms have the same formId");
+    if (new Set(ids).size !== ids.length) errors.push(problem("dossier.duplicate_form", "two forms have the same formId"));
     return errors;
   },
 
@@ -111,11 +111,11 @@ export const dossierModule: AssuranceModule = {
     return (settings as DossierSettings).forms.some(hasSensitive) ? ["records", "fieldCipher"] : ["records"];
   },
 
-  validateStep(step: FlowStep, ctx: StepContext): string[] {
-    const errors = unknownKeys(step, ["type", "form"]).map((k) => `${k} is not a field of this step`);
-    if (typeof step.form !== "string") return [...errors, "form must name a form"];
+  validateStep(step: FlowStep, ctx: StepContext): ValidationProblem[] {
+    const errors = unknownKeys(step, ["type", "form"]).map((k) => problem("dossier.unknown_step_field", `${k} is not a field of this step`, { key: k }));
+    if (typeof step.form !== "string") return [...errors, problem("dossier.form_missing_name", "form must name a form")];
     const settings = ctx.settings as DossierSettings | null;
-    if (settings !== null && !settings.forms.some((f) => f.formId === step.form)) errors.push(`no form ${step.form} in the dossier settings`);
+    if (settings !== null && !settings.forms.some((f) => f.formId === step.form)) errors.push(problem("dossier.form_not_in_settings", `no form ${step.form} in the dossier settings`, { form: step.form }));
     return errors;
   },
 

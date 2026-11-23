@@ -11,7 +11,7 @@ import { hmacSha256Hex } from "../src/core/hash.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import { readPinTag } from "../src/verify/pin.ts";
 import { FakeDuressNotifier, TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, pinOnFile, rejects, setup, testConfig, waitOut } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, pinOnFile, rejects, setup, testConfig, waitOut, messages } from "./helpers.ts";
 
 const OWNER = subjectKeyFor(TEST_KNOWLEDGE_KEY, ACCOUNT);
 const DURESS = "7391";
@@ -525,13 +525,13 @@ describe("Duress PIN: settings", () => {
   const settings = (duress: unknown) => ({ factors: ["pin"], pin: { mode: "keyed_hash", minDigits: 4, maxDigits: 8, maxAttemptsPerCall: 3, duress } });
 
   it("checks the duress settings and needs the duressNotifier adapter while they are on", () => {
-    assert.deepEqual(module.validateSettings(settings({ refuseScopes: [] })), []);
-    assert.deepEqual(module.validateSettings(settings(true)), ["pin.duress must be an object with refuseScopes"]);
-    assert.deepEqual(module.validateSettings(settings({ refuseScopes: "owner.command", alert: true })), [
+    assert.deepEqual(messages(module.validateSettings(settings({ refuseScopes: [] }))), []);
+    assert.deepEqual(messages(module.validateSettings(settings(true))), ["pin.duress must be an object with refuseScopes"]);
+    assert.deepEqual(messages(module.validateSettings(settings({ refuseScopes: "owner.command", alert: true }))), [
       "pin.duress.alert is not a duress setting",
       "pin.duress.refuseScopes must list scopes (it may be empty)",
     ]);
-    assert.deepEqual(module.validateSettings(settings({ refuseScopes: ["a", "a"] })), ["pin.duress.refuseScopes has duplicates"]);
+    assert.deepEqual(messages(module.validateSettings(settings({ refuseScopes: ["a", "a"] }))), ["pin.duress.refuseScopes has duplicates"]);
     assert.deepEqual(module.requiredAdapters(settings({ refuseScopes: [] })), ["records", "counters", "duressNotifier"]);
     assert.deepEqual(module.requiredAdapters({ factors: ["keypad_knowledge"], pin: settings({ refuseScopes: [] }).pin }), ["records", "counters"]);
     assert.throws(

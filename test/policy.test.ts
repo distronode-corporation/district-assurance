@@ -10,13 +10,17 @@ import {
   scopesForLevel,
   stepAmount,
   textCodeTrusted,
-  validatePolicy,
+  validatePolicy as validatePolicyRaw,
   type CarrierSignalReport,
   type FactorKind,
   type FactorResult,
   type StepUpRule,
   type VerificationPolicy,
 } from "../src/core/policy.ts";
+import { problemMessage } from "../src/core/module.ts";
+
+/** The policy validator's sentences, as the tests read them. */
+const validatePolicy = (...args: Parameters<typeof validatePolicyRaw>): string[] => validatePolicyRaw(...args).map(problemMessage);
 
 const at = "2026-01-01T00:00:00.000Z";
 const pass = (...kinds: FactorKind[]): FactorResult[] => kinds.map((kind) => ({ kind, passed: true, at }));

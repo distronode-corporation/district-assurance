@@ -6,6 +6,7 @@ import type { IntakeRecord } from "../src/core/adapters.ts";
 import { REDACTION_MARKERS, cardNumberRedactor, composeRedactors, healthCardRedactor, sinRedactor, type RedactionKind, type Redactor } from "../src/core/redaction.ts";
 import { deliverRecord } from "../src/file/delivery.ts";
 import { validateForm, type IntakeForm } from "../src/file/intake.ts";
+import { problemMessage } from "../src/core/module.ts";
 import { verifySubjectExport } from "../src/prove/subject.ts";
 import { LEDGER_PAGE } from "../src/prove/trace.ts";
 import { FakeFieldCipher, MemoryConsentStore, MemoryRecordStore } from "../src/testing/fakes.ts";
@@ -295,7 +296,7 @@ describe("L3 review round 3: validateForm maxLength", () => {
   });
   it("refuses a maxLength that is not a positive whole number, before the pattern's work bound reads it", () => {
     for (const bad of [Number.NaN, 0, -1, 1.5, "10", Number.POSITIVE_INFINITY, null]) {
-      assert.ok(validateForm(form(bad)).includes("field code: maxLength must be a positive whole number"), String(bad));
+      assert.ok(validateForm(form(bad)).map(problemMessage).includes("field code: maxLength must be a positive whole number"), String(bad));
     }
     const ok: IntakeForm = { formId: "f", version: "1", fields: [{ key: "code", label: { en: "Code", fr: "Code" }, type: "text", required: true, maxLength: 40, pattern: "[a-z]+" }] };
     assert.deepEqual(validateForm(ok), []);

@@ -64,6 +64,9 @@ export function waitOut(t: TestEngine): void {
   t.clock.advance(900_000);
 }
 
+/** A validator's problem messages: the sentences, whatever form the validator answered. */
+export const messages = (problems: readonly (string | { message: string })[]): string[] => problems.map((p) => (typeof p === "string" ? p : p.message));
+
 export const rejects =(code: EngineErrorCode, message?: RegExp) => (e: unknown) =>
   e instanceof EngineError && e.code === code && (message === undefined || message.test(e.message));
 

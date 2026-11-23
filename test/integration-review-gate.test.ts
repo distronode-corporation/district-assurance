@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 
 import type { AccessController, ReceiptSigner, UnlockResult } from "../src/core/adapters.ts";
 import type { JsonValue } from "../src/core/canonical.ts";
-import { validateConfig, type FlowConfig } from "../src/core/config.ts";
+import { configProblems, validateConfig, type FlowConfig } from "../src/core/config.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { hmacSha256Hex } from "../src/core/hash.ts";
 import { verifyAccessGrant, type SignedAccessGrant } from "../src/gate/access.ts";
@@ -78,6 +78,10 @@ describe("L1 review: Gate", () => {
     assert.deepEqual(validateConfig(flow(1, 1), registry), []);
     assert.deepEqual(validateConfig(flow(undefined, 3), registry), []);
     assert.deepEqual(validateConfig(flow(1, 2), registry), ["flows.entry (gate): 2 gate.grant steps, but a call may have at most 1 access grant (maxGrantsPerCall)"]);
+    // The same problem in the structured form: the flow's path, Gate's own code, the count.
+    assert.deepEqual(configProblems(flow(1, 2), registry), [
+      { path: "flows.entry (gate)", code: "gate.too_many_grant_steps", params: { grants: 2, max: 1 }, message: "flows.entry (gate): 2 gate.grant steps, but a call may have at most 1 access grant (maxGrantsPerCall)" },
+    ]);
     assert.deepEqual(validateConfig(flow(undefined, 4), registry), ["flows.entry (gate): 4 gate.grant steps, but a call may have at most 3 access grants (maxGrantsPerCall)"]);
     // A step that is not an object is its own problem, and is not counted.
     const junk = flow(1, 1);

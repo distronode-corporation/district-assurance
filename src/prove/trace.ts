@@ -10,7 +10,7 @@ import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { isEmailAddress } from "../core/email.ts";
 import { stepOfType } from "../core/flow.ts";
-import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
+import { problem, type AssuranceModule, type FlowStep, type StepContext, type StepStatus, type StepView, type StructuredProblem, type ValidationProblem } from "../core/module.ts";
 import type { ScopeClass } from "../core/policy.ts";
 import { LOCALES, type CallDraft, type CallRecord, type EngineRuntime, type Locale } from "../core/runtime.ts";
 import { isObject, unknownKeys } from "../core/shape.ts";
@@ -103,22 +103,22 @@ export interface TraceSlice {
   texts: TraceTexts;
 }
 
-function wordingErrors(wording: unknown, index: number): string[] {
+function wordingErrors(wording: unknown, index: number): StructuredProblem[] {
   const at = `wordings[${index}]`;
   if (!isObject(wording) || typeof wording.purpose !== "string" || typeof wording.version !== "string" || !isObject(wording.text)) {
-    return [`${at} must be { purpose, version, text: { en, fr, es? } }`];
+    return [problem("trace.wording_shape", `${at} must be { purpose, version, text: { en, fr, es? } }`, { index })];
   }
-  const errors: string[] = [];
-  if (!/^[a-z][a-z0-9_]{0,63}$/.test(wording.purpose)) errors.push(`${at}: purpose must be snake_case`);
-  if (wording.version === "") errors.push(`${at}: version is empty`);
+  const errors: StructuredProblem[] = [];
+  if (!/^[a-z][a-z0-9_]{0,63}$/.test(wording.purpose)) errors.push(problem("trace.wording_purpose", `${at}: purpose must be snake_case`, { index }));
+  if (wording.version === "") errors.push(problem("trace.wording_version", `${at}: version is empty`, { index }));
   // Both go into the ledger's consent.recorded detail, which refuses a card number: caught here,
   // before a call can reserve a consent the ledger would then never accept.
-  if (detailCarriesCardNumber([wording.purpose, wording.version])) errors.push(`${at}: purpose and version must not look like a card number`);
+  if (detailCarriesCardNumber([wording.purpose, wording.version])) errors.push(problem("trace.wording_card_number", `${at}: purpose and version must not look like a card number`, { index }));
   const text = wording.text;
-  if (typeof text.en !== "string" || text.en.trim() === "" || typeof text.fr !== "string" || text.fr.trim() === "") errors.push(`${at}: needs an English and a French text`);
+  if (typeof text.en !== "string" || text.en.trim() === "" || typeof text.fr !== "string" || text.fr.trim() === "") errors.push(problem("trace.wording_texts", `${at}: needs an English and a French text`, { index }));
   // Spanish is optional; when given it is a text like the others.
-  if (text.es !== undefined && (typeof text.es !== "string" || text.es.trim() === "")) errors.push(`${at}: the Spanish text (es), when given, must not be empty`);
-  errors.push(...unknownKeys(text, LOCALES).map((k) => `${at}: ${k} is not a locale (en, fr or es)`));
+  if (text.es !== undefined && (typeof text.es !== "string" || text.es.trim() === "")) errors.push(problem("trace.wording_spanish", `${at}: the Spanish text (es), when given, must not be empty`, { index }));
+  errors.push(...unknownKeys(text, LOCALES).map((k) => problem("trace.wording_locale", `${at}: ${k} is not a locale (en, fr or es)`, { index, key: k })));
   return errors;
 }
 
@@ -129,14 +129,14 @@ function wordingErrors(wording: unknown, index: number): string[] {
  */
 const BUSINESS_NAME = /^[^\p{Cc}\p{Cs}\u202a-\u202e\u2066-\u2069]{1,64}$/u;
 
-function textLinkErrors(link: unknown, ctx: StepContext): string[] {
-  if (!isObject(link) || typeof link.consent !== "string" || unknownKeys(link, ["consent"]).length > 0) return ["textLink must be { consent: <a wording purpose> }"];
-  const errors: string[] = [];
-  if (!ctx.adapters.has("messages")) errors.push("a texted receipt link needs the messages adapter, which the engine does not have");
+function textLinkErrors(link: unknown, ctx: StepContext): StructuredProblem[] {
+  if (!isObject(link) || typeof link.consent !== "string" || unknownKeys(link, ["consent"]).length > 0) return [problem("trace.text_link_shape", "textLink must be { consent: <a wording purpose> }")];
+  const errors: StructuredProblem[] = [];
+  if (!ctx.adapters.has("messages")) errors.push(problem("trace.text_link_needs_messages", "a texted receipt link needs the messages adapter, which the engine does not have"));
   const settings = ctx.settings as TraceSettings | undefined | null;
   if (settings === null) return errors;
-  if (!(settings?.wordings ?? []).some((w) => w.purpose === link.consent)) errors.push(`no wording for ${link.consent} in the trace settings`);
-  if (settings?.businessName === undefined) errors.push("a texted receipt link needs businessName in the trace settings");
+  if (!(settings?.wordings ?? []).some((w) => w.purpose === link.consent)) errors.push(problem("trace.text_link_needs_wording", `no wording for ${link.consent} in the trace settings`, { purpose: link.consent }));
+  if (settings?.businessName === undefined) errors.push(problem("trace.text_link_needs_business_name", "a texted receipt link needs businessName in the trace settings"));
   return errors;
 }
 
@@ -150,12 +150,12 @@ function receiptEmailOn(settings: TraceSettings | undefined): boolean {
 }
 
 /** Problems with Trace's `channels` setting: text always, email at most once, and email needs its wording. */
-function channelsErrors(value: unknown, wordings: unknown): string[] {
-  if (!Array.isArray(value) || !value.every((c) => c === "text" || c === "email")) return ["channels must list text, and email or not"];
-  if (new Set(value).size !== value.length) return ["channels has duplicates"];
-  if (!value.includes("text")) return ["channels must include text: it is how a receipt link goes when the caller chose text, or nothing, for their payment link"];
+function channelsErrors(value: unknown, wordings: unknown): StructuredProblem[] {
+  if (!Array.isArray(value) || !value.every((c) => c === "text" || c === "email")) return [problem("trace.channels_shape", "channels must list text, and email or not")];
+  if (new Set(value).size !== value.length) return [problem("trace.channels_duplicates", "channels has duplicates")];
+  if (!value.includes("text")) return [problem("trace.channels_text", "channels must include text: it is how a receipt link goes when the caller chose text, or nothing, for their payment link")];
   if (value.includes("email") && !(Array.isArray(wordings) && wordings.some((w: unknown) => isObject(w) && w.purpose === RECEIPT_EMAIL_PURPOSE))) {
-    return [`the email channel needs a ${RECEIPT_EMAIL_PURPOSE} wording in the trace settings`];
+    return [problem("trace.channels_needs_wording", `the email channel needs a ${RECEIPT_EMAIL_PURPOSE} wording in the trace settings`, { purpose: RECEIPT_EMAIL_PURPOSE })];
   }
   return [];
 }
@@ -171,18 +171,18 @@ export const traceModule: AssuranceModule = {
     alwaysOn: true,
   },
 
-  validateSettings(settings: unknown): string[] {
+  validateSettings(settings: unknown): ValidationProblem[] {
     if (settings === undefined) return [];
-    if (!isObject(settings)) return ["must be an object"];
-    const errors = unknownKeys(settings, ["receipts", "wordings", "businessName", "channels"]).map((k) => `${k} is not a trace setting`);
-    if (settings.receipts !== undefined && typeof settings.receipts !== "boolean") errors.push("receipts must be true or false");
+    if (!isObject(settings)) return [problem("trace.settings_shape", "must be an object")];
+    const errors = unknownKeys(settings, ["receipts", "wordings", "businessName", "channels"]).map((k) => problem("trace.unknown_setting", `${k} is not a trace setting`, { key: k }));
+    if (settings.receipts !== undefined && typeof settings.receipts !== "boolean") errors.push(problem("trace.receipts", "receipts must be true or false"));
     const name = settings.businessName;
-    if (name !== undefined && (typeof name !== "string" || !BUSINESS_NAME.test(name) || name.trim() === "")) errors.push("businessName must be 1 to 64 characters on one line");
+    if (name !== undefined && (typeof name !== "string" || !BUSINESS_NAME.test(name) || name.trim() === "")) errors.push(problem("trace.business_name", "businessName must be 1 to 64 characters on one line"));
     if (settings.wordings !== undefined) {
-      if (!Array.isArray(settings.wordings)) return [...errors, "wordings must be a list"];
+      if (!Array.isArray(settings.wordings)) return [...errors, problem("trace.wordings_shape", "wordings must be a list")];
       settings.wordings.forEach((w: unknown, i: number) => errors.push(...wordingErrors(w, i)));
       const purposes = settings.wordings.map((w: unknown) => (isObject(w) ? w.purpose : undefined));
-      if (new Set(purposes).size !== purposes.length) errors.push("two wordings have the same purpose");
+      if (new Set(purposes).size !== purposes.length) errors.push(problem("trace.wording_duplicate", "two wordings have the same purpose"));
     }
     if (settings.channels !== undefined) errors.push(...channelsErrors(settings.channels, settings.wordings));
     return errors;
@@ -194,19 +194,19 @@ export const traceModule: AssuranceModule = {
     return receiptEmailOn(trace) ? [...adapters, "emails"] : adapters;
   },
 
-  validateStep(step: FlowStep, ctx: StepContext): string[] {
+  validateStep(step: FlowStep, ctx: StepContext): ValidationProblem[] {
     if (step.type === "trace.receipt") {
-      const errors = unknownKeys(step, ["type", "textLink"]).map((k) => `${k} is not a field of this step`);
-      if (!ctx.adapters.has("signer")) errors.push("a receipt needs the signer adapter, which the engine does not have");
+      const errors = unknownKeys(step, ["type", "textLink"]).map((k) => problem("trace.step_unknown_field", `${k} is not a field of this step`, { key: k }));
+      if (!ctx.adapters.has("signer")) errors.push(problem("trace.receipt_needs_signer", "a receipt needs the signer adapter, which the engine does not have"));
       if (step.textLink !== undefined) errors.push(...textLinkErrors(step.textLink, ctx));
       return errors;
     }
-    const errors = unknownKeys(step, ["type", "purpose", "require"]).map((k) => `${k} is not a field of this step`);
-    if (step.require !== undefined && step.require !== "yes" && step.require !== "answer") errors.push('require must be "yes" (the default) or "answer"');
-    if (typeof step.purpose !== "string") return [...errors, "purpose must name a wording"];
+    const errors = unknownKeys(step, ["type", "purpose", "require"]).map((k) => problem("trace.step_unknown_field", `${k} is not a field of this step`, { key: k }));
+    if (step.require !== undefined && step.require !== "yes" && step.require !== "answer") errors.push(problem("trace.require", 'require must be "yes" (the default) or "answer"'));
+    if (typeof step.purpose !== "string") return [...errors, problem("trace.purpose_shape", "purpose must name a wording")];
     const settings = ctx.settings as TraceSettings | undefined | null;
     if (settings !== null && !(settings?.wordings ?? []).some((w) => w.purpose === step.purpose)) {
-      errors.push(`no wording for ${step.purpose} in the trace settings`);
+      errors.push(problem("trace.purpose_needs_wording", `no wording for ${step.purpose} in the trace settings`, { purpose: step.purpose }));
     }
     return errors;
   },

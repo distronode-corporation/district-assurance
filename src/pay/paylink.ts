@@ -33,7 +33,7 @@ import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import { stepAmount, type StepUpAmount } from "../core/policy.ts";
 import { hexDigestsEqual } from "../core/hash.ts";
-import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
+import { problem, problemMessage, type AssuranceModule, type FlowStep, type StepContext, type StepStatus, type StepView, type StructuredProblem, type ValidationProblem } from "../core/module.ts";
 import type { CallDraft, CallRecord, EngineRuntime, Locale } from "../core/runtime.ts";
 import type { SessionState } from "../core/session.ts";
 import { isIntegerIn, isObject, unknownKeys } from "../core/shape.ts";
@@ -172,30 +172,34 @@ interface PaymentTerms {
   paymentMethods: InstantPaymentMethod[];
 }
 
-function requestErrors(input: Record<string, unknown>, maxMinor: number | undefined): string[] {
-  const errors: string[] = [];
+function requestErrors(input: Record<string, unknown>, maxMinor: number | undefined): StructuredProblem[] {
+  const errors: StructuredProblem[] = [];
   if (input.amountRef !== undefined) {
-    if (input.amountMinor !== undefined || input.currency !== undefined) errors.push("name amountMinor and currency, or amountRef, not both");
-    if (typeof input.amountRef !== "string" || !AMOUNT_REF.test(input.amountRef)) errors.push("amountRef must be 1 to 64 letters, digits, '.', ':', '-' or '_'");
+    if (input.amountMinor !== undefined || input.currency !== undefined) errors.push(problem("paylink.amount_ref_and_amount", "name amountMinor and currency, or amountRef, not both"));
+    if (typeof input.amountRef !== "string" || !AMOUNT_REF.test(input.amountRef)) errors.push(problem("paylink.amount_ref_shape", "amountRef must be 1 to 64 letters, digits, '.', ':', '-' or '_'"));
   } else {
     const amount = input.amountMinor;
     const currency = input.currency;
-    errors.push(...(typeof amount === "number" && typeof currency === "string" ? validateAmount(amount, currency, maxMinor) : ["amountMinor and currency are required"]));
+    errors.push(
+      ...(typeof amount === "number" && typeof currency === "string"
+        ? validateAmount(amount, currency, maxMinor)
+        : [problem("paylink.amount_required", "amountMinor and currency are required")]),
+    );
   }
   const description = input.description;
-  if (typeof description !== "string" || description.trim() === "" || description.trim().length > 200) errors.push("description must be 1 to 200 characters");
+  if (typeof description !== "string" || description.trim() === "" || description.trim().length > 200) errors.push(problem("paylink.description_length", "description must be 1 to 200 characters"));
   // A lone surrogate is not text: it cannot be read back or hashed into the read-back's digest.
-  else if (!description.isWellFormed()) errors.push("description must be well-formed text, with no lone surrogate");
-  if (!AMOUNT_SOURCES.includes(input.amountSource as AmountSourceKind)) errors.push(`amountSource must be one of ${AMOUNT_SOURCES.join(", ")}`);
+  else if (!description.isWellFormed()) errors.push(problem("paylink.description_surrogate", "description must be well-formed text, with no lone surrogate"));
+  if (!AMOUNT_SOURCES.includes(input.amountSource as AmountSourceKind)) errors.push(problem("paylink.amount_source", `amountSource must be one of ${AMOUNT_SOURCES.join(", ")}`));
   return errors;
 }
 
 /** Problems with the fields a step and the settings share: mode, link life and payment methods. */
-function termErrors(value: Record<string, unknown>): string[] {
-  const errors: string[] = [];
-  if (value.mode !== undefined && !(PAYMENT_MODES as readonly unknown[]).includes(value.mode)) errors.push("mode must be connect or platform");
+function termErrors(value: Record<string, unknown>): StructuredProblem[] {
+  const errors: StructuredProblem[] = [];
+  if (value.mode !== undefined && !(PAYMENT_MODES as readonly unknown[]).includes(value.mode)) errors.push(problem("paylink.mode", "mode must be connect or platform"));
   if (value.linkLifeMinutes !== undefined && !isIntegerIn(value.linkLifeMinutes, MIN_LINK_LIFE_MINUTES, MAX_LINK_LIFE_MINUTES)) {
-    errors.push(`linkLifeMinutes must be an integer from ${MIN_LINK_LIFE_MINUTES} to ${MAX_LINK_LIFE_MINUTES}`);
+    errors.push(problem("paylink.link_life", `linkLifeMinutes must be an integer from ${MIN_LINK_LIFE_MINUTES} to ${MAX_LINK_LIFE_MINUTES}`, { min: MIN_LINK_LIFE_MINUTES, max: MAX_LINK_LIFE_MINUTES }));
   }
   if (value.paymentMethods !== undefined) errors.push(...paymentMethodErrors(value.paymentMethods));
   return errors;
@@ -224,12 +228,12 @@ function isCapabilities(value: unknown): value is PaymentLinkCapabilities {
 }
 
 /** Problems between a mode and a link life and what the payments adapter declares it can do. */
-function adapterErrors(caps: PaymentLinkCapabilities, mode: PaymentMode, lifeMinutes: number): string[] {
-  const errors: string[] = [];
+function adapterErrors(caps: PaymentLinkCapabilities, mode: PaymentMode, lifeMinutes: number): StructuredProblem[] {
+  const errors: StructuredProblem[] = [];
   // A refund is optional for the adapter: no flow step needs one (refunds are host calls), so a
   // platform payment flow is valid without it, and `refundPayment` is refused at run time instead.
-  if (!caps.modes.includes(mode)) errors.push(`the payments adapter does not take ${mode} payments (it takes: ${caps.modes.join(", ") || "none"})`);
-  if (lifeMinutes > caps.maxLinkMinutes) errors.push(`linkLifeMinutes ${lifeMinutes} is longer than the payments adapter keeps a link (${caps.maxLinkMinutes} minutes)`);
+  if (!caps.modes.includes(mode)) errors.push(problem("paylink.adapter_mode", `the payments adapter does not take ${mode} payments (it takes: ${caps.modes.join(", ") || "none"})`, { mode, modes: caps.modes.join(", ") || "none" }));
+  if (lifeMinutes > caps.maxLinkMinutes) errors.push(problem("paylink.adapter_life", `linkLifeMinutes ${lifeMinutes} is longer than the payments adapter keeps a link (${caps.maxLinkMinutes} minutes)`, { lifeMinutes, max: caps.maxLinkMinutes }));
   return errors;
 }
 
@@ -245,10 +249,10 @@ function providerExpiry(requestedAt: string, lifeMinutes: number, caps: PaymentL
 }
 
 /** Problems with Paylink's `channels` setting. */
-function channelsErrors(value: unknown): string[] {
-  if (!Array.isArray(value) || !value.every((c) => (PAYMENT_CHANNELS as readonly unknown[]).includes(c))) return ["channels must list text, and email or not"];
-  if (new Set(value).size !== value.length) return ["channels has duplicates"];
-  return value.includes("text") ? [] : ["channels must include text: it is how a link goes when no verified address is on file"];
+function channelsErrors(value: unknown): StructuredProblem[] {
+  if (!Array.isArray(value) || !value.every((c) => (PAYMENT_CHANNELS as readonly unknown[]).includes(c))) return [problem("paylink.channels_shape", "channels must list text, and email or not")];
+  if (new Set(value).size !== value.length) return [problem("paylink.channels_duplicates", "channels has duplicates")];
+  return value.includes("text") ? [] : [problem("paylink.channels_text", "channels must include text: it is how a link goes when no verified address is on file")];
 }
 
 /** Whether Paylink's settings turn the email channel on. */
@@ -257,18 +261,18 @@ function emailOn(settings: PaylinkSettings | undefined | null): boolean {
 }
 
 /** Problems with a `paylink.channel` step: the email channel on, and Trace's wordings and business name the choice and the email need. */
-function channelStepErrors(step: FlowStep, ctx: StepContext): string[] {
-  const errors = unknownKeys(step, ["type"]).map((k) => `${k} is not a field of this step`);
+function channelStepErrors(step: FlowStep, ctx: StepContext): StructuredProblem[] {
+  const errors = unknownKeys(step, ["type"]).map((k) => problem("paylink.channel_unknown_field", `${k} is not a field of this step`, { key: k }));
   // Settings that did not validate are reported on their own.
-  if (ctx.settings !== null && !emailOn(ctx.settings as PaylinkSettings | undefined)) errors.push('the channel choice needs "email" in Paylink\'s channels setting');
+  if (ctx.settings !== null && !emailOn(ctx.settings as PaylinkSettings | undefined)) errors.push(problem("paylink.channel_needs_email", 'the channel choice needs "email" in Paylink\'s channels setting'));
   // Without a config in view, or with Trace's settings refused (reported on their own), there is nothing to check against.
   if (ctx.settingsOf === undefined) return errors;
   const trace = ctx.settingsOf(TRACE) as TraceSettings | undefined | null;
   if (trace === null) return errors;
   for (const purpose of Object.values(PAYMENT_CHANNEL_PURPOSES)) {
-    if (!(trace?.wordings ?? []).some((w) => w.purpose === purpose)) errors.push(`the channel choice needs a wording for ${purpose} in the trace settings`);
+    if (!(trace?.wordings ?? []).some((w) => w.purpose === purpose)) errors.push(problem("paylink.channel_needs_wording", `the channel choice needs a wording for ${purpose} in the trace settings`, { purpose }));
   }
-  if (trace?.businessName === undefined) errors.push("the email channel needs businessName in the trace settings");
+  if (trace?.businessName === undefined) errors.push(problem("paylink.channel_needs_business_name", "the email channel needs businessName in the trace settings"));
   return errors;
 }
 
@@ -282,39 +286,39 @@ export const paylinkModule: AssuranceModule = {
     adapters: ["payments", "messages"],
   },
 
-  validateSettings(settings: unknown): string[] {
+  validateSettings(settings: unknown): ValidationProblem[] {
     if (settings === undefined) return [];
-    if (!isObject(settings)) return ["must be an object"];
-    const errors = unknownKeys(settings, ["maxAmountMinor", "mode", "connectedAccountId", "linkLifeMinutes", "paymentMethods", "channels"]).map((k) => `${k} is not a paylink setting`);
+    if (!isObject(settings)) return [problem("paylink.settings_shape", "must be an object")];
+    const errors = unknownKeys(settings, ["maxAmountMinor", "mode", "connectedAccountId", "linkLifeMinutes", "paymentMethods", "channels"]).map((k) => problem("paylink.unknown_setting", `${k} is not a paylink setting`, { key: k }));
     if (settings.channels !== undefined) errors.push(...channelsErrors(settings.channels));
     if (settings.maxAmountMinor !== undefined && !isIntegerIn(settings.maxAmountMinor, 1, MAX_LINK_AMOUNT_MINOR)) {
-      errors.push(`maxAmountMinor must be an integer from 1 to ${MAX_LINK_AMOUNT_MINOR}`);
+      errors.push(problem("paylink.max_amount", `maxAmountMinor must be an integer from 1 to ${MAX_LINK_AMOUNT_MINOR}`, { max: MAX_LINK_AMOUNT_MINOR }));
     }
     errors.push(...termErrors(settings));
     const account = settings.connectedAccountId;
     if (account !== undefined && (typeof account !== "string" || !ACCOUNT_ID.test(account))) {
-      errors.push("connectedAccountId must be 1 to 255 letters, digits, hyphens or underscores");
+      errors.push(problem("paylink.connected_account_shape", "connectedAccountId must be 1 to 255 letters, digits, hyphens or underscores"));
     } else if (settings.mode === "connect" && account === undefined) {
-      errors.push(CONNECT_NEEDS_ACCOUNT);
+      errors.push(problem("paylink.connect_needs_account", CONNECT_NEEDS_ACCOUNT));
     } else if (account !== undefined && settings.mode === undefined) {
       // A business account with the default mode would quietly take the money on the platform's.
-      errors.push("connectedAccountId needs an explicit mode: connect, or platform with connect chosen per step");
+      errors.push(problem("paylink.connected_account_mode", "connectedAccountId needs an explicit mode: connect, or platform with connect chosen per step"));
     }
     return errors;
   },
 
-  checkAdapters(settings: unknown, capabilities: Readonly<Record<string, unknown>>): string[] {
+  checkAdapters(settings: unknown, capabilities: Readonly<Record<string, unknown>>): ValidationProblem[] {
     const s = (settings ?? {}) as PaylinkSettings;
     // Known to be absent (an engine's adapter declared nothing): refused. Not known at all: skipped.
     if (Object.hasOwn(capabilities, "payments") && capabilities.payments === undefined) {
-      return ["the payments adapter declares no capabilities ({ modes, minLinkMinutes, maxLinkMinutes })"];
+      return [problem("paylink.adapter_capabilities_missing", "the payments adapter declares no capabilities ({ modes, minLinkMinutes, maxLinkMinutes })")];
     }
     const caps = capabilities.payments;
     if (caps === undefined) return [];
-    if (!isCapabilities(caps)) return ["the payments adapter's capabilities must be { modes, minLinkMinutes, maxLinkMinutes }"];
+    if (!isCapabilities(caps)) return [problem("paylink.adapter_capabilities_shape", "the payments adapter's capabilities must be { modes, minLinkMinutes, maxLinkMinutes }")];
     // The provider is asked for at least its minimum plus 5 minutes, so a narrower range could never create a link.
     if (caps.maxLinkMinutes < caps.minLinkMinutes + MIN_LINK_LIFE_MINUTES) {
-      return [`the payments adapter's maxLinkMinutes must be at least its minLinkMinutes plus ${MIN_LINK_LIFE_MINUTES}`];
+      return [problem("paylink.adapter_minutes_range", `the payments adapter's maxLinkMinutes must be at least its minLinkMinutes plus ${MIN_LINK_LIFE_MINUTES}`, { min: caps.minLinkMinutes, max: caps.maxLinkMinutes })];
     }
     return adapterErrors(caps, s.mode ?? "platform", s.linkLifeMinutes ?? DEFAULT_LINK_LIFE_MINUTES);
   },
@@ -323,17 +327,17 @@ export const paylinkModule: AssuranceModule = {
     return emailOn(settings as PaylinkSettings | undefined) ? ["payments", "messages", "emails"] : ["payments", "messages"];
   },
 
-  validateStep(step: FlowStep, ctx: StepContext): string[] {
+  validateStep(step: FlowStep, ctx: StepContext): ValidationProblem[] {
     if (step.type === "paylink.channel") return channelStepErrors(step, ctx);
     const errors = unknownKeys(step, ["type", "amountMinor", "currency", "amountRef", "description", "amountSource", "mode", "linkLifeMinutes", "paymentMethods"]).map(
-      (k) => `${k} is not a field of this step`,
+      (k) => problem("paylink.step_unknown_field", `${k} is not a field of this step`, { key: k }),
     );
     const settings = ctx.settings as PaylinkSettings | undefined | null;
     errors.push(...requestErrors(step, settings?.maxAmountMinor));
-    if (step.amountRef !== undefined && !ctx.adapters.has("amounts")) errors.push(NEEDS_AMOUNTS);
+    if (step.amountRef !== undefined && !ctx.adapters.has("amounts")) errors.push(problem("paylink.needs_amounts", NEEDS_AMOUNTS));
     errors.push(...termErrors(step));
     // Settings that did not validate are reported on their own; the cross-check needs good ones.
-    if (settings !== null && (step.mode ?? settings?.mode) === "connect" && settings?.connectedAccountId === undefined) errors.push(CONNECT_NEEDS_ACCOUNT);
+    if (settings !== null && (step.mode ?? settings?.mode) === "connect" && settings?.connectedAccountId === undefined) errors.push(problem("paylink.connect_needs_account", CONNECT_NEEDS_ACCOUNT));
     const caps = ctx.capabilities.payments;
     if (settings !== null && isCapabilities(caps) && (PAYMENT_MODES as readonly unknown[]).includes(step.mode ?? settings?.mode ?? "platform")) {
       const life = isIntegerIn(step.linkLifeMinutes, MIN_LINK_LIFE_MINUTES, MAX_LINK_LIFE_MINUTES) ? step.linkLifeMinutes : (settings?.linkLifeMinutes ?? DEFAULT_LINK_LIFE_MINUTES);
@@ -342,9 +346,9 @@ export const paylinkModule: AssuranceModule = {
     return errors;
   },
 
-  validateFlow(steps: readonly FlowStep[], ctx: StepContext): string[] {
+  validateFlow(steps: readonly FlowStep[], ctx: StepContext): ValidationProblem[] {
     // A choice serves the one link after it: each channel step is followed by a request, before another choice.
-    const errors: string[] = [];
+    const errors: StructuredProblem[] = [];
     let waiting = false;
     let verified = false;
     // The level payment.request needs; without a policy in view nothing is checked against it.
@@ -356,12 +360,12 @@ export const paylinkModule: AssuranceModule = {
       } else if (step.type === "paylink.channel") {
         // It needs no scope in the manifest (a choice is not a money action a receipt names), so its
         // place after the verification is checked here: it asks for payment.request when it runs.
-        if (!verified) errors.push(`steps[${index}]: a paylink.channel step comes after a badge.verify step that grants payment.request, since it needs that scope when it runs`);
-        if (waiting) errors.push(`steps[${index}]: a second paylink.channel step before the paylink.request the first one is for`);
+        if (!verified) errors.push(problem("paylink.channel_before_verify", `steps[${index}]: a paylink.channel step comes after a badge.verify step that grants payment.request, since it needs that scope when it runs`, { index }));
+        if (waiting) errors.push(problem("paylink.channel_twice", `steps[${index}]: a second paylink.channel step before the paylink.request the first one is for`, { index }));
         waiting = true;
       } else if (step.type === "paylink.request") waiting = false;
     });
-    if (waiting) errors.push("a paylink.channel step must be followed by the paylink.request step it chooses for");
+    if (waiting) errors.push(problem("paylink.channel_needs_request", "a paylink.channel step must be followed by the paylink.request step it chooses for"));
     return errors;
   },
 
@@ -444,7 +448,7 @@ function readBackSpec(
   const spec = (step as PaymentInput | null) ?? input;
   if (spec === undefined) throw new EngineError("invalid_input", OUTSIDE_A_FLOW);
   const errors = requestErrors({ ...spec }, maxMinor);
-  if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
+  if (errors.length > 0) throw new EngineError("invalid_input", errors.map(problemMessage).join("; "));
   return { spec, subject };
 }
 
@@ -480,7 +484,7 @@ export async function readBackPayment(rt: EngineRuntime, callId: string, given?:
     if (found === null || found === undefined) throw new EngineError("precondition_failed", "the amount source has no amount for this reference");
     amount = { amountMinor: found.amountMinor, currency: found.currency };
     const errors = requestErrors({ ...amount, description: spec.description, amountSource: spec.amountSource }, settings.maxAmountMinor);
-    if (errors.length > 0) throw new EngineError("invalid_input", `the amount source answered with a bad amount: ${errors.join("; ")}`);
+    if (errors.length > 0) throw new EngineError("invalid_input", `the amount source answered with a bad amount: ${errors.map(problemMessage).join("; ")}`);
   }
   // Each read-back has an id of its own, in its digest: a confirmation of an earlier, identical
   // read-back (a second deposit of the same amount) never confirms this one.
@@ -749,13 +753,13 @@ export async function requestPayment(
     // A call saved before PAY-2 has no quote field: the same as no read-back.
     const quote = confirmedQuote(slice.quote ?? null, (step as PaymentInput | null) ?? input, subject);
     const chosen: FixedPaymentInput = { amountMinor: quote.amountMinor, currency: quote.currency, description: quote.description, amountSource: quote.amountSource };
-    const errors = requestErrors({ ...chosen }, settings.maxAmountMinor);
+    const errors = requestErrors({ ...chosen }, settings.maxAmountMinor).map(problemMessage);
     const terms = termsFor(settings, step);
     // The config was checked when saved; a call keeps its steps while the settings can change under it.
     if (terms.mode === "connect" && terms.connectedAccountId === null) errors.push(CONNECT_NEEDS_ACCOUNT);
     // So can the engine: a call saved by an engine whose adapter took connect payments, or longer
     // links, is resumed here against this engine's adapter, before the read-back is used up.
-    errors.push(...adapterErrors(rt.adapter("payments").capabilities, terms.mode, terms.linkLifeMinutes));
+    errors.push(...adapterErrors(rt.adapter("payments").capabilities, terms.mode, terms.linkLifeMinutes).map(problemMessage));
     if (errors.length > 0) throw new EngineError("invalid_input", errors.join("; "));
     slice.quote = null;
     // A choice serves one link.

@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import { normaliseFieldValue, validateForm } from "../src/file/intake.ts";
+import { problemMessage } from "../src/core/module.ts";
 import { applyFindings, findCardNumbers } from "../src/core/redaction.ts";
 import { formatAmount } from "../src/pay/paylink.ts";
 import { ACCOUNT, DOB, form, rejects, setup, testConfig, wording } from "./helpers.ts";
@@ -76,7 +77,7 @@ describe("hostile #122: Spanish card numbers", () => {
 
 describe("hostile #122: Spanish names for a social security number", () => {
   const refused = (key: string, label: string) =>
-    validateForm({ formId: "f", version: "1", fields: [{ key, label: { en: "Number", fr: "Numéro", es: label }, type: "text", required: false }] }).some((e) => /names a card/.test(e));
+    validateForm({ formId: "f", version: "1", fields: [{ key, label: { en: "Number", fr: "Numéro", es: label }, type: "text", required: false }] }).map(problemMessage).some((e) => /names a card/.test(e));
 
   it("refuses NSS and its full names, as a word, run together, or in a label", () => {
     for (const [key, label] of [

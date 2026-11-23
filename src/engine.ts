@@ -1553,7 +1553,7 @@ export class Engine {
     try {
       copy = structuredClone(config);
     } catch {
-      throw new ConfigError(["the config must be plain JSON data"]);
+      throw new ConfigError([{ path: "", code: "config.not_plain_json", params: {}, message: "the config must be plain JSON data" }]);
     }
     const checked = assertConfig(copy, this.registry);
     // The starts of flows that need a money, contact or access scope are counted (VER-15), even
@@ -1561,7 +1561,7 @@ export class Engine {
     if (this.#adapters.counters === undefined) {
       const problems = Object.entries(checked.flows)
         .filter(([, flow]) => this.#limited(flow.steps, checked.policy))
-        .map(([name]) => `flows.${name}: needs the counters adapter: it needs a money, contact or access scope, so its starts are limited`);
+        .map(([name]) => ({ path: `flows.${name}`, code: "flow.counters_adapter_missing", params: { flow: name }, message: `flows.${name}: needs the counters adapter: it needs a money, contact or access scope, so its starts are limited` }));
       if (problems.length > 0) throw new ConfigError(problems);
     }
     return checked;

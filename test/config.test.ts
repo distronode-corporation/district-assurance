@@ -3,7 +3,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import type { JsonValue } from "../src/core/canonical.ts";
-import { ConfigError, assertConfig, moduleEnabled, validateConfig, type FlowConfig } from "../src/core/config.ts";
+import { ConfigError, assertConfig, configProblems, moduleEnabled, validateConfig, type FlowConfig } from "../src/core/config.ts";
 import { EngineError } from "../src/core/errors.ts";
 import { ModuleRegistry, checkFactorPlugin, checkFactorPlugins, checkManifest, type AssuranceModule, type FactorPlugin, type ModuleManifest } from "../src/core/module.ts";
 import { isBilingual } from "../src/core/shape.ts";
@@ -633,10 +633,90 @@ describe("validateConfig: flows", () => {
     ]);
   });
 
-  it("throws a ConfigError with every problem from assertConfig", () => {
+  it("still takes plain sentences, as 0.3.0 did", () => {
+    const error = new ConfigError(["one problem", "another"]);
+    assert.deepEqual(error.problems, ["one problem", "another"]);
+    assert.match(error.message, /2 problem/);
+    assert.deepEqual(error.details, [
+      { path: "", code: "", params: {}, message: "one problem" },
+      { path: "", code: "", params: {}, message: "another" },
+    ], "a plain sentence has no path or code");
+  });
+
+  it("answers every problem in the structured form, and validateConfig is its sentences", () => {
+    const bad = config((c) => {
+      c.version = 2;
+      c.x = 1;
+    });
+    const details = configProblems(bad, registry());
+    assert.deepEqual(details, [
+      { path: "x", code: "config.unknown_field", params: { key: "x" }, message: "x: not a config field" },
+      { path: "version", code: "config.version", params: { version: 1 }, message: "version: must be 1" },
+    ]);
+    assert.deepEqual(validateConfig(bad, registry()), details.map((d) => d.message));
+  });
+
+  it("carries a built-in module's own code and params, and keeps an outside module's sentence under the validator's code", () => {
+    const loyalty = outside("loyalty");
+    const reg = registry(ALL_ADAPTERS, [loyalty]);
+    const settings = configProblems(
+      config((c) => {
+        c.modules.badge.settings.factors = [];
+        c.modules.loyalty = { settings: "bad" };
+      }),
+      reg,
+    );
+    assert.ok(
+      settings.some((d) => d.path === "modules.badge.settings" && d.code === "badge.factors_empty" && d.params && JSON.stringify(d.params) === "{}" && d.message === "modules.badge.settings: factors must list at least one factor"),
+      "a built-in module's problem carries its own code and params",
+    );
+    assert.ok(
+      settings.some((d) => JSON.stringify(d) === JSON.stringify({ path: "modules.loyalty.settings", code: "module.settings_invalid", params: {}, message: "modules.loyalty.settings: bad settings" })),
+      "an outside module's plain sentence is kept, under the code that says which validator spoke",
+    );
+    const step = configProblems(config((c) => (c.flows = { f: { steps: [{ type: "badge.verify", level: 9, factors: ["keypad_knowledge"] }] } })), registry());
+    assert.ok(
+      step.some((d) => JSON.stringify(d) === JSON.stringify({ path: "flows.f.steps[0] (badge.verify)", code: "badge.step_level", params: {}, message: "flows.f.steps[0] (badge.verify): level must be 1, 2 or 3" })),
+      "a step problem carries its module's code",
+    );
+    const policy = configProblems(config((c) => delete c.policy), registry());
+    assert.deepEqual(policy, [{ path: "policy", code: "policy.shape", params: {}, message: "policy: must be an object" }], "a policy problem carries its own code, beside its path and sentence");
+  });
+
+  it("keeps a plain-answering module's sentences under the fallback codes, whatever they answer", () => {
+    const plain: AssuranceModule = {
+      ...outside("plain"),
+      checkAdapters: () => ["bad capabilities"],
+      validateFlow: () => [{ code: "plain.flow", message: "bad flow" }],
+    };
+    const reg = registry(ALL_ADAPTERS, [plain]);
+    const details = configProblems(
+      config((c) => {
+        c.modules.plain = {};
+        c.flows = { f: { steps: [{ type: "plain.lookup" }] } };
+      }),
+      reg,
+    );
+    assert.ok(
+      details.some((d) => JSON.stringify(d) === JSON.stringify({ path: "modules.plain", code: "module.adapters_invalid", params: {}, message: "modules.plain: bad capabilities" })),
+      "a plain sentence from checkAdapters is kept, under the adapters code",
+    );
+    assert.ok(
+      details.some((d) => JSON.stringify(d) === JSON.stringify({ path: "flows.f (plain)", code: "plain.flow", params: {}, message: "flows.f (plain): bad flow" })),
+      "a structured problem without params carries empty params",
+    );
+  });
+
+  it("throws a ConfigError with every problem from assertConfig, in both forms", () => {
     assert.throws(
       () => assertConfig({ version: 2 }, registry()),
-      (e: unknown) => e instanceof ConfigError && e instanceof EngineError && e.problems.length === 5 && /5 problem/.test(e.message),
+      (e: unknown) =>
+        e instanceof ConfigError &&
+        e instanceof EngineError &&
+        e.problems.length === 5 &&
+        /5 problem/.test(e.message) &&
+        (e as ConfigError).details.length === 5 &&
+        (e as ConfigError).details.every((d, i) => d.message === (e as ConfigError).problems[i] && typeof d.path === "string" && typeof d.code === "string"),
     );
     const good = testConfig();
     assert.equal(assertConfig(good, registry()), good);

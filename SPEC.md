@@ -146,7 +146,7 @@ string, lone UTF-16 surrogates, deep nesting, a sparse array, a missing value, a
 samples) and answer with the right types (`stepLevel` a level from 0 to 3, or null); that `initCall`
 and `enterStep` return canonical JSON, the same each time; that `stepStatus` answers the same for
 the same view, in any order; that `validateFlow` and `checkAdapters`, when a module has them, answer
-sentences for the sample settings and steps; and that none of these, nor `cannotRunStep` (asked for
+problems (a plain sentence, or `{code, params?, message}`) for the sample settings and steps; and that none of these, nor `cannotRunStep` (asked for
 an English call), `blocksEnd` (given a fixed `now`, as the engine passes its clock's time),
 `onUntrusted` or `receiptPart`, changes a (frozen) input. Every built-in module passes it, Gate and
 step-up included. `examples/modules/callback.ts` is an example outside module that passes it.
@@ -1063,6 +1063,29 @@ context's `settingsOf(name)` (null for a module off or whose settings were refus
 `paylink.channel` reads Trace's wordings. Cross-checks against a module's settings or the
 policy are skipped when those did not validate (their own problems are reported). The engine
 refuses a config with any problem (`ConfigError`, code `invalid_input`, with `problems`).
+`configProblems(config, registry)` answers the same problems in the form a dashboard localizes:
+`{path, code, params, message}`, where `path` is the sentence's own beginning (`modules.badge.settings`,
+`flows.f.steps[1] (badge.verify)`), `code` is a stable name for what is wrong (`config.unknown_field`,
+`badge.factors_empty`, `policy.scope_floor`, `gate.too_many_grant_steps`), `params` holds the values
+the sentence interpolates, and `message` is the sentence `validateConfig` answers, so a dashboard
+localizes by code, names the field from `path` and falls back to the sentence. The codes are API,
+stable from 0.4.0 on, and `test/config-codes.test.ts` pins the full list. A code names a problem,
+not a call site: two validators may answer the same code only when they answer the same problem
+(`paylink.connect_needs_account` is answered by Paylink's settings and step validators,
+`trace.step_unknown_field` by both trace steps), and a code is never reused for a different problem.
+A module's validators answer either form. The built-in ones answer `{code, params, message}` with
+codes naming the module or the shared rule that found the problem: `badge.*`, `dossier.*`, `gate.*`,
+`paylink.*`, `step_up.*`, `trace.*` for the modules, `intake.*` and `pay.*` for the shared
+validators their checks are built on (`validateForm`, `validateAmount`, `paymentMethodErrors`), and
+`policy.*` for the core's own policy rules (`policy.scope_floor`, `policy.step_up_rule_raises`), so
+every problem a config can have carries its own code and the values its sentence interpolates. The
+composition itself names the rest: `config.*` for the document's own problems, `module.*`, `step.*`
+and `flow.*` for where a problem sits. An outside module's plain sentences are kept as they are,
+under the code naming the validator that spoke (`module.settings_invalid`, `module.adapters_invalid`,
+`step.invalid`, `flow.invalid`): those problems carry no params and only their sentence, so a
+dashboard localizes them by falling back to it, which is why a built-in module answers the
+structured form.
+`ConfigError.details` holds the same structured list beside `problems`.
 
 | Step | Fields |
 |---|---|

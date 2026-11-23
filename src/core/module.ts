@@ -96,6 +96,30 @@ export interface StepContext {
   settingsOf?(module: string): unknown;
 }
 
+/**
+ * A problem a validator found: either a plain sentence, or the structured form a dashboard can
+ * localize by code and template with `params`, with the sentence kept as `message`. An outside
+ * module may answer plain sentences; the built-in ones answer the structured form.
+ */
+/** A structured validator problem: a stable code, the values its sentence interpolates, and the sentence. */
+export interface StructuredProblem {
+  code: string;
+  params?: Readonly<Record<string, string | number>>;
+  message: string;
+}
+
+export type ValidationProblem = string | StructuredProblem;
+
+/** A structured validator problem, with its sentence: what the built-in modules answer. */
+export function problem(code: string, message: string, params: Readonly<Record<string, string | number>> = {}): StructuredProblem {
+  return { code, params, message };
+}
+
+/** A validator problem's sentence, whatever form it answered. */
+export function problemMessage(value: ValidationProblem): string {
+  return typeof value === "string" ? value : value.message;
+}
+
 /** What a module sees of a call when it judges its current step. */
 export interface StepView {
   state: SessionState;
@@ -115,19 +139,19 @@ export interface AssuranceModule {
    * them on. Badge leaves this out: its own code judges its factors.
    */
   readonly factorPlugins?: readonly FactorPlugin[];
-  /** Every problem with this module's settings, as sentences. Settings come from storage: check every type. */
-  validateSettings(settings: unknown): string[];
+  /** Every problem with this module's settings. Settings come from storage: check every type. */
+  validateSettings(settings: unknown): ValidationProblem[];
   /** Every adapter valid settings need, the manifest's included. */
   requiredAdapters(settings: unknown): string[];
   /** Every problem between valid settings and what the adapters declare they can do. */
-  checkAdapters?(settings: unknown, capabilities: Readonly<Record<string, unknown>>): string[];
+  checkAdapters?(settings: unknown, capabilities: Readonly<Record<string, unknown>>): ValidationProblem[];
   /** Every problem with one flow step whose type this module provides. */
-  validateStep(step: FlowStep, ctx: StepContext): string[];
+  validateStep(step: FlowStep, ctx: StepContext): ValidationProblem[];
   /**
    * Every problem with a whole flow, given its steps in order, for what one step cannot show (a
    * per-call limit the flow's steps would exceed). Called once per flow that has a step of this module.
    */
-  validateFlow?(steps: readonly FlowStep[], ctx: StepContext): string[];
+  validateFlow?(steps: readonly FlowStep[], ctx: StepContext): ValidationProblem[];
   /** The level a step verifies to, so later steps can be checked against their scope floors. */
   stepLevel?(step: FlowStep): number | null;
   /** The scopes a step's grant is limited to, when it names them (null: every scope its level reaches). */

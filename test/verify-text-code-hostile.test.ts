@@ -1,5 +1,6 @@
 // Hostile pass on #79 (VER-2 texted codes), kept as regressions: each attack asserts the safe behaviour.
 import { strict as assert } from "node:assert";
+import { problemMessage } from "../src/core/module.ts";
 import { describe, it } from "node:test";
 
 import type { FlowConfig } from "../src/core/config.ts";
@@ -149,7 +150,7 @@ describe("#79 hostile: the ledger after the receipt", () => {
 describe("#79 hostile: where a code may go", () => {
   it("C6 textCodeCountryCodes takes only assigned E.164 country codes, or longer prefixes of one", async () => {
     const { validatePolicy, defaultVerificationPolicy, E164_COUNTRY_CODES } = await import("../src/core/policy.ts");
-    const errors = (codes: unknown) => validatePolicy({ ...defaultVerificationPolicy(), textCodeCountryCodes: codes } as never).filter((e) => e.includes("textCodeCountryCodes"));
+    const errors = (codes: unknown) => validatePolicy({ ...defaultVerificationPolicy(), textCodeCountryCodes: codes } as never).map(problemMessage).filter((e) => e.includes("textCodeCountryCodes"));
     for (const bad of [["4"], ["42"], ["0"], ["2"], ["999"], ["800"], ["881"], ["1", "4"], ["+1"], ["1234567"]]) assert.notDeepEqual(errors(bad), [], JSON.stringify(bad));
     for (const good of [["1"], ["44"], ["33", "1"], ["1204"], ["4420"], ["383"], ["7"]]) assert.deepEqual(errors(good), [], JSON.stringify(good));
     for (const a of E164_COUNTRY_CODES) for (const b of E164_COUNTRY_CODES) if (a !== b) assert.equal(b.startsWith(a), false, `${a} is a prefix of ${b}`);
@@ -159,7 +160,7 @@ describe("#79 hostile: where a code may go", () => {
     const { readFile } = await import("node:fs/promises");
     const { validatePolicy, defaultVerificationPolicy, isAssignedCountryPrefix } = await import("../src/core/policy.ts");
     const globalService = ["800", "808", "870", "878", "881", "882", "883", "888", "979"];
-    const errors = (codes: unknown) => validatePolicy({ ...defaultVerificationPolicy(), textCodeCountryCodes: codes } as never).filter((e) => e.includes("textCodeCountryCodes"));
+    const errors = (codes: unknown) => validatePolicy({ ...defaultVerificationPolicy(), textCodeCountryCodes: codes } as never).map(problemMessage).filter((e) => e.includes("textCodeCountryCodes"));
     for (const code of globalService) {
       for (const prefix of [code, `${code}1`, `${code}12`]) {
         assert.equal(isAssignedCountryPrefix(prefix), false, prefix);
@@ -182,7 +183,7 @@ describe("#79 hostile: where a code may go", () => {
     assert.equal(E164_COUNTRY_CODES.includes("379"), false);
     for (const prefix of ["379", "3791", "37912"]) {
       assert.equal(isAssignedCountryPrefix(prefix), false, prefix);
-      assert.notDeepEqual(validatePolicy({ ...defaultVerificationPolicy(), textCodeCountryCodes: [prefix] }).filter((e) => e.includes("textCodeCountryCodes")), [], prefix);
+      assert.notDeepEqual(validatePolicy({ ...defaultVerificationPolicy(), textCodeCountryCodes: [prefix] }).map(problemMessage).filter((e) => e.includes("textCodeCountryCodes")), [], prefix);
     }
     assert.equal(isAssignedCountryPrefix("39"), true, "Italy, which serves Vatican City numbers, stays");
   });

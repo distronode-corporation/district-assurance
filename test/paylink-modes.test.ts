@@ -8,12 +8,16 @@ import { ModuleRegistry } from "../src/core/module.ts";
 import { validateConfig } from "../src/core/config.ts";
 import { builtInModules } from "../src/modules.ts";
 import { paylinkModule } from "../src/pay/paylink.ts";
-import { INSTANT_PAYMENT_METHODS, outcomeAccountMatches, paymentMethodErrors } from "../src/pay/payment.ts";
+import { INSTANT_PAYMENT_METHODS, outcomeAccountMatches, paymentMethodErrors as paymentMethodProblems } from "../src/pay/payment.ts";
+import { problemMessage } from "../src/core/module.ts";
+
+/** The sentences of the shared payment validators, as the tests read them. */
+const paymentMethodErrors = (value: unknown): string[] => paymentMethodProblems(value).map(problemMessage);
 import { parseStripeEvent } from "../src/webhooks/stripe.ts";
 import { canonicalJson, type JsonValue } from "../src/core/canonical.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { FakePaymentLinks } from "../src/testing/fakes.ts";
-import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall } from "./helpers.ts";
+import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, rejects, setup, testConfig, verifiedCall , messages} from "./helpers.ts";
 
 const ACCT = "acct_business_1";
 const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
@@ -64,7 +68,7 @@ describe("paylink modes: config", () => {
   });
 
   it("checks every paylink setting", () => {
-    const at = (settings: unknown) => paylinkModule.validateSettings(settings);
+    const at = (settings: unknown) => messages(paylinkModule.validateSettings(settings));
     assert.deepEqual(at({ mode: "connect", connectedAccountId: ACCT, linkLifeMinutes: 60, paymentMethods: ["card"], maxAmountMinor: 1 }), []);
     assert.deepEqual(at({ mode: "platform", linkLifeMinutes: 5 }), []);
     assert.deepEqual(at({ mode: "cash", linkLifeMinutes: 4, paymentMethods: ["acss_debit"], x: 1 }), [

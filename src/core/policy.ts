@@ -4,6 +4,7 @@
 // from them here, and a scope is allowed only when the level reaches the scope's minimum. Caller
 // ID is not a factor kind at all, so no policy can count it, and no factor plug-in may take a name
 // that means it (FORBIDDEN_FACTOR_KINDS).
+import { problem, type StructuredProblem } from "./module.ts";
 import { isDenseArray, isIntegerIn, isObject, isStringArray, unknownKeys } from "./shape.ts";
 
 export type AssuranceLevel = 0 | 1 | 2 | 3;
@@ -287,70 +288,76 @@ export function validatePolicy(
   policy: unknown,
   knownFactors: readonly string[] = FACTOR_KINDS,
   declaredClasses: Readonly<Record<string, ScopeClass>> = {},
-): string[] {
-  if (typeof policy !== "object" || policy === null || Array.isArray(policy)) return ["must be an object"];
+): StructuredProblem[] {
+  if (typeof policy !== "object" || policy === null || Array.isArray(policy)) return [problem("policy.shape", "must be an object")];
   const p = policy as Record<string, unknown>;
-  const errors: string[] = [];
-  if (typeof p.version !== "string" || p.version === "") errors.push("version must be a non-empty string");
-  if (!Array.isArray(p.levels)) errors.push("levels must be a list of { level, anyOf: [[factor, ...], ...] }");
+  const errors: StructuredProblem[] = [];
+  if (typeof p.version !== "string" || p.version === "") errors.push(problem("policy.version", "version must be a non-empty string"));
+  if (!Array.isArray(p.levels)) errors.push(problem("policy.levels_shape", "levels must be a list of { level, anyOf: [[factor, ...], ...] }"));
   const seen = new Set<unknown>();
   for (const [index, rule] of (Array.isArray(p.levels) ? p.levels : []).entries()) {
     const r = (typeof rule === "object" && rule !== null ? rule : {}) as Record<string, unknown>;
     // Dense lists only: `every` skips a hole, which would then be read as a factor set.
     const sets = isDenseArray(r.anyOf) && r.anyOf.every(isStringArray) ? (r.anyOf as string[][]) : null;
     if (typeof r.level !== "number" || sets === null) {
-      errors.push(`levels[${index}] must be { level, anyOf: [[factor, ...], ...] }`);
+      errors.push(problem("policy.level_shape", `levels[${index}] must be { level, anyOf: [[factor, ...], ...] }`, { index }));
       continue;
     }
-    if (![1, 2, 3].includes(r.level)) errors.push(`level ${r.level} is not 1, 2 or 3`);
-    if (seen.has(r.level)) errors.push(`level ${r.level} is defined twice`);
+    if (![1, 2, 3].includes(r.level)) errors.push(problem("policy.level_not_123", `level ${r.level} is not 1, 2 or 3`, { level: r.level }));
+    if (seen.has(r.level)) errors.push(problem("policy.level_duplicate", `level ${r.level} is defined twice`, { level: r.level }));
     seen.add(r.level);
-    if (sets.length === 0) errors.push(`level ${r.level} has no factor sets`);
+    if (sets.length === 0) errors.push(problem("policy.level_sets_empty", `level ${r.level} has no factor sets`, { level: r.level }));
     for (const set of sets) errors.push(...checkFactorSet(r.level, set, knownFactors, p.spoken !== undefined));
   }
   const classes = p.scopeClasses;
   const classesOk = classes === undefined || (typeof classes === "object" && classes !== null && !Array.isArray(classes));
-  if (!classesOk) errors.push("scopeClasses must map scope names to money, contact, access or none");
+  if (!classesOk) errors.push(problem("policy.scope_classes_shape", "scopeClasses must map scope names to money, contact, access or none"));
   const policyClasses = (classesOk ? (classes ?? {}) : {}) as Record<string, unknown>;
   for (const [scope, cls] of Object.entries(policyClasses)) {
-    if (!(SCOPE_CLASSES as readonly unknown[]).includes(cls)) errors.push(`scopeClasses.${scope} must be money, contact, access or none`);
+    if (!(SCOPE_CLASSES as readonly unknown[]).includes(cls)) errors.push(problem("policy.scope_class", `scopeClasses.${scope} must be money, contact, access or none`, { scope }));
   }
   if (typeof p.scopes !== "object" || p.scopes === null || Array.isArray(p.scopes)) {
-    errors.push("scopes must map scope names to levels");
+    errors.push(problem("policy.scopes_shape", "scopes must map scope names to levels"));
   } else {
     for (const [scope, level] of Object.entries(p.scopes)) {
       if (!([0, 1, 2, 3] as unknown[]).includes(level)) {
         // Never coerce the value: an object with no usable toString would throw.
-        errors.push(`scope ${scope} has level ${typeof level === "number" ? level : `of type ${level === null ? "null" : typeof level}`}, not 0 to 3`);
+        errors.push(
+          problem(
+            "policy.scope_level",
+            `scope ${scope} has level ${typeof level === "number" ? level : `of type ${level === null ? "null" : typeof level}`}, not 0 to 3`,
+            { scope, ...(typeof level === "number" ? { level } : { type: level === null ? "null" : typeof level }) },
+          ),
+        );
       }
       const cls = scopeClass(scope, policyClasses, declaredClasses);
       if (cls === null) {
-        errors.push(`scope ${scope} has no class: name it in scopeClasses (money, contact, access or none)`);
+        errors.push(problem("policy.scope_class_missing", `scope ${scope} has no class: name it in scopeClasses (money, contact, access or none)`, { scope }));
         continue;
       }
       const floor = CLASS_FLOORS[cls];
-      if (typeof level === "number" && level < floor) errors.push(`scope ${scope} is ${cls}, and below its floor of level ${floor}`);
+      if (typeof level === "number" && level < floor) errors.push(problem("policy.scope_floor", `scope ${scope} is ${cls}, and below its floor of level ${floor}`, { scope, cls, floor }));
     }
   }
   if (!isStringArray(p.keypadFields)) {
-    errors.push("keypadFields must be a list of field names");
+    errors.push(problem("policy.keypad_fields_shape", "keypadFields must be a list of field names"));
   } else {
-    if (p.keypadFields.length === 0) errors.push("keypadFields is empty");
-    if (new Set(p.keypadFields).size !== p.keypadFields.length) errors.push("keypadFields has duplicates");
+    if (p.keypadFields.length === 0) errors.push(problem("policy.keypad_fields_empty", "keypadFields is empty"));
+    if (new Set(p.keypadFields).size !== p.keypadFields.length) errors.push(problem("policy.keypad_fields_duplicates", "keypadFields has duplicates"));
   }
   const attempts = p.maxKeypadAttemptsPerCall;
   if (!Number.isInteger(attempts) || (attempts as number) < 1 || (attempts as number) > MAX_KEYPAD_ATTEMPTS) {
-    errors.push(`maxKeypadAttemptsPerCall must be an integer from 1 to ${MAX_KEYPAD_ATTEMPTS}`);
+    errors.push(problem("policy.keypad_attempts", `maxKeypadAttemptsPerCall must be an integer from 1 to ${MAX_KEYPAD_ATTEMPTS}`, { max: MAX_KEYPAD_ATTEMPTS }));
   }
   if (p.spoken !== undefined) errors.push(...spokenErrors(p.spoken, Array.isArray(p.keypadFields) ? p.keypadFields : []));
-  if (typeof p.simSwapWindowHours !== "number" || !(p.simSwapWindowHours > 0)) errors.push("simSwapWindowHours must be a positive number");
-  if (typeof p.trustTextCodeWithoutCarrierCheck !== "boolean") errors.push("trustTextCodeWithoutCarrierCheck must be true or false");
+  if (typeof p.simSwapWindowHours !== "number" || !(p.simSwapWindowHours > 0)) errors.push(problem("policy.sim_swap_window", "simSwapWindowHours must be a positive number"));
+  if (typeof p.trustTextCodeWithoutCarrierCheck !== "boolean") errors.push(problem("policy.trust_text_code", "trustTextCodeWithoutCarrierCheck must be true or false"));
   const countries = p.textCodeCountryCodes;
   if (countries !== undefined) {
     if (!isStringArray(countries) || countries.length === 0 || !countries.every((c) => isAssignedCountryPrefix(c))) {
-      errors.push("textCodeCountryCodes must list assigned E.164 country calling codes (or longer prefixes of one), 1 to 6 digits without the +");
+      errors.push(problem("policy.text_code_countries", "textCodeCountryCodes must list assigned E.164 country calling codes (or longer prefixes of one), 1 to 6 digits without the +"));
     } else if (new Set(countries).size !== countries.length) {
-      errors.push("textCodeCountryCodes has duplicates");
+      errors.push(problem("policy.text_code_countries_duplicates", "textCodeCountryCodes has duplicates"));
     }
   }
   errors.push(...attestationCapErrors(p.attestationCaps));
@@ -358,53 +365,54 @@ export function validatePolicy(
   return errors;
 }
 
-function attestationCapErrors(caps: unknown): string[] {
+function attestationCapErrors(caps: unknown): StructuredProblem[] {
   if (caps === undefined) return [];
-  if (typeof caps !== "object" || caps === null || Array.isArray(caps)) return ["attestationCaps must map A, B, C, failed or none to a level from 0 to 3"];
-  const errors: string[] = [];
+  if (typeof caps !== "object" || caps === null || Array.isArray(caps)) return [problem("policy.attestation_caps_shape", "attestationCaps must map A, B, C, failed or none to a level from 0 to 3")];
+  const errors: StructuredProblem[] = [];
   for (const [attestation, cap] of Object.entries(caps)) {
-    if (!(ATTESTATIONS as readonly string[]).includes(attestation)) errors.push(`attestationCaps.${attestation} is not an attestation (A, B, C, failed or none)`);
-    if (!([0, 1, 2, 3] as unknown[]).includes(cap)) errors.push(`attestationCaps.${attestation} must be a level from 0 to 3`);
+    if (!(ATTESTATIONS as readonly string[]).includes(attestation)) errors.push(problem("policy.attestation_cap_name", `attestationCaps.${attestation} is not an attestation (A, B, C, failed or none)`, { attestation }));
+    if (!([0, 1, 2, 3] as unknown[]).includes(cap)) errors.push(problem("policy.attestation_cap_level", `attestationCaps.${attestation} must be a level from 0 to 3`, { attestation }));
   }
   return errors;
 }
 
 /** The spoken fields, each with a known format and none a keypad field too, and the attempt limit. */
-function spokenErrors(spoken: unknown, keypadFields: readonly unknown[]): string[] {
-  if (!isObject(spoken)) return ["spoken must be { fields, maxAttemptsPerCall }"];
-  const errors = unknownKeys(spoken, ["fields", "maxAttemptsPerCall"]).map((k) => `spoken.${k} is not a spoken setting`);
+function spokenErrors(spoken: unknown, keypadFields: readonly unknown[]): StructuredProblem[] {
+  if (!isObject(spoken)) return [problem("policy.spoken_shape", "spoken must be { fields, maxAttemptsPerCall }")];
+  const errors = unknownKeys(spoken, ["fields", "maxAttemptsPerCall"]).map((k) => problem("policy.spoken_unknown_setting", `spoken.${k} is not a spoken setting`, { key: k }));
   const formats = SPOKEN_FORMATS.join(", ");
   if (!isObject(spoken.fields) || Object.keys(spoken.fields).length === 0) {
-    errors.push(`spoken.fields must map at least one field name to a format (${formats})`);
+    errors.push(problem("policy.spoken_fields_shape", `spoken.fields must map at least one field name to a format (${formats})`));
   } else {
     for (const [field, format] of Object.entries(spoken.fields)) {
-      if (!(SPOKEN_FORMATS as readonly unknown[]).includes(format)) errors.push(`spoken.fields.${field} must be one of ${formats}`);
-      if (keypadFields.includes(field)) errors.push(`spoken.fields.${field} is also a keypad field`);
+      if (!(SPOKEN_FORMATS as readonly unknown[]).includes(format)) errors.push(problem("policy.spoken_field_format", `spoken.fields.${field} must be one of ${formats}`, { field }));
+      if (keypadFields.includes(field)) errors.push(problem("policy.spoken_field_keypad", `spoken.fields.${field} is also a keypad field`, { field }));
     }
   }
-  if (!isIntegerIn(spoken.maxAttemptsPerCall, 1, 5)) errors.push("spoken.maxAttemptsPerCall must be an integer from 1 to 5");
+  if (!isIntegerIn(spoken.maxAttemptsPerCall, 1, 5)) errors.push(problem("policy.spoken_attempts", "spoken.maxAttemptsPerCall must be an integer from 1 to 5"));
   return errors;
 }
 
-function checkFactorSet(level: number, set: string[], knownFactors: readonly string[], hasSpoken: boolean): string[] {
-  const errors: string[] = [];
+function checkFactorSet(level: number, set: string[], knownFactors: readonly string[], hasSpoken: boolean): StructuredProblem[] {
+  const errors: StructuredProblem[] = [];
   const label = `level ${level} set [${set.join(", ")}]`;
-  if (set.length === 0) return [`level ${level} has an empty factor set`];
+  const at = { level, factors: set.join(", ") };
+  if (set.length === 0) return [problem("policy.factor_set_empty", `level ${level} has an empty factor set`, { level })];
   for (const kind of set) {
-    if (!knownFactors.includes(kind)) errors.push(`${label}: unknown factor ${kind}`);
+    if (!knownFactors.includes(kind)) errors.push(problem("policy.factor_set_unknown", `${label}: unknown factor ${kind}`, { ...at, factor: kind }));
   }
-  if (new Set(set).size !== set.length) errors.push(`${label}: a factor is repeated`);
-  if (level >= 2 && new Set(set).size < 2) errors.push(`${label}: level 2 and above need two different factors`);
+  if (new Set(set).size !== set.length) errors.push(problem("policy.factor_set_duplicate", `${label}: a factor is repeated`, at));
+  if (level >= 2 && new Set(set).size < 2) errors.push(problem("policy.factor_set_two", `${label}: level 2 and above need two different factors`, at));
   if (level >= 2 && !set.some((kind) => NON_KNOWLEDGE_FACTORS.includes(kind))) {
-    errors.push(`${label}: level 2 and above need a factor that is not something the caller knows (${NON_KNOWLEDGE_FACTORS.join(", ")})`);
+    errors.push(problem("policy.factor_set_non_knowledge", `${label}: level 2 and above need a factor that is not something the caller knows (${NON_KNOWLEDGE_FACTORS.join(", ")})`, at));
   }
   if (set.every((kind) => NUMBER_POSSESSION_FACTORS.includes(kind))) {
-    errors.push(`${label}: possession of the number on file (${NUMBER_POSSESSION_FACTORS.join(", ")}) is never a factor on its own`);
+    errors.push(problem("policy.factor_set_number_possession", `${label}: possession of the number on file (${NUMBER_POSSESSION_FACTORS.join(", ")}) is never a factor on its own`, at));
   }
   // A spoken answer counts on its own only at level 1: above it, the rules before this one need a
   // second factor, and one that is not something the caller knows.
-  if (set.includes("spoken_knowledge") && !hasSpoken) errors.push(`${label}: spoken_knowledge needs the policy's spoken fields`);
-  if (level === 3 && !set.includes("photo_id")) errors.push(`${label}: level 3 needs photo_id`);
+  if (set.includes("spoken_knowledge") && !hasSpoken) errors.push(problem("policy.factor_set_needs_spoken", `${label}: spoken_knowledge needs the policy's spoken fields`, at));
+  if (level === 3 && !set.includes("photo_id")) errors.push(problem("policy.factor_set_photo_id", `${label}: level 3 needs photo_id`, at));
   return errors;
 }
 
@@ -435,47 +443,48 @@ const RULE_FIELDS = ["name", "scope", "level", "amountOverMinor", "localTime", "
 const CONDITIONS = ["amountOverMinor", "localTime", "signal"];
 
 /** Every problem with the time zone and the step-up rules. A rule only ever raises its scope's minimum. */
-function checkStepUp(p: Record<string, unknown>, policyClasses: Readonly<Record<string, unknown>>, declaredClasses: Readonly<Record<string, ScopeClass>>): string[] {
-  const errors: string[] = [];
-  if (p.timeZone !== undefined && !isTimeZone(p.timeZone)) errors.push("timeZone must be an IANA time zone, for example America/Toronto");
+function checkStepUp(p: Record<string, unknown>, policyClasses: Readonly<Record<string, unknown>>, declaredClasses: Readonly<Record<string, ScopeClass>>): StructuredProblem[] {
+  const errors: StructuredProblem[] = [];
+  if (p.timeZone !== undefined && !isTimeZone(p.timeZone)) errors.push(problem("policy.time_zone", "timeZone must be an IANA time zone, for example America/Toronto"));
   if (p.stepUp === undefined) return errors;
-  if (!isDenseArray(p.stepUp)) return [...errors, "stepUp must be a list of rules"];
+  if (!isDenseArray(p.stepUp)) return [...errors, problem("policy.step_up_shape", "stepUp must be a list of rules")];
   const scopes = isObject(p.scopes) ? p.scopes : {};
   const names = new Set<unknown>();
   p.stepUp.forEach((rule, index) => {
     const at = `stepUp[${index}]`;
     if (!isObject(rule)) {
-      errors.push(`${at} must be { name, scope, level } and one of amountOverMinor, localTime or signal`);
+      errors.push(problem("policy.step_up_rule_shape", `${at} must be { name, scope, level } and one of amountOverMinor, localTime or signal`, { index }));
       return;
     }
     const named = typeof rule.name === "string" && RULE_NAME.test(rule.name);
     const label = named ? `stepUp ${rule.name as string}` : at;
-    if (!named) errors.push(`${at}: name must be 1 to 64 of a-z, 0-9 and _, starting with a letter`);
-    else if (names.has(rule.name)) errors.push(`${label} is defined twice`);
+    const ruleAt = { rule: named ? (rule.name as string) : index };
+    if (!named) errors.push(problem("policy.step_up_rule_name", `${at}: name must be 1 to 64 of a-z, 0-9 and _, starting with a letter`, { index }));
+    else if (names.has(rule.name)) errors.push(problem("policy.step_up_rule_duplicate", `${label} is defined twice`, ruleAt));
     names.add(rule.name);
-    for (const key of unknownKeys(rule, RULE_FIELDS)) errors.push(`${label}: ${key} is not a step-up rule field`);
+    for (const key of unknownKeys(rule, RULE_FIELDS)) errors.push(problem("policy.step_up_rule_field", `${label}: ${key} is not a step-up rule field`, { ...ruleAt, key }));
     const scope = typeof rule.scope === "string" && Object.hasOwn(scopes, rule.scope) ? rule.scope : null;
-    if (scope === null) errors.push(`${label}: scope must be a scope the policy lists`);
+    if (scope === null) errors.push(problem("policy.step_up_rule_scope", `${label}: scope must be a scope the policy lists`, ruleAt));
     const base = scope === null ? undefined : scopes[scope];
-    if (!isIntegerIn(rule.level, 1, 3)) errors.push(`${label}: level must be 1, 2 or 3`);
-    else if (typeof base === "number" && rule.level <= base) errors.push(`${label}: level ${rule.level} does not raise ${scope} above its minimum of ${base}; a rule only raises`);
-    if (CONDITIONS.filter((key) => rule[key] !== undefined).length !== 1) errors.push(`${label}: needs exactly one of amountOverMinor, localTime or signal`);
+    if (!isIntegerIn(rule.level, 1, 3)) errors.push(problem("policy.step_up_rule_level", `${label}: level must be 1, 2 or 3`, ruleAt));
+    else if (typeof base === "number" && rule.level <= base) errors.push(problem("policy.step_up_rule_raises", `${label}: level ${rule.level} does not raise ${scope} above its minimum of ${base}; a rule only raises`, { ...ruleAt, level: rule.level, scope: scope!, minimum: base }));
+    if (CONDITIONS.filter((key) => rule[key] !== undefined).length !== 1) errors.push(problem("policy.step_up_rule_condition", `${label}: needs exactly one of amountOverMinor, localTime or signal`, ruleAt));
     if (rule.amountOverMinor !== undefined) {
       const limits = rule.amountOverMinor;
       if (!isObject(limits) || Object.keys(limits).length === 0 || !Object.entries(limits).every(([c, v]) => CURRENCY.test(c) && Number.isSafeInteger(v) && (v as number) >= 0)) {
-        errors.push(`${label}: amountOverMinor must map lower-case currency codes to whole amounts in minor units`);
+        errors.push(problem("policy.step_up_rule_amounts", `${label}: amountOverMinor must map lower-case currency codes to whole amounts in minor units`, ruleAt));
       }
-      if (scope !== null && scopeClass(scope, policyClasses, declaredClasses) !== "money") errors.push(`${label}: an amount rule applies only to a money scope`);
+      if (scope !== null && scopeClass(scope, policyClasses, declaredClasses) !== "money") errors.push(problem("policy.step_up_rule_money_scope", `${label}: an amount rule applies only to a money scope`, ruleAt));
     }
     if (rule.localTime !== undefined) {
       const window = rule.localTime;
       if (!isObject(window) || unknownKeys(window, ["from", "to"]).length > 0 || !isClockTime(window.from) || !isClockTime(window.to) || window.from === window.to) {
-        errors.push(`${label}: localTime must be { from: "HH:MM", to: "HH:MM" }, two different times`);
+        errors.push(problem("policy.step_up_rule_local_time", `${label}: localTime must be { from: "HH:MM", to: "HH:MM" }, two different times`, ruleAt));
       }
-      if (p.timeZone === undefined) errors.push(`${label}: a localTime rule needs the policy's timeZone`);
+      if (p.timeZone === undefined) errors.push(problem("policy.step_up_rule_needs_time_zone", `${label}: a localTime rule needs the policy's timeZone`, ruleAt));
     }
     if (rule.signal !== undefined && !(typeof rule.signal === "string" && RULE_NAME.test(rule.signal))) {
-      errors.push(`${label}: signal must be 1 to 64 of a-z, 0-9 and _, starting with a letter`);
+      errors.push(problem("policy.step_up_rule_signal", `${label}: signal must be 1 to 64 of a-z, 0-9 and _, starting with a letter`, ruleAt));
     }
   });
   return errors;
