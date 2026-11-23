@@ -1800,13 +1800,17 @@ export class Engine {
   /**
    * Appends a call's pending ledger entries in order, each with its event id (a ledger appends an
    * id once), then clears them from the record if nobody wrote since. A failed append throws and
-   * leaves the rest pending; a lost clear leaves them for the next write, which appends nothing twice.
-   * The listener is told after each append, so it never hears of an entry the ledger does not have.
+   * leaves the rest pending; a lost clear leaves them for the next write, which appends nothing
+   * twice. A queued entry a prune spent was appended before the clear was saved: the replay
+   * carries a write that happened, so it is skipped, never re-appended, and the counter store is
+   * not told twice. The listener is told after each append, so it never hears of an entry the
+   * ledger does not have.
    * Answers whether the clear was saved (true for an empty outbox, which needs none).
    */
   async #flush(callId: string, version: number, record: CallRecord): Promise<boolean> {
     if (record.outbox.length === 0) return true;
     for (const queued of record.outbox) {
+      if (await this.#spent(queued.eventId)) continue;
       await this.#append({ eventId: queued.eventId, callId, actor: queued.actor, event: queued.name, at: queued.at, detail: queued.detail });
       // Not awaited: a notice store that stalls holds up neither the rest of the outbox nor the call. It never rejects.
       if (queued.counter !== undefined) void this.#notifyLock(queued.counter, queued.detail);
@@ -1842,8 +1846,16 @@ export class Engine {
 
   /** Appends one entry, then tells the listener, with the entry's event id and seq. */
   async #append(entry: AuditInput & { eventId: string; callId: string }): Promise<void> {
+    // An id a prune spent was appended once already, below the base: the write this call carries
+    // happened then, the listener heard it then, and the entry is never written twice.
+    if (await this.#spent(entry.eventId)) return;
     const appended = await this.#adapters.ledger.append(entry);
     this.#tell({ name: entry.event, callId: entry.callId, actor: entry.actor, at: entry.at, detail: entry.detail, eventId: entry.eventId, seq: appended.seq });
+  }
+
+  /** Whether a prune spent the event id (its first entry sits below the base): a ledger that cannot prune never spent one. */
+  async #spent(eventId: string): Promise<boolean> {
+    return (await this.#adapters.ledger.spentEventId?.(eventId)) === true;
   }
 
   /**

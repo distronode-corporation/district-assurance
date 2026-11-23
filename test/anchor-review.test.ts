@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { MAX_REPLY_BYTES, RekorAnchor, TimestampAuthorityAnchor, timestampRequest } from "../examples/reference-server/src/anchor-adapters.ts";
-import type { AnchorProof } from "../src/core/adapters.ts";
+import type { AnchorProof, AuditEntry } from "../src/core/adapters.ts";
 import { anchorPayload, checkRekorEntry, checkTimestamp, isAnchorProof, readDer, timestampTokenFields, verifyAnchor, type RekorLog } from "../src/prove/anchor.ts";
 import { FakeTimestampAuthority, FixedClock } from "../src/testing/fakes.ts";
 import { createTestEngine } from "../src/testing/index.ts";
@@ -104,6 +104,18 @@ describe("review #133: verifyAnchor on a malformed export", () => {
     }
     // A value that reads, but as no entry, is a broken chain.
     assert.deepEqual(verifyAnchor(entry, [42, ...entries.slice(1)] as never, { tsa: tsa.chain }), { ok: false, reason: "chain" });
+    // A hole in the list (a sparse array's missing slot, which `some` and `filter` skip) is
+    // malformed wherever it sits, past the covered seq included.
+    const holed = [...entries] as AuditEntry[];
+    delete holed[entries.length - 1];
+    assert.deepEqual(verifyAnchor(entry, holed as never, { tsa: tsa.chain }), { ok: false, reason: "malformed" }, "a hole above the covered seq");
+    // A checkpoint reference that is not an object, or whose field throws when read, is malformed.
+    assert.deepEqual(verifyAnchor(entry, entries, { tsa: tsa.chain, checkpoint: null as never }), { ok: false, reason: "malformed" }, "a null checkpoint reference");
+    assert.deepEqual(
+      verifyAnchor(entry, entries, { tsa: tsa.chain, checkpoint: { get checkpoint(): never { throw new Error("no"); } } as never }),
+      { ok: false, reason: "malformed" },
+      "a checkpoint reference whose field throws when read",
+    );
   });
 
   it("a covered entry whose fields throw when read is malformed, never a throw", async () => {

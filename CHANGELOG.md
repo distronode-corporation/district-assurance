@@ -17,6 +17,51 @@ heading, and uses it as the GitHub release's text, with a link back here
 
 ## [Unreleased]
 
+A host can now cut an audit ledger's oldest entries below a signed checkpoint, and a reader can
+check everything that is left from that checkpoint on without the entries before it (SPEC section
+10, issues #157, #158 and #159).
+
+### Added
+
+- **Signed ledger checkpoints.** A first-class `ledger_checkpoint` document names the last entry a
+  prune removes (`seq` and `hash`), how many entries that checkpoint cuts (`prunedCount`), and when
+  it was signed, under the host's name for the ledger, and is signed by a `ReceiptSigner` over its
+  own domain so it can never verify as a receipt, an export trailer or an anchor.
+  `signLedgerCheckpoint(ledger, {signer, clock, ledgerId, seq?})` verifies the chain from the
+  ledger's base to the point in bounded pages before signing, and `verifyLedgerCheckpoint(checkpoint,
+  keys)` checks one and answers its point, which a reader hands to `verifyChain` as the starting
+  point of what is left. The whole key set verifies checkpoints, a retired key included.
+- **Pruning below a written checkpoint.** `pruneLedger(ledger, {ledgerId, checkpoint, keys})`
+  removes the entries at or below the checkpoint's point only once the checkpoint verifies, names
+  this ledger, and its `prunedCount` names the gap this prune cuts; the same checkpoint handed in
+  again, also by a second pruner racing the first, prunes nothing and answers the point, and a
+  deeper racing checkpoint is answered too, never an error read as a failed prune. A ledger that
+  prunes implements three optional `AuditLedger` methods: `base()`, the last pruned entry;
+  `prune(checkpoint)`, which removes the rows and moves the base as one step; and
+  `spentEventId(eventId)`, which answers whether a prune removed an entry. The pruned entries'
+  `eventIds` stay spent, so the ledger never appends a second entry for one, and the engine reads
+  the spent ids instead of failing a retry: a revocation already on the ledger below a base is
+  answered from the consent store, a queued outbox entry is cleared without a second append, a
+  finished PIN change clears its counters and appends nothing, and a repeat erasure takes the next
+  free number. A ledger pruned to its head answers the checkpoint as its head, and appends
+  continue from the base, so `anchorLedger`, `exportSubject` and `eraseSubject` work above it.
+  `MemoryAuditLedger` implements all three methods, and `auditLedgerContract` holds the
+  pruned-ledger cases for a durable store, the prune-racing-appends and spent-id cases included.
+- **Checkpoint-anchored exports and anchors.** A pruned ledger is exported only against the
+  checkpoint that pruned it: `exportLedger` takes `checkpoint: { checkpoint, keys }`, which must
+  verify, name the ledger, and match the base the ledger reports exactly, so storage that quietly
+  hid rows and moved its base never gets a signed export of the chain it rewrote. A full export
+  (`fromSeq` 1) then starts at the base and its trailer's `from` is the checkpoint, which
+  `verifyLedgerExport` checks through its new `checkpoint` argument: a run that does not start at
+  the verified point, or names another ledger, fails the new `checkpoint` reason (which
+  `AnchorFailure` gains too, so a host switching on either exhaustively needs the new case). Any
+  other `fromSeq` below the base is refused, and a cursor naming the base still resumes there.
+  `verifyAnchor` takes the checkpoint in its `trust` the same way, so an anchor written after a
+  prune is checked from the checkpoint's point; the covered entries are now taken by their `seq`
+  rather than their position, and an `entries` list holding null or a hole anywhere in it is
+  `malformed`, where a hole past the covered seq used to pass. A monthly report names the last
+  entry it read, or the base of a ledger pruned to its head, never a head read after its listing.
+
 ## [0.3.0] - 2026-11-22
 
 ### Added

@@ -8,7 +8,7 @@ import { createPublicKey, verify, type JsonWebKey } from "node:crypto";
 import type { AuditEntry, AuditLedger, ReceiptSigner } from "../core/adapters.ts";
 import { canonicalJson } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
-import { GENESIS_HASH } from "./ledger.ts";
+import { ledgerBase } from "./ledger.ts";
 
 /** Counts and totals in minor units, by lower-case ISO 4217 currency. */
 export interface PaymentTally {
@@ -24,7 +24,7 @@ export interface MonthlyReport {
   month: string;
   /** The IANA time zone the month is read in. */
   timeZone: string;
-  /** The last ledger entry read: the report covers the ledger up to and including it. */
+  /** The last entry the report read, or the base a pruned ledger continues from: the point the report covers the ledger up to. */
   ledger: { seq: number; hash: string };
   calls: { started: number; ended: number };
   verifications: {
@@ -157,14 +157,18 @@ export async function monthlyReport(input: { ledger: AuditLedger; workspaceId: s
   const timeZone = zone ?? "UTC";
   const monthOf = monthReader(timeZone);
   const entries = await ledger.list();
+  // The point the report names is the last entry it read, or the base a ledger pruned to its head
+  // continues from: never a head read after the listing, which could name a point the report
+  // never saw.
   const last = entries.at(-1);
+  const point = last !== undefined ? { seq: last.seq, hash: last.hash } : await ledgerBase(ledger);
   const report: MonthlyReport = {
     v: 1,
     document: "monthly_report",
     workspaceId,
     month: wanted,
     timeZone,
-    ledger: { seq: last?.seq ?? 0, hash: last?.hash ?? GENESIS_HASH },
+    ledger: point,
     calls: { started: 0, ended: 0 },
     verifications: { byLevel: { "0": 0, "1": 0, "2": 0, "3": 0 }, failedFactors: 0 },
     payments: { sent: tally(), paid: tally(), failed: tally(), expired: tally(), unmatched: 0 },

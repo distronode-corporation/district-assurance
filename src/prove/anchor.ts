@@ -10,6 +10,7 @@
 import { createHash, createPublicKey, verify, type KeyObject, type X509Certificate } from "node:crypto";
 
 import type { AnchorProof, AuditEntry } from "../core/adapters.ts";
+import { verifyLedgerCheckpoint, type LedgerCheckpointRef } from "./checkpoint.ts";
 import { canonicalJson } from "../core/canonical.ts";
 import { isObject } from "../core/shape.ts";
 import { verifyChain } from "./ledger.ts";
@@ -494,19 +495,26 @@ export interface AnchorTrust {
   tsa: readonly X509Certificate[];
   /** Rekor's log, needed for `rekor` proofs. */
   rekor?: RekorLog;
+  /**
+   * The signed `ledger_checkpoint` a pruned ledger was anchored on, with the key set that verifies
+   * it: the entries then start at its point, not at seq 1, and the chain up to the covered head
+   * runs from it. Without it, a pruned ledger's entries cannot reach the covered seq.
+   */
+  checkpoint?: LedgerCheckpointRef;
 }
 
-export type AnchorFailure = "malformed" | "chain" | "token" | "certificate" | "imprint" | "log";
+export type AnchorFailure = "malformed" | "chain" | "token" | "certificate" | "imprint" | "log" | "checkpoint";
 
 export type AnchorCheck =
   | { ok: true; seq: number; hash: string; time: string; logIndex: number | null }
   | { ok: false; reason: AnchorFailure };
 
 /**
- * Checks a `ledger.anchored` entry offline against the entries it covers (from seq 1, at least up
- * to the seq it covers): the chain up to that seq, then the time-stamp token over that head, then,
- * for a Rekor proof, the log entry. `imprint` means the token is for another head: the chain was
- * changed or rebuilt after it was anchored. Never throws.
+ * Checks a `ledger.anchored` entry offline against the entries it covers (from seq 1, or from the
+ * checkpoint's point when the trust carries the `ledger_checkpoint` a pruned ledger was anchored
+ * on, at least up to the seq it covers): the chain up to that seq, then the time-stamp token over
+ * that head, then, for a Rekor proof, the log entry. `imprint` means the token is for another
+ * head: the chain was changed or rebuilt after it was anchored. Never throws.
  */
 export function verifyAnchor(anchored: AuditEntry, entries: readonly AuditEntry[], trust: AnchorTrust): AnchorCheck {
   // What a verifier is handed is not trusted: anything that is not an entry, a list or a trust is malformed.
@@ -514,7 +522,23 @@ export function verifyAnchor(anchored: AuditEntry, entries: readonly AuditEntry[
   const detail: unknown = isObject(anchored) ? anchored.detail : undefined;
   const tsa: unknown = isObject(trust) ? trust.tsa : undefined;
   const rekor = isObject(trust) ? trust.rekor : undefined;
+  const checkpoint = isObject(trust) ? trust.checkpoint : undefined;
   if (!isObject(detail) || !Array.isArray(entries) || !Array.isArray(tsa)) return { ok: false, reason: "malformed" };
+  // A pruned ledger's anchor starts at the checkpoint, which must verify under the key set it came
+  // with: a checkpoint that is not a signed document is malformed input, and one whose signature
+  // does not verify fails `checkpoint`, never `token` (that reason is the time-stamp's). Its
+  // wrapper is read inside the boundary, so a trust object with getters answers once, never throws.
+  let checkpointCheck: ReturnType<typeof verifyLedgerCheckpoint> | null = null;
+  if (checkpoint !== undefined) {
+    if (!isObject(checkpoint)) return { ok: false, reason: "malformed" };
+    try {
+      const { checkpoint: signed, keys: checkpointKeys } = checkpoint as LedgerCheckpointRef;
+      checkpointCheck = verifyLedgerCheckpoint(signed, checkpointKeys);
+    } catch {
+      return { ok: false, reason: "malformed" };
+    }
+  }
+  if (checkpointCheck !== null && !checkpointCheck.ok) return { ok: false, reason: checkpointCheck.reason === "signature" ? "checkpoint" : "malformed" };
   const { seq, proof: given } = detail;
   // A plain copy of the proof: a getter in it answers once, here, and anything not plain data is malformed.
   let proof: unknown;
@@ -526,14 +550,19 @@ export function verifyAnchor(anchored: AuditEntry, entries: readonly AuditEntry[
   if (anchored.event !== "ledger.anchored" || !Number.isSafeInteger(seq) || (seq as number) < 1 || !isAnchorProof(proof)) {
     return { ok: false, reason: "malformed" };
   }
-  const covered: unknown[] = entries.slice(0, seq as number);
-  // An export holding nothing (null or a hole) where an entry should be is malformed. verifyChain
-  // reports any other value that is not an entry as a break in the chain (SRV-7), but it reads an
-  // object's fields, and one whose field throws when read is malformed too, never a throw.
-  if (covered.some((e) => e === null || e === undefined)) return { ok: false, reason: "malformed" };
   let chain: ReturnType<typeof verifyChain>;
   try {
-    chain = verifyChain(covered as AuditEntry[]);
+    // An export holding nothing (null, or a hole of a sparse list, which `some` and `filter` skip)
+    // where an entry should be is malformed, wherever it sits. verifyChain reports any other value
+    // that is not an entry as a break in the chain (SRV-7), but it reads an object's fields, and
+    // one whose field throws when read is malformed too, never a throw.
+    for (let at = 0; at < entries.length; at++) {
+      if (!(at in entries) || entries[at] === null || entries[at] === undefined) return { ok: false, reason: "malformed" };
+    }
+    // The entries up to the covered seq: from seq 1 on a whole ledger, or from the checkpoint's
+    // point on a pruned one, where the chain runs from the checkpoint instead of the genesis.
+    const covered: unknown[] = entries.filter((e) => (e as AuditEntry).seq <= (seq as number));
+    chain = verifyChain(covered as AuditEntry[], checkpointCheck === null ? undefined : checkpointCheck.point);
   } catch {
     return { ok: false, reason: "malformed" };
   }

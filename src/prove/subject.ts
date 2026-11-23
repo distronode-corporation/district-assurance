@@ -341,12 +341,23 @@ export async function eraseSubject(
   const subjectKey = key as string;
   const ledger = rt.adapter("ledger");
   const appended = new Map((await ledger.list()).map((e) => [e.eventId, e]));
+  // A number whose id a prune spent belongs to an erasure below the base: taken like a listed
+  // one, so on a pruned ledger the count starts again at 0 and still finds the next free number.
+  const taken = async (n: number): Promise<boolean> => {
+    const id = await erasureEventId(rt, subjectKey, n, "subject.erased");
+    return appended.has(id) || (ledger.spentEventId !== undefined && await ledger.spentEventId(id));
+  };
   let n = 0;
-  while (appended.has(await erasureEventId(rt, subjectKey, n, "subject.erased"))) n++;
-  // The last erasure, unfinished: carry out its plan before looking for anything filed since.
+  while (await taken(n)) n++;
+  // The last erasure, unfinished: carry out its plan before looking for anything filed since. A
+  // plan a prune took along with its entry cannot be read: its erasure finished below the base, or
+  // its leftovers are erased afresh below; only a plan the ledger still lists is carried out.
   let finished: ErasureResult | null = null;
-  if (n > 0 && !appended.has(await erasureEventId(rt, subjectKey, n - 1, "subject.erasure_completed"))) {
-    finished = await carryOut(rt, records, subjectKey, n - 1, appended.get(await erasureEventId(rt, subjectKey, n - 1, "subject.erased"))!);
+  if (n > 0) {
+    const plan = appended.get(await erasureEventId(rt, subjectKey, n - 1, "subject.erased"));
+    if (plan !== undefined && !appended.has(await erasureEventId(rt, subjectKey, n - 1, "subject.erasure_completed"))) {
+      finished = await carryOut(rt, records, subjectKey, n - 1, plan);
+    }
   }
   // Counted before the listing: a filing reserved before now and written after it stores nothing,
   // whether or not this listing sees it, so no record the plan misses can bring values back.
@@ -374,7 +385,8 @@ export async function eraseSubject(
     });
     fresh = await carryOut(rt, records, subjectKey, n, entry);
     if (recordIds.every((id) => fresh.recordIds.includes(id)) && (fresh.pinDigest || !pinDigest)) break;
-    n++;
+    do n++;
+    while (await taken(n));
   }
   if (finished === null) return fresh;
   return { erased: true, recordIds: [...finished.recordIds, ...fresh.recordIds], pinDigest: finished.pinDigest || fresh.pinDigest, entry: fresh.entry };

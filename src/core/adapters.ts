@@ -677,6 +677,31 @@ export interface AuditLedger {
    * large ledger page by page.
    */
   list(fromSeq?: number, limit?: number): Promise<AuditEntry[]>;
+  /**
+   * Optional (retention): the last pruned entry, or null while the ledger has never been pruned.
+   * The entries at or below it are gone; the first entry the ledger still holds is `seq + 1`, whose
+   * `prevHash` is `hash`, so what is left is checked from this point (`verifyChain`). A ledger
+   * prunes only below a signed checkpoint it has written, through `pruneLedger`.
+   */
+  base?(): Promise<{ seq: number; hash: string } | null>;
+  /**
+   * Optional (retention): whether `eventId` names an entry a prune removed. The id stays spent
+   * (below), so a replay of it is refused; this answers whether that refusal is the pruned one,
+   * which a caller retrying a write it already made asks before appending again. A ledger that
+   * prunes implements it, and the audit contract holds it to the tombstone.
+   */
+  spentEventId?(eventId: string): Promise<boolean>;
+  /**
+   * Optional (retention): removes every entry at or below `checkpoint.seq`, which becomes the
+   * ledger's base, as ONE step: a reader appending or listing while a prune runs never sees the
+   * rows gone with the base left behind, or the reverse. Refuses a checkpoint at or below the
+   * base it already holds, or one it does not hold with that hash. The eventIds of the removed
+   * entries stay spent (a tombstone, whatever shape the store gives it): a replay of a pruned
+   * id is refused, never appended again, for the id's first entry no longer exists to return. A
+   * host prunes only below a signed checkpoint it has written (`pruneLedger`); calling this
+   * directly is the store's own decision.
+   */
+  prune?(checkpoint: { seq: number; hash: string }): Promise<void>;
 }
 
 /**

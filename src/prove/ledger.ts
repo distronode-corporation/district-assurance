@@ -60,6 +60,14 @@ function hashMatches(entry: Omit<AuditEntry, "hash">, hash: string): boolean {
 export type ChainCheck = { ok: true; head: { seq: number; hash: string } } | { ok: false; seq: number; reason: "seq" | "prev_hash" | "hash" };
 
 /**
+ * The point a ledger continues from: its base when it has been pruned below one, else the genesis.
+ * A ledger with no `base` (one that cannot prune) has never been pruned.
+ */
+export async function ledgerBase(ledger: AuditLedger): Promise<{ seq: number; hash: string }> {
+  return (await ledger.base?.()) ?? { seq: 0, hash: GENESIS_HASH };
+}
+
+/**
  * Checks a run of entries. By default the run must start at the genesis; pass `from` to check a
  * slice that continues a known head.
  */
@@ -83,12 +91,20 @@ export function verifyChain(entries: readonly AuditEntry[], from: { seq: number;
 export class MemoryAuditLedger implements AuditLedger {
   readonly #entries: AuditEntry[] = [];
   readonly #byEventId = new Map<string, AuditEntry>();
+  /** The eventIds of pruned entries: an id the ledger once appended stays spent, its entry gone. */
+  readonly #prunedEventIds = new Set<string>();
+  #base: { seq: number; hash: string } | null = null;
 
   async append(input: AuditInput): Promise<AuditEntry> {
     const seen = input.eventId === undefined ? undefined : this.#byEventId.get(input.eventId);
     if (seen !== undefined) return structuredClone(seen);
+    if (input.eventId !== undefined && this.#prunedEventIds.has(input.eventId)) {
+      throw new EngineError("precondition_failed", "MemoryAuditLedger.append: this eventId's entry was pruned, and the id stays spent");
+    }
     const last = this.#entries.at(-1);
-    const entry = chainEntry(input, (last?.seq ?? 0) + 1, last?.hash ?? GENESIS_HASH);
+    // A pruned ledger's first append continues the chain from its base, the checkpoint it pruned below.
+    const prev = last ?? this.#base ?? { seq: 0, hash: GENESIS_HASH };
+    const entry = chainEntry(input, prev.seq + 1, prev.hash);
     this.#entries.push(entry);
     if (input.eventId !== undefined) this.#byEventId.set(input.eventId, entry);
     return structuredClone(entry);
@@ -96,11 +112,48 @@ export class MemoryAuditLedger implements AuditLedger {
 
   async head(): Promise<{ seq: number; hash: string }> {
     const last = this.#entries.at(-1);
-    return { seq: last?.seq ?? 0, hash: last?.hash ?? GENESIS_HASH };
+    if (last !== undefined) return { seq: last.seq, hash: last.hash };
+    // Every entry pruned: the head is the checkpoint the ledger continues from.
+    return this.#base === null ? { seq: 0, hash: GENESIS_HASH } : { ...this.#base };
   }
 
   async list(fromSeq = 1, limit?: number): Promise<AuditEntry[]> {
     if (limit !== undefined && !(Number.isSafeInteger(limit) && limit >= 1)) throw new TypeError("MemoryAuditLedger.list: limit must be an integer of 1 or more");
     return structuredClone(this.#entries.filter((e) => e.seq >= fromSeq).slice(0, limit));
+  }
+
+  async base(): Promise<{ seq: number; hash: string } | null> {
+    return this.#base === null ? null : { ...this.#base };
+  }
+
+  /** Whether an eventId names an entry a prune removed: the id stays spent (the tombstone above). */
+  async spentEventId(eventId: string): Promise<boolean> {
+    return this.#prunedEventIds.has(eventId);
+  }
+
+  async prune(checkpoint: { seq: number; hash: string }): Promise<void> {
+    if (!(Number.isSafeInteger(checkpoint.seq) && checkpoint.seq >= 1)) {
+      throw new TypeError("MemoryAuditLedger.prune: the checkpoint's seq must be an integer of 1 or more");
+    }
+    if (this.#base !== null && checkpoint.seq <= this.#base.seq) {
+      throw new EngineError("precondition_failed", `MemoryAuditLedger.prune: the ledger has already pruned through seq ${this.#base.seq}`);
+    }
+    const head = await this.head();
+    if (checkpoint.seq > head.seq) throw new EngineError("precondition_failed", `MemoryAuditLedger.prune: the ledger does not hold seq ${checkpoint.seq}`);
+    const at = this.#entries.findIndex((e) => e.seq === checkpoint.seq);
+    // The checkpoint must name this ledger's entry at its seq, never another chain's.
+    if (at === -1 || this.#entries[at]!.hash !== checkpoint.hash) {
+      throw new EngineError("precondition_failed", "MemoryAuditLedger.prune: the checkpoint does not name an entry of this ledger");
+    }
+    // The pruned entries' event ids stay spent, their entries gone: a replay must not write a
+    // second entry for an id the ledger once appended, and cannot return the first, which no
+    // longer exists. A durable store keeps the id (a tombstone row or the like), never frees it.
+    for (const removed of this.#entries.splice(0, at + 1)) {
+      if (removed.eventId !== undefined) {
+        this.#byEventId.delete(removed.eventId);
+        this.#prunedEventIds.add(removed.eventId);
+      }
+    }
+    this.#base = { seq: checkpoint.seq, hash: checkpoint.hash };
   }
 }
