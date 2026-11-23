@@ -13,6 +13,7 @@ import { canonicalJson } from "../core/canonical.ts";
 import type { Clock } from "../core/clock.ts";
 import { EngineError } from "../core/errors.ts";
 import { isObject } from "../core/shape.ts";
+import { verifyLedgerCheckpoint, type LedgerCheckpointRef, type SignedLedgerCheckpoint } from "./checkpoint.ts";
 import { GENESIS_HASH, ledgerBase, verifyChain } from "./ledger.ts";
 
 /** A point on the chain: an entry's `seq` and `hash`, or `{seq: 0, hash: GENESIS_HASH}`. */
@@ -52,6 +53,13 @@ export interface LedgerExportInput {
   signer: ReceiptSigner;
   clock: Clock;
   ledgerId: string;
+  /**
+   * The checkpoint the ledger was pruned below, with the key set that verifies it. A pruned ledger
+   * is exported only from a checkpoint that names this ledger and matches the base the ledger
+   * reports: the base alone is storage's word, which the signed checkpoint turns into proof. On a
+   * ledger that never pruned it is checked and left aside.
+   */
+  checkpoint?: LedgerCheckpointRef;
   /** The first entry to export, 1 or more. Give this or `cursor`, not both. */
   fromSeq?: number;
   /** A previous trailer's cursor: the run continues right after it, and only if the ledger still holds it. */
@@ -140,9 +148,10 @@ async function startPoint(input: { ledger: AuditLedger; base: ChainPoint; fromSe
   }
   const fromSeq = input.fromSeq!;
   if (fromSeq > head.seq + 1) throw new EngineError("invalid_input", "exportLedger: fromSeq is past the ledger head");
-  // The earliest a pruned ledger holds is its base: an export that asks for entries below it
-  // (a full export) starts at the checkpoint instead, and the run is everything the ledger holds.
-  if (fromSeq <= input.base.seq + 1) return { ...input.base };
+  // A full export of a pruned ledger starts at the base, the checkpoint it was pruned below: the
+  // run is everything the ledger still holds. Any other fromSeq below the base is refused as
+  // before: the entry before it is gone, and with it the anchor the run would need.
+  if (fromSeq === 1 && input.base.seq > 0) return { ...input.base };
   const point = await pointHeld(input.ledger, input.base, fromSeq - 1);
   if (point === null) throw new EngineError("precondition_failed", `exportLedger: the ledger does not hold seq ${fromSeq - 1}`);
   return point;
@@ -151,16 +160,17 @@ async function startPoint(input: { ledger: AuditLedger; base: ChainPoint; fromSe
 /**
  * Exports ledger entries from `fromSeq` (or after a `cursor`) as newline-delimited JSON: one line
  * per entry in canonical JSON, then one trailer line, each ending in a newline. The run stops at
- * the head read when the export starts (and at `limit`). A pruned ledger starts at its base: a
- * `fromSeq` below the base exports everything the ledger still holds, from the checkpoint on, and
- * the trailer's `from` is that checkpoint, which a reader checks against the signed
- * `ledger_checkpoint` (a `fromSeq` or cursor above the base works as on a whole ledger). The run
- * is checked against the chain before the trailer is signed, so a ledger that was tampered with is
- * refused, never vouched for.
+ * the head read when the export starts (and at `limit`). A pruned ledger is exported only below
+ * the checkpoint it was pruned below (its `checkpoint` input, which must match the base the
+ * ledger reports): a full export (`fromSeq` 1) starts at the base, so the trailer's `from` is that
+ * checkpoint, which a reader checks against the signed `ledger_checkpoint`; any other `fromSeq`
+ * below the base is refused (a `fromSeq` or cursor above the base works as on a whole ledger). The
+ * run is checked against the chain before the trailer is signed, so a ledger that was tampered
+ * with is refused, never vouched for.
  */
 export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<string, void, undefined> {
   // Each read once: a getter read again could pass a check with one value and run with another.
-  const { ledger, signer, clock, ledgerId, fromSeq, cursor, limit } = input;
+  const { ledger, signer, clock, ledgerId, checkpoint, fromSeq, cursor, limit } = input;
   if ((fromSeq === undefined) === (cursor === undefined)) {
     throw new EngineError("invalid_input", "exportLedger: give fromSeq or cursor, exactly one");
   }
@@ -173,6 +183,23 @@ export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<st
   // The trailer signs the head, so it must be a point the ledger holds: its last entry, or its
   // base when every entry was pruned (the head is then the checkpoint the chain continues from).
   if ((await pointHeld(ledger, base, head.seq))?.hash !== head.hash) throw new EngineError("precondition_failed", "exportLedger: the ledger head does not match its last entry");
+  // A base the ledger reports is storage's word. A pruned ledger exports only below a checkpoint
+  // that verifies, names this ledger, and matches that base exactly: without it, storage that hid
+  // rows and moved its base would get a signed export of a chain it quietly rewrote. A ledger that
+  // never pruned needs no checkpoint; one given is still checked.
+  if (checkpoint === undefined && base.seq > 0) {
+    throw new EngineError("precondition_failed", "exportLedger: the ledger is pruned; give the checkpoint it was pruned below, with the keys that verify it");
+  }
+  if (checkpoint !== undefined) {
+    const check = verifyLedgerCheckpoint(checkpoint.checkpoint, checkpoint.keys);
+    if (!check.ok) {
+      throw new EngineError("invalid_input", check.reason === "signature" ? "exportLedger: the checkpoint's signature does not verify against the key set" : "exportLedger: not a signed ledger_checkpoint document");
+    }
+    if (check.body.ledgerId !== ledgerId) throw new EngineError("invalid_input", `exportLedger: the checkpoint names the ledger ${check.body.ledgerId}, not ${ledgerId}`);
+    if (base.seq > 0 && (check.point.seq !== base.seq || check.point.hash !== base.hash)) {
+      throw new EngineError("precondition_failed", `exportLedger: the ledger's base (seq ${base.seq}) is not the checkpoint's point (seq ${check.point.seq})`);
+    }
+  }
   const from = await startPoint(cursor === undefined ? { ledger, base, fromSeq } : { ledger, base, cursor }, head);
   const last = Math.min(head.seq, from.seq + (limit ?? Number.MAX_SAFE_INTEGER));
   // The run's entries, in reads of at most EXPORT_WALK_PAGE: an adapter that hands back more is cut
@@ -227,7 +254,7 @@ export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<st
 
 export type LedgerExportCheck =
   | { ok: true; entries: AuditEntry[]; trailer: LedgerExportTrailerBody }
-  | { ok: false; reason: "malformed" | "signature" | "chain" | "continuity"; seq?: number };
+  | { ok: false; reason: "malformed" | "signature" | "chain" | "continuity" | "checkpoint"; seq?: number };
 
 function isChainPoint(v: unknown): v is ChainPoint {
   const p = v as ChainPoint;
@@ -272,12 +299,16 @@ function signatureValid(t: LedgerExportTrailer, keys: ReadonlyArray<JsonWebKey &
 /**
  * Checks an export, given as the whole NDJSON text, against a public key set (the receipt key
  * set, which keeps retired keys). Pass `after`, the previous run's trailer, to also check that
- * this run continues it on the same ledger. Never throws on bad input.
+ * this run continues it on the same ledger. Pass `checkpoint`, the signed `ledger_checkpoint` the
+ * pruned ledger was exported below, to also check that the run starts at its verified point on the
+ * ledger it names: the anchor a reader needs before trusting a run that starts mid-chain. Never
+ * throws on bad input.
  */
 export function verifyLedgerExport(
   ndjson: string,
   keys: ReadonlyArray<JsonWebKey & { kid?: string }>,
   after?: LedgerExportTrailerBody,
+  checkpoint?: SignedLedgerCheckpoint,
 ): LedgerExportCheck {
   if (typeof ndjson !== "string" || !ndjson.endsWith("\n")) return { ok: false, reason: "malformed" };
   const parsed: unknown[] = [];
@@ -292,6 +323,15 @@ export function verifyLedgerExport(
   const { trailer } = signed;
   if (after !== undefined && (typeof after !== "object" || after === null || after.ledgerId !== trailer.ledgerId || after.cursor !== encodeCursor(trailer.from))) {
     return { ok: false, reason: "continuity" };
+  }
+  // A checkpoint anchors a pruned ledger's run: it must verify under the same key set, name this
+  // ledger, and the run must start at its point, or the run's start is nobody's word.
+  if (checkpoint !== undefined) {
+    const check = verifyLedgerCheckpoint(checkpoint, keys);
+    if (!check.ok) return { ok: false, reason: check.reason === "signature" ? "signature" : "malformed" };
+    if (check.body.ledgerId !== trailer.ledgerId || check.point.seq !== trailer.from.seq || check.point.hash !== trailer.from.hash) {
+      return { ok: false, reason: "checkpoint" };
+    }
   }
   // An entry line that is not an object is malformed, not a break in the chain: verifyChain would
   // report it as a break at the seq it should hold (SRV-7), so it is checked here first.

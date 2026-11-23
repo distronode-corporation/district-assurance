@@ -1,5 +1,5 @@
 // Hostile-pass regressions for #73 (PRV-5, the store contracts): broken stores that must fail a
-// contract. T1, T3, T4 and T5 passed the contracts before their cases were added; T2 was caught.
+// contract. T1, T3, T4, T5 and T7 passed the contracts before their cases were added; T2 was caught.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
@@ -141,7 +141,57 @@ describe("hostile #73: the contracts catch", () => {
     );
   });
 
-  it("T7: the memory stores pass them all", async () => {
+  it("T7: a store whose prune removes the rows and moves the base as two steps, torn apart by an append", async () => {
+    // The removal and the base move must be one step: an append landing between them sees the rows
+    // gone and no base moved, chains from the genesis, and forks the ledger (review of #170). This
+    // store has its own rows so the tear is exact; it may fail other cases for its shortcuts, the
+    // point is the race case catching what the earlier pruned-ledger cases missed.
+    class TornPruner extends MemoryAuditLedger {
+      readonly rows: AuditEntry[] = [];
+      override async append(i: AuditInput): Promise<AuditEntry> {
+        const seen = i.eventId === undefined ? undefined : this.rows.find((e) => e.eventId === i.eventId);
+        if (seen !== undefined) return structuredClone(seen);
+        const prev = this.rows.at(-1) ?? (await this.base()) ?? { seq: 0, hash: GENESIS_HASH };
+        const entry = chainEntry(i, prev.seq + 1, prev.hash);
+        this.rows.push(entry);
+        return structuredClone(entry);
+      }
+      override async head() {
+        const last = this.rows.at(-1);
+        const base = await this.base();
+        return last !== undefined ? { seq: last.seq, hash: last.hash } : (base ?? { seq: 0, hash: GENESIS_HASH });
+      }
+      override async list(fromSeq = 1, limit?: number) {
+        return structuredClone(this.rows.filter((e) => e.seq >= fromSeq).slice(0, limit));
+      }
+      #baseValue: { seq: number; hash: string } | null = null;
+      override async base() {
+        return this.#baseValue === null ? null : { ...this.#baseValue };
+      }
+      override async prune(checkpoint: { seq: number; hash: string }): Promise<void> {
+        const at = this.rows.findIndex((e) => e.seq === checkpoint.seq);
+        if (at === -1 || this.rows[at]!.hash !== checkpoint.hash) throw new Error("not held");
+        // Statement 1: the rows go. Statement 2, after a round trip of its own: the base moves.
+        this.rows.splice(0, at + 1);
+        await new Promise((resolve) => setImmediate(resolve));
+        this.#baseValue = { ...checkpoint };
+      }
+    }
+    const failed: string[] = [];
+    for (const c of auditLedgerContract(() => new TornPruner())) await c.run().catch(() => failed.push(c.name));
+    assert.ok(failed.includes("keeps one consistent ledger while a prune races appends"), `the race case catches the torn store (failed: ${failed.join("; ")})`);
+    // And the tear itself, directly: an append during the prune chains from the genesis.
+    const torn = new TornPruner();
+    for (let n = 1; n <= 3; n++) await torn.append({ callId: `c${n}`, actor: "code", event: "module.event", at: "2026-01-01T00:00:00.000Z", detail: { n } });
+    const [third] = await torn.list(3, 1);
+    const pruned = torn.prune({ seq: 3, hash: third!.hash });
+    // Appends right away: it runs while the prune is parked between its two statements.
+    const forked = await torn.append({ callId: "c4", actor: "code", event: "module.event", at: "2026-01-01T00:00:00.000Z", detail: { n: 4 } });
+    await pruned;
+    assert.equal(forked.prevHash, GENESIS_HASH, "the append between the two statements chains from the genesis");
+  });
+
+  it("T8: the memory stores pass them all", async () => {
     assert.deepEqual(await failures(sessionStoreContract(() => new MemorySessionStore())), []);
     assert.deepEqual(await failures(auditLedgerContract(() => new MemoryAuditLedger())), []);
   });

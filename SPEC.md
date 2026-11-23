@@ -1330,9 +1330,10 @@ factory, since the engine only reads them) and intake records are copied in and 
 never share a key, keys that differ only in a lone surrogate stay apart, `putIntakeRecord` is
 idempotent by `recordId`, also concurrently, and keeps the first filing of a `recordId` (a later
 put with other contents changes nothing, so a confirmed record stays the one confirmed), and the
-confirmed flag is kept beside each record (below). `MemoryAuditLedger` and `MemoryRecordStore` pass both. `MemoryAuditLedger` can prune: a pruned
-entry's `eventId` goes with it (the id is freed, as a durable store frees the row), and an append
-on a ledger pruned to empty continues from the base, which is then also its head.
+confirmed flag is kept beside each record (below). `MemoryAuditLedger` and `MemoryRecordStore`
+pass both. `MemoryAuditLedger` can prune: a pruned entry's `eventId` stays spent (a tombstone, as
+a durable store keeps the id), and an append on a ledger pruned to empty continues from the base,
+which is then also its head.
 
 The reference server has optional SQLite stores on `node:sqlite` (SRV-4,
 `examples/reference-server/src/sqlite-stores.ts`; no dependency). `SqliteAuditLedger` keeps each
@@ -1400,12 +1401,16 @@ that fixes in time that the ledger was still there, unchanged, and each grows th
   the Rekor v2 TransparencyLogEntry JSON for a `hashedrekord` v0.0.2 of the payload, signed by the
   host's P-256 key. Rekor v2 gives an inclusion proof and a signed checkpoint but no time, so the
   time is always the token's.
-- `verifyAnchor(entry, entries, {tsa, rekor?})` checks offline and never throws. `entries` run from
-  seq 1 to at least the covered seq; `tsa` is the authority's certificate chain as the host has it,
-  signing certificate first (certificates in the token are ignored); `rekor` is the log's public key
-  (Ed25519 or ECDSA) and origin. In order: the entry's shape, and an `entries` that is not a list,
-  one holding null or anything else that is not an entry within the covered seqs, or a trust without
-  a `tsa` list (`malformed`); the chain up to `seq` (`chain`); the token: one signer, signed content
+- `verifyAnchor(entry, entries, {tsa, rekor?, checkpoint?})` checks offline and never throws.
+  `entries` run from seq 1 (from the checkpoint's point, when the trust carries the
+  `ledger_checkpoint` a pruned ledger was anchored on) to at least the covered seq; `tsa` is the
+  authority's certificate chain as the host has it, signing certificate first (certificates in the
+  token are ignored); `rekor` is the log's public key (Ed25519 or ECDSA) and origin. In order: the
+  entry's shape, and an `entries` that is not a list, one holding null or a hole anywhere in it, a
+  trust without a `tsa` list, or a `checkpoint` that is not a signed `ledger_checkpoint` document
+  (`malformed`); a `checkpoint` whose signature does not verify against the key set it came with
+  (`checkpoint`); the chain up to `seq`, from the checkpoint's verified point when the trust carries
+  one (`chain`); the token: one signer, signed content
   type TSTInfo, signed message digest of the TSTInfo, a signed SigningCertificate (RFC 2634, a SHA-1
   hash) or SigningCertificateV2 (RFC 5035, SHA-256 unless it names another hash) attribute,
   signature by the first certificate with RSA or ECDSA over SHA-256, 384 or 512 (`token`, also for
@@ -1490,13 +1495,16 @@ a failing signer never leaves a consumer with entries and no valid trailer. Each
 
 A run starts at `fromSeq` (1 or more, at most the head plus one) or right after `cursor`
 (`<seq>.<hash>` of a previous trailer's `through`), never both, and stops at the head read when the
-export starts, or after `limit` entries. A pruned ledger starts at its base: a `fromSeq` below the
-base's seq plus one (a full export) exports everything the ledger still holds, from the checkpoint
-on, and the trailer's `from` is the base, which a reader checks against the signed
-`ledger_checkpoint` (below); a cursor naming the base resumes there, and one below it is refused as
-before; it asks the ledger for that one page (`list(from + 1,
+export starts, or after `limit` entries; it asks the ledger for that one page (`list(from + 1,
 count)`), in reads of at most `EXPORT_WALK_PAGE` entries, and again for the rest when a read hands
-back fewer entries than asked. A run that stops short of the head is signed only once the chain is walked from its end
+back fewer entries than asked. A pruned ledger starts at its base: a full export (`fromSeq` 1)
+exports everything the ledger still holds, from the checkpoint on, and the trailer's `from` is the
+base; any other `fromSeq` below the base is refused, for the entry before it is gone; a cursor
+naming the base resumes there, and one below it is refused as before. A pruned ledger is exported
+only against the checkpoint that pruned it: `exportLedger` takes it (`checkpoint: { checkpoint,
+keys }`), which must verify, name this `ledgerId`, and match the base the ledger reports exactly,
+for a base alone is storage's word. A ledger that never pruned exports without one; a checkpoint
+given for one is still checked and its point left aside. A run that stops short of the head is signed only once the chain is walked from its end
 to the head, in reads of at most `EXPORT_WALK_PAGE` (1,000) entries, and verifies there; so an
 export reads the ledger from the run to the head, and a run that reaches the head reads only
 itself. A walk that fails is refused with `precondition_failed`, before anything is yielded. The run is complete when `through` equals `head`; otherwise
@@ -1509,15 +1517,19 @@ longer holds with that hash (the base counts as held, with its hash), a missing 
 `fromSeq`, and a run that fails `verifyChain`
 from its start. `ledgerId` is the host's name for the ledger, for example the workspace id.
 
-`verifyLedgerExport(ndjson, keys, after?)` checks a whole run and never throws, whatever its
-arguments are (a text that is not a string is `malformed`, a key set that is not a list of keys
-fails `signature`, an `after` that is not a trailer fails `continuity`). It returns
-`{ok: true, entries, trailer}`, or `{ok: false, reason}` with `reason`: `malformed` (a line that is
-not JSON, no final newline, a trailer that is missing or inconsistent, an entry line that is not an
-object), `signature` (unknown `kid`, wrong `alg`, a signature that does not verify), `continuity`
-(given the previous run's trailer as `after`: a different `ledgerId`, or a start other than its
-cursor) or `chain` (`verifyChain` from `from` fails, with its `seq`, or the run does not end on
-`through`).
+`verifyLedgerExport(ndjson, keys, after?, checkpoint?)` checks a whole run and never throws,
+whatever its arguments are (a text that is not a string is `malformed`, a key set that is not a list
+of keys fails `signature`, an `after` that is not a trailer fails `continuity`). Pass the signed
+`ledger_checkpoint` the pruned ledger was exported below, and the run must start at its verified
+point on the `ledgerId` it names, or the check fails `checkpoint`: the anchor a reader needs before
+trusting a run that starts mid-chain. It returns `{ok: true, entries, trailer}`, or `{ok: false,
+reason}` with `reason`: `malformed` (a line that is not JSON, no final newline, a trailer that is
+missing or inconsistent, an entry line that is not an object, a checkpoint that is not a signed
+`ledger_checkpoint`), `signature` (unknown `kid`, wrong `alg`, or a signature that does not verify,
+on the trailer or the checkpoint), `continuity` (given the previous run's trailer as `after`: a
+different `ledgerId`, or a start other than its cursor), `checkpoint` (a run that does not start
+at the given checkpoint's verified point, or names another ledger) or `chain` (`verifyChain` from
+`from` fails, with its `seq`, or the run does not end on `through`).
 
 ### Checkpoints and pruning
 
@@ -1550,19 +1562,38 @@ once, ahead of time.
 - `verifyLedgerCheckpoint(checkpoint, keys)` checks a checkpoint against a public key set, as
   `verifyLedgerExport` checks a trailer, and never throws: bad input of any shape is `malformed`,
   an unknown `kid`, a wrong `alg`, a malformed signature or any change to the body is `signature`.
-  It answers the checkpoint's point, which a reader hands to `verifyChain` as its starting point.
-- `pruneLedger(ledger, checkpoint, keys)` prunes below the written checkpoint: the checkpoint is
-  verified against the key set, the point it names must be the ledger's (its base, when that
-  checkpoint was already pruned below, in which case nothing is pruned and the point is answered,
-  or an entry it holds with that hash), and the ledger's `prune` removes every entry at or below
-  it, after which the base is read back. Refused with `precondition_failed`: a ledger without
-  `prune` and `base`, a checkpoint the ledger has already pruned past (the base only moves
-  forward), a point the ledger does not hold, and a prune that did not move the base. Refused
-  with `invalid_input`: a checkpoint that does not verify.
+  The whole key set verifies checkpoints, a retired key included: a checkpoint carries no issue time
+  to hold against a retirement. It answers the checkpoint's point, which a reader hands to
+  `verifyChain` as its starting point.
+- `pruneLedger(ledger, { ledgerId, checkpoint, keys })` prunes below the written checkpoint: the
+  checkpoint is verified against the key set and must name this `ledgerId`, the point it names
+  must be the ledger's (its base, when that checkpoint was already pruned below, in which case
+  nothing is pruned and the point is answered, or an entry it holds with that hash), its
+  `prunedCount` must name the gap this prune cuts (a checkpoint signed before an earlier prune
+  overstates it, and is refused: sign one checkpoint at a time, after the last prune), and the
+  ledger's `prune` removes every entry at or below it as one step, after which the base is read
+  back. A second pruner racing the first with the same checkpoint answers the point, pruning
+  nothing. Refused with `precondition_failed`: a ledger without `prune` and `base`, a checkpoint
+  the ledger has already pruned past (the base only moves forward), a point the ledger does not
+  hold, and a prune that did not move the base. Refused with `invalid_input`: a checkpoint that
+  does not verify, one that names another ledger, and one whose `prunedCount` names another gap
+  than this prune cuts.
 - On the ledger that pruned: `base()` answers the checkpoint's point; `head()` answers it too when
   every entry was pruned; an append continues the chain from the base; `list` answers the entries
-  the ledger still holds, whatever `fromSeq` below them says. `anchorLedger`, `exportSubject` and
-  `eraseSubject` work on a pruned ledger, appending above the base.
+  the ledger still holds, whatever `fromSeq` below them says; and `prune` is one step, rows and
+  base together, or a concurrent append sees rows gone with the base unmoved and chains from the
+  genesis, forking the ledger (`auditLedgerContract` races a prune against appends). The
+  `eventIds` of pruned entries stay spent, their entries gone: a replay of a pruned id is refused
+  (`precondition_failed`), never appended again, for the id's first entry no longer exists to
+  return, so a late retry of a long-pruned write fails closed rather than writing a second entry.
+  `anchorLedger`, `exportSubject` and `eraseSubject` work on a pruned ledger, appending above the
+  base. An anchor written above a base is checked by `verifyAnchor` given the checkpoint in its
+  `trust` (`checkpoint: { checkpoint, keys }`): the entries run from its point, not seq 1, and
+  without it a pruned ledger's entries cannot reach the covered seq. A receipt's `ledger` point is
+  checkable against a pruned ledger only at the base itself (`seq` equal, the hash the checkpoint
+  pins): above it the ledger no longer holds the entries, and below it the checkpoint says nothing,
+  so a receipt whose point falls below the base verifies on its signature alone, which is still
+  the signature's word for where the chain stood at the call's end.
 
 ## 11. Canonical JSON
 
@@ -3175,7 +3206,10 @@ last confirmed record (refused with `precondition_failed` while one of the subje
 still being filed on a call; a call record that is gone is skipped), appends `subject.erased` under
 the next number, deletes the records and the PIN digest, then appends `subject.erasure_completed`. A
 later erasure (for example of a PIN digest the host put back) gets an entry of its own; two erasures
-at once append one plan, and both carry it out. It never changes or removes a ledger entry or a
+at once append one plan, and both carry it out. On a ledger pruned below an erasure's entries the
+numbering starts again at 0, and the keyed id it reaches for was spent with the prune (section 10):
+a repeat erasure of the same subject is refused with `precondition_failed`, never numbered twice.
+It never changes or removes a ledger entry or a
 receipt, so `verifyChain` and every receipt still verify. The listener is not told (the entry names
 no call). Attempt counts live per call in the call record and, across calls, in the
 `AttemptCounters` store (section 6). Every erase request, with nothing on file too, resets the

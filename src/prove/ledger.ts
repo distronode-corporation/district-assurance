@@ -91,11 +91,16 @@ export function verifyChain(entries: readonly AuditEntry[], from: { seq: number;
 export class MemoryAuditLedger implements AuditLedger {
   readonly #entries: AuditEntry[] = [];
   readonly #byEventId = new Map<string, AuditEntry>();
+  /** The eventIds of pruned entries: an id the ledger once appended stays spent, its entry gone. */
+  readonly #prunedEventIds = new Set<string>();
   #base: { seq: number; hash: string } | null = null;
 
   async append(input: AuditInput): Promise<AuditEntry> {
     const seen = input.eventId === undefined ? undefined : this.#byEventId.get(input.eventId);
     if (seen !== undefined) return structuredClone(seen);
+    if (input.eventId !== undefined && this.#prunedEventIds.has(input.eventId)) {
+      throw new EngineError("precondition_failed", "MemoryAuditLedger.append: this eventId's entry was pruned, and the id stays spent");
+    }
     const last = this.#entries.at(-1);
     // A pruned ledger's first append continues the chain from its base, the checkpoint it pruned below.
     const prev = last ?? this.#base ?? { seq: 0, hash: GENESIS_HASH };
@@ -135,8 +140,15 @@ export class MemoryAuditLedger implements AuditLedger {
     if (at === -1 || this.#entries[at]!.hash !== checkpoint.hash) {
       throw new EngineError("precondition_failed", "MemoryAuditLedger.prune: the checkpoint does not name an entry of this ledger");
     }
-    // The pruned entries' event ids go with them: a durable store frees the id with the row.
-    for (const removed of this.#entries.splice(0, at + 1)) if (removed.eventId !== undefined) this.#byEventId.delete(removed.eventId);
+    // The pruned entries' event ids stay spent, their entries gone: a replay must not write a
+    // second entry for an id the ledger once appended, and cannot return the first, which no
+    // longer exists. A durable store keeps the id (a tombstone row or the like), never frees it.
+    for (const removed of this.#entries.splice(0, at + 1)) {
+      if (removed.eventId !== undefined) {
+        this.#byEventId.delete(removed.eventId);
+        this.#prunedEventIds.add(removed.eventId);
+      }
+    }
     this.#base = { seq: checkpoint.seq, hash: checkpoint.hash };
   }
 }

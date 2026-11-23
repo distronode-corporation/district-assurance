@@ -686,9 +686,13 @@ export interface AuditLedger {
   base?(): Promise<{ seq: number; hash: string } | null>;
   /**
    * Optional (retention): removes every entry at or below `checkpoint.seq`, which becomes the
-   * ledger's base. Refuses a checkpoint at or below the base it already holds, or one it does not
-   * hold with that hash. A host prunes only below a signed checkpoint it has written
-   * (`pruneLedger`); calling this directly is the store's own decision.
+   * ledger's base, as ONE step: a reader appending or listing while a prune runs never sees the
+   * rows gone with the base left behind, or the reverse. Refuses a checkpoint at or below the
+   * base it already holds, or one it does not hold with that hash. The eventIds of the removed
+   * entries stay spent (a tombstone, whatever shape the store gives it): a replay of a pruned
+   * id is refused, never appended again, for the id's first entry no longer exists to return. A
+   * host prunes only below a signed checkpoint it has written (`pruneLedger`); calling this
+   * directly is the store's own decision.
    */
   prune?(checkpoint: { seq: number; hash: string }): Promise<void>;
 }

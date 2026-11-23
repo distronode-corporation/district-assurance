@@ -38,6 +38,12 @@ export interface LedgerCheckpointBody {
 
 export type SignedLedgerCheckpoint = SignedDocument<LedgerCheckpointBody>;
 
+/** A checkpoint a host passes with the key set that verifies it, wherever a reader or an export anchors on one. */
+export interface LedgerCheckpointRef {
+  checkpoint: SignedLedgerCheckpoint;
+  keys: ReadonlyArray<JsonWebKey & { kid?: string }>;
+}
+
 /** The exact bytes that are signed: the domain, a newline, then the canonical body. */
 export function ledgerCheckpointPayload(body: LedgerCheckpointBody): Uint8Array {
   return new TextEncoder().encode(`${LEDGER_CHECKPOINT_DOMAIN}\n${canonicalJson(body)}`);
@@ -78,11 +84,12 @@ export type LedgerCheckpointCheck =
   | { ok: false; reason: "malformed" | "signature" };
 
 /**
- * Checks a signed checkpoint against a public key set (the receipt key set, which keeps retired
- * keys), as `verifyLedgerExport` checks a trailer. Never throws: bad input of any shape is
- * `malformed`, an unknown `kid`, a wrong algorithm, a malformed signature or any change to the body
- * is `signature`. Answers the checkpoint's point, which a reader hands to `verifyChain` as its
- * starting point.
+ * Checks a signed checkpoint against a public key set (the receipt key set), as
+ * `verifyLedgerExport` checks a trailer. Never throws: bad input of any shape is `malformed`, an
+ * unknown `kid`, a wrong algorithm, a malformed signature or any change to the body is `signature`.
+ * The whole key set verifies checkpoints, a retired key included: a checkpoint carries no issue time
+ * to hold against a retirement. Answers the checkpoint's point, which a reader hands to
+ * `verifyChain` as its starting point.
  */
 export function verifyLedgerCheckpoint(checkpoint: unknown, keys: ReadonlyArray<JsonWebKey & { kid?: string }>): LedgerCheckpointCheck {
   // A parsed checkpoint can be anything: check the envelope before reading it.
@@ -185,29 +192,40 @@ export async function signLedgerCheckpoint(ledger: AuditLedger, input: LedgerChe
   return signed;
 }
 
+export interface PruneLedgerInput {
+  /** The host's name for this ledger: the checkpoint must name it, and never another ledger's. */
+  ledgerId: string;
+  checkpoint: SignedLedgerCheckpoint;
+  keys: ReadonlyArray<JsonWebKey & { kid?: string }>;
+}
+
 /**
  * Prunes the ledger below the checkpoint the host wrote: the checkpoint is verified against the
- * key set, the point it names must be the ledger's (its base, when that checkpoint was already
- * pruned below, or an entry it holds with that hash), and the ledger's `prune` removes every entry
- * at or below it. Refuses a checkpoint the ledger has already pruned past, one that does not
- * verify, and a ledger that cannot prune. The checkpoint is the host's to write first: pruning
- * below a checkpoint that no longer exists leaves a ledger nobody can check. Answers the point the
- * ledger is now pruned below.
+ * key set and must name this ledger, the point it names must be the ledger's (its base, when that
+ * checkpoint was already pruned below, or an entry it holds with that hash), its `prunedCount`
+ * must name the gap it cuts here, and the ledger's `prune` removes every entry at or below it,
+ * as one step. Refuses a checkpoint the ledger has already pruned past, one that does not verify,
+ * one signed before an earlier prune (its `prunedCount` no longer names the gap), and a ledger
+ * that cannot prune. The checkpoint is the host's to write first: pruning below a checkpoint that
+ * no longer exists leaves a ledger nobody can check. Answers the point the ledger is now pruned
+ * below; the same checkpoint handed in again, also by a second pruner racing the first, prunes
+ * nothing and answers the point.
  */
-export async function pruneLedger(
-  ledger: AuditLedger,
-  checkpoint: SignedLedgerCheckpoint,
-  keys: ReadonlyArray<JsonWebKey & { kid?: string }>,
-): Promise<ChainPoint> {
+export async function pruneLedger(ledger: AuditLedger, input: PruneLedgerInput): Promise<ChainPoint> {
   if (ledger.prune === undefined || ledger.base === undefined) {
     throw new EngineError("precondition_failed", "pruneLedger: this ledger cannot prune");
   }
-  const check = verifyLedgerCheckpoint(checkpoint, keys);
+  const { ledgerId, keys } = input;
+  if (typeof ledgerId !== "string" || ledgerId === "") throw new EngineError("invalid_input", "pruneLedger: ledgerId must be a non-empty string");
+  const check = verifyLedgerCheckpoint(input.checkpoint, keys);
   if (!check.ok) {
     throw new EngineError(
       "invalid_input",
       check.reason === "signature" ? "pruneLedger: the checkpoint's signature does not verify against the key set" : "pruneLedger: not a signed ledger_checkpoint document",
     );
+  }
+  if (check.body.ledgerId !== ledgerId) {
+    throw new EngineError("invalid_input", `pruneLedger: the checkpoint names the ledger ${check.body.ledgerId}, not ${ledgerId}`);
   }
   const base = await ledgerBase(ledger);
   const point = check.point;
@@ -217,12 +235,23 @@ export async function pruneLedger(
   }
   // The same checkpoint handed in again after its prune: already done, and pruning nothing.
   if (point.seq === base.seq) return point;
+  if (check.body.prunedCount !== point.seq - base.seq) {
+    throw new EngineError("invalid_input", `pruneLedger: the checkpoint says it cuts ${check.body.prunedCount} entries, but this prune cuts ${point.seq - base.seq}: sign it again after the last prune`);
+  }
   // The checkpoint must name this ledger's entry at its seq, read once before anything is removed.
   const [entry] = await ledger.list(point.seq, 1);
   if (entry?.seq !== point.seq || entry.hash !== point.hash) {
     throw new EngineError("precondition_failed", "pruneLedger: the ledger does not hold the checkpoint's entry");
   }
-  await ledger.prune(point);
+  try {
+    await ledger.prune(point);
+  } catch (error) {
+    // A second pruner with the same checkpoint may have raced this one to it: the ledger pruned
+    // below the point already, and refusing would read as a failure of a prune that happened.
+    const after = await ledger.base();
+    if (after !== null && after.seq === point.seq && after.hash === point.hash) return point;
+    throw error;
+  }
   // Read back: a prune that answered without moving the base leaves a host exporting below its base.
   const after = await ledger.base();
   if (after === null || after.seq !== point.seq || after.hash !== point.hash) {

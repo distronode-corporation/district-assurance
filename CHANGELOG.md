@@ -17,21 +17,44 @@ heading, and uses it as the GitHub release's text, with a link back here
 
 ## [Unreleased]
 
+A host can now cut an audit ledger's oldest entries below a signed checkpoint, and a reader can
+check everything that is left from that checkpoint on without the entries before it (SPEC section
+10, issues #157, #158 and #159).
+
 ### Added
 
-- **Signed ledger checkpoints and pruning** (SPEC section 10). A first-class `ledger_checkpoint`
-  document, `{seq, hash, prunedCount, at}` under the host's ledger name, signed by a `ReceiptSigner`
-  over its own domain so it can never verify as a receipt or an export trailer, with
-  `verifyLedgerCheckpoint(checkpoint, keys)` answering the point a reader hands to `verifyChain`.
+- **Signed ledger checkpoints.** A first-class `ledger_checkpoint` document names the last entry a
+  prune removes (`seq` and `hash`), how many entries that checkpoint cuts (`prunedCount`), and when
+  it was signed, under the host's name for the ledger, and is signed by a `ReceiptSigner` over its
+  own domain so it can never verify as a receipt, an export trailer or an anchor.
   `signLedgerCheckpoint(ledger, {signer, clock, ledgerId, seq?})` verifies the chain from the
-  ledger's base to the checkpoint in bounded pages before signing, and `pruneLedger(ledger,
-  checkpoint, keys)` removes the entries below the written checkpoint only, refusing a rollback
-  below the base the ledger already holds. An `AuditLedger` may implement `base()` (the last pruned
-  entry) and `prune(checkpoint)`; `MemoryAuditLedger` does, and `auditLedgerContract` has the
-  pruned-ledger cases for a durable one. A pruned ledger's head is its base when every entry was
-  pruned, appends continue from the base, and `exportLedger` starts a full export at the base, so
-  the trailer's `from` is the checkpoint a reader checks it against; `anchorLedger`, `exportSubject`
-  and `eraseSubject` work on a pruned ledger.
+  ledger's base to the point in bounded pages before signing, and `verifyLedgerCheckpoint(checkpoint,
+  keys)` checks one and answers its point, which a reader hands to `verifyChain` as the starting
+  point of what is left. The whole key set verifies checkpoints, a retired key included.
+- **Pruning below a written checkpoint.** `pruneLedger(ledger, {ledgerId, checkpoint, keys})`
+  removes the entries at or below the checkpoint's point only once the checkpoint verifies, names
+  this ledger, and its `prunedCount` names the gap this prune cuts; the same checkpoint handed in
+  again, also by a second pruner racing the first, prunes nothing and answers the point. A ledger
+  that prunes implements two optional `AuditLedger` methods: `base()`, the last pruned entry, and
+  `prune(checkpoint)`, which removes the rows and moves the base as one step and keeps the pruned
+  entries' `eventIds` spent, so a replay of a pruned id is refused with `precondition_failed`
+  instead of appending a second entry: a late retry of a long-pruned write fails closed. A ledger
+  pruned to its head answers the checkpoint as its head, and appends continue from the base, so
+  `anchorLedger`, `exportSubject` and `eraseSubject` work above it (a repeat erasure of a subject
+  whose earlier plan was pruned is refused, never numbered twice). `MemoryAuditLedger` implements
+  both methods, and `auditLedgerContract` holds the pruned-ledger cases for a durable store, the
+  prune-racing-appends case included.
+- **Checkpoint-anchored exports and anchors.** A pruned ledger is exported only against the
+  checkpoint that pruned it: `exportLedger` takes `checkpoint: { checkpoint, keys }`, which must
+  verify, name the ledger, and match the base the ledger reports exactly, so storage that quietly
+  hid rows and moved its base never gets a signed export of the chain it rewrote. A full export
+  (`fromSeq` 1) then starts at the base and its trailer's `from` is the checkpoint, which
+  `verifyLedgerExport` checks through its new `checkpoint` argument: a run that does not start at
+  the verified point, or names another ledger, fails `checkpoint`. Any other `fromSeq` below the
+  base is refused, and a cursor naming the base still resumes there. `verifyAnchor` takes the
+  checkpoint in its `trust` the same way, so an anchor written after a prune is checked from the
+  checkpoint's point; a checkpoint in the trust that does not verify fails the new `checkpoint`
+  reason, and a monthly report names the head a prune left, not the genesis.
 
 ## [0.3.0] - 2026-11-22
 

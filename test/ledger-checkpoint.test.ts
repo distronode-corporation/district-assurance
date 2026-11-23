@@ -16,11 +16,13 @@ import {
   type SignedLedgerCheckpoint,
 } from "../src/prove/checkpoint.ts";
 import { encodeCursor, exportLedger, verifyLedgerExport, type LedgerExportInput } from "../src/prove/export.ts";
+import { verifyAnchor } from "../src/prove/anchor.ts";
+import { monthlyReport } from "../src/prove/report.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
 import type { AuditEntry, AuditInput, AuditLedger } from "../src/core/adapters.ts";
 import type { ChainPoint } from "../src/prove/export.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
-import { FakeTimestampAuthority, FixedClock, TEST_KNOWLEDGE_KEY, generateTestSigner, createTestEngine } from "../src/testing/index.ts";
+import { FakeTimestampAuthority, FixedClock, MemoryConsentStore, TEST_KNOWLEDGE_KEY, generateTestSigner, createTestEngine } from "../src/testing/index.ts";
 import { ACCOUNT, heard, rejects, setup, verifiedCall } from "./helpers.ts";
 
 const clock = new FixedClock("2026-11-18T12:00:00.000Z");
@@ -28,7 +30,7 @@ const signer = generateTestSigner("k1");
 const keys = [signer.publicJwk()];
 const OTHER_KEYS = [generateTestSigner("k1").publicJwk()];
 
-const input = (n: number): AuditInput => ({ callId: "c1", actor: "code", event: "module.event", at: "2026-01-01T00:00:00.000Z", detail: { n } });
+const input = (n: number, eventId?: string): AuditInput => ({ ...(eventId === undefined ? {} : { eventId }), callId: "c1", actor: "code", event: "module.event", at: "2026-01-01T00:00:00.000Z", detail: { n } });
 
 /** A ledger of `n` entries; `salt` shifts every detail, so two ledgers never share a chain. */
 async function ledgerOf(n: number, salt = 0): Promise<MemoryAuditLedger> {
@@ -104,7 +106,7 @@ describe("the ledger checkpoint document", () => {
   it("is signed at a given seq, and a checkpoint above a base cuts only the gap", async () => {
     const ledger = await ledgerOf(6);
     const first = await checkpoint(ledger, 3);
-    await pruneLedger(ledger, first, keys);
+    await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: first, keys });
     const second = await checkpoint(ledger);
     const head = await ledger.head();
     assert.deepEqual([second.body.seq, second.body.prunedCount, second.body.hash], [6, 3, head.hash], "the base was 3; the second checkpoint cuts 3 more");
@@ -118,7 +120,7 @@ describe("the ledger checkpoint document", () => {
     await assert.rejects(checkpoint(ledger, 1.5), rejects("invalid_input", /seq must be an integer/));
     await assert.rejects(signLedgerCheckpoint(ledger, { signer, clock, ledgerId: "", seq: 1 }), rejects("invalid_input", /ledgerId/));
     await assert.rejects(checkpoint(ledger, 4), rejects("invalid_input", /past the ledger head/));
-    await pruneLedger(ledger, await checkpoint(ledger, 2), keys);
+    await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: await checkpoint(ledger, 2), keys });
     await assert.rejects(checkpoint(ledger, 2), rejects("precondition_failed", /nothing would be cut/));
     await assert.rejects(checkpoint(ledger, 1), rejects("precondition_failed", /nothing would be cut/));
     // A ledger whose reads were rewritten is never vouched for.
@@ -190,7 +192,7 @@ describe("pruneLedger", () => {
     const ledger = await ledgerOf(5);
     const signed = await checkpoint(ledger, 3);
     const [third] = await ledger.list(3, 1);
-    assert.deepEqual(await pruneLedger(ledger, signed, keys), { seq: 3, hash: third!.hash });
+    assert.deepEqual(await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: signed, keys: keys }), { seq: 3, hash: third!.hash });
     assert.deepEqual(await ledger.base(), { seq: 3, hash: third!.hash });
     assert.deepEqual((await ledger.list()).map((e) => e.seq), [4, 5]);
     assert.deepEqual(await ledger.head(), { seq: 5, hash: (await ledger.list(5, 1))[0]!.hash }, "the head is untouched");
@@ -203,23 +205,23 @@ describe("pruneLedger", () => {
   it("refuses a checkpoint that is not signed or not by this key set, one of another ledger's chain, past the head, or below the base", async () => {
     const ledger = await ledgerOf(3);
     const forged: unknown = { alg: "ES256", kid: "k1", signature: "AAAA", body: { v: 1, type: "ledger_checkpoint", ledgerId: "ws_1", seq: 1, hash: "ab".repeat(32), prunedCount: 1, at: clock.now().toISOString() } };
-    await assert.rejects(pruneLedger(ledger, forged as never, keys), rejects("invalid_input", /does not verify against the key set/));
+    await assert.rejects(pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: forged as never, keys }), rejects("invalid_input", /does not verify against the key set/));
     const early = await checkpoint(ledger, 1);
     const signed = await checkpoint(ledger, 2);
     const malformed: unknown = { alg: "ES256", kid: "k1", signature: signed.signature, body: 7 };
-    await assert.rejects(pruneLedger(ledger, malformed as never, keys), rejects("invalid_input", /not a signed ledger_checkpoint document/));
-    await assert.rejects(pruneLedger(ledger, signed, OTHER_KEYS), rejects("invalid_input", /does not verify/));
+    await assert.rejects(pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: malformed as never, keys }), rejects("invalid_input", /not a signed ledger_checkpoint document/));
+    await assert.rejects(pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: signed, keys: OTHER_KEYS }), rejects("invalid_input", /does not verify/));
     // A checkpoint of another ledger's chain, at a seq this ledger holds with another hash.
     const foreign = await checkpoint(await ledgerOf(5, 100), 2);
-    await assert.rejects(pruneLedger(ledger, foreign, keys), rejects("precondition_failed", /does not hold the checkpoint's entry/));
+    await assert.rejects(pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: foreign, keys: keys }), rejects("precondition_failed", /does not hold the checkpoint's entry/));
     // A checkpoint past this ledger's head.
     const ahead = await checkpoint(await ledgerOf(5), 5);
-    await assert.rejects(pruneLedger(ledger, ahead, keys), rejects("precondition_failed", /does not hold the checkpoint's entry/));
-    await pruneLedger(ledger, signed, keys);
+    await assert.rejects(pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: ahead, keys: keys }), rejects("precondition_failed", /does not hold the checkpoint's entry/));
+    await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: signed, keys });
     // A rollback to an earlier checkpoint, and one at the base with another chain's hash.
-    await assert.rejects(pruneLedger(ledger, early, keys), rejects("precondition_failed", /already pruned through seq 2/));
+    await assert.rejects(pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: early, keys: keys }), rejects("precondition_failed", /already pruned through seq 2/));
     const sameSeqOtherChain = await checkpoint(await ledgerOf(2, 100), 2);
-    await assert.rejects(pruneLedger(ledger, sameSeqOtherChain, keys), rejects("precondition_failed", /already pruned through seq 2/));
+    await assert.rejects(pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: sameSeqOtherChain, keys: keys }), rejects("precondition_failed", /already pruned through seq 2/));
   });
 
   it("refuses a checkpoint seq that is not an integer of 1 or more, without pruning anything", async () => {
@@ -230,62 +232,160 @@ describe("pruneLedger", () => {
     assert.deepEqual((await ledger.list()).map((e) => e.seq), [1, 2], "nothing was pruned");
   });
 
+  it("refuses a checkpoint that names another ledger, and one whose prunedCount no longer names the gap", async () => {
+    const ledger = await ledgerOf(4);
+    const foreignName = await signLedgerCheckpoint(ledger, { signer, clock, ledgerId: "ws_other", seq: 2 });
+    await assert.rejects(pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: foreignName, keys }), rejects("invalid_input", /names the ledger ws_other, not ws_1/));
+    // A checkpoint signed before an earlier prune overstates what the next prune cuts.
+    const first = await checkpoint(ledger, 2);
+    const second = await checkpoint(ledger, 4);
+    await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: first, keys });
+    await assert.rejects(pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: second, keys }), rejects("invalid_input", /says it cuts 4 entries, but this prune cuts 2/), "sign one checkpoint at a time, after the last prune");
+  });
+
+  it("settles concurrent prunes: the same checkpoint twice is idempotent, and two checkpoints leave one base", async () => {
+    const same = await ledgerOf(6);
+    const c3a = await signLedgerCheckpoint(same, { signer, clock, ledgerId: "ws_1", seq: 3 });
+    const raced = await Promise.allSettled([
+      pruneLedger(same, { ledgerId: "ws_1", checkpoint: c3a, keys }),
+      pruneLedger(same, { ledgerId: "ws_1", checkpoint: c3a, keys }),
+    ]);
+    assert.ok(raced.every((r) => r.status === "fulfilled"), "the second pruner of the same checkpoint answers the point, never an error");
+    assert.deepEqual((await same.base())?.seq, 3, "the same checkpoint prunes once");
+    const two = await ledgerOf(6);
+    const c3 = await signLedgerCheckpoint(two, { signer, clock, ledgerId: "ws_1", seq: 3 });
+    const c5 = await signLedgerCheckpoint(two, { signer, clock, ledgerId: "ws_1", seq: 5 });
+    const settled = await Promise.allSettled([
+      pruneLedger(two, { ledgerId: "ws_1", checkpoint: c3, keys }),
+      pruneLedger(two, { ledgerId: "ws_1", checkpoint: c5, keys }),
+    ]);
+    // Whichever pruner won, the base moved wholly forward, never backwards or twice.
+    const base = (await two.base())!;
+    assert.ok([3, 5].includes(base.seq), `base ${base.seq}`);
+    assert.ok(settled.some((r) => r.status === "fulfilled"), "at least one prune happened");
+  });
+
+  it("keeps a pruned eventId spent: a replay is refused, never a second entry", async () => {
+    const ledger = new MemoryAuditLedger();
+    const first = await ledger.append(input(1, "evt_once"));
+    await ledger.append(input(2));
+    await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: await checkpoint(ledger, 1), keys });
+    await assert.rejects(ledger.append(input(1, "evt_once")), rejects("precondition_failed", /stays spent/));
+    assert.deepEqual((await ledger.list()).map((e) => e.seq), [2], "nothing appended, and the first entry is not back");
+    assert.notEqual((await ledger.head()).hash, first.hash);
+  });
+
   it("answers the point for the same checkpoint again and prunes nothing, and refuses a ledger that cannot prune or one whose prune moves nothing", async () => {
     const ledger = await ledgerOf(3);
     const signed = await checkpoint(ledger);
-    await pruneLedger(ledger, signed, keys);
-    assert.deepEqual(await pruneLedger(ledger, signed, keys), { seq: signed.body.seq, hash: signed.body.hash }, "already done");
+    await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: signed, keys });
+    assert.deepEqual(await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: signed, keys: keys }), { seq: signed.body.seq, hash: signed.body.hash }, "already done");
     assert.deepEqual((await ledger.list()).map((e) => e.seq), []);
     const plain: AuditLedger = { append: (input: AuditInput) => ledger.append(input), head: () => ledger.head(), list: (fromSeq?: number, limit?: number) => ledger.list(fromSeq, limit) };
-    await assert.rejects(pruneLedger(plain, signed, keys), rejects("precondition_failed", /cannot prune/));
+    await assert.rejects(pruneLedger(plain, { ledgerId: "ws_1", checkpoint: signed, keys: keys }), rejects("precondition_failed", /cannot prune/));
     class LazyPruner extends MemoryAuditLedger {
       override async prune(): Promise<void> {}
     }
     const lazy = new LazyPruner();
     await lazy.append(input(1));
     const lazyCheckpoint = await checkpoint(lazy);
-    await assert.rejects(pruneLedger(lazy, lazyCheckpoint, keys), rejects("precondition_failed", /did not prune to the checkpoint/));
+    await assert.rejects(pruneLedger(lazy, { ledgerId: "ws_1", checkpoint: lazyCheckpoint, keys: keys }), rejects("precondition_failed", /did not prune to the checkpoint/));
+    class FailingPruner extends MemoryAuditLedger {
+      override async prune(): Promise<void> {
+        throw new Error("storage refused the prune");
+      }
+    }
+    const failing = new FailingPruner();
+    await failing.append(input(1));
+    const failingCheckpoint = await checkpoint(failing);
+    await assert.rejects(
+      pruneLedger(failing, { ledgerId: "ws_1", checkpoint: failingCheckpoint, keys }),
+      (e: unknown) => e instanceof Error && /storage refused the prune/.test(e.message),
+      "a prune that failed without moving the base throws the store's own error, never a masked one",
+    );
   });
 });
 
 describe("exportLedger on a pruned ledger", () => {
-  it("starts a full export at the base: the trailer's from is the checkpoint, and the run is everything the ledger holds", async () => {
+  it("starts a full export at the base, only below a checkpoint that matches it, and the reader anchors the run on it", async () => {
     const ledger = await ledgerOf(6);
     const signed = await checkpoint(ledger, 3);
+    const otherLedger = await signLedgerCheckpoint(ledger, { signer, clock, ledgerId: "ws_other", seq: 3 });
     const point = verifyLedgerCheckpoint(signed, keys);
     assert.ok(point.ok);
-    await pruneLedger(ledger, signed, keys);
-    const text = await run(ledger, { fromSeq: 1 });
-    const check = verifyLedgerExport(text, keys);
+    await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: signed, keys });
+    // A pruned ledger is not exported without the checkpoint: the base alone is storage's word.
+    await assert.rejects(run(ledger, { fromSeq: 1 }), rejects("precondition_failed", /give the checkpoint it was pruned below/));
+    await assert.rejects(run(ledger, { fromSeq: 1, checkpoint: { checkpoint: await checkpoint(await ledgerOf(6, 100), 3), keys } }), rejects("precondition_failed", /base \(seq 3\) is not the checkpoint's point/), "a checkpoint of another chain does not match the base");
+    await assert.rejects(run(ledger, { fromSeq: 1, checkpoint: { checkpoint: otherLedger, keys } }), rejects("invalid_input", /names the ledger ws_other/), "a checkpoint that names another ledger");
+    await assert.rejects(run(ledger, { fromSeq: 1, checkpoint: { checkpoint: { alg: "ES256", kid: "k1", signature: "AAAA", body: 7 } as never, keys } }), rejects("invalid_input", /not a signed ledger_checkpoint/));
+    await assert.rejects(run(ledger, { fromSeq: 1, checkpoint: { checkpoint: { alg: "ES256", kid: "k1", signature: "AAAA", body: { v: 1, type: "ledger_checkpoint", ledgerId: "ws_1", seq: 3, hash: "ab".repeat(32), prunedCount: 3, at: clock.now().toISOString() } } as never, keys } }), rejects("invalid_input", /signature does not verify/));
+    const text = await run(ledger, { fromSeq: 1, checkpoint: { checkpoint: signed, keys } });
+    const check = verifyLedgerExport(text, keys, undefined, signed);
     assert.ok(check.ok);
     assert.deepEqual(check.trailer.from, point.point, "the reader checks the trailer's from against the signed checkpoint");
     assert.deepEqual(check.entries.map((e) => e.seq), [4, 5, 6]);
     assert.equal(verifyChain(check.entries, point.point).ok, true);
+    // Without the anchor, the run still verifies on its own; with a mismatched anchor it does not.
+    assert.ok(verifyLedgerExport(text, keys).ok);
+    const other = await checkpoint(await ledgerOf(6, 100), 3);
+    assert.deepEqual(verifyLedgerExport(text, keys, undefined, other), { ok: false, reason: "checkpoint" }, "the anchored start must be the checkpoint's point");
+    assert.deepEqual(verifyLedgerExport(text, keys, undefined, otherLedger), { ok: false, reason: "checkpoint" }, "the checkpoint must name the trailer's ledger");
+    assert.deepEqual(verifyLedgerExport(text, keys, undefined, { alg: "HS256", kid: "k1", signature: "AAAA" } as never), { ok: false, reason: "malformed" });
+    assert.deepEqual(verifyLedgerExport(text, keys, undefined, { alg: "ES256", kid: "k1", signature: "AAAA", body: { v: 1, type: "ledger_checkpoint", ledgerId: "ws_1", seq: 3, hash: "ab".repeat(32), prunedCount: 3, at: clock.now().toISOString() } } as never), { ok: false, reason: "signature" });
+  });
+
+  it("refuses to sign a full export for a base that storage moved with no checkpoint vouching for it", async () => {
+    // A legitimate checkpoint at 2, then storage hides rows and moves its base to 7 with nothing
+    // signed for it: the export is refused, where a base taken at its word would sign the gap.
+    const ledger = await ledgerOf(10);
+    await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: await checkpoint(ledger, 2), keys });
+    const [seventh] = await ledger.list(7, 1);
+    const second = await checkpoint(ledger, 7);
+    await ledger.prune({ seq: 7, hash: seventh!.hash });
+    await assert.rejects(run(ledger, { fromSeq: 1 }), rejects("precondition_failed", /give the checkpoint/));
+    const moved = verifyLedgerExport(await run(ledger, { fromSeq: 1, checkpoint: { checkpoint: second, keys } }), keys, undefined, second);
+    assert.ok(moved.ok, "a base that a matching checkpoint vouches for exports, whatever happened before");
+    assert.deepEqual(moved.entries.map((e) => e.seq), [8, 9, 10]);
+  });
+
+  it("refuses the same hidden rows on an adapter that reports no base at all, as before the checkpoint", async () => {
+    const inner = await ledgerOf(10);
+    const hiding: AuditLedger = {
+      append: (i) => inner.append(i),
+      head: () => inner.head(),
+      list: async (f, l) => (await inner.list(f, l)).filter((e) => e.seq > 5),
+    };
+    await assert.rejects(run(hiding, { fromSeq: 1 }), rejects("precondition_failed", /does not hold seq 0|does not verify/), "the chain from the genesis is refused, never signed");
   });
 
   it("resumes by a cursor naming the base, refuses one below it, and starts a fromSeq above the base on the entry it holds", async () => {
     const ledger = await ledgerOf(6);
-    await pruneLedger(ledger, await checkpoint(ledger, 3), keys);
+    const signed = await checkpoint(ledger, 3);
+    await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: signed, keys });
     const base = (await ledger.base())!;
-    const fromBase = verifyLedgerExport(await run(ledger, { cursor: encodeCursor(base) }), keys);
+    const fromBase = verifyLedgerExport(await run(ledger, { cursor: encodeCursor(base), checkpoint: { checkpoint: signed, keys } }), keys);
     assert.ok(fromBase.ok);
     assert.deepEqual(fromBase.entries.map((e) => e.seq), [4, 5, 6]);
-    await assert.rejects(run(ledger, { cursor: `1.${"ab".repeat(32)}` }), rejects("precondition_failed", /no longer holds the cursor's entry/), "a cursor below the base");
-    await assert.rejects(run(ledger, { cursor: encodeCursor({ seq: base.seq, hash: "ab".repeat(32) }) }), rejects("precondition_failed", /no longer holds the cursor's entry/), "a cursor naming the base with another hash");
+    await assert.rejects(run(ledger, { cursor: `1.${"ab".repeat(32)}`, checkpoint: { checkpoint: signed, keys } }), rejects("precondition_failed", /no longer holds the cursor's entry/), "a cursor below the base");
+    await assert.rejects(run(ledger, { cursor: encodeCursor({ seq: base.seq, hash: "ab".repeat(32) }), checkpoint: { checkpoint: signed, keys } }), rejects("precondition_failed", /no longer holds the cursor's entry/), "a cursor naming the base with another hash");
     const [fourth] = await ledger.list(4, 1);
-    const above = verifyLedgerExport(await run(ledger, { fromSeq: 5 }), keys);
+    const above = verifyLedgerExport(await run(ledger, { fromSeq: 5, checkpoint: { checkpoint: signed, keys } }), keys);
     assert.ok(above.ok);
     assert.deepEqual(above.trailer.from, { seq: fourth!.seq, hash: fourth!.hash });
-    const limited = verifyLedgerExport(await run(ledger, { fromSeq: 1, limit: 2 }), keys);
+    const limited = verifyLedgerExport(await run(ledger, { fromSeq: 1, limit: 2, checkpoint: { checkpoint: signed, keys } }), keys);
     assert.ok(limited.ok);
     assert.deepEqual(limited.entries.map((e) => e.seq), [4, 5], "a limited run of what the ledger holds, from the checkpoint on");
   });
 
-  it("exports an empty run from a ledger pruned to its head", async () => {
+  it("exports an empty run from a ledger pruned to its head, and refuses a fromSeq between 1 and the base", async () => {
     const ledger = await ledgerOf(3);
     const signed = await checkpoint(ledger);
-    await pruneLedger(ledger, signed, keys);
-    const check = verifyLedgerExport(await run(ledger, { fromSeq: 1 }), keys);
+    await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: signed, keys });
+    // A fromSeq below the base, other than a full export's 1, is refused as ever: the entry before
+    // it is gone, and only the checkpoint anchors the run.
+    await assert.rejects(run(ledger, { fromSeq: 2, checkpoint: { checkpoint: signed, keys } }), rejects("precondition_failed", /does not hold seq 1/));
+    const check = verifyLedgerExport(await run(ledger, { fromSeq: 1, checkpoint: { checkpoint: signed, keys } }), keys, undefined, signed);
     assert.ok(check.ok);
     assert.deepEqual([check.entries, check.trailer.count], [[], 0]);
     assert.deepEqual(check.trailer.from, check.trailer.through);
@@ -302,9 +402,10 @@ describe("exportLedger on a pruned ledger", () => {
     }
     const ledger = new LyingBase();
     for (let i = 1; i <= 4; i++) await ledger.append(input(i));
-    await pruneLedger(ledger, await checkpoint(ledger, 2), keys);
+    const signed = await checkpoint(ledger, 2);
+    await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: signed, keys });
     ledger.lie = true;
-    await assert.rejects(run(ledger, { fromSeq: 1 }), rejects("precondition_failed", /does not verify at seq 3/));
+    await assert.rejects(run(ledger, { fromSeq: 1, checkpoint: { checkpoint: signed, keys } }), rejects("precondition_failed", /base \(seq 2\) is not the checkpoint's point/));
   });
 });
 
@@ -316,13 +417,84 @@ describe("the engine on a pruned ledger", () => {
     const { callId } = await t.engine.startCall();
     await t.engine.endCall(callId);
     const signed = await signLedgerCheckpoint(t.ledger, { signer, clock: t.clock, ledgerId: "ws_test" });
-    const point = (await pruneLedger(t.ledger, signed, keys))!;
+    const point = await pruneLedger(t.ledger, { ledgerId: "ws_test", checkpoint: signed, keys });
     const entry = await t.engine.anchorLedger();
     assert.deepEqual({ seq: entry.seq, prevHash: entry.prevHash }, { seq: point.seq + 1, prevHash: point.hash }, "the anchor continues the pruned chain");
     assert.deepEqual(verifyChain(await t.ledger.list(), point), { ok: true, head: await t.ledger.head() });
     // And once more, on the entry the first anchor appended.
     const again = await t.engine.anchorLedger();
     assert.equal(again.seq, entry.seq + 1);
+  });
+
+  it("refuses a consent.revoked the ledger already wrote below a pruned base, instead of writing it twice", async () => {
+    const consents = new MemoryConsentStore();
+    const t = setup({ adapters: { consents } });
+    const callId = await verifiedCall(t);
+    const yes = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await t.engine.endCall(callId);
+    await t.engine.revokeConsent({ consentId: yes.consentId, via: "text" });
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "consent.revoked").length, 1);
+    // The checkpoint is the head, so the prune takes the consent.revoked entry with it.
+    const signed = await signLedgerCheckpoint(t.ledger, { signer, clock: t.clock, ledgerId: "ws_test" });
+    await pruneLedger(t.ledger, { ledgerId: "ws_test", checkpoint: signed, keys });
+    const held = (await t.ledger.list()).length;
+    await assert.rejects(t.engine.revokeConsent({ consentId: yes.consentId, via: "web" }), rejects("precondition_failed", /stays spent/), "the id's entry is pruned: the revocation stays in the store, and the ledger refuses the second entry");
+    assert.equal((await t.ledger.list()).length, held, "nothing was appended for the pruned id");
+  });
+
+  it("refuses an anchor whose checkpoint does not verify, and a prune whose ledgerId is empty", async () => {
+    const tsa = new FakeTimestampAuthority(new FixedClock());
+    const t = createTestEngine({ adapters: { anchor: tsa } });
+    const { callId } = await t.engine.startCall();
+    await t.engine.endCall(callId);
+    const anchored = await t.engine.anchorLedger();
+    const entries = await t.ledger.list();
+    assert.deepEqual(verifyAnchor(anchored, entries, { tsa: tsa.chain, checkpoint: { checkpoint: { alg: "ES256", kid: "k1", signature: "AAAA", body: 7 } as never, keys } }), { ok: false, reason: "malformed" }, "a checkpoint that is not a document");
+    assert.deepEqual(verifyAnchor(anchored, entries, { tsa: tsa.chain, checkpoint: { checkpoint: { alg: "ES256", kid: "k1", signature: "AAAA", body: { v: 1, type: "ledger_checkpoint", ledgerId: "ws_test", seq: 1, hash: "ab".repeat(32), prunedCount: 1, at: clock.now().toISOString() } } as never, keys } }), { ok: false, reason: "checkpoint" }, "a checkpoint whose signature does not verify, never a token failure");
+    const ledger = await ledgerOf(2);
+    const signed = await checkpoint(ledger);
+    await assert.rejects(pruneLedger(ledger, { ledgerId: "", checkpoint: signed, keys }), rejects("invalid_input", /ledgerId must be a non-empty string/));
+  });
+
+  it("answers the point when the store's prune throws after its own write", async () => {
+    // The store moved the base and then reported a hiccup: the prune happened, and the caller is
+    // told the point, not the store's complaint.
+    class Hiccup extends MemoryAuditLedger {
+      override async prune(checkpoint: { seq: number; hash: string }): Promise<void> {
+        await super.prune(checkpoint);
+        throw new Error("storage hiccup after the write");
+      }
+    }
+    const ledger = new Hiccup();
+    for (let i = 1; i <= 3; i++) await ledger.append(input(i));
+    const signed = await checkpoint(ledger);
+    assert.deepEqual(await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: signed, keys }), { seq: signed.body.seq, hash: signed.body.hash });
+    assert.deepEqual(await ledger.base(), { seq: signed.body.seq, hash: signed.body.hash });
+  });
+
+  it("verifies an anchor written after a prune against the checkpoint, and refuses it without one", async () => {
+    const tsa = new FakeTimestampAuthority(new FixedClock());
+    const t = createTestEngine({ adapters: { anchor: tsa } });
+    const { callId } = await t.engine.startCall();
+    await t.engine.endCall(callId);
+    const signed = await signLedgerCheckpoint(t.ledger, { signer, clock: t.clock, ledgerId: "ws_test" });
+    const point = await pruneLedger(t.ledger, { ledgerId: "ws_test", checkpoint: signed, keys });
+    const anchored = await t.engine.anchorLedger();
+    assert.equal(anchored.seq, point.seq + 1);
+    const entries = await t.ledger.list();
+    assert.equal(verifyAnchor(anchored, entries, { tsa: tsa.chain }).ok, false, "without the checkpoint the pruned entries cannot reach the covered seq");
+    const checked = verifyAnchor(anchored, entries, { tsa: tsa.chain, checkpoint: { checkpoint: signed, keys } });
+    assert.ok(checked.ok, "the checkpoint anchors the chain the anchor covers");
+    // The anchor covers the head it anchored: the pruned ledger's head, the checkpoint's point.
+    assert.deepEqual({ seq: checked.seq, hash: checked.hash, logIndex: checked.logIndex }, { seq: point.seq, hash: point.hash, logIndex: null });
+  });
+
+  it("names the head a prune left in a monthly report, not the genesis", async () => {
+    const ledger = await ledgerOf(3);
+    const signed = await checkpoint(ledger);
+    await pruneLedger(ledger, { ledgerId: "ws_1", checkpoint: signed, keys });
+    const report = await monthlyReport({ ledger, workspaceId: "ws_1", month: "2026-01" });
+    assert.deepEqual(report.ledger, { seq: signed.body.seq, hash: signed.body.hash }, "the ledger point is the head the pruned ledger keeps");
   });
 
   it("lists and erases a subject on a pruned ledger, appending above the checkpoint", async () => {
@@ -338,7 +510,7 @@ describe("the engine on a pruned ledger", () => {
     assert.ok(cut > 0, "the record was filed on the ledger");
     const point = { seq: entries[cut - 1]!.seq, hash: entries[cut - 1]!.hash };
     const signed = await signLedgerCheckpoint(t.ledger, { signer, clock: t.clock, ledgerId: "ws_test", seq: point.seq });
-    await pruneLedger(t.ledger, signed, keys);
+    await pruneLedger(t.ledger, { ledgerId: "ws_test", checkpoint: signed, keys });
     const exported = await t.engine.exportSubject({ workspaceId: "ws_test", subjectKey: SUBJECT });
     assert.equal(exported.body.intakeRecords.map((r) => r.recordId).includes(record.recordId), true, "the record itself is not pruned");
     assert.ok(exported.body.ledgerEntries.every((e) => e.seq > point.seq), "only the entries the ledger still holds are listed");
@@ -347,5 +519,32 @@ describe("the engine on a pruned ledger", () => {
     const left = await t.ledger.list();
     assert.ok(left.some((e) => e.event === "subject.erased" && e.seq > point.seq));
     assert.deepEqual(verifyChain(left, point), { ok: true, head: await t.ledger.head() });
+  });
+
+  it("refuses a second erasure of a subject whose first plan was pruned, instead of numbering it twice", async () => {
+    const t = setup();
+    const callId = await verifiedCall(t);
+    await t.engine.startIntake(callId, "repair");
+    await t.engine.setIntakeField(callId, "issue", "leak under the sink");
+    await t.engine.confirmIntake(callId, { confirmedBy: "voice", readBack: await heard(t, callId) });
+    await t.engine.endCall(callId);
+    const first = await t.engine.eraseSubject({ workspaceId: "ws_test", subjectKey: SUBJECT });
+    assert.equal(first.erased, true);
+    // The checkpoint is the head, so the prune takes the first erasure's plan and completion too.
+    const signed = await signLedgerCheckpoint(t.ledger, { signer, clock: t.clock, ledgerId: "ws_test" });
+    await pruneLedger(t.ledger, { ledgerId: "ws_test", checkpoint: signed, keys });
+    // A record filed since: there is something new to erase, but the numbering starts again at 0,
+    // whose keyed id the first erasure spent. The ledger refuses the replay, so the plan is never
+    // numbered twice, and the caller hears the refusal instead of a rewritten history.
+    const again = await verifiedCall(t);
+    await t.engine.startIntake(again, "repair");
+    await t.engine.setIntakeField(again, "issue", "new leak");
+    const refiled = await t.engine.confirmIntake(again, { confirmedBy: "voice", readBack: await heard(t, again) });
+    await t.engine.endCall(again);
+    const held = (await t.ledger.list()).length;
+    await assert.rejects(t.engine.eraseSubject({ workspaceId: "ws_test", subjectKey: SUBJECT }), rejects("precondition_failed", /stays spent/));
+    assert.equal((await t.ledger.list()).length, held, "no erasure entry was appended for the spent id");
+    const stillThere = await t.engine.exportSubject({ workspaceId: "ws_test", subjectKey: SUBJECT });
+    assert.equal(stillThere.body.intakeRecords.map((r) => r.recordId).includes(refiled.recordId), true, "the re-filed record is left intact for the host to retry with a fresh numbering");
   });
 });

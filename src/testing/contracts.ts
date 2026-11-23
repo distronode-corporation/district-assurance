@@ -560,6 +560,23 @@ export function auditLedgerContract(factory: () => AuditLedger | Promise<AuditLe
       },
     ],
     [
+      "keeps the eventId of a pruned entry spent: a replay is refused, never appended again",
+      async (ledger) => {
+        if (ledger.prune === undefined || ledger.base === undefined) return;
+        const first = await ledger.append(contractEntry(1, { eventId: "e_pruned" }));
+        await ledger.append(contractEntry(2));
+        await ledger.prune({ seq: first.seq, hash: first.hash });
+        // The id's first entry is gone, so a replay can never be answered with it: the store
+        // keeps the id spent, and a second entry under it is refused, never written.
+        await assert.rejects(
+          ledger.append(contractEntry(1, { eventId: "e_pruned" })),
+          (e: unknown) => e instanceof EngineError && e.code === "precondition_failed",
+          "a pruned id stays spent",
+        );
+        assert.deepEqual((await ledger.list()).map((e) => e.seq), [2], "nothing was appended for the pruned id");
+      },
+    ],
+    [
       "prunes to the head: an empty ledger's head is the checkpoint, and the next append continues from it",
       async (ledger) => {
         if (ledger.prune === undefined || ledger.base === undefined) return;
@@ -572,6 +589,32 @@ export function auditLedgerContract(factory: () => AuditLedger | Promise<AuditLe
         const next = await ledger.append(contractEntry(4));
         assert.deepEqual({ seq: next.seq, prevHash: next.prevHash }, { seq: point.seq + 1, prevHash: point.hash });
         assert.deepEqual(verifyChain(await ledger.list(), point), { ok: true, head: { seq: next.seq, hash: next.hash } });
+      },
+    ],
+    [
+      "keeps one consistent ledger while a prune races appends",
+      async (ledger) => {
+        if (ledger.prune === undefined || ledger.base === undefined) return;
+        const appended: AuditEntry[] = [];
+        for (let n = 1; n <= 5; n++) appended.push(await ledger.append(contractEntry(n)));
+        // The prune takes the head, so an append racing it has nothing left to chain from but the
+        // base: a store that moves the base as a second step, after the rows are already gone,
+        // chains that append from the genesis and forks the ledger.
+        const point = { seq: appended[4]!.seq, hash: appended[4]!.hash };
+        const settled = await Promise.allSettled([
+          ledger.prune(point),
+          ledger.append(contractEntry(6)),
+          ledger.append(contractEntry(7)),
+        ]);
+        assert.equal(settled.filter((r) => r.status === "rejected").length, 0, "a correct store refuses nothing here");
+        // Whatever order the race chose, the base moved wholly: nothing at or below it survives,
+        // everything held continues its chain, and the head names the last of it (or the base).
+        assert.deepEqual(await ledger.base(), point);
+        const held = await ledger.list();
+        assert.ok(held.every((e) => e.seq > point.seq), "no pruned entry survives the race");
+        const check = verifyChain(held, point);
+        assert.ok(check.ok, "the chain a pruned ledger still holds continues from the checkpoint");
+        assert.deepEqual(await ledger.head(), check.head);
       },
     ],
     [
