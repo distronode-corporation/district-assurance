@@ -2,7 +2,9 @@
 // closed by a signed trailer that names where the run starts, where it ends and the ledger head
 // at export time. An auditor or a SIEM checks the trailer with the public key set, the run with
 // `verifyChain` from the trailer's start, and takes the next run from the trailer's cursor, so
-// consecutive exports join into one checked chain. Entries never carry values (SPEC.md, section
+// consecutive exports join into one checked chain. A pruned ledger exports from its base, the
+// checkpoint it pruned below: its runs start there, and a reader pairs them with the signed
+// checkpoint (`signLedgerCheckpoint`). Entries never carry values (SPEC.md, section
 // 9), so the export carries none either.
 import { createPublicKey, verify, type JsonWebKey } from "node:crypto";
 
@@ -11,7 +13,7 @@ import { canonicalJson } from "../core/canonical.ts";
 import type { Clock } from "../core/clock.ts";
 import { EngineError } from "../core/errors.ts";
 import { isObject } from "../core/shape.ts";
-import { GENESIS_HASH, verifyChain } from "./ledger.ts";
+import { GENESIS_HASH, ledgerBase, verifyChain } from "./ledger.ts";
 
 /** A point on the chain: an entry's `seq` and `hash`, or `{seq: 0, hash: GENESIS_HASH}`. */
 export interface ChainPoint {
@@ -113,26 +115,35 @@ async function walkToHead(ledger: AuditLedger, point: ChainPoint, head: ChainPoi
   return at.hash === head.hash ? null : head.seq;
 }
 
-/** The chain point at `seq` as the ledger holds it, or null when the ledger does not hold it. */
-async function pointAt(ledger: AuditLedger, seq: number): Promise<ChainPoint | null> {
+/**
+ * The chain point at `seq` as the ledger holds it, or null when the ledger does not hold it. A
+ * pruned ledger's base counts as held: its entry is gone, but the chain continues from it, so a
+ * run may start or a cursor may resume there.
+ */
+async function pointHeld(ledger: AuditLedger, base: ChainPoint, seq: number): Promise<ChainPoint | null> {
   if (seq === 0) return { seq: 0, hash: GENESIS_HASH };
+  if (seq === base.seq) return { ...base };
   const [entry] = await ledger.list(seq, 1);
   return entry?.seq === seq ? { seq, hash: entry.hash } : null;
 }
 
-/** Where a run starts, from `fromSeq` or a cursor, checked against the ledger. */
-async function startPoint(input: { ledger: AuditLedger; fromSeq?: number | undefined; cursor?: string | undefined }, head: ChainPoint): Promise<ChainPoint> {
+/** Where a run starts, from `fromSeq` or a cursor, checked against the ledger and its base. */
+async function startPoint(input: { ledger: AuditLedger; base: ChainPoint; fromSeq?: number | undefined; cursor?: string | undefined }, head: ChainPoint): Promise<ChainPoint> {
   if (input.cursor !== undefined) {
     const point = decodeCursor(input.cursor);
     if (point === null || point.seq > head.seq) throw new EngineError("invalid_input", "exportLedger: the cursor is not a cursor of this ledger");
-    // A cursor whose entry is gone or different means the ledger changed under it: refuse.
-    const held = await pointAt(input.ledger, point.seq);
+    // A cursor whose entry is gone or different means the ledger changed under it: refuse. The base
+    // counts as held, so a cursor naming it resumes there: a pruned ledger's runs start at it.
+    const held = await pointHeld(input.ledger, input.base, point.seq);
     if (held?.hash !== point.hash) throw new EngineError("precondition_failed", "exportLedger: the ledger no longer holds the cursor's entry");
     return point;
   }
   const fromSeq = input.fromSeq!;
   if (fromSeq > head.seq + 1) throw new EngineError("invalid_input", "exportLedger: fromSeq is past the ledger head");
-  const point = await pointAt(input.ledger, fromSeq - 1);
+  // The earliest a pruned ledger holds is its base: an export that asks for entries below it
+  // (a full export) starts at the checkpoint instead, and the run is everything the ledger holds.
+  if (fromSeq <= input.base.seq + 1) return { ...input.base };
+  const point = await pointHeld(input.ledger, input.base, fromSeq - 1);
   if (point === null) throw new EngineError("precondition_failed", `exportLedger: the ledger does not hold seq ${fromSeq - 1}`);
   return point;
 }
@@ -140,8 +151,12 @@ async function startPoint(input: { ledger: AuditLedger; fromSeq?: number | undef
 /**
  * Exports ledger entries from `fromSeq` (or after a `cursor`) as newline-delimited JSON: one line
  * per entry in canonical JSON, then one trailer line, each ending in a newline. The run stops at
- * the head read when the export starts (and at `limit`). The run is checked against the chain
- * before the trailer is signed, so a ledger that was tampered with is refused, never vouched for.
+ * the head read when the export starts (and at `limit`). A pruned ledger starts at its base: a
+ * `fromSeq` below the base exports everything the ledger still holds, from the checkpoint on, and
+ * the trailer's `from` is that checkpoint, which a reader checks against the signed
+ * `ledger_checkpoint` (a `fromSeq` or cursor above the base works as on a whole ledger). The run
+ * is checked against the chain before the trailer is signed, so a ledger that was tampered with is
+ * refused, never vouched for.
  */
 export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<string, void, undefined> {
   // Each read once: a getter read again could pass a check with one value and run with another.
@@ -154,9 +169,11 @@ export async function* exportLedger(input: LedgerExportInput): AsyncGenerator<st
   if (typeof ledgerId !== "string" || ledgerId === "") throw new EngineError("invalid_input", "exportLedger: ledgerId must be a non-empty string");
 
   const head = await ledger.head();
-  // The trailer signs the head, so it must be an entry the ledger holds, even on a page short of it.
-  if ((await pointAt(ledger, head.seq))?.hash !== head.hash) throw new EngineError("precondition_failed", "exportLedger: the ledger head does not match its last entry");
-  const from = await startPoint(cursor === undefined ? { ledger, fromSeq } : { ledger, cursor }, head);
+  const base = await ledgerBase(ledger);
+  // The trailer signs the head, so it must be a point the ledger holds: its last entry, or its
+  // base when every entry was pruned (the head is then the checkpoint the chain continues from).
+  if ((await pointHeld(ledger, base, head.seq))?.hash !== head.hash) throw new EngineError("precondition_failed", "exportLedger: the ledger head does not match its last entry");
+  const from = await startPoint(cursor === undefined ? { ledger, base, fromSeq } : { ledger, base, cursor }, head);
   const last = Math.min(head.seq, from.seq + (limit ?? Number.MAX_SAFE_INTEGER));
   // The run's entries, in reads of at most EXPORT_WALK_PAGE: an adapter that hands back more is cut
   // to what was asked, and one that hands back fewer ("at most limit") is asked again for the

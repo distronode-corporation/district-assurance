@@ -513,6 +513,83 @@ export function auditLedgerContract(factory: () => AuditLedger | Promise<AuditLe
         assert.deepEqual(verifyChain(stored), { ok: true, head: await ledger.head() });
       },
     ],
+    // Pruned ledgers (#157 to #159): a ledger that can prune keeps its head, lists what is left from
+    // below the checkpoint as from above it, and appends after a prune on the chain the checkpoint
+    // names. A ledger without `prune` and `base` (retention is optional) has nothing more to keep here.
+    [
+      "answers no base before a prune, and the checkpoint's point after one",
+      async (ledger) => {
+        if (ledger.prune === undefined || ledger.base === undefined) return;
+        assert.equal(await ledger.base(), null, "never pruned");
+        const entries = [await ledger.append(contractEntry(1)), await ledger.append(contractEntry(2)), await ledger.append(contractEntry(3))];
+        await ledger.prune({ seq: entries[1]!.seq, hash: entries[1]!.hash });
+        assert.deepEqual(await ledger.base(), { seq: entries[1]!.seq, hash: entries[1]!.hash });
+      },
+    ],
+    [
+      "keeps the head and the remaining entries after a prune, listed from below and above the checkpoint",
+      async (ledger) => {
+        if (ledger.prune === undefined || ledger.base === undefined) return;
+        const appended: AuditEntry[] = [];
+        for (let n = 1; n <= 5; n++) appended.push(await ledger.append(contractEntry(n)));
+        const point = { seq: appended[2]!.seq, hash: appended[2]!.hash };
+        await ledger.prune(point);
+        assert.deepEqual(await ledger.head(), { seq: appended[4]!.seq, hash: appended[4]!.hash }, "the head is untouched by a prune below it");
+        assert.deepEqual(await ledger.list(), appended.slice(3), "everything the ledger holds");
+        assert.deepEqual(await ledger.list(1), appended.slice(3), "from below the checkpoint: the earliest it holds");
+        assert.deepEqual(await ledger.list(4), appended.slice(3), "from the checkpoint's next entry");
+        assert.deepEqual(await ledger.list(5), appended.slice(4), "from above the checkpoint");
+        assert.deepEqual(await ledger.list(6), []);
+        const held = await ledger.list();
+        assert.deepEqual(verifyChain(held, point), { ok: true, head: { seq: appended[4]!.seq, hash: appended[4]!.hash } });
+      },
+    ],
+    [
+      "appends after a prune, once per eventId, continuing the chain from the checkpoint",
+      async (ledger) => {
+        if (ledger.prune === undefined || ledger.base === undefined) return;
+        const kept = [await ledger.append(contractEntry(1)), await ledger.append(contractEntry(2))];
+        await ledger.prune({ seq: kept[1]!.seq, hash: kept[1]!.hash });
+        const next = await ledger.append(contractEntry(3, { eventId: "e_after_prune" }));
+        assert.equal(next.seq, kept[1]!.seq + 1);
+        assert.equal(next.prevHash, kept[1]!.hash);
+        assert.deepEqual(await ledger.append(contractEntry(4, { eventId: "e_after_prune" })), next, "a replayed eventId still appends once");
+        const held = await ledger.list();
+        assert.deepEqual(held, [next]);
+        assert.deepEqual(verifyChain(held, { seq: kept[1]!.seq, hash: kept[1]!.hash }), { ok: true, head: await ledger.head() });
+      },
+    ],
+    [
+      "prunes to the head: an empty ledger's head is the checkpoint, and the next append continues from it",
+      async (ledger) => {
+        if (ledger.prune === undefined || ledger.base === undefined) return;
+        const appended: AuditEntry[] = [];
+        for (let n = 1; n <= 3; n++) appended.push(await ledger.append(contractEntry(n)));
+        const point = { seq: appended[2]!.seq, hash: appended[2]!.hash };
+        await ledger.prune(point);
+        assert.deepEqual(await ledger.list(), []);
+        assert.deepEqual(await ledger.head(), point, "the head is the checkpoint the chain continues from");
+        const next = await ledger.append(contractEntry(4));
+        assert.deepEqual({ seq: next.seq, prevHash: next.prevHash }, { seq: point.seq + 1, prevHash: point.hash });
+        assert.deepEqual(verifyChain(await ledger.list(), point), { ok: true, head: { seq: next.seq, hash: next.hash } });
+      },
+    ],
+    [
+      "refuses to prune at or below its base, past its head, or at an entry it does not hold",
+      async (ledger) => {
+        if (ledger.prune === undefined || ledger.base === undefined) return;
+        const appended: AuditEntry[] = [];
+        for (let n = 1; n <= 4; n++) appended.push(await ledger.append(contractEntry(n)));
+        await ledger.prune({ seq: appended[1]!.seq, hash: appended[1]!.hash });
+        const refused = (prune: Promise<void>, what: string) => assert.rejects(prune, (e: unknown) => e instanceof EngineError && e.code === "precondition_failed", what);
+        await refused(ledger.prune!({ seq: appended[0]!.seq, hash: appended[0]!.hash }), "below the base");
+        await refused(ledger.prune!({ seq: appended[1]!.seq, hash: appended[1]!.hash }), "at the base");
+        await refused(ledger.prune!({ seq: appended[3]!.seq, hash: GENESIS_HASH }), "an entry it does not hold");
+        await refused(ledger.prune!({ seq: appended[3]!.seq + 1, hash: appended[3]!.hash }), "past the head");
+        await ledger.prune!({ seq: appended[3]!.seq, hash: appended[3]!.hash });
+        assert.deepEqual(await ledger.base(), { seq: appended[3]!.seq, hash: appended[3]!.hash }, "only a point above the base prunes");
+      },
+    ],
   ];
   return cases.map(([name, body]) => ({ name, run: async () => body(await factory()) }));
 }

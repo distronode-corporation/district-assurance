@@ -677,6 +677,20 @@ export interface AuditLedger {
    * large ledger page by page.
    */
   list(fromSeq?: number, limit?: number): Promise<AuditEntry[]>;
+  /**
+   * Optional (retention): the last pruned entry, or null while the ledger has never been pruned.
+   * The entries at or below it are gone; the first entry the ledger still holds is `seq + 1`, whose
+   * `prevHash` is `hash`, so what is left is checked from this point (`verifyChain`). A ledger
+   * prunes only below a signed checkpoint it has written, through `pruneLedger`.
+   */
+  base?(): Promise<{ seq: number; hash: string } | null>;
+  /**
+   * Optional (retention): removes every entry at or below `checkpoint.seq`, which becomes the
+   * ledger's base. Refuses a checkpoint at or below the base it already holds, or one it does not
+   * hold with that hash. A host prunes only below a signed checkpoint it has written
+   * (`pruneLedger`); calling this directly is the store's own decision.
+   */
+  prune?(checkpoint: { seq: number; hash: string }): Promise<void>;
 }
 
 /**

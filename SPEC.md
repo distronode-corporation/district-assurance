@@ -1307,7 +1307,9 @@ reported as a wrong `hash`, never thrown.
 a card number. An `AuditLedger` lists `list(fromSeq?, limit?)`: the entries with `seq` at or after
 `fromSeq`, in order, at most `limit` (an integer of 1 or more) when it is given, read as one page,
 so a large ledger is walked page by page; `MemoryAuditLedger` throws a TypeError for any other
-`limit`.
+`limit`. Two optional methods, for a ledger that prunes (below): `base()` answers the last pruned
+entry, or null while the ledger has never been pruned, and `prune(checkpoint)` removes every entry
+at or below `checkpoint.seq`, which becomes the base; both are defined with the checkpoint below.
 
 `auditLedgerContract(factory)` in `district-assurance/testing` is the suite a ledger must pass: it
 starts at seq 0 and the genesis hash, appends one seq at a time with each entry exactly as
@@ -1316,13 +1318,21 @@ chain, `list(fromSeq, limit)` returns at most `limit` of them as one page and re
 is not an integer of 1 or more, entries are copied in and out and never change once appended, an
 `eventId` is appended once (a second append, concurrent or not, returns a copy of the first entry,
 and eventIds that differ only in a lone surrogate are distinct), a detail carrying a card number is
-refused with nothing stored, and concurrent appends stay one valid chain.
+refused with nothing stored, and concurrent appends stay one valid chain. A ledger that can prune
+also passes the pruned-ledger cases: it answers no base before a prune and the checkpoint's point
+after one; a prune keeps the head and the remaining entries, listed from below the checkpoint as
+from above it; an append after a prune continues the chain from the checkpoint, once per `eventId`;
+a prune to the head leaves an empty ledger whose head is the checkpoint, and the next append
+continues from it; and it refuses to prune at or below its base, past its head, or at an entry it
+does not hold.
 `recordStoreContract(factory)` is the suite a `RecordStore` must pass: subjects (seeded by the
 factory, since the engine only reads them) and intake records are copied in and out, workspaces
 never share a key, keys that differ only in a lone surrogate stay apart, `putIntakeRecord` is
 idempotent by `recordId`, also concurrently, and keeps the first filing of a `recordId` (a later
 put with other contents changes nothing, so a confirmed record stays the one confirmed), and the
-confirmed flag is kept beside each record (below). `MemoryAuditLedger` and `MemoryRecordStore` pass both.
+confirmed flag is kept beside each record (below). `MemoryAuditLedger` and `MemoryRecordStore` pass both. `MemoryAuditLedger` can prune: a pruned
+entry's `eventId` goes with it (the id is freed, as a durable store frees the row), and an append
+on a ledger pruned to empty continues from the base, which is then also its head.
 
 The reference server has optional SQLite stores on `node:sqlite` (SRV-4,
 `examples/reference-server/src/sqlite-stores.ts`; no dependency). `SqliteAuditLedger` keeps each
@@ -1480,7 +1490,11 @@ a failing signer never leaves a consumer with entries and no valid trailer. Each
 
 A run starts at `fromSeq` (1 or more, at most the head plus one) or right after `cursor`
 (`<seq>.<hash>` of a previous trailer's `through`), never both, and stops at the head read when the
-export starts, or after `limit` entries; it asks the ledger for that one page (`list(from + 1,
+export starts, or after `limit` entries. A pruned ledger starts at its base: a `fromSeq` below the
+base's seq plus one (a full export) exports everything the ledger still holds, from the checkpoint
+on, and the trailer's `from` is the base, which a reader checks against the signed
+`ledger_checkpoint` (below); a cursor naming the base resumes there, and one below it is refused as
+before; it asks the ledger for that one page (`list(from + 1,
 count)`), in reads of at most `EXPORT_WALK_PAGE` entries, and again for the rest when a read hands
 back fewer entries than asked. A run that stops short of the head is signed only once the chain is walked from its end
 to the head, in reads of at most `EXPORT_WALK_PAGE` (1,000) entries, and verifies there; so an
@@ -1489,8 +1503,10 @@ itself. A walk that fails is refused with `precondition_failed`, before anything
 the next run takes `cursor`. Refused with `invalid_input`: neither or both of `fromSeq` and
 `cursor`, a `fromSeq` or `limit` that is not an integer of 1 or more, a `fromSeq` past the head plus
 one (on an empty ledger, more than 1), an empty `ledgerId`, a cursor that is malformed or past the head. Refused with `precondition_failed`,
-before anything is yielded: a head the ledger does not hold, a cursor whose entry the ledger no
-longer holds with that hash, a missing entry before `fromSeq`, and a run that fails `verifyChain`
+before anything is yielded: a head the ledger does not hold (its base counts as held when a prune to
+the head left no entry), a cursor whose entry the ledger no
+longer holds with that hash (the base counts as held, with its hash), a missing entry before
+`fromSeq`, and a run that fails `verifyChain`
 from its start. `ledgerId` is the host's name for the ledger, for example the workspace id.
 
 `verifyLedgerExport(ndjson, keys, after?)` checks a whole run and never throws, whatever its
@@ -1502,6 +1518,51 @@ object), `signature` (unknown `kid`, wrong `alg`, a signature that does not veri
 (given the previous run's trailer as `after`: a different `ledgerId`, or a start other than its
 cursor) or `chain` (`verifyChain` from `from` fails, with its `seq`, or the run does not end on
 `through`).
+
+### Checkpoints and pruning
+
+A ledger that prunes removes its oldest entries below a signed checkpoint, so a reader can check
+what is left from the checkpoint on without the entries before it. The checkpoint is the
+first-class form of the export trailer's cursor over the same point: a host that pruned below an
+export run's `through` could already resume from its cursor; the document below signs that point
+once, ahead of time.
+
+- The document is `ledger_checkpoint`: `{v: 1, type: "ledger_checkpoint", ledgerId, seq, hash,
+  prunedCount, at}`, where `seq` and `hash` name the last entry the prune removes (the first entry
+  the ledger still holds is `seq + 1`), `prunedCount` is how many entries the checkpoint cuts (the
+  gap between the ledger's previous base and this one, 1 or more and never more than `seq`), and
+  `at` is when it was signed (ISO 8601 UTC). The signed bytes are the UTF-8 of
+  "district-assurance/ledger-checkpoint/v1" + a newline + `canonicalJson(body)`, domain-separated
+  so a checkpoint signature can never pass as a receipt's, an export trailer's or an anchor's, and
+  the signer is a `ReceiptSigner`, so the receipt key set verifies checkpoints by `kid`. `ledgerId`
+  is the host's name for the ledger, as an export trailer's, so a checkpoint cannot be moved to
+  another ledger's history.
+- `signLedgerCheckpoint(ledger, {signer, clock, ledgerId, seq?})` signs the checkpoint at `seq`
+  (the head when left out) after reading and verifying the chain from the ledger's base to that
+  entry, in pages of at most `EXPORT_WALK_PAGE` (a tampered ledger is never vouched for), and
+  `prunedCount` is the gap above the base. Refused with `invalid_input`: an empty `ledgerId`, a
+  `seq` that is not an integer of 1 or more or is past the head, a signer that does not answer a
+  64-byte P1363 signature or does not verify against its own public key. Refused with
+  `precondition_failed`: an empty ledger, a `seq` at or below the base (nothing would be cut), a
+  chain that does not verify, and a `seq` the ledger does not hold. The host writes the answer
+  before pruning below it: pruning below a checkpoint that no longer exists leaves a ledger nobody
+  can check.
+- `verifyLedgerCheckpoint(checkpoint, keys)` checks a checkpoint against a public key set, as
+  `verifyLedgerExport` checks a trailer, and never throws: bad input of any shape is `malformed`,
+  an unknown `kid`, a wrong `alg`, a malformed signature or any change to the body is `signature`.
+  It answers the checkpoint's point, which a reader hands to `verifyChain` as its starting point.
+- `pruneLedger(ledger, checkpoint, keys)` prunes below the written checkpoint: the checkpoint is
+  verified against the key set, the point it names must be the ledger's (its base, when that
+  checkpoint was already pruned below, in which case nothing is pruned and the point is answered,
+  or an entry it holds with that hash), and the ledger's `prune` removes every entry at or below
+  it, after which the base is read back. Refused with `precondition_failed`: a ledger without
+  `prune` and `base`, a checkpoint the ledger has already pruned past (the base only moves
+  forward), a point the ledger does not hold, and a prune that did not move the base. Refused
+  with `invalid_input`: a checkpoint that does not verify.
+- On the ledger that pruned: `base()` answers the checkpoint's point; `head()` answers it too when
+  every entry was pruned; an append continues the chain from the base; `list` answers the entries
+  the ledger still holds, whatever `fromSeq` below them says. `anchorLedger`, `exportSubject` and
+  `eraseSubject` work on a pruned ledger, appending above the base.
 
 ## 11. Canonical JSON
 

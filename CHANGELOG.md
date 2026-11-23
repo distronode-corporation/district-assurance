@@ -17,6 +17,22 @@ heading, and uses it as the GitHub release's text, with a link back here
 
 ## [Unreleased]
 
+### Added
+
+- **Signed ledger checkpoints and pruning** (SPEC section 10). A first-class `ledger_checkpoint`
+  document, `{seq, hash, prunedCount, at}` under the host's ledger name, signed by a `ReceiptSigner`
+  over its own domain so it can never verify as a receipt or an export trailer, with
+  `verifyLedgerCheckpoint(checkpoint, keys)` answering the point a reader hands to `verifyChain`.
+  `signLedgerCheckpoint(ledger, {signer, clock, ledgerId, seq?})` verifies the chain from the
+  ledger's base to the checkpoint in bounded pages before signing, and `pruneLedger(ledger,
+  checkpoint, keys)` removes the entries below the written checkpoint only, refusing a rollback
+  below the base the ledger already holds. An `AuditLedger` may implement `base()` (the last pruned
+  entry) and `prune(checkpoint)`; `MemoryAuditLedger` does, and `auditLedgerContract` has the
+  pruned-ledger cases for a durable one. A pruned ledger's head is its base when every entry was
+  pruned, appends continue from the base, and `exportLedger` starts a full export at the base, so
+  the trailer's `from` is the checkpoint a reader checks it against; `anchorLedger`, `exportSubject`
+  and `eraseSubject` work on a pruned ledger.
+
 ## [0.3.0] - 2026-11-22
 
 ### Added

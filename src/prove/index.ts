@@ -1,4 +1,5 @@
 export * from "./anchor.ts";
+export * from "./checkpoint.ts";
 export * from "./consent.ts";
 export * from "./export.ts";
 export * from "./ledger.ts";

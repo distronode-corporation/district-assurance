@@ -127,7 +127,21 @@ describe("hostile #73: the contracts catch", () => {
     assert.notDeepEqual(await failures(auditLedgerContract(() => new AliasingReplay())), []);
   });
 
-  it("T6: the memory stores pass them all", async () => {
+  it("T6: a ledger that quietly ignores a prune it must refuse (below its base)", async () => {
+    class SilentRollback extends MemoryAuditLedger {
+      override async prune(checkpoint: { seq: number; hash: string }): Promise<void> {
+        await super.prune(checkpoint).catch(() => undefined);
+      }
+    }
+    assert.ok(
+      (await failures(auditLedgerContract(() => new SilentRollback()))).includes(
+        "refuses to prune at or below its base, past its head, or at an entry it does not hold",
+      ),
+      "a store that swallows the refusal instead of throwing fails the case",
+    );
+  });
+
+  it("T7: the memory stores pass them all", async () => {
     assert.deepEqual(await failures(sessionStoreContract(() => new MemorySessionStore())), []);
     assert.deepEqual(await failures(auditLedgerContract(() => new MemoryAuditLedger())), []);
   });
