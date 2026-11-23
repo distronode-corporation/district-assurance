@@ -205,6 +205,16 @@ describe("paylink channel: config", () => {
       "a policy without the scope",
     );
     assert.deepEqual(paylinkModule.validateFlow!([verify, channel, pay] as never, { settings: {}, policy: null, adapters: new Set(), capabilities: {} }), [], "no policy in view");
+    // A step that is not an object is the composition's own problem (#173): the whole-flow check
+    // skips it, as Gate's and step-up's do, and the rest of the flow is still checked.
+    const malformed = (i: number) => `flows.deposit.steps[${i}]: a step is an object with a type`;
+    assert.deepEqual(at([verify, null, channel, pay]), [malformed(1)], "the malformed step is reported once, and nothing throws");
+    assert.deepEqual(at([verify, null, pay]), [malformed(1)], "a null step beside a request neither throws nor counts");
+    assert.deepEqual(
+      at([channel, null, verify, pay]),
+      [malformed(1), refused(0)],
+      "the flow-level check still sees around the malformed step",
+    );
   });
 });
 

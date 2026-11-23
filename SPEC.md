@@ -1058,7 +1058,9 @@ step-up's `maxTokensPerCall` (each completes only on a grant or token of its own
 could never finish), and each `paylink.channel` step comes after a `badge.verify` step (the last one before it) whose
 level reaches `payment.request` and whose `scopes`, when listed, grant it, and is followed by a
 `paylink.request` before the next `paylink.channel` (the channel step declares no scope need, since
-a choice is not a money action a receipt names, but it asks for `payment.request` when it runs). A step validator sees another module's validated settings through the
+a choice is not a money action a receipt names, but it asks for `payment.request` when it runs). A
+whole-flow check skips a step that is not an object, which the composition reports on its own (#173),
+and never throws on it. A step validator sees another module's validated settings through the
 context's `settingsOf(name)` (null for a module off or whose settings were refused), as
 `paylink.channel` reads Trace's wordings. Cross-checks against a module's settings or the
 policy are skipped when those did not validate (their own problems are reported). The engine

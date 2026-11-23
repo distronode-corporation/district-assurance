@@ -360,6 +360,10 @@ export const paylinkModule: AssuranceModule = {
     // The level payment.request needs; without a policy in view nothing is checked against it.
     const min = ctx.policy === null ? 0 : (ctx.policy.scopes["payment.request"] ?? Infinity);
     steps.forEach((step, index) => {
+      // The composition reports a step that is not an object itself (#173); skip it here, as the
+      // whole-flow checks of Gate and step-up do, so a malformed step never crashes the check that
+      // answers every problem at once.
+      if (!isObject(step)) return;
       if (step.type === "badge.verify") {
         // The last verification is the one the call holds: it must reach payment.request and, when it lists scopes, grant it.
         verified = typeof step.level === "number" && step.level >= min && (!Array.isArray(step.scopes) || step.scopes.includes("payment.request"));

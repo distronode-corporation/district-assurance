@@ -17,6 +17,15 @@ heading, and uses it as the GitHub release's text, with a link back here
 
 ## [Unreleased]
 
+### Fixed
+
+- **`validateConfig` answers a flow with a null step beside a paylink step.** Paylink's whole-flow
+  check skipped nothing: a step that was not an object reached it as a `FlowStep` and threw a raw
+  `TypeError` on `step.type`, crashing the config check that promises to answer every problem and
+  never throw. It now skips the malformed step, as Gate's and step-up's whole-flow checks already
+  did, and the composition reports the step once (#173).
+
+
 A dashboard can now read every config problem in a structured form and localize it (issue #160), and
 a host can cut an audit ledger's oldest entries below a signed checkpoint, with a reader able to
 check everything that is left from that checkpoint on without the entries before it (SPEC section
