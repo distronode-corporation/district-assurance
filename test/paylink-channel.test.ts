@@ -15,7 +15,7 @@ import { wordingDigest } from "../src/prove/consent.ts";
 import { PAYMENT_CHANNEL_KEYS, PAYMENT_CHANNEL_PURPOSES, PAYMENT_EMAIL, formatAmount, paylinkModule, type PaylinkSlice } from "../src/pay/paylink.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { FakeEmailSender, MemoryConsentStore, TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine, type TestEngineOptions } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, confirmAmount, rejects, testConfig, wording } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, confirmAmount, rejects, testConfig, wording , messages} from "./helpers.ts";
 
 const EMAIL = "pat.caller@example.test";
 const BUSINESS = "Maple Property Management";
@@ -140,7 +140,7 @@ describe("paylink channel: config", () => {
   });
 
   it("checks the channels setting, and needs the emails adapter only with email on", () => {
-    const at = (channels: unknown) => paylinkModule.validateSettings({ channels });
+    const at = (channels: unknown) => messages(paylinkModule.validateSettings({ channels }));
     assert.deepEqual(at(["text"]), []);
     assert.deepEqual(at(["email", "text"]), []);
     for (const bad of [null, "email", ["sms"], [1], ["text", "fax"]]) assert.deepEqual(at(bad), ["channels must list text, and email or not"], String(bad));

@@ -12,7 +12,7 @@ import { FakeDuressNotifier, TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, 
 import { PIN_PASS_MAX_SECONDS, badgeModule, type BadgeSlice } from "../src/verify/badge.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
 import type { PinSettings } from "../src/verify/factors.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, testConfig } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, PIN, rejects, testConfig, messages } from "./helpers.ts";
 
 const CALLING = "+15555550199";
 const DURESS = "7391";
@@ -81,7 +81,7 @@ async function badgeOf(t: TestEngine, callId: string): Promise<BadgeSlice> {
 describe("PIN pass: settings", () => {
   it("is off unless pin.reuse is set, and maxAgeSeconds is 30 to 300", () => {
     const module = badgeModule();
-    const at = (reuse: unknown) => module.validateSettings({ factors: ["pin"], pin: { mode: "keyed_hash", minDigits: 4, maxDigits: 8, maxAttemptsPerCall: 3, reuse } });
+    const at = (reuse: unknown) => messages(module.validateSettings({ factors: ["pin"], pin: { mode: "keyed_hash", minDigits: 4, maxDigits: 8, maxAttemptsPerCall: 3, reuse } }));
     assert.equal(PIN_PASS_MAX_SECONDS, 300);
     assert.deepEqual(at(undefined), []);
     assert.deepEqual(at({ maxAgeSeconds: 30 }), []);

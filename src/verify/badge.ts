@@ -11,7 +11,7 @@ import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
 import { isStepLevel } from "../core/config.ts";
-import type { AssuranceModule, FlowStep, StepContext, StepStatus, StepView } from "../core/module.ts";
+import { problem, type AssuranceModule, type FlowStep, type StepContext, type StepStatus, type StepView, type StructuredProblem, type ValidationProblem } from "../core/module.ts";
 import {
   FACTOR_KINDS,
   capCallLevel,
@@ -378,22 +378,22 @@ export class BadgeModule implements AssuranceModule {
     return [...this.manifest.provides.factors, ...this.#outside.keys()];
   }
 
-  validateSettings(settings: unknown): string[] {
-    if (!isObject(settings)) return ["must be an object with the factors that are on"];
-    const errors = unknownKeys(settings, SETTINGS_KEYS).map((k) => `${k} is not a badge setting`);
+  validateSettings(settings: unknown): ValidationProblem[] {
+    if (!isObject(settings)) return [problem("badge.settings_shape", "must be an object with the factors that are on")];
+    const errors = unknownKeys(settings, SETTINGS_KEYS).map((k) => problem("badge.unknown_setting", `${k} is not a badge setting`, { key: k }));
     const known = this.installedFactors();
     if (!isStringArray(settings.factors) || settings.factors.length === 0) {
-      errors.push("factors must list at least one factor");
+      errors.push(problem("badge.factors_empty", "factors must list at least one factor"));
     } else {
-      if (new Set(settings.factors).size !== settings.factors.length) errors.push("factors has duplicates");
+      if (new Set(settings.factors).size !== settings.factors.length) errors.push(problem("badge.factors_duplicate", "factors has duplicates"));
       for (const kind of settings.factors) {
         // No built-in factor is planned any more (VER-2 and VER-3 are built), so none is refused as unbuilt.
-        if (!known.includes(kind)) errors.push(`factor ${kind} is not installed`);
+        if (!known.includes(kind)) errors.push(problem("badge.factor_unknown", `factor ${kind} is not installed`, { factor: kind }));
       }
       if (settings.factors.includes("pin")) errors.push(...pinSettingsErrors(settings.pin));
     }
     if (settings.grantTtlSeconds !== undefined && !isIntegerIn(settings.grantTtlSeconds, 1, 3600)) {
-      errors.push("grantTtlSeconds must be an integer from 1 to 3600");
+      errors.push(problem("badge.grant_ttl", "grantTtlSeconds must be an integer from 1 to 3600"));
     }
     if (settings.accessibility !== undefined) errors.push(...accessibilityErrors(settings.accessibility, settings.factors));
     errors.push(...lockoutSettingsErrors(settings.lockout));
@@ -415,22 +415,22 @@ export class BadgeModule implements AssuranceModule {
     return [...adapters];
   }
 
-  validateStep(step: FlowStep, ctx: StepContext): string[] {
-    const errors = unknownKeys(step, ["type", "level", "factors", "scopes"]).map((k) => `${k} is not a field of this step`);
+  validateStep(step: FlowStep, ctx: StepContext): ValidationProblem[] {
+    const errors = unknownKeys(step, ["type", "level", "factors", "scopes"]).map((k) => problem("badge.step_unknown_field", `${k} is not a field of this step`, { key: k }));
     if (step.scopes !== undefined) errors.push(...this.#scopeErrors(step, ctx));
-    if (!isStepLevel(step.level)) errors.push("level must be 1, 2 or 3");
+    if (!isStepLevel(step.level)) errors.push(problem("badge.step_level", "level must be 1, 2 or 3"));
     if (!isStringArray(step.factors) || step.factors.length === 0) {
-      errors.push("factors must list at least one factor");
+      errors.push(problem("badge.step_factors_empty", "factors must list at least one factor"));
       return errors;
     }
-    if (new Set(step.factors).size !== step.factors.length) errors.push("factors has duplicates");
+    if (new Set(step.factors).size !== step.factors.length) errors.push(problem("badge.step_factors_duplicate", "factors has duplicates"));
     const settings = ctx.settings as BadgeSettings | null;
     if (settings !== null) {
-      for (const kind of step.factors) if (!settings.factors.includes(kind)) errors.push(`factor ${kind} is turned off in the badge settings`);
+      for (const kind of step.factors) if (!settings.factors.includes(kind)) errors.push(problem("badge.step_factor_off", `factor ${kind} is turned off in the badge settings`, { factor: kind }));
       if (ctx.policy !== null && step.factors.includes("spoken_knowledge")) {
         const keypadFields = ctx.policy.keypadFields;
         for (const field of settings.accessibility?.spokenKeypadFields ?? []) {
-          if (!keypadFields.includes(field)) errors.push(`spoken keypad field ${field} is not one of the policy's keypad fields`);
+          if (!keypadFields.includes(field)) errors.push(problem("badge.step_spoken_field", `spoken keypad field ${field} is not one of the policy's keypad fields`, { field }));
         }
       }
     }
@@ -438,22 +438,22 @@ export class BadgeModule implements AssuranceModule {
       const factors = step.factors;
       const level = step.level;
       const reachable = ctx.policy.levels.some((rule) => rule.level >= level && rule.anyOf.some((set) => set.every((k) => factors.includes(k))));
-      if (!reachable) errors.push(`level ${level} cannot be reached with [${factors.join(", ")}] under the policy`);
+      if (!reachable) errors.push(problem("badge.step_level_unreachable", `level ${level} cannot be reached with [${factors.join(", ")}] under the policy`, { level, factors: factors.join(", ") }));
       if (factors.includes("text_code") && ctx.policy.textCodeCountryCodes === undefined) {
-        errors.push("factor text_code needs the policy's textCodeCountryCodes, or no code is ever texted");
+        errors.push(problem("badge.step_text_code", "factor text_code needs the policy's textCodeCountryCodes, or no code is ever texted"));
       }
     }
     return errors;
   }
 
-  #scopeErrors(step: FlowStep, ctx: StepContext): string[] {
-    if (!isStringArray(step.scopes) || step.scopes.length === 0) return ["scopes must list at least one scope"];
-    const errors = new Set(step.scopes).size === step.scopes.length ? [] : ["scopes has duplicates"];
+  #scopeErrors(step: FlowStep, ctx: StepContext): StructuredProblem[] {
+    if (!isStringArray(step.scopes) || step.scopes.length === 0) return [problem("badge.scopes_empty", "scopes must list at least one scope")];
+    const errors = new Set(step.scopes).size === step.scopes.length ? [] : [problem("badge.scopes_duplicate", "scopes has duplicates")];
     if (ctx.policy === null) return errors;
     for (const scope of step.scopes) {
       const min = Object.hasOwn(ctx.policy.scopes, scope) ? ctx.policy.scopes[scope] : undefined;
-      if (min === undefined) errors.push(`scope ${scope} is not in the policy`);
-      else if (isStepLevel(step.level) && min > step.level) errors.push(`scope ${scope} needs level ${min}, above this step's level ${step.level}`);
+      if (min === undefined) errors.push(problem("badge.scope_unknown", `scope ${scope} is not in the policy`, { scope }));
+      else if (isStepLevel(step.level) && min > step.level) errors.push(problem("badge.scope_level", `scope ${scope} needs level ${min}, above this step's level ${step.level}`, { scope, level: min, stepLevel: step.level }));
     }
     return errors;
   }
@@ -564,55 +564,55 @@ export function assertSameVerification(s: BadgeSlice, epoch: number): void {
   if (s.epoch !== epoch) throw new EngineError("precondition_failed", "verification restarted while this result was on its way; it does not count");
 }
 
-function accessibilityErrors(a: unknown, factors: unknown): string[] {
-  if (!isObject(a)) return ["accessibility must be an object"];
-  const errors = unknownKeys(a, ACCESSIBILITY_KEYS).map((k) => `accessibility.${k} is not an accessibility setting`);
+function accessibilityErrors(a: unknown, factors: unknown): StructuredProblem[] {
+  if (!isObject(a)) return [problem("badge.accessibility_shape", "accessibility must be an object")];
+  const errors = unknownKeys(a, ACCESSIBILITY_KEYS).map((k) => problem("badge.accessibility_unknown_setting", `accessibility.${k} is not an accessibility setting`, { key: k }));
   if (a.spokenKeypadFields !== undefined) {
     const fields = a.spokenKeypadFields;
     if (!isStringArray(fields) || fields.length === 0) {
-      errors.push("accessibility.spokenKeypadFields must list at least one keypad field");
+      errors.push(problem("badge.accessibility_fields_empty", "accessibility.spokenKeypadFields must list at least one keypad field"));
     } else {
-      if (new Set(fields).size !== fields.length) errors.push("accessibility.spokenKeypadFields has duplicates");
+      if (new Set(fields).size !== fields.length) errors.push(problem("badge.accessibility_fields_duplicate", "accessibility.spokenKeypadFields has duplicates"));
       // A spoken PIN reaches speech-to-text, so the PIN is only ever keyed.
-      if (fields.includes("pin")) errors.push("accessibility.spokenKeypadFields cannot hold the PIN: a PIN is never taken by speech");
-      if (!isStringArray(factors) || !factors.includes("spoken_knowledge")) errors.push("accessibility.spokenKeypadFields needs the spoken_knowledge factor on");
+      if (fields.includes("pin")) errors.push(problem("badge.accessibility_fields_pin", "accessibility.spokenKeypadFields cannot hold the PIN: a PIN is never taken by speech"));
+      if (!isStringArray(factors) || !factors.includes("spoken_knowledge")) errors.push(problem("badge.accessibility_fields_factor", "accessibility.spokenKeypadFields needs the spoken_knowledge factor on"));
     }
   }
   const idle = a.keypadIdleSeconds ?? DEFAULT_KEYPAD_IDLE_SECONDS;
-  if (!isIntegerIn(idle, 5, 60)) errors.push("accessibility.keypadIdleSeconds must be an integer from 5 to 60");
+  if (!isIntegerIn(idle, 5, 60)) errors.push(problem("badge.accessibility_idle", "accessibility.keypadIdleSeconds must be an integer from 5 to 60"));
   else if (a.maxKeypadIdleSeconds !== undefined && !isIntegerIn(a.maxKeypadIdleSeconds, idle, 300)) {
-    errors.push("accessibility.maxKeypadIdleSeconds must be an integer from keypadIdleSeconds to 300");
+    errors.push(problem("badge.accessibility_max_idle", "accessibility.maxKeypadIdleSeconds must be an integer from keypadIdleSeconds to 300"));
   }
   return errors;
 }
 
-function pinSettingsErrors(pin: unknown): string[] {
-  if (!isObject(pin)) return ["pin settings are required when the pin factor is on"];
-  const errors = unknownKeys(pin, PIN_KEYS).map((k) => `pin.${k} is not a pin setting`);
-  if (pin.mode !== "keyed_hash" && pin.mode !== "verifier") errors.push("pin.mode must be keyed_hash or verifier");
-  if (!isIntegerIn(pin.minDigits, 4, 12)) errors.push("pin.minDigits must be 4 to 12");
-  else if (!isIntegerIn(pin.maxDigits, pin.minDigits, 12)) errors.push("pin.maxDigits must be from minDigits to 12");
-  if (!isIntegerIn(pin.maxAttemptsPerCall, 1, 5)) errors.push("pin.maxAttemptsPerCall must be 1 to 5");
+function pinSettingsErrors(pin: unknown): StructuredProblem[] {
+  if (!isObject(pin)) return [problem("badge.pin_shape", "pin settings are required when the pin factor is on")];
+  const errors = unknownKeys(pin, PIN_KEYS).map((k) => problem("badge.pin_unknown_setting", `pin.${k} is not a pin setting`, { key: k }));
+  if (pin.mode !== "keyed_hash" && pin.mode !== "verifier") errors.push(problem("badge.pin_mode", "pin.mode must be keyed_hash or verifier"));
+  if (!isIntegerIn(pin.minDigits, 4, 12)) errors.push(problem("badge.pin_min_digits", "pin.minDigits must be 4 to 12"));
+  else if (!isIntegerIn(pin.maxDigits, pin.minDigits, 12)) errors.push(problem("badge.pin_max_digits", "pin.maxDigits must be from minDigits to 12"));
+  if (!isIntegerIn(pin.maxAttemptsPerCall, 1, 5)) errors.push(problem("badge.pin_max_attempts", "pin.maxAttemptsPerCall must be 1 to 5"));
   if (pin.duress !== undefined) errors.push(...duressSettingsErrors(pin.duress));
   if (pin.reuse !== undefined) errors.push(...reuseSettingsErrors(pin.reuse));
   return errors;
 }
 
-function reuseSettingsErrors(reuse: unknown): string[] {
-  if (!isObject(reuse)) return ["pin.reuse must be an object with maxAgeSeconds"];
-  const errors = unknownKeys(reuse, ["maxAgeSeconds"]).map((k) => `pin.reuse.${k} is not a PIN reuse setting`);
-  if (!isIntegerIn(reuse.maxAgeSeconds, 30, PIN_PASS_MAX_SECONDS)) errors.push(`pin.reuse.maxAgeSeconds must be an integer from 30 to ${PIN_PASS_MAX_SECONDS}`);
+function reuseSettingsErrors(reuse: unknown): StructuredProblem[] {
+  if (!isObject(reuse)) return [problem("badge.pin_reuse_shape", "pin.reuse must be an object with maxAgeSeconds")];
+  const errors = unknownKeys(reuse, ["maxAgeSeconds"]).map((k) => problem("badge.pin_reuse_unknown_setting", `pin.reuse.${k} is not a PIN reuse setting`, { key: k }));
+  if (!isIntegerIn(reuse.maxAgeSeconds, 30, PIN_PASS_MAX_SECONDS)) errors.push(problem("badge.pin_reuse_range", `pin.reuse.maxAgeSeconds must be an integer from 30 to ${PIN_PASS_MAX_SECONDS}`, { max: PIN_PASS_MAX_SECONDS }));
   return errors;
 }
 
 /** The longest a PIN pass lives, from the PIN's pass on the call that issued it: 5 minutes. */
 export const PIN_PASS_MAX_SECONDS = 300;
 
-function duressSettingsErrors(duress: unknown): string[] {
-  if (!isObject(duress)) return ["pin.duress must be an object with refuseScopes"];
-  const errors = unknownKeys(duress, ["refuseScopes"]).map((k) => `pin.duress.${k} is not a duress setting`);
-  if (!isStringArray(duress.refuseScopes)) errors.push("pin.duress.refuseScopes must list scopes (it may be empty)");
-  else if (new Set(duress.refuseScopes).size !== duress.refuseScopes.length) errors.push("pin.duress.refuseScopes has duplicates");
+function duressSettingsErrors(duress: unknown): StructuredProblem[] {
+  if (!isObject(duress)) return [problem("badge.pin_duress_shape", "pin.duress must be an object with refuseScopes")];
+  const errors = unknownKeys(duress, ["refuseScopes"]).map((k) => problem("badge.pin_duress_unknown_setting", `pin.duress.${k} is not a duress setting`, { key: k }));
+  if (!isStringArray(duress.refuseScopes)) errors.push(problem("badge.pin_duress_scopes_shape", "pin.duress.refuseScopes must list scopes (it may be empty)"));
+  else if (new Set(duress.refuseScopes).size !== duress.refuseScopes.length) errors.push(problem("badge.pin_duress_scopes_duplicate", "pin.duress.refuseScopes has duplicates"));
   return errors;
 }
 
@@ -644,21 +644,21 @@ export function acknowledgeDuressAlert(record: CallRecord, alertId: string): voi
   s.duressAlerts = s.duressAlerts!.filter((a) => a.alertId !== alertId);
 }
 
-function syntheticVoiceErrors(vendors: unknown): string[] {
-  if (!isObject(vendors)) return ["syntheticVoice must map each vendor's name to its thresholds"];
-  const errors: string[] = [];
+function syntheticVoiceErrors(vendors: unknown): StructuredProblem[] {
+  if (!isObject(vendors)) return [problem("badge.synthetic_voice_shape", "syntheticVoice must map each vendor's name to its thresholds")];
+  const errors: StructuredProblem[] = [];
   for (const [vendor, thresholds] of Object.entries(vendors)) {
     const at = `syntheticVoice.${vendor}`;
-    if (!VENDOR_NAME.test(vendor)) errors.push(`syntheticVoice vendor ${JSON.stringify(vendor)} must be 1 to 32 lower-case letters, digits, "-" or "_", starting with a letter`);
+    if (!VENDOR_NAME.test(vendor)) errors.push(problem("badge.synthetic_voice_vendor", `syntheticVoice vendor ${JSON.stringify(vendor)} must be 1 to 32 lower-case letters, digits, "-" or "_", starting with a letter`, { vendor }));
     if (!isObject(thresholds)) {
-      errors.push(`${at} must be {spokenKnowledgeAbove, levelOneAbove}`);
+      errors.push(problem("badge.synthetic_voice_thresholds_shape", `${at} must be {spokenKnowledgeAbove, levelOneAbove}`, { vendor }));
       continue;
     }
-    errors.push(...unknownKeys(thresholds, THRESHOLD_KEYS).map((k) => `${at}.${k} is not a threshold`));
+    errors.push(...unknownKeys(thresholds, THRESHOLD_KEYS).map((k) => problem("badge.synthetic_voice_unknown_setting", `${at}.${k} is not a threshold`, { vendor, key: k })));
     const bad = THRESHOLD_KEYS.filter((k) => !isScore(thresholds[k]));
-    for (const k of bad) errors.push(`${at}.${k} must be a number from 0 to 1`);
+    for (const k of bad) errors.push(problem("badge.synthetic_voice_threshold", `${at}.${k} must be a number from 0 to 1`, { vendor, key: k }));
     if (bad.length === 0 && (thresholds.levelOneAbove as number) < (thresholds.spokenKnowledgeAbove as number)) {
-      errors.push(`${at}.levelOneAbove must not be below spokenKnowledgeAbove`);
+      errors.push(problem("badge.synthetic_voice_threshold_order", `${at}.levelOneAbove must not be below spokenKnowledgeAbove`, { vendor }));
     }
   }
   return errors;

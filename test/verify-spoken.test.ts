@@ -5,11 +5,15 @@ import { describe, it } from "node:test";
 
 import type { FlowConfig } from "../src/core/config.ts";
 import { hmacSha256Hex } from "../src/core/hash.ts";
-import { defaultVerificationPolicy, validatePolicy, type SpokenFormat, type VerificationPolicy } from "../src/core/policy.ts";
+import { defaultVerificationPolicy, validatePolicy as validatePolicyRaw, type SpokenFormat, type VerificationPolicy } from "../src/core/policy.ts";
+import { problemMessage } from "../src/core/module.ts";
 import type { Locale } from "../src/core/runtime.ts";
 import { TEST_KNOWLEDGE_KEY, testSubject } from "../src/testing/index.ts";
 import { judgeSpoken } from "../src/verify/factors.ts";
 import { knowledgeDigest } from "../src/verify/knowledge.ts";
+
+/** The policy validator's sentences, as the tests read them. */
+const validatePolicy = (...args: Parameters<typeof validatePolicyRaw>): string[] => validatePolicyRaw(...args).map(problemMessage);
 import { MAX_SPOKEN_TRANSCRIPT, normaliseSpokenAnswer, normaliseSpokenKeypadEntry } from "../src/verify/spoken.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig } from "./helpers.ts";
 

@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 import type { JsonValue } from "../src/core/canonical.ts";
 import { validateConfig, type FlowConfig } from "../src/core/config.ts";
 import { hmacSha256Hex, sha256Hex } from "../src/core/hash.ts";
-import { ModuleRegistry } from "../src/core/module.ts";
+import { ModuleRegistry, problem } from "../src/core/module.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { stepUpAcr, stepUpModule, stepUpSubject } from "../src/gate/step-up.ts";
 import { builtInModules } from "../src/modules.ts";
@@ -80,7 +80,7 @@ describe("step-up: config", () => {
 
   it("needs an https issuer", () => {
     for (const issuer of ["http://verify.example.test", "https://verify.example.test/?x=1", "https://verify.example.test/?", "https://verify.example.test/#", "https://user@verify.example.test", "https://", "https:///", "https://verify .example.test", "not a url", 7, undefined]) {
-      assert.deepEqual(stepUp.validateSettings({ issuer, sites }), ["issuer must be an https URL without a query, a fragment or credentials"], String(issuer));
+      assert.deepEqual(stepUp.validateSettings({ issuer, sites }), [problem("step_up.issuer", "issuer must be an https URL without a query, a fragment or credentials")], String(issuer));
     }
     assert.deepEqual(stepUp.validateSettings({ issuer: "https://verify.example.test/ws_test", sites }), []);
   });
@@ -93,23 +93,23 @@ describe("step-up: config", () => {
 
   it("checks every step-up setting", () => {
     assert.deepEqual(stepUp.validateSettings({ issuer: ISSUER, sites, maxTokensPerCall: 5 }), []);
-    assert.deepEqual(stepUp.validateSettings(null), ["must be an object with the issuer and the sites"]);
+    assert.deepEqual(stepUp.validateSettings(null), [problem("step_up.settings_shape", "must be an object with the issuer and the sites")]);
     assert.deepEqual(stepUp.validateSettings({ issuer: ISSUER, sites: [], maxTokensPerCall: 0, x: 1 }), [
-      "x is not a step-up setting",
-      "maxTokensPerCall must be an integer from 1 to 5",
-      "sites must list at least one site",
+      problem("step_up.unknown_setting", "x is not a step-up setting", { key: "x" }),
+      problem("step_up.max_tokens", "maxTokensPerCall must be an integer from 1 to 5", { max: 5 }),
+      problem("step_up.sites_empty", "sites must list at least one site"),
     ]);
     const sparse: unknown[] = [];
     sparse[1] = sites[0];
-    assert.deepEqual(stepUp.validateSettings({ issuer: ISSUER, sites: sparse }), ["sites must list at least one site"], "a hole is not a site");
+    assert.deepEqual(stepUp.validateSettings({ issuer: ISSUER, sites: sparse }), [problem("step_up.sites_empty", "sites must list at least one site")], "a hole is not a site");
     assert.deepEqual(stepUp.validateSettings({ issuer: ISSUER, sites: ["portal", { id: "Portal", audience: "a b", y: 1 }, { id: "a", audience: "x".repeat(201) }, { id: "a", audience: 1 }] }), [
-      "sites[0] must be { id, audience }",
-      "sites[1].y is not a site field",
-      "sites[1].id must be lower-case letters, digits and hyphens, at most 64",
-      "sites[1].audience must be 1 to 200 characters, no spaces",
-      "sites[2].audience must be 1 to 200 characters, no spaces",
-      "sites[3].audience must be 1 to 200 characters, no spaces",
-      "two sites have the same id",
+      problem("step_up.site_shape", "sites[0] must be { id, audience }", { index: 0 }),
+      problem("step_up.site_unknown_field", "sites[1].y is not a site field", { index: 1, key: "y" }),
+      problem("step_up.site_id", "sites[1].id must be lower-case letters, digits and hyphens, at most 64", { index: 1 }),
+      problem("step_up.site_audience", "sites[1].audience must be 1 to 200 characters, no spaces", { index: 1 }),
+      problem("step_up.site_audience", "sites[2].audience must be 1 to 200 characters, no spaces", { index: 2 }),
+      problem("step_up.site_audience", "sites[3].audience must be 1 to 200 characters, no spaces", { index: 3 }),
+      problem("step_up.site_duplicate", "two sites have the same id"),
     ]);
   });
 

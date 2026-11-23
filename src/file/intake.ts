@@ -7,6 +7,7 @@ import { canonicalJson } from "../core/canonical.ts";
 import { sha256Hex } from "../core/hash.ts";
 import { findCardNumbers } from "../core/redaction.ts";
 import { LOCALES, type Locale, type LocalisedText } from "../core/runtime.ts";
+import { problem, type StructuredProblem } from "../core/module.ts";
 import { isObject, unknownKeys } from "../core/shape.ts";
 
 export type FieldType = "text" | "number" | "date" | "yes_no";
@@ -84,41 +85,43 @@ const FORBIDDEN_COMPOUND = [
 ];
 
 /** Every problem with a form, as sentences. */
-export function validateForm(form: IntakeForm): string[] {
-  const errors: string[] = [];
-  if (form.fields.length === 0) errors.push("the form has no fields");
+/** Every problem with one intake form, with the field it is about in `params`. */
+export function validateForm(form: IntakeForm): StructuredProblem[] {
+  const errors: StructuredProblem[] = [];
+  if (form.fields.length === 0) errors.push(problem("intake.form_empty", "the form has no fields"));
   const keys = new Set<string>();
   for (const field of form.fields) {
-    if (!FIELD_KEY.test(field.key)) errors.push(`field key ${JSON.stringify(field.key)} is not snake_case`);
-    if (keys.has(field.key)) errors.push(`field ${field.key} is defined twice`);
+    const at = { field: field.key };
+    if (!FIELD_KEY.test(field.key)) errors.push(problem("intake.field_key", `field key ${JSON.stringify(field.key)} is not snake_case`, at));
+    if (keys.has(field.key)) errors.push(problem("intake.field_duplicate", `field ${field.key} is defined twice`, at));
     keys.add(field.key);
-    if (field.label.en.trim() === "" || field.label.fr.trim() === "") errors.push(`field ${field.key} needs an English and a French label`);
+    if (field.label.en.trim() === "" || field.label.fr.trim() === "") errors.push(problem("intake.field_labels", `field ${field.key} needs an English and a French label`, at));
     // Spanish is optional; when given it is a label like the others.
     const es: unknown = field.label.es;
-    if (es !== undefined && (typeof es !== "string" || es.trim() === "")) errors.push(`field ${field.key}: the Spanish label (es), when given, must not be empty`);
-    for (const k of unknownKeys(field.label as unknown as Record<string, unknown>, LOCALES)) errors.push(`field ${field.key}: label ${k} is not a locale (en, fr or es)`);
-    for (const k of unknownKeys(field as unknown as Record<string, unknown>, FIELD_SETTINGS)) errors.push(`field ${field.key}: ${k} is not a field setting`);
+    if (es !== undefined && (typeof es !== "string" || es.trim() === "")) errors.push(problem("intake.field_spanish", `field ${field.key}: the Spanish label (es), when given, must not be empty`, at));
+    for (const k of unknownKeys(field.label as unknown as Record<string, unknown>, LOCALES)) errors.push(problem("intake.field_locale", `field ${field.key}: label ${k} is not a locale (en, fr or es)`, { ...at, key: k }));
+    for (const k of unknownKeys(field as unknown as Record<string, unknown>, FIELD_SETTINGS)) errors.push(problem("intake.field_setting", `field ${field.key}: ${k} is not a field setting`, { ...at, key: k }));
     // Only `true` marks a field sensitive: any other value ("true", 1) would file it in the clear.
     const sensitive: unknown = field.sensitive;
-    if (sensitive !== undefined && typeof sensitive !== "boolean") errors.push(`field ${field.key}: sensitive must be true or false`);
+    if (sensitive !== undefined && typeof sensitive !== "boolean") errors.push(problem("intake.field_sensitive", `field ${field.key}: sensitive must be true or false`, at));
     if ([field.key.replaceAll("_", " "), field.label.en, field.label.fr, typeof es === "string" ? es : ""].some(namesForbidden)) {
-      errors.push(`field ${field.key} names a card or a Social Insurance Number, which intake never collects`);
+      errors.push(problem("intake.field_forbidden", `field ${field.key} names a card or a Social Insurance Number, which intake never collects`, at));
     }
-    errors.push(...rangeErrors(field).map((e) => `field ${field.key}: ${e}`));
+    errors.push(...rangeErrors(field).map((e) => problem(e.code, `field ${field.key}: ${e.message}`, { ...at, ...e.params })));
     // The length cap and the pattern's work bound both read it: NaN, 0, a fraction or a string would
     // lift the cap, make the field impossible to fill, or give the two checks different limits.
     const maxLength: unknown = field.maxLength;
     if (maxLength !== undefined && (!Number.isInteger(maxLength) || (maxLength as number) < 1)) {
-      errors.push(`field ${field.key}: maxLength must be a positive whole number`);
+      errors.push(problem("intake.field_max_length", `field ${field.key}: maxLength must be a positive whole number`, at));
     }
     if (field.pattern !== undefined) {
       const longest = typeof field.maxLength === "number" ? field.maxLength : DEFAULT_MAX_LENGTH;
-      const problem = field.type === "text" ? patternProblem(field.pattern, longest) : "pattern is for text fields only";
-      if (problem !== null) errors.push(`field ${field.key}: ${problem}`);
+      const pattern = field.type === "text" ? patternProblem(field.pattern, longest) : "pattern is for text fields only";
+      if (pattern !== null) errors.push(problem("intake.field_pattern", `field ${field.key}: ${pattern}`, { ...at, reason: pattern }));
     }
     if (field.showIf !== undefined) {
-      const problem = showIfProblem(form, field);
-      if (problem !== null) errors.push(`field ${field.key}: ${problem}`);
+      const showIf = showIfProblem(form, field);
+      if (showIf !== null) errors.push(problem(showIf.code, `field ${field.key}: ${showIf.message}`, { ...at, ...showIf.params }));
     }
   }
   return errors;
@@ -136,16 +139,16 @@ function namesForbidden(name: string): boolean {
   return FORBIDDEN_NAME.test(plain) || plain.split(" ").some((word) => FORBIDDEN_COMPOUND.some((compound) => compound.test(word)));
 }
 
-function rangeErrors(field: IntakeField): string[] {
+function rangeErrors(field: IntakeField): StructuredProblem[] {
   if (field.min === undefined && field.max === undefined) return [];
-  if (field.type !== "number" && field.type !== "date") return ["min and max are for number and date fields only"];
+  if (field.type !== "number" && field.type !== "date") return [problem("intake.field_range_shape", "min and max are for number and date fields only")];
   const ok = field.type === "number" ? (v: unknown) => typeof v === "number" && Number.isFinite(v) : (v: unknown) => typeof v === "string" && isCalendarDate(v);
   const what = field.type === "number" ? "a number" : "a YYYY-MM-DD date";
-  const errors: string[] = [];
+  const errors: StructuredProblem[] = [];
   for (const bound of ["min", "max"] as const) {
-    if (field[bound] !== undefined && !ok(field[bound])) errors.push(`${bound} must be ${what}`);
+    if (field[bound] !== undefined && !ok(field[bound])) errors.push(problem("intake.field_range_bound", `${bound} must be ${what}`, { bound, type: field.type }));
   }
-  if (errors.length === 0 && field.min !== undefined && field.max !== undefined && (field.min as number) > (field.max as number)) errors.push("min is above max");
+  if (errors.length === 0 && field.min !== undefined && field.max !== undefined && (field.min as number) > (field.max as number)) errors.push(problem("intake.field_range_order", "min is above max"));
   return errors;
 }
 
@@ -204,19 +207,19 @@ function patternProblem(pattern: unknown, longest: number): string | null {
   return work > MAX_PATTERN_WORK ? "pattern can match in too many ways to check quickly; bound its repetitions, for example {1,40} for +" : null;
 }
 
-function showIfProblem(form: IntakeForm, field: IntakeField): string | null {
+function showIfProblem(form: IntakeForm, field: IntakeField): StructuredProblem | null {
   const rule: unknown = field.showIf;
   if (!isObject(rule) || typeof rule.field !== "string" || !("equals" in rule) || unknownKeys(rule, ["field", "equals"]).length > 0) {
-    return "showIf must be { field, equals }";
+    return problem("intake.show_if_shape", "showIf must be { field, equals }");
   }
   const target = form.fields.find((f) => f.key === rule.field);
-  if (target === undefined) return `showIf names no field ${rule.field}`;
-  if (target.sensitive === true) return `showIf depends on ${target.key}, which is sensitive, so the questions asked would tell its value`;
-  if (!acceptsValue(target, rule.equals)) return `showIf.equals is not a value field ${target.key} can take`;
+  if (target === undefined) return problem("intake.show_if_no_field", `showIf names no field ${rule.field}`, { field: rule.field });
+  if (target.sensitive === true) return problem("intake.show_if_sensitive", `showIf depends on ${target.key}, which is sensitive, so the questions asked would tell its value`, { field: target.key });
+  if (!acceptsValue(target, rule.equals)) return problem("intake.show_if_value", `showIf.equals is not a value field ${target.key} can take`, { field: target.key });
   // Follow the chain: a field that comes back to itself is never shown.
   const chain = [field.key];
   for (let next: IntakeField | undefined = target; next !== undefined; next = form.fields.find((f) => f.key === next!.showIf?.field)) {
-    if (next.key === field.key) return `showIf goes round in a cycle: ${[...chain, field.key].join(" > ")}`;
+    if (next.key === field.key) return problem("intake.show_if_cycle", `showIf goes round in a cycle: ${[...chain, field.key].join(" > ")}`, { cycle: [...chain, field.key].join(" > ") });
     if (chain.includes(next.key)) return null;
     chain.push(next.key);
   }

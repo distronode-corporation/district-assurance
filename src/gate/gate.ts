@@ -20,7 +20,8 @@ import type { AccessController, AccessGrantBody, SignedAccessGrant, UnlockResult
 import type { JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { stepOfType } from "../core/flow.ts";
-import type { AssuranceModule, FlowStep, ModuleManifest, StepContext, StepStatus, StepView } from "../core/module.ts";
+import { problem, type AssuranceModule, type FlowStep, type ModuleManifest, type StepContext, type StepStatus, type StepView, type ValidationProblem } from "../core/module.ts";
+
 import type { AssuranceLevel } from "../core/policy.ts";
 import type { CallDraft, EngineRuntime } from "../core/runtime.ts";
 import { isDenseArray, isIntegerIn, isObject, isStringArray, unknownKeys } from "../core/shape.ts";
@@ -108,28 +109,28 @@ export const gateModule: AssuranceModule = {
     adapters: ["access", "accessSigner"],
   } satisfies ModuleManifest,
 
-  validateSettings(settings: unknown): string[] {
-    if (!isObject(settings)) return ["must be an object with the targets"];
-    const errors = unknownKeys(settings, ["targets", "maxGrantsPerCall"]).map((k) => `${k} is not a gate setting`);
+  validateSettings(settings: unknown): ValidationProblem[] {
+    if (!isObject(settings)) return [problem("gate.settings_shape", "must be an object with the targets")];
+    const errors = unknownKeys(settings, ["targets", "maxGrantsPerCall"]).map((k) => problem("gate.unknown_setting", `${k} is not a gate setting`, { key: k }));
     if (settings.maxGrantsPerCall !== undefined && !isIntegerIn(settings.maxGrantsPerCall, 1, MAX_GRANTS_PER_CALL)) {
-      errors.push(`maxGrantsPerCall must be an integer from 1 to ${MAX_GRANTS_PER_CALL}`);
+      errors.push(problem("gate.max_grants", `maxGrantsPerCall must be an integer from 1 to ${MAX_GRANTS_PER_CALL}`, { max: MAX_GRANTS_PER_CALL }));
     }
     const targets = settings.targets;
-    if (!isDenseArray(targets) || targets.length === 0) return [...errors, "targets must list at least one target"];
+    if (!isDenseArray(targets) || targets.length === 0) return [...errors, problem("gate.targets_empty", "targets must list at least one target")];
     const ids: unknown[] = [];
     targets.forEach((target: unknown, i: number) => {
       const at = `targets[${i}]`;
       if (!isObject(target)) {
-        errors.push(`${at} must be { id, controller, ref }`);
+        errors.push(problem("gate.target_shape", `${at} must be { id, controller, ref }`, { index: i }));
         return;
       }
       ids.push(target.id);
-      errors.push(...unknownKeys(target, ["id", "controller", "ref"]).map((k) => `${at}.${k} is not a target field`));
-      if (typeof target.id !== "string" || !TARGET_ID.test(target.id)) errors.push(`${at}.id must be lower-case letters, digits and hyphens, at most 64`);
-      if (typeof target.controller !== "string" || target.controller === "") errors.push(`${at}.controller must name a controller`);
-      if (typeof target.ref !== "string" || target.ref.trim() === "" || target.ref.length > 200) errors.push(`${at}.ref must be 1 to 200 characters`);
+      errors.push(...unknownKeys(target, ["id", "controller", "ref"]).map((k) => problem("gate.unknown_target_field", `${at}.${k} is not a target field`, { index: i, key: k })));
+      if (typeof target.id !== "string" || !TARGET_ID.test(target.id)) errors.push(problem("gate.target_id", `${at}.id must be lower-case letters, digits and hyphens, at most 64`, { index: i }));
+      if (typeof target.controller !== "string" || target.controller === "") errors.push(problem("gate.target_controller", `${at}.controller must name a controller`, { index: i }));
+      if (typeof target.ref !== "string" || target.ref.trim() === "" || target.ref.length > 200) errors.push(problem("gate.target_ref", `${at}.ref must be 1 to 200 characters`, { index: i }));
     });
-    if (new Set(ids).size !== ids.length) errors.push("two targets have the same id");
+    if (new Set(ids).size !== ids.length) errors.push(problem("gate.duplicate_target", "two targets have the same id"));
     return errors;
   },
 
@@ -137,33 +138,33 @@ export const gateModule: AssuranceModule = {
     return ["access", "accessSigner"];
   },
 
-  checkAdapters(settings: unknown, capabilities: Readonly<Record<string, unknown>>): string[] {
+  checkAdapters(settings: unknown, capabilities: Readonly<Record<string, unknown>>): ValidationProblem[] {
     const declared = capabilities.access as AccessCapabilities | undefined;
     if (declared === undefined) return [];
-    if (!isObject(declared) || !isStringArray(declared.controllers)) return ["the access adapter must declare its controllers as a list of names"];
+    if (!isObject(declared) || !isStringArray(declared.controllers)) return [problem("gate.controllers_declared", "the access adapter must declare its controllers as a list of names")];
     return (settings as GateSettings).targets
       .filter((t) => !declared.controllers.includes(t.controller))
-      .map((t) => `target ${t.id} names the controller ${t.controller}, which the access adapter does not have (it has: ${declared.controllers.join(", ") || "none"})`);
+      .map((t) => problem("gate.controller_missing", `target ${t.id} names the controller ${t.controller}, which the access adapter does not have (it has: ${declared.controllers.join(", ") || "none"})`, { target: t.id, controller: t.controller, controllers: declared.controllers.join(", ") || "none" }));
   },
 
-  validateStep(step: FlowStep, ctx: StepContext): string[] {
-    const errors = unknownKeys(step, ["type", "target", "lifetimeSeconds"]).map((k) => `${k} is not a field of this step`);
+  validateStep(step: FlowStep, ctx: StepContext): ValidationProblem[] {
+    const errors = unknownKeys(step, ["type", "target", "lifetimeSeconds"]).map((k) => problem("gate.unknown_step_field", `${k} is not a field of this step`, { key: k }));
     if (step.lifetimeSeconds !== undefined && !isIntegerIn(step.lifetimeSeconds, MIN_ACCESS_SECONDS, MAX_ACCESS_GRANT_SECONDS)) {
-      errors.push(`lifetimeSeconds must be an integer from ${MIN_ACCESS_SECONDS} to ${MAX_ACCESS_GRANT_SECONDS}`);
+      errors.push(problem("gate.lifetime", `lifetimeSeconds must be an integer from ${MIN_ACCESS_SECONDS} to ${MAX_ACCESS_GRANT_SECONDS}`, { min: MIN_ACCESS_SECONDS, max: MAX_ACCESS_GRANT_SECONDS }));
     }
-    if (typeof step.target !== "string") return [...errors, "target must name a target in the gate settings"];
+    if (typeof step.target !== "string") return [...errors, problem("gate.target_missing_name", "target must name a target in the gate settings")];
     const settings = ctx.settings as GateSettings | null;
-    if (settings !== null && !settings.targets.some((t) => t.id === step.target)) errors.push(`no target ${step.target} in the gate settings`);
+    if (settings !== null && !settings.targets.some((t) => t.id === step.target)) errors.push(problem("gate.target_not_in_settings", `no target ${step.target} in the gate settings`, { target: step.target }));
     return errors;
   },
 
-  validateFlow(steps: readonly FlowStep[], ctx: StepContext): string[] {
+  validateFlow(steps: readonly FlowStep[], ctx: StepContext): ValidationProblem[] {
     // Each gate.grant step completes only on a grant of its own, and every grant counts against the
     // call's limit, so a flow with more such steps than the limit could never finish (and would fail
     // at the door after earlier grants were delivered).
     const max = (ctx.settings as GateSettings).maxGrantsPerCall ?? DEFAULT_GRANTS_PER_CALL;
     const grants = steps.filter((step) => isObject(step) && step.type === "gate.grant").length;
-    return grants > max ? [`${grants} gate.grant steps, but a call may have at most ${max} access grant${max === 1 ? "" : "s"} (maxGrantsPerCall)`] : [];
+    return grants > max ? [problem("gate.too_many_grant_steps", `${grants} gate.grant steps, but a call may have at most ${max} access grant${max === 1 ? "" : "s"} (maxGrantsPerCall)`, { grants, max })] : [];
   },
 
   initCall(settings: unknown): JsonValue {

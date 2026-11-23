@@ -18,6 +18,7 @@
 // The business is told of each lock and may lift one early (INT-7): see "lock notices" below.
 import type { AttemptCounterKey, AttemptCounters } from "../core/adapters.ts";
 import { hmacSha256Hex } from "../core/hash.ts";
+import { problem, type StructuredProblem } from "../core/module.ts";
 import { isDenseArray, isIntegerIn, isObject, unknownKeys } from "../core/shape.ts";
 
 /** Lockout settings, in Badge's settings. The defaults are also the floors: a config can only be stricter. */
@@ -66,35 +67,35 @@ export interface Lock {
 }
 
 /** Every problem with Badge's `lockout` setting. Absent is fine: the defaults apply. */
-export function lockoutSettingsErrors(value: unknown): string[] {
+export function lockoutSettingsErrors(value: unknown): StructuredProblem[] {
   if (value === undefined) return [];
-  if (!isObject(value)) return ["lockout must be an object"];
-  const errors = unknownKeys(value, LOCKOUT_KEYS).map((k) => `lockout.${k} is not a lockout setting`);
+  if (!isObject(value)) return [problem("badge.lockout_shape", "lockout must be an object")];
+  const errors = unknownKeys(value, LOCKOUT_KEYS).map((k) => problem("badge.lockout_unknown_setting", `lockout.${k} is not a lockout setting`, { key: k }));
   const backoff = value.backoffSeconds;
   if (backoff !== undefined) {
     if (!isDenseArray(backoff) || backoff.length < 5 || backoff.length > 10 || !backoff.every((s) => isIntegerIn(s, 1, 86_400))) {
-      errors.push("lockout.backoffSeconds must list 5 to 10 whole seconds, each at most 86400");
+      errors.push(problem("badge.lockout_backoff_shape", "lockout.backoffSeconds must list 5 to 10 whole seconds, each at most 86400"));
     } else if (backoff.some((s, i) => (s as number) < backoffFloor(i))) {
-      errors.push("lockout.backoffSeconds must not go below 5, 15, 60, 300, 900 (900 after that)");
+      errors.push(problem("badge.lockout_backoff_floor", "lockout.backoffSeconds must not go below 5, 15, 60, 300, 900 (900 after that)"));
     }
   }
   if (value.lockAfterFailures !== undefined && !isIntegerIn(value.lockAfterFailures, 1, DEFAULT_LOCKOUT.lockAfterFailures)) {
-    errors.push("lockout.lockAfterFailures must be 1 to 10");
+    errors.push(problem("badge.lockout_failures", "lockout.lockAfterFailures must be 1 to 10"));
   }
   if (value.windowHours !== undefined && !isIntegerIn(value.windowHours, DEFAULT_LOCKOUT.windowHours, 168)) {
-    errors.push("lockout.windowHours must be 24 to 168");
+    errors.push(problem("badge.lockout_window", "lockout.windowHours must be 24 to 168"));
   }
   errors.push(...flowStartErrors(value.flowStartsPerHour));
   return errors;
 }
 
-function flowStartErrors(value: unknown): string[] {
+function flowStartErrors(value: unknown): StructuredProblem[] {
   if (value === undefined) return [];
-  if (!isObject(value)) return ["lockout.flowStartsPerHour must be an object"];
-  const errors = unknownKeys(value, FLOW_START_SCOPES).map((k) => `lockout.flowStartsPerHour.${k} is not a scope: subject or number`);
+  if (!isObject(value)) return [problem("badge.lockout_flow_starts_shape", "lockout.flowStartsPerHour must be an object")];
+  const errors = unknownKeys(value, FLOW_START_SCOPES).map((k) => problem("badge.lockout_flow_starts_scope", `lockout.flowStartsPerHour.${k} is not a scope: subject or number`, { key: k }));
   for (const scope of FLOW_START_SCOPES) {
     const most = DEFAULT_LOCKOUT.flowStartsPerHour[scope];
-    if (value[scope] !== undefined && !isIntegerIn(value[scope], 1, most)) errors.push(`lockout.flowStartsPerHour.${scope} must be 1 to ${most}`);
+    if (value[scope] !== undefined && !isIntegerIn(value[scope], 1, most)) errors.push(problem("badge.lockout_flow_starts_range", `lockout.flowStartsPerHour.${scope} must be 1 to ${most}`, { scope, max: most }));
   }
   return errors;
 }

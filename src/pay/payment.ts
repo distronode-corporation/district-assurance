@@ -2,6 +2,7 @@
 // texts the link to the number on file, and learns the result from a signed webhook. The amount
 // comes from code (a record, the business's endpoint, a price list), never from the model.
 import type { InstantPaymentMethod, PaymentMode } from "../core/adapters.ts";
+import { problem, type StructuredProblem } from "../core/module.ts";
 
 /** Where an amount comes from. The `AmountSource` adapter (PAY-2) resolves a reference from one of them. */
 export type AmountSourceKind = "intake_record" | "business_endpoint" | "price_list";
@@ -70,16 +71,16 @@ export const DEFAULT_LINK_LIFE_MINUTES = 15;
 export const MIN_LINK_LIFE_MINUTES = 5;
 export const MAX_LINK_LIFE_MINUTES = 60;
 
-/** Every problem with a list of payment methods, as sentences. */
-export function paymentMethodErrors(value: unknown): string[] {
+/** Every problem with a list of payment methods, with the method it is about in `params`. */
+export function paymentMethodErrors(value: unknown): StructuredProblem[] {
   if (!Array.isArray(value) || Object.keys(value).length !== value.length || value.length === 0 || !value.every((m) => typeof m === "string")) {
-    return ["paymentMethods must list at least one payment method"];
+    return [problem("pay.methods_shape", "paymentMethods must list at least one payment method")];
   }
-  const errors = new Set(value).size === value.length ? [] : ["paymentMethods has duplicates"];
+  const errors: StructuredProblem[] = new Set(value).size === value.length ? [] : [problem("pay.methods_duplicates", "paymentMethods has duplicates")];
   for (const method of value as string[]) {
     if ((INSTANT_PAYMENT_METHODS as readonly string[]).includes(method)) continue;
     const why = Object.hasOwn(REFUSED_METHODS, method) ? REFUSED_METHODS[method] : "it is not an instant payment method";
-    errors.push(`payment method ${method} is refused: ${why} (allowed: ${INSTANT_PAYMENT_METHODS.join(", ")})`);
+    errors.push(problem("pay.method_refused", `payment method ${method} is refused: ${why} (allowed: ${INSTANT_PAYMENT_METHODS.join(", ")})`, { method }));
   }
   return errors;
 }
@@ -105,12 +106,12 @@ export function outcomeAccountMatches(request: Pick<PaymentRequest, "mode" | "co
 /** Upper bound for one in-call link, in minor units. A host can lower it, never raise it here. */
 export const MAX_LINK_AMOUNT_MINOR = 1_000_000;
 
-/** Every problem with an amount and currency, as sentences. */
-export function validateAmount(amountMinor: number, currency: string, maxMinor = MAX_LINK_AMOUNT_MINOR): string[] {
-  const errors: string[] = [];
-  if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) errors.push("amountMinor must be a positive integer");
-  else if (amountMinor > Math.min(maxMinor, MAX_LINK_AMOUNT_MINOR)) errors.push("amountMinor is above the limit");
-  if (!/^[a-z]{3}$/.test(currency)) errors.push("currency must be a lower-case ISO 4217 code");
+/** Every problem with an amount and currency, with the offending values in `params`. */
+export function validateAmount(amountMinor: number, currency: string, maxMinor = MAX_LINK_AMOUNT_MINOR): StructuredProblem[] {
+  const errors: StructuredProblem[] = [];
+  if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) errors.push(problem("pay.amount_positive", "amountMinor must be a positive integer", { amountMinor }));
+  else if (amountMinor > Math.min(maxMinor, MAX_LINK_AMOUNT_MINOR)) errors.push(problem("pay.amount_limit", "amountMinor is above the limit", { amountMinor, max: Math.min(maxMinor, MAX_LINK_AMOUNT_MINOR) }));
+  if (!/^[a-z]{3}$/.test(currency)) errors.push(problem("pay.currency", "currency must be a lower-case ISO 4217 code", { currency }));
   return errors;
 }
 

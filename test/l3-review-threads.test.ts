@@ -9,6 +9,7 @@ import { DEFAULT_LOCKOUT } from "../src/verify/counters.ts";
 import { bankAccountRedactor, cardNumberRedactor, composeRedactors } from "../src/core/redaction.ts";
 import { deliverRecord } from "../src/file/delivery.ts";
 import { validateForm, type IntakeForm } from "../src/file/intake.ts";
+import { problemMessage } from "../src/core/module.ts";
 import { FakeFieldCipher, FakeRecordDelivery, MemoryConsentStore, MemoryRecordStore } from "../src/testing/fakes.ts";
 import { FakeDuressNotifier, TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine } from "../src/testing/index.ts";
 import { hiddenCounterKey } from "../src/verify/duress-flag.ts";
@@ -258,7 +259,7 @@ describe("L3 review: validateForm", () => {
   it("refuses a sensitive flag that is not true or false", () => {
     for (const sensitive of ["true", 1, null]) {
       const form = { formId: "f", version: "1", fields: [{ key: "policy", label: { en: "Policy", fr: "Police" }, type: "text", sensitive }] } as unknown as IntakeForm;
-      assert.ok(validateForm(form).includes("field policy: sensitive must be true or false"), JSON.stringify(sensitive));
+      assert.ok(validateForm(form).map(problemMessage).includes("field policy: sensitive must be true or false"), JSON.stringify(sensitive));
     }
     assert.deepEqual(validateForm(note("f", true)), []);
   });

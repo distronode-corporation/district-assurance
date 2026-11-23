@@ -605,3 +605,20 @@ reusing the `payment_link_email` consent for the receipt (the caller consented t
 not a receipt); falling back to text when the email cannot be served (the caller chose a channel; a
 fallback would send on one they did not consent to).
 **Revisit** if a host needs a receipt channel choice of its own, or a third channel.
+
+## ADR-35. Config problems keep their sentences and gain a structured form
+
+**Decided.** `validateConfig` keeps answering sentences, and `configProblems` answers the same
+problems as `{path, code, params, message}`. A module's validators may answer either a plain
+sentence or `{code, params?, message}`; the built-in ones answer the structured form, with
+module-prefixed codes. `ConfigError` keeps `problems` (the sentences) and adds `details` (the
+structured list).
+**Why beside, not instead.** The sentences are the product: a host with no dashboard reads them
+verbatim, and every validator, test and error message keeps its exact words. A dashboard needs a
+stable code to localize by and the values to fill its template with, which a sentence cannot give
+it. An outside module that answers plain sentences keeps them, under the code naming the validator
+that spoke.
+**Revisit** if a problem's wording needs to change: the sentence changes with the release, the
+code and its params do not. The codes are API, stable from 0.4.0 on, and `test/config-codes.test.ts`
+pins the full list.
+

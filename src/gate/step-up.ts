@@ -14,7 +14,7 @@ import { canonicalJson, type JsonValue } from "../core/canonical.ts";
 import { EngineError } from "../core/errors.ts";
 import { hexDigestsEqual, sha256Hex } from "../core/hash.ts";
 import { stepOfType } from "../core/flow.ts";
-import type { AssuranceModule, FlowStep, ModuleManifest, StepContext, StepStatus, StepView } from "../core/module.ts";
+import { problem, type AssuranceModule, type FlowStep, type ModuleManifest, type StepContext, type StepStatus, type StepView, type ValidationProblem } from "../core/module.ts";
 import type { AssuranceLevel } from "../core/policy.ts";
 import { isDenseArray, isIntegerIn, isObject, unknownKeys } from "../core/shape.ts";
 import type { CallDraft, CallRecord, EngineRuntime } from "../core/runtime.ts";
@@ -165,28 +165,28 @@ export const stepUpModule: AssuranceModule = {
     adapters: ["stepUpSigner"],
   } satisfies ModuleManifest,
 
-  validateSettings(settings: unknown): string[] {
-    if (!isObject(settings)) return ["must be an object with the issuer and the sites"];
-    const errors = unknownKeys(settings, ["issuer", "sites", "maxTokensPerCall"]).map((k) => `${k} is not a step-up setting`);
-    if (!isIssuer(settings.issuer)) errors.push("issuer must be an https URL without a query, a fragment or credentials");
+  validateSettings(settings: unknown): ValidationProblem[] {
+    if (!isObject(settings)) return [problem("step_up.settings_shape", "must be an object with the issuer and the sites")];
+    const errors = unknownKeys(settings, ["issuer", "sites", "maxTokensPerCall"]).map((k) => problem("step_up.unknown_setting", `${k} is not a step-up setting`, { key: k }));
+    if (!isIssuer(settings.issuer)) errors.push(problem("step_up.issuer", "issuer must be an https URL without a query, a fragment or credentials"));
     if (settings.maxTokensPerCall !== undefined && !isIntegerIn(settings.maxTokensPerCall, 1, MAX_TOKENS_PER_CALL)) {
-      errors.push(`maxTokensPerCall must be an integer from 1 to ${MAX_TOKENS_PER_CALL}`);
+      errors.push(problem("step_up.max_tokens", `maxTokensPerCall must be an integer from 1 to ${MAX_TOKENS_PER_CALL}`, { max: MAX_TOKENS_PER_CALL }));
     }
     const sites = settings.sites;
-    if (!isDenseArray(sites) || sites.length === 0) return [...errors, "sites must list at least one site"];
+    if (!isDenseArray(sites) || sites.length === 0) return [...errors, problem("step_up.sites_empty", "sites must list at least one site")];
     const ids: unknown[] = [];
     sites.forEach((site: unknown, i: number) => {
       const at = `sites[${i}]`;
       if (!isObject(site)) {
-        errors.push(`${at} must be { id, audience }`);
+        errors.push(problem("step_up.site_shape", `${at} must be { id, audience }`, { index: i }));
         return;
       }
       ids.push(site.id);
-      errors.push(...unknownKeys(site, ["id", "audience"]).map((k) => `${at}.${k} is not a site field`));
-      if (typeof site.id !== "string" || !SITE_ID.test(site.id)) errors.push(`${at}.id must be lower-case letters, digits and hyphens, at most 64`);
-      if (typeof site.audience !== "string" || !/^\S{1,200}$/.test(site.audience)) errors.push(`${at}.audience must be 1 to 200 characters, no spaces`);
+      errors.push(...unknownKeys(site, ["id", "audience"]).map((k) => problem("step_up.site_unknown_field", `${at}.${k} is not a site field`, { index: i, key: k })));
+      if (typeof site.id !== "string" || !SITE_ID.test(site.id)) errors.push(problem("step_up.site_id", `${at}.id must be lower-case letters, digits and hyphens, at most 64`, { index: i }));
+      if (typeof site.audience !== "string" || !/^\S{1,200}$/.test(site.audience)) errors.push(problem("step_up.site_audience", `${at}.audience must be 1 to 200 characters, no spaces`, { index: i }));
     });
-    if (new Set(ids).size !== ids.length) errors.push("two sites have the same id");
+    if (new Set(ids).size !== ids.length) errors.push(problem("step_up.site_duplicate", "two sites have the same id"));
     return errors;
   },
 
@@ -194,23 +194,23 @@ export const stepUpModule: AssuranceModule = {
     return ["stepUpSigner"];
   },
 
-  validateStep(step: FlowStep, ctx: StepContext): string[] {
-    const errors = unknownKeys(step, ["type", "site", "lifetimeSeconds"]).map((k) => `${k} is not a field of this step`);
+  validateStep(step: FlowStep, ctx: StepContext): ValidationProblem[] {
+    const errors = unknownKeys(step, ["type", "site", "lifetimeSeconds"]).map((k) => problem("step_up.step_unknown_field", `${k} is not a field of this step`, { key: k }));
     if (step.lifetimeSeconds !== undefined && !isIntegerIn(step.lifetimeSeconds, MIN_STEP_UP_SECONDS, MAX_STEP_UP_SECONDS)) {
-      errors.push(`lifetimeSeconds must be an integer from ${MIN_STEP_UP_SECONDS} to ${MAX_STEP_UP_SECONDS}`);
+      errors.push(problem("step_up.lifetime_seconds", `lifetimeSeconds must be an integer from ${MIN_STEP_UP_SECONDS} to ${MAX_STEP_UP_SECONDS}`, { min: MIN_STEP_UP_SECONDS, max: MAX_STEP_UP_SECONDS }));
     }
-    if (typeof step.site !== "string") return [...errors, "site must name a site in the step-up settings"];
+    if (typeof step.site !== "string") return [...errors, problem("step_up.step_site_shape", "site must name a site in the step-up settings")];
     const settings = ctx.settings as StepUpSettings | null;
-    if (settings !== null && !settings.sites.some((s) => s.id === step.site)) errors.push(`no site ${step.site} in the step-up settings`);
+    if (settings !== null && !settings.sites.some((s) => s.id === step.site)) errors.push(problem("step_up.step_site_unknown", `no site ${step.site} in the step-up settings`, { site: step.site }));
     return errors;
   },
 
-  validateFlow(steps: readonly FlowStep[], ctx: StepContext): string[] {
+  validateFlow(steps: readonly FlowStep[], ctx: StepContext): ValidationProblem[] {
     // Each step-up.issue step completes only on a token of its own, and every token counts
     // against the call's limit, so a flow with more such steps than the limit can never finish.
     const max = (ctx.settings as StepUpSettings).maxTokensPerCall ?? DEFAULT_TOKENS_PER_CALL;
     const issues = steps.filter((step) => isObject(step) && step.type === "step-up.issue").length;
-    return issues > max ? [`${issues} step-up.issue steps, but a call may have at most ${max} step-up token${max === 1 ? "" : "s"} (maxTokensPerCall)`] : [];
+    return issues > max ? [problem("step_up.too_many_steps", `${issues} step-up.issue steps, but a call may have at most ${max} step-up token${max === 1 ? "" : "s"} (maxTokensPerCall)`, { issues, max })] : [];
   },
 
   initCall(settings: unknown): JsonValue {

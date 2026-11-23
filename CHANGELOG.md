@@ -17,12 +17,21 @@ heading, and uses it as the GitHub release's text, with a link back here
 
 ## [Unreleased]
 
-A host can now cut an audit ledger's oldest entries below a signed checkpoint, and a reader can
+A dashboard can now read every config problem in a structured form and localize it (issue #160), and
+a host can cut an audit ledger's oldest entries below a signed checkpoint, with a reader able to
 check everything that is left from that checkpoint on without the entries before it (SPEC section
 10, issues #157, #158 and #159).
 
 ### Added
 
+- **Structured config problems.** `configProblems(config, registry)` answers every problem
+  `validateConfig` does, as `{path, code, params, message}`: where the problem is, a stable code
+  for it (`badge.factors_empty`, `policy.scope_floor`, `gate.too_many_grant_steps`), the values the
+  sentence interpolates, and the sentence itself. `ConfigError.details` carries the same list beside
+  `problems`, and the constructor still takes plain sentences. Every problem a config can have now
+  carries its own code, the shared validators a module's checks are built on included
+  (`validateForm`, `validateAmount`, `paymentMethodErrors`, `validatePolicy`), and the full list is
+  pinned and unique by `test/config-codes.test.ts`, stable from 0.4.0 on.
 - **Signed ledger checkpoints.** A first-class `ledger_checkpoint` document names the last entry a
   prune removes (`seq` and `hash`), how many entries that checkpoint cuts (`prunedCount`), and when
   it was signed, under the host's name for the ledger, and is signed by a `ReceiptSigner` over its
@@ -79,6 +88,17 @@ check everything that is left from that checkpoint on without the entries before
   business, what the call did and the link, nothing else, and the ledger gets at most one entry per
   channel that sent (`receipt.link_texted`, `receipt.link_emailed`).
 
+### Changed
+
+- **The validators answer problems, not sentences.** The built-in modules' validators
+  (`validateSettings`, `validateStep`, `validateFlow`, `checkAdapters` on `badgeModule`,
+  `paylinkModule` and the rest, all root exports) and the shared validators (`validateForm`,
+  `validateAmount`, `paymentMethodErrors`, `validatePolicy`) now answer the structured form where
+  0.3.0 answered strings: a consumer that read their results as strings breaks at compile time
+  (TS2322) and at run time (`.join()` prints `[object Object]`); `problemMessage` reads the sentence
+  back out of a problem. An outside module may still answer plain sentences (kept under the code
+  naming the validator that spoke, with no params, so a dashboard falls back to the sentence for
+  those), and every sentence itself is unchanged, byte for byte.
 
 ## [0.3.0] - 2026-11-22
 

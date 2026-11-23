@@ -6,7 +6,11 @@ import { describe, it } from "node:test";
 import type { CodeSendKey } from "../src/core/adapters.ts";
 import type { FlowConfig } from "../src/core/config.ts";
 import { hmacSha256Hex } from "../src/core/hash.ts";
-import { defaultVerificationPolicy, validatePolicy } from "../src/core/policy.ts";
+import { defaultVerificationPolicy, validatePolicy as validatePolicyRaw } from "../src/core/policy.ts";
+import { problemMessage } from "../src/core/module.ts";
+
+/** The policy validator's sentences, as the tests read them. */
+const validatePolicy = (...args: Parameters<typeof validatePolicyRaw>): string[] => validatePolicyRaw(...args).map(problemMessage);
 import { MemoryCodeStore, TEST_KNOWLEDGE_KEY, codeStoreContract, testSubject, type TestEngine } from "../src/testing/index.ts";
 import { TEXT_CODE_LIMITS, textCodeDestinationAllowed, textCodeText } from "../src/verify/text-code.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig } from "./helpers.ts";

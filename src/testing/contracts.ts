@@ -14,7 +14,7 @@ import type { AuditEntry, AuditInput, AuditLedger, IntakeRecord, RecordStore, Su
 import { EngineError } from "../core/errors.ts";
 import { GENESIS_HASH, chainEntry, verifyChain } from "../prove/ledger.ts";
 import { canonicalJson } from "../core/canonical.ts";
-import { checkManifest, type AssuranceModule, type FlowStep, type StepContext, type StepView } from "../core/module.ts";
+import { checkManifest, type AssuranceModule, type FlowStep, type StepContext, type StepView, type ValidationProblem } from "../core/module.ts";
 import { defaultVerificationPolicy, type VerificationPolicy } from "../core/policy.ts";
 import { newSession, type Grant, type SessionState } from "../core/session.ts";
 import { isDenseArray, isObject } from "../core/shape.ts";
@@ -1099,7 +1099,22 @@ function mustNotThrow<T>(what: string, fn: () => T): T {
 }
 
 function assertSentences(value: unknown, what: string): void {
-  // Dense only: every() skips a hole, which is no sentence.
+  // Dense only: every() skips a hole, which is no problem. A problem is either a plain sentence
+  // (an outside module) or the structured form: a code, params of strings and numbers, with the
+  // sentence as message.
+  assert.ok(
+    isDenseArray(value) &&
+      value.every((s: unknown) =>
+        typeof s === "string" ||
+        (isObject(s) && typeof s.code === "string" && typeof s.message === "string" && (s.params === undefined || (isObject(s.params) && Object.values(s.params).every((p) => typeof p === "string" || typeof p === "number"))))
+      ),
+    `${what} must return a list of problems (a sentence, or { code, params?, message }), got ${show(value)}`,
+  );
+}
+
+/** Adapter names, scope names: a plain list of strings, never a problem object. */
+function assertStrings(value: unknown, what: string): void {
+  // Dense only: every() skips a hole, which is no string.
   assert.ok(isDenseArray(value) && value.every((s) => typeof s === "string"), `${what} must return a list of strings, got ${show(value)}`);
 }
 
@@ -1140,7 +1155,7 @@ export function moduleContract(module: AssuranceModule, options: ModuleContractO
     Object.freeze({ settings: frozen(settings), policy: frozen(policy), adapters: new Set(module.requiredAdapters(frozen(settings))), capabilities: Object.freeze({}) });
   const emptyContext = (): StepContext => Object.freeze({ settings: null, policy: null, adapters: new Set<string>(), capabilities: Object.freeze({}) });
   /** validateStep on a frozen context. A host shares its adapter set, so a change to it fails the case. */
-  const validateStep = (step: FlowStep, ctx: StepContext, what: string): string[] => {
+  const validateStep = (step: FlowStep, ctx: StepContext, what: string): ValidationProblem[] => {
     const before = [...ctx.adapters];
     const problems = mustNotThrow(what, () => module.validateStep(frozen(step), ctx));
     assert.deepEqual([...ctx.adapters], before, `${what} must not change the adapters it is given`);
@@ -1160,7 +1175,7 @@ export function moduleContract(module: AssuranceModule, options: ModuleContractO
       () => {
         assert.deepEqual(module.validateSettings(frozen(settings)), [], "the sample settings");
         const adapters = module.requiredAdapters(frozen(settings));
-        assertSentences(adapters, "requiredAdapters");
+        assertStrings(adapters, "requiredAdapters");
         for (const adapter of manifest.adapters) assert.ok(adapters.includes(adapter), `requiredAdapters must include the manifest's ${adapter}`);
         for (const type of manifest.provides.steps) assert.ok(steps.some((s) => s.type === type), `no sample step of type ${type}`);
         for (const step of steps) {
@@ -1192,7 +1207,7 @@ export function moduleContract(module: AssuranceModule, options: ModuleContractO
             const level = mustNotThrow(`stepLevel ${what}`, () => module.stepLevel?.(frozen(bad)) ?? null);
             assert.ok(level === null || [0, 1, 2, 3].includes(level), `stepLevel ${what} must return a level from 0 to 3, or null`);
             const grants = mustNotThrow(`stepGrants ${what}`, () => module.stepGrants?.(frozen(bad)) ?? null);
-            if (grants !== null) assertSentences(grants, `stepGrants ${what}`);
+            if (grants !== null) assertStrings(grants, `stepGrants ${what}`);
           }
         }
       },

@@ -2,8 +2,12 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { validatePolicy, type Attestation, type AssuranceLevel } from "../src/core/policy.ts";
+import { validatePolicy as validatePolicyRaw, type Attestation, type AssuranceLevel } from "../src/core/policy.ts";
+import { problemMessage } from "../src/core/module.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
+
+/** The policy validator's sentences, as the tests read them. */
+const validatePolicy = (...args: Parameters<typeof validatePolicyRaw>): string[] => validatePolicyRaw(...args).map(problemMessage);
 import type { TestEngine } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, rejects, setup, testConfig } from "./helpers.ts";
 
@@ -50,7 +54,7 @@ describe("hostile #104: the policy's caps", () => {
     const policy = testConfig().policy;
     for (const caps of [null, [], "C:2", 2, { c: 2 }, { "C ": 2 }, { C: "2" }, { C: 2.5 }, { C: -1 }, { C: 4 }, { C: Number.NaN }, { C: true }, JSON.parse('{"__proto__":1}'), { toString: 1 }]) {
       const errors = validatePolicy({ ...policy, attestationCaps: caps as never });
-      assert.ok(errors.some((e) => e.startsWith("attestationCaps")), JSON.stringify(caps));
+      assert.ok(errors.map(problemMessage).some((e) => e.startsWith("attestationCaps")), JSON.stringify(caps));
     }
     assert.deepEqual(validatePolicy({ ...policy, attestationCaps: { A: 3, B: 3, C: 2, failed: 0, none: 2 } }), []);
   });

@@ -27,7 +27,7 @@ import {
   type AccessCodeStore,
 } from "../src/gate/codes.ts";
 import { MemoryCodeStore, TEST_KNOWLEDGE_KEY, createTestEngine, testSubject } from "../src/testing/index.ts";
-import { ACCOUNT, DOB, PHONE_ON_FILE, rejects, setup, testConfig } from "./helpers.ts";
+import { ACCOUNT, DOB, PHONE_ON_FILE, messages, rejects, setup, testConfig } from "./helpers.ts";
 
 const verify = { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["entry.open"] };
 const targets = [
@@ -111,16 +111,16 @@ const registry = (adapters = ["ledger", "records", "carrier", "identity", "messa
 describe("gate: config", () => {
   it("checks every gate setting", () => {
     assert.deepEqual(gateModule.validateSettings({ targets, maxGrantsPerCall: 5 }), []);
-    assert.deepEqual(gateModule.validateSettings(undefined), ["must be an object with the targets"]);
-    assert.deepEqual(gateModule.validateSettings({ targets: [], maxGrantsPerCall: 6, x: 1 }), [
+    assert.deepEqual(messages(gateModule.validateSettings(undefined)), ["must be an object with the targets"]);
+    assert.deepEqual(messages(gateModule.validateSettings({ targets: [], maxGrantsPerCall: 6, x: 1 })), [
       "x is not a gate setting",
       "maxGrantsPerCall must be an integer from 1 to 5",
       "targets must list at least one target",
     ]);
     const sparse: unknown[] = [];
     sparse[1] = targets[0];
-    assert.deepEqual(gateModule.validateSettings({ targets: sparse }), ["targets must list at least one target"], "a hole is not a target");
-    assert.deepEqual(gateModule.validateSettings({ targets: [7, { id: "Front", controller: "", ref: " ", y: 1 }, { id: "a", controller: "lobby", ref: "x".repeat(201) }, { id: "a", controller: 1, ref: 1 }] }), [
+    assert.deepEqual(messages(gateModule.validateSettings({ targets: sparse })), ["targets must list at least one target"], "a hole is not a target");
+    assert.deepEqual(messages(gateModule.validateSettings({ targets: [7, { id: "Front", controller: "", ref: " ", y: 1 }, { id: "a", controller: "lobby", ref: "x".repeat(201) }, { id: "a", controller: 1, ref: 1 }] })), [
       "targets[0] must be { id, controller, ref }",
       "targets[1].y is not a target field",
       "targets[1].id must be lower-case letters, digits and hyphens, at most 64",
