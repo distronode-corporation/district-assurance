@@ -15,21 +15,12 @@ released out of this file, from its dated `## [X.Y.Z] - YYYY-MM-DD` heading to t
 heading, and uses it as the GitHub release's text, with a link back here
 (`scripts/release-notes.mjs`). A release with no dated section is refused.
 
-## [Unreleased]
+## [0.4.0] - 2026-11-23
 
-### Fixed
-
-- **`validateConfig` answers a flow with a null step beside a paylink step.** Paylink's whole-flow
-  check skipped nothing: a step that was not an object reached it as a `FlowStep` and threw a raw
-  `TypeError` on `step.type`, crashing the config check that promises to answer every problem and
-  never throw. It now skips the malformed step, as Gate's and step-up's whole-flow checks already
-  did, and the composition reports the step once (#173).
-
-
-A dashboard can now read every config problem in a structured form and localize it (issue #160), and
-a host can cut an audit ledger's oldest entries below a signed checkpoint, with a reader able to
-check everything that is left from that checkpoint on without the entries before it (SPEC section
-10, issues #157, #158 and #159).
+district-assurance 0.4.0 lets a caller get their receipt link by email on the channel they chose
+for their payment link, lets a host cut its audit ledger's oldest entries below a signed checkpoint
+while readers keep checking everything that is left, and gives every config problem a stable code a
+dashboard can localize by. Existing flow configs keep working unchanged, and receipts stay version 1.
 
 ### Added
 
@@ -77,64 +68,58 @@ check everything that is left from that checkpoint on without the entries before
   `verifyAnchor` takes the checkpoint in its `trust` the same way, so an anchor written after a
   prune is checked from the checkpoint's point; the covered entries are now taken by their `seq`
   rather than their position, and an `entries` list holding null or a hole anywhere in it is
-  `malformed`, where a trailing null or a hole past the covered seq used to pass. A monthly report names the last
-  entry it read, or the base of a ledger pruned to its head, never a head read after its listing.
+  `malformed`, where a trailing null or a hole past the covered seq used to pass. A monthly report
+  names the last entry it read, or the base of a ledger pruned to its head, never a head read
+  after its listing.
 - **A receipt link by email** (ADR-34, SPEC section 16): `sendReceiptLink(callId, url)` sends the
   link to an ended call's receipt by the channel the caller chose for their payment link, and
   `textReceiptLink` still texts it as before. The email goes only when the call's last delivered
   payment link went by email, Trace's `channels` setting is `["text", "email"]` (the new setting;
   the default is text only), a keypad or PIN match still stands and the caller's latest answer to
-  the `receipt_email` consent purpose is yes, and only to the address kept for the subject when the
-  call's verification first read it (the
-  address on file as Badge held it then, as the contact notice keeps the number before a change; a
-  first read of no address is kept too, so a later one never fills it in): never an address
-  the host's records changed to later on the call, never one heard or keyed on the call, and a call
-  with nothing kept sends no email. A channel that was chosen but not consented to
-  sends nothing, never the other channel instead. `textReceiptLink` stays its own entry point, once
-  per call on the text consent, so a host that adopts `sendReceiptLink` calls it alone, never both.
-  A config with the email channel on needs the `emails` adapter and a `receipt_email` wording in
-  Trace's settings, checked when the config is saved. The email (`RECEIPT_EMAIL`) names the
-  business, what the call did and the link, nothing else, and the ledger gets at most one entry per
-  channel that sent (`receipt.link_texted`, `receipt.link_emailed`).
+  the `receipt_email` consent purpose is yes, and only to the address kept for the subject as the
+  call's verification first read it (the address on file as Badge held it then, as the contact
+  notice keeps the number before a change; a first read of no address is kept too, so a later one
+  never fills it in): never an address the host's records changed to later on the call, never one
+  heard or keyed on the call, and a call with nothing kept sends no email. A channel that was
+  chosen but not consented to sends nothing, never the other channel instead. `textReceiptLink`
+  stays its own entry point, once per call on the text consent, so a host that adopts
+  `sendReceiptLink` calls it alone, never both. A config with the email channel on needs the
+  `emails` adapter and a `receipt_email` wording in Trace's settings, checked when the config is
+  saved. The email (`RECEIPT_EMAIL`) names the business, what the call did and the link, nothing
+  else, and the ledger gets at most one entry per channel that sent (`receipt.link_texted`,
+  `receipt.link_emailed`).
 
 ### Changed
 
-- **The validators answer problems, not sentences.** The built-in modules' validators
+- **The validators answer problems, not sentences (breaking).** The built-in modules' validators
   (`validateSettings`, `validateStep`, `validateFlow`, `checkAdapters` on `badgeModule`,
   `paylinkModule` and the rest, all root exports) and the shared validators (`validateForm`,
   `validateAmount`, `paymentMethodErrors`, `validatePolicy`) now answer the structured form where
   0.3.0 answered strings: a consumer that read their results as strings breaks at compile time
-  (TS2322) and at run time (`.join()` prints `[object Object]`); `problemMessage` reads the sentence
-  back out of a problem. An outside module may still answer plain sentences (kept under the code
-  naming the validator that spoke, with no params, so a dashboard falls back to the sentence for
-  those), and every sentence itself is unchanged, byte for byte.- **A payment link no longer goes by email to an address added during the call; text is offered
-  instead.** The kept address decides, as it does for a receipt email, and a call that started with
-  no address keeps trusting none added later.
-
+  (TS2322) and at run time (`.join()` prints `[object Object]`); `problemMessage` reads the
+  sentence back out of a problem. An outside module may still answer plain sentences (kept under
+  the code naming the validator that spoke, with no params, so a dashboard falls back to the
+  sentence for those), and every sentence itself is unchanged, byte for byte.
 - **A payment link no longer goes by email to an address added during the call; text is offered
-  instead.** The kept address decides, as it does for a receipt email, and a call that started with
-  no address keeps trusting none added later.
+  instead (breaking for the email channel).** The destination is now the address the call kept as
+  the verification first read the subject, once per subject, kept on the channel choice and then
+  on the request; email is offered only while the address on file is still that one. An address
+  the host's records changed during the call (a keypad recheck re-reads the subject) never
+  receives the link, before or after the choice, and a choice or a request that kept no address is
+  refused, never redirected to whatever is on file now. An emailed request left open by a 0.3.0
+  engine is refused until the host cancels it and offers the channels again (#167).
 
 ### Fixed
 
-- **A payment link email goes to the address the call kept.** The destination is the address kept
-  for the subject as the call's verification first reads it, once per subject, the same one a
-  receipt email goes to,
-  kept on the channel choice and then on the request so a resume sends to the same place, and email
-  is offered only while the address on file is still that one: an address the host's records
-  changed during the call (a keypad recheck re-reads the subject) never receives the link, before
-  or after the choice, and a choice or a request that kept no address is refused, never redirected
-  to whatever is on file now. An emailed request left open by a 0.3.0 engine is refused until the
-  host cancels it and offers the channels again (#167).
-
-
-### Fixed
-
+- **`validateConfig` answers a flow with a null step beside a paylink step.** Paylink's whole-flow
+  check skipped nothing: a step that was not an object reached it as a `FlowStep` and threw a raw
+  `TypeError` on `step.type`, crashing the config check that promises to answer every problem and
+  never throw. It now skips the malformed step, as Gate's and step-up's whole-flow checks already
+  did, and the composition reports the step once (#173).
 - **The Seam confirm window no longer flakes on a loaded runner.** `seamAccessController` takes a
   `nowMs` option, the monotonic clock its confirmation window is measured on, defaulting to
   `performance.now`; the adapter test injects one it controls, so one slow event-loop tick cannot
   let the window lapse before the first poll reads the attempt as still pending (#168).
-
 
 ## [0.3.0] - 2026-11-22
 
