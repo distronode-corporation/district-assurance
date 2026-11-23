@@ -1853,9 +1853,16 @@ export class Engine {
     this.#tell({ name: entry.event, callId: entry.callId, actor: entry.actor, at: entry.at, detail: entry.detail, eventId: entry.eventId, seq: appended.seq });
   }
 
-  /** Whether a prune spent the event id (its first entry sits below the base): a ledger that cannot prune never spent one. */
+  /**
+   * Whether a prune spent the event id (its first entry sits below the base). The base read is the
+   * cheap gate: a ledger that never pruned, or cannot prune, spent nothing, and its appends never
+   * probe the tombstone; only a ledger that pruned pays the spent-id read.
+   */
   async #spent(eventId: string): Promise<boolean> {
-    return (await this.#adapters.ledger.spentEventId?.(eventId)) === true;
+    const ledger = this.#adapters.ledger;
+    const base = await ledger.base?.();
+    if (base === null || base === undefined) return false;
+    return (await ledger.spentEventId?.(eventId)) === true;
   }
 
   /**

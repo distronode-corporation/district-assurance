@@ -292,6 +292,7 @@ describe("pruneLedger", () => {
         return inner.base();
       },
       prune: (point: { seq: number; hash: string }) => inner.prune(point),
+      spentEventId: (id: string) => inner.spentEventId(id),
     };
     assert.deepEqual(await pruneLedger(racing, { ledgerId: "ws_1", checkpoint: signed, keys }), { seq: 3, hash: signed.body.hash });
   });
@@ -311,6 +312,7 @@ describe("pruneLedger", () => {
         return ledger.base();
       },
       prune: (point: { seq: number; hash: string }) => ledger.prune(point),
+      spentEventId: (id: string) => ledger.spentEventId(id),
     };
     assert.deepEqual(await pruneLedger(mutating, { ledgerId: "ws_1", checkpoint: second, keys }), { seq: 4, hash: second.body.hash });
   });
@@ -333,6 +335,16 @@ describe("pruneLedger", () => {
     assert.deepEqual((await ledger.list()).map((e) => e.seq), []);
     const plain: AuditLedger = { append: (input: AuditInput) => ledger.append(input), head: () => ledger.head(), list: (fromSeq?: number, limit?: number) => ledger.list(fromSeq, limit) };
     await assert.rejects(pruneLedger(plain, { ledgerId: "ws_1", checkpoint: signed, keys: keys }), rejects("precondition_failed", /cannot prune/));
+    // A ledger with prune and base but no spentEventId would free replayed ids as it pruned them
+    // and leave the engine blind to spent ones: it cannot prune either.
+    const noTombstone: AuditLedger = {
+      append: (input: AuditInput) => ledger.append(input),
+      head: () => ledger.head(),
+      list: (fromSeq?: number, limit?: number) => ledger.list(fromSeq, limit),
+      base: () => ledger.base(),
+      prune: (point: { seq: number; hash: string }) => ledger.prune(point),
+    };
+    await assert.rejects(pruneLedger(noTombstone, { ledgerId: "ws_1", checkpoint: signed, keys }), rejects("precondition_failed", /cannot prune/), "a ledger that prunes must also answer which ids it spent");
     class LazyPruner extends MemoryAuditLedger {
       override async prune(): Promise<void> {}
     }
@@ -603,6 +615,33 @@ describe("the engine on a pruned ledger", () => {
     assert.equal(plans.length, 1, "one fresh plan above the base, never the spent number taken twice");
     assert.ok(plans[0]!.seq > base.seq);
     assert.deepEqual(verifyChain(entries, base), { ok: true, head: await t.ledger.head() });
+  });
+
+  it("skips the spent-id probe on a ledger that never pruned, or cannot", async () => {
+    const inner = new MemoryAuditLedger();
+    let probed = 0;
+    const counting: AuditLedger = {
+      append: (i) => inner.append(i),
+      head: () => inner.head(),
+      list: (fromSeq?: number, limit?: number) => inner.list(fromSeq, limit),
+      base: async () => null,
+      spentEventId: async () => {
+        probed++;
+        return false;
+      },
+    };
+    const t = setup({ adapters: { ledger: counting } });
+    const callId = await verifiedCall(t);
+    await t.engine.endCall(callId);
+    assert.ok((await inner.list()).length > 0, "the appends flowed");
+    assert.equal(probed, 0, "a ledger whose base is null never pruned, so its tombstone is never probed");
+    // And a ledger with no base at all (one that cannot prune): the appends flow as ever.
+    const bareInner = new MemoryAuditLedger();
+    const bare: AuditLedger = { append: (i) => bareInner.append(i), head: () => bareInner.head(), list: (fromSeq?: number, limit?: number) => bareInner.list(fromSeq, limit) };
+    const plain = setup({ adapters: { ledger: bare } });
+    const second = await verifiedCall(plain);
+    await plain.engine.endCall(second);
+    assert.ok((await bareInner.list()).length > 0, "a ledger without base or spentEventId appends as ever");
   });
 
   it("finishes a pin change again after a prune: the spent id is skipped and nothing is appended", async () => {
