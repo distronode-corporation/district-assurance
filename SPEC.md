@@ -2474,8 +2474,12 @@ the ask. A channel that was chosen but cannot be served (no answer, a later "no"
 stored or revoked, no address kept) sends nothing, and the link never falls back to the other
 channel; a caller who chose email and only answered the text purpose gets no link from
 `sendReceiptLink`. `textReceiptLink` is its own entry point, though: it still texts on the text
-purpose's consent, so a host that adopts `sendReceiptLink` calls it alone, never both. At most one
-link per call from `sendReceiptLink`, whichever channel it sends. The email is `RECEIPT_EMAIL`: subject "Your receipt from
+purpose's consent, so a host that adopts `sendReceiptLink` calls it alone, never both. Called
+together on one call, they can send both a text and an email of the same link, each on its own
+consent: nothing claims the send across the two entry points (ADR-37; a claim would change
+`textReceiptLink`'s shipped concurrency and a crashed sender's claim would block every retry), and
+each channel that sends is recorded on the ledger, once. At most one link per call from
+`sendReceiptLink`, whichever channel it sends. The email is `RECEIPT_EMAIL`: subject "Your receipt from
 BUSINESS" / "Votre reçu de BUSINESS" / "Su recibo de BUSINESS", body "BUSINESS sent you a receipt
 for ACTIONS on your call.", the link on a line of its own, then "If you did not have this call, do
 not use the link." / "BUSINESS vous a envoyé un reçu pour ACTIONS lors de votre appel." ... "Si vous

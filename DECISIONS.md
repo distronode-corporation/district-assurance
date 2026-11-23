@@ -645,3 +645,22 @@ still redirect that one call's link.
 **Revisit** if a host needs a mid-call address change to redirect a payment link: that needs a
 fresh consent to the new address, not a looser pin.
 
+## ADR-37. No cross-entry-point lease on the receipt link
+
+**Decided.** The receipt link keeps its two entry points with no claim between them: `textReceiptLink`
+texts once on the text consent, `sendReceiptLink` sends once on the caller's payment channel's
+consent, and a host that runs both on one call can send both a text and an email of the same link,
+each on its own consent. The adoption note stands: a host that adopts `sendReceiptLink` calls it
+alone.
+**Why no lease.** A sender that claims the send before sending would refuse a second sender and
+change `textReceiptLink`'s shipped concurrency, where two concurrent calls both answer `texted:
+true` because one text goes out by its idempotency key; and a sender that crashes mid-send would
+leave the claim behind and block every retry (the payment link's lease avoids that with a lapse,
+at the cost of the larger change #166's review set aside). The duplicate it would prevent is rare,
+consented twice over (each channel has its own purpose), confined to one call, and #174's
+kept-address rule confines it further: both sends reach the one subject, the email at the address
+the call kept, the text at the number kept before any contact change, else the subject's number on
+file. Each channel that sends is recorded on the ledger, once.
+**Revisit** if a host ever runs both entry points in production and the duplicate becomes a
+complaint: the lease with a lapse, as the payment link send uses, is the known design.
+
