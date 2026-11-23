@@ -357,7 +357,9 @@ export async function revokeConsent(rt: EngineRuntime, input: { consentId: strin
   const ledgered = call !== null || (await recordedOnLedger(rt, consent));
   const revoked = stored.revoked ?? (await store.revokeConsent(rt.workspaceId, { consentId: consent.consentId, via, at: rt.now() }));
   // One entry per consent, however often it is revoked: the event id names the consent, and a
-  // ledger appends an id once, so a retry after a failed append completes it.
+  // ledger appends an id once, so a retry after a failed append completes it. An id a prune
+  // spent was appended before the prune: the engine skips the write and the stored revocation
+  // answers, so no second entry is written below a base either.
   await rt.append({
     eventId: JSON.stringify([rt.workspaceId, consent.callId, "consent.revoked", consent.consentId]),
     callId: consent.callId,

@@ -170,6 +170,11 @@ export async function signLedgerCheckpoint(ledger: AuditLedger, input: LedgerChe
   const check = await chainTo(ledger, base, at);
   if (!check.ok) throw new EngineError("precondition_failed", `signLedgerCheckpoint: the ledger chain does not verify at seq ${check.seq}`);
   if (check.head.seq !== at) throw new EngineError("precondition_failed", `signLedgerCheckpoint: the ledger does not hold seq ${at}`);
+  // The head read before the walk is what a default checkpoint signs: a `list` that walks to
+  // another hash than the `head` the ledger answers is an inconsistent read, never vouched for.
+  if (at === head.seq && check.head.hash !== head.hash) {
+    throw new EngineError("precondition_failed", `signLedgerCheckpoint: the ledger's head does not match the chain walked to seq ${at}`);
+  }
   const body: LedgerCheckpointBody = {
     v: 1,
     type: "ledger_checkpoint",
@@ -241,20 +246,26 @@ export async function pruneLedger(ledger: AuditLedger, input: PruneLedgerInput):
   // The checkpoint must name this ledger's entry at its seq, read once before anything is removed.
   const [entry] = await ledger.list(point.seq, 1);
   if (entry?.seq !== point.seq || entry.hash !== point.hash) {
+    // A racing pruner may have taken the ledger past the point: the entry is gone because a
+    // deeper prune happened, and this one answers its point, never an error.
+    const raced = await ledger.base();
+    if (raced !== null && (raced.seq > point.seq || (raced.seq === point.seq && raced.hash === point.hash))) return point;
     throw new EngineError("precondition_failed", "pruneLedger: the ledger does not hold the checkpoint's entry");
   }
   try {
     await ledger.prune(point);
   } catch (error) {
-    // A second pruner with the same checkpoint may have raced this one to it: the ledger pruned
-    // below the point already, and refusing would read as a failure of a prune that happened.
-    const after = await ledger.base();
-    if (after !== null && after.seq === point.seq && after.hash === point.hash) return point;
+    // A second pruner may have raced this one to the point, or past it: the ledger pruned below
+    // the point already, and refusing would read as a failure of a prune that happened.
+    const raced = await ledger.base();
+    if (raced !== null && (raced.seq > point.seq || (raced.seq === point.seq && raced.hash === point.hash))) return point;
     throw error;
   }
-  // Read back: a prune that answered without moving the base leaves a host exporting below its base.
+  // Read back: a prune that answered without moving the base leaves a host exporting below its
+  // base. A racing deeper prune may have moved it past this point already: the ledger is pruned
+  // below this point either way, so the point is answered, never an error.
   const after = await ledger.base();
-  if (after === null || after.seq !== point.seq || after.hash !== point.hash) {
+  if (after === null || after.seq < point.seq || (after.seq === point.seq && after.hash !== point.hash)) {
     throw new EngineError("precondition_failed", "pruneLedger: the ledger did not prune to the checkpoint");
   }
   return point;

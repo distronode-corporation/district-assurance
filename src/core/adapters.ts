@@ -685,6 +685,13 @@ export interface AuditLedger {
    */
   base?(): Promise<{ seq: number; hash: string } | null>;
   /**
+   * Optional (retention): whether `eventId` names an entry a prune removed. The id stays spent
+   * (below), so a replay of it is refused; this answers whether that refusal is the pruned one,
+   * which a caller retrying a write it already made asks before appending again. A ledger that
+   * prunes implements it, and the audit contract holds it to the tombstone.
+   */
+  spentEventId?(eventId: string): Promise<boolean>;
+  /**
    * Optional (retention): removes every entry at or below `checkpoint.seq`, which becomes the
    * ledger's base, as ONE step: a reader appending or listing while a prune runs never sees the
    * rows gone with the base left behind, or the reverse. Refuses a checkpoint at or below the

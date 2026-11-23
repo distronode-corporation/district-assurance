@@ -323,7 +323,8 @@ export async function replacePin(rt: EngineRuntime, subjectKey: string, change: 
  * Finishes a PIN change that landed (`PinChangeUnfinishedError` names it): forgets the subject's PIN
  * failures, and its hidden ones (VER-12), recorded before `at`, never one at or after it, and appends
  * its `pin.reset` once (by `eventId`). Reads no PIN record, so a change made since never stops it and
- * is never touched. Safe to run again. A host call from the business's own tools.
+ * is never touched. Safe to run again, also after a prune spent the id: the counters are cleared
+ * and nothing is appended. A host call from the business's own tools.
  */
 export async function finishPinChange(rt: EngineRuntime, subjectKey: string, ref: PinChangeRef, counters: AttemptCounters | undefined): Promise<void> {
   keyedPinSubject(rt, subjectKey);
@@ -343,7 +344,12 @@ async function finish(rt: EngineRuntime, subjectKey: string, ref: PinChangeRef, 
       if (Date.parse(failure) < before) await counters!.removeFailure(key, failure);
     }
   }
-  await rt.adapter("ledger").append({ eventId: `pin_reset_${ref.change}`, callId: null, actor: "member", event: "pin.reset", at: rt.now(), detail: { subjectKey } });
+  const ledger = rt.adapter("ledger");
+  // The entry may already sit below a prune that spent its id: the change finished then, and the
+  // retry still clears the counters it came to clear, appending nothing.
+  if (await ledger.spentEventId?.(`pin_reset_${ref.change}`) !== true) {
+    await ledger.append({ eventId: `pin_reset_${ref.change}`, callId: null, actor: "member", event: "pin.reset", at: rt.now(), detail: { subjectKey } });
+  }
 }
 
 /** `keyed_hash` mode and a well-formed subject key, or a refusal. */

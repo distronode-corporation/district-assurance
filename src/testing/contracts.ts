@@ -563,9 +563,12 @@ export function auditLedgerContract(factory: () => AuditLedger | Promise<AuditLe
       "keeps the eventId of a pruned entry spent: a replay is refused, never appended again",
       async (ledger) => {
         if (ledger.prune === undefined || ledger.base === undefined) return;
+        assert.notEqual(ledger.spentEventId, undefined, "a ledger that prunes answers which eventIds it spent");
         const first = await ledger.append(contractEntry(1, { eventId: "e_pruned" }));
         await ledger.append(contractEntry(2));
+        assert.equal(await ledger.spentEventId!("e_pruned"), false, "an entry the ledger still holds is not spent");
         await ledger.prune({ seq: first.seq, hash: first.hash });
+        assert.equal(await ledger.spentEventId!("e_pruned"), true, "the pruned id is spent");
         // The id's first entry is gone, so a replay can never be answered with it: the store
         // keeps the id spent, and a second entry under it is refused, never written.
         await assert.rejects(

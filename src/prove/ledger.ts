@@ -126,6 +126,11 @@ export class MemoryAuditLedger implements AuditLedger {
     return this.#base === null ? null : { ...this.#base };
   }
 
+  /** Whether an eventId names an entry a prune removed: the id stays spent (the tombstone above). */
+  async spentEventId(eventId: string): Promise<boolean> {
+    return this.#prunedEventIds.has(eventId);
+  }
+
   async prune(checkpoint: { seq: number; hash: string }): Promise<void> {
     if (!(Number.isSafeInteger(checkpoint.seq) && checkpoint.seq >= 1)) {
       throw new TypeError("MemoryAuditLedger.prune: the checkpoint's seq must be an integer of 1 or more");

@@ -34,27 +34,33 @@ check everything that is left from that checkpoint on without the entries before
 - **Pruning below a written checkpoint.** `pruneLedger(ledger, {ledgerId, checkpoint, keys})`
   removes the entries at or below the checkpoint's point only once the checkpoint verifies, names
   this ledger, and its `prunedCount` names the gap this prune cuts; the same checkpoint handed in
-  again, also by a second pruner racing the first, prunes nothing and answers the point. A ledger
-  that prunes implements two optional `AuditLedger` methods: `base()`, the last pruned entry, and
-  `prune(checkpoint)`, which removes the rows and moves the base as one step and keeps the pruned
-  entries' `eventIds` spent, so a replay of a pruned id is refused with `precondition_failed`
-  instead of appending a second entry: a late retry of a long-pruned write fails closed. A ledger
-  pruned to its head answers the checkpoint as its head, and appends continue from the base, so
-  `anchorLedger`, `exportSubject` and `eraseSubject` work above it (a repeat erasure of a subject
-  whose earlier plan was pruned is refused, never numbered twice). `MemoryAuditLedger` implements
-  both methods, and `auditLedgerContract` holds the pruned-ledger cases for a durable store, the
-  prune-racing-appends case included.
+  again, also by a second pruner racing the first, prunes nothing and answers the point, and a
+  deeper racing checkpoint is answered too, never an error read as a failed prune. A ledger that
+  prunes implements three optional `AuditLedger` methods: `base()`, the last pruned entry;
+  `prune(checkpoint)`, which removes the rows and moves the base as one step; and
+  `spentEventId(eventId)`, which answers whether a prune removed an entry. The pruned entries'
+  `eventIds` stay spent, so the ledger never appends a second entry for one, and the engine reads
+  the spent ids instead of failing a retry: a revocation already on the ledger below a base is
+  answered from the consent store, a queued outbox entry is cleared without a second append, a
+  finished PIN change clears its counters and appends nothing, and a repeat erasure takes the next
+  free number. A ledger pruned to its head answers the checkpoint as its head, and appends
+  continue from the base, so `anchorLedger`, `exportSubject` and `eraseSubject` work above it.
+  `MemoryAuditLedger` implements all three methods, and `auditLedgerContract` holds the
+  pruned-ledger cases for a durable store, the prune-racing-appends and spent-id cases included.
 - **Checkpoint-anchored exports and anchors.** A pruned ledger is exported only against the
   checkpoint that pruned it: `exportLedger` takes `checkpoint: { checkpoint, keys }`, which must
   verify, name the ledger, and match the base the ledger reports exactly, so storage that quietly
   hid rows and moved its base never gets a signed export of the chain it rewrote. A full export
   (`fromSeq` 1) then starts at the base and its trailer's `from` is the checkpoint, which
   `verifyLedgerExport` checks through its new `checkpoint` argument: a run that does not start at
-  the verified point, or names another ledger, fails `checkpoint`. Any other `fromSeq` below the
-  base is refused, and a cursor naming the base still resumes there. `verifyAnchor` takes the
-  checkpoint in its `trust` the same way, so an anchor written after a prune is checked from the
-  checkpoint's point; a checkpoint in the trust that does not verify fails the new `checkpoint`
-  reason, and a monthly report names the head a prune left, not the genesis.
+  the verified point, or names another ledger, fails the new `checkpoint` reason (which
+  `AnchorFailure` gains too, so a host switching on either exhaustively needs the new case). Any
+  other `fromSeq` below the base is refused, and a cursor naming the base still resumes there.
+  `verifyAnchor` takes the checkpoint in its `trust` the same way, so an anchor written after a
+  prune is checked from the checkpoint's point; the covered entries are now taken by their `seq`
+  rather than their position, and an `entries` list holding null or a hole anywhere in it is
+  `malformed`, where a hole past the covered seq used to pass. A monthly report names the last
+  entry it read, or the base of a ledger pruned to its head, never a head read after its listing.
 
 ## [0.3.0] - 2026-11-22
 

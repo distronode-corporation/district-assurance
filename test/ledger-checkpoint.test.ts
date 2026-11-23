@@ -4,8 +4,10 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { canonicalJson } from "../src/core/canonical.ts";
+import { canonicalJson, type JsonValue } from "../src/core/canonical.ts";
 import { EngineError } from "../src/core/errors.ts";
+import { MemorySessionStore } from "../src/core/session-store.ts";
+import type { WriteHint } from "../src/core/adapters.ts";
 import {
   LEDGER_CHECKPOINT_DOMAIN,
   ledgerCheckpointPayload,
@@ -18,7 +20,7 @@ import {
 import { encodeCursor, exportLedger, verifyLedgerExport, type LedgerExportInput } from "../src/prove/export.ts";
 import { verifyAnchor } from "../src/prove/anchor.ts";
 import { monthlyReport } from "../src/prove/report.ts";
-import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
+import { MemoryAuditLedger, chainEntry, verifyChain } from "../src/prove/ledger.ts";
 import type { AuditEntry, AuditInput, AuditLedger } from "../src/core/adapters.ts";
 import type { ChainPoint } from "../src/prove/export.ts";
 import { subjectKeyFor } from "../src/verify/knowledge.ts";
@@ -126,6 +128,15 @@ describe("the ledger checkpoint document", () => {
     // A ledger whose reads were rewritten is never vouched for.
     const tampered = new EditedLedger(await ledgerOf(4), (entries) => entries.map((e) => (e.seq === 2 ? { ...e, detail: { n: 99 } } : e)));
     await assert.rejects(checkpoint(tampered), rejects("precondition_failed", /does not verify at seq 2/));
+    // A rewritten head whose hash is recomputed walks as a consistent chain, but it still ends on
+    // another hash than the head the ledger answers: the default checkpoint names the head, and an
+    // inconsistent read is never vouched for.
+    const swapped = new EditedLedger(await ledgerOf(4), (entries) =>
+      entries.map((e) => (e.seq === 4 ? chainEntry(input(99), e.seq, e.prevHash) : e)),
+    );
+    await assert.rejects(checkpoint(swapped), rejects("precondition_failed", /head does not match the chain walked/));
+    const belowHead = await checkpoint(swapped, 3);
+    assert.equal(belowHead.body.seq, 3, "a checkpoint below the head signs the seq it names, untouched by the swapped read");
     // A ledger that stops short of the seq holds no point there.
     const short = new EditedLedger(await ledgerOf(4), (entries) => entries.filter((e) => e.seq !== 4));
     await assert.rejects(checkpoint(short, 4), rejects("precondition_failed", /does not hold seq 4/));
@@ -259,10 +270,30 @@ describe("pruneLedger", () => {
       pruneLedger(two, { ledgerId: "ws_1", checkpoint: c3, keys }),
       pruneLedger(two, { ledgerId: "ws_1", checkpoint: c5, keys }),
     ]);
-    // Whichever pruner won, the base moved wholly forward, never backwards or twice.
-    const base = (await two.base())!;
-    assert.ok([3, 5].includes(base.seq), `base ${base.seq}`);
-    assert.ok(settled.some((r) => r.status === "fulfilled"), "at least one prune happened");
+    // The deeper checkpoint prunes and the shallower one answers its point, never an error read
+    // as a failed prune that happened; the base ends at the deeper point either way.
+    assert.ok(settled.every((r) => r.status === "fulfilled"), settled.map((r) => (r.status === "rejected" ? String(r.reason) : "")).join("; "));
+    assert.deepEqual((await two.base())?.seq, 5, "whichever pruner won, the base ends at the deeper point");
+  });
+
+  it("answers the point when the base moves under the hold check, to the very point", async () => {
+    // The pruner reads a base of nothing, another pruner wins to the very point while the hold
+    // check reads, and the recovery reads the base back as the point: answered, never an error.
+    const inner = await ledgerOf(6);
+    const signed = await signLedgerCheckpoint(inner, { signer, clock, ledgerId: "ws_1", seq: 3 });
+    let reads = 0;
+    const racing: AuditLedger = {
+      append: (i) => inner.append(i),
+      head: () => inner.head(),
+      list: async (fromSeq?: number, limit?: number) => (await inner.list(fromSeq, limit)).filter((e) => e.seq > 3),
+      base: async () => {
+        if (++reads === 1) return null;
+        await inner.prune({ seq: 3, hash: signed.body.hash });
+        return inner.base();
+      },
+      prune: (point: { seq: number; hash: string }) => inner.prune(point),
+    };
+    assert.deepEqual(await pruneLedger(racing, { ledgerId: "ws_1", checkpoint: signed, keys }), { seq: 3, hash: signed.body.hash });
   });
 
   it("keeps a pruned eventId spent: a replay is refused, never a second entry", async () => {
@@ -426,20 +457,22 @@ describe("the engine on a pruned ledger", () => {
     assert.equal(again.seq, entry.seq + 1);
   });
 
-  it("refuses a consent.revoked the ledger already wrote below a pruned base, instead of writing it twice", async () => {
+  it("answers a consent.revoked the ledger already wrote below a pruned base, without writing it twice", async () => {
     const consents = new MemoryConsentStore();
     const t = setup({ adapters: { consents } });
     const callId = await verifiedCall(t);
     const yes = await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
     await t.engine.endCall(callId);
-    await t.engine.revokeConsent({ consentId: yes.consentId, via: "text" });
+    const first = await t.engine.revokeConsent({ consentId: yes.consentId, via: "text" });
     assert.equal((await t.ledger.list()).filter((e) => e.event === "consent.revoked").length, 1);
-    // The checkpoint is the head, so the prune takes the consent.revoked entry with it.
+    // The checkpoint is the head, so the prune takes the consent.revoked entry with it: the id
+    // stays spent, and a second STOP must not write a second entry either.
     const signed = await signLedgerCheckpoint(t.ledger, { signer, clock: t.clock, ledgerId: "ws_test" });
     await pruneLedger(t.ledger, { ledgerId: "ws_test", checkpoint: signed, keys });
     const held = (await t.ledger.list()).length;
-    await assert.rejects(t.engine.revokeConsent({ consentId: yes.consentId, via: "web" }), rejects("precondition_failed", /stays spent/), "the id's entry is pruned: the revocation stays in the store, and the ledger refuses the second entry");
-    assert.equal((await t.ledger.list()).length, held, "nothing was appended for the pruned id");
+    const again = await t.engine.revokeConsent({ consentId: yes.consentId, via: "web" });
+    assert.deepEqual(again, first, "the revocation the store already holds answers");
+    assert.equal((await t.ledger.list()).length, held, "nothing was appended for the spent id");
   });
 
   it("refuses an anchor whose checkpoint does not verify, and a prune whose ledgerId is empty", async () => {
@@ -521,7 +554,7 @@ describe("the engine on a pruned ledger", () => {
     assert.deepEqual(verifyChain(left, point), { ok: true, head: await t.ledger.head() });
   });
 
-  it("refuses a second erasure of a subject whose first plan was pruned, instead of numbering it twice", async () => {
+  it("erases a subject again after a prune: the spent number is skipped, never taken twice", async () => {
     const t = setup();
     const callId = await verifiedCall(t);
     await t.engine.startIntake(callId, "repair");
@@ -533,18 +566,72 @@ describe("the engine on a pruned ledger", () => {
     // The checkpoint is the head, so the prune takes the first erasure's plan and completion too.
     const signed = await signLedgerCheckpoint(t.ledger, { signer, clock: t.clock, ledgerId: "ws_test" });
     await pruneLedger(t.ledger, { ledgerId: "ws_test", checkpoint: signed, keys });
-    // A record filed since: there is something new to erase, but the numbering starts again at 0,
-    // whose keyed id the first erasure spent. The ledger refuses the replay, so the plan is never
-    // numbered twice, and the caller hears the refusal instead of a rewritten history.
+    // A record filed since: the numbering starts again at 0 below the base, whose keyed id the
+    // first erasure spent, so the second erasure takes the next free number and completes.
     const again = await verifiedCall(t);
     await t.engine.startIntake(again, "repair");
     await t.engine.setIntakeField(again, "issue", "new leak");
     const refiled = await t.engine.confirmIntake(again, { confirmedBy: "voice", readBack: await heard(t, again) });
     await t.engine.endCall(again);
+    const base = (await t.ledger.base())!;
+    const second = await t.engine.eraseSubject({ workspaceId: "ws_test", subjectKey: SUBJECT });
+    assert.equal(second.erased, true);
+    assert.equal(second.recordIds.includes(refiled.recordId), true, "the re-filed record is erased");
+    assert.equal(await t.records.getIntakeRecord("ws_test", refiled.recordId), null, "the record store no longer holds it");
+    const entries = await t.ledger.list();
+    const plans = entries.filter((e) => e.event === "subject.erased");
+    assert.equal(plans.length, 1, "one fresh plan above the base, never the spent number taken twice");
+    assert.ok(plans[0]!.seq > base.seq);
+    assert.deepEqual(verifyChain(entries, base), { ok: true, head: await t.ledger.head() });
+  });
+
+  it("finishes a pin change again after a prune: the spent id is skipped and nothing is appended", async () => {
+    const t = setup();
+    const ref = { at: t.clock.now().toISOString(), change: "b".repeat(64) };
+    await t.engine.finishPinChange(SUBJECT, ref);
+    assert.equal((await t.ledger.list()).length, 1, "the pin.reset entry");
+    // The checkpoint is the head, so the prune takes the pin.reset entry with it.
+    const signed = await signLedgerCheckpoint(t.ledger, { signer, clock: t.clock, ledgerId: "ws_test" });
+    await pruneLedger(t.ledger, { ledgerId: "ws_test", checkpoint: signed, keys });
     const held = (await t.ledger.list()).length;
-    await assert.rejects(t.engine.eraseSubject({ workspaceId: "ws_test", subjectKey: SUBJECT }), rejects("precondition_failed", /stays spent/));
-    assert.equal((await t.ledger.list()).length, held, "no erasure entry was appended for the spent id");
-    const stillThere = await t.engine.exportSubject({ workspaceId: "ws_test", subjectKey: SUBJECT });
-    assert.equal(stillThere.body.intakeRecords.map((r) => r.recordId).includes(refiled.recordId), true, "the re-filed record is left intact for the host to retry with a fresh numbering");
+    await t.engine.finishPinChange(SUBJECT, ref);
+    assert.equal((await t.ledger.list()).length, held, "the id is spent: the counters still cleared, and no second entry written");
+  });
+
+  it("clears an outbox whose entries a prune spent, appending nothing twice", async () => {
+    // The session store refuses the outbox's clear while the call is ended (a store that was
+    // partitioned): the entries are appended but stay queued, the engine's own retry appends
+    // nothing twice (the ledger dedups), and the call is left pending. A prune past them spends
+    // their ids, and the next flush skips every one and clears the outbox.
+    class EndClearLost extends MemorySessionStore {
+      #lost = true;
+      release(): void {
+        this.#lost = false;
+      }
+      override async compareAndSet(w: string, c: string, version: number, record: JsonValue, hint?: WriteHint): Promise<{ ok: true; version: number } | { ok: false }> {
+        if (this.#lost && hint?.ledgerPending === false && (record as { state?: { phase?: string } }).state?.phase === "ended") {
+          const stored = (await super.get(w, c))?.record as { outbox?: unknown[] } | undefined;
+          if ((stored?.outbox?.length ?? 0) > 0) return { ok: false };
+        }
+        return super.compareAndSet(w, c, version, record, hint);
+      }
+    }
+    const sessions = new EndClearLost();
+    const t = setup({ adapters: { sessions } });
+    const callId = await verifiedCall(t);
+    await t.engine.recordConsent(callId, { purpose: "texts", answer: "yes" });
+    await t.engine.endCall(callId);
+    const appended = (await t.ledger.list()).length;
+    assert.ok(appended > 0, "the queued entries were appended, however often the clear was refused");
+    const queued = ((await sessions.get("ws_test", callId))!.record as { outbox?: unknown[] }).outbox?.length ?? 0;
+    assert.ok(queued > 0, "the outbox still holds its entries");
+    const signed = await signLedgerCheckpoint(t.ledger, { signer, clock: t.clock, ledgerId: "ws_test" });
+    await pruneLedger(t.ledger, { ledgerId: "ws_test", checkpoint: signed, keys });
+    sessions.release();
+    const report = await t.engine.flushPending();
+    assert.deepEqual(report.failed, []);
+    assert.ok(report.flushed.includes(callId), "the call's outbox was cleared");
+    assert.equal((await t.ledger.list()).length, 0, "nothing was re-appended for the spent ids");
+    assert.deepEqual(await t.engine.flushPending(), { flushed: [], failed: [] }, "nothing is pending any more");
   });
 });
