@@ -100,6 +100,14 @@ check everything that is left from that checkpoint on without the entries before
   naming the validator that spoke, with no params, so a dashboard falls back to the sentence for
   those), and every sentence itself is unchanged, byte for byte.
 
+### Fixed
+
+- **The Seam confirm window no longer flakes on a loaded runner.** `seamAccessController` takes a
+  `nowMs` option, the monotonic clock its confirmation window is measured on, defaulting to
+  `performance.now`; the adapter test injects one it controls, so one slow event-loop tick cannot
+  let the window lapse before the first poll reads the attempt as still pending (#168).
+
+
 ## [0.3.0] - 2026-11-22
 
 ### Added

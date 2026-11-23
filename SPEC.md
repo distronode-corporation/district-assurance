@@ -2646,14 +2646,16 @@ against `engine.accessKeys()`, its own workspace and its own audience, and refus
 seen.
 
 **The Seam adapter** (`seamAccessController({apiKey, baseUrl?, allowLoopbackForTests?, timeoutMs?,
-confirmWithinMs?, pollIntervalMs?, fetch?, clock?})`), named in the engine's `access` adapter like
+confirmWithinMs?, pollIntervalMs?, fetch?, clock?, nowMs?})`), named in the engine's `access` adapter like
 any controller: the target's `ref` is the Seam `device_id`. `baseUrl` defaults to
 `https://connect.getseam.com`, and its host must be one of `SEAM_HOSTS` (`connect.getseam.com`),
 over HTTPS on the default port, with no credentials, query or fragment: the API key goes nowhere
 else. The loopback address, over HTTP or HTTPS, is accepted only with `allowLoopbackForTests: true`,
 which is for tests and never for production; `timeoutMs` is per request, 100 to 30,000 (default
 5,000); `confirmWithinMs` 0 to 30,000 (default 10,000) and `pollIntervalMs` 10 to 5,000 (default
-1,000). Every request is a `POST` with `authorization: Bearer <apiKey>` and a JSON body, redirects
+1,000); `nowMs` is the monotonic clock the confirmation window is measured on, defaulting to
+`performance.now` (the tests inject one they control, so a loaded runner cannot lapse a window the
+test did not mean to time). Every request is a `POST` with `authorization: Bearer <apiKey>` and a JSON body, redirects
 not followed. No idempotency key is sent: Seam documents none on unlock.
 
 0. Unless the grant's signed `target` is the device it is asked to open, the result is `refused`
@@ -2673,7 +2675,7 @@ not followed. No idempotency key is sent: Seam documents none on unlock.
    connection, a redirect, or a 2xx without an action attempt (`action_attempt_id` 1 to 200
    characters, `status` `pending`, `success` or `error`) throws, which Gate records as `unknown`.
 4. While the attempt is `pending`: `POST /action_attempts/get {action_attempt_id}` after each
-   pause of `pollIntervalMs`, the whole wait held to `confirmWithinMs` of elapsed time (each pause
+   pause of `pollIntervalMs`, the whole wait held to `confirmWithinMs` of elapsed time on `nowMs` (each pause
    and each request is cut to what is left; 0 never asks). `success` is `delivered`, `confirmed:
    true` only when Seam reports `result.was_confirmed_by_device: true` (a `success` alone means
    Seam sent the command, not that the lock moved); `error` throws (`unknown`: a lock that timed
