@@ -694,6 +694,17 @@ export function paymentChannelOf(record: CallRecord): PaymentChannel {
   return slice?.payments.findLast((p) => p.textedAt !== null)?.channel ?? "text";
 }
 
+/**
+ * The channel the call's payment link goes by: the choice the caller made and no link has used yet,
+ * else the channel of the last delivered link, text when there was none. This is the reading a
+ * conditioned consent step matches (ADR-38); the receipt link reads the last delivered link only
+ * (`paymentChannelOf`), because its consent is asked after the payment by design.
+ */
+export function chosenPaymentChannel(record: CallRecord): PaymentChannel {
+  const choice = (record.modules[PAYLINK] as PaylinkSlice | undefined)?.channel;
+  return choice !== undefined && choice !== null ? choice.channel : paymentChannelOf(record);
+}
+
 /** Where a link goes, by its channel: the number on file, or the verified address on file with the business's name. */
 interface Destination {
   phone: string;

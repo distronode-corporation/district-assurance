@@ -9,7 +9,7 @@ import { ModuleRegistry, checkFactorPlugin, checkFactorPlugins, checkManifest, t
 import { isBilingual } from "../src/core/shape.ts";
 import { builtInModules, defaultConfig } from "../src/modules.ts";
 import { badgeModule } from "../src/verify/badge.ts";
-import { testConfig } from "./helpers.ts";
+import { testConfig, wording } from "./helpers.ts";
 
 /** A sparse array of length 1: one hole, no element. */
 function hole(): unknown[] {
@@ -18,7 +18,7 @@ function hole(): unknown[] {
   return list;
 }
 
-const ALL_ADAPTERS = ["ledger", "sessions", "records", "identity", "carrier", "messages", "payments", "signer", "pinVerifier", "counters", "codes"];
+const ALL_ADAPTERS = ["ledger", "sessions", "records", "identity", "carrier", "messages", "payments", "signer", "pinVerifier", "counters", "codes", "emails"];
 
 function registry(adapters: readonly string[] = ALL_ADAPTERS, extra: AssuranceModule[] = []): ModuleRegistry {
   return new ModuleRegistry({ adapters, modules: [...builtInModules(), ...extra] });
@@ -569,6 +569,55 @@ describe("validateConfig: flows", () => {
     assert.deepEqual(flows({ f: { steps: [verify, { ...byRef, currency: "cad" }] } }, withAmounts), ["flows.f.steps[1] (paylink.request): name amountMinor and currency, or amountRef, not both"]);
     assert.deepEqual(one({ type: "trace.consent", x: 1 }), ["(trace.consent): x is not a field of this step", "(trace.consent): purpose must name a wording"]);
     assert.deepEqual(one({ type: "trace.consent", purpose: "nope" }), ["(trace.consent): no wording for nope in the trace settings"]);
+    // The channel condition: shaped, and either channel; a matching wording is still required.
+    // A conditioned question must follow a paylink.channel step, or it could never be asked of an
+    // email caller (the choice would not exist yet).
+    const verify3 = { type: "badge.verify", level: 3, factors: ["keypad_knowledge", "photo_id"] };
+    const afterChoice = { type: "paylink.channel" };
+    const conditioned = (when: unknown) => flows({ f: { steps: [verify3, { type: "trace.consent", purpose: "texts", when }] } });
+    assert.deepEqual(conditioned("email"), ["flows.f.steps[1] (trace.consent): when must be { paymentChannel }"]);
+    assert.deepEqual(conditioned({ paymentChannel: "email", extra: true }), [
+      "flows.f.steps[1] (trace.consent): when must be { paymentChannel }",
+      "flows.f (trace): steps[1]: a conditioned consent question follows the channel choice",
+    ]);
+    assert.deepEqual(conditioned({ paymentChannel: "fax" }), ["flows.f.steps[1] (trace.consent): when.paymentChannel must be text or email"]);
+    assert.deepEqual(conditioned({ paymentChannel: "email" }), ["flows.f (trace): steps[1]: a conditioned consent question follows the channel choice"], "asked before any choice, the question could never be asked of an email caller");
+    // The whole flow, malformed steps included, reaches trace's whole-flow check: never a throw.
+    assert.deepEqual(
+      flows({ f: { steps: [verify3, null, { type: "trace.consent", purpose: "texts", when: { paymentChannel: "email" } }] } }),
+      ["flows.f.steps[1]: a step is an object with a type", "flows.f (trace): steps[2]: a conditioned consent question follows the channel choice"],
+      "a null step is answered, and the conditioned question after it still checked",
+    );
+    // The valid case: a choice, the payment it serves, then the conditioned question, on a config
+    // with the email channel fully set up.
+    const askAfter = validateConfig(
+      config((c) => {
+        c.modules.paylink = { settings: { mode: "platform", channels: ["text", "email"] } };
+        c.modules.trace = {
+          settings: {
+            receipts: true,
+            wordings: [
+              structuredClone(wording),
+              { purpose: "payment_link_text", version: "1", text: { en: "text", fr: "texto" } },
+              { purpose: "payment_link_email", version: "1", text: { en: "email", fr: "courriel" } },
+            ],
+            businessName: "Maple Property Management",
+          },
+        };
+        c.flows = {
+          f: {
+            steps: [
+              verify3,
+              afterChoice,
+              { type: "paylink.request", amountMinor: 100, currency: "cad", description: "x", amountSource: "price_list" },
+              { type: "trace.consent", purpose: "texts", when: { paymentChannel: "email" } },
+            ],
+          },
+        };
+      }),
+      registry([...ALL_ADAPTERS, "emails"]),
+    );
+    assert.deepEqual(askAfter, [], "asked after a channel choice, the condition is valid");
     assert.deepEqual(one({ type: "trace.receipt", x: 1 }), ["(trace.receipt): x is not a field of this step"]);
     const noSigner = validateConfig(
       config((c) => {

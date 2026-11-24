@@ -77,6 +77,10 @@ function config(patch: (c: FlowConfig) => void = () => undefined): FlowConfig {
       // A contact change between the payment and the recheck: both the notice and the kept address
       // are read from before the change.
       "change-recheck": { steps: [{ type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["payment.request", "contact.update"] }, channel, pay, { type: "acme.change_phone" }, askEmail, askTexts, { type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }, receipt] },
+      // Each consent question asked only of the caller whose payment channel it is for (issue #179).
+      "deposit-conditional": { steps: [verify, channel, pay, { ...askEmail, when: { paymentChannel: "email" } }, { ...askTexts, when: { paymentChannel: "text" } }, receipt] },
+      // The question asked while the choice is still pending, before the link is sent.
+      "ask-before-pay": { steps: [verify, channel, { ...askEmail, when: { paymentChannel: "email" } }, { ...askTexts, when: { paymentChannel: "text" } }, pay, receipt] },
     };
     patch(c);
   });
@@ -486,6 +490,110 @@ describe("receipt link email", () => {
     assert.deepEqual(await byText.engine.sendReceiptLink(texted, LINK), { sent: true, channel: "text" });
     assert.equal(sent.messages.sent.filter((m) => m.purpose === "receipt_link").length, 1, "the delivered text link's channel");
     assert.equal(sent.emails.sent.filter((m) => m.purpose === "receipt_link").length, 1, "the failed email request never becomes the receipt channel");
+  });
+
+  it("asks only the consent question of the caller's payment channel, skipping the other (#179)", async () => {
+    // An email caller: the email question is asked (the flow waits on it), the texts one is
+    // skipped; one answer later, the flow is done and only the email consent exists.
+    const emailed = engine(EMAIL);
+    let callId = await paidCall(emailed, "2", "deposit-conditional");
+    let position = await emailed.engine.flowPosition(callId);
+    assert.equal(position!.step!.type, "trace.consent", "the flow waits on the email question");
+    assert.equal((position!.step! as unknown as { purpose: string }).purpose, "receipt_email");
+    const before = (await events(emailed, "flow.step_completed")).map((e) => e.detail.step);
+    assert.deepEqual(before, [0, 1, 2], "the flow waits on the email question, the texts one not yet reached");
+    await emailed.engine.recordConsent(callId, { purpose: "receipt_email", answer: "yes" });
+    assert.equal((await emailed.engine.flowPosition(callId))!.status, "completed", "the receipt step ends the flow");
+    const after = (await events(emailed, "flow.step_completed")).map((e) => e.detail.step);
+    assert.deepEqual(after, [0, 1, 2, 3, 4, 5], "the texts question (step 4) completed by being skipped, never asked");
+    assert.equal((await emailed.ledger.list()).filter((e) => e.event === "consent.recorded" && e.detail.purpose === "receipt_texts").length, 0, "the skipped question recorded nothing");
+    assert.notEqual((await emailed.ledger.list()).filter((e) => e.event === "consent.recorded" && e.detail.purpose === "receipt_email").length, 0, "the asked question recorded");
+
+    // A text caller: the email question is skipped, the texts one asked.
+    const texted = engine(EMAIL);
+    callId = await paidCall(texted, "1", "deposit-conditional");
+    position = await texted.engine.flowPosition(callId);
+    assert.equal((position!.step! as unknown as { purpose: string }).purpose, "receipt_texts", "the flow waits on the texts question");
+    assert.equal((await texted.ledger.list()).filter((e) => e.event === "consent.recorded" && e.detail.purpose === "receipt_email").length, 0, "the skipped question recorded nothing");
+    await texted.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "yes" });
+    assert.equal((await texted.engine.flowPosition(callId))!.status, "completed");
+  });
+
+  it("runs a conditioned consent step only on a trace.consent step, never another module's (#180 review)", async () => {
+    // The probe's case: an outside module's step carrying when must run as itself, whatever the
+    // call's channel, because the condition is a trace.consent step's (ADR-38). The acme module
+    // accepts any step field, so the config is valid and the step is the flow's current one.
+    const t = engine(EMAIL, (c) => {
+      c.flows = { "acme-when": { steps: [verifyContact, { type: "acme.change_phone", when: { paymentChannel: "email" } }, askTexts, receipt] } };
+    });
+    const callId = await verified(t, "acme-when");
+    const position = await t.engine.flowPosition(callId);
+    assert.equal(position!.step!.type, "acme.change_phone", "the outside step is the flow's current step, never skipped");
+    const record = (await t.sessions.get("ws_test", callId))!.record as unknown as { flow: { index: number } };
+    assert.equal(record.flow.index, 1, "the flow waits on it, not past it");
+  });
+
+  it("reads a delivered link a 0.3.0 process recorded, with no channel of its own, as text", async () => {
+    // A payment record written before channels existed holds no channel; the condition reading
+    // counts it as text, exactly as the receipt link does. Only an edit can produce that record.
+    const t = engine(EMAIL, (c) => {
+      c.flows = {
+        "ask-after-pay": { steps: [verify, channel, pay, { ...askEmail, when: { paymentChannel: "email" } }, { ...askTexts, when: { paymentChannel: "text" } }, receipt] },
+      };
+    });
+    const callId = await verified(t, "ask-after-pay");
+    await t.engine.offerPaymentChannels(callId);
+    await t.engine.choosePaymentChannel(callId, { key: "1" });
+    await confirmAmount(t.engine, callId);
+    await t.engine.requestPayment(callId);
+    await t.engine.applyPaymentOutcome({ kind: "completed", linkId: t.payments.created.at(-1)!.linkId, paymentStatus: "paid" });
+    const stored = (await t.sessions.get("ws_test", callId))!;
+    const paylink = (stored.record as { modules: { paylink: { payments: Array<{ channel?: unknown }> } } }).modules.paylink;
+    delete paylink.payments.at(-1)!.channel;
+    await t.sessions.compareAndSet("ws_test", callId, stored.version, stored.record as never);
+    // Any write re-advances the flow: the email question skips, the texts one is asked.
+    await t.engine.recordConsent(callId, { purpose: "receipt_texts", answer: "yes" });
+    const position = await t.engine.flowPosition(callId);
+    assert.ok(position === null || position.status === "completed" || (position.step! as unknown as { purpose: string }).purpose === "receipt_texts", "the channel-less link reads as text: the email question skipped");
+    assert.equal((await t.ledger.list()).filter((e) => e.event === "consent.recorded" && e.detail.purpose === "receipt_email").length, 0);
+  });
+
+  it("reads the choice the caller made and no link has used yet, asked before the link is sent", async () => {
+    // The question sits between the choice and the payment, so the pending choice is what the
+    // condition reads: an email chooser is asked, a text chooser skips straight to the payment.
+    const emailed = engine(EMAIL);
+    let callId = await verified(emailed, "ask-before-pay");
+    await emailed.engine.offerPaymentChannels(callId);
+    await emailed.engine.choosePaymentChannel(callId, { key: "2" });
+    let position = await emailed.engine.flowPosition(callId);
+    assert.equal((position!.step! as unknown as { purpose: string }).purpose, "receipt_email", "the pending email choice matches");
+    await emailed.engine.recordConsent(callId, { purpose: "receipt_email", answer: "yes" });
+    position = await emailed.engine.flowPosition(callId);
+    assert.equal(position!.step!.type, "paylink.request", "the texts question skipped, the payment is next");
+
+    const texted = engine(EMAIL);
+    callId = await verified(texted, "ask-before-pay");
+    await texted.engine.offerPaymentChannels(callId);
+    await texted.engine.choosePaymentChannel(callId, { key: "1" });
+    position = await texted.engine.flowPosition(callId);
+    assert.equal((position!.step! as unknown as { purpose: string }).purpose, "receipt_texts", "the pending text choice skips the email question");
+    assert.equal((await texted.ledger.list()).filter((e) => e.event === "consent.recorded" && e.detail.purpose === "receipt_email").length, 0);
+  });
+
+  it("asks a question whose stored condition was corrupted, rather than skipping on it", async () => {
+    // The config validates `when` at save, so only an edit to the stored record can put a garbage
+    // condition on a step. A corrupted condition must fail toward asking, never toward skipping.
+    for (const [name, corrupted] of [["an unknown channel", { paymentChannel: "fax" }], ["an extra key", { paymentChannel: "email", extra: true }]] as const) {
+      const t = engine(EMAIL);
+      const callId = await verified(t, "ask-before-pay");
+      const stored = (await t.sessions.get("ws_test", callId))!;
+      (stored.record as unknown as { flow: { steps: Array<{ when?: unknown }> } }).flow.steps[2]!.when = corrupted;
+      await t.sessions.compareAndSet("ws_test", callId, stored.version, stored.record as never);
+      await t.engine.offerPaymentChannels(callId);
+      await t.engine.choosePaymentChannel(callId, { key: "1" });
+      const position = await t.engine.flowPosition(callId);
+      assert.equal((position!.step! as unknown as { purpose: string }).purpose, "receipt_email", `${name}: the corrupted condition skipped nothing, the question is asked`);
+    }
   });
 
   it("keeps a first observation of no address, and a later re-read never fills one in", async () => {

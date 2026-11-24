@@ -15,6 +15,18 @@ released out of this file, from its dated `## [X.Y.Z] - YYYY-MM-DD` heading to t
 heading, and uses it as the GitHub release's text, with a link back here
 (`scripts/release-notes.mjs`). A release with no dated section is refused.
 
+## [Unreleased]
+
+### Added
+
+- **A consent step can follow the caller's payment channel.** A `trace.consent` step takes an
+  optional `when: { paymentChannel }`: the step runs only for that channel and is skipped
+  otherwise, recording nothing, so a host with one email-conditioned and one text-conditioned
+  question asks each caller exactly one. The channel is the one the call's payment link goes by
+  (the choice not yet used, else the last delivered link's, text when there was none), and the
+  question must follow the channel choice in its flow, or the config is refused. The condition is
+  a `trace.consent` step's alone (issue #179).
+
 ## [0.4.0] - 2026-11-23
 
 district-assurance 0.4.0 lets a caller get their receipt link by email on the channel they chose

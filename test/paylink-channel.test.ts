@@ -12,7 +12,7 @@ import { ModuleRegistry, type AssuranceModule } from "../src/core/module.ts";
 import type { CallRecord } from "../src/core/runtime.ts";
 import { builtInModules } from "../src/modules.ts";
 import { wordingDigest } from "../src/prove/consent.ts";
-import { PAYMENT_CHANNEL_KEYS, PAYMENT_CHANNEL_PURPOSES, PAYMENT_EMAIL, formatAmount, paylinkModule, type PaylinkSlice } from "../src/pay/paylink.ts";
+import { PAYMENT_CHANNEL_KEYS, PAYMENT_CHANNEL_PURPOSES, PAYMENT_EMAIL, chosenPaymentChannel, formatAmount, paylinkModule, type PaylinkSlice } from "../src/pay/paylink.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
 import { FakeEmailSender, MemoryConsentStore, TEST_KNOWLEDGE_KEY, createTestEngine, testSubject, type TestEngine, type TestEngineOptions } from "../src/testing/index.ts";
 import { ACCOUNT, DOB, PHONE_ON_FILE, confirmAmount, rejects, testConfig, wording , messages} from "./helpers.ts";
@@ -172,6 +172,13 @@ describe("paylink channel: config", () => {
     assert.deepEqual(at(channelConfig((c) => (c.modules.trace = { settings: { businessName: "" } }))), ["modules.trace.settings: businessName must be 1 to 64 characters on one line"]);
     // Outside validateConfig there is no other module's settings to check against.
     assert.deepEqual(paylinkModule.validateStep(channel, { settings: { channels: ["text", "email"] }, policy: null, adapters: new Set(["emails"]), capabilities: {} }), []);
+  });
+
+  it("reads no paylink slice at all as text, in the condition's channel reading", () => {
+    // A record with no paylink module data (the module off, or a record from before it existed):
+    // the reading a conditioned consent step matches is text. Only a bare record produces it now,
+    // because a conditioned question must follow a channel step (#180's review).
+    assert.equal(chosenPaymentChannel({ modules: {} } as never), "text");
   });
 
   it("checks the channels setting, and needs the emails adapter only with email on", () => {

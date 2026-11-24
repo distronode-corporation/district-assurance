@@ -18,6 +18,7 @@ import { EngineError, RateLimitedError } from "./core/errors.ts";
 import { assertFlowNotEnded, currentStep } from "./core/flow.ts";
 import type { Actor, DeliveredEvent, EngineEventName, EventListener, ListenerErrorHandler } from "./core/events.ts";
 import { ModuleRegistry, type AssuranceModule, type FlowStep } from "./core/module.ts";
+import { isObject } from "./core/shape.ts";
 import { ATTESTATIONS, capCallLevel, raiseMinimum, scopeClass, scopesForLevel, stepAmount, type AssuranceLevel, type Attestation, type ScopeClass, type StepUpAmount, type VerificationPolicy } from "./core/policy.ts";
 import { cardNumberRedactor, interruptLine, type RedactionFinding, type Redactor } from "./core/redaction.ts";
 import { SUPPORTED_LOCALES, isSupportedLocale, type AdapterName, type CallAccess, type CallDraft, type CallRecord, type EngineAdapters, type EngineRuntime, type FlowStatus, type Locale } from "./core/runtime.ts";
@@ -1705,9 +1706,12 @@ export class Engine {
     const flow = record.flow;
     while (flow !== null && flow.status === "running") {
       const step = flow.steps[flow.index]!;
+      // A step whose condition does not match the call is skipped (ADR-38): no module work runs for
+      // it and nothing is recorded, and the flow moves past it as complete.
+      const skipped = this.#conditionSkips(step, record);
       // A module removed while the call ran fails its step. Slices exist for every module a flow uses (startFlow).
       const owner = this.registry.stepOwner(step.type);
-      const status = owner === undefined ? "failed" : owner.stepStatus(step, { state: record.state, slice: record.modules[owner.manifest.name]!, mark: flow.mark });
+      const status = skipped ? "complete" : owner === undefined ? "failed" : owner.stepStatus(step, { state: record.state, slice: record.modules[owner.manifest.name]!, mark: flow.mark });
       if (status === "pending") return;
       const detail = { flow: flow.name, step: flow.index, type: step.type };
       if (status === "failed") {
@@ -1720,9 +1724,12 @@ export class Engine {
       // Such a step follows a level 2 verification, which a keypad or PIN match always unlocked. Only
       // a contact step needs the match to stand (its notice goes to the matched subject's number):
       // Trace's noteAction fails closed if it does not. A payment texted before a taint still completes
-      // when the provider reports it, without the match, which stays void.
-      const action = this.#actionClass(owner!, step.type);
-      if (action !== null) trace.noteAction(draft, action, () => this.#currentSubject(record));
+      // when the provider reports it, without the match, which stays void. A skipped step records
+      // nothing, so it notes no action either.
+      if (!skipped) {
+        const action = this.#actionClass(owner!, step.type);
+        if (action !== null) trace.noteAction(draft, action, () => this.#currentSubject(record));
+      }
       flow.index++;
       const next = flow.steps[flow.index];
       if (next === undefined) {
@@ -1734,6 +1741,22 @@ export class Engine {
       flow.mark = nextOwner === undefined ? null : nextOwner.enterStep(next, record.modules[nextOwner.manifest.name]!);
       this.#holdStep(draft);
     }
+  }
+
+  /**
+   * Whether a step's `when` condition does not match the call, so the step is skipped. The one
+   * condition today is `paymentChannel` (ADR-38), and it is a trace.consent step's: another
+   * module's step carrying a `when` field is that module's own business, never a condition here.
+   * A step with no condition, or one the config's own module would have refused, never skips.
+   */
+  #conditionSkips(step: FlowStep, record: CallRecord): boolean {
+    if (step.type !== "trace.consent") return false;
+    const when: unknown = (step as { when?: unknown }).when;
+    // The shape trace's own validation accepts, and nothing else: a stored condition with any
+    // other key is not a condition the config could have saved, and fails toward asking.
+    if (!isObject(when) || Object.keys(when).some((key) => key !== "paymentChannel")) return false;
+    const channel = (when as { paymentChannel?: unknown }).paymentChannel;
+    return channel === "text" || channel === "email" ? paylink.chosenPaymentChannel(record) !== channel : false;
   }
 
   /**

@@ -11,9 +11,9 @@ import { EngineError } from "../core/errors.ts";
 import { isEmailAddress } from "../core/email.ts";
 import { stepOfType } from "../core/flow.ts";
 import { problem, type AssuranceModule, type FlowStep, type StepContext, type StepStatus, type StepView, type StructuredProblem, type ValidationProblem } from "../core/module.ts";
+import { isObject, unknownKeys } from "../core/shape.ts";
 import type { ScopeClass } from "../core/policy.ts";
 import { LOCALES, type CallDraft, type CallRecord, type EngineRuntime, type Locale } from "../core/runtime.ts";
-import { isObject, unknownKeys } from "../core/shape.ts";
 import type { PaymentChannel } from "../pay/payment.ts";
 import { wordingDigest, type ConsentWording } from "./consent.ts";
 import { detailCarriesCardNumber } from "./ledger.ts";
@@ -85,6 +85,12 @@ export interface TraceConsentStep extends FlowStep {
   purpose: string;
   /** "yes" (the default): a "no" fails the step and stops the flow. "answer": either answer moves on. */
   require?: "yes" | "answer";
+  /**
+   * Runs the step only when the call's payment channel matches: the choice not yet used, else the
+   * channel of the last delivered link, text when there was none (ADR-38). A step whose condition
+   * does not match is skipped and records nothing. Absent: the step runs for every caller.
+   */
+  when?: { paymentChannel: "text" | "email" };
 }
 
 export interface TraceSlice {
@@ -201,8 +207,14 @@ export const traceModule: AssuranceModule = {
       if (step.textLink !== undefined) errors.push(...textLinkErrors(step.textLink, ctx));
       return errors;
     }
-    const errors = unknownKeys(step, ["type", "purpose", "require"]).map((k) => problem("trace.step_unknown_field", `${k} is not a field of this step`, { key: k }));
+    const errors = unknownKeys(step, ["type", "purpose", "require", "when"]).map((k) => problem("trace.step_unknown_field", `${k} is not a field of this step`, { key: k }));
     if (step.require !== undefined && step.require !== "yes" && step.require !== "answer") errors.push(problem("trace.require", 'require must be "yes" (the default) or "answer"'));
+    const when: unknown = step.when;
+    if (when !== undefined && (!isObject(when) || unknownKeys(when, ["paymentChannel"]).length > 0)) {
+      errors.push(problem("trace.when_shape", "when must be { paymentChannel }"));
+    } else if (when !== undefined && (when as { paymentChannel: unknown }).paymentChannel !== "text" && (when as { paymentChannel: unknown }).paymentChannel !== "email") {
+      errors.push(problem("trace.when_channel", "when.paymentChannel must be text or email"));
+    }
     if (typeof step.purpose !== "string") return [...errors, problem("trace.purpose_shape", "purpose must name a wording")];
     const settings = ctx.settings as TraceSettings | undefined | null;
     if (settings !== null && !(settings?.wordings ?? []).some((w) => w.purpose === step.purpose)) {
@@ -229,6 +241,27 @@ export const traceModule: AssuranceModule = {
     const wording = (s as unknown as TraceSlice).wordings.find((w) => w.purpose === step.purpose);
     if (wording === undefined) return `the call has no wording for ${String(step.purpose)}`;
     return wording.text[locale] === undefined ? `the wording for ${wording.purpose} has no ${locale} text` : null;
+  },
+
+  validateFlow(steps: readonly FlowStep[], _ctx: StepContext): ValidationProblem[] {
+    // A conditioned consent question reads the choice a paylink.channel step records, so it comes
+    // after one: asked before any choice exists it would read text and an email question could
+    // never be asked (issue #179's review).
+    const errors: ValidationProblem[] = [];
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i]!;
+      // The composition hands the whole flow, malformed steps included (#173): a non-object step is
+      // its own problem, reported once, never a throw out of this check.
+      if (!isObject(step) || step.type !== "trace.consent") continue;
+      const when: unknown = (step as { when?: unknown }).when;
+      if (!isObject(when)) continue;
+      const channel = (when as { paymentChannel?: unknown }).paymentChannel;
+      if (channel !== "text" && channel !== "email") continue;
+      if (!steps.slice(0, i).some((earlier) => isObject(earlier) && earlier.type === "paylink.channel")) {
+        errors.push(problem("trace.when_needs_choice", `steps[${i}]: a conditioned consent question follows the channel choice`, { index: i }));
+      }
+    }
+    return errors;
   },
 
   stepStatus(step: FlowStep, view: StepView): StepStatus {
