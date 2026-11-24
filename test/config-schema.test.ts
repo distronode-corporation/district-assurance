@@ -182,7 +182,7 @@ const OBJECTS: ReadonlyArray<readonly [pointer: string, keys: readonly string[]]
   ["#/$defs/paylinkChannelStep", keysOf<PaylinkChannelStep>()(["type"])],
   ["#/$defs/pinSettings/properties/reuse", keysOf<NonNullable<PinSettings["reuse"]>>()(["maxAgeSeconds"])],
   ["#/$defs/paylinkRequestStep", keysOf<PaylinkRequestStep>()(["type", "amountMinor", "currency", "amountRef", "description", "amountSource", "mode", "linkLifeMinutes", "paymentMethods"])],
-  ["#/$defs/traceConsentStep", keysOf<TraceConsentStep>()(["type", "purpose", "require"])],
+  ["#/$defs/traceConsentStep", keysOf<TraceConsentStep>()(["type", "purpose", "require", "when"])],
   ["#/$defs/traceReceiptStep", keysOf<TraceReceiptStep>()(["type", "textLink"])],
   ["#/$defs/traceReceiptStep/properties/textLink", keysOf<NonNullable<TraceReceiptStep["textLink"]>>()(["consent"])],
   ["#/$defs/gateSettings", keysOf<GateSettings>()(["targets", "maxGrantsPerCall"])],
@@ -261,6 +261,22 @@ function gateAndStepUpConfig(): { [key: string]: any } {
   return c;
 }
 
+/** A conditioned consent question after the channel choice it reads (issue #179). */
+function conditionedConsentConfig(): { [key: string]: any } {
+  const c = json(testConfig());
+  c.modules.paylink = { settings: { mode: "platform", channels: ["text", "email"] } };
+  c.modules.trace.settings.businessName = "Maple Property Management";
+  c.modules.trace.settings.wordings.push(
+    { purpose: "payment_link_text", version: "1", text: { en: "By text?", fr: "Par texto ?" } },
+    { purpose: "payment_link_email", version: "1", text: { en: "By email?", fr: "Par courriel ?" } },
+  );
+  const verify = { type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["payment.request"] };
+  c.flows.conditioned = {
+    steps: [verify, { type: "paylink.channel" }, { type: "paylink.request", amountMinor: 5000, currency: "cad", description: "Deposit", amountSource: "price_list" }, { type: "trace.consent", purpose: c.modules.trace.settings.wordings[0].purpose, when: { paymentChannel: "email" } }, { type: "trace.receipt" }],
+  };
+  return c;
+}
+
 /** Configs validateConfig accepts, each with the adapters its engine has. */
 const GOOD: ReadonlyArray<readonly [name: string, config: { [key: string]: any }, adapters?: readonly string[]]> = [
   ["the default config", json(defaultConfig())],
@@ -298,6 +314,7 @@ const GOOD: ReadonlyArray<readonly [name: string, config: { [key: string]: any }
     return c;
   })(), ALL_ADAPTERS.filter((a) => a !== "signer")],
   ["Gate and step-up on, and a receipt that texts its link", gateAndStepUpConfig()],
+  ["a consent step that runs only for the caller's payment channel", conditionedConsentConfig(), ["ledger", "sessions", "records", "identity", "carrier", "messages", "payments", "signer", "pinVerifier", "counters", "codes", "emails"]],
   ["a step-up rule on an amount, and a keypad idle timeout left to its default with null", (() => {
     const c = json(demoConfig());
     c.policy.stepUp = [{ name: "big", scope: "payment.request", level: 3, amountOverMinor: { cad: 100_000 } }];
@@ -375,6 +392,9 @@ const BAD: ReadonlyArray<readonly [name: string, kind: "shape" | "rule", patch: 
   ["a description of 201 characters", "shape", (c) => (c.flows.deposit.steps[2].description = "x".repeat(201))],
   ["an amount from the model", "shape", (c) => (c.flows.deposit.steps[2].amountSource = "model")],
   ["a consent that requires maybe", "shape", (c) => (c.flows.deposit.steps[3].require = "maybe")],
+  ["a consent condition that is not an object", "shape", (c) => (c.flows.deposit.steps[3].when = "email")],
+  ["a consent condition with an extra field", "shape", (c) => (c.flows.deposit.steps[3].when = { paymentChannel: "email", extra: true })],
+  ["a consent condition for an unknown channel", "shape", (c) => (c.flows.deposit.steps[3].when = { paymentChannel: "fax" })],
   ["a receipt step with a field", "shape", (c) => (c.flows.deposit.steps[4].sign = true)],
   ["a module that is not installed", "rule", (c) => (c.modules.crm2 = {})],
   ["Gate on without settings", "shape", (c) => (c.modules.gate = {})],

@@ -437,6 +437,27 @@ describe("module switches", () => {
   });
 });
 
+describe("a step's channel condition (issue #179)", () => {
+  it("ignores a condition the engine does not know, on any module's step: the step runs as itself", async () => {
+    // An outside module accepts any step field, so a `when` reaches the engine, but the condition
+    // is a trace.consent step's (ADR-38): another module's step is never skipped, whatever its
+    // `when` says, well-formed or garbage.
+    const t = setup({ config: flowConfig(), modules: [loyaltyModule()] });
+    t.engine.configure(
+      flowConfig((c) => {
+        c.modules.loyalty = {};
+        c.flows.loyalty = { steps: [{ type: "badge.verify", level: 1, factors: ["keypad_knowledge"] }, { type: "loyalty.lookup", when: { paymentChannel: "fax" } }] };
+      }),
+    );
+    const { callId } = await t.engine.startCall({ flow: "loyalty" });
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    await t.engine.finishVerification(callId);
+    const position = await t.engine.flowPosition(callId);
+    assert.equal(position!.step!.type, "loyalty.lookup", "the unknown condition skipped nothing");
+  });
+});
+
 describe("lone surrogates and other values the ledger cannot hash (PRV-2 review)", () => {
   it("never saves a ledger entry it cannot append, so the call is never wedged", async () => {
     const t = setup({ config: flowConfig(), modules: [loyaltyModule()] });

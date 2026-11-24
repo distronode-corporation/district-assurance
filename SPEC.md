@@ -1060,7 +1060,20 @@ level reaches `payment.request` and whose `scopes`, when listed, grant it, and i
 `paylink.request` before the next `paylink.channel` (the channel step declares no scope need, since
 a choice is not a money action a receipt names, but it asks for `payment.request` when it runs). A
 whole-flow check skips a step that is not an object, which the composition reports on its own (#173),
-and never throws on it. A step validator sees another module's validated settings through the
+and never throws on it. A step may also carry a condition: today `when: { paymentChannel }`, named
+`"text"` or `"email"`, on a `trace.consent` step, and only there (another module's step carrying a
+`when` field is that module's own business). The condition is read as the step is reached, against
+the channel the call's payment link goes by: the choice not yet used, else the channel of the last
+delivered link, text when there was none, so the question can be asked before the payment as well as
+after it. The receipt link reads the last delivered link alone (its consent is asked after the
+payment by design); the two readings agree once a link has been delivered. A conditioned
+`trace.consent` step must follow a `paylink.channel` step in its flow, or the config is refused
+(`trace.when_needs_choice`): asked before any choice exists it would read text, and an email question
+could never be asked. A step whose condition does not match is skipped: no module work runs for it,
+nothing is recorded, and the flow moves past it as complete, the caller hearing nothing of it. A step
+without a condition runs for every caller, as before.
+
+A step validator sees another module's validated settings through the
 context's `settingsOf(name)` (null for a module off or whose settings were refused), as
 `paylink.channel` reads Trace's wordings. Cross-checks against a module's settings or the
 policy are skipped when those did not validate (their own problems are reported). The engine
@@ -1095,7 +1108,7 @@ structured form.
 | `dossier.collect` | `form`, a form id in Dossier's settings |
 | `paylink.channel` | no fields; needs `email` in Paylink's `channels`, Trace's wordings for `payment_link_text` and `payment_link_email`, and Trace's `businessName`; each comes after a `badge.verify` step that grants `payment.request` and must be followed by the `paylink.request` it chooses for, before another `paylink.channel` (section 14) |
 | `paylink.request` | `amountMinor` and `currency`, or instead `amountRef` (1 to 64 of letters, digits, `.`, `:`, `-`, `_`; needs the `amounts` adapter), never both; `description`, `amountSource` (section 14); optional `mode` (`connect` or `platform`; connect needs Paylink's `connectedAccountId`), `linkLifeMinutes` (5 to 60), `paymentMethods` (instant methods only) |
-| `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"` |
+| `trace.consent` | `purpose`, a wording in Trace's settings; `require`: `"yes"` (default) or `"answer"`; optional `when: { paymentChannel }` runs the step only for that channel (skipped otherwise, recording nothing) |
 | `trace.receipt` | optional `textLink: {consent}`, a wording purpose in Trace's settings, which also needs Trace's `businessName` and the `messages` adapter (section 16); needs the `signer` adapter |
 | `gate.grant` | `target`, a target id in Gate's settings; optional `lifetimeSeconds` (10 to 900, default 60) |
 | `step-up.issue` | `site`, a site id in step-up's settings; optional `lifetimeSeconds` (120 to 300, default 120) |

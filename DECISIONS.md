@@ -664,3 +664,27 @@ file. Each channel that sends is recorded on the ledger, once.
 **Revisit** if a host ever runs both entry points in production and the duplicate becomes a
 complaint: the lease with a lapse, as the payment link send uses, is the known design.
 
+
+## ADR-38. A consent step can follow the caller's payment channel
+
+**Decided.** A `trace.consent` step takes an optional `when: { paymentChannel }` condition, and
+only a `trace.consent` step: another module's step carrying a `when` field is that module's own
+business, never a condition. The engine reads it as the step is reached, against the channel the
+call's payment link goes by: the choice not yet used, else the channel of the last delivered link,
+text when there was none, a reading of its own, so the question can be asked between the choice and
+the payment as well as after it. The receipt link reads the last delivered link alone (its consent
+is asked after the payment by design); the two readings agree once a link has been delivered, and
+were kept separate rather than break the asked-before-the-payment order. A conditioned question must
+follow a `paylink.channel` step in its flow, or the config is refused: asked before any choice
+exists it would read text, and an email question could never be asked. A non-matching step is
+skipped: no module work runs, the caller hears nothing, nothing is recorded, and the flow moves
+past it as complete, so a host with one email-conditioned and one text-conditioned consent step
+asks each caller exactly one question.
+**Why the engine, and why skip.** The condition is a flow-level concern: the module's step view
+carries only its own slice, so the check lives in the engine's advance, where the whole record is;
+and skipping is silent by design, because the alternative (failing a step whose question does not
+apply) would end flows for callers who answered nothing wrong. The channel reading is pinned to the
+receipt link's so the two features cannot disagree about what the caller chose. Absent `when` is
+today's behaviour, byte for byte; the shape is checked when the config is saved, with stable codes.
+**Revisit** if a host needs a condition on another field, or a condition that fails a flow: the
+mechanism reads one field today, and a wider vocabulary wants its own ADR.

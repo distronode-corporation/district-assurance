@@ -462,8 +462,16 @@
       "properties": {
         "type": true,
         "purpose": { "type": "string" },
-        "require": { "enum": ["yes", "answer"] }
+        "require": { "enum": ["yes", "answer"] },
+        "when": { "$ref": "#/$defs/paymentChannelWhen" }
       }
+    },
+    "paymentChannelWhen": {
+      "description": "Runs the step only when the call's payment channel matches; a non-matching step is skipped and records nothing.",
+      "type": "object",
+      "required": ["paymentChannel"],
+      "additionalProperties": false,
+      "properties": { "paymentChannel": { "enum": ["text", "email"] } }
     },
     "traceReceiptStep": {
       "description": "Sign the call's receipt. Needs the signer adapter. textLink texts a link to it after a money, contact or access step, when the caller said yes to that consent purpose (PRV-10).",
