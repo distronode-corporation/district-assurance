@@ -15,7 +15,7 @@ released out of this file, from its dated `## [X.Y.Z] - YYYY-MM-DD` heading to t
 heading, and uses it as the GitHub release's text, with a link back here
 (`scripts/release-notes.mjs`). A release with no dated section is refused.
 
-## [Unreleased]
+## [0.4.1] - 2026-11-24
 
 ### Added
 
