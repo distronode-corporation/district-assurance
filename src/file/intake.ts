@@ -1,5 +1,5 @@
 // Intake forms: the fields a business defines, and the values a caller gives during the call. A
-// value is normalised by code before it reaches the draft, and a free-text value that carries a
+// value is normalised by code before it reaches the draft, and a text or number value that carries a
 // card number is refused, so intake can never become a way to store one. A form cannot ask for a
 // card or a Social Insurance Number at all, and a field can be asked only when another field's
 // value says so (`showIf`).
@@ -228,7 +228,7 @@ function showIfProblem(form: IntakeForm, field: IntakeField): StructuredProblem 
 
 /**
  * Whether a stored value is one the field could hold after normalisation: its type, and its
- * bounds, length, pattern and card check. A rule the form gets wrong is reported on its own and
+ * bounds, length, pattern and card check (text and number fields). A rule the form gets wrong is reported on its own and
  * not applied here.
  */
 function acceptsValue(field: IntakeField, value: unknown): boolean {
@@ -241,7 +241,7 @@ function acceptsValue(field: IntakeField, value: unknown): boolean {
       return normaliseFieldValue(checked, value).ok;
     }
     case "number":
-      return typeof value === "number" && Number.isFinite(value) && withinBounds(field, value);
+      return typeof value === "number" && Number.isFinite(value) && findCardNumbers(String(value)).length === 0 && withinBounds(field, value);
     case "date":
       return typeof value === "string" && isCalendarDate(value) && withinBounds(field, value);
     default:
@@ -266,6 +266,9 @@ export function normaliseFieldValue(field: IntakeField, raw: string): NormaliseR
       if (field.pattern !== undefined && !new RegExp(`^(?:${field.pattern})$`, "u").test(value)) return { ok: false, reason: "no_match" };
       return { ok: true, value };
     case "number":
+      // A card number is refused as in a text field, whatever its form ("4111 1111 1111 1111"
+      // included), so a number field cannot become a way to store one either.
+      if (findCardNumbers(value).length > 0) return { ok: false, reason: "card_number" };
       // Hundreds of digits overflow to Infinity, which no record can hold.
       return /^-?\d+(\.\d+)?$/.test(value) && Number.isFinite(Number(value)) ? inRange(field, Number(value)) : { ok: false, reason: "not_a_number" };
     case "date":

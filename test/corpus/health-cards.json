@@ -5,6 +5,8 @@
     { "lang": "en", "text": "health card 1234 567 897 AB", "found": ["1234 567 897"] },
     { "lang": "en", "text": "OHIP 1234-567-897", "found": ["1234-567-897"] },
     { "lang": "en", "text": "it is 9876543217.", "found": ["9876543217"] },
+    { "lang": "en", "text": "6 1 2 3 4 5 6 7 8 9 7", "found": ["6 1 2 3 4 5 6 7 8 9 7"] },
+    { "lang": "en", "text": "card six one two three four five six seven eight nine seven", "found": ["six one two three four five six seven eight nine seven"] },
     { "lang": "fr", "text": "carte santé un deux trois quatre cinq six sept huit neuf sept", "found": ["un deux trois quatre cinq six sept huit neuf sept"] },
     { "lang": "en", "text": "1234 567 890", "found": [] },
     { "lang": "en", "text": "123 456 7897", "found": [] },

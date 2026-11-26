@@ -15,6 +15,26 @@ released out of this file, from its dated `## [X.Y.Z] - YYYY-MM-DD` heading to t
 heading, and uses it as the GitHub release's text, with a link back here
 (`scripts/release-notes.mjs`). A release with no dated section is refused.
 
+## [Unreleased]
+
+Two fixes to how card numbers are kept out of what the engine stores. Nothing changes for a host
+that already redacts and collects intake as before; text that held a card after other digits, and
+a number field given a card number, are now handled the way the security model says.
+
+### Fixed
+
+- **A card number after other digits is removed whole.** Digits read just before a card (a phone
+  number, a reference) could pass the Luhn check together with the card's first digits. Redaction
+  removed that false match and left the rest of the card, up to 12 digits, in the text:
+  "416 555 0021, 4111 1111 1111 1111" came out as "[card number removed] 1111 1111 1111". Now every
+  match in a run is inside what is removed, so that text comes out as "[card number removed]", and
+  two cards side by side are still two. Social insurance numbers and health card numbers had the
+  same flaw and are fixed the same way. The shared test corpus has the new cases.
+- **A number intake field refuses a card number.** Only text fields ran the card check, so a
+  `number` field took "4111111111111111" and stored it. A number field now refuses a card number
+  with the same `card_number` reason as a text field, written with or without separators, and a
+  form whose `showIf` waits for a card number as a number is refused when it is saved.
+
 ## [0.4.1] - 2026-11-24
 
 ### Added

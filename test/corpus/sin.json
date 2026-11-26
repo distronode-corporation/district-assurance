@@ -10,6 +10,8 @@
     { "lang": "fr", "text": "mon NAS est zéro quatre six, quatre cinq quatre, deux huit six", "found": ["zéro quatre six, quatre cinq quatre, deux huit six"] },
     { "lang": "fr", "text": "numéro d'assurance sociale 087 654 323, merci", "found": ["087 654 323"] },
     { "lang": "en", "text": "one 046 454 286", "found": ["046 454 286"] },
+    { "lang": "en", "text": "103 046 454 286", "found": ["103 046 454 286"] },
+    { "lang": "en", "text": "0 0 4 046 454 286", "found": ["0 0 4 046 454 286"] },
     { "lang": "en", "text": "SIN 046 454 286 7", "found": ["046 454 286"] },
     { "lang": "en", "text": "046 454 286 and 012 345 674", "found": ["046 454 286", "012 345 674"] },
     { "lang": "en", "text": "046 454 287", "found": [] },
