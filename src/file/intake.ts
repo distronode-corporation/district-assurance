@@ -270,7 +270,11 @@ export function normaliseFieldValue(field: IntakeField, raw: string): NormaliseR
       // included), so a number field cannot become a way to store one either.
       if (findCardNumbers(value).length > 0) return { ok: false, reason: "card_number" };
       // Hundreds of digits overflow to Infinity, which no record can hold.
-      return /^-?\d+(\.\d+)?$/.test(value) && Number.isFinite(Number(value)) ? inRange(field, Number(value)) : { ok: false, reason: "not_a_number" };
+      if (!/^-?\d+(\.\d+)?$/.test(value) || !Number.isFinite(Number(value))) return { ok: false, reason: "not_a_number" };
+      // The number stored is checked too: Number() drops leading zeros, so "00004111111111111111"
+      // (one numeral too long to be a card) would be stored as one.
+      if (findCardNumbers(String(Number(value))).length > 0) return { ok: false, reason: "card_number" };
+      return inRange(field, Number(value));
     case "date":
       return isCalendarDate(value) ? inRange(field, value) : { ok: false, reason: "not_a_date" };
     case "yes_no": {

@@ -166,7 +166,7 @@ describe("a number intake field and a card number (0.4.2)", () => {
 
   it("refuses a card number as a number field's value, as a text field does", () => {
     for (const card of CARDS) {
-      for (const raw of [card, ` ${card} `, `-${card}`, `${card}.0`, `${card}.25`, fours(card, " "), fours(card, "-"), fours(card, ".")]) {
+      for (const raw of [card, ` ${card} `, `-${card}`, `${card}.0`, `${card}.25`, `0000${card}`, `-0000${card}`, `000000000${card}.000`, fours(card, " "), fours(card, "-"), fours(card, ".")]) {
         assert.deepEqual(normaliseFieldValue(units, raw), { ok: false, reason: "card_number" }, raw);
       }
     }

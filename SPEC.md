@@ -1889,7 +1889,7 @@ that is not a whole, non-negative, safe integer.
 | Type | Accepted | Stored as |
 |---|---|---|
 | `text` | trimmed, non-empty, Unicode text (a lone surrogate is `not_text`), at most `maxLength` (500), no card number, and matching `pattern` whole if set (`no_match`) | string |
-| `number` | `-?\d+(\.\d+)?`, no card number (as for `text`, in any form: `4111 1111 1111 1111` is `card_number`, not `not_a_number`), from `min` to `max` if set (`below_min`, `above_max`) | number |
+| `number` | `-?\d+(\.\d+)?`, no card number, as written or as the number stored (as for `text`, in any form: `4111 1111 1111 1111` and `00004111111111111111` are `card_number`), from `min` to `max` if set (`below_min`, `above_max`) | number |
 | `date` | `YYYY-MM-DD` naming a real day, from `min` to `max` if set | string |
 | `yes_no` | `yes`, `y`, `oui` / `no`, `n`, `non`, any case, in every locale (no Spanish word: a Spanish call confirms on the keypad) | boolean |
 

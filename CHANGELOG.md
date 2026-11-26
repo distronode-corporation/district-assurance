@@ -32,7 +32,8 @@ a number field given a card number, are now handled the way the security model s
   same flaw and are fixed the same way. The shared test corpus has the new cases.
 - **A number intake field refuses a card number.** Only text fields ran the card check, so a
   `number` field took "4111111111111111" and stored it. A number field now refuses a card number
-  with the same `card_number` reason as a text field, written with or without separators, and a
+  with the same `card_number` reason as a text field, written with or without separators or
+  with leading zeros, and a
   form whose `showIf` waits for a card number as a number is refused when it is saved.
 
 ## [0.4.1] - 2026-11-24
