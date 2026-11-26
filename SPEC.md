@@ -1889,7 +1889,7 @@ that is not a whole, non-negative, safe integer.
 | Type | Accepted | Stored as |
 |---|---|---|
 | `text` | trimmed, non-empty, Unicode text (a lone surrogate is `not_text`), at most `maxLength` (500), no card number, and matching `pattern` whole if set (`no_match`) | string |
-| `number` | `-?\d+(\.\d+)?`, from `min` to `max` if set (`below_min`, `above_max`) | number |
+| `number` | `-?\d+(\.\d+)?`, no card number, as written or as the number stored (as for `text`, in any form: `4111 1111 1111 1111` and `00004111111111111111` are `card_number`), from `min` to `max` if set (`below_min`, `above_max`) | number |
 | `date` | `YYYY-MM-DD` naming a real day, from `min` to `max` if set | string |
 | `yes_no` | `yes`, `y`, `oui` / `no`, `n`, `non`, any case, in every locale (no Spanish word: a Spanish call confirms on the keypad) | boolean |
 
@@ -3176,7 +3176,12 @@ or `triple` before anything but one digit is an ordinary word.
 
 **Redaction.** `findCardNumbers` looks, in each run, for 13 to 19 digits that pass the Luhn check,
 starting and ending on a numeral or spoken number, leftmost first and longest at each position,
-never overlapping; `cardNumberRedactor` replaces each with `[card number removed]`.
+never overlapping; `cardNumberRedactor` replaces each with `[card number removed]`. A match taken
+that way can be a false one: digits read just before a card (a phone number, a reference) that pass
+the check with the card's first digits. So every match in the run is then checked against those
+taken, and one that has a numeral or spoken number left outside them is taken too, merged with any
+it overlaps into one finding. Every match is then inside a finding, and findings never overlap:
+`416 555 0021, 4111 1111 1111 1111` is removed whole, and two cards side by side stay two.
 
 **Live detection.** `LiveCardNumberDetector` is fed a call's transcript one chunk at a time
 (`push(chunk)`; chunks are joined with a space, so each must end at a word boundary). It answers
@@ -3213,7 +3218,9 @@ with no call), with only the separators listed there between them. A numeral is 
 decimal digits (fullwidth, Arabic-Indic and the rest), read by its values for every check, and the
 original span is what is removed. Joining this widely can join things that are not one number;
 over-redaction is the safe side, since the risk is a number reaching storage. In each run, matches
-are taken leftmost first, longest at each position, never overlapping. A format with groups accepts
+are taken leftmost first, longest at each position, never overlapping, and then, as for card numbers
+(section 24), any match left partly outside those taken is taken too and merged with what it
+overlaps, so digits just before a number never leave part of it in clear. A format with groups accepts
 a written number only when its groups break where the format's do, or not at all; single digits
 (spoken digit words, or digits read one by one) may break anywhere.
 

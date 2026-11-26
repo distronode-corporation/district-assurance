@@ -45,7 +45,10 @@
     { "name": "fails Luhn", "text": "twelve thirty four fifty six seventy eight twelve thirty four fifty six seventy eight", "redacted": "twelve thirty four fifty six seventy eight twelve thirty four fifty six seventy eight" },
     { "name": "the longest part that passes Luhn", "text": "forty two forty two forty two forty two forty two forty two forty two forty three", "redacted": "[card number removed] forty three" },
     { "name": "ordinary speech", "text": "I am forty two and I live at twelve thirty four Main", "redacted": "I am forty two and I live at twelve thirty four Main" },
-    { "name": "a phone number is not a card number", "text": "four one six five five five zero one double zero", "redacted": "four one six five five five zero one double zero" }
+    { "name": "a phone number is not a card number", "text": "four one six five five five zero one double zero", "redacted": "four one six five five five zero one double zero" },
+    { "name": "a card after a phone number whose digits and the card's first ones pass Luhn", "text": "416 555 0021, 4111 1111 1111 1111", "redacted": "[card number removed]" },
+    { "name": "a card after one digit that, with the card's first ones, passes Luhn", "text": "ref 6 4111 1111 1111 1111 ok", "redacted": "ref [card number removed] ok" },
+    { "name": "two cards after a phone number stay two", "text": "416-555-0001-4111-1111-1111-1111 4242.4242.4242.4242", "redacted": "416-[card number removed] [card number removed]" }
   ],
   "live": [
     {

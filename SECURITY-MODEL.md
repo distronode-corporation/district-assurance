@@ -804,7 +804,11 @@ same corpus); it keeps only the open run in memory and never returns it. Over-re
 over-interrupting (a phone number read aloud) are accepted. Speech-to-text that renders a number
 in a way the corpus does not cover can still slip past both, and so can Spanish number words on
 an English or French call; the host's sensitive pause around payment stays the main control.
-Intake refuses a value carrying a card number, and the ledger refuses detail carrying one
+Digits read just before a card number (a phone number, a reference) never leave part of it in
+clear: every match in a run (13 to 19 digits that pass the Luhn check, starting and ending on a
+numeral or spoken number) is inside what is removed, a false match before the card included, and
+SINs and health card numbers are found the same way (tested). Intake refuses a value carrying a
+card number, in a text field or a number field, and the ledger refuses detail carrying one
 (tested). Keypad card capture is not built: it is planned only through a PCI-certified carrier
 service on a call path where tones never reach this engine (PAY-6), after an assessor's scoping.
 Nothing here is a PCI DSS attestation; a host's scope depends on its whole call path.

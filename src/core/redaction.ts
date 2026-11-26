@@ -426,26 +426,73 @@ export function digitRuns(text: string, languages: readonly NumberLanguage[] = N
   return runs;
 }
 
-/** Card numbers in a text, leftmost first, longest match at each position, never overlapping. */
+/** One match in a run: the tokens it uses (first to last) and where in the text it starts. */
+interface RunMatch {
+  first: number;
+  last: number;
+  start: number;
+}
+
+/**
+ * The spans to remove from one run, given every match that starts at each token (`at(i)`, shortest
+ * first). Matches are taken leftmost first and longest at each position, never overlapping, as
+ * before. A match taken that way can be a false one (digits before a card, such as a phone number,
+ * that pass the check with its first digits), and skipping past it would leave the rest of the real
+ * number in clear. So every match is then checked against what was taken: one with a token left
+ * uncovered is taken too, and overlapping spans are merged into one. Every match, the real number
+ * included, is then inside a span, and two numbers side by side stay two spans. Each token starts
+ * at most 19 matches (every token holds a digit, and no number is longer than 19), so a run is
+ * read in linear time.
+ */
+function coverMatches(run: readonly DigitPart[], at: (i: number) => RunMatch[]): RunMatch[] {
+  const matches = run.map((_, i) => at(i));
+  const taken: RunMatch[] = [];
+  const covered = new Uint8Array(run.length);
+  for (let i = 0; i < run.length; ) {
+    const longest = matches[i]!.at(-1);
+    if (longest === undefined) {
+      i++;
+      continue;
+    }
+    taken.push(longest);
+    covered.fill(1, longest.first, longest.last + 1);
+    i = longest.last + 1;
+  }
+  for (const m of matches.flat()) if (covered.subarray(m.first, m.last + 1).includes(0)) taken.push(m);
+  taken.sort((a, b) => a.first - b.first);
+  const spans: RunMatch[] = [];
+  for (const m of taken) {
+    const open = spans.at(-1);
+    if (open !== undefined && m.first <= open.last) {
+      open.last = Math.max(open.last, m.last);
+      open.start = Math.min(open.start, m.start);
+    } else {
+      spans.push({ ...m });
+    }
+  }
+  return spans;
+}
+
+/**
+ * Card numbers in a text: every match (13 to 19 digits that pass the Luhn check, starting and
+ * ending on a numeral or spoken number) is inside a finding (coverMatches), so digits read just
+ * before a card never leave part of it in clear.
+ * Findings are sorted and never overlap.
+ */
 export function findCardNumbers(text: string, languages: readonly NumberLanguage[] = NUMBER_LANGUAGES): RedactionFinding[] {
   const findings: RedactionFinding[] = [];
   for (const run of digitRuns(text, languages)) {
-    let i = 0;
-    while (i < run.length) {
-      let best = -1;
+    const at = (i: number): RunMatch[] => {
+      const found: RunMatch[] = [];
       let digits = "";
       for (let j = i; j < run.length; j++) {
         digits += run[j]!.digits;
         if (digits.length > 19) break;
-        if (digits.length >= 13 && luhnValid(digits)) best = j;
+        if (digits.length >= 13 && luhnValid(digits)) found.push({ first: i, last: j, start: run[i]!.start });
       }
-      if (best >= 0) {
-        findings.push({ kind: "card_number", start: run[i]!.start, end: run[best]!.end });
-        i = best + 1;
-      } else {
-        i++;
-      }
-    }
+      return found;
+    };
+    for (const m of coverMatches(run, at)) findings.push({ kind: "card_number", start: m.start, end: run[m.last]!.end });
   }
   return findings;
 }
@@ -530,39 +577,33 @@ function fourLettersBefore(text: string, at: number): number | undefined {
 }
 
 /**
- * Numbers of the given formats in a text, leftmost first, longest match at each position, never
- * overlapping. A match starts at the first run token it uses, or at its four letters.
+ * Numbers of the given formats in a text. Every match is inside a finding, as for card numbers
+ * (coverMatches); findings are sorted and never overlap. A match starts at the first run token it
+ * uses, or at its four letters.
  */
 function findFormatted(text: string, kind: RedactionKind, formats: readonly NumberFormat[], languages: readonly NumberLanguage[]): RedactionFinding[] {
   const longest = Math.max(...formats.map((f) => f.length));
   const findings: RedactionFinding[] = [];
   for (const run of digitRuns(text, languages)) {
-    let i = 0;
-    while (i < run.length) {
-      let best = -1;
-      let start = 0;
+    const at = (i: number): RunMatch[] => {
+      const found: RunMatch[] = [];
       let digits = "";
       for (let j = i; j < run.length; j++) {
         digits += run[j]!.digits;
         if (digits.length > longest) break;
+        let start: number | undefined;
         for (const f of formats) {
           if (f.length !== digits.length || !groupedAs(run, i, j, f.breaks) || !f.valid(digits)) continue;
           // The letters must come before the run itself, never be a digit word inside it.
           let from: number | undefined = run[i]!.start;
           if (f.afterFourLetters === true) from = i === 0 ? fourLettersBefore(text, from) : undefined;
-          if (from !== undefined) {
-            best = j;
-            start = from;
-          }
+          if (from !== undefined) start = from;
         }
+        if (start !== undefined) found.push({ first: i, last: j, start });
       }
-      if (best >= 0) {
-        findings.push({ kind, start, end: run[best]!.end });
-        i = best + 1;
-      } else {
-        i++;
-      }
-    }
+      return found;
+    };
+    for (const m of coverMatches(run, at)) findings.push({ kind, start: m.start, end: run[m.last]!.end });
   }
   return findings;
 }
