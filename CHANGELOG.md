@@ -15,7 +15,7 @@ released out of this file, from its dated `## [X.Y.Z] - YYYY-MM-DD` heading to t
 heading, and uses it as the GitHub release's text, with a link back here
 (`scripts/release-notes.mjs`). A release with no dated section is refused.
 
-## [Unreleased]
+## [0.4.2] - 2026-11-26
 
 Two fixes to how card numbers are kept out of what the engine stores. Nothing changes for a host
 that already redacts and collects intake as before; text that held a card after other digits, and
