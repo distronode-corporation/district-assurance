@@ -569,6 +569,8 @@ describe("reference UI: the page's checks (receipt-check.js, no DOM)", () => {
     assert.equal(await check.sha256Hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     assert.equal(check.shortHash("a".repeat(64)), "aaaaaaaa...aaaaaaaa");
     assert.equal(check.shortHash("abc"), "abc");
+    assert.equal(check.shortHash("a".repeat(20)), "a".repeat(20));
+    assert.equal(check.shortHash("a".repeat(21)), "aaaaaaaa...aaaaaaaa");
   });
 });
 
