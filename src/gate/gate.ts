@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Gate (entry): the outcome after verification. A verified call gets a signed, time-limited access
 // grant (ES256 over canonical JSON, `access.ts`), delivered to a door controller. It refuses without
 // a valid verification grant covering `entry.open`, an access scope whose floor is level 2, and

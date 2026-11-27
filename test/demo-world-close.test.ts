@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The demo world's door relay, from the #50 hostile pass (W1): close() while the relay is starting.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

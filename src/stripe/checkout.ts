@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Stripe Checkout as the engine's PaymentLinks, in one Stripe mode per instance. A session is made
 // on the platform's own account (`platform`) or as a direct charge on the business's connected
 // account (`connect`: the `Stripe-Account` header and nothing else; no `on_behalf_of` or

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for INT-5 (event delivery, #97): a hostile or re-entrant listener,
 // races between a write and the background flush, two engines on one store, hostile limits and
 // two workspaces sharing call ids. Each attack held; kept so it keeps holding.

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // FlowConfig: one versioned JSON document per workspace that says which modules are on, their
 // settings, the assurance policy, and the named flows a call can run. Flows are config, not code.
 //

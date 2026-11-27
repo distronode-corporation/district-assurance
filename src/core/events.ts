@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The audit events the engine writes. Each one names what happened and how, never a value: no
 // digits keyed, no answers on file, no card data, no phone numbers.
 import type { JsonValue } from "./canonical.ts";

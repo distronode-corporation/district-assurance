@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // MOD-1: the module contract, the built-in modules and the example Callback module against it, and
 // what the suite catches in a broken module.
 import { strict as assert } from "node:assert";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The carrier checks run over the bytes on the wire: a body that is not valid UTF-8 is never
 // decoded (with replacement characters) before it is checked, so two different bodies never verify
 // under one signature. And a key list with entries that are not strings skips them.

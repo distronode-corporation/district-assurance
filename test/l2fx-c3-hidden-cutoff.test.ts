@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 fix U6 (PR #130 review, round 3): a pass not under duress takes off the hidden failures up to
 // it, never a later one, and the hidden cleanup costs the same round trips whichever pass it is.
 import { strict as assert } from "node:assert";

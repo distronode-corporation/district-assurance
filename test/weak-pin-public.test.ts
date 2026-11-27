@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // `isWeakPin` from the package root, as a host imports it: the digits-only rule `enrolPin` and
 // `enrolDuressPin` refuse as `weak`, so a host taking PINs itself refuses the same ones. It fails
 // closed: anything that is not a well-formed PIN is weak.

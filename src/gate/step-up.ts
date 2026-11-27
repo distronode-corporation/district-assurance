@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Web sign-in step-up (GAT-4): digital entry. A person signing in on the host's site is shown a
 // nonce, calls, is verified, and keys the nonce; the call then gets a step-up token, a compact JWS
 // (ES256, a JWT) bound to that nonce, the verified subject and the call's verification grant. The

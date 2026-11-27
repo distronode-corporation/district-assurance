@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // SRV-8: the STRIDE tables in SECURITY-MODEL.md name real tests and open issues, never an issue as proof.
 import { strict as assert } from "node:assert";
 import { existsSync, readFileSync } from "node:fs";

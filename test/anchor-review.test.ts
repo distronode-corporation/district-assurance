@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Review regressions for PR #133 (PRV-9, ledger anchors): what verifyAnchor, isAnchorProof and
 // checkRekorEntry accept, the ESS signing-certificate check, the reference adapters' reply cap,
 // nonce, imprint and ordering, and the fixture builders. Each test here failed before its fix.

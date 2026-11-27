@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // T14 (CWE-367): enrolPin stores a PIN only while the call is still open, holds a grant at
 // PIN_ENROLMENT_LEVEL or above, and still belongs to the subject the try was reserved for. Both
 // windows are checked: before the pending entry is written, and between it and the store's write.

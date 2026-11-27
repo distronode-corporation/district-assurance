@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // `district-assurance/testing`: fakes, contract suites and a ready-wired engine for tests and demos.
 import type { AttemptCounters, SessionStore } from "../core/adapters.ts";
 import type { EngineAdapters } from "../core/runtime.ts";

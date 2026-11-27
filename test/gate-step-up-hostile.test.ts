@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #101 (GAT-4): web sign-in step-up tokens, issued on a verified call, exchanged once.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

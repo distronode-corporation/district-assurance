@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The stand-alone receipt verifier (scripts/verify-receipt.mjs, PRV-2), run as a child process the
 // way a receipt holder runs it: on files, on standard input and on the reference server's key set.
 import { strict as assert } from "node:assert";

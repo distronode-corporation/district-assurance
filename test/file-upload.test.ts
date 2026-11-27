@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Documents by text (FIL-5): single-use upload links bound to a call and a record, with an expiry,
 // allowed types and a size cap, a scanning hook, and only the token's hash in the store.
 import { strict as assert } from "node:assert";

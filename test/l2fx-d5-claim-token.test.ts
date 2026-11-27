@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Callback claims, V5b of the L2 review: a claim on the callback call is this try's only when the
 // call holds this try's own token. A claim write that saved nothing, then another try's claim before
 // the read-back, is not this try's; a claim saved with no token is no try's (fail closed).

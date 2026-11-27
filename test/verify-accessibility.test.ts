@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The accessible verification path (VER-11): keypad fields said instead of keyed, through the
 // spoken_knowledge factor and within the policy's limits; keypad repeat and slower requests and
 // longer idle timeouts that never add an attempt; and relay or TTY calls, which get longer

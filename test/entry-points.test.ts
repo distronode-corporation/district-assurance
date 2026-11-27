@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The public entry points load, and export what the documents name.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

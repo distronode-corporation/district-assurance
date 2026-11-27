@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The append-only, hash-chained audit ledger. Each entry's hash covers its own fields and the
 // previous entry's hash, so changing, removing or reordering any entry breaks every hash after
 // it. `MemoryAuditLedger` is the reference implementation; a durable one keeps the same chain.

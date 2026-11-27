@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // SRV-7: validateConfig on garbage and on valid configs broken in a few random places. It never
 // throws, never changes its input, answers the same twice, and lists problems as sentences.
 import { strict as assert } from "node:assert";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Compares two `npm run bench -- --out` files, the previous release's and this one's, case by
 // case on the mean time of one operation. A case more than 20% slower is reported, in the table
 // and as a warning; nothing here fails a run, because one run on a shared runner is noisy.

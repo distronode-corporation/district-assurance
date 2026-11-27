@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // VER-1 counters under two engines and flawed or malformed stores, from the iMac's hostile passes on
 // wp-a 607b324 and 85e0766.
 import { strict as assert } from "node:assert";

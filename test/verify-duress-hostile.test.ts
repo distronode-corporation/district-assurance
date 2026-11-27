@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // VER-12 duress alerts and the "fail, no alarm" rule, from the iMac's hostile pass on jr/wp-au a9ffe3b.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

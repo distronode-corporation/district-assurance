@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // SRV-7: verifyStripeSignature and parseStripeEvent on hostile headers and bodies. A signature
 // holds for exactly the bytes it was made over; any header or body change, or any garbage, is
 // refused with a reason and never throws. An event body maps to a well-formed outcome or to null.

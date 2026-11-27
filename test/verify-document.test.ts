@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // verifyDocument (access grants and receipts share it) with a key or a body it cannot use: false, never a throw.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

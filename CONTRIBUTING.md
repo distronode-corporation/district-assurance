@@ -2,6 +2,8 @@
 
 Thank you for helping. A few ground rules keep the engine small and trustworthy.
 
+New here? Issues labelled [good first issue](https://github.com/distronode-corporation/district-assurance/issues?q=is%3Aissue%20is%3Aopen%20label%3A%22good%20first%20issue%22) are small, well scoped and need no access beyond this repository.
+
 ## Principles
 
 - **The model proposes, code decides.** Nothing a model says may become a factor, a level, a

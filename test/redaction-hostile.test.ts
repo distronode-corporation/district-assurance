@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #89 (PAY-5): a live card-number detector, and spoken numbers in redaction.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

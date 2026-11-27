@@ -1,4 +1,9 @@
 #!/usr/bin/env node
+
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The flow simulator (MOD-4): `district-assurance simulate <config.json> --flow <name> --script <name or file>`
 // runs one flow of a workspace's FlowConfig against a scripted caller, on the in-memory adapters,
 // and prints each step, each decision, every event and the final receipt. A business sees what a

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The Stripe Checkout adapter (PAY-1, test mode only) and the live demo's scripts, against a local
 // fake of Stripe's REST API on 127.0.0.1. Nothing here reaches Stripe.
 import { strict as assert } from "node:assert";

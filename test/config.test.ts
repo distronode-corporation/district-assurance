@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // FlowConfig, validateConfig and the module registry: every problem, at save time.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

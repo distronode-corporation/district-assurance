@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // CodeRabbit's review of the 0.1.0 release diff (#149): the Stripe recorder's redactor kept a
 // Checkout customer's name, email and address, so a recording paid with a real person's details
 // would have written them into this public repository. They are redacted now, and the guard finds

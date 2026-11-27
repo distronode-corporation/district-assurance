@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Every workflow that installs dependencies does so with install scripts off, so a compromised
 // dependency's preinstall or postinstall never runs on a runner (with a token in reach).
 import { strict as assert } from "node:assert";

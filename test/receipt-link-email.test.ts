@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // A receipt link by email (#161): the channel the caller chose for their payment link carried to
 // the receipt, to the verified address on file only, off by default, and a "no" that stops it with
 // no fallback to text. Mirrors 0.3.0's payment link email (ADR-32).

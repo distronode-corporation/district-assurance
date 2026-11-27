@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PRV-5: the AuditLedger and RecordStore contract suites, run against the memory adapters, and
 // shown to catch adapters that break them.
 import { strict as assert } from "node:assert";

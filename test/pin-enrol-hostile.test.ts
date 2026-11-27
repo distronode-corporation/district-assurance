@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile pass on #74 (VER-6 PIN enrolment and reset), kept as regressions: each attack asserts the safe behaviour.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

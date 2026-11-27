@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PR #130 review (CodeRabbit on 07e50ea): a duress alert send owns its claim by token, so a send
 // that resumes after another took its alert over neither notifies nor clears the newer claim; and
 // the counter preflight before the notify is bounded by `notifyTimeoutMs`, so a read that never

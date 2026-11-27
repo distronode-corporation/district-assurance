@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The built-in modules and a starting config that turns them on.
 import type { FlowConfig } from "./core/config.ts";
 import type { AssuranceModule } from "./core/module.ts";

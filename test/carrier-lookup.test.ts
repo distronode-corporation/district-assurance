@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // district-assurance/carrier: the Lookup field parsers, pure. The reference server's adapters that
 // fetch the answers are tested in carrier-adapters*.test.ts.
 import { strict as assert } from "node:assert";

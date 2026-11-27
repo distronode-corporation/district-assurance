@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #109 (PRV-9, ledger anchors). Y1 failed before the listener was
 // handed a copy of the anchored entry's detail; the rest held. Y1 also checks that the listener
 // was told at all, so a listener never called cannot pass it.

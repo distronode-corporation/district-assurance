@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PR #130 review U4: a call that owes two duress alerts, whose first notify never settles, still
 // gets its second attempted once `notifyTimeoutMs` passes; the first stays owed.
 import { strict as assert } from "node:assert";

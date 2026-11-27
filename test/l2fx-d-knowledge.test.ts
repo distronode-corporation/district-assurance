@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // judgeKeypadWith compares the fields it hashed: a field the caller adds while the HMACs are
 // pending is neither hashed nor compared (cr-main, knowledge.ts:107).
 import { strict as assert } from "node:assert";

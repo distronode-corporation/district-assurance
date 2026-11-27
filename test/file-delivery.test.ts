@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Record delivery (FIL-3): signed webhooks, retries with backoff, one idempotency key per record
 // and destination, and ledger entries without the payload. On the fixed clock and the fakes, plus
 // the reference server's sample receiver on 127.0.0.1.

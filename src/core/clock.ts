@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Time and identifiers are injected, so tests and the demo are deterministic and nothing in the
 // engine reads the wall clock or a random source directly.
 import { randomBytes } from "node:crypto";

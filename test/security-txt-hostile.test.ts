@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #103 (SRV-9): security.txt and its guard against this project's own addresses.
 import { strict as assert } from "node:assert";
 import type { AddressInfo } from "node:net";

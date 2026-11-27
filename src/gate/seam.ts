@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The Seam adapter: an AccessController for locks Seam reaches (August, Yale, Nuki, Salto KS, Kisi,
 // Brivo, Avigilon Alta) through one API. The target's `ref` is the Seam `device_id`.
 //

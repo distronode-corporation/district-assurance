@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The owner PIN (ADR-20, ADR-31): the PIN a business's owner keys on the business's own phone line
 // for the `owner-command` flow, kept as an ordinary PIN subject of the engine.
 //

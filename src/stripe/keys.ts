@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Stripe modes, keys and API versions. A key is checked against the mode it is used in before any
 // client exists, and nothing here ever puts any part of a key in a message.
 

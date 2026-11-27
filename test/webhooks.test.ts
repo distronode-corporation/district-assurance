@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 import { strict as assert } from "node:assert";
 import { createHmac, createPrivateKey, sign, verify } from "node:crypto";
 import { describe, it } from "node:test";

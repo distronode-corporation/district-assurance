@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // deliverRecord reads its input once: a getter (or a host changing the object while the record is
 // read) can never fetch one record and key or deliver it as another.
 import { strict as assert } from "node:assert";

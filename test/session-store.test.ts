@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // INT-3: the SessionStore, its contract suite, two engines on one store, and conflicts.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

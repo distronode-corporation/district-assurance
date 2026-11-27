@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Trace (prove): the audit ledger, signed receipts and consent records. The ledger is always on:
 // Trace is the one module that cannot be turned off or removed, and every engine needs a ledger
 // adapter. Receipts and consent are optional parts, switched in Trace's settings and per flow.

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The PIN record check is timing-insensitive (ADR-29): one Argon2id run per check whatever is on
 // file, and every tag or digest compared in constant time over its full length. `node:crypto` is
 // watched before the engine is loaded (each test file runs in its own process), so the named

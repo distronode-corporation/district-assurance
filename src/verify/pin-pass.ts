@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PIN passes: one caller, one phone call, two engine calls. A host that runs a sign-in (an owner's
 // PIN on the business's line) on one engine call and then a flow on another call of the same
 // phone call can carry the PIN factor across, once, within 5 minutes of the PIN's pass, instead of

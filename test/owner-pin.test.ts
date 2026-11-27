@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The owner PIN (ADR-20, ADR-31): the business sets, clears and lifts the owner's PIN over the
 // engine's own stores, and a PIN keyed on the line is judged by the engine as any PIN.
 import { strict as assert } from "node:assert";

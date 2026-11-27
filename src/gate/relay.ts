@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The signed-webhook relay: the first real AccessController. It POSTs the signed access grant to a
 // small relay on the site's own network (a program on a Raspberry Pi or the business's server),
 // which checks it with the public key (`verifyAccessGrant`), refuses a grant id it has seen

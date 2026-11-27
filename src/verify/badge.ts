@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Badge (verify): who is calling, in levels. The factors are plug-ins (factors.ts); a flow's
 // `badge.verify` step names the level it needs and the factors that may count toward it.
 //

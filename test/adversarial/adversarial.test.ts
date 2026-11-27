@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The adversarial suite (VER-7): scripted dialogues in English and Canadian French that try to talk
 // the engine past its rules, run through a scripted host (host.ts). Every script asserts the same
 // four rules after every turn; this file also holds the suite to its own coverage, so a new tactic

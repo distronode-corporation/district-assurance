@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Distronode Corporation
+#
+# SPDX-License-Identifier: Apache-2.0
+
 name: ❓ Question
 description: Ask how to use district-assurance, or whether it fits what you are building.
 labels: ["question"]

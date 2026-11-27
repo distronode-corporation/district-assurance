@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 review (PR #130, CodeRabbit on e9fa8ce): a flow start that wrote nothing takes back every
 // counter it took, each on its own, so one refused take-back never keeps another counter's slot;
 // the start's own error is kept beside the take-back's.

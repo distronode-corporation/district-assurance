@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // `npm run serve`: the reference server on a port, for trying the webhook routes with your OWN
 // Stripe test-mode account (for example `stripe listen --forward-to localhost:8787/webhooks/stripe/identity`).
 //

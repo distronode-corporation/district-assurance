@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The reference server's browser UI: the static files (allow-list, traversal, content types,
 // headers), the /demo/* routes that run the scripted calls one step at a time, and the page's own
 // receipt and ledger checks (public/receipt-check.js), run here against what the engine signed.

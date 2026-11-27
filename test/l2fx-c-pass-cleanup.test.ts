@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 fix T13 (PR #130 review): a pass's counters cleanup is safe to replay. The subject forgets only
 // the failures up to the pass, so a cleanup run again (its owed marker not cleared) erases nothing
 // recorded since.

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Errors the engine throws. Two kinds only: work that is planned but not built yet, and a refusal
 // with a stable code a host can branch on.
 

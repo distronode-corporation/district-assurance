@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Ledger checkpoints and pruning (#157, #158, #159): the signed ledger_checkpoint document and its
 // verifier, pruneLedger's gate on a written checkpoint, the checkpoint-aware export, and the engine
 // on a pruned ledger.

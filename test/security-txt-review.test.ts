@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // security.txt: a tel: contact is a global number under RFC 3966, and a warn sink that throws or
 // rejects never turns the route into a 500 or repeats its warning on every request.
 import { strict as assert } from "node:assert";

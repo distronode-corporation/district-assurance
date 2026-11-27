@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Distronode Corporation
+#
+# SPDX-License-Identifier: Apache-2.0
+
 name: Release
 
 # Releases main's version, on its own, when a release pull request merges. One human gate: the

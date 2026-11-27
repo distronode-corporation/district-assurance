@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #113 (MOD-4, the flow simulator): what a config or script file can
 // put on the terminal. M1 to M3 failed before every line was escaped; M4 and M5 held.
 import { strict as assert } from "node:assert";

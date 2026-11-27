@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // VER-12 duress, from the iMac's re-check of jr/wp-au fb25a75: cases that held, kept as regressions.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Badge factors are plug-ins. Each factor kind says how it is entered, how many attempts a call
 // gets, and which adapters it needs; Badge's settings turn each one on or off, and a flow step
 // says which of them may count. A host adds its own factor (one the caller enters and code judges)

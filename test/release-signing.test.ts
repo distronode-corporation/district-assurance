@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The release workflow releases main's version on its own, once, under a tag it signed itself:
 // the decide step's every branch (the no-op included) run as the runner runs it, and the shape
 // that keeps an unsigned or hand-pushed tag from ever publishing.

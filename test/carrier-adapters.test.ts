@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The carrier signal adapters (VER-4) against a local fake HTTP server that replays fixture
 // responses shaped after Twilio Lookup v2 and Telnyx Number Lookup. Never the network.
 import { strict as assert } from "node:assert";

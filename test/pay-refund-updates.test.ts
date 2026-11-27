@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // A platform refund's later outcome at the provider (PAY-9, #117, #132): a refund Stripe first
 // answers `pending` is brought to its final status by Stripe's refund update events, found by the
 // provider's refund id. A pending refund stays reserved; one that fails later is released, so the

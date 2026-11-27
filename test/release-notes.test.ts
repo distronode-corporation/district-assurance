@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The release notes release.yml writes from CHANGELOG.md (scripts/release-notes.mjs): the guard
 // that refuses a release with no dated section, the section copied as it is with its hard wraps
 // joined, the link to it, and the link alone for a long one. The real 0.1.0, 0.2.0 and 0.3.0

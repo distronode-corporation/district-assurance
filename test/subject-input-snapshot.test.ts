@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Subject requests are read once: a getter (or a host changing the object while the engine waits)
 // can never pass the subject key check with one key and gather, erase or name another.
 import { strict as assert } from "node:assert";

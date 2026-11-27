@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #116 (PAY-8): refunds and disputes of platform payments.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

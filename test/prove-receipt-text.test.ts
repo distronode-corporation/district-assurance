@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PRV-10: the receipt link texted to the caller after a money, contact or access step, and the
 // security notice after a contact change.
 import { strict as assert } from "node:assert";

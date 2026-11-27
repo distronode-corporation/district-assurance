@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The monthly report per business: what one workspace's line verified, refused, collected and
 // opened in a calendar month, built from the audit ledger. Counts and totals only: no call ids, no
 // subjects, no values. Signed with the receipt signer, but the signed bytes start with a domain

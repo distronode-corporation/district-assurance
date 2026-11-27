@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Pay pieces that are planned and not built. Each throws NotImplementedError naming its issue.
 import { NotImplementedError } from "../core/errors.ts";
 

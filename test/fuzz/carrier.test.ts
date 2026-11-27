@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // SRV-7: the carrier signature checks (SRV-1) on any input, as the Stripe check is fuzzed. A
 // request signed under the carrier's scheme verifies; any changed byte of what is signed does not;
 // garbage is refused with a reason and never throws.

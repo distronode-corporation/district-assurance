@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Redaction of transcripts and any other text before it is stored or sent on.
 //
 // The first detector is card numbers (PANs): 13 to 19 digits that pass the Luhn check, written as

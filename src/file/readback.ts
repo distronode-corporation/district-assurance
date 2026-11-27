@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The read-back: what will be filed, built by code in English, French or Spanish, which the host
 // speaks before the caller confirms. Its digest goes back to `confirmIntake`, which files the draft
 // only while it still reads back the same, so a value changed after the caller heard it is never

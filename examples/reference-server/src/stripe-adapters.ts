@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Stripe adapters for the reference server, so people can try it with their OWN Stripe test-mode
 // keys. They call Stripe's REST API with Node's built-in fetch (no SDK, no dependency).
 //

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // monthlyReport reads its input once: a getter can never pass the checks with one workspace or
 // month and filter entries by, or name, another.
 import { strict as assert } from "node:assert";

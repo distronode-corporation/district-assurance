@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #75 (PRV-1 key rotation, PRV-2 stand-alone verifier). K1, K2, K6
 // and K7 failed before their fixes (no throw on bad input, the taint always lands, no raw bidi in the
 // verifier's output); K3 to K5 held.

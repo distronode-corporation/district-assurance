@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Documents by text: a single-use link the caller opens on their phone to add a photo or a PDF to
 // a record they confirmed. The link carries a capability token of 256 random bits; only its
 // SHA-256 is stored, so a copy of the store never yields a working link. A link is bound to one

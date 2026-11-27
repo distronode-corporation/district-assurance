@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Overlapping retries and mid-call changes (CodeRabbit's third pass on PR 3): each case is one
 // process racing another, or a config changing under a call.
 import { strict as assert } from "node:assert";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Access and deletion requests for one subject (PRV-7). A person can ask the business for what it
 // holds about them, and in some cases ask it to delete that; what the law requires in a given case
 // is the business's to decide. These are host calls the business makes from its own code, never a

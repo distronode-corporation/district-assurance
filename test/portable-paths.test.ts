@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Tests run on Windows too: a file URL's pathname is not a path there ("/C:/..."), so a path
 // built from import.meta.url goes through fileURLToPath.
 import { strict as assert } from "node:assert";

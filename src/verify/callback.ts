@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The callback factor (VER-9). Caller ID can be spoofed, so the business calls back the number it
 // has on file: whatever number the first call came from, the callback reaches the line on record.
 // It proves possession of that line, as a texted code does, and shares its weaknesses (a SIM swap,

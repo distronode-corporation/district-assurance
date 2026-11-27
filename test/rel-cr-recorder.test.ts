@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // CodeRabbit's review of the 0.1.0 release diff (#149): the Stripe recorder kept the reference
 // server's 500 or 503 answer to a webhook as the recorded delivery and still told `stripe listen`
 // 200, so a run could write a fixture for an event that was never applied. A failed answer now

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Carrier signal adapters for the reference server (VER-4): Twilio Lookup v2 (SIM Swap and Identity
 // Match) and Telnyx Number Lookup (porting status and date, and the carrier). They call the vendors'
 // REST APIs with fetch (no SDK dependency), with credentials read from the environment by

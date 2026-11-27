@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #56 (SRV-7, the property and fuzz suites): what its fixes must hold
 // for. F1 failed before verifyChain took an entry that is not an object as a break; the rest held.
 import { strict as assert } from "node:assert";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #98 (MOD-1, the module contract): modules that must fail it. C1
 // failed before the contract held stepLevel to 0 to 3 (it took any integer); the rest held.
 import { strict as assert } from "node:assert";

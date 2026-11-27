@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // A payment link by text or by email (0.3.0): the channel step, the keypress that is the caller's
 // consent to the channel, the email to the verified address on file and nowhere else, and the same
 // single-use link, deadline, send lease and close for both channels.

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 fix T9 (PR #130 review): clearDuress clears the hidden counters of every factor Badge judges,
 // outside modules' judges included, on or off.
 import { strict as assert } from "node:assert";

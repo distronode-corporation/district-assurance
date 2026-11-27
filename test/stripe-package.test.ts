@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // district-assurance/stripe: keys and modes, errors, Checkout payment links, Connect onboarding
 // and the Connect webhook verifier, against an in-memory StripeClientLike. What Stripe itself
 // accepts is proven against Stripe test mode (examples/reference-server/src/stripe-proof.ts); the

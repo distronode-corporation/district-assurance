@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // A document or a key without a kid never matches: a missing kid is not equal to another missing kid.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

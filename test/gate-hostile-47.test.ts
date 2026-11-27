@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile pass on #47's commits after 6e48b37 (be29022, 66c439d, 5930120), kept as regressions: each attack asserts the safe behaviour.
 import { strict as assert } from "node:assert";
 import { createServer, type IncomingHttpHeaders } from "node:http";

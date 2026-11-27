@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The demo's scripted calls, one step at a time. `npm run demo` runs every step of the four flows
 // in a row and prints a line per step; the browser UI (`npm run ui`) runs the same steps one click at a
 // time. A step takes no input: what the caller keys is fixed here, so the UI can only replay the

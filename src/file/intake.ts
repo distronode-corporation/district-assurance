@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Intake forms: the fields a business defines, and the values a caller gives during the call. A
 // value is normalised by code before it reaches the draft, and a text or number value that carries a
 // card number is refused, so intake can never become a way to store one. A form cannot ask for a

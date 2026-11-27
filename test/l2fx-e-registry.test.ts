@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 review fixes (worker e), the registry: a module's judges are read once, removal checks the
 // judges installed, and a new build of a module never changes alwaysOn.
 import { strict as assert } from "node:assert";

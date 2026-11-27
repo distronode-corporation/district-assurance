@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 fix T13, callback path (PR #130 review, option c): a passed callback's own failure on the calling
 // number is claimed on the callback call before it is taken off, so a repeated outcome that replays
 // the cleanup never takes off another failure of the same millisecond. The subject's part replays.

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The second hostile pass on #124 (VER-12 "flag until cleared"), kept as regressions: the ledger's
 // event ids, the alert outbox and clearDuress. Each attack asserts the safe behaviour; Z12 pins the
 // fail-closed behaviour Sean accepted for a clearing that races an alert's delivery.

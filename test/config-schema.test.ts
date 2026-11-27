@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The JSON Schema for FlowConfig (schema/flow-config.v1.json): published with the package, in step
 // with the TypeScript types, and never stricter than validateConfig, which stays the authority.
 //

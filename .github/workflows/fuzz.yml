@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Distronode Corporation
+#
+# SPDX-License-Identifier: Apache-2.0
+
 name: Fuzz
 
 # The property and fuzz suites (test/property, test/fuzz, SRV-7) for much longer than CI gives

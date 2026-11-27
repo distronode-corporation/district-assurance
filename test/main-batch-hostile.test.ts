@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for the main fixes batch (fix-main-batch): Dossier confirmedBy, Stripe signature
 // tolerance and clock, and the reference server's bounded webhook event ids.
 import { strict as assert } from "node:assert";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PR #130 review W0: a late flow count's write that saved and then failed (the ledger append after
 // it) still gives back the counts another verification on the call took first.
 import { strict as assert } from "node:assert";

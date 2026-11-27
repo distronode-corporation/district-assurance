@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Paylink's two payment modes, the link life the engine enforces itself, and the allow-list of
 // instant payment methods (PAY-7).
 import { strict as assert } from "node:assert";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PR #130 review U3b: beginVerification counts a running limited flow's start before it writes the
 // subject, so over the limit no factor can be judged for that subject in between.
 import { strict as assert } from "node:assert";

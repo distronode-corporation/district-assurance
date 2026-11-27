@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Amounts from code (PAY-2). A `paylink.request` step carries a fixed amount, or names a reference
 // that the host's `AmountSource` adapter resolves (a record, the business's endpoint, a price
 // list). Either way code builds the read-back, the caller hears the amount and confirms it, and

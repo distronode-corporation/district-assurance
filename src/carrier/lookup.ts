@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The carrier Lookup answers read as the engine's carrier signals: Twilio Lookup v2's `sim_swap` and
 // `identity_match` fields and Telnyx Number Lookup's `portability`. Pure: the host fetches the
 // answer with its own credentials, rate limits and country policy (ADR-30) and hands the fields here.

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The flow simulator's callers for the rest of the built-in steps (#134): a door unlock and a
 // refusal (gate.grant), a step-up token issued and exchanged (step-up.issue), and Badge's callback,
 // texted code and spoken answers, each right and wrong. A flow with every built-in step type runs

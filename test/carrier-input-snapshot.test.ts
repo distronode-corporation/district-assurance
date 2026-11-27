@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // verifyTwilioSignature reads its input once: the URL whose bodySHA256 is taken is the URL whose
 // signature is checked, and the header checked present is the header compared.
 import { strict as assert } from "node:assert";

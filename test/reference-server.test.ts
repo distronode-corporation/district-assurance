@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The reference server, over a real socket on 127.0.0.1, and the scripted demo.
 import { strict as assert } from "node:assert";
 import { createHmac, createPublicKey, generateKeyPairSync, sign, type JsonWebKey } from "node:crypto";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 review fixes (worker e): flow cursors stored before `counted`, grant lists never written to,
 // and alert enumeration past a null record.
 import { strict as assert } from "node:assert";

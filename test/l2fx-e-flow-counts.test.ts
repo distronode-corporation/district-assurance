@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 review fixes (worker e), flow-start counts: a start is given back when its write definitely did
 // not commit, and read back when the store gave no answer; one that committed keeps its count.
 import { strict as assert } from "node:assert";

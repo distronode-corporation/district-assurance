@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Removing a call record (L3 #131, decided 2026-11-20): the engine refuses to remove a call record
 // while its outbox holds ledger entries not yet appended, so a pending entry (a `consent.recorded`
 // written while the ledger was down) is never lost with the record. The background flush keeps

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The scripted host for the adversarial suite (VER-7). A script is a dialogue: what the caller says,
 // what the model proposes, and what the host's own code paths do (keypad events, webhook routes,
 // business lookups). The host plays a real host's part and nothing more:

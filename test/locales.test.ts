@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Supported locales (#47): one list, and every catalog of text the engine builds has an entry for
 // each, so adding a locale makes every catalog grow with it.
 import { strict as assert } from "node:assert";

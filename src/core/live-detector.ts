@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Live card-number detection, for a transcript while the caller is still speaking.
 //
 // Redaction (redaction.ts) finds whole card numbers once a text is complete. This detector is fed

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The Connect webhook's verifier. Direct charges on a connected account arrive as Connect events
 // (the endpoint is a "Connected accounts" endpoint), each naming the account in `account`. One
 // endpoint URL may serve both modes, each with its own signing secret: the mode is the SECRET's,

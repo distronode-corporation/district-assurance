@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 fix U5 (PR #130 review, round 3): a call owes one cleanup per saved pass, so two factors passing
 // at once on one call each get theirs, and neither settles the other's.
 import { strict as assert } from "node:assert";

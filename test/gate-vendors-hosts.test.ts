@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The host allowlist, from the iMac's //host re-check: every case held, kept as regressions.
 import { strict as assert } from "node:assert";
 import { createServer } from "node:http";

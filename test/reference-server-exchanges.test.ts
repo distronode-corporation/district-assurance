@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The reference server's exchanges at their edges: an upload that outlasts its deadline after
 // claiming its link, a client that resets while its answer is pending, and a malformed request
 // pipelined behind one still being answered.

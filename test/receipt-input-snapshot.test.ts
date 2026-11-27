@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // checkReceipt reads the receipt once: the body whose issue time is checked against a key's
 // retirement is the body whose signature is verified.
 import { strict as assert } from "node:assert";

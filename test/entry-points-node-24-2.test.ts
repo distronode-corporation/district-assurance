@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Node.js 24.2, the floor before 24.19, sets import.meta.main to false for a .ts entry, so an
 // entry guarded by it does nothing there. Node 24.19 does not, so this load hook gives the demo
 // entries what 24.2 gives them: every `import.meta.main` in their source reads false.

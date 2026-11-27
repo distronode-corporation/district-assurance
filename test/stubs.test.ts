@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Every planned-but-unbuilt entry point throws NotImplementedError naming its roadmap issue.
 import { strict as assert } from "node:assert";
 import { readFileSync, readdirSync } from "node:fs";

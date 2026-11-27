@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #94 (SRV-3, receipt links by capability token, the receipt page). X1
 // failed before the page looked its words up by own key; the rest held.
 import { strict as assert } from "node:assert";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Helpers the modules share for running inside a flow.
 import { EngineError } from "./errors.ts";
 import type { FlowStep } from "./module.ts";

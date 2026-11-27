@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The duress PIN (VER-12): a pass to the caller, refused money, contact and access, a told notifier.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PRV-9 against real services: one anchor of a throwaway ledger, recorded by
 // test/fixtures/anchor/record-real.ts through the engine's own `anchorLedger()` and the reference
 // server's adapters, with DigiCert's public RFC 3161 time-stamp authority and Sigstore's public

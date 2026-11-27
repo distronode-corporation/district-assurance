@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hashing helpers on node:crypto. Hex output everywhere, lower case.
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 

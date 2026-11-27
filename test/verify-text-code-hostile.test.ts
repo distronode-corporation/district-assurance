@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile pass on #79 (VER-2 texted codes), kept as regressions: each attack asserts the safe behaviour.
 import { strict as assert } from "node:assert";
 import { problemMessage } from "../src/core/module.ts";

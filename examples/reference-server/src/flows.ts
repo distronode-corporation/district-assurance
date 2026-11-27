@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The demo's FlowConfig: one workspace with five flows. Gate needs the engine's `access` adapters
 // (its targets name the "lobby" controller) and an `accessSigner`.
 //

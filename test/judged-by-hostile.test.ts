@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #83 (VER-8, the policy version and config revision in grants and
 // receipts). V1 failed before the receipt took only the two fields from lastJudgedBy; V2 held; V3
 // failed before each field was taken only when it is text.

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PIN enrolment and reset (VER-6).
 //
 // A caller who verified to level 2 or above on this call chooses a PIN: keyed twice, each entry

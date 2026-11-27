@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Callback dials (VER-9), from the L2 review: a callback voided while the store is read never
 // rings (cr-followup, verify-callback-attack.test.ts:243), the carrier check asks about the line
 // the dial rang (T11), and a placed callback resumed a day later counts toward the daily limit

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // INT-1: the keypad collector. A host gets keypad tones one at a time from its carrier bridge and
 // must buffer them, outside the model and outside its logs, until the caller presses `#`. This is
 // that buffer, written once: pure (no timers, no I/O; time comes from the injected clock), with a

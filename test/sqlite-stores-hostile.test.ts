@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // SRV-4 SQLite stores under attack (a hostile pass on #95): file modes, hostile input checked
 // against the memory stores, and races and faults across connections. Each pins safe behaviour.
 import { strict as assert } from "node:assert";

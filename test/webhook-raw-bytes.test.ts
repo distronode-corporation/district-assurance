@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The Stripe webhooks and the record-delivery receiver check the signature over the bytes on the
 // wire, before anything decodes or parses them: a body under a bad signature is refused without
 // ever being read as text, and two different bodies that decode to one string never verify under

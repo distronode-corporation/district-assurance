@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Contract suites: the guarantees a host's durable adapter must keep, written once and run
 // against any implementation. Each suite returns its cases as plain async functions, so a host
 // runs them under whatever test runner it uses (node:test, vitest, jest):

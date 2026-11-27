@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Distronode Corporation
+#
+# SPDX-License-Identifier: Apache-2.0
+
 name: 💡 Feature request
 description: Ask for something district-assurance does not do yet.
 labels: ["enhancement"]

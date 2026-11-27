@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PR #130 review (CodeRabbit on 07e50ea), flow-start counts:
 // - startFlow counts on the keys the call had when it was read; a subject verification bound before
 //   the flow attached is counted again, inside the attach write, and the unused count given back.

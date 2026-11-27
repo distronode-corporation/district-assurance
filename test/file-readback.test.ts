@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The read-back library (FIL-1, FIL-6): what the caller hears before confirming, snapshot per field
 // type and locale, and the parity of every string code builds across locales.
 import { strict as assert } from "node:assert";

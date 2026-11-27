@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // `npm run demo`: four scripted calls, end to end, on fake adapters and servers on 127.0.0.1.
 // No network beyond the loopback, no keys, no real people (script.ts holds the script).
 //

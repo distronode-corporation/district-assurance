@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // What the built-in modules see of the engine while they run a step: the call record, a way to
 // change it (one compare-and-set write per change), the adapters and the clock. This is internal
 // to the package; outside modules use `Engine.updateModule` and `Engine.moduleState` instead.

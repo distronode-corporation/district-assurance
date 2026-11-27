@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PR #130 review T5, T6, T19: a store, ledger or notifier that never answers holds up only its own work.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Pay by link. The engine never sees a card: it asks the payment provider for a hosted page,
 // texts the link to the number on file, and learns the result from a signed webhook. The amount
 // comes from code (a record, the business's endpoint, a price list), never from the model.

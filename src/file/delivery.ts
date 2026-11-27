@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Record delivery (FIL-3): a confirmed record, posted to the business's endpoint as a signed
 // webhook, retried with backoff, under one idempotency key per record and destination. The
 // signature is the `t=<unix seconds>,v1=<hex>` HMAC-SHA256 scheme the engine verifies for Stripe,

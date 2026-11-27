@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Attack tests for the callback factor (VER-9), from a hostile review: the number dialed, races on
 // the asking call, outcomes and oracles. Each pins behaviour that holds; four findings were fixed
 // (the number is read from the store at dial time, a tainted call is refused, two requests at once

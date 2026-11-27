@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 review fix V1 (worker a5): on an engine's registry a module supplying factors is not replaced
 // from outside, so the judge the registry lists is always the one Badge runs.
 import { strict as assert } from "node:assert";

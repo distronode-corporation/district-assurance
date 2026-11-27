@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // SRV-4: the reference server's SQLite stores pass the PRV-5 contract suites, and keep what they
 // hold across a restart.
 import { strict as assert } from "node:assert";

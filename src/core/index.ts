@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 export * from "./adapters.ts";
 export * from "./canonical.ts";
 export * from "./clock.ts";

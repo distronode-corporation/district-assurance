@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // VER-1: failure counters and lockouts across calls, per subject and per calling number.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // SRV-4 SQLite stores (#95) under real contention: a PIN enrolment and an append on one connection
 // start while another connection holds the write lock (BEGIN IMMEDIATE) with its own write in it,
 // and the lock is released only once the contender has begun its transaction or done a read. The

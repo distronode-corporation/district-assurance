@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Builds the audit pack (SRV-8): one folder an outside auditor can start from. It holds the test
 // and coverage reports, the contract suite results, the SBOM, the threat model with its STRIDE
 // tables and the other documents, an INDEX.md that says where to begin, and SHA256SUMS over

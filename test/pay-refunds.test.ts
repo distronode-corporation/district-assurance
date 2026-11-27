@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Refunds and disputes of platform payments (PAY-8): the platform is the merchant, so it refunds
 // and answers disputes; connect payments stay the business's.
 import { strict as assert } from "node:assert";

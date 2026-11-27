@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // SRV-4: optional persistent stores for the reference server, on `node:sqlite` (built into Node,
 // so no new dependency, not even an optional peer). `SqliteAuditLedger` and `SqliteRecordStore`
 // keep the guarantees of the memory adapters and pass the same contract suites

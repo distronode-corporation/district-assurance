@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The Stripe Identity adapter (VER-5), against a local fake of Stripe's API on 127.0.0.1 that
 // replays the fixtures in test/fixtures/stripe-identity, and the reference server's trial call end
 // to end: a check created through the adapter, then a signed `identity.verification_session.verified`

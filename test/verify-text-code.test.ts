@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // VER-2: texted one-time codes. Expiry, tries, single use, the send limits, the country allow-list,
 // and refused sends that look exactly like sent ones.
 import { strict as assert } from "node:assert";

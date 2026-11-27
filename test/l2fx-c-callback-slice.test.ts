@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 fix T7 (PR #130 review): a call stored before Badge kept `callback` reads it as the empty state
 // a new call starts with, so a taint or a change of subject on it never throws.
 import { strict as assert } from "node:assert";

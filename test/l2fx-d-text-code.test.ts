@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Texted codes (VER-2), from the L2 review (cr-main, text-code.ts:118 and :133): a code's
 // validity starts after the awaited work, and each send holds the end of the call until its own
 // ledger entry is written, so a refused resend cannot release a pending send's hold.

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Release workflow steps run as written, with stand-in `npm`, `gh` and `git` commands on PATH: the
 // registry check that makes a rerun after a publish recoverable, the private guard on fixture
 // manifests, and the choice of the previous release the benchmarks compare with.

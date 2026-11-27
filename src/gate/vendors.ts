@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Direct vendor adapters (GAT-6): an AccessController that unlocks a door through one access
 // vendor's own documented API, for systems no aggregator reaches (Verkada) or a host with an
 // account at one vendor only (Kisi).

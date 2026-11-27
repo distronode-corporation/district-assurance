@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Callback dials, round 3 of the L2 review: a resumed callback is counted once per day across
 // workers (U8), no dial is claimed on an ended call (U9), and a callback's lock notice names the
 // counter that locked (U10).

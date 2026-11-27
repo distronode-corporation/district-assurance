@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The Seam adapter (GAT-5), against a local HTTP server that replays Seam's answers. The answers
 // below follow the shapes Seam's API reference documents (`/devices/get`, `/locks/unlock_door`,
 // `/action_attempts/get`); they are not yet recorded from Seam's sandbox (#48). The device id

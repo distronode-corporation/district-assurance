@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 fix V7 (PR #130 review, round 4): a flag write taken back after a clearing takes back only its
 // own write, never a newer entry's flag written in the same millisecond.
 import { strict as assert } from "node:assert";

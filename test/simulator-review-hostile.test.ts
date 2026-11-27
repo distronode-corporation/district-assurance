@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for the flow simulator (MOD-4, PR #133 review): a configured backoff
 // longer than 900 seconds is waited out, and a badge.verify step with a factor the simulator has no
 // caller for stops the run (exit 3) instead of silently skipping that factor.
