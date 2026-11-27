@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Refunds and disputes in platform mode. In `platform` mode the money lands on the platform's own
 // account at the provider, so the platform, not the business, refunds it and answers its disputes.
 // A refund is a host call made for the business (its back office, its support staff): no call's

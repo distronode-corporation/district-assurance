@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #91 (PRV-6): SIN, health card and bank number redactors.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

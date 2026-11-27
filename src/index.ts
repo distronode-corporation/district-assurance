@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // district-assurance: the engine for District Assurance. Pre-alpha; the API will change.
 export * from "./core/index.ts";
 export * from "./engine.ts";

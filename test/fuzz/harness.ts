@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // SRV-7: the shared settings and value generators of the property and fuzz suites under
 // test/property and test/fuzz, on fast-check (a development dependency only, ADR-3). Each property
 // runs at least a fixed number of cases, then more until its time budget is spent, and a failure

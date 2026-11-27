@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Public timestamp anchors for the ledger (PRV-9): the anchor payload, the DER reader, the engine's
 // `anchorLedger`, offline checks with `verifyAnchor`, and the reference server's two adapters
 // replaying recorded answers (test/fixtures/anchor, written by record.ts from a throwaway authority

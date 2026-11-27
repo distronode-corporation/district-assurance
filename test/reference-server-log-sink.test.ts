@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The default log sink of npm run serve: one JSON line per entry on standard output, bounded while
 // standard output is backpressured, and stopped (never a crash) when standard output fails.
 import { strict as assert } from "node:assert";

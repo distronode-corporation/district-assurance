@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The browser UI's side of the demo: runs of script.ts, one step per request, and what each run
 // looks like after it (the call's session state, its flow position, its ledger entries). A run
 // can only replay its script; nothing a browser sends reaches the engine except the flow's name.

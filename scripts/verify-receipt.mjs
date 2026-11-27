@@ -1,4 +1,9 @@
 #!/usr/bin/env node
+
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Checks a District Assurance receipt against a key set, without this package: Node 24.19 or later
 // and nothing else. SPEC.md, section 12, describes the format; this file repeats only what a
 // verifier needs (canonical JSON and ES256 over it), so it can be copied out on its own.

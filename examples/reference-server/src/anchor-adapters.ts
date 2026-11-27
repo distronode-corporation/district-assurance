@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Anchor adapters for the reference server (PRV-9): an RFC 3161 time-stamp authority, and
 // Sigstore's Rekor v2 plus one. Both use fetch (no SDK, no ASN.1 library) and check what they get
 // back before the engine writes it to the ledger.

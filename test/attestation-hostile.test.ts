@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #104 (VER-10, caller ID attestation): every attack held.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

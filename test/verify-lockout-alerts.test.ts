@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // INT-7: the business is told of lockouts, once per lock and capped per workspace, and may lift one.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The audit pack's --out check (SRV-8), apart from scripts/audit-pack.mjs so it can be tested
 // without building a pack.
 import { existsSync, readdirSync } from "node:fs";

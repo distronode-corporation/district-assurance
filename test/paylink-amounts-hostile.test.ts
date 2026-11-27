@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #88 (PAY-2): amounts from code, read back and confirmed before a payment link.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PR #130 review V4: a send that waits on one alert reads the call again before each later alert,
 // so an alert a concurrent send delivered and acknowledged meanwhile is not sent twice.
 import { strict as assert } from "node:assert";

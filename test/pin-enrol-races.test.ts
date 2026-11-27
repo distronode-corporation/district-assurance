@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // VER-6 enrolment races and enrolment ids, from the iMac's hostile passes on wp-d ebc0190 and d62c9c6:
 // each finishes with one pin.enrolled for the one enrolment that stored the PIN, credited to the
 // call whose try stored it.

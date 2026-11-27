@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // startCall reads its input once: the access checked is the access stored on the call.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

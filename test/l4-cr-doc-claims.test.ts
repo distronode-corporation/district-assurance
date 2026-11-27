@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // CodeRabbit's review of 0aa6a63 on #133: the audit tables and SPEC claim no more than the code gives.
 // The listener is told best effort, not at least once; an open draft holds sensitive values in the
 // call record; Telnyx's check is tested with an RFC 8032 vector, not a Telnyx example.

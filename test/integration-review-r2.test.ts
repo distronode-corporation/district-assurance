@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L1 integration review (PR #129), round 2: each case is a finding from CodeRabbit's re-review of
 // the integrated branch, or one of the design decisions taken on it, and each test failed before
 // its fix.

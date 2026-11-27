@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // `npm run demo:e2e`: the demo UI with one real piece, a Stripe Checkout Session in TEST MODE.
 // Everything else stays local and made up: the caller, the carrier, the texts, the ledger, and
 // the example door relay on another loopback port. No production system is involved.

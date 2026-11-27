@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // SRV-7: the reference server's request parsing, over raw sockets on 127.0.0.1, so the request line,
 // the headers and the body go out exactly as generated. Whatever arrives, the server answers with a
 // status it means (never a 500), in JSON on every route that is not a static file, and keeps serving.

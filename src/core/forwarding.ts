@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // What the host may forward for a call right now. This is the single place a host asks: it reads
 // the session state and answers for the transcript, audio to speech-to-text, audio to the model and
 // staff listen-in together, so no host code path judges the `sensitive` flag on its own. Pure.

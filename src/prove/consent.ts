@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Consent captured by code: the exact wording read, its version, and the answer. The wording is
 // fingerprinted, so a receipt proves which words the caller heard without carrying them. A consent
 // is revoked by voice, text or dashboard through the host's `ConsentStore` (`Engine.revokeConsent`).

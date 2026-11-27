@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #76 (FIL-1 read-back, FIL-4 conditional fields). I1 and I2 failed
 // before their fixes (a required field named constructor, a lone surrogate in text); the rest held.
 import { strict as assert } from "node:assert";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Texted one-time codes (VER-2): the second factor for level 2, and the easiest way to abuse a
 // phone line, so the limits ship with the feature.
 //

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // An example outside module: Callback books a time for someone to call the caller back.
 //
 // It is what a host writes to add its own step to a flow, and it passes `moduleContract` from

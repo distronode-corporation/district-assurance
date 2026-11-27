@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Badge's public surface. The runtime functions in badge.ts are reached through the Engine.
 export {
   BADGE,

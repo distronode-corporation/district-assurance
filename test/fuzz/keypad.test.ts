@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // SRV-7: the keypad collector (INT-1) on hostile tones, clocks and options. Every run of tones is
 // checked against a small model of the rules, and nothing the collector shows ever has a digit.
 import { strict as assert } from "node:assert";

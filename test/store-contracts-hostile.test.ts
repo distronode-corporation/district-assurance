@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #73 (PRV-5, the store contracts): broken stores that must fail a
 // contract. T1, T3, T4, T5 and T7 passed the contracts before their cases were added; T2 was caught.
 import { strict as assert } from "node:assert";

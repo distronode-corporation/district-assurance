@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Flow execution: a call runs its flow step by step, only the current step's work is allowed, and
 // outside modules plug in their own steps.
 import { strict as assert } from "node:assert";

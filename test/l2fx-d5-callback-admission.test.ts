@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Callback dials, V6 of the L2 review: a resumed dial whose admission is known not to have counted
 // (the daily-limit read failed) is not held for a day; one that may have counted stays held.
 import { strict as assert } from "node:assert";

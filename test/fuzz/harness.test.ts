@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The fuzz harness itself: every example runs whatever the budget, a replay sees the same stream
 // as the run that printed its path, and a case still running when the budget is spent is awaited.
 import { strict as assert } from "node:assert";

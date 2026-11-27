@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Keypad knowledge factors: compare, then discard.
 //
 // Reference values are stored as HMACs under a per-workspace key, because a plain hash of a date

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PIN enrolment and texted codes, round 3 of the L2 review: enrolment applies today's attestation
 // cap (U12), a retry after a ledger failure finishes its own enrolment (U13), an SMS is dispatched
 // only under its own unexpired hold (U14), and a call stored without textCode reads as no code (U15).

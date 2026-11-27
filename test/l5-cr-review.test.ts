@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // CodeRabbit's review of 4edbcb2 on #135: SPEC states one `fromSeq` boundary for the ledger export,
 // the one the code enforces (at most the head plus one, so an empty ledger exports from 1).
 import { strict as assert } from "node:assert";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The measuring loop for `npm run bench`, on `node:perf_hooks` only: `performance.now()` around
 // each operation and a `createHistogram()` of the times, in nanoseconds. No dependency.
 import { createHistogram, performance } from "node:perf_hooks";

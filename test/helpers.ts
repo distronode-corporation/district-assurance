@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Shared test fixtures: a config with every built-in module on, a form, a wording and the PIN factor.
 import { strict as assert } from "node:assert";
 

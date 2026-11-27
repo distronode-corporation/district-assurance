@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The hostile pass on #124 (VER-12 "flag until cleared"), kept as regressions: each attack asserts
 // the safe behaviour. C2 is a todo until Sean decides how the flag survives a failed write.
 import { strict as assert } from "node:assert";

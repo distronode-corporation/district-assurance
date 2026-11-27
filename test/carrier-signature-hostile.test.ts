@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #92 (SRV-1, Twilio and Telnyx webhook signatures). P7 failed before
 // Twilio skipped auth tokens that are not strings; the rest held.
 import { strict as assert } from "node:assert";

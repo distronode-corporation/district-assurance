@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Regressions for the CodeRabbit review of the L3 integration (#131): each case failed before its fix.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 fix T13, number side (PR #130 review, option c): a pass claims its own-failure removals on the
 // call before it runs them, so a cleanup replayed after its clearing write was lost removes nothing
 // more, even when another failure on the same number shares the pass's millisecond.

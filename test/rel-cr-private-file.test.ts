@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // CodeRabbit's review of #148: the Stripe recorder wrote each hosted page URL with
 // `writeFileSync(path, url, { mode: 0o600 })`, and a mode applies only to a file the call creates,
 // so an existing URL file readable by others stayed readable with the fresh URL in it. The URL now

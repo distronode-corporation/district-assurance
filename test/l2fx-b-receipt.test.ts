@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Receipts: a signature that is not a base64url string is never valid, and a single signer's
 // published key names its kid, so the receipts it signs verify against it.
 import { strict as assert } from "node:assert";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Two callback requests on one call that both reach the end of the asking call: the one that ends
 // it second is not an error (engine.requestCallback). Held at endCall so both get there for certain.
 import { strict as assert } from "node:assert";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // VER-9: the callback factor. The first call is ended, the callback is its own call to the number
 // on file, and `callback` counts there only when that line answered and the person keyed the
 // confirmation.

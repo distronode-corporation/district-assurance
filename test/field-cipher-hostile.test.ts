@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #78 (FIL-2, encrypted sensitive intake fields): every attack held.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

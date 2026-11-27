@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The reference script over a flow's hourly limit: the engine fails the flow and leaves the call
 // open, so the step ends that call and fails, never leaving it open behind a thrown error.
 import { strict as assert } from "node:assert";

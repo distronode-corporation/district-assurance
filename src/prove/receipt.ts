@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Signed call receipts: what was verified and how, what was filed (as a fingerprint), what was
 // paid (the provider's reference), what was consented to, and the ledger head at the end of the
 // call. No content and no secrets. Signed with ES256 over the canonical JSON of the body, so

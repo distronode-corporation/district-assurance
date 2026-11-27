@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The synthetic voice signal (VER-14): a speech vendor's score can only make a call count for less.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

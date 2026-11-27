@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PIN records as Argon2id over the keyed HMAC (ADR-29): hash and verify, a wrong PIN, the earlier
 // keyed-HMAC records verifying and then upgraded, tampered and downgraded parameters refused.
 import { strict as assert } from "node:assert";

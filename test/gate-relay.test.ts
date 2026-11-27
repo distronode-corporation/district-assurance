@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The signed-webhook relay adapter (GAT-2), against a real HTTP server on the loopback address.
 import { strict as assert } from "node:assert";
 import { once } from "node:events";

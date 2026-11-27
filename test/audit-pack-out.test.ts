@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile pass on #121 (SRV-8 audit pack): the --out folder is emptied, so only a new folder, an
 // empty one or an earlier pack may be named. Kept as regressions.
 import { strict as assert } from "node:assert";

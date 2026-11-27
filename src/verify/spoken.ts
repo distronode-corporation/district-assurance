@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Spoken answers for values a keypad cannot enter: Canadian postal codes, US ZIP codes and short
 // alphanumeric references.
 //

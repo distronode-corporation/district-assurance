@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The Stripe adapters' errors. Neither ever carries Stripe's own message or any part of a key:
 // Stripe's message can quote part of the key a request was made with.
 

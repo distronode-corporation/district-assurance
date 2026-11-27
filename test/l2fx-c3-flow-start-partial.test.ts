@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 fix U11 (PR #130 review, round 3): a flow start whose later counter write fails takes back the
 // starts it had already counted, so the subject's slot is not spent on a flow that never attached.
 import { strict as assert } from "node:assert";

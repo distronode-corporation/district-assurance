@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #86 (VER-7 engine fix): a taint voids the keypad or PIN match made before it.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

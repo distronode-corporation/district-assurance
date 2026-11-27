@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The SDK path and `fetchStripeClient` send Stripe the same bytes: the same Checkout Session create
 // body (form-encoded), the same v2 Account create body (JSON), the same v2 retrieve query, and the
 // same `Stripe-Version`, `Stripe-Account` and `Idempotency-Key` headers. Both talk to one local

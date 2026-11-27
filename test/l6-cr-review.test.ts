@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // CodeRabbit's review of 31ebecf on #136: three claims in the docs, each held to the code.
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";

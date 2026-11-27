@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Access grants: what Gate hands a door controller after a call is verified. A grant is a short
 // JSON body signed with ES256 over its canonical JSON (the code receipts use), so the access side
 // checks it with the public key only and cannot mint one. The controller adapter (AccessController)

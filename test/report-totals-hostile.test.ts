@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for the monthly report (PRV-8, PR #133 review): totals past
 // Number.MAX_SAFE_INTEGER are refused, never rounded and signed, and a link or a settlement without
 // a payment id never matches another.

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Twilio Lookup adapter: the deadline covers the identity on file, and an identity score outside
 // Twilio's 0 to 100 is not an answer. A stubbed fetch replays the vendor; never the network.
 import { strict as assert } from "node:assert";

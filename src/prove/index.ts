@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 export * from "./anchor.ts";
 export * from "./checkpoint.ts";
 export * from "./consent.ts";

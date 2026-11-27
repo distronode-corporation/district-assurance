@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // One-time access codes (GAT-3): entry where no controller can be called live. Instead of sending
 // the signed access grant to a door, Gate texts a short code to the number on file, and a keypad at
 // the door later hands the code to the host, which redeems it here, once, for that same grant.

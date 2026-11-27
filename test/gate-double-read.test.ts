@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Slot 2's double-read sweep on #47: every host or relay input is read once, so a getter cannot
 // change a value after it was checked.
 import { strict as assert } from "node:assert";

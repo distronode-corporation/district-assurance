@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #114 (PAY-3): cancel payment links, and expire open ones when the call ends.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

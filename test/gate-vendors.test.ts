@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Direct vendor adapters (GAT-6), Kisi and Verkada, against a real HTTP server on the loopback
 // address that answers with the vendors' documented response shapes. No vendor is called.
 import { strict as assert } from "node:assert";

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Distronode Corporation
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # No blank issues: everything goes through the Bug report, Feature request or Question form, or
 # one of the links below.
 blank_issues_enabled: false

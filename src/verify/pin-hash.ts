@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PIN records (VER-6, VER-12, ADR-29): Argon2id over the keyed HMAC.
 //
 // A PIN or duress PIN on file is `$pin1$argon2id$v=19$m=<KiB>,t=<passes>,p=<lanes>$<salt>$<tag>`:

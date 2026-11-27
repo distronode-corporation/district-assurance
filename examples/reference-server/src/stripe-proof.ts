@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The Stripe TEST-mode proof of district-assurance/stripe: every call the package's adapters make,
 // sent to real Stripe test mode through the package's own `fetchStripeClient` (no SDK on the call
 // path). Run by hand; not part of `npm test`. No phone call, no text, nothing stored.

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The duress flag (VER-12, "flag until cleared"): once a duress PIN is entered for a subject, the
 // subject stays under duress, on every call and every engine, until the business clears it.
 //

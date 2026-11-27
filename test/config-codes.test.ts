@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The structured problem codes are API from 0.4.0: a dashboard localizes by them, so the full list
 // is pinned here. A code names a problem, not a call site: two sites may answer the same code only
 // when they answer the same problem (today only paylink.connect_needs_account, answered by the

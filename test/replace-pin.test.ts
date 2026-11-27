@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Engine.replacePin: the business replaces or removes a PIN in one compare-and-set
 // (RecordStore.replacePinDigest), so of two changes at once one lands and the other changes nothing.
 import { strict as assert } from "node:assert";

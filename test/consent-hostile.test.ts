@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile pass on #80 (PRV-3 consent records and revocation), kept as regressions: each attack asserts the safe behaviour.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

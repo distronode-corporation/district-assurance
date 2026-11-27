@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #50 (the e2e demo): the Stripe Checkout adapter, the demo routes and
 // DemoRuns. S1 to S4 failed before the adapter sent its idempotency key as printable ASCII and
 // kept to plain words in errors; the rest held.

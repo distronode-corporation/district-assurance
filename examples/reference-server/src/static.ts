@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The browser UI's files: a fixed allow-list, read once when the server is created. A request path
 // is only ever a key into this map, so it never reaches the file system: no traversal, no
 // directory listing, nothing outside the list.

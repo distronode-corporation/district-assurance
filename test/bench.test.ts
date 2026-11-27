@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The benchmark scripts (SRV-10): the loop measures, and the release comparison reports a case
 // more than 20% slower without failing. The timings themselves are not tested; CI runs a short
 // `npm run bench` so the cases cannot rot.

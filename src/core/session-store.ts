@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The in-memory session store: the reference implementation of `SessionStore`, for a host that
 // runs one process, for tests and for the demo. Records are copied in and out, so a caller can
 // never change what is stored except through `compareAndSet`. Keys are JSON tuples, so no pair of

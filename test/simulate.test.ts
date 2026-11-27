@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The flow simulator (MOD-4): every built-in script, script files, refused configs, the command line and the output format.
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";

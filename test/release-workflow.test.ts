@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #119 (SRV-5): the release workflow's own checks, run as they are written in it.
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";

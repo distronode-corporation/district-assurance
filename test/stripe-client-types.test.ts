@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Compile-time proof that a real stripe-node client on endive is a `StripeClientLike` as it is: the
 // assignment below is checked by `npm run typecheck`, which fails if the SDK's shapes drift from the
 // package's. stripe is a development dependency only; the package never imports it (ADR-3).

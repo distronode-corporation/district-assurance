@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // U14, round 4: a texted code's dispatch is claimed in a write on the call ("sending", under an
 // unexpired hold, renewed for TEXT_SEND_HOLD_SECONDS from the claim), so endCall refuses between
 // the claim and the SMS adapter's answer, and nothing lands in the ledger after receipt.issued.

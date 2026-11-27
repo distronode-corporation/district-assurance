@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // applyCallbackOutcome reads the outcome once: the answer that decided the factor is the one the
 // ledger's callback_finished entry names, and the reference looked up is the one applied.
 import { strict as assert } from "node:assert";

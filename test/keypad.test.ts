@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // INT-1: the keypad collector buffers tones until `#`, within a length and an idle timeout, and
 // never shows a digit.
 import { strict as assert } from "node:assert";

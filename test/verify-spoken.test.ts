@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Spoken answers (VER-3): exact normalisation of postal codes, ZIP codes and references in English
 // and French, and the spoken_knowledge factor that compares them like keypad fields.
 import { strict as assert } from "node:assert";

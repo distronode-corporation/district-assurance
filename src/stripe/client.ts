@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The Stripe calls the adapters make, as a structural type. A stripe-node `Stripe` instance fits it
 // unchanged (test/stripe-client-types.test.ts proves that at compile time), and `fetchStripeClient`
 // is the same surface over Node's own fetch, for a host without the SDK. No runtime dependency

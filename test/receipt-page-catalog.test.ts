@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The receipt page's words (PAGE_TEXT in the reference server): the same keys in English and
 // French, and a word for every payment status, so a status another change adds fails here, loudly,
 // instead of showing its raw name on the page.

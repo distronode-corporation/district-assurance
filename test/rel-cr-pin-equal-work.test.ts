@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // CodeRabbit's review of the 0.1.0 release diff (#149, CWE-208): a PIN record was checked at its own
 // stored cost, anything from today's cost up to a ceiling, while an unknown subject's stand-in ran
 // at today's cost, so a wrong PIN for a subject with a dearer record took longer than for an

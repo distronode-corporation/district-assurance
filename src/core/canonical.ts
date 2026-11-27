@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Canonical JSON: one byte sequence per value, so a hash or a signature over it is stable.
 //
 // The output follows RFC 8785 (JSON Canonicalization Scheme) for the values this engine

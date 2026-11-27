@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // In-memory and fake adapters, for tests and the demo. They never call a network. Hosts use them
 // to test their own wiring; production hosts plug in real adapters behind the same interfaces.
 import { X509Certificate, createHash, generateKeyPairSync, sign, type KeyObject } from "node:crypto";

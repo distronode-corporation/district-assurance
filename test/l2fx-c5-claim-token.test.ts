@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 fix V5 (PR #130 review, round 4): a cleanup's claim is this run's only when the call holds this
 // run's own claim. A claim write that saved nothing, followed by another run's claim before the
 // read-back, runs none of the removals.

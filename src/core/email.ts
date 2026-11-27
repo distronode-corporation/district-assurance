@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Email addresses on file. The engine never takes an address from a call: the one it emails is the
 // subject's verified `emailOnFile`, and this is the check it holds that address to before using it.
 

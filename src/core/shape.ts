@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Small type checks for values that come from storage or a request (a FlowConfig, module
 // settings). Validators use them so that a malformed document gives sentences, never a crash.
 

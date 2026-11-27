@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // VER-12 "flag until cleared", from the iMac's re-check of jr/wp-au ec8d4cc: a known duress PIN must
 // not clear an attacker's wrong guesses at the real PIN, and a subject that entered a duress PIN
 // stays under duress, on every call, until the business clears it.

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // #124 cross-review item 1: ledger event ids numbered by the writes that queue entries must never
 // equal the version-numbered ids an older build writes on the same call, or the ledger drops the
 // newer build's entry as a replay. Both builds run on one session store and one ledger (a rolling

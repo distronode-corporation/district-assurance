@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 fix T8 (PR #130 review): the hidden counter's cleanup is owed with a saved pass, like the
 // visible counters', so a pass whose ledger entry fails still gets it, or the call's next factor does.
 import { strict as assert } from "node:assert";

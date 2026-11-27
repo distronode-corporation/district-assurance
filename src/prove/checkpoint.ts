@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // A signed checkpoint of a pruned ledger: the last entry a host removed, with how many entries that
 // prune cut and when, signed under its own domain so it can never verify as a receipt or an export
 // trailer. A reader who holds the checkpoint and the entries after it can check the chain from the

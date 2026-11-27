@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Carrier webhook signature checks, each on the carrier's published scheme. Nothing here calls a
 // carrier.
 //

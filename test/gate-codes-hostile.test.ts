@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #100 (GAT-3): one-time access codes, texted to the number on file, redeemed once.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

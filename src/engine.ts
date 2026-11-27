@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The engine: one object per workspace. It holds the core (the session state machine on a shared
 // SessionStore, the policy and its levels, redaction, the module registry and the audit ledger)
 // and runs the modules a workspace's FlowConfig turns on. The host's voice agent and web backend

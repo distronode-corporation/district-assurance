@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // What `npm pack` ships. `files` lists dist/, which only a build makes and git never holds, so a
 // pack from a fresh checkout would ship the documents and no code. A local `npm pack` or
 // `npm publish` builds first (prepack); the release workflow builds explicitly, packs with

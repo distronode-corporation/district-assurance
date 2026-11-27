@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The page's own checks, with nothing but Web Crypto: a receipt's ES256 signature against the
 // public key set, and a ledger entry's hash. No DOM here, so the same module runs in Node's test
 // suite against receipts the engine signed (test/reference-ui.test.ts).

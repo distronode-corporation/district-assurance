@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Modules. The core holds the session state machine, the policy and its levels, redaction, this
 // registry and the audit ledger; everything else is a module: Badge (verify), Dossier (file),
 // Paylink (pay), Trace (prove), and any outside module a host adds with `engine.use(module)`.

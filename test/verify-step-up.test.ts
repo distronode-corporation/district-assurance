@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Risk-based step-up (VER-13): the policy's rules raise a scope's minimum for a large amount, after
 // hours in the business's time zone, or on a signal the host raised, and only ever raise it.
 import { strict as assert } from "node:assert";

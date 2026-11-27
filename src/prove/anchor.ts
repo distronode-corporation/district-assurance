@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Public timestamp anchors for the ledger (PRV-9). A hash chain shows that no entry changed after
 // later ones were written, but whoever holds the ledger could rebuild the whole chain. An anchor
 // fixes the head in time with a third party: an RFC 3161 time-stamp authority signs a hash of it,

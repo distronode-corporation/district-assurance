@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #111 (VER-11, the accessible verification path). A5 failed before
 // the collector ended an entry when the clock went back; the rest held.
 import { strict as assert } from "node:assert";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // confirmIntake reads its input once: a getter (or a host changing the object while the engine
 // waits) can never pass the read-back check with one value or file a channel other than the one given.
 import { strict as assert } from "node:assert";

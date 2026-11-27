@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Ledger export: a run of ledger entries as newline-delimited JSON, one canonical entry per line,
 // closed by a signed trailer that names where the run starts, where it ends and the ledger head
 // at export time. An auditor or a SIEM checks the trailer with the public key set, the run with

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Regressions for two card-data leaks (0.4.2). (1) A number intake field took a whole card number
 // and stored it, since only text fields ran the card check. (2) Digits just before a card number (a
 // phone number, a reference) could form a false Luhn match: the finder took it, skipped past it, and

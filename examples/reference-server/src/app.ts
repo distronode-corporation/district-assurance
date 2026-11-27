@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The reference server: a small node:http server around one Engine. It receives the Stripe
 // webhooks that finish a photo ID check and a payment (platform-mode payments on the account
 // endpoint, connect-mode payments on the Connect endpoint, each with its own signing secret),

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PIN passes (0.3.0): a PIN keyed on one engine call (an owner's sign-in) carried to another call of
 // the same caller, once, within 5 minutes, as the PIN factor only. The texted or emailed code is
 // still needed there, and the receipt and the ledger say the PIN was reused.

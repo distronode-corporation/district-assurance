@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PAY-2 (#88): amounts from code, read back to the caller and confirmed before every payment link.
 // Ported from #88's engine.test.ts block onto the merged Paylink (modes, link life, deadlines).
 import { strict as assert } from "node:assert";

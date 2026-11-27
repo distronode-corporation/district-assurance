@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // #79 x #47: a door grant at its controller and a texted code with the SMS adapter, both in flight
 // on one call. endCall refuses until both have answered, and nothing lands in the call's ledger
 // after receipt.issued, whichever answers first.

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Gate (GAT-1, ADR-25): signed, time-limited access grants after verification, delivered once
 // through an AccessController the engine holds, with the engine itself recording every outcome.
 // Every hostile-review case of PR 2 that applies to the engine-owned design is kept here.

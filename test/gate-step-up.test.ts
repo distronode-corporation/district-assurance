@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Web sign-in step-up (GAT-4, ADR-24, ADR-25): a short-lived ES256 JWT, bound to the site's nonce,
 // the verified subject and the call's verification grant, issued by the engine and exchanged once,
 // through the engine, by the host's web sign-in. No module code can write a token or its outcome.

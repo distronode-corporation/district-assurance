@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Assurance levels and the policy that decides what a verified caller may do.
 //
 // The model never takes part in this: factors are results recorded by code, the level is computed

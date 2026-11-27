@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // CodeRabbit's review of the 0.1.0 release diff (#149): SECURITY-MODEL.md gave a duress PIN record
 // the `pin:` namespace, while the code keys it under `duress:`. The doc's formulas are held to the
 // records the engine writes.

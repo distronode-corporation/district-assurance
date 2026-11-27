@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #93 (SRV-2): the reference server's limits, deadlines and request logs.
 import { strict as assert } from "node:assert";
 import { connect, type AddressInfo } from "node:net";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // An example door relay: the small program on a site's own network that Gate's `webhookRelay`
 // adapter posts to. It holds only Gate's public key. It checks the grant (signature, audience,
 // window, lifetime), refuses a grant id it has seen, and only then works the door, here a callback

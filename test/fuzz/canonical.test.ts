@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // SRV-7: canonicalJson on any JSON value and on values JSON cannot carry. Every JSON value has one
 // canonical form that parses back to it; anything else is refused with a TypeError, never dropped.
 import { strict as assert } from "node:assert";

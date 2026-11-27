@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The demo page: pick a flow, run its scripted steps one request at a time, and show what the
 // server answers. Every value is written with textContent, never as markup. The receipt and the
 // ledger hashes are checked here, in the browser, by receipt-check.js.

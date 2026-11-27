@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // `npm run ui`: the reference server with the demo's browser UI, on 127.0.0.1 only. Pick a flow,
 // run the scripted call one step at a time, and watch the session state, the ledger entries and
 // the signed receipt, which the page checks itself against /.well-known/receipt-keys.json.

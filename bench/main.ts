@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // `npm run bench`: measures the engine's own costs on the memory adapters and prints a table.
 // With `--out file.json` it also writes the results with the machine they ran on (CPU, operating
 // system, Node version, commit), the shape `bench/compare.ts` reads.

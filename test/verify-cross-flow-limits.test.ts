@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // VER-15: limits across flows. Failures in one flow count in every other, and flows that need a
 // money, contact or access scope are limited per hour, per calling number and per subject.
 import { strict as assert } from "node:assert";

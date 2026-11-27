@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L2 fix U7 (PR #130 review, round 3): a clearing that lands between a flag write's check of the
 // clearings and the write itself is never undone, for the entry's own write and for its alert's.
 import { strict as assert } from "node:assert";

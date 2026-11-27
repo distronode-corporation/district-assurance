@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PR #130 review T19 follow-up: a duress notify that does not settle within `notifyTimeoutMs` counts as
 // failed, its alert stays owed, and a late answer changes nothing.
 import { strict as assert } from "node:assert";

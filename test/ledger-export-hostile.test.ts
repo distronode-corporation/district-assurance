@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile pass on #90 (PRV-4 ledger export), kept as regressions: each attack asserts the safe behaviour.
 import { strict as assert } from "node:assert";
 import { randomBytes } from "node:crypto";

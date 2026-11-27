@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Paylink (pay): payment by a hosted link sent to the subject on file, by text to the number on
 // file or, when the caller chose it, by email to the verified address on file. The engine never sees a
 // card. In a flow, the `paylink.request` step carries the amount, the payment mode, the link's

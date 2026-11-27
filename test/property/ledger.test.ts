@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // SRV-7: properties of the audit ledger. Any sequence of appends from several writers, in any order
 // and interleaving, keeps one valid hash chain; any single changed byte in a stored entry breaks it.
 import { strict as assert } from "node:assert";

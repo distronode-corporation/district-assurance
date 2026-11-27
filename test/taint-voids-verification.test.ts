@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Sean, 2026-11-19: a taint while a verification is open fails that verification. No level is
 // granted from it, however many factors matched before or after the taint, and the caller must start
 // a new verification, which starts from no factors.

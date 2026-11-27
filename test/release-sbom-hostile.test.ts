@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #125 (SRV-6, signed releases): the release workflow's SBOM check,
 // run here on SBOMs a release could produce, its two copies kept the same, and which job may sign.
 // Every attack held.

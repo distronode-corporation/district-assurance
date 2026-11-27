@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Failure counters and lockouts across calls (VER-1). A per-call limit alone lets a caller call
 // again: a 4-digit PIN with 3 attempts per call falls within about 3,300 calls. So every factor the
 // caller enters is also counted per subject and per calling number, in a store every engine of the

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The RecordStore's confirmed flag (L3 #131, decided 2026-11-20): a stored intake record counts as
 // filed only once the confirmation that filed it committed. `deliverRecord`, `exportSubject` and
 // upload links skip a row without the flag (one a refusal left behind when its delete failed), and

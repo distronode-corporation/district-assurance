@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Refund and dispute inputs are read once: a getter (or a host changing the object while the engine
 // waits) can never pass a check with one value and have another refunded, recorded or ledgered.
 import { strict as assert } from "node:assert";

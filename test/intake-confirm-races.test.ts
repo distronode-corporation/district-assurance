@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // confirmIntake against a call that changes between its first read and its reserving write, and a
 // filing abandoned while it is written and followed by a new intake.
 import { strict as assert } from "node:assert";

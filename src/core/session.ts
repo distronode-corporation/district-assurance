@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The call session and its state machine. Pure: `reduce` takes a state and an event and returns
 // the next state, or throws `invalid_transition`. SPEC.md draws the same machine.
 import { EngineError } from "./errors.ts";

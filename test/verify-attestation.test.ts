@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Caller ID attestation (VER-10): recorded on every call, never a factor, and only ever a cap.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile pass on #123 (SRV-10 benchmarks): the release comparison reads the previous release's
 // results file, and a missing or unreadable one is reported and skipped, never a failed step.
 // Kept as regressions.

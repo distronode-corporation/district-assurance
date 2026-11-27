@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The cases `npm run bench` measures: engine costs on the memory adapters and the fakes of
 // `district-assurance/testing`, never the cost of a store, a carrier or a provider. Every case checks
 // its own result once before it is timed, so a case that stops doing its work fails the run

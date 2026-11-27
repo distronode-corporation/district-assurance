@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Stripe Connect onboarding on Accounts v2: the business's own Stripe account, connected by
 // Stripe-hosted onboarding, so a payment link is a direct charge on it and the business is the
 // merchant. Standard-equivalent: the merchant configuration, the full Dashboard (the business

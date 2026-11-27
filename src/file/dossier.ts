@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Dossier (file): intake the caller confirms. The forms live in the module's settings, so a flow
 // step names a form by id and a host's config is checked before any call uses it.
 import { randomUUID } from "node:crypto";

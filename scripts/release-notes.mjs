@@ -1,4 +1,9 @@
 #!/usr/bin/env node
+
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // A version's CHANGELOG.md section, for its GitHub release. release.yml runs it twice: the decide
 // job's guard (`check`) refuses a release with no dated section, and the github-release job
 // (`notes`) puts the section at the top of the release notes. One parser serves both, so the guard

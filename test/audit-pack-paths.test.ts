@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile pass on the audit pack's paths (SRV-8, PR #133 review): the v8 coverage temp folder never
 // overlaps --out (so its cleanup can never remove the pack or an ancestor of it), and a supplied
 // SBOM never shares a name with the manifests copied next to it. Imported, never run: importing

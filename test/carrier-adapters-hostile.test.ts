@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // VER-4 carrier signals under attack (a hostile pass on #85): vendor answers that must never trust
 // a texted code, and hostile answers and input. A stubbed fetch replays them; never the network.
 import { strict as assert } from "node:assert";

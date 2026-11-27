@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Hostile-pass regressions for #96 (INT-2, forwardingFor and the payment hold). W1 to W3 failed
 // before forwardingFor read each field once as the state's own and required the hold while paying.
 import { strict as assert } from "node:assert";

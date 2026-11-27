@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The adapter interfaces: everything the engine needs from the outside world. A host plugs in its
 // own (a carrier, Stripe, its database, its key store); `district-assurance/testing` has
 // in-memory and fake versions for tests and the demo. None of these ever carries card data.

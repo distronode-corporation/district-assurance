@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // VER-5 and PAY-1 against Stripe test mode: the runs test/fixtures/stripe-real/record.ts recorded
 // through the reference server's own adapters and webhook routes, redacted, replayed here offline.
 // Each replay makes the same request the recording made (checked field by field), gets Stripe's

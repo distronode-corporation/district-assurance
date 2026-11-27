@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // PR #130 review X0: a limited flow that attaches between beginVerification's late count (which
 // found no flow) and its subject write is counted before the subject is written.
 import { strict as assert } from "node:assert";

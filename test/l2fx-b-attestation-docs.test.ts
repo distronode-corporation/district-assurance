@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // The host maps its carrier's caller ID result (no code here maps it): the reference server's
 // README table and SPEC section 4 pin Twilio's Diverted and Passthrough StirVerstat values.
 import { strict as assert } from "node:assert";

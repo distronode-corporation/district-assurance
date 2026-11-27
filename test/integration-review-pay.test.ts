@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // L1 integration review (PR #129), Paylink, access codes and disputes: each case is a finding from
 // the review of the integrated branch, and each test failed before its fix.
 import { strict as assert } from "node:assert";

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Distronode Corporation
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Stripe webhooks: the signature check and the mapping from Stripe's event types to the engine's
 // outcomes. The signature scheme is Stripe's published one: the `Stripe-Signature` header carries
 // `t=<unix seconds>` and one or more `v1=<hex>`, each an HMAC-SHA256 of `<t>.<raw body>` under the
