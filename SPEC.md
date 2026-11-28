@@ -2390,6 +2390,9 @@ card number, else `declined`); a throw is
   `no_answer_recorded`, actor `system`) before `call.ended` and the receipt's head, and one
   answered meanwhile keeps its answer. An answer that arrives later is still
   recorded, as `paid` or `declined` with `late: true`; the receipt already signed is not changed.
+  `removeCall` does not wait for it: when the record is gone by then, the late answer is appended
+  to the ledger on its own, once per charge (event id `[workspaceId, callId, event, paymentId]`),
+  and `chargeSavedCard` returns it; a lost answer then throws `unknown_call`.
 - The receipt lists each charge in `payments` with `method: "saved_card"` (section 12), its status
   as the end of the call left it. Refunds,
   disputes and monthly report totals cover payment links only; a saved-card charge is refunded by

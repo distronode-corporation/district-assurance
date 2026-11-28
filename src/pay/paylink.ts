@@ -1335,29 +1335,48 @@ export async function chargeSavedCard(rt: EngineRuntime, callId: string, given: 
     // not have been charged. Recorded so, and never sent again.
     answer = "lost";
   }
-  return rt.update(callId, (draft) => {
-    const c = draft.slice<PaylinkSlice>(PAYLINK).charges!.find((x) => x.paymentId === charge.paymentId)!;
-    // Only this process sends the charge, so it is still `charging`, or `unknown` when the call
-    // ended first (`settleChargesAtEnd`): an answer that comes after that is recorded, flagged late.
-    const late = c.status !== "charging" ? { late: true } : {};
-    if (answer === "lost" || answer === "malformed") {
-      if (c.status === "charging") {
-        c.status = "unknown";
+  // What a readable answer settles the charge at, and the entry that says so.
+  const settled =
+    answer === "lost" || answer === "malformed"
+      ? null
+      : answer.outcome === "charged"
+        ? ({ status: "paid", providerRef: answer.providerRef, event: "payment.card_charged", detail: { paymentId: charge.paymentId, providerRef: answer.providerRef, amountMinor: charge.amountMinor, currency: charge.currency, mode: charge.mode } } as const)
+        : ({ status: "declined", providerRef: null, event: "payment.card_declined", detail: { paymentId: charge.paymentId, reason: declineCode(answer.reason) } } as const);
+  try {
+    return await rt.update(callId, (draft) => {
+      const c = draft.slice<PaylinkSlice>(PAYLINK).charges!.find((x) => x.paymentId === charge.paymentId)!;
+      // Only this process sends the charge, so it is still `charging`, or `unknown` when the call
+      // ended first (`settleChargesAtEnd`): an answer that comes after that is recorded, flagged late.
+      if (settled === null) {
+        if (c.status === "charging") {
+          c.status = "unknown";
+          c.settledAt = rt.now();
+          draft.emit("payment.card_unknown", "code", { paymentId: c.paymentId, reason: answer === "lost" ? "answer_lost" : "malformed_answer" });
+        }
+      } else {
+        const late = c.status !== "charging" ? { late: true } : {};
+        c.status = settled.status;
+        c.providerRef = settled.providerRef;
         c.settledAt = rt.now();
-        draft.emit("payment.card_unknown", "code", { paymentId: c.paymentId, reason: answer === "lost" ? "answer_lost" : "malformed_answer" });
+        draft.emit(settled.event, "code", { ...settled.detail, ...late });
       }
-    } else if (answer.outcome === "charged") {
-      c.status = "paid";
-      c.providerRef = answer.providerRef;
-      c.settledAt = rt.now();
-      draft.emit("payment.card_charged", "code", { paymentId: c.paymentId, providerRef: answer.providerRef, amountMinor: c.amountMinor, currency: c.currency, mode: c.mode, ...late });
-    } else {
-      c.status = "declined";
-      c.settledAt = rt.now();
-      draft.emit("payment.card_declined", "code", { paymentId: c.paymentId, reason: declineCode(answer.reason), ...late });
-    }
-    return { paymentId: c.paymentId, status: c.status as SavedCardChargeAnswer["status"] };
-  });
+      return { paymentId: c.paymentId, status: c.status as SavedCardChargeAnswer["status"] };
+    });
+  } catch (error) {
+    // The host removed the ended call's record while this answer was on its way (the end had settled
+    // the charge unknown, so removeCall allowed it): the answer still reaches the ledger, flagged
+    // late, once per charge, and the host gets it. A lost answer adds nothing to `unknown`.
+    if (settled === null || !(error instanceof EngineError && error.code === "unknown_call")) throw error;
+    await rt.append({
+      eventId: JSON.stringify([rt.workspaceId, callId, settled.event, charge.paymentId]),
+      callId,
+      actor: "code",
+      event: settled.event,
+      at: rt.now(),
+      detail: { ...settled.detail, late: true },
+    });
+    return { paymentId: charge.paymentId, status: settled.status };
+  }
 }
 
 /**

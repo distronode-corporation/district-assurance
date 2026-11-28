@@ -1702,6 +1702,78 @@ describe("Engine pay: saved-card charges (PAY-4)", () => {
     ]);
   });
 
+  it("writes a late answer to the ledger even after the ended call's record was removed, and loses nothing else", async () => {
+    for (const late of ["charged", "declined", "lost"] as const) {
+      let t!: TestEngine;
+      t = charging({
+        savedCards: {
+          capabilities: { modes: ["platform"] },
+          charge: async (input) => {
+            // The answer is slow: the call ends with the charge unknown, and the host removes its record.
+            t.clock.advance(60_000);
+            await t.engine.endCall(input.callId);
+            assert.deepEqual(await t.engine.removeCall(input.callId), { removed: true });
+            if (late === "lost") throw new Error("timeout");
+            return late === "charged" ? { outcome: "charged", providerRef: "pi_late" } : { outcome: "declined", reason: "expired_card" };
+          },
+        },
+      });
+      const callId = await callAt(t, 2);
+      await confirmAmount(t.engine, callId, request);
+      if (late === "lost") {
+        await assert.rejects(t.engine.chargeSavedCard(callId, request), rejects("unknown_call"), "a lost answer adds nothing to the unknown the ledger has");
+        assert.equal((await events(t)).at(-1)![0], "payment.card_unknown");
+        continue;
+      }
+      assert.deepEqual(await t.engine.chargeSavedCard(callId, request), { paymentId: "pay_1", status: late === "charged" ? "paid" : "declined" });
+      const entry = (await t.ledger.list()).at(-1)!;
+      assert.equal(entry.callId, callId);
+      assert.deepEqual(
+        [entry.event, entry.actor, entry.detail],
+        late === "charged"
+          ? ["payment.card_charged", "code", { paymentId: "pay_1", providerRef: "pi_late", amountMinor: 15000, currency: "cad", mode: "platform", late: true }]
+          : ["payment.card_declined", "code", { paymentId: "pay_1", reason: "expired_card", late: true }],
+      );
+      assert.equal(verifyChain(await t.ledger.list()).ok, true);
+    }
+  });
+
+  it("passes on a store failure while it records the answer, as any write does", async () => {
+    for (const failure of ["thrown", "conflict"] as const) {
+      const sessions = new MemorySessionStore();
+      let failing = false;
+      const get = sessions.get.bind(sessions);
+      const compareAndSet = sessions.compareAndSet.bind(sessions);
+      sessions.get = async (...args) => {
+        if (failing && failure === "thrown") throw new Error("store down");
+        return get(...args);
+      };
+      sessions.compareAndSet = async (...args) => (failing && failure === "conflict" ? { ok: false } : compareAndSet(...args));
+      const t = setup({
+        config: testConfig((c) => {
+          c.modules.paylink = { settings: { savedCardCharges: true } };
+          c.policy.scopes[SAVED_CARD_SCOPE] = 2;
+        }),
+        adapters: {
+          sessions,
+          savedCards: {
+            capabilities: { modes: ["platform"] },
+            charge: async () => {
+              failing = true;
+              return { outcome: "charged", providerRef: "pi_1" };
+            },
+          },
+        },
+      });
+      const callId = await callAt(t, 2);
+      await confirmAmount(t.engine, callId, request);
+      await assert.rejects(t.engine.chargeSavedCard(callId, request), failure === "thrown" ? /store down/ : rejects("conflict"));
+      failing = false;
+      assert.equal((await t.engine.state(callId)).phase, "open");
+      assert.equal((await events(t)).at(-1)![0], "payment.card_charge_requested", "the charge stays waiting, never recorded as anything");
+    }
+  });
+
   it("ends the call only once a charge answers, or after its 60 seconds with the charge unknown, and records a later answer flagged late", async () => {
     for (const late of ["charged", "lost"] as const) {
       let answer!: (value: SavedCardChargeResult) => void;
