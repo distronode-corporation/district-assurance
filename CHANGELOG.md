@@ -15,6 +15,31 @@ released out of this file, from its dated `## [X.Y.Z] - YYYY-MM-DD` heading to t
 heading, and uses it as the GitHub release's text, with a link back here
 (`scripts/release-notes.mjs`). A release with no dated section is refused.
 
+## [Unreleased]
+
+A host can now charge a card the business already holds, for a caller verified to level 2 or
+higher and only for the amount the caller heard and confirmed. It is off unless a host turns it
+on, and the package ships no real provider adapter for it, so nothing changes for anyone who does
+not bring one.
+
+### Added
+
+- **Charging a card on file, off by default.** `engine.chargeSavedCard(callId, request)` charges
+  the subject's saved card through a new `savedCards` adapter, only while Paylink's new
+  `savedCardCharges` setting is `true` and the policy lists the new `payment.saved_card` scope,
+  which can never be set below level 2. It needs the same confirmed amount read-back as a payment
+  link, runs outside a flow, and never sees the card: the adapter gets the subject key, the amount
+  and an idempotency key. A charge is sent once. An answer that is lost or cannot be read is
+  recorded as `unknown`, never as charged, and no other charge or payment link is taken on that
+  call after it. The receipt lists each charge with `method: "saved_card"`, and the ledger has four
+  new `payment.card_*` entries. `FakeSavedCards` in `district-assurance/testing` stands in for a
+  real adapter in tests.
+
+### Changed
+
+- **The `chargeSavedCard` stub is gone from the pay exports.** It only ever threw
+  `NotImplementedError`; the working entry point is the engine's `chargeSavedCard`.
+
 ## [0.4.2] - 2026-11-26
 
 Two fixes to how card numbers are kept out of what the engine stores. Nothing changes for a host

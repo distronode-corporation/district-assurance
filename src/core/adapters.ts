@@ -208,6 +208,54 @@ export interface PaymentRefundRequest {
   idempotencyKey: string;
 }
 
+/** What a saved-card adapter declares, checked when a config is saved: the modes it can charge in. */
+export interface SavedCardCapabilities {
+  modes: readonly PaymentMode[];
+}
+
+/**
+ * The request to charge the card the business already holds for a subject (PAY-4). It names the
+ * subject by its keyed subject key, never a card: the adapter finds the card the business keeps at
+ * its provider for that subject (for example a Stripe customer's default payment method).
+ */
+export interface SavedCardChargeRequest {
+  callId: string;
+  paymentId: string;
+  /** The subject Badge matched on the call: the HMAC of the account number, never the number. */
+  subjectKey: string;
+  /** Integer, in the currency's minor unit (cents): the amount the caller heard and confirmed. */
+  amountMinor: number;
+  /** ISO 4217, lower case. */
+  currency: string;
+  description: string;
+  mode: PaymentMode;
+  /** The business's account at the provider. Present exactly when `mode` is `connect`. */
+  connectedAccountId?: string;
+  /** One per charge, derived by the engine: the provider must charge at most once per key. */
+  idempotencyKey: string;
+}
+
+/**
+ * What a saved-card adapter answered. A lost answer (a timeout, a dropped connection) is a thrown
+ * error, never a value: the engine records it as unknown and never charges again on that call.
+ */
+export type SavedCardChargeResult =
+  /** The provider charged the card. `providerRef` is its id for the charge (for example `pi_...`). */
+  | { outcome: "charged"; providerRef: string }
+  /** The provider certainly did not charge the card (declined, no card on file, refused). */
+  | { outcome: "declined"; reason: string };
+
+/**
+ * Charges a card the business already holds at its payment provider, for a level 2 caller (PAY-4).
+ * Optional, and used only while Paylink's `savedCardCharges` setting is on. The engine calls
+ * `charge` once per payment and never retries; an adapter must not retry on its own either, except
+ * with the same idempotency key.
+ */
+export interface SavedCards {
+  readonly capabilities: SavedCardCapabilities;
+  charge(input: SavedCardChargeRequest): Promise<SavedCardChargeResult>;
+}
+
 /** The person on record, as the engine sees them: keyed digests, never the values. */
 export interface SubjectRecord {
   /** HMAC of the account number under the workspace's knowledge key. */

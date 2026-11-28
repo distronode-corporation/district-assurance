@@ -26,6 +26,7 @@ import type {
   PinVerifier,
   ReceiptSigner,
   RecordStore,
+  SavedCards,
   SessionStore,
 } from "./adapters.ts";
 import type { JsonValue } from "./canonical.ts";
@@ -89,6 +90,8 @@ export interface EngineAdapters {
   /** Emails a payment link to the subject's verified address on file, when the caller chose email (`paylink.channel`). */
   emails?: EmailSender;
   payments?: PaymentLinks;
+  /** Charges a card the business already holds (PAY-4). Needed while Paylink's `savedCardCharges` is on. */
+  savedCards?: SavedCards;
   signer?: ReceiptSigner;
   pinVerifier?: PinVerifier;
   /** Needed by a `paylink.request` step that names an `amountRef` (PAY-2). */

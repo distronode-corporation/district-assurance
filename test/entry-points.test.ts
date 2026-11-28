@@ -138,6 +138,24 @@ describe("fakes", () => {
     assert.deepEqual(links.created[0], { paymentId: "p", amountMinor: 1, currency: "cad", mode: "platform", paymentMethods: ["card"], expiresAt: "2026-01-01T00:15:00.000Z", linkId: a.linkId });
   });
 
+  it("saved cards charge once per idempotency key", async () => {
+    const cards = new testing.FakeSavedCards({ modes: ["platform"] });
+    assert.deepEqual(cards.capabilities, { modes: ["platform"] });
+    assert.deepEqual(new testing.FakeSavedCards().capabilities, { modes: ["connect", "platform"] });
+    const input = { callId: "c", paymentId: "p", subjectKey: "a".repeat(64), amountMinor: 1, currency: "cad", description: "d", mode: "platform" as const, idempotencyKey: "k" };
+    const first = await cards.charge(input);
+    assert.deepEqual(first, { outcome: "charged", providerRef: "pi_fake_1" });
+    assert.deepEqual(await cards.charge(input), first, "a repeated key gives the first answer back");
+    cards.answer = "decline";
+    assert.deepEqual(await cards.charge(input), first);
+    assert.deepEqual(await cards.charge({ ...input, idempotencyKey: "k2" }), { outcome: "declined", reason: "card_declined" });
+    cards.answer = "lose";
+    await assert.rejects(cards.charge({ ...input, idempotencyKey: "k3" }), /answer was lost/);
+    assert.deepEqual(await cards.charge({ ...input, idempotencyKey: "k3" }), { outcome: "charged", providerRef: "pi_fake_2" }, "the lost answer's charge was made");
+    assert.equal(cards.charged.length, 2);
+    assert.equal(cards.received.length, 6);
+  });
+
   it("payment links expire once, and not after the provider closed them", async () => {
     const links = new testing.FakePaymentLinks();
     assert.deepEqual(await links.expireLink({ linkId: "cs_1", mode: "connect", connectedAccountId: "acct_1", idempotencyKey: "k" }), { state: "expired" });

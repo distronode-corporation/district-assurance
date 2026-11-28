@@ -789,6 +789,30 @@ call never changes (tested). Connect payments are the business's, refunded and d
 account: the engine refuses to refund one and never binds its disputes (tested). Left to the host:
 who in the business may ask for a refund, and answering a dispute with evidence at the provider.
 
+### Saved-card charges
+
+A card the business holds charged for a caller who is not who they claim, for an amount the caller
+never heard, twice for one request, or reported as charged when nobody knows. **Controls:**
+`chargeSavedCard` (PAY-4) is off unless Paylink's `savedCardCharges` is `true`, a setting that must
+be a boolean and needs the `savedCards` adapter in Paylink's mode, checked when the config is saved
+(tested). It needs the scope `payment.saved_card`, a money scope by its name, so never below level
+2 whatever the business sets, refused unless the policy names it, held to the step-up rules on the
+amount, and refused the same way whichever of those failed (tested). It charges only the amount
+the caller heard read back and confirmed, for that request and subject, checked again against the
+limit in force, and the read-back is used up (tested). It is a host call outside a flow, on an
+open call with a keypad or PIN match, never while a link is out (tested); the host keeps it off
+every tool the model can call (left to the host). The engine never sees the card: the adapter is
+given the subject key, the amount and an idempotency key the engine derives, and finds the card at
+the business's provider (tested). A charge is sent once and never retried; a lost or unreadable
+answer is `unknown`, never charged, and while a charge is unknown or waiting no other charge or
+payment link is taken on the call, so a lost answer cannot become a second charge (tested). The
+end of the call waits 60 seconds for an answer, then settles the charge unknown before the
+receipt's head; an answer that comes later is still recorded, flagged late (tested). Ledger entries
+carry the payment id, the amount, the mode, the provider's charge id and a decline reason only when
+it is a short code, never card data (tested). Left to the host: a real `savedCards` adapter (none
+ships), the customer's agreement to keep and charge the card, and settling an unknown charge with
+the provider.
+
 ### Card data and PCI DSS scope
 
 **Controls:** Pay is by a hosted payment page; the engine sees a link id and a status, never a card
@@ -1193,7 +1217,8 @@ Payment by a link texted to the number on file, or emailed to the verified addre
 | paylink-12 | I | A forwarded or stolen email exposes more than the payment. | The email holds the merchant, the amount, the link's life and the link only, never a code or a number; the address is in no ledger entry or receipt; the link is single use and closed at the engine's deadline, a cancel and the end of the call. | covered | `paylink-channel.test.ts`: "records the key as consent to email under its wording, then emails the link there and texts nothing"; `paylink-channel.test.ts`: "cancels and expires an emailed link like a texted one, and a choice serves one link" |
 | paylink-13 | R | A caller denies choosing email, or the choice is the model's. | The channel is the caller's keypress, fixed in code, recorded as a consent to that channel under its versioned wording (by digest); a later "no" stops an emailed link. | covered | `paylink-channel.test.ts`: "refuses an emailed link once the caller says no to the email consent, and for a subject matched since"; `paylink-channel.test.ts`: "refuses to resume an emailed request once the caller says no to the email consent, and the link can be cancelled"; `paylink-channel.test.ts`: "refuses a key that is not one offered, or not a string, before anything is written" |
 | paylink-9 | I | Card numbers keyed on the phone reach the engine. | Keypad card capture only through a certified carrier service, gated on an assessor's scoping. Not built: `startKeypadCardCapture` throws. | open | PAY-6 |
-| paylink-10 | E | A saved card is charged for a weakly verified caller. | Saved-card charges gated on level 2 and amounts from code. Not built: `chargeSavedCard` throws. | open | PAY-4 |
+| paylink-10 | E | A saved card is charged for a weakly verified caller. | `chargeSavedCard` is off unless `savedCardCharges` is true, needs `payment.saved_card` (a money scope, never below level 2, refused unless the policy names it) and charges only the amount the caller confirmed. | covered | `engine.test.ts`: "refuses a caller below level 2, and a policy that does not allow the scope, with one refusal that names no check"; `engine.test.ts`: "is off by default and off unless set to true: refused before anything is written"; `engine.test.ts`: "never charges without the caller's confirmed read-back of this request, nor above the limit in force" |
+| paylink-14 | T | A lost answer is reported as a charge, or a retry charges the card twice. | A charge is sent once with an engine-derived idempotency key; a lost or unreadable answer is `unknown`, and no other charge or link follows it on the call. | covered | `engine.test.ts`: "records a lost answer as unknown, never as charged, and takes no other payment on the call"; `engine.test.ts`: "reads an answer it cannot trust as unknown, and a decline as declined with a short reason code" |
 
 ### Trace
 
@@ -1375,6 +1400,18 @@ Hosted payment links (the package's Stripe Checkout adapter, `district-assurance
 | paymentlinks-5 | E | A live key runs in test mode or a test key in live mode, or a live payment is taken on the wrong mode's session. | Each adapter is built for one Stripe mode: `assertStripeKey` takes only that mode's `sk_` or `rk_` key, with a fixed message that never quotes it; session ids must be that mode's (`cs_test_` or `cs_live_`) and every answer's `livemode` that mode's; the basil API version (kept to replay the recorded runs) is refused in live mode. Left to the host: the client it passes to `StripeCheckoutLinks` must be in the adapter's `mode` (a structural client cannot be asked its key; `fetchStripeClient` checks it with `assertStripeKey`), since a client of the other mode would have Stripe create the session before the adapter refuses the answer. | covered | `stripe-package.test.ts`: "⛔ refuses a live key in test mode and a test key in live mode, by name"; `stripe-package.test.ts`: "⛔ refuses publishable keys, webhook secrets, short keys, whitespace and non-strings, never quoting them"; `stripe-package.test.ts`: "⛔ refuses a cs_test_ id in live mode and a cs_live_ id in test mode, before anything is sent"; `stripe-package.test.ts`: "⛔ endive by default; basil in test mode only (the recordings), never in live mode" |
 | paymentlinks-6 | T | A link is closed when the wait ends but the payer paid at that moment, or a retried close throws on a link already closed. | `expire` sends no idempotency key (Stripe would answer a saved failure to every retry) and reads back what Stripe holds after any answer: `expired` (this call's answer shows the close), `already_expired` (idempotent; never claimed for this call without its answer), `complete` (the payment won the race) or `open`; a session still open after a 429, a 5xx or a lost answer is a retryable error, another refusal is not. | covered | `stripe-package.test.ts`: "⛔ is idempotent: an already-expired session (Stripe's 400) answers already_expired, never throws"; `stripe-package.test.ts`: "⛔ tells a payment that won the race (complete) from an expire, on a 400 or on a 200 that did not expire"; `stripe-package.test.ts`: "⛔ surfaces a 5xx, a 429 or a lost answer as a retryable StripeAdapterError, and another 4xx as not retryable, when the session reads open"; `stripe-package.test.ts`: "⛔ after a 5xx or a lost answer, reads the session back: a close or a payment that took effect is answered, an unreadable session throws the expire's error" |
 | paymentlinks-7 | I | Stripe's error message, which can quote part of a key, reaches a log or a caller. | `StripeAdapterError` and `StripeHttpError` carry the step, the HTTP status and Stripe's error type and code when they are plain words, never Stripe's message or anything shaped like a key. | covered | `stripe-package.test.ts`: "names the step, status, type and code only, never Stripe's message"; `stripe-package.test.ts`: "⛔ throws StripeHttpError with the status, type and code only, never Stripe's message" |
+
+### SavedCards
+
+Charges a card the business already holds at its provider (PAY-4). The package ships only the
+`FakeSavedCards` test double; a real adapter is the host's.
+
+| Id | STRIDE | Threat | Control | Status | Proof |
+|---|---|---|---|---|---|
+| savedcards-1 | I | Card data reaches the engine, the ledger or a receipt. | The port carries the subject key, the amount, the mode and an idempotency key, and answers a provider id or a decline reason; ledger entries keep a decline reason only as a short code. | covered | `engine.test.ts`: "charges the saved card of a level 2 caller once, for the amount read back and confirmed, and the receipt names it"; `engine.test.ts`: "reads an answer it cannot trust as unknown, and a decline as declined with a short reason code" |
+| savedcards-2 | T | A retried charge takes the money twice. | One key per charge, `[workspaceId, callId, paymentId, "charge", mode]`; the engine never sends a charge twice. | covered | `engine.test.ts`: "records a lost answer as unknown, never as charged, and takes no other payment on the call"; `entry-points.test.ts`: "saved cards charge once per idempotency key" |
+| savedcards-3 | S | A malformed answer is read as a charge. | Only `charged` with a provider id, or `declined` with a reason, is read; anything else is `unknown`. | covered | `engine.test.ts`: "reads an answer it cannot trust as unknown, and a decline as declined with a short reason code" |
+| savedcards-4 | E | The adapter is used in a mode it cannot charge in, or while the switch is off. | Its `capabilities.modes` must include Paylink's mode when the config is saved, and nothing calls it while `savedCardCharges` is off. | covered | `config.test.ts`: "checks the saved-card charges switch: a boolean, off by default, the savedCards adapter and its modes when on"; `engine.test.ts`: "is off by default and off unless set to true: refused before anything is written" |
 
 ### ReceiptSigner
 

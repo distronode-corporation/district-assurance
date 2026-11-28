@@ -1115,8 +1115,10 @@ structured form.
 
 Settings: Badge (sections 4, 5a and 6); Dossier `{forms}` (section 13, ids unique; a sensitive
 field needs the `fieldCipher` adapter; field rules as section 13 lists); Paylink `{maxAmountMinor?,
-mode?, connectedAccountId?, linkLifeMinutes?, paymentMethods?, channels?}` (`channels`: `["text"]`
-by default, or `["text", "email"]`, which needs the `emails` adapter; text is always one;
+mode?, connectedAccountId?, linkLifeMinutes?, paymentMethods?, channels?, savedCardCharges?}`
+(`channels`: `["text"]` by default, or `["text", "email"]`, which needs the `emails` adapter; text
+is always one; `savedCardCharges` a boolean, off unless `true`, which needs the `savedCards`
+adapter in Paylink's `mode`, section 14;
 `maxAmountMinor` 1 to
 1,000,000; `mode` default `platform`, and `connect` needs `connectedAccountId`, 1 to 255 letters,
 digits, `-` or `_`; a `connectedAccountId` needs an explicit `mode`, so a business account never
@@ -1250,6 +1252,10 @@ answer on file, a phone number, a link or card data.
 | `payment.refunded` | `paymentId`, `refundId`, `providerRef`, `amountMinor`, `currency`, `reason`, `status` (`pending`, `succeeded` or `failed`) |
 | `payment.refund_updated` | `paymentId`, `refundId`, `providerRef`, `amountMinor`, `currency`, `status` (`succeeded` or `failed`): a refund's later outcome at the provider |
 | `payment.disputed` | `paymentId`, `disputeId`, `status`, `amountMinor`, `currency` |
+| `payment.card_charge_requested` | `paymentId`, `amountMinor`, `currency`, `amountSource`, `mode`: a saved-card charge reserved, before the adapter is asked (section 14) |
+| `payment.card_charged` | `paymentId`, `providerRef`, `amountMinor`, `currency`, `mode`, and `late: true` for an answer recorded after the end of the call settled the charge unknown |
+| `payment.card_declined` | `paymentId`, `reason` (the provider's reason as a short code, else `declined`), and `late: true` as above |
+| `payment.card_unknown` | `paymentId`, `reason` (`answer_lost`, `malformed_answer`, or `no_answer_recorded` when the call ended first, actor `system`): never charged, never declined |
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
 | `consent.revoked` | `consentId`, `purpose`, `wordingVersion`, `via` (`call`, `text` or `web`) |
 | `consent.unrecorded` | `purpose` (a consent still being stored when the call ended: no consent) |
@@ -1711,6 +1717,10 @@ empty part.
   status}` as the end of the call left it, `failed` ones included (a reservation whose signing
   failed is listed too, so the part's presence is no proof that a token became valid). It is
   present only on a call with at least one record, so the format stays at `v: 1`.
+- `payments` lists the call's payment links, then its saved-card charges (section 14, PAY-4). A
+  charge carries `method: "saved_card"`, its status (`paid`, `declined` or `unknown`) and the
+  provider's charge id as `providerRef` (empty when there is none); a link has no `method`, so the
+  format stays at `v: 1`.
 - `ledger` is the head after `call.ended`, the expiry of the call's open payment links (section
   14) and the access code entries the end wrote (section 17), kept in the call record. If signing
   fails, `endCall` on the ended call issues the receipt later with the same head, without ending
@@ -2323,6 +2333,50 @@ recordIds})` returns `{amountMinor, currency}` or null. `source` is the step's `
   raised or a window opened while the link was created means the link is not texted
   (`scope_denied`; the link id is kept). The mode, link life and payment methods still come from the
   step and the settings when the link is reserved.
+
+**Saved-card charges (PAY-4).** `chargeSavedCard(callId, input)` charges the card the business
+already holds for the matched subject, through the `savedCards` adapter, for the amount the caller
+heard read back and confirmed. The engine never sees the card: the adapter finds it at the
+business's provider by the subject key. It is off unless Paylink's `savedCardCharges` is `true`
+(a missing or `false` setting is `precondition_failed`, before anything is written); the setting
+must be a boolean, needs the `savedCards` adapter, and the adapter's `capabilities.modes` must
+include Paylink's `mode` (default `platform`), or the config is refused when it is saved
+(`paylink.saved_card_charges_shape`, `module.adapter_missing`, `paylink.saved_cards_capabilities`,
+`paylink.saved_cards_mode`). The charge needs the scope `payment.saved_card`, a money scope by its
+name, so its floor is level 2 and a policy that sets it lower is refused; a policy that does not
+list it refuses every charge (`scope_denied`), as does a grant below its level, with the same
+message whichever check failed. The scope is held to its minimum for the amount confirmed, so
+step-up rules on amounts apply (section 4).
+
+- It runs outside a flow only (a flow on a `paylink.request` step is `precondition_failed`; another
+  step is refused as for any Paylink call), on an open call (a call `paying` a link is
+  `invalid_transition`), with a keypad or PIN match. The host passes the request it read back
+  (`{amountMinor, currency, description, amountSource}` or `{amountRef, description,
+  amountSource}`); none is `invalid_input`. It needs a read-back confirmed by the caller for that
+  request and subject, exactly as a link does (`precondition_failed` otherwise), and the amount is
+  checked again against Paylink's `maxAmountMinor` in force. The read-back is used up by the charge.
+- The charge is reserved in one write (`payment.card_charge_requested`, a `paymentId` from the
+  engine's ids), then `SavedCards.charge({callId, paymentId, subjectKey, amountMinor, currency,
+  description, mode, connectedAccountId?, idempotencyKey})` is called once, with the key
+  `[workspaceId, callId, paymentId, "charge", mode]` and `connectedAccountId` exactly in connect
+  mode (from Paylink's settings), and its answer is committed in another write. It is never
+  retried. `{outcome: "charged", providerRef}` with a non-empty `providerRef` is `paid`
+  (`payment.card_charged`); `{outcome: "declined", reason}` with a string reason is `declined`
+  (`payment.card_declined`, the reason kept only when it is a short snake_case code); a throw is
+  `unknown` (`payment.card_unknown`, `answer_lost`), and so is any other answer (`malformed_answer`),
+  never charged. `chargeSavedCard` returns `{paymentId, status}`.
+- While a charge of the call is waiting for its answer or `unknown`, every further
+  `chargeSavedCard` and `requestPayment` on the call is `precondition_failed`: the money may have
+  moved, so no other payment is taken on that call, and the business settles it with its provider
+  (the payment id and the idempotency key name it there). A `declined` charge is settled: the caller
+  can pay another way.
+- `endCall` is refused (`precondition_failed`) while a charge has waited less than 60 seconds for
+  its answer; after that, the end settles it `unknown` (`payment.card_unknown`, `no_answer_recorded`,
+  actor `system`) before `call.ended` and the receipt's head. An answer that arrives later is still
+  recorded, as `paid` or `declined` with `late: true`; the receipt already signed is not changed.
+- The receipt lists each charge in `payments` with `method: "saved_card"` (section 12). Refunds,
+  disputes and monthly report totals cover payment links only; a saved-card charge is refunded by
+  the business at its provider.
 
 ## 15. Stripe webhooks
 

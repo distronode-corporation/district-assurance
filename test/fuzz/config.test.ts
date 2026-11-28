@@ -30,6 +30,7 @@ const ADAPTERS: Record<AdapterName, true> = {
   messages: true,
   emails: true,
   payments: true,
+  savedCards: true,
   signer: true,
   pinVerifier: true,
   amounts: true,

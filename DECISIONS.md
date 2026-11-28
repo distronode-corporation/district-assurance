@@ -688,3 +688,31 @@ receipt link's so the two features cannot disagree about what the caller chose. 
 today's behaviour, byte for byte; the shape is checked when the config is saved, with stable codes.
 **Revisit** if a host needs a condition on another field, or a condition that fails a flow: the
 mechanism reads one field today, and a wider vocabulary wants its own ADR.
+
+## ADR-39. Saved-card charges: their own scope, sent once, and an unknown answer stops the call's payments
+
+**Decided.** A saved-card charge (PAY-4) is a host call, `chargeSavedCard`, outside a flow, behind
+Paylink's `savedCardCharges` switch and its own scope, `payment.saved_card`. It uses the same
+confirmed amount read-back as a payment link. It is reserved, sent once with an idempotency key the
+engine derives (`[workspaceId, callId, paymentId, "charge", mode]`), and committed; it is never
+resumed. A lost or unreadable answer is `unknown`, and while any charge of the call is unknown or
+still waiting, every further charge and payment link on that call is refused.
+**Why a scope of its own, not `payment.request`.** Charging a card nobody types in is a stronger
+act than texting a link the caller must still open and pay. A scope of its own is refused until the
+business names it in its policy, so turning the switch on is not enough by itself, and the business
+can ask level 3 for charges while links stay at level 2. Its `payment.` name makes it a money scope,
+so its floor of level 2 is the policy validator's, not a check of this feature's own.
+**Why sent once, not resumed with the same key like a refund.** A refund resumes because the engine
+owns the refund's number and the provider's key outlives the call. A charge's safety would rest
+entirely on every host adapter honouring the key, within the provider's key window, and a host that
+retried after a lost answer would charge twice if it did not. Sending once, as Gate sends an unlock
+once, makes the engine's side safe whatever the adapter does; the cost is that a lost answer leaves
+the business to look the charge up at its provider (the payment id and the key name it), and the
+caller to pay on another call. Refusing every later payment on the call follows: a new charge or
+link would be a second payment if the first went through.
+**Why outside a flow, for now.** A flow step would need its own completion rule beside the link's,
+and a branch for a decline (pay by link instead), which flows cannot express (ADR-14). A host that
+wants it in a flow's place calls it between steps.
+**Revisit** when a real provider adapter exists and a host needs charges inside a flow, or needs to
+resume an unknown charge on the call: both want the adapter's idempotency proven against the
+provider first.

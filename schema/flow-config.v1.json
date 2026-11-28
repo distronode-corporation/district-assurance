@@ -329,6 +329,10 @@
           "uniqueItems": true,
           "contains": { "const": "text" },
           "items": { "enum": ["text", "email"] }
+        },
+        "savedCardCharges": {
+          "description": "Turns on charging the card the business already holds (chargeSavedCard, PAY-4); it needs the savedCards adapter and the payment.saved_card scope in the policy. Off unless true.",
+          "type": "boolean"
         }
       }
     },
