@@ -688,3 +688,30 @@ receipt link's so the two features cannot disagree about what the caller chose. 
 today's behaviour, byte for byte; the shape is checked when the config is saved, with stable codes.
 **Revisit** if a host needs a condition on another field, or a condition that fails a flow: the
 mechanism reads one field today, and a wider vocabulary wants its own ADR.
+
+## ADR-39. 1.0: what the public API is
+
+**Decided.** From 1.0.0 on, versions follow Semantic Versioning, and the public API is what
+README.md lists under "What 1.0 promises": the runtime exports of the four entry points with their
+types and the package's export map (pinned by `test/public-api.test.ts` and
+`test/fixtures/public-api.json`), FlowConfig version 1 and its JSON Schema, the formats the engine
+signs or writes for others to check (receipts, the ledger and its checkpoints and exports, monthly
+reports, subject exports), ledger event names, config problem codes, the simulator's arguments
+and exit codes, and the minimum Node.js version. Left out: functions that throw
+`NotImplementedError`, the Stripe API version the adapters send, anything not exported, the
+reference server and examples, and the wording of messages, logs and spoken text. A fix for a
+security flaw may refuse a config or an input that was accepted before, and its CHANGELOG.md line
+says so.
+**Why.** 1.0.0 is 0.4.2's code: nothing was removed or renamed to reach it, so a host on 0.4.2
+upgrades without a change. Pinning the names in a test makes a removal fail CI rather than wait for
+a reviewer to notice. A placeholder is not a promise, so building one (as PAY-4 will build
+`chargeSavedCard`) may give it its real shape in a minor version. The Stripe version is left out
+because Stripe retires versions on its own schedule and the adapters' job is to keep working; the
+host's own Stripe calls never depend on it. The security exception exists because 0.4.2 needed it:
+refusing a number field that held a card number was right, and a promise that forbade it would
+be kept by leaving card numbers in storage.
+**Alternatives.** Listing only the documented functions (narrower, but which are documented is a
+judgment a host cannot check), or staying on 0.x until the gated work (PAY-4, PAY-6) and the door
+vendors' proofs are done (none of them changes an existing export).
+**Revisit** when a 2.0 is needed, or if the export list turns out to hold something that should
+never have been public: it can be deprecated in a minor version and removed only in a major.

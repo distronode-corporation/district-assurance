@@ -1,8 +1,7 @@
 # Security model
 
 What the engine protects, what it trusts, the threats it is designed against, and what it leaves
-to the host. Pre-alpha: these are design intentions backed by tests where marked, not an audited
-claim.
+to the host. These are design intentions backed by tests where marked, not an audited claim.
 
 ## Assets
 
@@ -1278,7 +1277,7 @@ What is published, and how.
 
 | Id | STRIDE | Threat | Control | Status | Proof |
 |---|---|---|---|---|---|
-| release-1 | T | A published package differs from the reviewed source, or cannot be traced to it. | A release workflow (`release.yml`) with a reproducible pack, an exports smoke test, npm provenance and a signed SBOM attestation, which publishes every version from 0.1.0 on. Open until the first publish (0.1.0) is checked against the reviewed source. | open | SRV-5 |
+| release-1 | T | A published package differs from the reviewed source, or cannot be traced to it. | A release workflow (`release.yml`) with a reproducible pack, an exports smoke test, npm provenance and a signed SBOM attestation, which publishes every version from 0.1.0 on. Every published version (0.1.0 to 0.4.2) has been checked against this repository with `gh attestation verify` and its npm provenance (README.md, "Verify a release"). | covered | `pack.test.ts`: "requires every export target in the tarball" |
 | release-2 | E | A host imports a runtime function of a module that was meant to stay internal. | The root entry point keeps the modules' runtime functions out. | covered | `entry-points.test.ts`: "keeps the runtime functions of the modules out of the root" |
 
 ### SessionStore

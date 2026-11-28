@@ -206,8 +206,8 @@ describe("npm run serve's banner", () => {
     const line = firstLine(stream);
     stream.write("reference server on http://127.0.0.1:");
     await new Promise((resolve) => setImmediate(resolve));
-    stream.write("4321 (pre-alpha)\nnext");
-    assert.equal(await line, "reference server on http://127.0.0.1:4321 (pre-alpha)");
+    stream.write("4321 (fake adapters)\nnext");
+    assert.equal(await line, "reference server on http://127.0.0.1:4321 (fake adapters)");
   });
   it("names the port the server bound, so PORT=0 gives a port that answers", { timeout: 30_000 }, async (ctx) => {
     const { child, port, banner, stderr } = await startServe(ctx);

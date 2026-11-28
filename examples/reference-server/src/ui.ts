@@ -29,5 +29,5 @@ const server = createReferenceServer({
 });
 server.listen(port, "127.0.0.1", () => {
   world.base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  console.log(`District Assurance demo UI on ${world.base}/ (pre-alpha, fake adapters)`);
+  console.log(`District Assurance demo UI on ${world.base}/ (fake adapters)`);
 });

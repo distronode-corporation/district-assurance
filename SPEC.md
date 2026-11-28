@@ -1,6 +1,6 @@
 # Specification
 
-Version 0 (pre-alpha). This document describes what the code in `src/` does today.
+Version 1, for district-assurance 1.x. This document describes what the code in `src/` does today.
 
 ## 1. Session state machine
 
