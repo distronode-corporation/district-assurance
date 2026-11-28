@@ -11,6 +11,8 @@ import { request } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, it, mock } from "node:test";
 
+import fc from "fast-check";
+
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { DemoRuns, type RunView } from "../examples/reference-server/src/demo-runs.ts";
 import {
@@ -497,6 +499,10 @@ describe("reference UI: the page's checks (receipt-check.js, no DOM)", () => {
     assert.throws(() => check.canonicalJson({ a: "\ud800" }), TypeError);
     assert.throws(() => check.canonicalJson({ "\udc00": 1 }), TypeError);
     assert.throws(() => canonicalJson({ a: "\ud800" }), TypeError);
+  });
+
+  it("writes the same canonical JSON as the engine for any JSON value", () => {
+    fc.assert(fc.property(fc.jsonValue(), (value) => check.canonicalJson(value) === canonicalJson(value)));
   });
 
   it("accepts the engine's receipt, as verifyReceipt does, and rejects every kind of change", async () => {
