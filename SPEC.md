@@ -1255,6 +1255,7 @@ answer on file, a phone number, a link or card data.
 | `payment.card_charge_requested` | `paymentId`, `amountMinor`, `currency`, `amountSource`, `mode`: a saved-card charge reserved, before the adapter is asked (section 14) |
 | `payment.card_charged` | `paymentId`, `providerRef`, `amountMinor`, `currency`, `mode`, and `late: true` for an answer recorded after the end of the call settled the charge unknown |
 | `payment.card_declined` | `paymentId`, `reason` (the provider's reason as a short code, else `declined`), and `late: true` as above |
+| `payment.card_not_sent` | `paymentId`, `reason` (`lease_lapsed`): the charge's 60 seconds ran out before it could be sent, so the adapter was never asked; `late: true` when the end of the call had settled it unknown |
 | `payment.card_unknown` | `paymentId`, `reason` (`answer_lost`, `malformed_answer`, or `no_answer_recorded` when the call ended first, actor `system`): never charged, never declined |
 | `consent.recorded` | `consentId`, `purpose`, `wordingVersion`, `wordingDigest`, `answer`, `locale` |
 | `consent.revoked` | `consentId`, `purpose`, `wordingVersion`, `via` (`call`, `text` or `web`) |
@@ -1718,7 +1719,7 @@ empty part.
   failed is listed too, so the part's presence is no proof that a token became valid). It is
   present only on a call with at least one record, so the format stays at `v: 1`.
 - `payments` lists the call's payment links, then its saved-card charges (section 14, PAY-4). A
-  charge carries `method: "saved_card"`, its status (`paid`, `declined` or `unknown`) and the
+  charge carries `method: "saved_card"`, its status (`paid`, `declined`, `not_sent` or `unknown`) and the
   provider's charge id as `providerRef` (empty when there is none); a link has no `method`, so the
   format stays at `v: 1`.
 - `ledger` is the head after `call.ended`, the expiry of the call's open payment links (section
@@ -2360,7 +2361,13 @@ step-up rules on amounts apply (section 4).
   description, mode, connectedAccountId?, idempotencyKey})` is called once, with the key
   `[workspaceId, callId, paymentId, "charge", mode]` and `connectedAccountId` exactly in connect
   mode (from Paylink's settings), and its answer is committed in another write. It is never
-  retried. `{outcome: "charged", providerRef}` with a non-empty `providerRef` is `paid`
+  retried. Right before the send, with nothing awaited in between, the charge is read again: one
+  that is no longer waiting (the end of the call settled it) or whose 60 seconds since the
+  reservation ran out (its write can wait on a slow ledger) is never sent. It is recorded
+  `not_sent` (`payment.card_not_sent`, `late: true` when the end had settled it unknown) and
+  `chargeSavedCard` throws `precondition_failed`; nothing was charged, so the caller can pay another
+  way. `{outcome: "charged", providerRef}` with a `providerRef` of 1 to 255 letters, digits, `_` or
+  `-` that is not a card number is `paid`
   (`payment.card_charged`); `{outcome: "declined", reason}` with a string reason is `declined`
   (`payment.card_declined`, the reason kept only when it is a short snake_case code); a throw is
   `unknown` (`payment.card_unknown`, `answer_lost`), and so is any other answer (`malformed_answer`),
@@ -2374,7 +2381,8 @@ step-up rules on amounts apply (section 4).
   its answer; after that, the end settles it `unknown` (`payment.card_unknown`, `no_answer_recorded`,
   actor `system`) before `call.ended` and the receipt's head. An answer that arrives later is still
   recorded, as `paid` or `declined` with `late: true`; the receipt already signed is not changed.
-- The receipt lists each charge in `payments` with `method: "saved_card"` (section 12). Refunds,
+- The receipt lists each charge in `payments` with `method: "saved_card"` (section 12), its status
+  as the end of the call left it. Refunds,
   disputes and monthly report totals cover payment links only; a saved-card charge is refunded by
   the business at its provider.
 

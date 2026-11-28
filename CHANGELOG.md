@@ -31,8 +31,9 @@ not bring one.
   link, runs outside a flow, and never sees the card: the adapter gets the subject key, the amount
   and an idempotency key. A charge is sent once. An answer that is lost or cannot be read is
   recorded as `unknown`, never as charged, and no other charge or payment link is taken on that
-  call after it. The receipt lists each charge with `method: "saved_card"`, and the ledger has four
-  new `payment.card_*` entries. `FakeSavedCards` in `district-assurance/testing` stands in for a
+  call after it; a charge that could not be sent within 60 seconds is never sent. The receipt
+  lists each charge with `method: "saved_card"`, and the ledger has five new `payment.card_*`
+  entries. `FakeSavedCards` in `district-assurance/testing` stands in for a
   real adapter in tests.
 
 ### Changed

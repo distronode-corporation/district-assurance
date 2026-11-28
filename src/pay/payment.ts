@@ -61,10 +61,11 @@ export interface PaymentRequest {
 
 /**
  * A saved-card charge's status (PAY-4). `charging` while the adapter has not answered; `paid` when
- * the provider charged the card; `declined` when it certainly did not; `unknown` when its answer was
- * lost or unreadable, or the call ended before it came: do not assume either.
+ * the provider charged the card; `declined` when it certainly did not; `not_sent` when the engine
+ * never sent it (its 60 seconds ran out first); `unknown` when its answer was lost or unreadable, or
+ * the call ended before it came: do not assume either.
  */
-export type SavedCardChargeStatus = "charging" | "paid" | "declined" | "unknown";
+export type SavedCardChargeStatus = "charging" | "paid" | "declined" | "not_sent" | "unknown";
 
 /** A charge of the card the business already holds for the subject, as the call keeps it. Never card data. */
 export interface SavedCardCharge {

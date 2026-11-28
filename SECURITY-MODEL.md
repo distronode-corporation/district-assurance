@@ -807,7 +807,11 @@ the business's provider (tested). A charge is sent once and never retried; a los
 answer is `unknown`, never charged, and while a charge is unknown or waiting no other charge or
 payment link is taken on the call, so a lost answer cannot become a second charge (tested). The
 end of the call waits 60 seconds for an answer, then settles the charge unknown before the
-receipt's head; an answer that comes later is still recorded, flagged late (tested). Ledger entries
+receipt's head; an answer that comes later is still recorded, flagged late (tested). A charge is
+read again right before it is sent, and one whose 60 seconds ran out first (a slow ledger held its
+reservation's write) is never sent and is recorded `not_sent`, so no charge reaches the provider
+after the end of the call settled it (tested). A provider id the ledger cannot carry (a lone
+surrogate, a card number) is read as an unreadable answer, `unknown` (tested). Ledger entries
 carry the payment id, the amount, the mode, the provider's charge id and a decline reason only when
 it is a short code, never card data (tested). Left to the host: a real `savedCards` adapter (none
 ships), the customer's agreement to keep and charge the card, and settling an unknown charge with
@@ -1410,7 +1414,8 @@ Charges a card the business already holds at its provider (PAY-4). The package s
 |---|---|---|---|---|---|
 | savedcards-1 | I | Card data reaches the engine, the ledger or a receipt. | The port carries the subject key, the amount, the mode and an idempotency key, and answers a provider id or a decline reason; ledger entries keep a decline reason only as a short code. | covered | `engine.test.ts`: "charges the saved card of a level 2 caller once, for the amount read back and confirmed, and the receipt names it"; `engine.test.ts`: "reads an answer it cannot trust as unknown, and a decline as declined with a short reason code" |
 | savedcards-2 | T | A retried charge takes the money twice. | One key per charge, `[workspaceId, callId, paymentId, "charge", mode]`; the engine never sends a charge twice. | covered | `engine.test.ts`: "records a lost answer as unknown, never as charged, and takes no other payment on the call"; `entry-points.test.ts`: "saved cards charge once per idempotency key" |
-| savedcards-3 | S | A malformed answer is read as a charge. | Only `charged` with a provider id, or `declined` with a reason, is read; anything else is `unknown`. | covered | `engine.test.ts`: "reads an answer it cannot trust as unknown, and a decline as declined with a short reason code" |
+| savedcards-3 | S | A malformed answer is read as a charge. | Only `charged` with a provider id of letters, digits, `_` or `-` that is not a card number, or `declined` with a reason, is read; anything else is `unknown`. | covered | `engine.test.ts`: "reads an answer it cannot trust as unknown, and a decline as declined with a short reason code" |
+| savedcards-5 | T | A charge reaches the provider after the end of the call settled it unknown. | The charge is read again right before the send, with nothing awaited between, and one past its 60 seconds is never sent and is recorded `not_sent`. | covered | `engine.test.ts`: "never sends a charge whose 60 seconds ran out while its reservation was being written, and records it not sent" |
 | savedcards-4 | E | The adapter is used in a mode it cannot charge in, or while the switch is off. | Its `capabilities.modes` must include Paylink's mode when the config is saved, and nothing calls it while `savedCardCharges` is off. | covered | `config.test.ts`: "checks the saved-card charges switch: a boolean, off by default, the savedCards adapter and its modes when on"; `engine.test.ts`: "is off by default and off unless set to true: refused before anything is written" |
 
 ### ReceiptSigner

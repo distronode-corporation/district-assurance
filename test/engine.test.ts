@@ -1587,7 +1587,17 @@ describe("Engine pay: saved-card charges (PAY-4)", () => {
   });
 
   it("reads an answer it cannot trust as unknown, and a decline as declined with a short reason code", async () => {
-    const answers: unknown[] = [null, { outcome: "charged" }, { outcome: "charged", providerRef: "" }, { outcome: "declined", reason: 7 }, { outcome: "refunded" }];
+    const answers: unknown[] = [
+      null,
+      { outcome: "charged" },
+      { outcome: "charged", providerRef: "" },
+      // A provider id the ledger and the receipt cannot carry: a lone surrogate, a card number, a space.
+      { outcome: "charged", providerRef: "pi_\ud800" },
+      { outcome: "charged", providerRef: "4111111111111111" },
+      { outcome: "charged", providerRef: "pi 1" },
+      { outcome: "declined", reason: 7 },
+      { outcome: "refunded" },
+    ];
     for (const answer of answers) {
       const t = charging({ savedCards: { capabilities: { modes: ["platform"] }, charge: async () => answer as never } });
       const callId = await callAt(t, 2);
@@ -1614,6 +1624,50 @@ describe("Engine pay: saved-card charges (PAY-4)", () => {
     assert.equal((await t.engine.chargeSavedCard(callId, request)).status, "declined");
     assert.equal(t.savedCards.charged.length, 0);
     assert.equal((await t.engine.endCall(callId))!.body.payments[0]!.status, "declined");
+  });
+
+  it("never sends a charge whose 60 seconds ran out while its reservation was being written, and records it not sent", async () => {
+    for (const ended of [false, true]) {
+      // A ledger that holds the reservation's entry, as a slow ledger would: the reservation's write
+      // returns only once it is appended.
+      const ledger = new MemoryAuditLedger();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let reached!: () => void;
+      const reserving = new Promise<void>((resolve) => (reached = resolve));
+      const append = ledger.append.bind(ledger);
+      ledger.append = async (input) => {
+        if (input.event === "payment.card_charge_requested") {
+          reached();
+          await held;
+        }
+        return append(input);
+      };
+      const t = setup({ config: testConfig((c) => {
+        c.modules.paylink = { settings: { savedCardCharges: true } };
+        c.policy.scopes[SAVED_CARD_SCOPE] = 2;
+      }), adapters: { ledger } });
+      const callId = await callAt(t, 2);
+      await confirmAmount(t.engine, callId, request);
+      const charge = t.engine.chargeSavedCard(callId, request);
+      await reserving;
+      t.clock.advance(60_000);
+      // The end of the call settles the charge unknown once its 60 seconds ran out; its receipt waits on the ledger.
+      const end = ended ? t.engine.endCall(callId) : null;
+      if (ended) while ((await t.engine.state(callId)).phase !== "ended") await new Promise((resolve) => setImmediate(resolve));
+      release();
+      await assert.rejects(charge, rejects("precondition_failed", /not charged/));
+      assert.equal(t.savedCards.received.length, 0, "nothing was sent to the provider");
+      const written = (await ledger.list()).filter((e) => e.event.startsWith("payment.card_")).map((e) => [e.event, e.actor, e.detail]);
+      assert.deepEqual(written.at(ended ? -1 : 1), ["payment.card_not_sent", "code", { paymentId: "pay_1", reason: "lease_lapsed", ...(ended ? { late: true } : {}) }]);
+      if (end !== null) assert.equal((await end)!.body.payments[0]!.status, "unknown", "the receipt was signed before the charge was found unsent");
+      else {
+        // Not sent is settled: the caller can pay another way on the call.
+        await confirmAmount(t.engine, callId, request);
+        assert.equal((await t.engine.chargeSavedCard(callId, request)).status, "paid");
+        assert.deepEqual((await t.engine.endCall(callId))!.body.payments.map((p) => p.status), ["not_sent", "paid"]);
+      }
+    }
   });
 
   it("ends the call only once a charge answers, or after its 60 seconds with the charge unknown, and records a later answer flagged late", async () => {

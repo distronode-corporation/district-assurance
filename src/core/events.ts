@@ -57,6 +57,7 @@ export const ENGINE_EVENTS = [
   "payment.card_charge_requested",
   "payment.card_charged",
   "payment.card_declined",
+  "payment.card_not_sent",
   "payment.card_unknown",
   "consent.recorded",
   "access.issued",

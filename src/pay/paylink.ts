@@ -47,6 +47,7 @@ import type { CallDraft, CallRecord, EngineRuntime, Locale } from "../core/runti
 import type { SessionState } from "../core/session.ts";
 import { isIntegerIn, isObject, unknownKeys } from "../core/shape.ts";
 import { keepEmailAddress, keptEmailAddress, recordConsent, TRACE, type TraceSettings, type TraceSlice } from "../prove/trace.ts";
+import { detailCarriesCardNumber } from "../prove/ledger.ts";
 import { matchedSubject } from "../verify/badge.ts";
 import { AMOUNT_REF, buildAmountReadBack, formatAmount, type AmountQuote, type AmountReadBack } from "./amount.ts";
 import {
@@ -83,7 +84,7 @@ export { AMOUNT_REGION, formatAmount } from "./amount.ts";
 const AMOUNT_SOURCES: readonly AmountSourceKind[] = ["intake_record", "business_endpoint", "price_list"];
 const CONFIRMED_BY: readonly string[] = ["voice", "keypad"];
 
-/** A provider's account id: what a host's adapter passes on (for Stripe, `acct_...`). */
+/** A provider's account id, or a saved-card charge's id: what a host's adapter passes on (for Stripe, `acct_...`, `pi_...`). */
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,255}$/;
 
 export interface PaylinkSettings {
@@ -1251,7 +1252,8 @@ export interface SavedCardChargeAnswer {
  * The charge is reserved in one write, sent once with an idempotency key the engine derives, and
  * its answer committed in another. It is never retried: an answer that was lost or cannot be read is
  * recorded `unknown`, never as charged, and while a charge of the call is unknown (or still waiting)
- * no other charge or payment link is taken on that call.
+ * no other charge or payment link is taken on that call. A charge whose 60 seconds ran out before it
+ * could be sent is never sent: it is recorded `not_sent`, and this throws `precondition_failed`.
  */
 export async function chargeSavedCard(rt: EngineRuntime, callId: string, given: PaymentInput): Promise<SavedCardChargeAnswer> {
   const settings = rt.settings<PaylinkSettings | undefined>(PAYLINK) ?? {};
@@ -1295,6 +1297,22 @@ export async function chargeSavedCard(rt: EngineRuntime, callId: string, given: 
   });
   if ("refused" in reserved) throw reserved.refused;
   const { charge, subjectKey } = reserved;
+  // The reservation's write returns once its ledger entries are appended, which can take a while:
+  // the charge is read again, with nothing awaited between this check and the send. One whose 60
+  // seconds ran out (the end of the call may settle it unknown from then on) is never sent.
+  const held = ((await rt.read(callId)).modules[PAYLINK] as unknown as PaylinkSlice).charges!.find((c) => c.paymentId === charge.paymentId)!;
+  if (held.status !== "charging" || rt.clock.now().getTime() - Date.parse(charge.requestedAt) >= CHARGE_LEASE_MS) {
+    await rt.update(callId, (draft) => {
+      const c = draft.slice<PaylinkSlice>(PAYLINK).charges!.find((x) => x.paymentId === charge.paymentId)!;
+      // Only this process sends the charge, so it is still waiting, or settled unknown by the end of
+      // the call (flagged late): either way nothing was sent.
+      const late = c.status === "unknown" ? { late: true } : {};
+      c.status = "not_sent";
+      c.settledAt = rt.now();
+      draft.emit("payment.card_not_sent", "code", { paymentId: c.paymentId, reason: "lease_lapsed", ...late });
+    });
+    throw new EngineError("precondition_failed", "the saved card was not charged: the charge could not be sent within its 60 seconds; read the amount back again");
+  }
   let answer: SavedCardChargeResult | "lost" | "malformed";
   try {
     answer = readChargeAnswer(
@@ -1348,7 +1366,8 @@ export async function chargeSavedCard(rt: EngineRuntime, callId: string, given: 
 function readChargeAnswer(raw: unknown): SavedCardChargeResult | "malformed" {
   if (!isObject(raw)) return "malformed";
   const { outcome, providerRef, reason } = raw;
-  if (outcome === "charged" && typeof providerRef === "string" && providerRef !== "") return { outcome, providerRef };
+  // A provider's id, as the ledger and the receipt carry it: letters, digits, `_` and `-` (never a lone surrogate), and never a card number.
+  if (outcome === "charged" && typeof providerRef === "string" && ACCOUNT_ID.test(providerRef) && !detailCarriesCardNumber(providerRef)) return { outcome, providerRef };
   if (outcome === "declined" && typeof reason === "string") return { outcome, reason };
   return "malformed";
 }
